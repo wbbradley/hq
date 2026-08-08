@@ -34,7 +34,7 @@ hq
 
 When stdin or stdout is not a terminal, bare `hq` lists only pending questions in the current work dir and inferred session. If HQ cannot infer a session, the list includes all sessions in the current work dir. Use explicit `hq list` flags for another scope or status.
 
-Use `j` and `k` to move, Enter to answer, Ctrl+S to submit, and `q` to quit. The human commands also work without a TTY:
+Use `j` and `k` to move, Enter to answer, Shift+Enter to submit, and `q` to quit. Ctrl+S remains a fallback when the terminal cannot report Shift+Enter. The TUI refreshes the pending queue every minute. A refresh keeps any answer being edited and keeps the draft bound to its original question. The human commands also work without a TTY:
 
 ```sh
 hq list --status pending

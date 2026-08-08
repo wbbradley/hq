@@ -12,6 +12,8 @@ The question key has three useful parts:
 
 Bare `hq` checks both stdin and stdout. When both streams are terminals, HQ opens the TUI. Otherwise, HQ lists pending questions for the current work dir and inferred session. Without an inferred session, bare mode lists pending questions for all sessions in the current work dir.
 
+The TUI reloads pending questions every minute. An active answer draft stores its question ID and question data apart from the queue cursor, so a reload cannot clear the editor or retarget the answer.
+
 ## Storage contract
 
 The `internal/store.Store` interface owns question creation, queries, state changes, and answer delivery. SQLite is the first implementation. A later server or shared database can implement the same interface.
