@@ -20,6 +20,14 @@ go install ./cmd/hq
 
 ## Agent use
 
+Install the HQ agent skill with GitHub CLI:
+
+```sh
+gh skill install wbbradley/hq hq@main --agent codex --scope user
+```
+
+The `@main` pin installs the current skill before the next tagged HQ release. After a release includes the skill, `hq@main` can be shortened to `hq`.
+
 Run `hq agents` to print agent-specific setup, output, and delivery rules:
 
 ```sh

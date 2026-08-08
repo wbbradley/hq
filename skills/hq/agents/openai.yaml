@@ -1,0 +1,4 @@
+interface:
+  display_name: "HQ"
+  short_description: "Send and receive messages with HQ"
+  default_prompt: "Use $hq to send a message to the human and check my session mailbox."
