@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/repoctx"
 	"github.com/wbbradley/hq/internal/store"
@@ -27,31 +29,35 @@ var (
 )
 
 type app struct {
-	ctx       context.Context
-	store     store.Store
-	repo      repoctx.Provider
-	questions []model.Question
-	pending   []model.Question
-	history   []model.Question
-	historyOn bool
-	cursor    int
-	width     int
-	height    int
-	answering bool
-	answerID  string
-	answerQ   model.Question
-	editor    textarea.Model
-	err       error
-	contextID string
-	branch    string
-	remotes   string
-	pull      string
+	ctx          context.Context
+	store        store.Store
+	repo         repoctx.Provider
+	messages     []model.Message
+	inbox        []model.Message
+	sent         []model.Message
+	archived     []model.Message
+	showSent     bool
+	showArchived bool
+	cursor       int
+	width        int
+	height       int
+	answering    bool
+	answerID     string
+	answerQ      model.Message
+	composeTo    string
+	editor       textarea.Model
+	err          error
+	contextID    string
+	branch       string
+	remotes      string
+	pull         string
 }
 
 type loadedMsg struct {
-	pending []model.Question
-	history []model.Question
-	err     error
+	inbox    []model.Message
+	sent     []model.Message
+	archived []model.Message
+	err      error
 }
 
 type answeredMsg struct{ err error }
@@ -59,9 +65,9 @@ type answeredMsg struct{ err error }
 type refreshMsg struct{}
 
 type branchMsg struct {
-	question model.Question
-	branch   string
-	err      error
+	message model.Message
+	branch  string
+	err     error
 }
 
 type pullMsg struct {
@@ -71,15 +77,15 @@ type pullMsg struct {
 }
 
 type remotesMsg struct {
-	question model.Question
-	branch   string
-	remotes  []repoctx.Remote
-	err      error
+	message model.Message
+	branch  string
+	remotes []repoctx.Remote
+	err     error
 }
 
 func Run(ctx context.Context, s store.Store, in io.Reader, out io.Writer) error {
 	editor := textarea.New()
-	editor.Placeholder = "Type the answer"
+	editor.Placeholder = "Type a message"
 	editor.KeyMap.InsertNewline = key.NewBinding(
 		key.WithKeys("shift+enter", "ctrl+j"),
 		key.WithHelp("shift+enter/ctrl+j", "insert newline"),
@@ -98,19 +104,40 @@ func scheduleRefresh() tea.Cmd {
 }
 
 func (m app) load() tea.Msg {
-	pending, err := m.store.List(m.ctx, model.Filter{Status: model.StatusPending, Limit: 1000})
+	open := false
+	inbox, err := m.store.List(m.ctx, model.Filter{RecipientSession: model.HumanSession, Archived: &open, Limit: 1000, NewestFirst: true})
 	if err != nil {
 		return loadedMsg{err: err}
 	}
-	history, err := m.store.List(m.ctx, model.Filter{ExcludeStatus: model.StatusPending, Limit: 1000, NewestFirst: true})
-	return loadedMsg{pending: pending, history: history, err: err}
+	sent, err := m.store.List(m.ctx, model.Filter{SenderSession: model.HumanSession, Limit: 1000, NewestFirst: true})
+	if err != nil {
+		return loadedMsg{err: err}
+	}
+	closed := true
+	archived, err := m.store.List(m.ctx, model.Filter{RecipientSession: model.HumanSession, Archived: &closed, Limit: 1000, NewestFirst: true})
+	return loadedMsg{inbox: inbox, sent: sent, archived: archived, err: err}
 }
 
 func (m app) answer() tea.Msg {
-	if m.answerID == "" {
-		return answeredMsg{err: errors.New("answer has no question")}
+	if m.answerID == "" && m.composeTo == "" {
+		return answeredMsg{err: errors.New("message has no recipient")}
 	}
-	err := m.store.Answer(m.ctx, m.answerID, strings.TrimSpace(m.editor.Value()))
+	id, err := uuid.NewV7()
+	if err != nil {
+		return answeredMsg{err: err}
+	}
+	directory := m.answerQ.Directory
+	recipient := m.answerQ.SenderSession
+	message := model.Message{ID: id.String(), Directory: directory, SenderSession: model.HumanSession,
+		RecipientSession: recipient, Body: strings.TrimSpace(m.editor.Value()), CreatedAt: time.Now().UTC()}
+	if m.composeTo != "" {
+		message.RecipientSession = m.composeTo
+		err = m.store.Create(m.ctx, message)
+	} else {
+		replyTo := m.answerID
+		message.ReplyTo = &replyTo
+		err = m.store.Reply(m.ctx, m.answerID, message)
+	}
 	return answeredMsg{err: err}
 }
 
@@ -121,18 +148,18 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetWidth(max(20, min(72, msg.Width-6)))
 	case loadedMsg:
 		selectedID := m.selectedID()
-		m.pending, m.history, m.err = msg.pending, msg.history, msg.err
-		m.setQuestions()
-		if index := questionIndex(m.questions, selectedID); index >= 0 {
+		m.inbox, m.sent, m.archived, m.err = msg.inbox, msg.sent, msg.archived, msg.err
+		m.setMessages()
+		if index := messageIndex(m.messages, selectedID); index >= 0 {
 			m.cursor = index
-		} else if m.cursor >= len(m.questions) {
-			m.cursor = max(0, len(m.questions)-1)
+		} else if m.cursor >= len(m.messages) {
+			m.cursor = max(0, len(m.messages)-1)
 		}
 		return m.withContextCommand()
 	case refreshMsg:
 		return m, tea.Batch(m.load, scheduleRefresh())
 	case branchMsg:
-		if msg.question.ID != m.contextID {
+		if msg.message.ID != m.contextID {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -144,9 +171,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.branch = msg.branch
 		m.remotes = "remotes loading…"
 		m.pull = ""
-		return m, m.loadRemotes(msg.question, msg.branch)
+		return m, m.loadRemotes(msg.message, msg.branch)
 	case remotesMsg:
-		if msg.question.ID != m.contextID {
+		if msg.message.ID != m.contextID {
 			return m, nil
 		}
 		if msg.err != nil {
@@ -161,7 +188,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pull = "PR loading…"
-		return m, m.loadPull(msg.question, msg.branch)
+		return m, m.loadPull(msg.message, msg.branch)
 	case pullMsg:
 		if msg.questionID != m.contextID {
 			return m, nil
@@ -179,7 +206,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.answering = false
 			m.answerID = ""
-			m.answerQ = model.Question{}
+			m.answerQ = model.Message{}
+			m.composeTo = ""
 			m.editor.Reset()
 			return m, m.load
 		}
@@ -189,7 +217,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c", "esc":
 				m.answering = false
 				m.answerID = ""
-				m.answerQ = model.Question{}
+				m.answerQ = model.Message{}
+				m.composeTo = ""
 				m.editor.Blur()
 				m.editor.Reset()
 				return m, nil
@@ -207,7 +236,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "j", "down":
-			if m.cursor+1 < len(m.questions) {
+			if m.cursor+1 < len(m.messages) {
 				m.cursor++
 				return m.withContextCommand()
 			}
@@ -216,18 +245,36 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor--
 				return m.withContextCommand()
 			}
-		case "tab", "h":
-			m.historyOn = !m.historyOn
+		case "s":
+			m.showSent = !m.showSent
 			m.cursor = 0
-			m.setQuestions()
+			m.setMessages()
+			return m.withContextCommand()
+		case "x":
+			m.showArchived = !m.showArchived
+			m.cursor = 0
+			m.setMessages()
 			return m.withContextCommand()
 		case "enter", "a":
-			if !m.historyOn && len(m.questions) > 0 {
+			if len(m.messages) > 0 && canReply(m.messages[m.cursor]) {
 				m.answering = true
-				m.answerQ = m.questions[m.cursor]
+				m.answerQ = m.messages[m.cursor]
 				m.answerID = m.answerQ.ID
+				m.composeTo = ""
 				m.editor.Focus()
 				return m, textarea.Blink
+			}
+		case "n":
+			if len(m.messages) > 0 {
+				target := agentSession(m.messages[m.cursor])
+				if target != "" {
+					m.answering = true
+					m.answerQ = m.messages[m.cursor]
+					m.answerID = ""
+					m.composeTo = target
+					m.editor.Focus()
+					return m, textarea.Blink
+				}
 			}
 		case "r":
 			return m, m.load
@@ -236,20 +283,42 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *app) setQuestions() {
-	if m.historyOn {
-		m.questions = m.history
-	} else {
-		m.questions = m.pending
+func (m *app) setMessages() {
+	seen := make(map[string]bool)
+	m.messages = nil
+	add := func(messages []model.Message) {
+		for _, message := range messages {
+			if !seen[message.ID] {
+				seen[message.ID] = true
+				m.messages = append(m.messages, message)
+			}
+		}
 	}
+	add(m.inbox)
+	if m.showSent {
+		for _, message := range m.sent {
+			if message.ArchivedAt == nil || m.showArchived {
+				add([]model.Message{message})
+			}
+		}
+	}
+	if m.showArchived {
+		add(m.archived)
+	}
+	sort.Slice(m.messages, func(i, j int) bool {
+		if m.messages[i].CreatedAt.Equal(m.messages[j].CreatedAt) {
+			return m.messages[i].ID > m.messages[j].ID
+		}
+		return m.messages[i].CreatedAt.After(m.messages[j].CreatedAt)
+	})
 }
 
 func (m app) withContextCommand() (tea.Model, tea.Cmd) {
-	var q model.Question
+	var q model.Message
 	if m.answering {
 		q = m.answerQ
-	} else if len(m.questions) > 0 {
-		q = m.questions[m.cursor]
+	} else if len(m.messages) > 0 {
+		q = m.messages[m.cursor]
 	}
 	if q.ID == "" || m.repo == nil {
 		m.contextID, m.branch, m.remotes, m.pull = "", "", "", ""
@@ -265,21 +334,21 @@ func (m app) withContextCommand() (tea.Model, tea.Cmd) {
 	return m, m.loadBranch(q)
 }
 
-func (m app) loadRemotes(q model.Question, branch string) tea.Cmd {
+func (m app) loadRemotes(q model.Message, branch string) tea.Cmd {
 	return func() tea.Msg {
 		remotes, err := m.repo.Remotes(m.ctx, q.Directory)
-		return remotesMsg{question: q, branch: branch, remotes: remotes, err: err}
+		return remotesMsg{message: q, branch: branch, remotes: remotes, err: err}
 	}
 }
 
-func (m app) loadBranch(q model.Question) tea.Cmd {
+func (m app) loadBranch(q model.Message) tea.Cmd {
 	return func() tea.Msg {
 		branch, err := m.repo.Branch(m.ctx, q.Directory)
-		return branchMsg{question: q, branch: branch, err: err}
+		return branchMsg{message: q, branch: branch, err: err}
 	}
 }
 
-func (m app) loadPull(q model.Question, branch string) tea.Cmd {
+func (m app) loadPull(q model.Message, branch string) tea.Cmd {
 	return func() tea.Msg {
 		pull, err := m.repo.PullRequest(m.ctx, q.Directory, branch)
 		return pullMsg{questionID: q.ID, pull: pull, err: err}
@@ -296,51 +365,73 @@ func formatRemotes(remotes []repoctx.Remote) string {
 
 func (m app) selectedID() string {
 	if m.answering {
-		return m.answerID
+		return m.answerQ.ID
 	}
-	if m.cursor >= 0 && m.cursor < len(m.questions) {
-		return m.questions[m.cursor].ID
+	if m.cursor >= 0 && m.cursor < len(m.messages) {
+		return m.messages[m.cursor].ID
 	}
 	return ""
 }
 
-func questionIndex(questions []model.Question, id string) int {
-	for i := range questions {
-		if questions[i].ID == id {
+func messageIndex(messages []model.Message, id string) int {
+	for i := range messages {
+		if messages[i].ID == id {
 			return i
 		}
 	}
 	return -1
 }
 
+func canReply(message model.Message) bool {
+	return message.RecipientSession == model.HumanSession && message.SenderSession != model.HumanSession && message.ArchivedAt == nil
+}
+
+func agentSession(message model.Message) string {
+	if message.SenderSession != model.HumanSession {
+		return message.SenderSession
+	}
+	if message.RecipientSession != model.HumanSession {
+		return message.RecipientSession
+	}
+	return ""
+}
+
 func (m app) View() tea.View {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("HQ · Questions"))
+	b.WriteString(titleStyle.Render("HQ · Mailbox"))
 	b.WriteString("  ")
-	if m.historyOn {
-		b.WriteString(dim.Render("Pending"))
-		b.WriteString("  ")
-		b.WriteString(selected.Render("History"))
+	b.WriteString(selected.Render("Inbox"))
+	b.WriteString("  ")
+	if m.showSent {
+		b.WriteString(selected.Render("Sent:on"))
 	} else {
-		b.WriteString(selected.Render("Pending"))
-		b.WriteString("  ")
-		b.WriteString(dim.Render("History"))
+		b.WriteString(dim.Render("Sent:off"))
+	}
+	b.WriteString("  ")
+	if m.showArchived {
+		b.WriteString(selected.Render("Archived:on"))
+	} else {
+		b.WriteString(dim.Render("Archived:off"))
 	}
 	b.WriteString("\n\n")
 	if m.err != nil {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
 		b.WriteString("\n\n")
 	}
-	if len(m.questions) == 0 {
-		if m.historyOn {
-			b.WriteString(dim.Render("No question history. Press r to refresh."))
-		} else {
-			b.WriteString(dim.Render("No pending questions. Press r to refresh."))
-		}
+	if len(m.messages) == 0 {
+		b.WriteString(dim.Render("No messages in this view. Press r to refresh."))
 	} else {
-		for i, q := range m.questions {
-			line := fmt.Sprintf("%-9s %-8s  %s", q.Status, short(q.SessionID, 8), singleLine(q.Prompt))
-			if i == m.cursor && (!m.answering || q.ID == m.answerID) {
+		for i, message := range m.messages {
+			direction := "inbox ← " + short(message.SenderSession, 8)
+			if message.SenderSession == model.HumanSession {
+				direction = "sent → " + short(message.RecipientSession, 8)
+			}
+			state := ""
+			if message.ArchivedAt != nil {
+				state = " [archived]"
+			}
+			line := fmt.Sprintf("%-18s %s%s", direction, singleLine(message.Body), state)
+			if i == m.cursor && (!m.answering || message.ID == m.answerQ.ID) {
 				b.WriteString(selected.Render("› " + line))
 			} else {
 				b.WriteString("  " + line)
@@ -348,18 +439,22 @@ func (m app) View() tea.View {
 			b.WriteByte('\n')
 		}
 	}
-	var detail model.Question
+	var detail model.Message
 	if m.answering {
 		detail = m.answerQ
-	} else if len(m.questions) > 0 {
-		detail = m.questions[m.cursor]
+	} else if len(m.messages) > 0 {
+		detail = m.messages[m.cursor]
 	}
 	if detail.ID != "" {
 		b.WriteString("\n")
 		var body strings.Builder
-		body.WriteString(titleStyle.Render(detail.Prompt))
+		body.WriteString(titleStyle.Render(detail.Body))
 		body.WriteByte('\n')
-		body.WriteString(dim.Render(detail.Directory + " · " + detail.SessionID))
+		body.WriteString(dim.Render(detail.SenderSession + " → " + detail.RecipientSession + " · " + detail.Directory))
+		if detail.ReplyTo != nil {
+			body.WriteByte('\n')
+			body.WriteString(dim.Render("reply to " + *detail.ReplyTo))
+		}
 		if m.branch != "" {
 			body.WriteByte('\n')
 			body.WriteString(dim.Render("git " + m.branch))
@@ -375,28 +470,22 @@ func (m app) View() tea.View {
 			body.WriteString("\n\n")
 			body.WriteString(detail.Details)
 		}
-		if m.historyOn && detail.Response != nil {
-			body.WriteString("\n\n")
-			body.WriteString(titleStyle.Render("Answer"))
-			body.WriteByte('\n')
-			body.WriteString(*detail.Response)
-		}
 		b.WriteString(panel.Render(body.String()))
 	}
 	if m.answering {
 		b.WriteString("\n\n")
-		b.WriteString(titleStyle.Render("Answer"))
+		if m.composeTo != "" {
+			b.WriteString(titleStyle.Render("New message to " + m.composeTo))
+		} else {
+			b.WriteString(titleStyle.Render("Reply to " + m.answerQ.SenderSession))
+		}
 		b.WriteString("\n")
 		b.WriteString(m.editor.View())
 		b.WriteString("\n")
 		b.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
 	} else {
 		b.WriteString("\n\n")
-		if m.historyOn {
-			b.WriteString(dim.Render("j/k move · tab/h pending · r refresh · q quit · auto-refresh 1m"))
-		} else {
-			b.WriteString(dim.Render("j/k move · enter answer · tab/h history · r refresh · q quit · auto-refresh 1m"))
-		}
+		b.WriteString(dim.Render("j/k move · enter reply · n new message · s sent · x archived · r refresh · q quit · auto-refresh 1m"))
 	}
 	view := tea.NewView(b.String())
 	view.AltScreen = true

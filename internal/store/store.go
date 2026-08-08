@@ -8,20 +8,27 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("question not found")
-	ErrAlreadyHandled = errors.New("question has already been handled")
-	ErrNotReady       = errors.New("question has no answer ready")
-	ErrClaimed        = errors.New("answer is being delivered by another process")
+	ErrNotFound       = errors.New("message not found")
+	ErrAlreadyHandled = errors.New("message has already been handled")
+	ErrNotReady       = errors.New("no message is ready")
+	ErrClaimed        = errors.New("message is being delivered by another process")
 )
 
+type Claim struct {
+	MessageID        string
+	ReplyTo          string
+	Directory        string
+	RecipientSession string
+}
+
 type Store interface {
-	Create(context.Context, model.Question) error
-	Get(context.Context, string) (model.Question, error)
-	List(context.Context, model.Filter) ([]model.Question, error)
-	Answer(context.Context, string, string) error
-	Cancel(context.Context, string) error
-	ClaimAnswer(context.Context, string, string) (model.Question, error)
-	CompleteAnswer(context.Context, string, string) error
-	ReleaseAnswer(context.Context, string, string) error
+	Create(context.Context, model.Message) error
+	Reply(context.Context, string, model.Message) error
+	Get(context.Context, string) (model.Message, error)
+	List(context.Context, model.Filter) ([]model.Message, error)
+	Archive(context.Context, string) error
+	Claim(context.Context, Claim, string) (model.Message, error)
+	Complete(context.Context, string, string) error
+	Release(context.Context, string, string) error
 	Close() error
 }

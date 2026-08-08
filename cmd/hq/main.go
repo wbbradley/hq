@@ -20,7 +20,7 @@ func main() {
 	if err == nil {
 		return
 	}
-	if errors.Is(err, cli.ErrNoAnswers) {
+	if errors.Is(err, cli.ErrNoMessages) {
 		os.Exit(3)
 	}
 	fmt.Fprintln(os.Stderr, "hq:", err)

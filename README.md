@@ -1,8 +1,8 @@
 # HQ
 
-HQ lets an agent ask a person a question, keep working, and later poll or wait for the answer. A terminal UI gives the person one queue for all local agents.
+HQ is a local message system for agents and a human. Agents send messages to the human inbox, the human replies from a terminal UI, and agents read replies or other mailbox messages later.
 
-HQ stores each question in a local SQLite database. The default path is `~/.local/state/hq/hq.db`, or `$XDG_STATE_HOME/hq/hq.db` when `XDG_STATE_HOME` is set.
+HQ stores messages in SQLite at `~/.local/state/hq/hq.db`, or `$XDG_STATE_HOME/hq/hq.db` when `XDG_STATE_HOME` is set.
 
 ## Install
 
@@ -12,59 +12,90 @@ HQ needs Go 1.25 or later.
 go install github.com/wbbradley/hq/cmd/hq@latest
 ```
 
+From a local checkout:
+
+```sh
+go install ./cmd/hq
+```
+
 ## Agent use
 
-Run `hq agents` to print agent-specific setup, command, output, and delivery rules:
+Run `hq agents` to print agent-specific setup, output, and delivery rules:
 
 ```sh
 hq agents
 ```
 
-HQ embeds [the agent instruction source](internal/agenthelp/instructions.md) in the binary. Edit that file to update both the checked-in source and `hq agents` output.
+HQ embeds [the agent instruction source](internal/agenthelp/instructions.md) in the binary. Edit that file to update both the source and `hq agents` output.
 
-HQ resolves an agent session from `HQ_SESSION`, then `CODEX_THREAD_ID`. An explicit `--session` flag takes priority.
+HQ resolves the current agent session from `HQ_SESSION`, then `CODEX_THREAD_ID`. An explicit `--session` flag takes priority.
+
+```sh
+export HQ_SESSION="my-agent-run"
+
+message_id=$(hq ask "Which API name should I use?")
+reply=$(hq wait --timeout 30m "$message_id")
+
+# Read replies and unsolicited messages in this agent mailbox.
+hq poll
+```
+
+`poll` exits with code 3 and writes nothing when the mailbox has no ready messages.
 
 ## Human use
 
-Run `hq` with no command in a terminal to open the terminal UI:
+Run `hq` in a terminal to open the mailbox UI:
 
 ```sh
 hq
 ```
 
-When stdin or stdout is not a terminal, bare `hq` lists only pending questions in the current work dir and inferred session. If HQ cannot infer a session, the list includes all sessions in the current work dir. Use explicit `hq list` flags for another scope or status.
+The default view shows open messages in the reserved `human` mailbox. Use these keys:
 
-Use `j` and `k` to move, Enter to answer, Enter again to submit, and `q` to quit. Shift+Enter and Ctrl+J insert line breaks while editing. The TUI refreshes the pending queue every minute. A refresh keeps any answer being edited and keeps the draft bound to its original question. The human commands also work without a TTY:
+- `j` / `k`: move
+- Enter: reply to an open inbox message; Enter again submits
+- `n`: write a new message to the agent session tied to the selected row
+- Shift+Enter / Ctrl+J: add a line break while editing
+- `s`: toggle sent messages
+- `x`: toggle archived inbox messages
+- `r`: refresh
+- `q`: quit
 
-Press Tab or `h` to switch between pending questions and question history. History keeps answered and cancelled questions, with full answers shown in the detail panel. Each detail panel shows the current local git branch and remotes, such as `origin: wbbradley/hq`. GitHub and GitLab URL prefixes are omitted. Linked worktrees use the main repository's shared remote settings. HQ then looks up the matching open pull request in the background. HQ uses the same environment, config, and keyring credentials as `gh`; the panel shows `[gh unavailable]` when no credentials are available.
+Sent and Archived are independent filters. This lets the human view the open inbox, add sent messages, add archived messages, or show all three sets together. Each detail panel also shows the local git branch, compact remotes, and an asynchronously loaded open pull request when `gh` credentials are available.
+
+When stdin or stdout is not a terminal, bare `hq` lists open messages in the human mailbox for the current work directory.
+
+Human commands also work without the TUI:
 
 ```sh
-hq list --status pending
-hq answer 0198c7ec-73b0-7cc3-a5f7-e31c77140d65 "Use ListWidgets"
-hq cancel 0198c7ec-73b0-7cc3-a5f7-e31c77140d65
+hq list --recipient human --open
+hq answer MESSAGE_ID "Use ListWidgets"
+hq cancel MESSAGE_ID
 ```
 
 ## Command summary
 
 ```text
-hq ask [--session ID] [--dir PATH] [--details TEXT] [--json] [PROMPT]
-hq wait [--timeout DURATION] [--interval DURATION] [--json] QUESTION_ID
+hq ask [--session ID] [--dir PATH] [--details TEXT] [--json] [MESSAGE]
+hq wait [--timeout DURATION] [--interval DURATION] [--json] MESSAGE_ID
 hq poll [--session ID] [--dir PATH] [--json]
-hq get QUESTION_ID
-hq list [--session ID] [--dir PATH] [--status STATUS] [--limit N] [--json]
-hq answer QUESTION_ID [RESPONSE]
-hq cancel QUESTION_ID
+hq get MESSAGE_ID
+hq list [--sender ID] [--recipient ID] [--dir PATH] [--open|--archived] [--limit N] [--json]
+hq answer MESSAGE_ID [RESPONSE]
+hq cancel MESSAGE_ID
 hq tui
 hq agents
 ```
 
-Set `HQ_DB` or pass the global `--db PATH` flag before the command to use another database.
+Set `HQ_DB` or pass global `--db PATH` before the command to use another database.
 
-## Data and delivery rules
+## Message and delivery rules
 
-HQ keeps all question rows. A row moves from `pending` to `answered` or `cancelled`. A successful `wait` or `poll` sets `completed_at`; HQ does not delete the row.
+Each mailbox is identified by `(directory, session)`. `human` is reserved for the human mailbox. Message content and routing do not change. Replying creates a new human-to-agent message with `reply_to` set and archives the inbound agent-to-human message.
 
-HQ leases an answered row before delivery, so two consumers cannot print the same answer at the same time. A failed write releases the lease. A process crash between stdout and the final database update can cause a later retry to print the answer again. Consumers should use the question ID as an idempotency key when that rare duplicate matters.
+`wait` reads a reply to one prior message. `poll` reads every ready message addressed to the current agent session, including unsolicited human messages. Delivery leases each row, writes stdout once, and then sets `completed_at` and `archived_at`. A crash after stdout but before the database update can cause one later retry, so consumers can use the message ID as an idempotency key.
+
+The version 2 schema does not migrate old question rows. HQ preserves the old table as `legacy_questions_v1` when it first opens a version 1 database.
 
 See [docs/design.md](docs/design.md) for the schema and storage contract.
 

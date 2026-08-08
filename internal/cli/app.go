@@ -21,24 +21,24 @@ import (
 	"github.com/wbbradley/hq/internal/tui"
 )
 
-const usage = `hq queues questions from agents for people to answer.
+const usage = `hq delivers messages between agent sessions and a human mailbox.
 
 Usage:
   hq [--db PATH] <command> [options]
-  hq                          Open the TUI in a terminal; list pending questions otherwise
+  hq                          Open the TUI in a terminal; list the open human inbox otherwise
 
 Agent commands:
   agents  Print instructions for agents
-  ask     Create a question; print its ID
-  wait    Wait for one answer; print and complete it
-  poll    Print and complete all ready answers in a session
-  get     Read one question without changing it
+  ask     Send a message to the human inbox; print its ID
+  wait    Wait for a reply to one message
+  poll    Read and complete messages in an agent mailbox
+  get     Read one message without changing it
 
 Human commands:
-  tui     Browse and answer pending questions
-  list    List questions
-  answer  Answer one question
-  cancel  Cancel one pending question
+  tui     Read inbox, sent, and archived messages
+  list    List messages
+  answer  Reply to one inbox message
+  cancel  Archive one inbox message
 
 Other commands:
   help     Print command help
@@ -48,7 +48,7 @@ HQ_SESSION sets the agent session. HQ can also detect CODEX_THREAD_ID.
 The default database is $XDG_STATE_HOME/hq/hq.db or ~/.local/state/hq/hq.db.
 `
 
-var ErrNoAnswers = errors.New("no answers ready")
+var ErrNoMessages = errors.New("no messages ready")
 
 type App struct {
 	In     io.Reader
@@ -182,11 +182,7 @@ func (a *App) bareListArgs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"--status", string(model.StatusPending), "--dir", directory}
-	if session := a.inferredSession(); session != "" {
-		args = append(args, "--session", session)
-	}
-	return args, nil
+	return []string{"--recipient", model.HumanSession, "--open", "--dir", directory}, nil
 }
 
 func flags(name string) *flag.FlagSet {
@@ -207,6 +203,9 @@ func (a *App) ask(ctx context.Context, s store.Store, args []string) error {
 	if strings.TrimSpace(*session) == "" {
 		return errors.New("ask needs --session, HQ_SESSION, or a detected agent session")
 	}
+	if *session == model.HumanSession {
+		return fmt.Errorf("%q is reserved for the human mailbox", model.HumanSession)
+	}
 	if *directory == "" {
 		var err error
 		*directory, err = a.workDirectory()
@@ -222,25 +221,25 @@ func (a *App) ask(ctx context.Context, s store.Store, args []string) error {
 	if prompt == "" {
 		data, err := io.ReadAll(a.In)
 		if err != nil {
-			return fmt.Errorf("read question: %w", err)
+			return fmt.Errorf("read message: %w", err)
 		}
 		prompt = strings.TrimSpace(string(data))
 	}
 	if prompt == "" {
-		return errors.New("question text is required")
+		return errors.New("message text is required")
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
-		return fmt.Errorf("make question ID: %w", err)
+		return fmt.Errorf("make message ID: %w", err)
 	}
-	q := model.Question{ID: id.String(), Directory: filepath.Clean(absolute), SessionID: *session, Prompt: prompt, Details: *details, Status: model.StatusPending, CreatedAt: time.Now().UTC()}
-	if err := s.Create(ctx, q); err != nil {
+	m := model.Message{ID: id.String(), Directory: filepath.Clean(absolute), SenderSession: *session, RecipientSession: model.HumanSession, Body: prompt, Details: *details, CreatedAt: time.Now().UTC()}
+	if err := s.Create(ctx, m); err != nil {
 		return err
 	}
 	if *jsonOutput {
-		return writeJSON(a.Out, q)
+		return writeJSON(a.Out, m)
 	}
-	return writeOnce(a.Out, []byte(q.ID+"\n"))
+	return writeOnce(a.Out, []byte(m.ID+"\n"))
 }
 
 func (a *App) wait(ctx context.Context, s store.Store, args []string) error {
@@ -252,7 +251,7 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string) error {
 		return err
 	}
 	if len(f.Args()) != 1 {
-		return errors.New("wait needs one question ID")
+		return errors.New("wait needs one message ID")
 	}
 	if *interval <= 0 {
 		return errors.New("--interval must be positive")
@@ -263,28 +262,39 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string) error {
 		defer cancel()
 	}
 	id := f.Args()[0]
+	original, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if original.SenderSession == model.HumanSession || original.RecipientSession != model.HumanSession {
+		return errors.New("wait needs an agent-to-human message ID")
+	}
 	for {
 		token := uuid.NewString()
-		q, err := s.ClaimAnswer(ctx, id, token)
+		m, err := s.Claim(ctx, store.Claim{ReplyTo: id, Directory: original.Directory, RecipientSession: original.SenderSession}, token)
 		if err == nil {
-			if err := deliver(a.Out, q, *jsonOutput); err != nil {
-				_ = s.ReleaseAnswer(context.Background(), id, token)
+			if err := deliver(a.Out, m, *jsonOutput); err != nil {
+				_ = s.Release(context.Background(), m.ID, token)
 				return err
 			}
-			return s.CompleteAnswer(context.Background(), id, token)
+			return s.Complete(context.Background(), m.ID, token)
 		}
 		if !errors.Is(err, store.ErrNotReady) && !errors.Is(err, store.ErrClaimed) {
 			return err
 		}
-		q, getErr := s.Get(ctx, id)
+		replies, listErr := s.List(ctx, model.Filter{ReplyTo: id, Directory: original.Directory, RecipientSession: original.SenderSession, Limit: 1})
+		if listErr != nil {
+			return listErr
+		}
+		if len(replies) == 1 && replies[0].CompletedAt != nil {
+			return errors.New("reply was already delivered")
+		}
+		current, getErr := s.Get(ctx, id)
 		if getErr != nil {
 			return getErr
 		}
-		if q.Status == model.StatusCancelled {
-			return errors.New("question was cancelled")
-		}
-		if q.CompletedAt != nil {
-			return errors.New("answer was already completed")
+		if current.ArchivedAt != nil && len(replies) == 0 {
+			return errors.New("message was archived without a reply")
 		}
 		select {
 		case <-ctx.Done():
@@ -305,6 +315,9 @@ func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
 	if len(f.Args()) != 0 || strings.TrimSpace(*session) == "" {
 		return errors.New("poll needs --session, HQ_SESSION, or a detected agent session")
 	}
+	if *session == model.HumanSession {
+		return fmt.Errorf("%q is reserved for the human mailbox", model.HumanSession)
+	}
 	if *directory == "" {
 		var err error
 		*directory, err = a.workDirectory()
@@ -316,47 +329,45 @@ func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	questions, err := s.List(ctx, model.Filter{Directory: filepath.Clean(abs), SessionID: *session, Status: model.StatusAnswered, Limit: 1000})
+	completed := false
+	messages, err := s.List(ctx, model.Filter{Directory: filepath.Clean(abs), RecipientSession: *session, Completed: &completed, Limit: 1000})
 	if err != nil {
 		return err
 	}
 	type claim struct {
-		q     model.Question
+		m     model.Message
 		token string
 	}
 	var claims []claim
-	for _, candidate := range questions {
-		if candidate.CompletedAt != nil {
-			continue
-		}
+	for _, candidate := range messages {
 		token := uuid.NewString()
-		q, err := s.ClaimAnswer(ctx, candidate.ID, token)
+		m, err := s.Claim(ctx, store.Claim{MessageID: candidate.ID}, token)
 		if err == nil {
-			claims = append(claims, claim{q: q, token: token})
+			claims = append(claims, claim{m: m, token: token})
 		}
 	}
 	if len(claims) == 0 {
-		return ErrNoAnswers
+		return ErrNoMessages
 	}
 	var data []byte
 	if *jsonOutput {
-		items := make([]model.Question, len(claims))
+		items := make([]model.Message, len(claims))
 		for i := range claims {
-			items[i] = claims[i].q
+			items[i] = claims[i].m
 		}
 		data, err = json.Marshal(items)
 		data = append(data, '\n')
 	} else {
 		var b bytes.Buffer
 		for _, c := range claims {
-			fmt.Fprintf(&b, "%s\t%s\n", c.q.ID, *c.q.Response)
+			fmt.Fprintf(&b, "%s\t%s\n", c.m.ID, c.m.Body)
 		}
 		data = b.Bytes()
 	}
 	writeErr := writeOnce(a.Out, data)
 	if err != nil || writeErr != nil {
 		for _, c := range claims {
-			_ = s.ReleaseAnswer(context.Background(), c.q.ID, c.token)
+			_ = s.Release(context.Background(), c.m.ID, c.token)
 		}
 		if err != nil {
 			return err
@@ -364,7 +375,7 @@ func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
 		return writeErr
 	}
 	for _, c := range claims {
-		if err := s.CompleteAnswer(context.Background(), c.q.ID, c.token); err != nil {
+		if err := s.Complete(context.Background(), c.m.ID, c.token); err != nil {
 			return err
 		}
 	}
@@ -373,20 +384,23 @@ func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
 
 func (a *App) get(ctx context.Context, s store.Store, args []string) error {
 	if len(args) != 1 {
-		return errors.New("get needs one question ID")
+		return errors.New("get needs one message ID")
 	}
-	q, err := s.Get(ctx, args[0])
+	m, err := s.Get(ctx, args[0])
 	if err != nil {
 		return err
 	}
-	return writeJSON(a.Out, q)
+	return writeJSON(a.Out, m)
 }
 
 func (a *App) list(ctx context.Context, s store.Store, args []string) error {
 	f := flags("list")
-	session := f.String("session", "", "session ID")
+	session := f.String("session", "", "recipient session ID")
+	sender := f.String("sender", "", "sender session ID")
+	recipient := f.String("recipient", "", "recipient session ID")
 	directory := f.String("dir", "", "work directory scope")
-	status := f.String("status", "", "pending, answered, or cancelled")
+	open := f.Bool("open", false, "only unarchived messages")
+	archived := f.Bool("archived", false, "only archived messages")
 	limit := f.Int("limit", 100, "maximum rows")
 	jsonOutput := f.Bool("json", false, "write JSON")
 	if err := f.Parse(args); err != nil {
@@ -395,20 +409,27 @@ func (a *App) list(ctx context.Context, s store.Store, args []string) error {
 	if len(f.Args()) != 0 {
 		return errors.New("list takes flags only")
 	}
-	if *status != "" && *status != string(model.StatusPending) && *status != string(model.StatusAnswered) && *status != string(model.StatusCancelled) {
-		return fmt.Errorf("invalid status %q", *status)
+	if *open && *archived {
+		return errors.New("list cannot combine --open and --archived")
 	}
-	filter := model.Filter{Directory: *directory, SessionID: *session, Status: model.Status(*status), Limit: *limit}
-	questions, err := s.List(ctx, filter)
+	if *recipient == "" {
+		*recipient = *session
+	}
+	filter := model.Filter{Directory: *directory, SenderSession: *sender, RecipientSession: *recipient, Limit: *limit}
+	if *open || *archived {
+		filter.Archived = new(bool)
+		*filter.Archived = *archived
+	}
+	messages, err := s.List(ctx, filter)
 	if err != nil {
 		return err
 	}
 	if *jsonOutput {
-		return writeJSON(a.Out, questions)
+		return writeJSON(a.Out, messages)
 	}
 	var b bytes.Buffer
-	for _, q := range questions {
-		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", q.ID, q.Status, q.SessionID, strings.Join(strings.Fields(q.Prompt), " "))
+	for _, m := range messages {
+		fmt.Fprintf(&b, "%s\t%s→%s\t%s\n", m.ID, m.SenderSession, m.RecipientSession, strings.Join(strings.Fields(m.Body), " "))
 	}
 	return writeOnce(a.Out, b.Bytes())
 }
@@ -419,7 +440,7 @@ func (a *App) answer(ctx context.Context, s store.Store, args []string) error {
 		return err
 	}
 	if len(f.Args()) < 1 {
-		return errors.New("answer needs a question ID")
+		return errors.New("answer needs a message ID")
 	}
 	response := strings.TrimSpace(strings.Join(f.Args()[1:], " "))
 	if response == "" {
@@ -430,23 +451,34 @@ func (a *App) answer(ctx context.Context, s store.Store, args []string) error {
 		response = strings.TrimSpace(string(data))
 	}
 	if response == "" {
-		return errors.New("answer text is required")
+		return errors.New("reply text is required")
 	}
-	return s.Answer(ctx, f.Args()[0], response)
+	original, err := s.Get(ctx, f.Args()[0])
+	if err != nil {
+		return err
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("make message ID: %w", err)
+	}
+	replyTo := original.ID
+	reply := model.Message{ID: id.String(), Directory: original.Directory, SenderSession: model.HumanSession,
+		RecipientSession: original.SenderSession, Body: response, ReplyTo: &replyTo, CreatedAt: time.Now().UTC()}
+	return s.Reply(ctx, original.ID, reply)
 }
 
 func (a *App) cancel(ctx context.Context, s store.Store, args []string) error {
 	if len(args) != 1 {
-		return errors.New("cancel needs one question ID")
+		return errors.New("cancel needs one message ID")
 	}
-	return s.Cancel(ctx, args[0])
+	return s.Archive(ctx, args[0])
 }
 
-func deliver(out io.Writer, q model.Question, asJSON bool) error {
+func deliver(out io.Writer, m model.Message, asJSON bool) error {
 	if asJSON {
-		return writeJSON(out, q)
+		return writeJSON(out, m)
 	}
-	return writeOnce(out, []byte(*q.Response+"\n"))
+	return writeOnce(out, []byte(m.Body+"\n"))
 }
 
 func writeJSON(out io.Writer, value any) error {
