@@ -67,6 +67,15 @@ func TestRepositoryContextIgnoresStaleResultsAndShowsUnavailable(t *testing.T) {
 	if m.branch != "feature" || cmd == nil {
 		t.Fatalf("branch = %q, cmd = %#v", m.branch, cmd)
 	}
+	updated, cmd = m.Update(remotesMsg{
+		question: q,
+		branch:   "feature",
+		remotes:  []repoctx.Remote{{Name: "origin", Display: "wbbradley/hq"}},
+	})
+	m = updated.(app)
+	if m.remotes != "origin: wbbradley/hq" || cmd == nil {
+		t.Fatalf("remotes = %q, cmd = %#v", m.remotes, cmd)
+	}
 	updated, _ = m.Update(pullMsg{questionID: q.ID, err: repoctx.ErrUnavailable})
 	m = updated.(app)
 	if m.pull != "[gh unavailable]" {
@@ -75,6 +84,10 @@ func TestRepositoryContextIgnoresStaleResultsAndShowsUnavailable(t *testing.T) {
 	updated, _ = m.Update(branchMsg{question: model.Question{ID: "stale"}, branch: "wrong", err: errors.New("stale")})
 	if got := updated.(app).branch; got != "feature" {
 		t.Fatalf("stale branch changed context to %q", got)
+	}
+	view := m.View().Content
+	if strings.Index(view, "origin: wbbradley/hq") > strings.Index(view, "[gh unavailable]") {
+		t.Fatalf("remote appears after pull status: %q", view)
 	}
 }
 

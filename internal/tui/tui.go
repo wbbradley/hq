@@ -44,6 +44,7 @@ type app struct {
 	err       error
 	contextID string
 	branch    string
+	remotes   string
 	pull      string
 }
 
@@ -67,6 +68,13 @@ type pullMsg struct {
 	questionID string
 	pull       *repoctx.PullRequest
 	err        error
+}
+
+type remotesMsg struct {
+	question model.Question
+	branch   string
+	remotes  []repoctx.Remote
+	err      error
 }
 
 func Run(ctx context.Context, s store.Store, in io.Reader, out io.Writer) error {
@@ -129,10 +137,29 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.branch = "[git unavailable]"
+			m.remotes = ""
 			m.pull = ""
 			return m, nil
 		}
 		m.branch = msg.branch
+		m.remotes = "remotes loading…"
+		m.pull = ""
+		return m, m.loadRemotes(msg.question, msg.branch)
+	case remotesMsg:
+		if msg.question.ID != m.contextID {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.remotes = "[remotes unavailable]"
+			m.pull = ""
+			return m, nil
+		}
+		m.remotes = formatRemotes(msg.remotes)
+		if len(msg.remotes) == 0 {
+			m.remotes = "no remotes"
+			m.pull = ""
+			return m, nil
+		}
 		m.pull = "PR loading…"
 		return m, m.loadPull(msg.question, msg.branch)
 	case pullMsg:
@@ -225,7 +252,7 @@ func (m app) withContextCommand() (tea.Model, tea.Cmd) {
 		q = m.questions[m.cursor]
 	}
 	if q.ID == "" || m.repo == nil {
-		m.contextID, m.branch, m.pull = "", "", ""
+		m.contextID, m.branch, m.remotes, m.pull = "", "", "", ""
 		return m, nil
 	}
 	if q.ID == m.contextID {
@@ -233,8 +260,16 @@ func (m app) withContextCommand() (tea.Model, tea.Cmd) {
 	}
 	m.contextID = q.ID
 	m.branch = "git loading…"
+	m.remotes = ""
 	m.pull = ""
 	return m, m.loadBranch(q)
+}
+
+func (m app) loadRemotes(q model.Question, branch string) tea.Cmd {
+	return func() tea.Msg {
+		remotes, err := m.repo.Remotes(m.ctx, q.Directory)
+		return remotesMsg{question: q, branch: branch, remotes: remotes, err: err}
+	}
 }
 
 func (m app) loadBranch(q model.Question) tea.Cmd {
@@ -249,6 +284,14 @@ func (m app) loadPull(q model.Question, branch string) tea.Cmd {
 		pull, err := m.repo.PullRequest(m.ctx, q.Directory, branch)
 		return pullMsg{questionID: q.ID, pull: pull, err: err}
 	}
+}
+
+func formatRemotes(remotes []repoctx.Remote) string {
+	parts := make([]string, 0, len(remotes))
+	for _, remote := range remotes {
+		parts = append(parts, remote.Name+": "+remote.Display)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (m app) selectedID() string {
@@ -320,9 +363,13 @@ func (m app) View() tea.View {
 		if m.branch != "" {
 			body.WriteByte('\n')
 			body.WriteString(dim.Render("git " + m.branch))
-			if m.pull != "" {
-				body.WriteString(dim.Render(" · " + m.pull))
-			}
+		}
+		if m.remotes != "" {
+			body.WriteByte('\n')
+			body.WriteString(dim.Render(m.remotes))
+		}
+		if m.pull != "" {
+			body.WriteString(dim.Render(" · " + m.pull))
 		}
 		if detail.Details != "" {
 			body.WriteString("\n\n")

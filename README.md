@@ -36,7 +36,7 @@ When stdin or stdout is not a terminal, bare `hq` lists only pending questions i
 
 Use `j` and `k` to move, Enter to answer, Enter again to submit, and `q` to quit. Shift+Enter and Ctrl+J insert line breaks while editing. The TUI refreshes the pending queue every minute. A refresh keeps any answer being edited and keeps the draft bound to its original question. The human commands also work without a TTY:
 
-Press Tab or `h` to switch between pending questions and question history. History keeps answered and cancelled questions, with full answers shown in the detail panel. Each detail panel shows the current local git branch. HQ then looks up the matching open pull request in the background. HQ uses the same environment, config, and keyring credentials as `gh`; the panel shows `[gh unavailable]` when no credentials are available.
+Press Tab or `h` to switch between pending questions and question history. History keeps answered and cancelled questions, with full answers shown in the detail panel. Each detail panel shows the current local git branch and remotes, such as `origin: wbbradley/hq`. GitHub and GitLab URL prefixes are omitted. Linked worktrees use the main repository's shared remote settings. HQ then looks up the matching open pull request in the background. HQ uses the same environment, config, and keyring credentials as `gh`; the panel shows `[gh unavailable]` when no credentials are available.
 
 ```sh
 hq list --status pending

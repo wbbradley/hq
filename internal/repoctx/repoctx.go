@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
-	"path"
 	"strings"
 	"time"
 
@@ -22,8 +21,15 @@ type PullRequest struct {
 	URL    string
 }
 
+type Remote struct {
+	Name    string
+	URL     string
+	Display string
+}
+
 type Provider interface {
 	Branch(context.Context, string) (string, error)
+	Remotes(context.Context, string) ([]Remote, error)
 	PullRequest(context.Context, string, string) (*PullRequest, error)
 }
 
@@ -45,12 +51,43 @@ func (GitHub) Branch(ctx context.Context, directory string) (string, error) {
 	return "detached@" + strings.TrimSpace(string(output)), nil
 }
 
-func (GitHub) PullRequest(ctx context.Context, directory, branch string) (*PullRequest, error) {
-	remote, err := exec.CommandContext(ctx, "git", "-C", directory, "remote", "get-url", "origin").Output()
+func (GitHub) Remotes(ctx context.Context, directory string) ([]Remote, error) {
+	output, err := exec.CommandContext(ctx, "git", "-C", directory, "remote").Output()
 	if err != nil {
-		return nil, fmt.Errorf("read git remote: %w", err)
+		return nil, fmt.Errorf("list git remotes: %w", err)
 	}
-	host, owner, repo, err := parseRemote(strings.TrimSpace(string(remote)))
+	names := strings.Fields(string(output))
+	remotes := make([]Remote, 0, len(names))
+	for _, name := range names {
+		output, err := exec.CommandContext(ctx, "git", "-C", directory, "remote", "get-url", name).Output()
+		if err != nil {
+			return nil, fmt.Errorf("read git remote %s: %w", name, err)
+		}
+		raw := strings.TrimSpace(string(output))
+		remotes = append(remotes, Remote{Name: name, URL: raw, Display: compactRemote(raw)})
+	}
+	return remotes, nil
+}
+
+func (GitHub) PullRequest(ctx context.Context, directory, branch string) (*PullRequest, error) {
+	remotes, err := (GitHub{}).Remotes(ctx, directory)
+	if err != nil {
+		return nil, err
+	}
+	var remote string
+	for _, candidate := range remotes {
+		host, _, _, parseErr := parseRemote(candidate.URL)
+		if parseErr == nil && host != "gitlab.com" && (remote == "" || candidate.Name == "origin") {
+			remote = candidate.URL
+			if candidate.Name == "origin" {
+				break
+			}
+		}
+	}
+	if remote == "" {
+		return nil, ErrUnavailable
+	}
+	host, owner, repo, err := parseRemote(remote)
 	if err != nil {
 		return nil, err
 	}
@@ -81,23 +118,44 @@ func (GitHub) PullRequest(ctx context.Context, directory, branch string) (*PullR
 }
 
 func parseRemote(remote string) (host, owner, repo string, err error) {
-	if strings.HasPrefix(remote, "git@") && strings.Contains(remote, ":") {
-		parts := strings.SplitN(strings.TrimPrefix(remote, "git@"), ":", 2)
+	host, repoPath, parseErr := remoteParts(remote)
+	if parseErr != nil {
+		return "", "", "", parseErr
+	}
+	parts := strings.Split(repoPath, "/")
+	if len(parts) != 2 {
+		return "", "", "", fmt.Errorf("parse git remote %q", remote)
+	}
+	return host, parts[0], parts[1], nil
+}
+
+func compactRemote(remote string) string {
+	host, repoPath, err := remoteParts(remote)
+	if err == nil && (host == "github.com" || host == "gitlab.com") {
+		return repoPath
+	}
+	return remote
+}
+
+func remoteParts(remote string) (host, repoPath string, err error) {
+	if !strings.Contains(remote, "://") && strings.Contains(remote, ":") {
+		parts := strings.SplitN(remote, ":", 2)
 		host = parts[0]
-		remote = parts[1]
+		if at := strings.LastIndex(host, "@"); at >= 0 {
+			host = host[at+1:]
+		}
+		repoPath = parts[1]
 	} else {
 		u, parseErr := url.Parse(remote)
 		if parseErr != nil || u.Hostname() == "" {
-			return "", "", "", fmt.Errorf("parse git remote %q", remote)
+			return "", "", fmt.Errorf("parse git remote %q", remote)
 		}
 		host = u.Hostname()
-		remote = strings.TrimPrefix(u.Path, "/")
+		repoPath = strings.TrimPrefix(u.Path, "/")
 	}
-	remote = strings.TrimSuffix(remote, ".git")
-	owner, repo = path.Split(remote)
-	owner = strings.TrimSuffix(owner, "/")
-	if host == "" || owner == "" || repo == "" || strings.Contains(owner, "/") {
-		return "", "", "", fmt.Errorf("parse git remote %q", remote)
+	repoPath = strings.TrimSuffix(repoPath, ".git")
+	if host == "" || repoPath == "" {
+		return "", "", fmt.Errorf("parse git remote %q", remote)
 	}
-	return host, owner, repo, nil
+	return host, repoPath, nil
 }
