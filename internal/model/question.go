@@ -24,8 +24,10 @@ type Question struct {
 }
 
 type Filter struct {
-	Directory string
-	SessionID string
-	Status    Status
-	Limit     int
+	Directory     string
+	SessionID     string
+	Status        Status
+	ExcludeStatus Status
+	Limit         int
+	NewestFirst   bool
 }

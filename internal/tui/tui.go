@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/repoctx"
 	"github.com/wbbradley/hq/internal/store"
 )
 
@@ -27,7 +29,11 @@ var (
 type app struct {
 	ctx       context.Context
 	store     store.Store
+	repo      repoctx.Provider
 	questions []model.Question
+	pending   []model.Question
+	history   []model.Question
+	historyOn bool
 	cursor    int
 	width     int
 	height    int
@@ -36,23 +42,43 @@ type app struct {
 	answerQ   model.Question
 	editor    textarea.Model
 	err       error
+	contextID string
+	branch    string
+	pull      string
 }
 
 type loadedMsg struct {
-	questions []model.Question
-	err       error
+	pending []model.Question
+	history []model.Question
+	err     error
 }
 
 type answeredMsg struct{ err error }
 
 type refreshMsg struct{}
 
+type branchMsg struct {
+	question model.Question
+	branch   string
+	err      error
+}
+
+type pullMsg struct {
+	questionID string
+	pull       *repoctx.PullRequest
+	err        error
+}
+
 func Run(ctx context.Context, s store.Store, in io.Reader, out io.Writer) error {
 	editor := textarea.New()
 	editor.Placeholder = "Type the answer"
+	editor.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("shift+enter", "ctrl+j"),
+		key.WithHelp("shift+enter/ctrl+j", "insert newline"),
+	)
 	editor.SetWidth(72)
 	editor.SetHeight(6)
-	m := app{ctx: ctx, store: s, editor: editor}
+	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor}
 	_, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
 	return err
 }
@@ -64,8 +90,12 @@ func scheduleRefresh() tea.Cmd {
 }
 
 func (m app) load() tea.Msg {
-	questions, err := m.store.List(m.ctx, model.Filter{Status: model.StatusPending, Limit: 1000})
-	return loadedMsg{questions: questions, err: err}
+	pending, err := m.store.List(m.ctx, model.Filter{Status: model.StatusPending, Limit: 1000})
+	if err != nil {
+		return loadedMsg{err: err}
+	}
+	history, err := m.store.List(m.ctx, model.Filter{ExcludeStatus: model.StatusPending, Limit: 1000, NewestFirst: true})
+	return loadedMsg{pending: pending, history: history, err: err}
 }
 
 func (m app) answer() tea.Msg {
@@ -83,14 +113,40 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetWidth(max(20, min(72, msg.Width-6)))
 	case loadedMsg:
 		selectedID := m.selectedID()
-		m.questions, m.err = msg.questions, msg.err
+		m.pending, m.history, m.err = msg.pending, msg.history, msg.err
+		m.setQuestions()
 		if index := questionIndex(m.questions, selectedID); index >= 0 {
 			m.cursor = index
 		} else if m.cursor >= len(m.questions) {
 			m.cursor = max(0, len(m.questions)-1)
 		}
+		return m.withContextCommand()
 	case refreshMsg:
 		return m, tea.Batch(m.load, scheduleRefresh())
+	case branchMsg:
+		if msg.question.ID != m.contextID {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.branch = "[git unavailable]"
+			m.pull = ""
+			return m, nil
+		}
+		m.branch = msg.branch
+		m.pull = "PR loading…"
+		return m, m.loadPull(msg.question, msg.branch)
+	case pullMsg:
+		if msg.questionID != m.contextID {
+			return m, nil
+		}
+		switch {
+		case msg.err != nil:
+			m.pull = "[gh unavailable]"
+		case msg.pull == nil:
+			m.pull = "no open PR"
+		default:
+			m.pull = fmt.Sprintf("PR #%d · %s", msg.pull.Number, msg.pull.Title)
+		}
 	case answeredMsg:
 		m.err = msg.err
 		if msg.err == nil {
@@ -110,7 +166,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editor.Blur()
 				m.editor.Reset()
 				return m, nil
-			case "shift+enter", "ctrl+s":
+			case "enter":
 				if strings.TrimSpace(m.editor.Value()) != "" {
 					return m, m.answer
 				}
@@ -126,13 +182,20 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j", "down":
 			if m.cursor+1 < len(m.questions) {
 				m.cursor++
+				return m.withContextCommand()
 			}
 		case "k", "up":
 			if m.cursor > 0 {
 				m.cursor--
+				return m.withContextCommand()
 			}
+		case "tab", "h":
+			m.historyOn = !m.historyOn
+			m.cursor = 0
+			m.setQuestions()
+			return m.withContextCommand()
 		case "enter", "a":
-			if len(m.questions) > 0 {
+			if !m.historyOn && len(m.questions) > 0 {
 				m.answering = true
 				m.answerQ = m.questions[m.cursor]
 				m.answerID = m.answerQ.ID
@@ -144,6 +207,48 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *app) setQuestions() {
+	if m.historyOn {
+		m.questions = m.history
+	} else {
+		m.questions = m.pending
+	}
+}
+
+func (m app) withContextCommand() (tea.Model, tea.Cmd) {
+	var q model.Question
+	if m.answering {
+		q = m.answerQ
+	} else if len(m.questions) > 0 {
+		q = m.questions[m.cursor]
+	}
+	if q.ID == "" || m.repo == nil {
+		m.contextID, m.branch, m.pull = "", "", ""
+		return m, nil
+	}
+	if q.ID == m.contextID {
+		return m, nil
+	}
+	m.contextID = q.ID
+	m.branch = "git loading…"
+	m.pull = ""
+	return m, m.loadBranch(q)
+}
+
+func (m app) loadBranch(q model.Question) tea.Cmd {
+	return func() tea.Msg {
+		branch, err := m.repo.Branch(m.ctx, q.Directory)
+		return branchMsg{question: q, branch: branch, err: err}
+	}
+}
+
+func (m app) loadPull(q model.Question, branch string) tea.Cmd {
+	return func() tea.Msg {
+		pull, err := m.repo.PullRequest(m.ctx, q.Directory, branch)
+		return pullMsg{questionID: q.ID, pull: pull, err: err}
+	}
 }
 
 func (m app) selectedID() string {
@@ -168,16 +273,30 @@ func questionIndex(questions []model.Question, id string) int {
 func (m app) View() tea.View {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("HQ · Questions"))
+	b.WriteString("  ")
+	if m.historyOn {
+		b.WriteString(dim.Render("Pending"))
+		b.WriteString("  ")
+		b.WriteString(selected.Render("History"))
+	} else {
+		b.WriteString(selected.Render("Pending"))
+		b.WriteString("  ")
+		b.WriteString(dim.Render("History"))
+	}
 	b.WriteString("\n\n")
 	if m.err != nil {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
 		b.WriteString("\n\n")
 	}
 	if len(m.questions) == 0 {
-		b.WriteString(dim.Render("No pending questions. Press r to refresh."))
+		if m.historyOn {
+			b.WriteString(dim.Render("No question history. Press r to refresh."))
+		} else {
+			b.WriteString(dim.Render("No pending questions. Press r to refresh."))
+		}
 	} else {
 		for i, q := range m.questions {
-			line := fmt.Sprintf("%-8s  %s", short(q.SessionID, 8), singleLine(q.Prompt))
+			line := fmt.Sprintf("%-9s %-8s  %s", q.Status, short(q.SessionID, 8), singleLine(q.Prompt))
 			if i == m.cursor && (!m.answering || q.ID == m.answerID) {
 				b.WriteString(selected.Render("› " + line))
 			} else {
@@ -194,7 +313,28 @@ func (m app) View() tea.View {
 	}
 	if detail.ID != "" {
 		b.WriteString("\n")
-		b.WriteString(panel.Render(fmt.Sprintf("%s\n%s\n\n%s", titleStyle.Render(detail.Prompt), dim.Render(detail.Directory+" · "+detail.SessionID), detail.Details)))
+		var body strings.Builder
+		body.WriteString(titleStyle.Render(detail.Prompt))
+		body.WriteByte('\n')
+		body.WriteString(dim.Render(detail.Directory + " · " + detail.SessionID))
+		if m.branch != "" {
+			body.WriteByte('\n')
+			body.WriteString(dim.Render("git " + m.branch))
+			if m.pull != "" {
+				body.WriteString(dim.Render(" · " + m.pull))
+			}
+		}
+		if detail.Details != "" {
+			body.WriteString("\n\n")
+			body.WriteString(detail.Details)
+		}
+		if m.historyOn && detail.Response != nil {
+			body.WriteString("\n\n")
+			body.WriteString(titleStyle.Render("Answer"))
+			body.WriteByte('\n')
+			body.WriteString(*detail.Response)
+		}
+		b.WriteString(panel.Render(body.String()))
 	}
 	if m.answering {
 		b.WriteString("\n\n")
@@ -202,10 +342,14 @@ func (m app) View() tea.View {
 		b.WriteString("\n")
 		b.WriteString(m.editor.View())
 		b.WriteString("\n")
-		b.WriteString(dim.Render("shift+enter submit · ctrl+s fallback · esc cancel"))
+		b.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
 	} else {
 		b.WriteString("\n\n")
-		b.WriteString(dim.Render("j/k move · enter answer · r refresh · q quit · auto-refresh 1m"))
+		if m.historyOn {
+			b.WriteString(dim.Render("j/k move · tab/h pending · r refresh · q quit · auto-refresh 1m"))
+		} else {
+			b.WriteString(dim.Render("j/k move · enter answer · tab/h history · r refresh · q quit · auto-refresh 1m"))
+		}
 	}
 	view := tea.NewView(b.String())
 	view.AltScreen = true

@@ -108,3 +108,28 @@ func TestListFiltersScope(t *testing.T) {
 		t.Fatalf("questions = %#v", questions)
 	}
 }
+
+func TestListNewestFirst(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "hq.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ctx := context.Background()
+	questions := []model.Question{
+		{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d65", Directory: "/repo", SessionID: "run", Prompt: "old", CreatedAt: time.Now().UTC()},
+		{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d66", Directory: "/repo", SessionID: "run", Prompt: "new", CreatedAt: time.Now().UTC().Add(time.Second)},
+	}
+	for _, q := range questions {
+		if err := s.Create(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.List(ctx, model.Filter{NewestFirst: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Prompt != "new" || got[1].Prompt != "old" {
+		t.Fatalf("questions = %#v", got)
+	}
+}

@@ -37,6 +37,8 @@ CREATE INDEX IF NOT EXISTS questions_queue
     ON questions(directory, session_id, status, created_at, id);
 CREATE INDEX IF NOT EXISTS questions_answered
     ON questions(status, completed_at, answered_at, id);
+CREATE INDEX IF NOT EXISTS questions_history
+    ON questions(created_at DESC, id DESC) WHERE status != 'pending';
 PRAGMA user_version = 1;
 `
 
@@ -174,11 +176,19 @@ func (s *SQLite) List(ctx context.Context, f model.Filter) ([]model.Question, er
 		where = append(where, "status = ?")
 		args = append(args, f.Status)
 	}
+	if f.ExcludeStatus != "" {
+		where = append(where, "status != ?")
+		args = append(args, f.ExcludeStatus)
+	}
 	query := `SELECT ` + columns + ` FROM questions`
 	if len(where) > 0 {
 		query += ` WHERE ` + strings.Join(where, " AND ")
 	}
-	query += ` ORDER BY created_at, id LIMIT ?`
+	if f.NewestFirst {
+		query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
+	} else {
+		query += ` ORDER BY created_at, id LIMIT ?`
+	}
 	limit := f.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 100

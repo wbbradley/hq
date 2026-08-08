@@ -14,6 +14,8 @@ Bare `hq` checks both stdin and stdout. When both streams are terminals, HQ open
 
 The TUI reloads pending questions every minute. An active answer draft stores its question ID and question data apart from the queue cursor, so a reload cannot clear the editor or retarget the answer.
 
+The TUI also loads answered and cancelled rows newest-first for its History view. It reads the local branch for the selected question's directory, then looks up an open pull request in a background command. The `go-gh` client reads the same token sources as the `gh` CLI. Git and GitHub failures stay in the context line and do not block queue use.
+
 ## Storage contract
 
 The `internal/store.Store` interface owns question creation, queries, state changes, and answer delivery. SQLite is the first implementation. A later server or shared database can implement the same interface.
