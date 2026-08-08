@@ -22,13 +22,17 @@ hq agents
 
 HQ embeds [the agent instruction source](internal/agenthelp/instructions.md) in the binary. Edit that file to update both the checked-in source and `hq agents` output.
 
+HQ resolves an agent session from `HQ_SESSION`, then `CODEX_THREAD_ID`. An explicit `--session` flag takes priority.
+
 ## Human use
 
-Run `hq` with no command to open the terminal UI:
+Run `hq` with no command in a terminal to open the terminal UI:
 
 ```sh
 hq
 ```
+
+When stdin or stdout is not a terminal, bare `hq` lists only pending questions in the current work dir and inferred session. If HQ cannot infer a session, the list includes all sessions in the current work dir. Use explicit `hq list` flags for another scope or status.
 
 Use `j` and `k` to move, Enter to answer, Ctrl+S to submit, and `q` to quit. The human commands also work without a TTY:
 

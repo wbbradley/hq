@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/agenthelp"
 	"github.com/wbbradley/hq/internal/model"
@@ -24,7 +25,7 @@ const usage = `hq queues questions from agents for people to answer.
 
 Usage:
   hq [--db PATH] <command> [options]
-  hq                          Open the human TUI
+  hq                          Open the TUI in a terminal; list pending questions otherwise
 
 Agent commands:
   agents  Print instructions for agents
@@ -43,7 +44,7 @@ Other commands:
   help     Print command help
   version  Print the version
 
-Set HQ_SESSION to avoid passing --session to ask and poll.
+HQ_SESSION sets the agent session. HQ can also detect CODEX_THREAD_ID.
 The default database is $XDG_STATE_HOME/hq/hq.db or ~/.local/state/hq/hq.db.
 `
 
@@ -54,23 +55,40 @@ type App struct {
 	Out    io.Writer
 	ErrOut io.Writer
 	Getwd  func() (string, error)
+	Getenv func(string) string
+	IsTTY  func() bool
 	Open   func(string) (store.Store, error)
+	RunTUI func(context.Context, store.Store, io.Reader, io.Writer) error
 }
 
 func New() *App {
 	return &App{
-		In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr, Getwd: os.Getwd,
-		Open: func(path string) (store.Store, error) { return store.Open(path) },
+		In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr, Getwd: os.Getwd, Getenv: os.Getenv,
+		IsTTY: func() bool {
+			return term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd())
+		},
+		Open:   func(path string) (store.Store, error) { return store.Open(path) },
+		RunTUI: tui.Run,
 	}
 }
 
 func (a *App) Run(ctx context.Context, args []string) error {
-	dbPath, args, err := globalArgs(args)
+	dbPath, args, err := globalArgs(args, a.getenv("HQ_DB"))
 	if err != nil {
 		return err
 	}
-	command := "tui"
-	if len(args) > 0 {
+	command := ""
+	if len(args) == 0 {
+		if a.isTTY() {
+			command = "tui"
+		} else {
+			command = "list"
+			args, err = a.bareListArgs()
+			if err != nil {
+				return err
+			}
+		}
+	} else {
 		command, args = args[0], args[1:]
 	}
 	if command == "help" || command == "-h" || command == "--help" {
@@ -107,14 +125,16 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		if len(args) != 0 {
 			return errors.New("tui takes no arguments")
 		}
+		if a.RunTUI != nil {
+			return a.RunTUI(ctx, s, a.In, a.Out)
+		}
 		return tui.Run(ctx, s, a.In, a.Out)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", command, usage)
 	}
 }
 
-func globalArgs(args []string) (string, []string, error) {
-	path := os.Getenv("HQ_DB")
+func globalArgs(args []string, path string) (string, []string, error) {
 	if len(args) >= 2 && args[0] == "--db" {
 		path, args = args[1], args[2:]
 	} else if len(args) > 0 && strings.HasPrefix(args[0], "--db=") {
@@ -125,6 +145,50 @@ func globalArgs(args []string) (string, []string, error) {
 	return path, args, nil
 }
 
+func (a *App) getenv(name string) string {
+	if a.Getenv != nil {
+		return a.Getenv(name)
+	}
+	return os.Getenv(name)
+}
+
+func (a *App) isTTY() bool {
+	return a.IsTTY != nil && a.IsTTY()
+}
+
+func (a *App) inferredSession() string {
+	for _, name := range []string{"HQ_SESSION", "CODEX_THREAD_ID"} {
+		if value := strings.TrimSpace(a.getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (a *App) workDirectory() (string, error) {
+	directory, err := a.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get work directory: %w", err)
+	}
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		return "", fmt.Errorf("resolve work directory: %w", err)
+	}
+	return filepath.Clean(absolute), nil
+}
+
+func (a *App) bareListArgs() ([]string, error) {
+	directory, err := a.workDirectory()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"--status", string(model.StatusPending), "--dir", directory}
+	if session := a.inferredSession(); session != "" {
+		args = append(args, "--session", session)
+	}
+	return args, nil
+}
+
 func flags(name string) *flag.FlagSet {
 	f := flag.NewFlagSet(name, flag.ContinueOnError)
 	f.SetOutput(io.Discard)
@@ -133,7 +197,7 @@ func flags(name string) *flag.FlagSet {
 
 func (a *App) ask(ctx context.Context, s store.Store, args []string) error {
 	f := flags("ask")
-	session := f.String("session", os.Getenv("HQ_SESSION"), "caller session ID")
+	session := f.String("session", a.inferredSession(), "caller session ID")
 	directory := f.String("dir", "", "work directory scope")
 	details := f.String("details", "", "extra context")
 	jsonOutput := f.Bool("json", false, "write JSON")
@@ -141,13 +205,13 @@ func (a *App) ask(ctx context.Context, s store.Store, args []string) error {
 		return err
 	}
 	if strings.TrimSpace(*session) == "" {
-		return errors.New("ask needs --session or HQ_SESSION")
+		return errors.New("ask needs --session, HQ_SESSION, or a detected agent session")
 	}
 	if *directory == "" {
 		var err error
-		*directory, err = a.Getwd()
+		*directory, err = a.workDirectory()
 		if err != nil {
-			return fmt.Errorf("get work directory: %w", err)
+			return err
 		}
 	}
 	absolute, err := filepath.Abs(*directory)
@@ -232,18 +296,18 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string) error {
 
 func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
 	f := flags("poll")
-	session := f.String("session", os.Getenv("HQ_SESSION"), "caller session ID")
+	session := f.String("session", a.inferredSession(), "caller session ID")
 	directory := f.String("dir", "", "work directory scope")
 	jsonOutput := f.Bool("json", false, "write JSON")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
 	if len(f.Args()) != 0 || strings.TrimSpace(*session) == "" {
-		return errors.New("poll needs --session or HQ_SESSION")
+		return errors.New("poll needs --session, HQ_SESSION, or a detected agent session")
 	}
 	if *directory == "" {
 		var err error
-		*directory, err = a.Getwd()
+		*directory, err = a.workDirectory()
 		if err != nil {
 			return err
 		}

@@ -10,6 +10,8 @@ Set `HQ_SESSION` to one stable ID for the whole agent run. Keep the same work di
 export HQ_SESSION="stable-agent-run-id"
 ```
 
+When `HQ_SESSION` is empty, HQ uses `CODEX_THREAD_ID` when Codex provides that variable. An explicit `--session` flag wins over both variables.
+
 ## Ask a question
 
 Write a clear prompt that states the choice the person must make. Put useful context, options, and tradeoffs in `--details`. Save the question ID from stdout.
@@ -50,3 +52,5 @@ fi
 `wait` and `poll` lease each answer, write the full output once, and then set `completed_at`. HQ keeps every question in the database. A process crash after the stdout write but before the database update can cause one later retry, so use the question ID as an idempotency key when a duplicate response matters.
 
 Do not use the human `tui`, `list`, `answer`, or `cancel` commands to read an agent response. Use `wait`, `poll`, or `get`.
+
+Bare `hq` does not open the TUI when stdin or stdout is redirected. Bare non-interactive mode lists pending questions in the current work dir and inferred session. When HQ cannot infer a session, bare mode lists pending questions from all sessions in the current work dir.

@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wbbradley/hq/internal/agenthelp"
 	"github.com/wbbradley/hq/internal/model"
@@ -21,6 +23,7 @@ func TestAgentsPrintsEmbeddedInstructionsWithoutOpeningStore(t *testing.T) {
 		Out:    out,
 		ErrOut: new(bytes.Buffer),
 		Getwd:  func() (string, error) { return "/work/repo", nil },
+		Getenv: func(string) string { return "" },
 		Open: func(string) (store.Store, error) {
 			t.Fatal("agents opened the store")
 			return nil, nil
@@ -42,11 +45,86 @@ func testApp(t *testing.T, db string, input string) (*App, *bytes.Buffer) {
 		Out:    out,
 		ErrOut: new(bytes.Buffer),
 		Getwd:  func() (string, error) { return "/work/repo", nil },
+		Getenv: func(string) string { return "" },
 		Open: func(path string) (store.Store, error) {
 			return store.Open(path)
 		},
 	}
 	return a, out
+}
+
+func TestBareCommandUsesTUIWhenInteractive(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "hq.db")
+	called := false
+	a, _ := testApp(t, db, "")
+	a.IsTTY = func() bool { return true }
+	a.RunTUI = func(context.Context, store.Store, io.Reader, io.Writer) error {
+		called = true
+		return nil
+	}
+	if err := a.Run(context.Background(), []string{"--db", db}); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("bare interactive command did not run the TUI")
+	}
+}
+
+func TestBareCommandListsPendingQuestionsInInferredScope(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "hq.db")
+	ctx := context.Background()
+	s, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	questions := []model.Question{
+		{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d61", Directory: "/work/repo", SessionID: "codex-run", Prompt: "include", CreatedAt: now},
+		{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d62", Directory: "/work/repo", SessionID: "other-run", Prompt: "wrong session", CreatedAt: now.Add(time.Millisecond)},
+		{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d63", Directory: "/other/repo", SessionID: "codex-run", Prompt: "wrong dir", CreatedAt: now.Add(2 * time.Millisecond)},
+		{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d64", Directory: "/work/repo", SessionID: "codex-run", Prompt: "answered", CreatedAt: now.Add(3 * time.Millisecond)},
+	}
+	for _, q := range questions {
+		if err := s.Create(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Answer(ctx, questions[3].ID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	a, out := testApp(t, db, "")
+	a.IsTTY = func() bool { return false }
+	a.Getenv = func(name string) string {
+		if name == "CODEX_THREAD_ID" {
+			return "codex-run"
+		}
+		return ""
+	}
+	if err := a.Run(ctx, []string{"--db", db}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "include") {
+		t.Fatalf("bare output misses pending question: %q", out.String())
+	}
+	for _, excluded := range []string{"wrong session", "wrong dir", "answered"} {
+		if strings.Contains(out.String(), excluded) {
+			t.Fatalf("bare output contains %q: %q", excluded, out.String())
+		}
+	}
+}
+
+func TestInferredSessionPrefersHQSession(t *testing.T) {
+	a, _ := testApp(t, "", "")
+	a.Getenv = func(name string) string {
+		return map[string]string{"HQ_SESSION": "explicit-env", "CODEX_THREAD_ID": "codex-run"}[name]
+	}
+	if got := a.inferredSession(); got != "explicit-env" {
+		t.Fatalf("inferred session = %q", got)
+	}
 }
 
 func TestAskAnswerWait(t *testing.T) {
