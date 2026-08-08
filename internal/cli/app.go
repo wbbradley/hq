@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/agenthelp"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
 	"github.com/wbbradley/hq/internal/tui"
@@ -23,10 +24,10 @@ const usage = `hq queues questions from agents for people to answer.
 
 Usage:
   hq [--db PATH] <command> [options]
-  hq                         Open the human TUI
-	  hq version                 Print the version
+  hq                          Open the human TUI
 
 Agent commands:
+  agents  Print instructions for agents
   ask     Create a question; print its ID
   wait    Wait for one answer; print and complete it
   poll    Print and complete all ready answers in a session
@@ -37,6 +38,10 @@ Human commands:
   list    List questions
   answer  Answer one question
   cancel  Cancel one pending question
+
+Other commands:
+  help     Print command help
+  version  Print the version
 
 Set HQ_SESSION to avoid passing --session to ask and poll.
 The default database is $XDG_STATE_HOME/hq/hq.db or ~/.local/state/hq/hq.db.
@@ -71,6 +76,12 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if command == "help" || command == "-h" || command == "--help" {
 		_, err := io.WriteString(a.Out, usage)
 		return err
+	}
+	if command == "agents" {
+		if len(args) != 0 {
+			return errors.New("agents takes no arguments")
+		}
+		return writeOnce(a.Out, []byte(agenthelp.Text))
 	}
 	s, err := a.Open(dbPath)
 	if err != nil {

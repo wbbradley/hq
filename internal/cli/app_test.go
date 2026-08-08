@@ -9,9 +9,30 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wbbradley/hq/internal/agenthelp"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
 )
+
+func TestAgentsPrintsEmbeddedInstructionsWithoutOpeningStore(t *testing.T) {
+	out := new(bytes.Buffer)
+	a := &App{
+		In:     strings.NewReader(""),
+		Out:    out,
+		ErrOut: new(bytes.Buffer),
+		Getwd:  func() (string, error) { return "/work/repo", nil },
+		Open: func(string) (store.Store, error) {
+			t.Fatal("agents opened the store")
+			return nil, nil
+		},
+	}
+	if err := a.Run(context.Background(), []string{"agents"}); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != agenthelp.Text {
+		t.Fatal("agents output differs from the embedded source")
+	}
+}
 
 func testApp(t *testing.T, db string, input string) (*App, *bytes.Buffer) {
 	t.Helper()

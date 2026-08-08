@@ -14,23 +14,13 @@ go install github.com/wbbradley/hq/cmd/hq@latest
 
 ## Agent use
 
-Give each agent run a stable session ID. HQ groups questions by the canonical work dir and session ID. HQ assigns each question a time-sortable UUIDv7.
+Run `hq agents` to print agent-specific setup, command, output, and delivery rules:
 
 ```sh
-export HQ_SESSION="my-agent-run"
-
-question_id=$(hq ask "Which API name should I use?")
-
-# Do other work, then check all ready answers in this work dir and session.
-hq poll
-
-# Or block for one answer. Only the response goes to stdout.
-hq wait --timeout 30m "$question_id"
+hq agents
 ```
 
-`ask` also reads the prompt from stdin. Use `--details` for logs, options, or other context. Pass `--json` to `ask`, `wait`, `poll`, or `list` for stable JSON output.
-
-`poll` exits with code 3 and writes nothing when no answer is ready. Errors go to stderr. `wait` and `poll` mark an answer complete only after the whole stdout write succeeds.
+HQ embeds [the agent instruction source](internal/agenthelp/instructions.md) in the binary. Edit that file to update both the checked-in source and `hq agents` output.
 
 ## Human use
 
@@ -59,6 +49,7 @@ hq list [--session ID] [--dir PATH] [--status STATUS] [--limit N] [--json]
 hq answer QUESTION_ID [RESPONSE]
 hq cancel QUESTION_ID
 hq tui
+hq agents
 ```
 
 Set `HQ_DB` or pass the global `--db PATH` flag before the command to use another database.
