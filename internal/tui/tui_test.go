@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/repoctx"
@@ -66,6 +67,54 @@ func TestStatusViewIsSeparateAndToggleable(t *testing.T) {
 	if view := m.View().Content; !strings.Contains(view, "Relay status") || !strings.Contains(view, "queued 2") || !strings.Contains(view, "rejected 1") {
 		t.Fatalf("status view = %q", view)
 	}
+}
+
+func TestMessageDetailWrapsToTerminalWidth(t *testing.T) {
+	item := message(
+		"0198c7ec-73b0-7cc3-a5f7-e31c77140d67",
+		testAgentID,
+		model.HumanMailboxID,
+		"Which feature should come next for the cellular automata ASCII art generator?",
+	)
+	item.Details = "RLE support shares patterns with other tools.\nCell-age trails add richer terminal art and keep the tail-marker visible."
+	m := app{messages: []model.Message{item}, width: 40}
+
+	view := m.View().Content
+	inDetailPanel := false
+	foundDetailPanel := false
+	for lineNumber, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "╭") {
+			inDetailPanel = true
+			foundDetailPanel = true
+		}
+		if inDetailPanel && lipgloss.Width(line) > m.width {
+			t.Fatalf("detail panel line %d width = %d; want at most %d: %q", lineNumber+1, lipgloss.Width(line), m.width, line)
+		}
+		if inDetailPanel && strings.Contains(line, "╰") {
+			break
+		}
+	}
+	if !foundDetailPanel {
+		t.Fatal("detail panel not found")
+	}
+	if !strings.Contains(view, "tail-marker") {
+		t.Fatalf("wrapped detail lost text: %q", view)
+	}
+}
+
+func TestShortMessageDetailKeepsNaturalWidth(t *testing.T) {
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d68", testAgentID, model.HumanMailboxID, "Short")
+	m := app{messages: []model.Message{item}, width: 100}
+
+	for _, line := range strings.Split(m.View().Content, "\n") {
+		if strings.Contains(line, "╭") {
+			if width := lipgloss.Width(line); width >= m.width {
+				t.Fatalf("short detail panel width = %d; want natural width below %d", width, m.width)
+			}
+			return
+		}
+	}
+	t.Fatal("detail panel not found")
 }
 
 func TestSentAndArchivedAreIndependent(t *testing.T) {

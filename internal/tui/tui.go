@@ -522,7 +522,7 @@ func (m app) View() tea.View {
 			body.WriteString("\n\n")
 			body.WriteString(detail.Details)
 		}
-		b.WriteString(panel.Render(body.String()))
+		b.WriteString(renderMessagePanel(body.String(), m.width))
 	}
 	if m.answering {
 		b.WriteString("\n\n")
@@ -552,6 +552,14 @@ func short(s string, n int) string {
 }
 
 func singleLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+func renderMessagePanel(content string, terminalWidth int) string {
+	rendered := panel.Render(content)
+	if terminalWidth <= panel.GetHorizontalFrameSize() || lipgloss.Width(rendered) <= terminalWidth {
+		return rendered
+	}
+	return panel.Width(terminalWidth).Render(content)
+}
 
 func deliveryLabel(message model.Message) string {
 	if message.SenderMailboxID != model.HumanMailboxID {
