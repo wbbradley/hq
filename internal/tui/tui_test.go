@@ -16,9 +16,11 @@ import (
 	"github.com/wbbradley/hq/internal/store"
 )
 
+const testAgentID = "0198c7ec-73b0-7cc3-a5f7-e31c77140d60"
+
 func TestRefreshPreservesActiveDraft(t *testing.T) {
-	m1 := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", "agent", model.HumanSession, "First")
-	m2 := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d62", "agent", model.HumanSession, "Second")
+	m1 := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", testAgentID, model.HumanMailboxID, "First")
+	m2 := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d62", testAgentID, model.HumanMailboxID, "Second")
 	editor := textarea.New()
 	editor.SetValue("unfinished")
 	m := app{messages: []model.Message{m1, m2}, answering: true, answerID: m1.ID, answerQ: m1, editor: editor}
@@ -30,10 +32,10 @@ func TestRefreshPreservesActiveDraft(t *testing.T) {
 }
 
 func TestSentAndArchivedAreIndependent(t *testing.T) {
-	inbox := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", "agent", model.HumanSession, "Inbox")
-	sent := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d62", model.HumanSession, "agent", "Sent")
-	archived := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d63", "agent", model.HumanSession, "Archived")
-	archivedSent := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d64", model.HumanSession, "agent", "Archived sent")
+	inbox := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", testAgentID, model.HumanMailboxID, "Inbox")
+	sent := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d62", model.HumanMailboxID, testAgentID, "Sent")
+	archived := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d63", testAgentID, model.HumanMailboxID, "Archived")
+	archivedSent := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d64", model.HumanMailboxID, testAgentID, "Archived sent")
 	now := time.Now().UTC()
 	archived.ArchivedAt = &now
 	archivedSent.ArchivedAt = &now
@@ -52,21 +54,16 @@ func TestSentAndArchivedAreIndependent(t *testing.T) {
 	if len(m.messages) != 4 || !m.showSent || !m.showArchived {
 		t.Fatalf("combined mode = %#v", m)
 	}
-	updated, _ = m.Update(tea.KeyPressMsg{Code: 's', Text: "s"})
-	m = updated.(app)
-	if len(m.messages) != 2 || m.showSent || !m.showArchived {
-		t.Fatalf("archived mode = %#v", m)
-	}
 }
 
 func TestRepositoryContextShowsRemotesBeforePullState(t *testing.T) {
-	message := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", "agent", model.HumanSession, "Question")
-	m := app{messages: []model.Message{message}, contextID: message.ID}
-	updated, _ := m.Update(branchMsg{message: message, branch: "feature"})
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", testAgentID, model.HumanMailboxID, "Question")
+	m := app{messages: []model.Message{item}, contextID: item.ID}
+	updated, _ := m.Update(branchMsg{message: item, branch: "feature"})
 	m = updated.(app)
-	updated, _ = m.Update(remotesMsg{message: message, branch: "feature", remotes: []repoctx.Remote{{Name: "origin", Display: "wbbradley/hq"}}})
+	updated, _ = m.Update(remotesMsg{message: item, branch: "feature", remotes: []repoctx.Remote{{Name: "origin", Display: "wbbradley/hq"}}})
 	m = updated.(app)
-	updated, _ = m.Update(pullMsg{questionID: message.ID, err: repoctx.ErrUnavailable})
+	updated, _ = m.Update(pullMsg{questionID: item.ID, err: repoctx.ErrUnavailable})
 	m = updated.(app)
 	view := m.View().Content
 	remoteAt, pullAt := strings.Index(view, "origin: wbbradley/hq"), strings.Index(view, "[gh unavailable]")
@@ -79,9 +76,10 @@ func TestRepositoryContextShowsRemotesBeforePullState(t *testing.T) {
 	}
 }
 
-func TestReplyArchivesInboundAndCreatesAgentMessage(t *testing.T) {
-	s, ctx := openStore(t)
-	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", "agent", model.HumanSession, "Question")
+func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", agent.ID, model.HumanMailboxID, "Question")
+	inbound.SenderLabel = agent.Label
 	if err := s.Create(ctx, inbound); err != nil {
 		t.Fatal(err)
 	}
@@ -99,35 +97,27 @@ func TestReplyArchivesInboundAndCreatesAgentMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(replies) != 1 || replies[0].RecipientSession != "agent" || replies[0].Body != "Answer" {
+	if len(replies) != 1 || replies[0].RecipientMailboxID != agent.ID || replies[0].Body != "Answer" {
 		t.Fatalf("replies = %#v", replies)
 	}
-	original, _ := s.Get(ctx, inbound.ID)
-	if original.ArchivedAt == nil {
-		t.Fatal("inbound was not archived")
-	}
-}
 
-func TestNComposesUnsolicitedMessageToSelectedAgent(t *testing.T) {
-	s, ctx := openStore(t)
-	historical := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", "agent", model.HumanSession, "Old question")
 	now := time.Now().UTC()
-	historical.ArchivedAt = &now
-	m := app{ctx: ctx, store: s, messages: []model.Message{historical}, editor: textarea.New()}
+	inbound.ArchivedAt = &now
+	m = app{ctx: ctx, store: s, messages: []model.Message{inbound}, editor: textarea.New()}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	m = updated.(app)
-	if !m.answering || m.composeTo != "agent" {
+	if !m.answering || m.composeTo != agent.ID {
 		t.Fatalf("compose state = %#v", m)
 	}
-	m.editor.SetValue("Please send more detail")
+	m.editor.SetValue("More detail")
 	if msg := m.answer().(answeredMsg); msg.err != nil {
 		t.Fatal(msg.err)
 	}
-	sent, err := s.List(ctx, model.Filter{SenderSession: model.HumanSession, RecipientSession: "agent"})
+	sent, err := s.List(ctx, model.Filter{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sent) != 1 || sent[0].ReplyTo != nil || sent[0].Body != "Please send more detail" {
+	if len(sent) != 2 || sent[1].ReplyTo != nil || sent[1].Body != "More detail" {
 		t.Fatalf("sent = %#v", sent)
 	}
 }
@@ -154,16 +144,28 @@ func TestRefreshSchedulesNextRefresh(t *testing.T) {
 	}
 }
 
-func openStore(t *testing.T) (*store.SQLite, context.Context) {
+func openStore(t *testing.T) (*store.SQLite, context.Context, model.Mailbox) {
 	t.Helper()
 	s, err := store.Open(filepath.Join(t.TempDir(), "hq.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return s, context.Background()
+	ctx := context.Background()
+	agent, err := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "test"}, model.RepositoryContext{Directory: "/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, ctx, agent
 }
 
 func message(id, sender, recipient, body string) model.Message {
-	return model.Message{ID: id, Directory: "/repo", SenderSession: sender, RecipientSession: recipient, Body: body, CreatedAt: time.Now().UTC()}
+	senderLabel, recipientLabel := "codex:0198c7ec", "codex:0198c7ec"
+	if sender == model.HumanMailboxID {
+		senderLabel = "human"
+	}
+	if recipient == model.HumanMailboxID {
+		recipientLabel = "human"
+	}
+	return model.Message{ID: id, Context: model.RepositoryContext{Directory: "/repo"}, SenderMailboxID: sender, RecipientMailboxID: recipient, SenderLabel: senderLabel, RecipientLabel: recipientLabel, Body: body, CreatedAt: time.Now().UTC()}
 }

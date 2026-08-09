@@ -24,7 +24,7 @@ If `hq` is missing, report that the HQ binary is required. Do not install softwa
 - Send a message with `hq ask`. Write a clear body, save the message ID, and report the ID to the user.
 - Check the current agent mailbox with `hq poll`. Treat exit code 3 as an empty mailbox, not as a failure.
 - Use `hq wait` only when a reply blocks all useful work. Prefer continued work plus later polling when other work remains.
-- Use the same session ID and work directory for related sends, waits, and polls.
+- Let HQ detect the harness session. Do not create, print, save, or pass a session ID in normal use.
 - Follow the duplicate-delivery guidance printed by `hq agents` when message IDs control side effects.
 
 Do not open the human TUI or use human mailbox commands to consume an agent mailbox.

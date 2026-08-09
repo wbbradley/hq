@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/cli/go-gh/v2/pkg/auth"
+	"github.com/wbbradley/hq/internal/model"
 )
 
 var ErrUnavailable = errors.New("github unavailable")
@@ -34,6 +37,37 @@ type Provider interface {
 }
 
 type GitHub struct{}
+
+func (GitHub) Snapshot(ctx context.Context, directory string) model.RepositoryContext {
+	result := model.RepositoryContext{Directory: filepath.Clean(directory)}
+	if value, err := gitOutput(ctx, directory, "rev-parse", "--path-format=absolute", "--git-common-dir"); err == nil {
+		result.GitCommonDir = filepath.Clean(value)
+	}
+	if value, err := gitOutput(ctx, directory, "rev-parse", "--show-toplevel"); err == nil {
+		result.Worktree = filepath.Clean(value)
+	}
+	if value, err := (GitHub{}).Branch(ctx, directory); err == nil {
+		result.Branch = value
+	}
+	if remotes, err := (GitHub{}).Remotes(ctx, directory); err == nil {
+		values := make([]string, 0, len(remotes))
+		for _, remote := range remotes {
+			values = append(values, remote.Name+": "+remote.Display)
+		}
+		sort.Strings(values)
+		result.RemoteIdentity = strings.Join(values, " · ")
+	}
+	return result
+}
+
+func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
+	commandArgs := append([]string{"-C", directory}, args...)
+	output, err := exec.CommandContext(ctx, "git", commandArgs...).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
 
 func (GitHub) Branch(ctx context.Context, directory string) (string, error) {
 	output, err := exec.CommandContext(ctx, "git", "-C", directory, "branch", "--show-current").Output()

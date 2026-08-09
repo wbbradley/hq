@@ -36,11 +36,9 @@ hq agents
 
 HQ embeds [the agent instruction source](internal/agenthelp/instructions.md) in the binary. Edit that file to update both the source and `hq agents` output.
 
-HQ resolves the current agent session from `HQ_SESSION`, then `CODEX_THREAD_ID`. An explicit `--session` flag takes priority.
+HQ detects `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, or `PI_SESSION_ID` and binds one private mailbox to that namespaced harness session. Agents do not need to manage a session ID. HQ stops with an error if more than one built-in harness ID is present because silent routing could select the wrong mailbox.
 
 ```sh
-export HQ_SESSION="my-agent-run"
-
 message_id=$(hq ask "Which API name should I use?")
 reply=$(hq wait --timeout 30m "$message_id")
 
@@ -49,6 +47,8 @@ hq poll
 ```
 
 `poll` exits with code 3 and writes nothing when the mailbox has no ready messages.
+
+The mailbox follows a resumed harness session across process restarts and directory changes. `--session ID` and `HQ_SESSION` select a `custom` mailbox for advanced use; an explicit flag wins. `hq mailboxes` lists mailbox candidates seen in the current directory, Git common directory, worktree, branch, or compact remote identity. The command does not claim or merge a mailbox.
 
 ## Human use
 
@@ -85,10 +85,11 @@ hq cancel MESSAGE_ID
 
 ```text
 hq ask [--session ID] [--dir PATH] [--details TEXT] [--json] [MESSAGE]
-hq wait [--timeout DURATION] [--interval DURATION] [--json] MESSAGE_ID
+hq wait [--session ID] [--dir PATH] [--timeout DURATION] [--interval DURATION] [--json] MESSAGE_ID
 hq poll [--session ID] [--dir PATH] [--json]
 hq get MESSAGE_ID
-hq list [--sender ID] [--recipient ID] [--dir PATH] [--open|--archived] [--limit N] [--json]
+hq list [--sender MAILBOX] [--recipient MAILBOX] [--dir PATH] [--archived|--all] [--limit N] [--json]
+hq mailboxes [--dir PATH] [--json]
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
 hq tui
@@ -99,11 +100,13 @@ Set `HQ_DB` or pass global `--db PATH` before the command to use another databas
 
 ## Message and delivery rules
 
-Each mailbox is identified by `(directory, session)`. `human` is reserved for the human mailbox. Message content and routing do not change. Replying creates a new human-to-agent message with `reply_to` set and archives the inbound agent-to-human message.
+Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, external session ID)` binding. The reserved human mailbox is installation-wide. Directory and Git data stay on messages and in mailbox context history; those fields aid display and abandoned-mailbox search but do not grant mailbox access. Replying creates a new human-to-agent message with `reply_to` set and archives the inbound agent-to-human message.
 
-`wait` reads a reply to one prior message. `poll` reads every ready message addressed to the current agent session, including unsolicited human messages. Delivery leases each row, writes stdout once, and then sets `completed_at` and `archived_at`. A crash after stdout but before the database update can cause one later retry, so consumers can use the message ID as an idempotency key.
+`wait` reads a reply only when the current mailbox sent the first message. `poll` reads every ready message addressed to the current harness mailbox, including unsolicited human messages, without a directory filter. `get` keeps direct-ID access as an explicit path for cooperative cross-mailbox inspection. Delivery leases each row, writes stdout once, and then sets `completed_at` and `archived_at`. A crash after stdout but before the database update can cause one later retry, so consumers can use the message ID as an idempotency key.
 
-The version 2 schema does not migrate old question rows. HQ preserves the old table as `legacy_questions_v1` when it first opens a version 1 database.
+`hq list` shows only open messages by default. `--archived` shows archived messages, and `--all` shows both.
+
+The version 3 schema resets all older HQ tables and data when HQ first opens an old database. HQ is still in green-field development and does not migrate version 1 or version 2 rows.
 
 See [docs/design.md](docs/design.md) for the schema and storage contract.
 

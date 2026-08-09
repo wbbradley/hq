@@ -105,16 +105,16 @@ func scheduleRefresh() tea.Cmd {
 
 func (m app) load() tea.Msg {
 	open := false
-	inbox, err := m.store.List(m.ctx, model.Filter{RecipientSession: model.HumanSession, Archived: &open, Limit: 1000, NewestFirst: true})
+	inbox, err := m.store.List(m.ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Archived: &open, Limit: 1000, NewestFirst: true})
 	if err != nil {
 		return loadedMsg{err: err}
 	}
-	sent, err := m.store.List(m.ctx, model.Filter{SenderSession: model.HumanSession, Limit: 1000, NewestFirst: true})
+	sent, err := m.store.List(m.ctx, model.Filter{SenderMailboxID: model.HumanMailboxID, Limit: 1000, NewestFirst: true})
 	if err != nil {
 		return loadedMsg{err: err}
 	}
 	closed := true
-	archived, err := m.store.List(m.ctx, model.Filter{RecipientSession: model.HumanSession, Archived: &closed, Limit: 1000, NewestFirst: true})
+	archived, err := m.store.List(m.ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Archived: &closed, Limit: 1000, NewestFirst: true})
 	return loadedMsg{inbox: inbox, sent: sent, archived: archived, err: err}
 }
 
@@ -126,12 +126,12 @@ func (m app) answer() tea.Msg {
 	if err != nil {
 		return answeredMsg{err: err}
 	}
-	directory := m.answerQ.Directory
-	recipient := m.answerQ.SenderSession
-	message := model.Message{ID: id.String(), Directory: directory, SenderSession: model.HumanSession,
-		RecipientSession: recipient, Body: strings.TrimSpace(m.editor.Value()), CreatedAt: time.Now().UTC()}
+	recipient := m.answerQ.SenderMailboxID
+	message := model.Message{ID: id.String(), Context: m.answerQ.Context, SenderMailboxID: model.HumanMailboxID,
+		RecipientMailboxID: recipient, SenderLabel: "human", RecipientLabel: m.answerQ.SenderLabel, Body: strings.TrimSpace(m.editor.Value()), CreatedAt: time.Now().UTC()}
 	if m.composeTo != "" {
-		message.RecipientSession = m.composeTo
+		message.RecipientMailboxID = m.composeTo
+		message.RecipientLabel = agentLabel(m.answerQ)
 		err = m.store.Create(m.ctx, message)
 	} else {
 		replyTo := m.answerID
@@ -266,7 +266,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "n":
 			if len(m.messages) > 0 {
-				target := agentSession(m.messages[m.cursor])
+				target := agentMailbox(m.messages[m.cursor])
 				if target != "" {
 					m.answering = true
 					m.answerQ = m.messages[m.cursor]
@@ -336,21 +336,21 @@ func (m app) withContextCommand() (tea.Model, tea.Cmd) {
 
 func (m app) loadRemotes(q model.Message, branch string) tea.Cmd {
 	return func() tea.Msg {
-		remotes, err := m.repo.Remotes(m.ctx, q.Directory)
+		remotes, err := m.repo.Remotes(m.ctx, q.Context.Directory)
 		return remotesMsg{message: q, branch: branch, remotes: remotes, err: err}
 	}
 }
 
 func (m app) loadBranch(q model.Message) tea.Cmd {
 	return func() tea.Msg {
-		branch, err := m.repo.Branch(m.ctx, q.Directory)
+		branch, err := m.repo.Branch(m.ctx, q.Context.Directory)
 		return branchMsg{message: q, branch: branch, err: err}
 	}
 }
 
 func (m app) loadPull(q model.Message, branch string) tea.Cmd {
 	return func() tea.Msg {
-		pull, err := m.repo.PullRequest(m.ctx, q.Directory, branch)
+		pull, err := m.repo.PullRequest(m.ctx, q.Context.Directory, branch)
 		return pullMsg{questionID: q.ID, pull: pull, err: err}
 	}
 }
@@ -383,15 +383,25 @@ func messageIndex(messages []model.Message, id string) int {
 }
 
 func canReply(message model.Message) bool {
-	return message.RecipientSession == model.HumanSession && message.SenderSession != model.HumanSession && message.ArchivedAt == nil
+	return message.RecipientMailboxID == model.HumanMailboxID && message.SenderMailboxID != model.HumanMailboxID && message.ArchivedAt == nil
 }
 
-func agentSession(message model.Message) string {
-	if message.SenderSession != model.HumanSession {
-		return message.SenderSession
+func agentMailbox(message model.Message) string {
+	if message.SenderMailboxID != model.HumanMailboxID {
+		return message.SenderMailboxID
 	}
-	if message.RecipientSession != model.HumanSession {
-		return message.RecipientSession
+	if message.RecipientMailboxID != model.HumanMailboxID {
+		return message.RecipientMailboxID
+	}
+	return ""
+}
+
+func agentLabel(message model.Message) string {
+	if message.SenderMailboxID != model.HumanMailboxID {
+		return message.SenderLabel
+	}
+	if message.RecipientMailboxID != model.HumanMailboxID {
+		return message.RecipientLabel
 	}
 	return ""
 }
@@ -422,9 +432,9 @@ func (m app) View() tea.View {
 		b.WriteString(dim.Render("No messages in this view. Press r to refresh."))
 	} else {
 		for i, message := range m.messages {
-			direction := "inbox ← " + short(message.SenderSession, 8)
-			if message.SenderSession == model.HumanSession {
-				direction = "sent → " + short(message.RecipientSession, 8)
+			direction := "inbox ← " + short(message.SenderLabel, 16)
+			if message.SenderMailboxID == model.HumanMailboxID {
+				direction = "sent → " + short(message.RecipientLabel, 16)
 			}
 			state := ""
 			if message.ArchivedAt != nil {
@@ -450,7 +460,7 @@ func (m app) View() tea.View {
 		var body strings.Builder
 		body.WriteString(titleStyle.Render(detail.Body))
 		body.WriteByte('\n')
-		body.WriteString(dim.Render(detail.SenderSession + " → " + detail.RecipientSession + " · " + detail.Directory))
+		body.WriteString(dim.Render(detail.SenderLabel + " → " + detail.RecipientLabel + " · " + detail.Context.Directory))
 		if detail.ReplyTo != nil {
 			body.WriteByte('\n')
 			body.WriteString(dim.Render("reply to " + *detail.ReplyTo))
@@ -475,9 +485,9 @@ func (m app) View() tea.View {
 	if m.answering {
 		b.WriteString("\n\n")
 		if m.composeTo != "" {
-			b.WriteString(titleStyle.Render("New message to " + m.composeTo))
+			b.WriteString(titleStyle.Render("New message to " + agentLabel(m.answerQ)))
 		} else {
-			b.WriteString(titleStyle.Render("Reply to " + m.answerQ.SenderSession))
+			b.WriteString(titleStyle.Render("Reply to " + m.answerQ.SenderLabel))
 		}
 		b.WriteString("\n")
 		b.WriteString(m.editor.View())

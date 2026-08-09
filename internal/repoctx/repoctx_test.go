@@ -62,6 +62,18 @@ func TestRemotesUseMainRepositoryConfigFromWorktree(t *testing.T) {
 	if len(remotes) != 1 || remotes[0].Name != "origin" || remotes[0].Display != "wbbradley/hq" {
 		t.Fatalf("remotes = %#v", remotes)
 	}
+	snapshot := (GitHub{}).Snapshot(ctx, worktree)
+	common, err := filepath.EvalSymlinks(filepath.Join(root, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCommon, err := filepath.EvalSymlinks(snapshot.GitCommonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Directory != worktree || snapshot.Worktree != worktree || gotCommon != common || snapshot.Branch != "linked-test" || snapshot.RemoteIdentity != "origin: wbbradley/hq" {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
 }
 
 func runGit(t *testing.T, args ...string) {

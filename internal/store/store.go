@@ -15,13 +15,15 @@ var (
 )
 
 type Claim struct {
-	MessageID        string
-	ReplyTo          string
-	Directory        string
-	RecipientSession string
+	MessageID          string
+	ReplyTo            string
+	RecipientMailboxID string
 }
 
 type Store interface {
+	HumanMailbox(context.Context) (model.Mailbox, error)
+	ResolveMailbox(context.Context, model.SessionIdentity, model.RepositoryContext) (model.Mailbox, error)
+	FindMailboxes(context.Context, model.RepositoryContext) ([]model.Mailbox, error)
 	Create(context.Context, model.Message) error
 	Reply(context.Context, string, model.Message) error
 	Get(context.Context, string) (model.Message, error)
