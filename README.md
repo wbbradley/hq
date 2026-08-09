@@ -36,13 +36,19 @@ gh skill install wbbradley/hq hq@main --agent codex --scope user
 
 The `@main` pin installs the current skill before the next tagged HQ release. After a release includes the skill, `hq@main` can be shortened to `hq`.
 
-Run `hq agents` to print agent-specific setup, output, and delivery rules:
+Run `hq agents` to print the short agent workflow:
 
 ```sh
 hq agents
 ```
 
-HQ embeds [the agent instruction source](internal/agenthelp/instructions.md) in the binary. Edit that file to update both the source and `hq agents` output.
+HQ embeds [the agent instruction source](internal/agenthelp/instructions.md) in the binary. Focused topics keep rare details out of the default agent context:
+
+```sh
+hq agents commands
+hq agents sync-semantics
+hq agents delivery-semantics
+```
 
 HQ detects `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, or `PI_SESSION_ID` and binds one private mailbox to that namespaced harness session. Agents do not need to manage a session ID. HQ stops with an error if more than one built-in harness ID is present because silent routing could select the wrong mailbox.
 
@@ -118,7 +124,7 @@ hq daemon run|status|stop
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
 hq tui
-hq agents
+hq agents [commands|sync-semantics|delivery-semantics]
 ```
 
 Set `HQ_DB` or pass global `--db PATH` before the command to use another database. Mutating commands commit their signed local event and then run a three-second foreground sync pass. `--no-sync` skips that pass for explicit offline work. Relay errors go to stderr and never undo the local event.

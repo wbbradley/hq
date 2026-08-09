@@ -74,6 +74,29 @@ func TestAgentsPrintsEmbeddedInstructionsWithoutOpeningStore(t *testing.T) {
 	}
 }
 
+func TestAgentsPrintsFocusedTopicWithoutOpeningStore(t *testing.T) {
+	a, out := testApp(t, "")
+	a.Open = func(string) (store.Store, error) { t.Fatal("agents opened store"); return nil, nil }
+	if err := a.Run(context.Background(), []string{"agents", "sync-semantics"}); err != nil {
+		t.Fatal(err)
+	}
+	want, ok := agenthelp.Topic("sync-semantics")
+	if !ok {
+		t.Fatal("sync-semantics topic is missing")
+	}
+	if out.String() != want {
+		t.Fatal("agents topic output differs from source")
+	}
+}
+
+func TestAgentsRejectsUnknownTopic(t *testing.T) {
+	a, _ := testApp(t, "")
+	err := a.Run(context.Background(), []string{"agents", "unknown"})
+	if err == nil || !strings.Contains(err.Error(), "unknown agents topic") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestBareCommandUsesTUIWhenInteractive(t *testing.T) {
 	a, _ := testApp(t, "")
 	a.IsTTY = func() bool { return true }

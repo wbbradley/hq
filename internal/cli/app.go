@@ -33,7 +33,7 @@ Usage:
   hq                          Open the TUI in a terminal; list the open human inbox otherwise
 
 Agent commands:
-  agents  Print instructions for agents
+  agents  Print instructions for agents, with optional focused topics
   ask     Send a message to the human inbox; print its ID
   wait    Wait for a reply to one message
   poll    Read and complete messages in an agent mailbox
@@ -133,10 +133,17 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return err
 	}
 	if command == "agents" {
-		if len(args) != 0 {
-			return errors.New("agents takes no arguments")
+		if len(args) == 0 {
+			return writeOnce(a.Out, []byte(agenthelp.Text))
 		}
-		return writeOnce(a.Out, []byte(agenthelp.Text))
+		if len(args) > 1 {
+			return errors.New("agents takes at most one topic")
+		}
+		text, ok := agenthelp.Topic(args[0])
+		if !ok {
+			return fmt.Errorf("unknown agents topic %q; run hq agents for available topics", args[0])
+		}
+		return writeOnce(a.Out, []byte(text))
 	}
 	if command == "identity" {
 		return a.identity(dbPath, args)

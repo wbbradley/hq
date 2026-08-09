@@ -1,16 +1,10 @@
 # HQ instructions for agents
 
-HQ lets an agent send a message to a human and read messages from its agent mailbox later.
+Use HQ for async contact with the human. HQ binds a private mailbox to the current Codex, Claude Code, or Pi session.
 
-## Mailbox scope
+## Send a question or work item
 
-HQ finds the current Codex, Claude Code, or Pi session and binds one private mailbox to that harness session. The mailbox stays the same after a process restart or directory change when the harness resumes the same session. Do not create, print, save, or pass a session ID in normal use.
-
-If HQ reports an ambiguous or missing harness session, stop and report the error. The `--session` flag and `HQ_SESSION` variable are manual overrides for advanced use only.
-
-## Send to the human inbox
-
-Write a clear message that states the choice or information the human should provide. Put useful context and tradeoffs in `--details`. Save the message ID from stdout.
+Write a clear message that states what the human should provide. Put context and tradeoffs in `--details`. Save the message ID printed by `ask`.
 
 ```sh
 message_id=$(hq ask \
@@ -18,49 +12,28 @@ message_id=$(hq ask \
   "Should I choose option A or option B?")
 ```
 
-`hq ask` reads the body from stdin when no body argument is present. Add `--json` for structured output.
+## Read messages
 
-HQ commits the signed local event before it tries relay sync. The message ID on stdout means the local event is safe. HQ may write a relay-pending note to stderr; that note does not undo the local send. A running daemon receives a wake request, but no daemon is required. Do not pass `--no-sync` unless the human asks for offline-only work.
-
-## Read the agent mailbox
-
-Use `wait` only when a reply to one message blocks all useful work:
+When a reply blocks all useful work, wait for the answer:
 
 ```sh
 reply=$(hq wait --timeout 30m "$message_id")
 ```
 
-`wait` runs bounded relay sync while it waits. The agent does not need relay keys, relay credentials, or daemon access.
-
-Use `poll` when the agent can keep working. `poll` reads replies and unsolicited messages addressed to the current harness mailbox, even when the work directory has changed:
+When other work remains, keep working and check later:
 
 ```sh
-if messages=$(hq poll); then
-  printf '%s\n' "$messages"
-else
-  status=$?
-  if [ "$status" -ne 3 ]; then
-    exit "$status"
-  fi
-fi
+hq poll
 ```
 
-`poll` exits with code 3 and writes nothing when no message is ready. Other errors go to stderr. Plain `wait` output contains only the reply body. Plain `poll` output contains one tab-separated message ID and body per line. Pass `--json` for structured output.
+`poll` reads replies and new messages for the current agent session. An empty mailbox exits with code 3 and prints nothing.
 
-## Delivery rules
+Let HQ detect the session. Do not set or save a session ID in normal use. If HQ reports a missing or unclear session, report the error.
 
-`wait` and `poll` lease each message, write the full output once, and then set `completed_at` and `archived_at`. HQ keeps every message. A process crash after stdout but before the database update can cause one later retry, so use the message ID as an idempotency key when a duplicate matters.
+If HQ reports a missing installation identity, tell the human to run `hq identity init`. Agents must not manage installation keys or transport settings.
 
-Do not use the human `tui`, `list`, `answer`, or `cancel` commands to consume the agent mailbox. Use `wait`, `poll`, or `get`.
+## More detail
 
-`wait` checks that the current mailbox sent the given message. `get MESSAGE_ID` is the direct-ID path for a cooperative agent that must inspect a message from another mailbox.
-
-HQ threads may contain more than one answer. `wait` returns the first answer available to the current mailbox, not a globally selected answer. Use `poll` to read later answers and async messages.
-
-Network events may arrive before their causal parents. `poll` prefixes plain output with `[incomplete causal history]` and JSON output sets `incomplete_causal_history`; `get` exposes the same JSON field. `wait` requires the original local question so HQ can prove mailbox ownership. Keep the message ID and treat a later copy with the same canonical `event_id` as the same event.
-
-Cancellation does not erase an answer. A thread may show both facts when an answer arrived after the sender cancelled or when answer and cancellation were concurrent. Read the causal status and handle the answer if it still helps; do not assume that the answerer saw the cancellation.
-
-Agents must not run `hq identity`, `hq peer`, `hq mailbox`, `hq relay`, `hq sync`, `hq daemon`, or `hq status`. Those commands manage the human-owned installation and transport.
-
-Bare `hq` opens the human TUI only when stdin and stdout are terminals. In non-interactive use, bare `hq` lists the open human inbox for the current work directory.
+- `hq agents commands`: syntax, output, and exit codes
+- `hq agents sync-semantics`: local saves, relay sync, and offline use
+- `hq agents delivery-semantics`: leases, duplicate reads, threads, and cancellation
