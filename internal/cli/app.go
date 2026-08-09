@@ -49,6 +49,7 @@ Other commands:
   identity   Create, inspect, back up, import, or reset the installation identity
   peer       Add, list, or distrust peer installations
   mailbox    Share or revoke a mailbox for one peer
+  relay      Configure installation inbox relays
   help       Print command help
   version    Print the version
 
@@ -151,6 +152,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.peer(ctx, s, args)
 	case "mailbox":
 		return a.mailbox(ctx, s, args)
+	case "relay":
+		return a.relay(ctx, s, args)
 	case "tui":
 		if len(args) != 0 {
 			return errors.New("tui takes no arguments")
@@ -356,6 +359,54 @@ func (a *App) mailbox(ctx context.Context, s store.Store, args []string) error {
 		return errors.New("mailbox needs share or revoke, MAILBOX_ID, and PEER_INSTALLATION_ID")
 	}
 	return s.SetMailboxShare(ctx, args[1], args[2], args[0] == "share")
+}
+
+func (a *App) relay(ctx context.Context, s store.Store, args []string) error {
+	if len(args) == 0 {
+		return errors.New("relay needs add, list, or remove")
+	}
+	switch args[0] {
+	case "add":
+		f := flags("relay add")
+		read := f.Bool("read", true, "read the installation inbox")
+		write := f.Bool("write", true, "allow writes")
+		unsafeNoAuth := f.Bool("unsafe-no-auth", false, "allow private reads without NIP-42")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 1 {
+			return errors.New("relay add needs one WebSocket URL")
+		}
+		return s.AddRelay(ctx, store.RelayConfig{URL: f.Args()[0], Read: *read, Write: *write, RequireAuth: *read && !*unsafeNoAuth, UnsafeNoAuth: *unsafeNoAuth})
+	case "list":
+		f := flags("relay list")
+		asJSON := f.Bool("json", false, "write JSON")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 0 {
+			return errors.New("relay list takes flags only")
+		}
+		relays, err := s.ListRelays(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return writeJSON(a.Out, relays)
+		}
+		var output bytes.Buffer
+		for _, relay := range relays {
+			fmt.Fprintf(&output, "%s\tread=%t\twrite=%t\tauth=%t\n", relay.URL, relay.Read, relay.Write, relay.RequireAuth)
+		}
+		return writeOnce(a.Out, output.Bytes())
+	case "remove":
+		if len(args) != 2 {
+			return errors.New("relay remove needs one WebSocket URL")
+		}
+		return s.RemoveRelay(ctx, args[1])
+	default:
+		return fmt.Errorf("unknown relay command %q", args[0])
+	}
 }
 
 func globalArgs(args []string, path string) (string, []string, error) {

@@ -39,6 +39,9 @@ type Message struct {
 	EventID                 string            `json:"event_id"`
 	ThreadID                string            `json:"thread_id"`
 	Incomplete              bool              `json:"incomplete_causal_history,omitempty"`
+	PeerReceived            bool              `json:"peer_received,omitempty"`
+	Rejected                bool              `json:"rejected,omitempty"`
+	DeliveryState           string            `json:"delivery_state,omitempty"`
 	Context                 RepositoryContext `json:"context"`
 	SenderMailboxID         string            `json:"sender_mailbox_id"`
 	RecipientMailboxID      string            `json:"recipient_mailbox_id"`

@@ -62,6 +62,9 @@ type Store interface {
 	DistrustPeer(context.Context, string) error
 	ListPeers(context.Context) ([]Peer, error)
 	SetMailboxShare(context.Context, string, string, bool) error
+	AddRelay(context.Context, RelayConfig) error
+	RemoveRelay(context.Context, string) error
+	ListRelays(context.Context) ([]RelayConfig, error)
 	Rebuild(context.Context) error
 	Close() error
 }

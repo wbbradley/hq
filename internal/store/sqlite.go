@@ -20,7 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -96,6 +96,8 @@ CREATE TABLE messages (
     created_at INTEGER NOT NULL,
     archived_at INTEGER,
     incomplete INTEGER NOT NULL CHECK(incomplete IN (0, 1)),
+    peer_received INTEGER NOT NULL CHECK(peer_received IN (0, 1)),
+    rejected INTEGER NOT NULL CHECK(rejected IN (0, 1)),
     FOREIGN KEY(event_id) REFERENCES canonical_events(event_id)
 ) STRICT;
 CREATE TABLE threads (
@@ -121,9 +123,54 @@ CREATE TABLE outbox (
     event_id TEXT PRIMARY KEY,
     recipient_installation_id TEXT NOT NULL,
     exact_canonical_bytes BLOB NOT NULL,
+    recipient_public_key TEXT NOT NULL DEFAULT '',
+    gift_wrap_event_id TEXT UNIQUE,
+    exact_gift_wrap_bytes BLOB,
+    ephemeral_public_key TEXT UNIQUE,
+    wrapped_at INTEGER,
     state TEXT NOT NULL DEFAULT 'queued',
     created_at INTEGER NOT NULL,
     FOREIGN KEY(event_id) REFERENCES canonical_events(event_id)
+) STRICT;
+CREATE TABLE relays (
+    url TEXT PRIMARY KEY,
+    read_enabled INTEGER NOT NULL CHECK(read_enabled IN (0,1)),
+    write_enabled INTEGER NOT NULL CHECK(write_enabled IN (0,1)),
+    require_auth INTEGER NOT NULL CHECK(require_auth IN (0,1)),
+    unsafe_no_auth INTEGER NOT NULL CHECK(unsafe_no_auth IN (0,1)),
+    created_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE outbound_relay_attempts (
+    event_id TEXT NOT NULL,
+    relay_url TEXT NOT NULL,
+    state TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    attempt_count INTEGER NOT NULL,
+    last_attempt_at INTEGER NOT NULL,
+    next_attempt_at INTEGER NOT NULL,
+    accepted_at INTEGER,
+    PRIMARY KEY(event_id, relay_url),
+    FOREIGN KEY(event_id) REFERENCES outbox(event_id)
+) STRICT;
+CREATE TABLE inbound_wrappers (
+    outer_event_id TEXT PRIMARY KEY,
+    ephemeral_public_key TEXT NOT NULL UNIQUE,
+    origin_installation_id TEXT NOT NULL,
+    canonical_event_id TEXT NOT NULL,
+    exact_wrapper BLOB NOT NULL,
+    relay_url TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    received_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX inbound_logical ON inbound_wrappers(origin_installation_id, canonical_event_id);
+CREATE TABLE relay_sync_state (
+    relay_url TEXT PRIMARY KEY,
+    connected INTEGER NOT NULL DEFAULT 0,
+    authenticated INTEGER NOT NULL DEFAULT 0,
+    last_eose_at INTEGER,
+    last_event_at INTEGER,
+    last_error TEXT NOT NULL DEFAULT ''
 ) STRICT;
 CREATE TABLE delivery_facts (
     message_id TEXT PRIMARY KEY,
@@ -153,7 +200,7 @@ CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, creat
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 `
 
 const (
@@ -469,8 +516,8 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if message.Archived {
 			archived = archiveTime(state, eventID)
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, body, details, reply_to, created_at, archived_at, incomplete) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, eventID, message.ThreadID, message.Type, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.Body, message.Details, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete))
+		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, body, details, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, eventID, message.ThreadID, message.Type, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.Body, message.Details, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
 		if err != nil {
 			return fmt.Errorf("project message: %w", err)
 		}
@@ -496,7 +543,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 	}
 	for _, record := range state.Records {
 		content := record.Event.Content
-		if record.Status == event.StatusProjected && content.Scope == event.ScopePeerAddressed && content.Recipient != nil {
+		if record.Status == event.StatusProjected && content.InstallationID == s.signer.InstallationID && content.Scope == event.ScopePeerAddressed && content.Recipient != nil {
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(event_id, recipient_installation_id, exact_canonical_bytes, created_at) VALUES (?, ?, ?, ?)`, record.Event.ID(), content.Recipient.InstallationID, record.Event.Wire, record.Event.Nostr.CreatedAt); err != nil {
 				return err
 			}
@@ -723,8 +770,8 @@ func (s *SQLite) messageRecord(ctx context.Context, id string) (messageWithEvent
 	return messageWithEvent{message: m, eventID: eventID}, nil
 }
 
-const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.incomplete, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN sb.harness||':'||substr(sm.id,-8) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END, CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN rb.harness||':'||substr(rm.id,-8) ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
-const joins = ` messages msg LEFT JOIN mailboxes sm ON sm.id=msg.sender_mailbox_id AND sm.installation_id=msg.sender_installation_id LEFT JOIN harness_bindings sb ON sb.mailbox_id=sm.id LEFT JOIN mailboxes rm ON rm.id=msg.recipient_mailbox_id AND rm.installation_id=msg.recipient_installation_id LEFT JOIN harness_bindings rb ON rb.mailbox_id=rm.id LEFT JOIN delivery_facts d ON d.message_id=msg.id `
+const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN sb.harness||':'||substr(sm.id,-8) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END, CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN rb.harness||':'||substr(rm.id,-8) ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
+const joins = ` messages msg LEFT JOIN mailboxes sm ON sm.id=msg.sender_mailbox_id AND sm.installation_id=msg.sender_installation_id LEFT JOIN harness_bindings sb ON sb.mailbox_id=sm.id LEFT JOIN mailboxes rm ON rm.id=msg.recipient_mailbox_id AND rm.installation_id=msg.recipient_installation_id LEFT JOIN harness_bindings rb ON rb.mailbox_id=rm.id LEFT JOIN delivery_facts d ON d.message_id=msg.id LEFT JOIN outbox o ON o.event_id=msg.event_id `
 
 type scanner interface{ Scan(...any) error }
 
@@ -733,7 +780,7 @@ func scanMessage(row scanner) (model.Message, error) {
 	var reply sql.NullString
 	var created int64
 	var archived, completed sql.NullInt64
-	err := row.Scan(&m.ID, &m.EventID, &m.ThreadID, &m.Incomplete, &m.Context.Directory, &m.Context.GitCommonDir, &m.Context.RemoteIdentity, &m.Context.Worktree, &m.Context.Branch, &m.SenderInstallationID, &m.RecipientInstallationID, &m.SenderMailboxID, &m.RecipientMailboxID, &m.SenderLabel, &m.RecipientLabel, &m.Body, &m.Details, &reply, &created, &archived, &completed)
+	err := row.Scan(&m.ID, &m.EventID, &m.ThreadID, &m.Incomplete, &m.PeerReceived, &m.Rejected, &m.DeliveryState, &m.Context.Directory, &m.Context.GitCommonDir, &m.Context.RemoteIdentity, &m.Context.Worktree, &m.Context.Branch, &m.SenderInstallationID, &m.RecipientInstallationID, &m.SenderMailboxID, &m.RecipientMailboxID, &m.SenderLabel, &m.RecipientLabel, &m.Body, &m.Details, &reply, &created, &archived, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -927,6 +974,16 @@ type Peer struct {
 }
 
 func (s *SQLite) TrustPeer(ctx context.Context, peer Peer) error {
+	if len(peer.Relays) > 3 {
+		return errors.New("a peer may have at most three relay hints")
+	}
+	for index, relay := range peer.Relays {
+		normalized, err := normalizeRelay(relay)
+		if err != nil {
+			return err
+		}
+		peer.Relays[index] = normalized
+	}
 	payload, err := event.MarshalPayload(event.PeerPayload{InstallationID: peer.InstallationID, SignerKeyID: peer.SignerKeyID, Name: peer.Name, Relays: peer.Relays})
 	if err != nil {
 		return err

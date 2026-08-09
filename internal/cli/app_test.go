@@ -436,6 +436,26 @@ func TestPeerAndMailboxCommands(t *testing.T) {
 	}
 }
 
+func TestRelayCommands(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	initializeTestIdentity(t, database)
+	if err := a.Run(context.Background(), []string{"--db", database, "relay", "add", "wss://relay.example"}); err != nil {
+		t.Fatal(err)
+	}
+	a, out := testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "relay", "list"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "wss://relay.example\tread=true\twrite=true\tauth=true") {
+		t.Fatalf("relay list = %q", out.String())
+	}
+	a, _ = testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "relay", "remove", "wss://relay.example"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func envMap(values map[string]string) func(string) string {
 	return func(name string) string { return values[name] }
 }

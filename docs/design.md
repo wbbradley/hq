@@ -1,12 +1,12 @@
 # HQ design
 
-HQ's durable event format and causal reduction rules are defined in [events.md](events.md). Schema version 4 stores exact signed event bytes as the source of truth. Mailbox, message, thread, peer, and share tables are disposable projections.
+HQ's durable event format and causal reduction rules are defined in [events.md](events.md). Schema version 5 stores exact signed event bytes as the source of truth. Mailbox, message, thread, peer, and share tables are disposable projections. [nostr.md](nostr.md) defines encrypted relay transport.
 
 ## Installation identity
 
 One HQ state directory has one stable installation UUID and one secp256k1 root key. `hq identity init` creates `hq.key` with mode `0600`. The sibling SQLite database never stores the secret key. `identity show` prints only the installation UUID and public key.
 
-State paths use `$XDG_STATE_HOME/hq` or `~/.local/state/hq`. Future relay settings use `$XDG_CONFIG_HOME/hq` or `~/.config/hq`; schema version 4 keeps peer trust and relay hints in signed events instead of a separate config file.
+State paths use `$XDG_STATE_HOME/hq` or `~/.local/state/hq`. Relay settings may later use `$XDG_CONFIG_HOME/hq` or `~/.config/hq`; schema version 5 keeps peer trust and relay hints in signed events and local installation relay settings in SQLite.
 
 `identity export` writes a mode-`0600` backup. The backup keeps the installation UUID and encrypts the root key as NIP-49 `ncryptsec` data. Passwords enter through hidden terminal input, never command arguments. `identity import` restores an identity only when no key exists. Running the same imported identity on two active hosts is unsupported.
 
@@ -46,7 +46,7 @@ User commands accept a signed message UUID from the payload. Causal parent links
 
 `delivery_facts`, `mailbox_activity`, and projection checkpoints are unsigned local facts. Delivery claims use a 30-second lease because SQLite and stdout cannot share a transaction. A crash after stdout and before completion can cause one retry.
 
-`inbound_staging` holds temporary receive failures for a later retry. `quarantine` holds permanent failures and never retries them on its own. Quarantine keeps the raw wrapper, relay, event ID, reason, and receive time. The local cap is 1,000 rows, 16 MiB, and 30 days; the oldest row leaves first.
+`relays`, `outbound_relay_attempts`, `inbound_wrappers`, and `relay_sync_state` hold unsigned transport facts. `outbox` adds the exact signed gift wrap before publish. `inbound_staging` holds temporary receive failures for a later retry. `quarantine` holds permanent failures and never retries them on its own. Quarantine keeps the raw wrapper, relay, event ID, reason, and receive time. The local cap is 1,000 rows, 16 MiB, and 30 days; the oldest row leaves first.
 
 SQLite uses strict tables, foreign keys, WAL mode, `synchronous=FULL`, a five-second busy timeout, one connection per process, and mode `0600` for the database file. HQ does not tail SQLite's WAL and does not add a second file WAL.
 

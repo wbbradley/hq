@@ -108,6 +108,9 @@ hq peer list [--json]
 hq peer distrust INSTALLATION_ID
 hq mailbox share MAILBOX_ID PEER_INSTALLATION_ID
 hq mailbox revoke MAILBOX_ID PEER_INSTALLATION_ID
+hq relay add [--read=BOOL] [--write=BOOL] [--unsafe-no-auth] WSS_URL
+hq relay list [--json]
+hq relay remove WSS_URL
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
 hq tui
@@ -124,9 +127,9 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 `hq list` shows only open messages by default. `--archived` shows archived messages, and `--all` shows both.
 
-Schema version 4 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
+Schema version 5 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
 
-See [docs/design.md](docs/design.md) for the schema and storage contract, and [docs/events.md](docs/events.md) for the signed event and causal reduction protocol.
+See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for signed causal state, and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
 
 ## Development
 
