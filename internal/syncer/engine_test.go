@@ -54,6 +54,10 @@ func TestTwoInstallationsSyncThroughAuthenticatedRelayWithCatchUp(t *testing.T) 
 	if err := receiverEngine.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
+	status, err := receiver.NetworkStatus(ctx)
+	if err != nil || len(status.Relays) != 1 || status.Relays[0].Connected || status.Relays[0].Authenticated || status.Relays[0].LastEOSE == nil {
+		t.Fatalf("relay state after pass = %#v, %v", status.Relays, err)
+	}
 	for _, id := range ids {
 		message, err := receiver.Get(ctx, id)
 		if err != nil || !strings.HasPrefix(message.Body, "relay message") {
@@ -244,7 +248,7 @@ func TestRelayRejectionKeepsRetryState(t *testing.T) {
 	}
 	eventID = stored.EventID
 	attempts, err := sender.RelayAttempts(ctx, eventID)
-	if err != nil || len(attempts) != 1 || attempts[0].State != "retry" {
+	if err != nil || len(attempts) != 1 || attempts[0].State != "rejected" {
 		t.Fatalf("attempts = %#v, %v", attempts, err)
 	}
 }

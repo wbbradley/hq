@@ -4,7 +4,7 @@ Status: first-release protocol, schema version 1.
 
 HQ derives durable state from signed canonical events. SQLite tables, relay queues, and user views are indexes of those events. A supported HQ command must not change durable domain state without creating and applying a valid event.
 
-The format follows [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) for event IDs and Schnorr signatures. Relay transport will wrap these events later; relay URLs and transport retry data are not part of a canonical event.
+The format follows [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) for event IDs and Schnorr signatures. [nostr.md](nostr.md) defines the relay wrapper. Relay URLs and transport retry data are not part of a canonical event.
 
 ## Identity
 

@@ -50,6 +50,25 @@ type RelayAttempt struct {
 	AcceptedAt   *time.Time
 }
 
+type RelayHealth struct {
+	URL           string     `json:"url"`
+	Connected     bool       `json:"connected"`
+	Authenticated bool       `json:"authenticated"`
+	LastEOSE      *time.Time `json:"last_eose,omitempty"`
+	LastEvent     *time.Time `json:"last_event,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
+}
+
+type NetworkStatus struct {
+	Queued      int           `json:"queued"`
+	Rejected    int           `json:"rejected"`
+	Unresolved  int           `json:"unresolved"`
+	Unsupported int           `json:"unsupported"`
+	Staged      int           `json:"staged"`
+	Quarantined int           `json:"quarantined"`
+	Relays      []RelayHealth `json:"relays"`
+}
+
 func (s *SQLite) InstallationIdentity() (string, string) {
 	return s.signer.InstallationID, s.signer.PublicKey()
 }
@@ -250,7 +269,7 @@ func (s *SQLite) RelayJobs(ctx context.Context, relayURL string, limit int, now 
 	return jobs, rows.Err()
 }
 
-func (s *SQLite) RecordPublish(ctx context.Context, eventID, relayURL string, accepted bool, message string, now, retryAt time.Time) error {
+func (s *SQLite) RecordPublish(ctx context.Context, eventID, relayURL string, accepted, rejected bool, message string, now, retryAt time.Time) error {
 	normalized, err := normalizeRelay(relayURL)
 	if err != nil {
 		return err
@@ -259,6 +278,8 @@ func (s *SQLite) RecordPublish(ctx context.Context, eventID, relayURL string, ac
 	var acceptedAt any
 	if accepted {
 		state, acceptedAt = "accepted", now.UTC().UnixMilli()
+	} else if rejected {
+		state = "rejected"
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -271,6 +292,10 @@ func (s *SQLite) RecordPublish(ctx context.Context, eventID, relayURL string, ac
 	}
 	if accepted {
 		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='relay-accepted' WHERE event_id=?`, eventID); err != nil {
+			return err
+		}
+	} else if rejected {
+		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='rejected' WHERE event_id=? AND state<>'relay-accepted'`, eventID); err != nil {
 			return err
 		}
 	}
@@ -370,6 +395,48 @@ func (s *SQLite) RelayAttempts(ctx context.Context, eventID string) ([]RelayAtte
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func (s *SQLite) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
+	var status NetworkStatus
+	queries := []struct {
+		query  string
+		target *int
+	}{
+		{`SELECT count(*) FROM outbox WHERE state<>'relay-accepted'`, &status.Queued},
+		{`SELECT count(*) FROM outbound_relay_attempts WHERE state='rejected'`, &status.Rejected},
+		{`SELECT count(*) FROM canonical_events WHERE reduction_status='unresolved'`, &status.Unresolved},
+		{`SELECT count(*) FROM canonical_events WHERE reduction_status='unsupported'`, &status.Unsupported},
+		{`SELECT count(*) FROM inbound_staging`, &status.Staged},
+		{`SELECT count(*) FROM quarantine`, &status.Quarantined},
+	}
+	for _, item := range queries {
+		if err := s.db.QueryRowContext(ctx, item.query).Scan(item.target); err != nil {
+			return status, err
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT relay_url,connected,authenticated,last_eose_at,last_event_at,last_error FROM relay_sync_state ORDER BY relay_url`)
+	if err != nil {
+		return status, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var relay RelayHealth
+		var eose, eventAt sql.NullInt64
+		if err := rows.Scan(&relay.URL, &relay.Connected, &relay.Authenticated, &eose, &eventAt, &relay.LastError); err != nil {
+			return status, err
+		}
+		if eose.Valid {
+			value := time.UnixMilli(eose.Int64).UTC()
+			relay.LastEOSE = &value
+		}
+		if eventAt.Valid {
+			value := time.UnixMilli(eventAt.Int64).UTC()
+			relay.LastEvent = &value
+		}
+		status.Relays = append(status.Relays, relay)
+	}
+	return status, rows.Err()
 }
 
 // jsonUnmarshal is a small seam for relay-hint parsing tests.

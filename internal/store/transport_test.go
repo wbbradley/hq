@@ -53,7 +53,7 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 	if err != nil || duplicate.Status != "duplicate-wrapper" {
 		t.Fatalf("duplicate = %#v, %v", duplicate, err)
 	}
-	if err := sender.RecordPublish(ctx, job.CanonicalEventID, relayOne, true, "duplicate: already saved", time.Now(), time.Now()); err != nil {
+	if err := sender.RecordPublish(ctx, job.CanonicalEventID, relayOne, true, false, "duplicate: already saved", time.Now(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if jobs, err := sender.RelayJobs(ctx, relayOne, 10, time.Now()); err != nil || len(jobs) != 0 {
@@ -154,6 +154,49 @@ func TestConfiguredWriteRelayReceivesJobsWithoutPeerHint(t *testing.T) {
 	jobs, err := sender.RelayJobs(ctx, relay, 10, time.Now())
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("configured relay jobs = %#v, %v", jobs, err)
+	}
+}
+
+func TestNetworkStatusReportsQueueRejectAndInboundFailures(t *testing.T) {
+	ctx := context.Background()
+	sender := openStore(t, filepath.Join(t.TempDir(), "sender", "hq.db"))
+	receiver := openStore(t, filepath.Join(t.TempDir(), "receiver", "hq.db"))
+	receiverID, receiverKey := receiver.InstallationIdentity()
+	const relay = "wss://relay.test"
+	if err := sender.TrustPeer(ctx, Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay}}); err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d97", SenderMailboxID: model.HumanMailboxID, Body: "status", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := sender.RelayJobs(ctx, relay, 10, time.Now())
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("jobs = %#v, %v", jobs, err)
+	}
+	now := time.Now().UTC()
+	if err := sender.RecordPublish(ctx, jobs[0].CanonicalEventID, relay, false, true, "rate-limited", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.Stage(ctx, []byte("temporary"), relay, "", "busy", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.Quarantine(ctx, []byte("bad"), relay, "", "invalid", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.SetRelaySyncState(ctx, relay, true, true, "rate-limited", &now, &now); err != nil {
+		t.Fatal(err)
+	}
+	status, err := sender.NetworkStatus(ctx)
+	if err != nil || status.Queued != 1 || status.Rejected != 1 || status.Staged != 1 || status.Quarantined != 1 || len(status.Relays) != 1 || !status.Relays[0].Authenticated {
+		t.Fatalf("network status = %#v, %v", status, err)
+	}
+	stored, err := sender.Get(ctx, message.ID)
+	if err != nil || stored.DeliveryState != "rejected" {
+		t.Fatalf("rejected message = %#v, %v", stored, err)
 	}
 }
 

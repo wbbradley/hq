@@ -20,6 +20,8 @@ message_id=$(hq ask \
 
 `hq ask` reads the body from stdin when no body argument is present. Add `--json` for structured output.
 
+HQ commits the signed local event before it tries relay sync. The message ID on stdout means the local event is safe. HQ may write a relay-pending note to stderr; that note does not undo the local send. A running daemon receives a wake request, but no daemon is required. Do not pass `--no-sync` unless the human asks for offline-only work.
+
 ## Read the agent mailbox
 
 Use `wait` only when a reply to one message blocks all useful work:
@@ -27,6 +29,8 @@ Use `wait` only when a reply to one message blocks all useful work:
 ```sh
 reply=$(hq wait --timeout 30m "$message_id")
 ```
+
+`wait` runs bounded relay sync while it waits. The agent does not need relay keys, relay credentials, or daemon access.
 
 Use `poll` when the agent can keep working. `poll` reads replies and unsolicited messages addressed to the current harness mailbox, even when the work directory has changed:
 
@@ -56,5 +60,7 @@ HQ threads may contain more than one answer. `wait` returns the first answer ava
 Network events may arrive before their causal parents. `poll` prefixes plain output with `[incomplete causal history]` and JSON output sets `incomplete_causal_history`; `get` exposes the same JSON field. `wait` requires the original local question so HQ can prove mailbox ownership. Keep the message ID and treat a later copy with the same canonical `event_id` as the same event.
 
 Cancellation does not erase an answer. A thread may show both facts when an answer arrived after the sender cancelled or when answer and cancellation were concurrent. Read the causal status and handle the answer if it still helps; do not assume that the answerer saw the cancellation.
+
+Agents must not run `hq identity`, `hq peer`, `hq mailbox`, `hq relay`, `hq sync`, `hq daemon`, or `hq status`. Those commands manage the human-owned installation and transport.
 
 Bare `hq` opens the human TUI only when stdin and stdout are terminals. In non-interactive use, bare `hq` lists the open human inbox for the current work directory.

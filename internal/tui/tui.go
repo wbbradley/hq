@@ -38,6 +38,7 @@ type app struct {
 	archived     []model.Message
 	showSent     bool
 	showArchived bool
+	showStatus   bool
 	cursor       int
 	width        int
 	height       int
@@ -51,18 +52,24 @@ type app struct {
 	branch       string
 	remotes      string
 	pull         string
+	sync         func(context.Context) error
+	syncErr      error
+	network      store.NetworkStatus
 }
 
 type loadedMsg struct {
 	inbox    []model.Message
 	sent     []model.Message
 	archived []model.Message
+	network  store.NetworkStatus
 	err      error
 }
 
 type answeredMsg struct{ err error }
 
 type refreshMsg struct{}
+
+type syncMsg struct{ err error }
 
 type branchMsg struct {
 	message model.Message
@@ -84,6 +91,10 @@ type remotesMsg struct {
 }
 
 func Run(ctx context.Context, s store.Store, in io.Reader, out io.Writer) error {
+	return RunWithSync(ctx, s, in, out, nil)
+}
+
+func RunWithSync(ctx context.Context, s store.Store, in io.Reader, out io.Writer, sync func(context.Context) error) error {
 	editor := textarea.New()
 	editor.Placeholder = "Type a message"
 	editor.KeyMap.InsertNewline = key.NewBinding(
@@ -92,15 +103,26 @@ func Run(ctx context.Context, s store.Store, in io.Reader, out io.Writer) error 
 	)
 	editor.SetWidth(72)
 	editor.SetHeight(6)
-	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor}
+	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync}
 	_, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
 	return err
 }
 
-func (m app) Init() tea.Cmd { return tea.Batch(m.load, scheduleRefresh()) }
+func (m app) Init() tea.Cmd { return tea.Batch(m.load, m.syncNow(), scheduleRefresh()) }
 
 func scheduleRefresh() tea.Cmd {
 	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return refreshMsg{} })
+}
+
+func (m app) syncNow() tea.Cmd {
+	if m.sync == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Second)
+		defer cancel()
+		return syncMsg{err: m.sync(ctx)}
+	}
 }
 
 func (m app) load() tea.Msg {
@@ -115,7 +137,11 @@ func (m app) load() tea.Msg {
 	}
 	closed := true
 	archived, err := m.store.List(m.ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Archived: &closed, Limit: 1000, NewestFirst: true})
-	return loadedMsg{inbox: inbox, sent: sent, archived: archived, err: err}
+	if err != nil {
+		return loadedMsg{err: err}
+	}
+	network, err := m.store.NetworkStatus(m.ctx)
+	return loadedMsg{inbox: inbox, sent: sent, archived: archived, network: network, err: err}
 }
 
 func (m app) answer() tea.Msg {
@@ -148,7 +174,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetWidth(max(20, min(72, msg.Width-6)))
 	case loadedMsg:
 		selectedID := m.selectedID()
-		m.inbox, m.sent, m.archived, m.err = msg.inbox, msg.sent, msg.archived, msg.err
+		m.inbox, m.sent, m.archived, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.network, msg.err
 		m.setMessages()
 		if index := messageIndex(m.messages, selectedID); index >= 0 {
 			m.cursor = index
@@ -157,7 +183,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.withContextCommand()
 	case refreshMsg:
-		return m, tea.Batch(m.load, scheduleRefresh())
+		return m, tea.Batch(m.load, m.syncNow(), scheduleRefresh())
+	case syncMsg:
+		m.syncErr = msg.err
+		if msg.err == nil {
+			return m, m.load
+		}
 	case branchMsg:
 		if msg.message.ID != m.contextID {
 			return m, nil
@@ -209,7 +240,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.answerQ = model.Message{}
 			m.composeTo = ""
 			m.editor.Reset()
-			return m, m.load
+			return m, tea.Batch(m.load, m.syncNow())
 		}
 	case tea.KeyPressMsg:
 		if m.answering {
@@ -255,6 +286,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			m.setMessages()
 			return m.withContextCommand()
+		case "v":
+			m.showStatus = !m.showStatus
+			return m, nil
 		case "enter", "a":
 			if len(m.messages) > 0 && canReply(m.messages[m.cursor]) {
 				m.answering = true
@@ -428,6 +462,14 @@ func (m app) View() tea.View {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
 		b.WriteString("\n\n")
 	}
+	if m.syncErr != nil {
+		b.WriteString(dim.Render("relay sync pending: " + m.syncErr.Error()))
+		b.WriteString("\n\n")
+	}
+	if m.showStatus {
+		b.WriteString(panel.Render(formatNetworkStatus(m.network)))
+		b.WriteString("\n\n")
+	}
 	if len(m.messages) == 0 {
 		b.WriteString(dim.Render("No messages in this view. Press r to refresh."))
 	} else {
@@ -436,9 +478,9 @@ func (m app) View() tea.View {
 			if message.SenderMailboxID == model.HumanMailboxID {
 				direction = "sent → " + short(message.RecipientLabel, 16)
 			}
-			state := ""
+			state := deliveryLabel(message)
 			if message.ArchivedAt != nil {
-				state = " [archived]"
+				state += " [archived]"
 			}
 			line := fmt.Sprintf("%-18s %s%s", direction, singleLine(message.Body), state)
 			if i == m.cursor && (!m.answering || message.ID == m.answerQ.ID) {
@@ -495,7 +537,7 @@ func (m app) View() tea.View {
 		b.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
 	} else {
 		b.WriteString("\n\n")
-		b.WriteString(dim.Render("j/k move · enter reply · n new message · s sent · x archived · r refresh · q quit · auto-refresh 1m"))
+		b.WriteString(dim.Render("j/k move · enter reply · n new message · s sent · x archived · v status · r refresh · q quit · auto-refresh 1m"))
 	}
 	view := tea.NewView(b.String())
 	view.AltScreen = true
@@ -510,3 +552,37 @@ func short(s string, n int) string {
 }
 
 func singleLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+func deliveryLabel(message model.Message) string {
+	if message.SenderMailboxID != model.HumanMailboxID {
+		return ""
+	}
+	switch message.DeliveryState {
+	case "queued":
+		return " [sending]"
+	case "relay-accepted":
+		return " [sent]"
+	case "peer-received":
+		return " [peer received]"
+	case "rejected":
+		return " [rejected]"
+	default:
+		return ""
+	}
+}
+
+func formatNetworkStatus(status store.NetworkStatus) string {
+	var value strings.Builder
+	value.WriteString(titleStyle.Render("Relay status"))
+	fmt.Fprintf(&value, "\nqueued %d · rejected %d · unresolved %d · unsupported %d · staged %d · quarantined %d", status.Queued, status.Rejected, status.Unresolved, status.Unsupported, status.Staged, status.Quarantined)
+	for _, relay := range status.Relays {
+		fmt.Fprintf(&value, "\n%s · connected %t · auth %t", relay.URL, relay.Connected, relay.Authenticated)
+		if relay.LastError != "" {
+			value.WriteString(" · " + relay.LastError)
+		}
+	}
+	if len(status.Relays) == 0 {
+		value.WriteString("\nno relay sync state")
+	}
+	return value.String()
+}

@@ -65,6 +65,7 @@ type Store interface {
 	AddRelay(context.Context, RelayConfig) error
 	RemoveRelay(context.Context, string) error
 	ListRelays(context.Context) ([]RelayConfig, error)
+	NetworkStatus(context.Context) (NetworkStatus, error)
 	Rebuild(context.Context) error
 	Close() error
 }

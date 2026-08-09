@@ -21,6 +21,7 @@ import (
 	"github.com/wbbradley/hq/internal/repoctx"
 	"github.com/wbbradley/hq/internal/session"
 	"github.com/wbbradley/hq/internal/store"
+	"github.com/wbbradley/hq/internal/syncer"
 	"github.com/wbbradley/hq/internal/tui"
 	systerm "golang.org/x/term"
 )
@@ -28,7 +29,7 @@ import (
 const usage = `hq delivers messages between agent sessions and a human mailbox.
 
 Usage:
-  hq [--db PATH] <command> [options]
+  hq [--db PATH] [--no-sync] <command> [options]
   hq                          Open the TUI in a terminal; list the open human inbox otherwise
 
 Agent commands:
@@ -50,6 +51,9 @@ Other commands:
   peer       Add, list, or distrust peer installations
   mailbox    Share or revoke a mailbox for one peer
   relay      Configure installation inbox relays
+  status     Show relay and event processing status
+  sync       Run one full foreground relay sync pass
+  daemon     Run or control the optional relay sync daemon
   help       Print command help
   version    Print the version
 
@@ -60,17 +64,23 @@ The default database is $XDG_STATE_HOME/hq/hq.db or ~/.local/state/hq/hq.db.
 var ErrNoMessages = errors.New("no messages ready")
 
 type App struct {
-	In           io.Reader
-	Out          io.Writer
-	ErrOut       io.Writer
-	Getwd        func() (string, error)
-	Getenv       func(string) string
-	IsTTY        func() bool
-	Open         func(string) (store.Store, error)
-	RunTUI       func(context.Context, store.Store, io.Reader, io.Writer) error
-	RepoContext  func(context.Context, string) model.RepositoryContext
-	Sessions     session.IdentityResolver
-	ReadPassword func(string) ([]byte, error)
+	In             io.Reader
+	Out            io.Writer
+	ErrOut         io.Writer
+	Getwd          func() (string, error)
+	Getenv         func(string) string
+	IsTTY          func() bool
+	Open           func(string) (store.Store, error)
+	RunTUI         func(context.Context, store.Store, io.Reader, io.Writer) error
+	RunTUIWithSync func(context.Context, store.Store, io.Reader, io.Writer, func(context.Context) error) error
+	RepoContext    func(context.Context, string) model.RepositoryContext
+	Sessions       session.IdentityResolver
+	ReadPassword   func(string) ([]byte, error)
+	SyncOnce       func(context.Context, string, store.Store) error
+	WakeSync       func(string) error
+	RunDaemon      func(context.Context, string, store.Store) error
+	DaemonStatus   func(string) (string, error)
+	StopDaemon     func(string) error
 }
 
 func New() *App {
@@ -79,10 +89,15 @@ func New() *App {
 		IsTTY: func() bool {
 			return charmterm.IsTerminal(os.Stdin.Fd()) && charmterm.IsTerminal(os.Stdout.Fd())
 		},
-		Open:        func(path string) (store.Store, error) { return store.Open(path) },
-		RunTUI:      tui.Run,
-		RepoContext: repoctx.GitHub{}.Snapshot,
-		Sessions:    session.Resolver{Getenv: os.Getenv},
+		Open:           func(path string) (store.Store, error) { return store.Open(path) },
+		RunTUIWithSync: tui.RunWithSync,
+		RepoContext:    repoctx.GitHub{}.Snapshot,
+		Sessions:       session.Resolver{Getenv: os.Getenv},
+		SyncOnce:       defaultSyncOnce,
+		WakeSync:       syncer.Wake,
+		RunDaemon:      defaultRunDaemon,
+		DaemonStatus:   syncer.DaemonStatus,
+		StopDaemon:     syncer.StopDaemon,
 		ReadPassword: func(prompt string) ([]byte, error) {
 			if _, err := io.WriteString(os.Stderr, prompt); err != nil {
 				return nil, err
@@ -95,7 +110,7 @@ func New() *App {
 }
 
 func (a *App) Run(ctx context.Context, args []string) error {
-	dbPath, args, err := globalArgs(args, a.getenv("HQ_DB"))
+	dbPath, noSync, args, err := globalArgs(args, a.getenv("HQ_DB"))
 	if err != nil {
 		return err
 	}
@@ -131,12 +146,16 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return err
 	}
 	defer s.Close()
+	var commandErr error
 	switch command {
 	case "ask":
-		return a.ask(ctx, s, args)
+		commandErr = a.ask(ctx, s, args)
 	case "wait":
-		return a.wait(ctx, s, args)
+		return a.wait(ctx, s, args, dbPath, noSync)
 	case "poll":
+		if !noSync {
+			a.trySync(ctx, dbPath, s, false, "")
+		}
 		return a.poll(ctx, s, args)
 	case "get":
 		return a.get(ctx, s, args)
@@ -145,15 +164,27 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	case "mailboxes":
 		return a.mailboxes(ctx, s, args)
 	case "answer":
-		return a.answer(ctx, s, args)
+		commandErr = a.answer(ctx, s, args)
 	case "cancel":
-		return a.cancel(ctx, s, args)
+		commandErr = a.cancel(ctx, s, args)
 	case "peer":
-		return a.peer(ctx, s, args)
+		commandErr = a.peer(ctx, s, args)
 	case "mailbox":
-		return a.mailbox(ctx, s, args)
+		commandErr = a.mailbox(ctx, s, args)
 	case "relay":
-		return a.relay(ctx, s, args)
+		commandErr = a.relay(ctx, s, args)
+	case "status":
+		return a.status(ctx, s, args)
+	case "sync":
+		if len(args) != 0 {
+			return errors.New("sync takes no arguments")
+		}
+		if noSync {
+			return errors.New("sync cannot be combined with --no-sync")
+		}
+		return a.trySync(ctx, dbPath, s, true, "")
+	case "daemon":
+		return a.daemon(ctx, dbPath, s, args)
 	case "tui":
 		if len(args) != 0 {
 			return errors.New("tui takes no arguments")
@@ -161,9 +192,127 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		if a.RunTUI != nil {
 			return a.RunTUI(ctx, s, a.In, a.Out)
 		}
+		if noSync {
+			return tui.Run(ctx, s, a.In, a.Out)
+		}
+		if a.RunTUIWithSync != nil {
+			return a.RunTUIWithSync(ctx, s, a.In, a.Out, func(syncCtx context.Context) error {
+				return a.trySync(syncCtx, dbPath, s, true, "")
+			})
+		}
 		return tui.Run(ctx, s, a.In, a.Out)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", command, usage)
+	}
+	if commandErr != nil || noSync || !mutatesState(command, args) {
+		return commandErr
+	}
+	note := "local change saved"
+	if command == "ask" {
+		note = "message saved"
+	}
+	return a.trySync(ctx, dbPath, s, false, note)
+}
+
+func defaultRunDaemon(ctx context.Context, databasePath string, s store.Store) error {
+	sqlite, ok := s.(*store.SQLite)
+	if !ok {
+		return errors.New("relay daemon needs the SQLite store")
+	}
+	resolved, err := identity.ResolveDatabasePath(databasePath)
+	if err != nil {
+		return err
+	}
+	engine := &syncer.Engine{State: sqlite, Codec: sqlite.WireCodec(nil, nil)}
+	return (syncer.Daemon{Engine: engine, Coordinator: syncer.FileCoordinator{DatabasePath: resolved}, DatabasePath: resolved}).Run(ctx)
+}
+
+func (a *App) daemon(ctx context.Context, databasePath string, s store.Store, args []string) error {
+	if len(args) != 1 {
+		return errors.New("daemon needs run, status, or stop")
+	}
+	resolved, err := identity.ResolveDatabasePath(databasePath)
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "run":
+		if a.RunDaemon == nil {
+			return errors.New("daemon runner is unavailable")
+		}
+		return a.RunDaemon(ctx, resolved, s)
+	case "status":
+		if a.DaemonStatus == nil {
+			return errors.New("daemon status is unavailable")
+		}
+		status, err := a.DaemonStatus(resolved)
+		if err != nil {
+			return err
+		}
+		return writeOnce(a.Out, []byte(status+"\n"))
+	case "stop":
+		if a.StopDaemon == nil {
+			return errors.New("daemon stop is unavailable")
+		}
+		return a.StopDaemon(resolved)
+	default:
+		return fmt.Errorf("unknown daemon command %q", args[0])
+	}
+}
+
+func defaultSyncOnce(ctx context.Context, databasePath string, s store.Store) error {
+	sqlite, ok := s.(*store.SQLite)
+	if !ok {
+		return errors.New("relay sync needs the SQLite store")
+	}
+	resolved, err := identity.ResolveDatabasePath(databasePath)
+	if err != nil {
+		return err
+	}
+	engine := &syncer.Engine{State: sqlite, Codec: sqlite.WireCodec(nil, nil)}
+	return (syncer.CoordinatedEngine{Engine: engine, Coordinator: syncer.FileCoordinator{DatabasePath: resolved}}).RunOnce(ctx)
+}
+
+func (a *App) trySync(ctx context.Context, databasePath string, s store.Store, strict bool, savedNote string) error {
+	if a.SyncOnce == nil {
+		return nil
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	err := a.SyncOnce(syncCtx, databasePath, s)
+	if errors.Is(err, syncer.ErrSyncLocked) && a.WakeSync != nil {
+		resolved, resolveErr := identity.ResolveDatabasePath(databasePath)
+		if resolveErr == nil && a.WakeSync(resolved) == nil {
+			return nil
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	if strict {
+		return err
+	}
+	if a.ErrOut == nil {
+		return nil
+	}
+	prefix := ""
+	if savedNote != "" {
+		prefix = savedNote + "; "
+	}
+	_, _ = fmt.Fprintf(a.ErrOut, "hq: %srelay sync pending: %v\n", prefix, err)
+	return nil
+}
+
+func mutatesState(command string, args []string) bool {
+	switch command {
+	case "ask", "answer", "cancel", "mailbox":
+		return true
+	case "peer":
+		return len(args) > 0 && args[0] != "list"
+	case "relay":
+		return len(args) > 0 && args[0] != "list"
+	default:
+		return false
 	}
 }
 
@@ -409,15 +558,51 @@ func (a *App) relay(ctx context.Context, s store.Store, args []string) error {
 	}
 }
 
-func globalArgs(args []string, path string) (string, []string, error) {
-	if len(args) >= 2 && args[0] == "--db" {
-		path, args = args[1], args[2:]
-	} else if len(args) > 0 && strings.HasPrefix(args[0], "--db=") {
-		path, args = strings.TrimPrefix(args[0], "--db="), args[1:]
-	} else if len(args) > 0 && args[0] == "--db" {
-		return "", nil, errors.New("--db needs a path")
+func (a *App) status(ctx context.Context, s store.Store, args []string) error {
+	f := flags("status")
+	asJSON := f.Bool("json", false, "write JSON")
+	if err := f.Parse(args); err != nil {
+		return err
 	}
-	return path, args, nil
+	if len(f.Args()) != 0 {
+		return errors.New("status takes flags only")
+	}
+	status, err := s.NetworkStatus(ctx)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return writeJSON(a.Out, status)
+	}
+	var output bytes.Buffer
+	fmt.Fprintf(&output, "queued=%d rejected=%d unresolved=%d unsupported=%d staged=%d quarantined=%d\n", status.Queued, status.Rejected, status.Unresolved, status.Unsupported, status.Staged, status.Quarantined)
+	for _, relay := range status.Relays {
+		fmt.Fprintf(&output, "%s\tconnected=%t\tauth=%t", relay.URL, relay.Connected, relay.Authenticated)
+		if relay.LastError != "" {
+			fmt.Fprintf(&output, "\terror=%s", relay.LastError)
+		}
+		output.WriteByte('\n')
+	}
+	return writeOnce(a.Out, output.Bytes())
+}
+
+func globalArgs(args []string, path string) (string, bool, []string, error) {
+	noSync := false
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--no-sync":
+			noSync, args = true, args[1:]
+		case args[0] == "--db" && len(args) >= 2:
+			path, args = args[1], args[2:]
+		case strings.HasPrefix(args[0], "--db="):
+			path, args = strings.TrimPrefix(args[0], "--db="), args[1:]
+		case args[0] == "--db":
+			return "", false, nil, errors.New("--db needs a path")
+		default:
+			return path, noSync, args, nil
+		}
+	}
+	return path, noSync, args, nil
 }
 
 func (a *App) getenv(name string) string {
@@ -534,7 +719,7 @@ func (a *App) ask(ctx context.Context, s store.Store, args []string) error {
 	return writeOnce(a.Out, []byte(m.ID+"\n"))
 }
 
-func (a *App) wait(ctx context.Context, s store.Store, args []string) error {
+func (a *App) wait(ctx context.Context, s store.Store, args []string, databasePath string, noSync bool) error {
 	f := flags("wait")
 	timeout := f.Duration("timeout", 0, "maximum wait time")
 	sessionID := f.String("session", "", "advanced session override")
@@ -570,7 +755,12 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string) error {
 	if original.RecipientMailboxID != model.HumanMailboxID {
 		return errors.New("wait needs an agent-to-human message ID")
 	}
+	nextSync := time.Time{}
 	for {
+		if !noSync && !time.Now().Before(nextSync) {
+			a.trySync(ctx, databasePath, s, false, "")
+			nextSync = time.Now().Add(5 * time.Second)
+		}
 		token := uuid.NewString()
 		m, err := s.Claim(ctx, store.Claim{ReplyTo: id, RecipientMailboxID: mailbox.ID}, token)
 		if err == nil {

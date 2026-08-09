@@ -32,6 +32,42 @@ func TestRefreshPreservesActiveDraft(t *testing.T) {
 	}
 }
 
+func TestSyncCompletionPreservesActiveDraft(t *testing.T) {
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d65", testAgentID, model.HumanMailboxID, "Question")
+	editor := textarea.New()
+	editor.SetValue("draft survives")
+	editor.Focus()
+	m := app{messages: []model.Message{item}, answering: true, answerID: item.ID, answerQ: item, editor: editor}
+	updated, cmd := m.Update(syncMsg{})
+	got := updated.(app)
+	if got.editor.Value() != "draft survives" || !got.editor.Focused() || got.answerQ.ID != item.ID || cmd == nil {
+		t.Fatalf("sync changed draft: %#v", got)
+	}
+}
+
+func TestDeliveryLabels(t *testing.T) {
+	message := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d66", model.HumanMailboxID, testAgentID, "sent")
+	wants := map[string]string{"queued": " [sending]", "relay-accepted": " [sent]", "peer-received": " [peer received]", "rejected": " [rejected]", "local": ""}
+	for state, want := range wants {
+		message.DeliveryState = state
+		if got := deliveryLabel(message); got != want {
+			t.Fatalf("delivery label %q = %q; want %q", state, got, want)
+		}
+	}
+}
+
+func TestStatusViewIsSeparateAndToggleable(t *testing.T) {
+	m := app{network: store.NetworkStatus{Queued: 2, Rejected: 1}}
+	if strings.Contains(m.View().Content, "Relay status") {
+		t.Fatal("status crowded the default view")
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
+	m = updated.(app)
+	if view := m.View().Content; !strings.Contains(view, "Relay status") || !strings.Contains(view, "queued 2") || !strings.Contains(view, "rejected 1") {
+		t.Fatalf("status view = %q", view)
+	}
+}
+
 func TestSentAndArchivedAreIndependent(t *testing.T) {
 	inbox := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", testAgentID, model.HumanMailboxID, "Inbox")
 	sent := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d62", model.HumanMailboxID, testAgentID, "Sent")

@@ -16,6 +16,7 @@ import (
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
+	"github.com/wbbradley/hq/internal/syncer"
 )
 
 func testApp(t *testing.T, input string) (*App, *bytes.Buffer) {
@@ -453,6 +454,116 @@ func TestRelayCommands(t *testing.T) {
 	a, _ = testApp(t, "")
 	if err := a.Run(context.Background(), []string{"--db", database, "relay", "remove", "wss://relay.example"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestForegroundSyncNoSyncAndDaemonWake(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, out := testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "foreground"})
+	calls := 0
+	a.SyncOnce = func(context.Context, string, store.Store) error {
+		calls++
+		return nil
+	}
+	if err := a.Run(context.Background(), []string{"--db", database, "ask", "sync me"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(strings.TrimSpace(out.String())) != 36 {
+		t.Fatalf("foreground sync calls=%d stdout=%q", calls, out.String())
+	}
+	a, _ = testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "offline"})
+	a.SyncOnce = func(context.Context, string, store.Store) error {
+		t.Fatal("--no-sync ran sync")
+		return nil
+	}
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "ask", "offline"}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "wake"})
+	a.SyncOnce = func(context.Context, string, store.Store) error { return syncer.ErrSyncLocked }
+	wakes := 0
+	a.WakeSync = func(string) error { wakes++; return nil }
+	if err := a.Run(context.Background(), []string{"--db", database, "ask", "wake daemon"}); err != nil {
+		t.Fatal(err)
+	}
+	if wakes != 1 {
+		t.Fatalf("daemon wakes = %d", wakes)
+	}
+}
+
+func TestForegroundRelayFailureKeepsLocalSuccess(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, out := testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "failure"})
+	a.SyncOnce = func(context.Context, string, store.Store) error { return errors.New("relay offline") }
+	if err := a.Run(context.Background(), []string{"--db", database, "ask", "keep local"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(strings.TrimSpace(out.String())) != 36 || !strings.Contains(a.ErrOut.(*bytes.Buffer).String(), "message saved; relay sync pending") {
+		t.Fatalf("stdout=%q stderr=%q", out.String(), a.ErrOut.(*bytes.Buffer).String())
+	}
+	s := openTestStore(t, database)
+	defer s.Close()
+	message, err := s.Get(context.Background(), strings.TrimSpace(out.String()))
+	if err != nil || message.Body != "keep local" {
+		t.Fatalf("saved message = %#v, %v", message, err)
+	}
+}
+
+func TestDaemonCLICommands(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, out := testApp(t, "")
+	a.DaemonStatus = func(string) (string, error) { return "running test", nil }
+	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "status"}); err != nil || out.String() != "running test\n" {
+		t.Fatalf("daemon status stdout=%q err=%v", out.String(), err)
+	}
+	a, _ = testApp(t, "")
+	stopped := false
+	a.StopDaemon = func(string) error { stopped = true; return nil }
+	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "stop"}); err != nil || !stopped {
+		t.Fatalf("daemon stop stopped=%t err=%v", stopped, err)
+	}
+}
+
+func TestWaitRunsBoundedSyncAndFailedWakeKeepsLocalSuccess(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, out := testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "waiting"})
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "ask", "wait for me"}); err != nil {
+		t.Fatal(err)
+	}
+	messageID := strings.TrimSpace(out.String())
+	a, _ = testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "waiting"})
+	syncCalls := 0
+	a.SyncOnce = func(context.Context, string, store.Store) error { syncCalls++; return nil }
+	err := a.Run(context.Background(), []string{"--db", database, "wait", "--timeout", "20ms", "--interval", "5ms", messageID})
+	if !errors.Is(err, context.DeadlineExceeded) || syncCalls == 0 {
+		t.Fatalf("wait error=%v sync calls=%d", err, syncCalls)
+	}
+	a, out = testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "failed-wake"})
+	a.SyncOnce = func(context.Context, string, store.Store) error { return syncer.ErrSyncLocked }
+	a.WakeSync = func(string) error { return errors.New("stale socket") }
+	if err := a.Run(context.Background(), []string{"--db", database, "ask", "wake can fail"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(strings.TrimSpace(out.String())) != 36 || !strings.Contains(a.ErrOut.(*bytes.Buffer).String(), "relay sync pending") {
+		t.Fatalf("failed wake stdout=%q stderr=%q", out.String(), a.ErrOut.(*bytes.Buffer).String())
+	}
+}
+
+func TestStatusCommandWording(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, out := testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "status"}); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "queued=0 rejected=0 unresolved=0 unsupported=0 staged=0 quarantined=0\n" {
+		t.Fatalf("status = %q", out.String())
 	}
 }
 

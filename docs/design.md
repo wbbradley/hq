@@ -48,6 +48,8 @@ User commands accept a signed message UUID from the payload. Causal parent links
 
 `relays`, `outbound_relay_attempts`, `inbound_wrappers`, and `relay_sync_state` hold unsigned transport facts. `outbox` adds the exact signed gift wrap before publish. `inbound_staging` holds temporary receive failures for a later retry. `quarantine` holds permanent failures and never retries them on its own. Quarantine keeps the raw wrapper, relay, event ID, reason, and receive time. The local cap is 1,000 rows, 16 MiB, and 30 days; the oldest row leaves first.
 
+CLI writes and the optional daemon open SQLite at the same time under WAL mode. A separate advisory sync lock grants one process relay-worker ownership without blocking local event commits. Foreground commands wake the daemon through a protected Unix socket when the daemon owns that lock. Polling repairs a lost wake. The socket does not carry message bodies or signing keys.
+
 SQLite uses strict tables, foreign keys, WAL mode, `synchronous=FULL`, a five-second busy timeout, one connection per process, and mode `0600` for the database file. HQ does not tail SQLite's WAL and does not add a second file WAL.
 
 ## Trust and sharing

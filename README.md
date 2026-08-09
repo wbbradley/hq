@@ -74,6 +74,7 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - Shift+Enter / Ctrl+J: add a line break while editing
 - `s`: toggle sent messages
 - `x`: toggle archived inbox messages
+- `v`: toggle relay and event status
 - `r`: refresh
 - `q`: quit
 
@@ -84,7 +85,7 @@ When stdin or stdout is not a terminal, bare `hq` lists open messages in the hum
 Human commands also work without the TUI:
 
 ```sh
-hq list --recipient human --open
+hq list --recipient human
 hq answer MESSAGE_ID "Use ListWidgets"
 hq cancel MESSAGE_ID
 ```
@@ -111,13 +112,18 @@ hq mailbox revoke MAILBOX_ID PEER_INSTALLATION_ID
 hq relay add [--read=BOOL] [--write=BOOL] [--unsafe-no-auth] WSS_URL
 hq relay list [--json]
 hq relay remove WSS_URL
+hq status [--json]
+hq sync
+hq daemon run|status|stop
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
 hq tui
 hq agents
 ```
 
-Set `HQ_DB` or pass global `--db PATH` before the command to use another database.
+Set `HQ_DB` or pass global `--db PATH` before the command to use another database. Mutating commands commit their signed local event and then run a three-second foreground sync pass. `--no-sync` skips that pass for explicit offline work. Relay errors go to stderr and never undo the local event.
+
+No daemon is required. `hq daemon run` is an optional foreground service for continuous polling; a service manager may keep it alive. `hq daemon status` reads its protected local socket, and `hq daemon stop` requests a clean stop. A CLI send wakes the daemon when the daemon owns the sync lock. `hq sync` runs one full pass when no daemon owns the lock.
 
 ## Message and delivery rules
 
@@ -126,6 +132,8 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 `wait` reads a reply only when the current mailbox sent the first message. `poll` reads every ready message addressed to the current harness mailbox, including unsolicited human messages, without a directory filter. `get` keeps direct-ID access as an explicit path for cooperative cross-mailbox inspection. Delivery leases each row, writes stdout once, and then sets `completed_at` and `archived_at`. A crash after stdout but before the database update can cause one later retry, so consumers can use the message ID as an idempotency key.
 
 `hq list` shows only open messages by default. `--archived` shows archived messages, and `--all` shows both.
+
+The TUI syncs in the background on start, after a reply, and during its one-minute refresh. Active text, focus, and selection survive the reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health and queue, unresolved, unsupported, staging, and quarantine counts.
 
 Schema version 5 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
 

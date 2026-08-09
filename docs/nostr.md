@@ -57,16 +57,20 @@ Catch-up starts a live kind-1059 subscription filtered by the local root `p` tag
 
 Reconnect uses bounded exponential backoff. One unavailable relay does not remove queued work. Relay attempts, rejection text, retry times, auth state, EOSE time, and connection errors are unsigned node facts.
 
+Each mutating CLI command commits its canonical event before a bounded foreground sync pass. `--no-sync` is the explicit offline switch. The stable stdout result, including the bare `hq ask` message ID, does not include sync status; a pending notice goes to stderr. `wait` performs bounded passes while it waits.
+
+`hq daemon run` is optional. The daemon holds the sync lock, polls every 15 seconds, and accepts wake, status, and stop commands over a mode-0600 Unix socket next to the database. A lost wake does not lose work because the outbox stays durable and polling continues. The CLI still opens SQLite directly under WAL mode. Windows keeps the same service interfaces but does not yet expose local daemon control.
+
 ## Delivery terms
 
-`queued` means HQ has durable canonical state and, when the peer key is known, durable exact gift-wrap bytes. `relay-accepted` means at least one recipient relay returned a positive or duplicate `OK`. `peer-received` requires a later valid causal child from the peer. Relay acceptance is not peer delivery.
+`queued` means HQ has durable canonical state and, when the peer key is known, durable exact gift-wrap bytes. `rejected` means a relay returned a negative `OK`; HQ keeps the retry schedule. `relay-accepted` means at least one recipient relay returned a positive or duplicate `OK`. `peer-received` requires a later valid causal child from the peer. Relay acceptance is not peer delivery.
 
 HQ does not send automatic per-message receipts. A causal child proves receipt without extra writes. Batched receipt frontiers remain deferred.
 
 ## Sync lock
 
-One process may own `hq.db.sync.lock` with a nonblocking advisory file lock. HQ never locks the SQLite database file. The lock limits duplicate relay work but does not provide correctness: event IDs, exact wrapper reuse, and SQLite uniqueness still make overlap safe. The interface leaves room for per-relay leases or database advisory locks later.
+One process may own `hq.db.sync.lock` with a nonblocking advisory file lock. HQ never locks the SQLite database file. The lock limits duplicate relay work but does not provide correctness: event IDs, exact wrapper reuse, and SQLite uniqueness still make overlap safe. When the daemon owns the lock, a CLI process sends a wake request and returns. The interface leaves room for per-relay leases or database advisory locks later.
 
 ## First-release limits
 
-HQ uses configured installation inbox relays and signed per-peer relay hints. HQ does not publish kind 10050 relay lists, import generic kind-14 messages, use public events, rotate root keys, or run one installation identity on several active hosts.
+HQ uses configured installation inbox relays and signed per-peer relay hints. Local bodies remain plaintext in SQLite, and same-user local actors are cooperative. NIP-44 provides neither forward secrecy nor post-compromise security. HQ does not publish kind 10050 relay lists, import generic kind-14 messages, use public events, rotate root keys, or run one installation identity on several active hosts.

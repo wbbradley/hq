@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/wbbradley/hq/internal/cli"
 )
@@ -16,7 +18,9 @@ func main() {
 		fmt.Fprintln(os.Stdout, "hq", version)
 		return
 	}
-	err := cli.New().Run(context.Background(), os.Args[1:])
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := cli.New().Run(ctx, os.Args[1:])
 	if err == nil {
 		return
 	}

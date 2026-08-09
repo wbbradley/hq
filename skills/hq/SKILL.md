@@ -21,6 +21,8 @@ If `hq` is missing, report that the HQ binary is required. Do not install softwa
 
 If HQ says the installation identity is missing, report that the human must run `hq identity init`. Agents must not create, import, export, reset, or read installation keys.
 
+Treat the message ID from `hq ask` as proof of a durable local send. A relay-pending note on stderr does not mean the local event failed. Do not use `--no-sync` unless the human asks for offline-only work.
+
 ## Choose the action
 
 - Send a message with `hq ask`. Write a clear body, save the message ID, and report the ID to the user.
@@ -30,3 +32,4 @@ If HQ says the installation identity is missing, report that the human must run 
 - Follow the duplicate-delivery guidance printed by `hq agents` when message IDs control side effects.
 
 Do not open the human TUI or use human mailbox commands to consume an agent mailbox.
+Do not run installation, peer, relay, sync, daemon, or status commands. HQ handles bounded sync during normal agent commands without exposing keys or relay access to the agent workflow.

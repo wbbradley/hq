@@ -25,7 +25,7 @@ type State interface {
 	OutboundRelays(context.Context) ([]string, error)
 	PrepareOutbound(context.Context, int) (int, error)
 	RelayJobs(context.Context, string, int, time.Time) ([]store.RelayJob, error)
-	RecordPublish(context.Context, string, string, bool, string, time.Time, time.Time) error
+	RecordPublish(context.Context, string, string, bool, bool, string, time.Time, time.Time) error
 	ReceiveGiftWrap(context.Context, []byte, string, time.Time) (store.ReceiveResult, error)
 	SetRelaySyncState(context.Context, string, bool, bool, string, *time.Time, *time.Time) error
 }
@@ -136,13 +136,20 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 }
 
-func (e *Engine) runRelay(ctx context.Context, relayURL string, mode struct{ read, write, requireAuth, unsafe bool }) error {
+func (e *Engine) runRelay(ctx context.Context, relayURL string, mode struct{ read, write, requireAuth, unsafe bool }) (resultErr error) {
 	client, err := e.Transport.Dial(ctx, relayURL, e.Codec)
 	if err != nil {
 		_ = e.State.SetRelaySyncState(context.Background(), relayURL, false, false, err.Error(), nil, nil)
 		return err
 	}
-	defer client.Close()
+	defer func() {
+		_ = client.Close()
+		message := ""
+		if resultErr != nil {
+			message = resultErr.Error()
+		}
+		_ = e.State.SetRelaySyncState(context.Background(), relayURL, false, false, message, nil, nil)
+	}()
 	if mode.read {
 		if err := e.read(ctx, client, relayURL, mode.requireAuth, mode.unsafe); err != nil {
 			_ = e.State.SetRelaySyncState(context.Background(), relayURL, true, client.Authenticated(), err.Error(), nil, nil)
@@ -181,7 +188,7 @@ func (e *Engine) publish(ctx context.Context, client nostrwire.RelayClient, rela
 		now := e.Now().UTC()
 		if publishErr != nil {
 			retry := now.Add(nostrwire.BackoffWithJitter(0, e.Random))
-			_ = e.State.RecordPublish(context.Background(), job.CanonicalEventID, relayURL, false, publishErr.Error(), now, retry)
+			_ = e.State.RecordPublish(context.Background(), job.CanonicalEventID, relayURL, false, false, publishErr.Error(), now, retry)
 			failures = append(failures, publishErr)
 			continue
 		}
@@ -190,7 +197,7 @@ func (e *Engine) publish(ctx context.Context, client nostrwire.RelayClient, rela
 		if !accepted {
 			retry = now.Add(nostrwire.BackoffWithJitter(0, e.Random))
 		}
-		if err := e.State.RecordPublish(ctx, job.CanonicalEventID, relayURL, accepted, result.Message, now, retry); err != nil {
+		if err := e.State.RecordPublish(ctx, job.CanonicalEventID, relayURL, accepted, !accepted, result.Message, now, retry); err != nil {
 			return err
 		}
 		if !accepted {
