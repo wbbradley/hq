@@ -45,6 +45,11 @@ const (
 	TypePeerDistrust       Type = "peer.distrust"
 	TypeMailboxShare       Type = "mailbox.share"
 	TypeMailboxShareRevoke Type = "mailbox.share.revoke"
+	TypeHumanAccountCreate Type = "human.account.create"
+	TypeHumanAccountSelect Type = "human.account.select"
+	TypeHumanDeviceGrant   Type = "human.device.grant"
+	TypeHumanDeviceAccept  Type = "human.device.accept"
+	TypeHumanDeviceRevoke  Type = "human.device.revoke"
 )
 
 type Scope string
@@ -141,6 +146,31 @@ type PeerPayload struct {
 type MailboxSharePayload struct {
 	MailboxID          string `json:"mailbox_id"`
 	PeerInstallationID string `json:"peer_installation_id"`
+}
+
+// HumanAccountPayload defines one logical human account and its creator.
+type HumanAccountPayload struct {
+	AccountID             string `json:"account_id"`
+	CreatorInstallationID string `json:"creator_installation_id"`
+	CreatorSignerKeyID    string `json:"creator_signer_key_id"`
+	Label                 string `json:"label"`
+}
+
+// HumanAccountSelectionPayload selects the account used by one installation.
+type HumanAccountSelectionPayload struct {
+	AccountID string `json:"account_id"`
+}
+
+// HumanDevicePayload binds an installation key and display data to an account.
+type HumanDevicePayload struct {
+	AccountID             string   `json:"account_id"`
+	CreatorInstallationID string   `json:"creator_installation_id"`
+	CreatorSignerKeyID    string   `json:"creator_signer_key_id"`
+	InstallationID        string   `json:"installation_id"`
+	SignerKeyID           string   `json:"signer_key_id"`
+	Label                 string   `json:"label"`
+	Relays                []string `json:"relays"`
+	CreatorRelays         []string `json:"creator_relays"`
 }
 
 type SecretKey [32]byte

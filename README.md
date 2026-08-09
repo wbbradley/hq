@@ -96,6 +96,34 @@ hq answer MESSAGE_ID "Use ListWidgets"
 hq cancel MESSAGE_ID
 ```
 
+### Pair another installation
+
+Each machine keeps its own installation ID, root key, SQLite database, and daemon. A signed device grant can place both installations in one logical human account without sharing those files or identities.
+
+On the machine being added, get its identity:
+
+```sh
+hq identity show
+```
+
+Configure the same retained relay on both machines first. On the account creator, make the invite. `--relay` records the added machine's relay hint; the bundle also signs up to three relay hints from the creator's relay config. Redirect stdout to retain the exact signed bundle.
+
+```sh
+hq human invite --name desktop --relay ws://relay.lan:7447 INSTALLATION_ID NPUB > desktop.hq-invite.json
+```
+
+Copy the file to the added machine, then join:
+
+```sh
+hq human join desktop.hq-invite.json
+hq human show
+hq human devices
+```
+
+Both installations must use the same retained relay for network delivery. The account creator may run `hq human revoke INSTALLATION_ID`. Device names are signed display text; hostnames, relay URLs, IP addresses, and ports never prove identity.
+
+The creator installation is the only account administrator in this release. Back up its identity with `hq identity export`. Admin transfer and creator-key rotation are deferred. Pairing now proves shared account membership; human inbox fanout across account devices lands in the next protocol step.
+
 ## Command summary
 
 ```text
@@ -110,6 +138,11 @@ hq identity show [--json]
 hq identity export BACKUP_PATH
 hq identity import BACKUP_PATH
 hq identity reset --yes
+hq human show [--json]
+hq human invite [--name NAME] [--relay URL] INSTALLATION_ID NPUB
+hq human join FILE
+hq human devices [--json]
+hq human revoke INSTALLATION_ID
 hq peer add [--name NAME] [--relay URL] INSTALLATION_ID NPUB
 hq peer list [--json]
 hq peer distrust INSTALLATION_ID
@@ -141,7 +174,7 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 The TUI syncs in the background on start, after a reply, and during its one-minute refresh. Active text, focus, and selection survive the reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health and queue, unresolved, unsupported, staging, and quarantine counts.
 
-Schema version 5 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
+Schema version 6 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
 
 See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for signed causal state, and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
 

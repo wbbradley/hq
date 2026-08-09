@@ -20,7 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -119,6 +119,32 @@ CREATE TABLE mailbox_shares (
     active INTEGER NOT NULL CHECK(active IN (0, 1)),
     PRIMARY KEY(mailbox_id, peer_installation_id)
 ) STRICT;
+CREATE TABLE human_accounts (
+    account_id TEXT PRIMARY KEY,
+    creator_installation_id TEXT NOT NULL,
+    creator_signer_key_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    creation_event_id TEXT NOT NULL,
+    FOREIGN KEY(creation_event_id) REFERENCES canonical_events(event_id)
+) STRICT;
+CREATE TABLE human_account_devices (
+    account_id TEXT NOT NULL,
+    installation_id TEXT NOT NULL,
+    signer_key_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    relays_json TEXT NOT NULL DEFAULT '[]',
+    state TEXT NOT NULL CHECK(state IN ('active','pending','revoked')),
+    grant_event_id TEXT NOT NULL DEFAULT '',
+    accept_event_id TEXT NOT NULL DEFAULT '',
+    revoke_event_ids_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY(account_id, installation_id),
+    FOREIGN KEY(account_id) REFERENCES human_accounts(account_id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE human_account_default (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    account_id TEXT NOT NULL,
+    FOREIGN KEY(account_id) REFERENCES human_accounts(account_id)
+) STRICT;
 CREATE TABLE outbox (
     event_id TEXT PRIMARY KEY,
     recipient_installation_id TEXT NOT NULL,
@@ -200,7 +226,7 @@ CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, creat
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;
 `
 
 const (
@@ -317,13 +343,41 @@ func (s *SQLite) resetSchema(ctx context.Context) error {
 
 func (s *SQLite) bootstrap(ctx context.Context) error {
 	now := time.Now().UTC()
+	accountID, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	label, err := os.Hostname()
+	if err != nil || strings.TrimSpace(label) == "" {
+		label = "hq"
+	}
 	installationPayload, _ := event.MarshalPayload(event.InstallationPayload{Label: "hq"})
 	humanPayload, _ := event.MarshalPayload(event.MailboxPayload{MailboxID: model.HumanMailboxID, Kind: string(model.MailboxHuman), Label: "human"})
+	accountPayload, _ := event.MarshalPayload(event.HumanAccountPayload{AccountID: accountID.String(), CreatorInstallationID: s.signer.InstallationID, CreatorSignerKeyID: s.signer.PublicKey(), Label: label})
 	contents := []event.Content{
 		{Type: event.TypeInstallationCreate, Scope: event.ScopeInstallationPrivate, Payload: installationPayload},
 		{Type: event.TypeMailboxCreate, Scope: event.ScopeInstallationPrivate, Payload: humanPayload},
+		{Type: event.TypeHumanAccountCreate, Scope: event.ScopeInstallationPrivate, Payload: accountPayload},
 	}
-	return s.appendContents(ctx, contents, []time.Time{now, now}, nil)
+	signed, err := s.signContents(ctx, contents, []time.Time{now, now, now})
+	if err != nil {
+		return err
+	}
+	selectionPayload, _ := event.MarshalPayload(event.HumanAccountSelectionPayload{AccountID: accountID.String()})
+	selection := event.Content{Type: event.TypeHumanAccountSelect, Parents: []string{signed[2].ID()}, Scope: event.ScopeInstallationPrivate, Payload: selectionPayload}
+	selected, err := s.signContents(ctx, []event.Content{selection}, []time.Time{now})
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.appendSignedTx(ctx, tx, append(signed, selected...)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLite) Close() error { return s.db.Close() }
@@ -333,23 +387,9 @@ func (s *SQLite) policy() event.Policy {
 }
 
 func (s *SQLite) appendContents(ctx context.Context, contents []event.Content, times []time.Time, after func(*sql.Tx) error) error {
-	signed := make([]event.SignedEvent, len(contents))
-	for i := range contents {
-		if contents[i].InstallationID == "" {
-			contents[i].InstallationID = s.signer.InstallationID
-		}
-		if contents[i].SignerKeyID == "" {
-			contents[i].SignerKeyID = s.signer.PublicKey()
-		}
-		created := time.Now().UTC()
-		if i < len(times) && !times[i].IsZero() {
-			created = times[i].UTC()
-		}
-		var err error
-		signed[i], err = s.signer.Sign(ctx, contents[i], created)
-		if err != nil {
-			return err
-		}
+	signed, err := s.signContents(ctx, contents, times)
+	if err != nil {
+		return err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -365,6 +405,28 @@ func (s *SQLite) appendContents(ctx context.Context, contents []event.Content, t
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *SQLite) signContents(ctx context.Context, contents []event.Content, times []time.Time) ([]event.SignedEvent, error) {
+	signed := make([]event.SignedEvent, len(contents))
+	for i := range contents {
+		if contents[i].InstallationID == "" {
+			contents[i].InstallationID = s.signer.InstallationID
+		}
+		if contents[i].SignerKeyID == "" {
+			contents[i].SignerKeyID = s.signer.PublicKey()
+		}
+		created := time.Now().UTC()
+		if i < len(times) && !times[i].IsZero() {
+			created = times[i].UTC()
+		}
+		var err error
+		signed[i], err = s.signer.Sign(ctx, contents[i], created)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return signed, nil
 }
 
 func (s *SQLite) appendSignedTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent) error {
@@ -449,7 +511,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 			return err
 		}
 	}
-	for _, table := range []string{"causal_edges", "threads", "messages", "mailbox_contexts", "harness_bindings", "mailbox_activity", "mailboxes", "peers", "mailbox_shares"} {
+	for _, table := range []string{"causal_edges", "threads", "messages", "mailbox_contexts", "harness_bindings", "mailbox_activity", "mailboxes", "peers", "mailbox_shares", "human_account_default", "human_account_devices", "human_accounts"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 			return fmt.Errorf("clear %s projection: %w", table, err)
 		}
@@ -538,6 +600,27 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 	}
 	for _, share := range state.Shares {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_shares(mailbox_id, peer_installation_id, active) VALUES (?, ?, ?)`, share.MailboxID, share.PeerInstallationID, boolInt(share.Active)); err != nil {
+			return err
+		}
+	}
+	for _, account := range state.Accounts {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO human_accounts(account_id,creator_installation_id,creator_signer_key_id,label,creation_event_id) VALUES (?,?,?,?,?)`, account.ID, account.CreatorInstallationID, account.CreatorSignerKeyID, account.Label, account.CreationEventID); err != nil {
+			return err
+		}
+		for _, device := range account.Devices {
+			deviceState := device.State
+			if deviceState == "" {
+				deviceState = "pending"
+			}
+			relays, _ := json.Marshal(device.Relays)
+			revokes, _ := json.Marshal(device.RevokeEventIDs)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO human_account_devices(account_id,installation_id,signer_key_id,label,relays_json,state,grant_event_id,accept_event_id,revoke_event_ids_json) VALUES (?,?,?,?,?,?,?,?,?)`, account.ID, device.InstallationID, device.SignerKeyID, device.Label, string(relays), deviceState, device.GrantEventID, device.AcceptEventID, string(revokes)); err != nil {
+				return err
+			}
+		}
+	}
+	if state.DefaultAccountID != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO human_account_default(id,account_id) VALUES (1,?)`, state.DefaultAccountID); err != nil {
 			return err
 		}
 	}

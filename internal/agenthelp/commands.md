@@ -36,4 +36,4 @@ hq get MESSAGE_ID
 
 HQ detects the current harness session. The `--session` flag and `HQ_SESSION` variable are manual overrides for advanced use. Do not use them in normal work.
 
-Do not use human commands such as `tui`, `list`, `answer`, or `cancel` to read an agent mailbox. Agents also must not run `identity`, `peer`, `mailbox`, `relay`, `sync`, `daemon`, or `status`; those commands manage the human-owned installation and transport.
+Do not use human commands such as `tui`, `list`, `answer`, or `cancel` to read an agent mailbox. Agents also must not run `identity`, `human`, `peer`, `mailbox`, `relay`, `sync`, `daemon`, or `status`; those commands manage the human-owned account, installation, and transport.

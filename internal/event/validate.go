@@ -210,6 +210,61 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if err := validUUID("peer installation ID", payload.PeerInstallationID); err != nil {
 			return StatusInvalid, err
 		}
+	case TypeHumanAccountCreate:
+		if err := validateControl(content); err != nil {
+			return StatusInvalid, err
+		}
+		if len(content.Parents) != 0 {
+			return StatusInvalid, errors.New("human account creation must omit parents")
+		}
+		var payload HumanAccountPayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validateHumanAccountPayload(payload); err != nil {
+			return StatusInvalid, err
+		}
+		if payload.CreatorInstallationID != content.InstallationID || payload.CreatorSignerKeyID != content.SignerKeyID {
+			return StatusInvalid, errors.New("human account creator does not match the event signer")
+		}
+	case TypeHumanAccountSelect:
+		if err := validateControl(content); err != nil {
+			return StatusInvalid, err
+		}
+		if len(content.Parents) == 0 {
+			return StatusInvalid, errors.New("human account selection needs a membership parent")
+		}
+		var payload HumanAccountSelectionPayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validUUID("human account ID", payload.AccountID); err != nil {
+			return StatusInvalid, err
+		}
+	case TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke:
+		if content.Scope != ScopePeerAddressed {
+			return StatusInvalid, errors.New("human device event must be peer-addressed")
+		}
+		if len(content.Parents) == 0 {
+			return StatusInvalid, errors.New("human device event needs a causal parent")
+		}
+		if err := validateMessageAddresses(content); err != nil {
+			return StatusInvalid, err
+		}
+		var payload HumanDevicePayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validateHumanDevicePayload(payload); err != nil {
+			return StatusInvalid, err
+		}
+		if content.Type == TypeHumanDeviceAccept {
+			if payload.InstallationID != content.InstallationID || payload.SignerKeyID != content.SignerKeyID || content.Sender.InstallationID != payload.InstallationID || content.Recipient.InstallationID != payload.CreatorInstallationID {
+				return StatusInvalid, errors.New("device acceptance does not match the invited event signer and route")
+			}
+		} else if payload.CreatorInstallationID != content.InstallationID || payload.CreatorSignerKeyID != content.SignerKeyID || content.Sender.InstallationID != payload.CreatorInstallationID || content.Recipient.InstallationID != payload.InstallationID {
+			return StatusInvalid, errors.New("device grant or revocation does not match the creator event signer and route")
+		}
 	}
 	return StatusProjected, nil
 }
@@ -218,11 +273,62 @@ func knownType(kind Type) bool {
 	switch kind {
 	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeQuestion, TypeAnswer, TypeMessage,
 		TypeThreadCancel, TypeMessageArchive, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
-		TypeMailboxShare, TypeMailboxShareRevoke:
+		TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountCreate, TypeHumanAccountSelect,
+		TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke:
 		return true
 	default:
 		return false
 	}
+}
+
+func validateHumanAccountPayload(payload HumanAccountPayload) error {
+	if err := validUUID("human account ID", payload.AccountID); err != nil {
+		return err
+	}
+	if err := validUUID("creator installation ID", payload.CreatorInstallationID); err != nil {
+		return err
+	}
+	if err := validHex("creator signer key ID", payload.CreatorSignerKeyID, 32); err != nil {
+		return err
+	}
+	if strings.TrimSpace(payload.Label) == "" || !utf8.ValidString(payload.Label) || len(payload.Label) > 200 {
+		return errors.New("human account label must be valid non-empty UTF-8 of at most 200 bytes")
+	}
+	return nil
+}
+
+func validateHumanDevicePayload(payload HumanDevicePayload) error {
+	if err := validateHumanAccountPayload(HumanAccountPayload{AccountID: payload.AccountID, CreatorInstallationID: payload.CreatorInstallationID, CreatorSignerKeyID: payload.CreatorSignerKeyID, Label: "account"}); err != nil {
+		return err
+	}
+	if err := validUUID("device installation ID", payload.InstallationID); err != nil {
+		return err
+	}
+	if err := validHex("device signer key ID", payload.SignerKeyID, 32); err != nil {
+		return err
+	}
+	if payload.InstallationID == payload.CreatorInstallationID {
+		return errors.New("creator installation is already an account device")
+	}
+	if strings.TrimSpace(payload.Label) == "" || !utf8.ValidString(payload.Label) || len(payload.Label) > 200 {
+		return errors.New("device label must be valid non-empty UTF-8 of at most 200 bytes")
+	}
+	for _, group := range []struct {
+		name   string
+		relays []string
+	}{{"device", payload.Relays}, {"creator", payload.CreatorRelays}} {
+		name, relays := group.name, group.relays
+		if len(relays) > 3 {
+			return fmt.Errorf("%s may have at most three relay hints", name)
+		}
+		for _, relay := range relays {
+			parsed, err := url.Parse(relay)
+			if err != nil || (parsed.Scheme != "wss" && parsed.Scheme != "ws") || parsed.Host == "" {
+				return fmt.Errorf("invalid %s relay %q", name, relay)
+			}
+		}
+	}
+	return nil
 }
 
 func validateMessageAddresses(content Content) error {

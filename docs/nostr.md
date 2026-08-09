@@ -74,3 +74,9 @@ One process may own `hq.db.sync.lock` with a nonblocking advisory file lock. HQ 
 ## First-release limits
 
 HQ uses configured installation inbox relays and signed per-peer relay hints. Local bodies remain plaintext in SQLite, and same-user local actors are cooperative. NIP-44 provides neither forward secrecy nor post-compromise security. HQ does not publish kind 10050 relay lists, import generic kind-14 messages, use public events, rotate root keys, or run one installation identity on several active hosts.
+
+## Human device pairing
+
+Human account grants, acceptances, and revocations use the same exact-canonical-event and NIP-59 transport path as peer messages. The creator sends a grant to the invited installation. A copied pairing bundle lets the invited installation verify and import that grant even when relay delivery has not run. The invited installation sends its signed acceptance to the creator through the creator relay hints signed in the grant.
+
+Pairing adds one-way peer trust on each installation only to carry these addressed events. The human account reducer still checks creator and device signatures, exact grant fields, and causal parents. Peer trust alone cannot create account membership. Account membership alone cannot address an agent mailbox.

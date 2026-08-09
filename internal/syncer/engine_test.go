@@ -69,6 +69,54 @@ func TestTwoInstallationsSyncThroughAuthenticatedRelayWithCatchUp(t *testing.T) 
 	}
 }
 
+func TestPairingAcceptanceTraversesRetainedRelay(t *testing.T) {
+	relay := newFakeRelay(t)
+	creator := syncStore(t)
+	invited := syncStore(t)
+	ctx := context.Background()
+	for _, installation := range []*store.SQLite{creator, invited} {
+		if err := installation.AddRelay(ctx, store.RelayConfig{URL: relay.url, Read: true, Write: true, RequireAuth: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invitedID, invitedKey := invited.InstallationIdentity()
+	bundle, err := creator.CreateHumanInvite(ctx, store.HumanInviteRequest{InstallationID: invitedID, SignerKeyID: invitedKey, Name: "desktop", Relays: []string{relay.url}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := invited.JoinHumanInvite(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	creatorEngine := &Engine{State: creator, Codec: creator.WireCodec(nil, nil), AuthTimeout: time.Second}
+	invitedEngine := &Engine{State: invited, Codec: invited.WireCodec(nil, nil), AuthTimeout: time.Second}
+	if err := creatorEngine.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := invitedEngine.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := creatorEngine.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := creator.HumanDevices(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := "missing"
+	for _, device := range devices {
+		if device.InstallationID == invitedID {
+			state = device.State
+		}
+	}
+	if state != "active" {
+		t.Fatalf("creator device state = %q", state)
+	}
+}
+
 func TestCatchUpDoesNotSkipEventsWithTheSameTimestamp(t *testing.T) {
 	relay := newFakeRelay(t)
 	sender := syncStore(t)

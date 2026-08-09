@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -587,6 +588,67 @@ func TestStatusCommandWording(t *testing.T) {
 	}
 	if out.String() != "queued=0 rejected=0 unresolved=0 unsupported=0 staged=0 quarantined=0\n" {
 		t.Fatalf("status = %q", out.String())
+	}
+}
+
+func TestHumanAccountCLIShowInviteJoinAndDevices(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	creatorDB := filepath.Join(root, "creator", "hq.db")
+	invitedDB := filepath.Join(root, "invited", "hq.db")
+	creator := openTestStore(t, creatorDB)
+	creatorAccount, err := creator.HumanAccount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invited := openTestStore(t, invitedDB)
+	invitedID, invitedKey := invited.InstallationIdentity()
+	npub, err := identity.EncodePublicKey(invitedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := creator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := invited.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app, output := testApp(t, "")
+	app.Hostname = func() (string, error) { return "desktop", nil }
+	if err := app.Run(ctx, []string{"--no-sync", "--db", creatorDB, "human", "invite", "--relay", "ws://relay.lan:7447", invitedID, npub}); err != nil {
+		t.Fatal(err)
+	}
+	var bundle store.PairingBundle
+	if err := json.Unmarshal(output.Bytes(), &bundle); err != nil {
+		t.Fatalf("invite output = %q: %v", output.String(), err)
+	}
+	if bundle.AccountID != creatorAccount.ID || bundle.TargetLabel != "desktop" {
+		t.Fatalf("invite = %#v", bundle)
+	}
+	invitePath := filepath.Join(root, "pairing.json")
+	if err := os.WriteFile(invitePath, output.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app, _ = testApp(t, "")
+	if err := app.Run(ctx, []string{"--no-sync", "--db", invitedDB, "human", "join", invitePath}); err != nil {
+		t.Fatal(err)
+	}
+	app, output = testApp(t, "")
+	if err := app.Run(ctx, []string{"--db", invitedDB, "human", "show", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var joined store.HumanAccount
+	if err := json.Unmarshal(output.Bytes(), &joined); err != nil || joined.ID != creatorAccount.ID || joined.Creator {
+		t.Fatalf("joined account = %#v, %v", joined, err)
+	}
+	app, output = testApp(t, "")
+	if err := app.Run(ctx, []string{"--db", invitedDB, "human", "devices"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), invitedID+"\tactive\tdesktop") {
+		t.Fatalf("devices = %q", output.String())
 	}
 }
 

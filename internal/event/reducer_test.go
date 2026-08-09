@@ -175,6 +175,125 @@ func TestConcurrentTrustAndDistrustFailsClosed(t *testing.T) {
 	}
 }
 
+func TestHumanAccountDeviceMembershipConvergesAcrossInputOrder(t *testing.T) {
+	create, grant, accept := humanMembershipEvents(t)
+	selectAccount := localControl(t, TypeHumanAccountSelect, HumanAccountSelectionPayload{AccountID: accountA}, []string{accept.ID()}, 4)
+	raw := wires(create, grant, accept, selectAccount)
+	want := Reduce(raw, localPolicy())
+	device := want.Accounts[accountA].Devices[installationB]
+	if !device.Active || device.AcceptEventID != accept.ID() || want.DefaultAccountID != accountA {
+		t.Fatalf("membership = %#v, default = %q", device, want.DefaultAccountID)
+	}
+	for range 100 {
+		shuffled := append([][]byte(nil), raw...)
+		rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+		if got := Reduce(shuffled, localPolicy()); !reflect.DeepEqual(got, want) {
+			t.Fatalf("account reduction changed after shuffle\nwant: %#v\ngot: %#v", want, got)
+		}
+	}
+}
+
+func TestHumanAccountRequiresGrantAndInvitedKey(t *testing.T) {
+	create, grant, accept := humanMembershipEvents(t)
+	withoutGrant := Reduce(wires(create, accept), localPolicy())
+	if withoutGrant.Records[accept.ID()].Status != StatusUnresolved {
+		t.Fatalf("acceptance without grant = %#v", withoutGrant.Records[accept.ID()])
+	}
+
+	forgedPayload := HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop"}
+	forgedRaw := mustSignSchema(t, Content{
+		Schema: SchemaVersion,
+		Type:   TypeHumanDeviceGrant, InstallationID: installationB,
+		SignerKeyID: secretB.PublicKeyHex(),
+		Sender:      &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
+		Recipient:   &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Parents:     []string{create.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, forgedPayload),
+	}, secretB, 5)
+	state := Reduce(append(wires(create), forgedRaw), localPolicy())
+	if len(state.Invalid) != 1 || state.Invalid[0].Status != StatusInvalid {
+		t.Fatalf("forged grant invalid records = %#v", state.Invalid)
+	}
+	if !Reduce(wires(create, grant, accept), localPolicy()).Accounts[accountA].Devices[installationB].Active {
+		t.Fatal("valid invited-key acceptance was not active")
+	}
+	changed := humanDevicePayload()
+	changed.Label = "forged label"
+	changedAcceptance := mustSign(t, Content{
+		Type: TypeHumanDeviceAccept, InstallationID: installationB,
+		Sender:    &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Parents:   []string{grant.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, changed),
+	}, time.Unix(6, 0), secretB)
+	changedState := Reduce(wires(create, grant, changedAcceptance), localPolicy())
+	if changedState.Records[changedAcceptance.ID()].Status != StatusUnresolved || changedState.Accounts[accountA].Devices[installationB].Active {
+		t.Fatalf("changed acceptance = %#v, %#v", changedState.Records[changedAcceptance.ID()], changedState.Accounts[accountA].Devices[installationB])
+	}
+}
+
+func TestConflictingHumanAccountCreationFailsClosed(t *testing.T) {
+	create, _, _ := humanMembershipEvents(t)
+	conflict := mustSign(t, Content{
+		Type: TypeHumanAccountCreate, InstallationID: installationB, Scope: ScopeInstallationPrivate,
+		Payload: mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationB, CreatorSignerKeyID: secretB.PublicKeyHex(), Label: "desktop"}),
+	}, time.Unix(2, 0), secretB)
+	state := Reduce(wires(create, conflict), localPolicy())
+	if _, ok := state.Accounts[accountA]; ok || state.Records[create.ID()].Status != StatusUnresolved || state.Records[conflict.ID()].Status != StatusUnresolved {
+		t.Fatalf("conflicting account = %#v, %#v, %#v", state.Accounts[accountA], state.Records[create.ID()], state.Records[conflict.ID()])
+	}
+}
+
+func TestHumanDeviceRevokeAndConcurrentAcceptFailClosed(t *testing.T) {
+	create, grant, accept := humanMembershipEvents(t)
+	payload := humanDevicePayload()
+	revokeAfter := mustSign(t, Content{
+		Type: TypeHumanDeviceRevoke, InstallationID: installationA,
+		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Parents:   []string{accept.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+	}, time.Unix(5, 0), secretA)
+	after := Reduce(wires(create, grant, accept, revokeAfter), localPolicy())
+	if after.Accounts[accountA].Devices[installationB].Active {
+		t.Fatal("later revocation left device active")
+	}
+
+	concurrentRevoke := mustSign(t, Content{
+		Type: TypeHumanDeviceRevoke, InstallationID: installationA,
+		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Parents:   []string{grant.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+	}, time.Unix(6, 0), secretA)
+	concurrent := Reduce(wires(create, grant, accept, concurrentRevoke), localPolicy())
+	if concurrent.Accounts[accountA].Devices[installationB].Active {
+		t.Fatal("concurrent acceptance and revocation left device active")
+	}
+}
+
+func humanMembershipEvents(t *testing.T) (SignedEvent, SignedEvent, SignedEvent) {
+	t.Helper()
+	create := mustSign(t, Content{
+		Type: TypeHumanAccountCreate, InstallationID: installationA, Scope: ScopeInstallationPrivate,
+		Payload: mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), Label: "laptop"}),
+	}, time.Unix(1, 0), secretA)
+	payload := humanDevicePayload()
+	grant := mustSign(t, Content{
+		Type: TypeHumanDeviceGrant, InstallationID: installationA,
+		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Parents:   []string{create.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+	}, time.Unix(2, 0), secretA)
+	accept := mustSign(t, Content{
+		Type: TypeHumanDeviceAccept, InstallationID: installationB,
+		Sender:    &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Parents:   []string{grant.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+	}, time.Unix(3, 0), secretB)
+	return create, grant, accept
+}
+
+func humanDevicePayload() HumanDevicePayload {
+	return HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}}
+}
+
 func TestArchiveAndRejectRetainCanonicalMessage(t *testing.T) {
 	message := signedText(t, TypeMessage, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},

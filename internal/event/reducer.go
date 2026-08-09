@@ -3,6 +3,7 @@ package event
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 )
@@ -49,6 +50,27 @@ type MailboxShareProjection struct {
 	Active             bool
 }
 
+type HumanAccountProjection struct {
+	ID                    string
+	CreatorInstallationID string
+	CreatorSignerKeyID    string
+	Label                 string
+	CreationEventID       string
+	Devices               map[string]HumanDeviceProjection
+}
+
+type HumanDeviceProjection struct {
+	InstallationID string
+	SignerKeyID    string
+	Label          string
+	Relays         []string
+	GrantEventID   string
+	AcceptEventID  string
+	RevokeEventIDs []string
+	Active         bool
+	State          string
+}
+
 type MessageProjection struct {
 	ID           string
 	Type         Type
@@ -86,15 +108,17 @@ type ThreadProjection struct {
 }
 
 type State struct {
-	Policy       Policy
-	Records      map[string]Record
-	Invalid      []Record
-	Mailboxes    map[string]MailboxProjection
-	Peers        map[string]PeerProjection
-	Shares       map[string]MailboxShareProjection
-	Messages     map[string]MessageProjection
-	Threads      map[string]ThreadProjection
-	DisplayOrder []string
+	Policy           Policy
+	Records          map[string]Record
+	Invalid          []Record
+	Mailboxes        map[string]MailboxProjection
+	Peers            map[string]PeerProjection
+	Shares           map[string]MailboxShareProjection
+	Accounts         map[string]HumanAccountProjection
+	DefaultAccountID string
+	Messages         map[string]MessageProjection
+	Threads          map[string]ThreadProjection
+	DisplayOrder     []string
 }
 
 // Reduce verifies and reduces a complete event set. Callers may pass the events
@@ -106,6 +130,7 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 		Mailboxes: make(map[string]MailboxProjection),
 		Peers:     make(map[string]PeerProjection),
 		Shares:    make(map[string]MailboxShareProjection),
+		Accounts:  make(map[string]HumanAccountProjection),
 		Messages:  make(map[string]MessageProjection),
 		Threads:   make(map[string]ThreadProjection),
 	}
@@ -131,6 +156,10 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 
 	state.classifyLocalControls()
 	state.reducePeers()
+	state.classifyAccountEvents()
+	state.projectAccounts()
+	state.classifyAccountSelections()
+	state.projectDefaultAccount()
 	state.classifyUnsupported()
 	state.reduceShares()
 	state.classifyDomainEvents()
@@ -140,6 +169,251 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 	state.projectThreads()
 	state.DisplayOrder = state.orderMessages()
 	return state
+}
+
+func (s *State) classifyAccountEvents() {
+	ids := sortedRecordIDs(s.Records)
+	for _, id := range ids {
+		record := s.Records[id]
+		if record.Status != StatusProjected || !isAccountAuthorityType(record.Event.Content.Type) {
+			continue
+		}
+		var reason string
+		if isHumanDeviceType(record.Event.Content.Type) && (record.Event.Content.Sender == nil || record.Event.Content.Recipient == nil || record.Event.Content.Sender.MailboxID != s.Policy.HumanMailboxID || record.Event.Content.Recipient.MailboxID != s.Policy.HumanMailboxID) {
+			reason = "human device event must use the reserved human mailbox"
+		}
+		switch record.Event.Content.Type {
+		case TypeHumanAccountCreate:
+			var payload HumanAccountPayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			if record.Event.Content.InstallationID != payload.CreatorInstallationID || record.Event.Nostr.PubKey != payload.CreatorSignerKeyID {
+				reason = "human account creation signer does not match its creator"
+			} else if s.accountCreationConflicts(id, payload) {
+				reason = "human account ID has conflicting creation events"
+			}
+		case TypeHumanDeviceGrant:
+			var payload HumanDevicePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			if reason == "" && !s.accountCreatorMatches(payload.AccountID, payload.CreatorInstallationID, payload.CreatorSignerKeyID, record.Event.Content.Parents) {
+				reason = "device grant has no matching account creation parent"
+			}
+		case TypeHumanDeviceAccept:
+			var payload HumanDevicePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			if reason == "" && !s.hasMatchingGrant(payload, record.Event.Content.Parents) {
+				reason = "device acceptance has no matching grant parent"
+			}
+		case TypeHumanDeviceRevoke:
+			var payload HumanDevicePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			if reason == "" && !s.hasMatchingGrant(payload, record.Event.Content.Parents) {
+				reason = "device revocation has no matching grant ancestor"
+			}
+		}
+		if reason != "" {
+			record.Status = StatusUnresolved
+			record.Reason = reason
+			s.Records[id] = record
+		}
+	}
+	for _, id := range ids {
+		record := s.Records[id]
+		if record.Status == StatusProjected && isAccountAuthorityType(record.Event.Content.Type) && !s.parentsUsable(record.Event, make(map[string]bool)) {
+			record.Status = StatusUnresolved
+			record.Reason = "human account event has a missing or unusable causal parent"
+			s.Records[id] = record
+		}
+	}
+}
+
+func (s *State) accountCreationConflicts(currentID string, current HumanAccountPayload) bool {
+	for id, record := range s.Records {
+		if id == currentID || record.Event.Content.Type != TypeHumanAccountCreate {
+			continue
+		}
+		var other HumanAccountPayload
+		_ = decodePayload(record.Event.Content.Payload, &other)
+		if other.AccountID == current.AccountID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *State) accountCreatorMatches(accountID, installationID, signerKeyID string, parents []string) bool {
+	for _, id := range parents {
+		for candidateID, record := range s.Records {
+			if record.Status != StatusProjected || record.Event.Content.Type != TypeHumanAccountCreate || !s.ancestor(candidateID, id) {
+				continue
+			}
+			var payload HumanAccountPayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			if payload.AccountID == accountID && payload.CreatorInstallationID == installationID && payload.CreatorSignerKeyID == signerKeyID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *State) hasMatchingGrant(payload HumanDevicePayload, parents []string) bool {
+	for _, parent := range parents {
+		for id, record := range s.Records {
+			if record.Status != StatusProjected || record.Event.Content.Type != TypeHumanDeviceGrant || !s.ancestor(id, parent) {
+				continue
+			}
+			var grant HumanDevicePayload
+			_ = decodePayload(record.Event.Content.Payload, &grant)
+			if sameHumanDevice(grant, payload) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sameHumanDevice(a, b HumanDevicePayload) bool {
+	return a.AccountID == b.AccountID && a.CreatorInstallationID == b.CreatorInstallationID && a.CreatorSignerKeyID == b.CreatorSignerKeyID &&
+		a.InstallationID == b.InstallationID && a.SignerKeyID == b.SignerKeyID && a.Label == b.Label && slices.Equal(a.Relays, b.Relays) && slices.Equal(a.CreatorRelays, b.CreatorRelays)
+}
+
+func (s *State) projectAccounts() {
+	for _, id := range sortedRecordIDs(s.Records) {
+		record := s.Records[id]
+		if record.Status != StatusProjected || record.Event.Content.Type != TypeHumanAccountCreate {
+			continue
+		}
+		var payload HumanAccountPayload
+		_ = decodePayload(record.Event.Content.Payload, &payload)
+		s.Accounts[payload.AccountID] = HumanAccountProjection{
+			ID: payload.AccountID, CreatorInstallationID: payload.CreatorInstallationID,
+			CreatorSignerKeyID: payload.CreatorSignerKeyID, Label: payload.Label, CreationEventID: id,
+			Devices: map[string]HumanDeviceProjection{payload.CreatorInstallationID: {
+				InstallationID: payload.CreatorInstallationID, SignerKeyID: payload.CreatorSignerKeyID,
+				Label: payload.Label, Active: true, State: "active",
+			}},
+		}
+	}
+	for accountID, account := range s.Accounts {
+		groups := make(map[string][]Record)
+		for _, record := range s.Records {
+			if record.Status != StatusProjected || !isHumanDeviceType(record.Event.Content.Type) {
+				continue
+			}
+			var payload HumanDevicePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			if payload.AccountID == accountID {
+				groups[payload.InstallationID] = append(groups[payload.InstallationID], record)
+			}
+		}
+		for installationID, records := range groups {
+			device := HumanDeviceProjection{InstallationID: installationID}
+			var grants, accepts, revokes []Record
+			for _, record := range records {
+				var payload HumanDevicePayload
+				_ = decodePayload(record.Event.Content.Payload, &payload)
+				switch record.Event.Content.Type {
+				case TypeHumanDeviceGrant:
+					grants = append(grants, record)
+				case TypeHumanDeviceAccept:
+					accepts = append(accepts, record)
+					if device.AcceptEventID == "" || record.Event.ID() < device.AcceptEventID {
+						device.AcceptEventID = record.Event.ID()
+					}
+				case TypeHumanDeviceRevoke:
+					revokes = append(revokes, record)
+					device.RevokeEventIDs = append(device.RevokeEventIDs, record.Event.ID())
+				}
+			}
+			maximalGrants := s.maximal(grants)
+			if len(maximalGrants) > 0 {
+				grant := maximalGrants[0]
+				var payload HumanDevicePayload
+				_ = decodePayload(grant.Event.Content.Payload, &payload)
+				device.GrantEventID, device.SignerKeyID, device.Label, device.Relays = grant.Event.ID(), payload.SignerKeyID, payload.Label, append([]string(nil), payload.Relays...)
+			}
+			terminals := append(append(append([]Record(nil), grants...), accepts...), revokes...)
+			maxima := s.maximal(terminals)
+			device.State = "pending"
+			for _, record := range maxima {
+				if record.Event.Content.Type == TypeHumanDeviceRevoke {
+					device.State = "revoked"
+					break
+				}
+			}
+			if device.State != "revoked" && len(maxima) > 0 {
+				device.State = "active"
+				for _, record := range maxima {
+					if record.Event.Content.Type != TypeHumanDeviceAccept {
+						device.State = "pending"
+						break
+					}
+				}
+			}
+			device.Active = device.State == "active"
+			sort.Strings(device.RevokeEventIDs)
+			account.Devices[installationID] = device
+		}
+		s.Accounts[accountID] = account
+	}
+}
+
+func (s *State) classifyAccountSelections() {
+	for id, record := range s.Records {
+		if record.Status != StatusProjected || record.Event.Content.Type != TypeHumanAccountSelect {
+			continue
+		}
+		var payload HumanAccountSelectionPayload
+		_ = decodePayload(record.Event.Content.Payload, &payload)
+		account, ok := s.Accounts[payload.AccountID]
+		device, member := account.Devices[s.Policy.InstallationID]
+		if !s.signedByLocalRoot(record.Event) || !ok || !member || !s.selectionHasMembershipParent(record.Event, account, device) {
+			record.Status = StatusUnauthorized
+			record.Reason = "human account selection lacks active local membership"
+			s.Records[id] = record
+		}
+	}
+}
+
+func (s *State) selectionHasMembershipParent(selection SignedEvent, account HumanAccountProjection, device HumanDeviceProjection) bool {
+	target := account.CreationEventID
+	if s.Policy.InstallationID != account.CreatorInstallationID {
+		target = device.AcceptEventID
+	}
+	for _, parent := range selection.Content.Parents {
+		if target != "" && s.ancestor(target, parent) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *State) projectDefaultAccount() {
+	var records []Record
+	for _, record := range s.Records {
+		if record.Status == StatusProjected && record.Event.Content.Type == TypeHumanAccountSelect {
+			records = append(records, record)
+		}
+	}
+	maxima := s.maximal(records)
+	if len(maxima) != 1 {
+		return
+	}
+	var payload HumanAccountSelectionPayload
+	_ = decodePayload(maxima[0].Event.Content.Payload, &payload)
+	account := s.Accounts[payload.AccountID]
+	if device, ok := account.Devices[s.Policy.InstallationID]; ok && device.Active {
+		s.DefaultAccountID = payload.AccountID
+	}
+}
+
+func sortedRecordIDs(records map[string]Record) []string {
+	ids := make([]string, 0, len(records))
+	for id := range records {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (s *State) classifyUnsupported() {
@@ -252,7 +526,7 @@ func (s *State) reduceShares() {
 
 func (s *State) classifyDomainEvents() {
 	for id, record := range s.Records {
-		if record.Status != StatusProjected || isControlType(record.Event.Content.Type) {
+		if record.Status != StatusProjected || isControlType(record.Event.Content.Type) || isAccountAuthorityType(record.Event.Content.Type) {
 			continue
 		}
 		if !s.authorized(record.Event) {
@@ -264,7 +538,7 @@ func (s *State) classifyDomainEvents() {
 	memo := make(map[string]bool)
 	var unresolved []string
 	for id, record := range s.Records {
-		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) && !s.parentsUsable(record.Event, memo) {
+		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) && !isAccountAuthorityType(record.Event.Content.Type) && !s.parentsUsable(record.Event, memo) {
 			unresolved = append(unresolved, id)
 		}
 	}
@@ -275,7 +549,7 @@ func (s *State) classifyDomainEvents() {
 		s.Records[id] = record
 	}
 	for id, record := range s.Records {
-		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) {
+		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) && !isAccountAuthorityType(record.Event.Content.Type) {
 			if record.Event.Content.Type == TypeMessageArchive || record.Event.Content.Type == TypeMessageReject {
 				var payload TargetPayload
 				_ = decodePayload(record.Event.Content.Payload, &payload)
@@ -637,11 +911,19 @@ func (s State) Wait(questionID string, mailbox MailboxAddress) (MessageProjectio
 
 func isControlType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke:
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountSelect:
 		return true
 	default:
 		return false
 	}
+}
+
+func isAccountAuthorityType(kind Type) bool {
+	return kind == TypeHumanAccountCreate || isHumanDeviceType(kind)
+}
+
+func isHumanDeviceType(kind Type) bool {
+	return kind == TypeHumanDeviceGrant || kind == TypeHumanDeviceAccept || kind == TypeHumanDeviceRevoke
 }
 
 func shareKey(mailboxID, peerInstallationID string) string {

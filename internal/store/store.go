@@ -61,6 +61,11 @@ type Store interface {
 	TrustPeer(context.Context, Peer) error
 	DistrustPeer(context.Context, string) error
 	ListPeers(context.Context) ([]Peer, error)
+	HumanAccount(context.Context) (HumanAccount, error)
+	HumanDevices(context.Context) ([]HumanDevice, error)
+	CreateHumanInvite(context.Context, HumanInviteRequest) (PairingBundle, error)
+	JoinHumanInvite(context.Context, []byte) error
+	RevokeHumanDevice(context.Context, string) error
 	SetMailboxShare(context.Context, string, string, bool) error
 	AddRelay(context.Context, RelayConfig) error
 	RemoveRelay(context.Context, string) error

@@ -14,6 +14,8 @@ Each installation has:
 - One root secp256k1 key in the first release.
 - Any number of mailbox UUIDs.
 
+A logical human account has its own stable UUID and may grant several installation identities the right to act as devices for that human. The account UUID is not a mailbox address, installation ID, or public key.
+
 The installation ID does not change when a key changes. Schema version 1 does not implement key rotation, but every event contains `signer_key_id` so a later reducer can check signed key grants. The first-release key ID is the root public key as 32-byte lowercase hex.
 
 A full mailbox address is `(installation_id, mailbox_id)`. A bare mailbox UUID is not a network address and grants no access.
@@ -97,6 +99,11 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `peer.distrust` | Installation-private; peer installation ID | Stops later peer projection. |
 | `mailbox.share` | Installation-private; mailbox ID and peer installation ID | Lets one peer address one agent mailbox. |
 | `mailbox.share.revoke` | Installation-private; mailbox ID and peer installation ID | Stops later direct delivery to that mailbox. |
+| `human.account.create` | Installation-private; account ID, creator installation and key, signed label | Creates a human account and makes its creator the first active device. |
+| `human.account.select` | Installation-private; account ID | Selects one active account as the local default. |
+| `human.device.grant` | Peer-addressed; account, creator, target installation and key, signed label, relay hints | Records creator authority for one device. |
+| `human.device.accept` | Peer-addressed; the exact grant payload | Proves that the invited installation controls its root key and accepts the grant. |
+| `human.device.revoke` | Peer-addressed; the exact device identity | Removes current device authority without erasing history. |
 
 Archive, reject, cancel, distrust, and share revoke events are signed tombstones. They change projections but never erase prior canonical bytes.
 
@@ -112,6 +119,10 @@ A trusted remote installation may address the reserved local human mailbox. The 
 Knowing an agent mailbox UUID grants no rights. A share revoke stops later projection but cannot erase data that the peer already received.
 
 Trust and share changes use causal parents. The reducer finds maximal facts in the causal graph. Concurrent trust and distrust fail closed as distrusted. Concurrent share and revoke fail closed as revoked. A later trust or share must causally descend from the conflicting tombstone to become active.
+
+Human account authority uses a separate causal graph. The account creator signs grants and revokes. The invited installation signs acceptance with the exact installation key, label, and relay hints from the grant. Membership needs both a grant and a causally later acceptance. A revoke that follows or races with the maximal acceptance makes the device inactive. A later accepted regrant can restore the device only when the new graph descends from the revoke. Missing creation or grant parents remain unresolved. Conflicting account creation events for one UUID do not create an account.
+
+Peer trust and human account authority stay separate. A trusted peer is not an account device. An account device gets no direct access to an agent mailbox. The local default-account selection must be signed by the local root and must causally include that installation's account creation or accepted grant.
 
 ## Reduction
 

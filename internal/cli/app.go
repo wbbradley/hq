@@ -48,6 +48,7 @@ Human commands:
 Other commands:
   mailboxes  Find agent mailboxes seen in this repository
   identity   Create, inspect, back up, import, or reset the installation identity
+  human      Show, pair, list, or revoke human account devices
   peer       Add, list, or distrust peer installations
   mailbox    Share or revoke a mailbox for one peer
   relay      Configure installation inbox relays
@@ -69,6 +70,7 @@ type App struct {
 	ErrOut         io.Writer
 	Getwd          func() (string, error)
 	Getenv         func(string) string
+	Hostname       func() (string, error)
 	IsTTY          func() bool
 	Open           func(string) (store.Store, error)
 	RunTUI         func(context.Context, store.Store, io.Reader, io.Writer) error
@@ -86,6 +88,7 @@ type App struct {
 func New() *App {
 	return &App{
 		In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr, Getwd: os.Getwd, Getenv: os.Getenv,
+		Hostname: os.Hostname,
 		IsTTY: func() bool {
 			return charmterm.IsTerminal(os.Stdin.Fd()) && charmterm.IsTerminal(os.Stdout.Fd())
 		},
@@ -176,6 +179,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		commandErr = a.cancel(ctx, s, args)
 	case "peer":
 		commandErr = a.peer(ctx, s, args)
+	case "human":
+		commandErr = a.human(ctx, s, args)
 	case "mailbox":
 		commandErr = a.mailbox(ctx, s, args)
 	case "relay":
@@ -316,6 +321,8 @@ func mutatesState(command string, args []string) bool {
 		return true
 	case "peer":
 		return len(args) > 0 && args[0] != "list"
+	case "human":
+		return len(args) > 0 && args[0] != "show" && args[0] != "devices"
 	case "relay":
 		return len(args) > 0 && args[0] != "list"
 	default:
@@ -507,6 +514,105 @@ func (a *App) peer(ctx context.Context, s store.Store, args []string) error {
 		return s.DistrustPeer(ctx, args[1])
 	default:
 		return fmt.Errorf("unknown peer command %q", args[0])
+	}
+}
+
+func (a *App) human(ctx context.Context, s store.Store, args []string) error {
+	if len(args) == 0 {
+		return errors.New("human needs show, invite, join, devices, or revoke")
+	}
+	switch args[0] {
+	case "show":
+		f := flags("human show")
+		asJSON := f.Bool("json", false, "write JSON")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 0 {
+			return errors.New("human show takes flags only")
+		}
+		account, err := s.HumanAccount(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return writeJSON(a.Out, account)
+		}
+		_, err = fmt.Fprintf(a.Out, "account: %s\nlabel: %s\ncreator: %s\nlocal installation: %s\n", account.ID, account.Label, account.CreatorInstallationID, account.LocalInstallationID)
+		return err
+	case "devices":
+		f := flags("human devices")
+		asJSON := f.Bool("json", false, "write JSON")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 0 {
+			return errors.New("human devices takes flags only")
+		}
+		devices, err := s.HumanDevices(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return writeJSON(a.Out, devices)
+		}
+		var output bytes.Buffer
+		for _, device := range devices {
+			fmt.Fprintf(&output, "%s\t%s\t%s\n", device.InstallationID, device.State, device.Label)
+		}
+		return writeOnce(a.Out, output.Bytes())
+	case "invite":
+		f := flags("human invite")
+		name := f.String("name", "", "signed device display name")
+		var relays stringList
+		f.Var(&relays, "relay", "target relay hint; may be repeated")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 2 {
+			return errors.New("human invite needs INSTALLATION_ID NPUB")
+		}
+		public, err := identity.DecodePublicKey(f.Args()[1])
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(*name) == "" {
+			hostname := a.Hostname
+			if hostname == nil {
+				hostname = os.Hostname
+			}
+			*name, err = hostname()
+			if err != nil || strings.TrimSpace(*name) == "" {
+				return errors.New("--name is required when the hostname is unavailable")
+			}
+		}
+		bundle, err := s.CreateHumanInvite(ctx, store.HumanInviteRequest{InstallationID: f.Args()[0], SignerKeyID: public, Name: *name, Relays: relays})
+		if err != nil {
+			return err
+		}
+		return writeJSON(a.Out, bundle)
+	case "join":
+		if len(args) != 2 {
+			return errors.New("human join needs FILE")
+		}
+		var raw []byte
+		var err error
+		if args[1] == "-" {
+			raw, err = io.ReadAll(a.In)
+		} else {
+			raw, err = os.ReadFile(args[1])
+		}
+		if err != nil {
+			return fmt.Errorf("read pairing invite: %w", err)
+		}
+		return s.JoinHumanInvite(ctx, raw)
+	case "revoke":
+		if len(args) != 2 {
+			return errors.New("human revoke needs INSTALLATION_ID")
+		}
+		return s.RevokeHumanDevice(ctx, args[1])
+	default:
+		return fmt.Errorf("unknown human command %q", args[0])
 	}
 }
 
