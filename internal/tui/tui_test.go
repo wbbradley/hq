@@ -58,13 +58,14 @@ func TestDeliveryLabels(t *testing.T) {
 }
 
 func TestStatusViewIsSeparateAndToggleable(t *testing.T) {
-	m := app{network: store.NetworkStatus{Queued: 2, Rejected: 1}}
+	received := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	m := app{network: store.NetworkStatus{Queued: 2, RelayAccepted: 3, Rejected: 1, Relays: []store.RelayHealth{{URL: "wss://relay.test", LastEvent: &received}}}}
 	if strings.Contains(m.View().Content, "Relay status") {
 		t.Fatal("status crowded the default view")
 	}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'v', Text: "v"})
 	m = updated.(app)
-	if view := m.View().Content; !strings.Contains(view, "Relay status") || !strings.Contains(view, "queued 2") || !strings.Contains(view, "rejected 1") {
+	if view := m.View().Content; !strings.Contains(view, "Relay status") || !strings.Contains(view, "queued 2") || !strings.Contains(view, "relay accepted 3") || !strings.Contains(view, "rejected 1") || !strings.Contains(view, "last receive 2026-08-09T12:00:00Z") {
 		t.Fatalf("status view = %q", view)
 	}
 }

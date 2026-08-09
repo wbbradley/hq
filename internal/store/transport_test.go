@@ -200,6 +200,39 @@ func TestNetworkStatusReportsQueueRejectAndInboundFailures(t *testing.T) {
 	}
 }
 
+func TestNetworkStatusReportsRelayAcceptanceAndLastReceive(t *testing.T) {
+	ctx := context.Background()
+	sender := openStore(t, filepath.Join(t.TempDir(), "sender", "hq.db"))
+	receiver := openStore(t, filepath.Join(t.TempDir(), "receiver", "hq.db"))
+	receiverID, receiverKey := receiver.InstallationIdentity()
+	const relay = "wss://relay.test"
+	if err := sender.TrustPeer(ctx, Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay}}); err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140e01", SenderMailboxID: model.HumanMailboxID, Body: "accepted", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := sender.RelayJobs(ctx, relay, 10, time.Now())
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("jobs = %#v, %v", jobs, err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := sender.RecordPublish(ctx, jobs[0].CanonicalEventID, jobs[0].RecipientInstallation, relay, true, false, "saved", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.SetRelaySyncState(ctx, relay, true, true, "", nil, &now); err != nil {
+		t.Fatal(err)
+	}
+	status, err := sender.NetworkStatus(ctx)
+	if err != nil || status.RelayAccepted != 1 || len(status.Relays) != 1 || status.Relays[0].LastEvent == nil || !status.Relays[0].LastEvent.Equal(now) {
+		t.Fatalf("network status = %#v, %v", status, err)
+	}
+}
+
 func TestUnknownSenderGiftWrapIsQuarantined(t *testing.T) {
 	ctx := context.Background()
 	sender := openStore(t, filepath.Join(t.TempDir(), "sender", "hq.db"))

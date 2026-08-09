@@ -313,6 +313,10 @@ func (s *SQLite) configure(ctx context.Context) error {
 	if installationID != s.signer.InstallationID || signerKeyID != s.signer.PublicKey() {
 		return errors.New("database identity does not match hq.key")
 	}
+	var projectedCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT event_count FROM projection_checkpoint WHERE id=1`).Scan(&projectedCount); err == nil && projectedCount == count {
+		return nil
+	}
 	return s.Rebuild(ctx)
 }
 
@@ -1131,6 +1135,22 @@ func (s *SQLite) Release(ctx context.Context, id, token string) error {
 }
 
 func (s *SQLite) Rebuild(ctx context.Context) error {
+	for attempt := 0; ; attempt++ {
+		err := s.rebuildOnce(ctx)
+		if err == nil || !sqliteBusy(err) || attempt == 7 {
+			return err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *SQLite) rebuildOnce(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1154,6 +1174,11 @@ func (s *SQLite) Rebuild(ctx context.Context) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func sqliteBusy(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "locked") || strings.Contains(message, "busy")
 }
 
 type Peer struct {

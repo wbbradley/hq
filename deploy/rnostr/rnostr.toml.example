@@ -1,0 +1,52 @@
+[information]
+name = "HQ LAN relay"
+description = "Retained private relay for HQ installations"
+software = "https://github.com/rnostr/rnostr"
+
+[data]
+path = "./data"
+db_query_timeout = "1s"
+
+[network]
+host = "0.0.0.0"
+port = 8080
+
+[limitation]
+max_message_length = 524288
+max_subscriptions = 20
+max_filters = 10
+max_limit = 1000
+max_subid_length = 100
+min_prefix = 10
+max_event_tags = 5000
+max_event_time_older_than_now = 94608000
+max_event_time_newer_than_now = 900
+
+[metrics]
+enabled = false
+
+[auth]
+enabled = true
+
+[auth.req]
+# Add every active HQ installation root public key from `hq identity show`.
+pubkey_whitelist = [
+  "REPLACE_WITH_FIRST_INSTALLATION_PUBLIC_KEY",
+  "REPLACE_WITH_SECOND_INSTALLATION_PUBLIC_KEY",
+]
+
+[auth.event]
+# These are NIP-42 client keys, not the one-use gift-wrap author keys.
+pubkey_whitelist = [
+  "REPLACE_WITH_FIRST_INSTALLATION_PUBLIC_KEY",
+  "REPLACE_WITH_SECOND_INSTALLATION_PUBLIC_KEY",
+]
+
+[rate_limiter]
+enabled = false
+
+[count]
+enabled = false
+
+[search]
+enabled = false

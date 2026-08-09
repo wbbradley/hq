@@ -601,10 +601,13 @@ func deliveryLabel(message model.Message) string {
 func formatNetworkStatus(status store.NetworkStatus) string {
 	var value strings.Builder
 	value.WriteString(titleStyle.Render("Relay status"))
-	fmt.Fprintf(&value, "\nqueued %d · rejected %d · unresolved %d · unsupported %d · staged %d · quarantined %d", status.Queued, status.Rejected, status.Unresolved, status.Unsupported, status.Staged, status.Quarantined)
+	fmt.Fprintf(&value, "\nqueued %d · relay accepted %d · rejected %d · unresolved %d · unsupported %d · staged %d · quarantined %d", status.Queued, status.RelayAccepted, status.Rejected, status.Unresolved, status.Unsupported, status.Staged, status.Quarantined)
 	fmt.Fprintf(&value, "\naccount members %d · pending fanout %d · invalid account %d · revoked device %d", status.AccountMembers, status.PendingAccountFanout, status.InvalidAccountTraffic, status.RevokedDeviceTraffic)
 	for _, relay := range status.Relays {
 		fmt.Fprintf(&value, "\n%s · connected %t · auth %t", relay.URL, relay.Connected, relay.Authenticated)
+		if relay.LastEvent != nil {
+			fmt.Fprintf(&value, " · last receive %s", relay.LastEvent.Format(time.RFC3339))
+		}
 		if relay.LastError != "" {
 			value.WriteString(" · " + relay.LastError)
 		}

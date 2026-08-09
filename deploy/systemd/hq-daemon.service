@@ -1,0 +1,16 @@
+[Unit]
+Description=HQ relay sync daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment="PATH=%h/go/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/bin/env hq daemon run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -51,6 +51,27 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	}
 }
 
+func TestOpenSkipsRebuildWhenProjectionIsCurrent(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	if _, err := s.db.Exec(`UPDATE projection_checkpoint SET rebuilt_at=7 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	var rebuiltAt int64
+	if err := reopened.db.QueryRow(`SELECT rebuilt_at FROM projection_checkpoint WHERE id=1`).Scan(&rebuiltAt); err != nil || rebuiltAt != 7 {
+		t.Fatalf("current projection was rebuilt: rebuilt_at=%d, err=%v", rebuiltAt, err)
+	}
+}
+
 func TestResolveMailboxIsolationContinuityAndContext(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hq.db")
 	s := openStore(t, path)

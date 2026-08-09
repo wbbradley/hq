@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -35,6 +36,10 @@ type SyncEngine interface {
 	Run(context.Context) error
 }
 
+type WakeSyncEngine interface {
+	RunWithWake(context.Context, <-chan struct{}) error
+}
+
 type Engine struct {
 	State          State
 	Transport      Transport
@@ -44,6 +49,7 @@ type Engine struct {
 	PublishTimeout time.Duration
 	AuthTimeout    time.Duration
 	PollInterval   time.Duration
+	ConfigRefresh  time.Duration
 	Random         io.Reader
 	sequence       atomic.Uint64
 }
@@ -66,6 +72,9 @@ func (e *Engine) defaults() {
 	}
 	if e.PollInterval <= 0 {
 		e.PollInterval = 30 * time.Second
+	}
+	if e.ConfigRefresh <= 0 {
+		e.ConfigRefresh = 5 * time.Minute
 	}
 }
 
@@ -112,12 +121,20 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 }
 
 func (e *Engine) Run(ctx context.Context) error {
+	return e.RunWithWake(ctx, nil)
+}
+
+func (e *Engine) RunWithWake(ctx context.Context, wake <-chan struct{}) error {
 	e.defaults()
 	attempt := 0
 	for {
-		err := e.RunOnce(ctx)
+		err := e.runContinuousSession(ctx, wake)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, errSessionRefresh) {
+			attempt = 0
+			continue
 		}
 		delay := e.PollInterval
 		if err != nil {
@@ -136,6 +153,74 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 }
 
+var errSessionRefresh = errors.New("refresh relay session")
+
+type relayMode struct {
+	read, write, requireAuth, unsafe bool
+}
+
+func (e *Engine) relayModes(ctx context.Context) (map[string]relayMode, error) {
+	configured, err := e.State.ListRelays(ctx)
+	if err != nil {
+		return nil, err
+	}
+	modes := make(map[string]relayMode)
+	for _, relay := range configured {
+		modes[relay.URL] = relayMode{relay.Read, relay.Write, relay.RequireAuth, relay.UnsafeNoAuth}
+	}
+	outbound, err := e.State.OutboundRelays(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, relay := range outbound {
+		value := modes[relay]
+		value.write = true
+		modes[relay] = value
+	}
+	return modes, nil
+}
+
+func (e *Engine) runContinuousSession(ctx context.Context, wake <-chan struct{}) error {
+	if e.State == nil || e.Codec == nil {
+		return errors.New("sync engine needs state and an installation codec")
+	}
+	if _, err := e.State.PrepareOutbound(ctx, 1000); err != nil {
+		return err
+	}
+	modes, err := e.relayModes(ctx)
+	if err != nil {
+		return err
+	}
+	refresh := time.NewTimer(e.ConfigRefresh)
+	defer refresh.Stop()
+	if len(modes) == 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wake:
+			return errSessionRefresh
+		case <-refresh.C:
+			return errSessionRefresh
+		}
+	}
+	sessionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan error, len(modes))
+	for relayURL, mode := range modes {
+		go func() { results <- e.runRelayLive(sessionCtx, relayURL, mode) }()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-wake:
+		return errSessionRefresh
+	case <-refresh.C:
+		return errSessionRefresh
+	case err := <-results:
+		return err
+	}
+}
+
 func (e *Engine) runRelay(ctx context.Context, relayURL string, mode struct{ read, write, requireAuth, unsafe bool }) (resultErr error) {
 	client, err := e.Transport.Dial(ctx, relayURL, e.Codec)
 	if err != nil {
@@ -151,8 +236,12 @@ func (e *Engine) runRelay(ctx context.Context, relayURL string, mode struct{ rea
 		_ = e.State.SetRelaySyncState(context.Background(), relayURL, false, false, message, nil, nil)
 	}()
 	if mode.read {
-		if err := e.read(ctx, client, relayURL, mode.requireAuth, mode.unsafe); err != nil {
+		live, err := e.openInbox(ctx, client, relayURL, mode.requireAuth, mode.unsafe)
+		if err != nil {
 			_ = e.State.SetRelaySyncState(context.Background(), relayURL, true, client.Authenticated(), err.Error(), nil, nil)
+			return err
+		}
+		if err := e.drainReady(ctx, live, relayURL, client.Authenticated()); err != nil {
 			return err
 		}
 	}
@@ -163,6 +252,70 @@ func (e *Engine) runRelay(ctx context.Context, relayURL string, mode struct{ rea
 		}
 	}
 	return e.State.SetRelaySyncState(ctx, relayURL, true, client.Authenticated(), "", nil, nil)
+}
+
+func (e *Engine) runRelayLive(ctx context.Context, relayURL string, mode relayMode) (resultErr error) {
+	client, err := e.Transport.Dial(ctx, relayURL, e.Codec)
+	if err != nil {
+		_ = e.State.SetRelaySyncState(context.Background(), relayURL, false, false, err.Error(), nil, nil)
+		return err
+	}
+	defer func() {
+		_ = client.Close()
+		message := ""
+		if resultErr != nil && !errors.Is(resultErr, context.Canceled) {
+			message = resultErr.Error()
+		}
+		_ = e.State.SetRelaySyncState(context.Background(), relayURL, false, false, message, nil, nil)
+	}()
+	var live *nostrwire.Subscription
+	if mode.read {
+		live, err = e.openInbox(ctx, client, relayURL, mode.requireAuth, mode.unsafe)
+		if err != nil {
+			return err
+		}
+	}
+	if err := e.State.SetRelaySyncState(ctx, relayURL, true, client.Authenticated(), "", nil, nil); err != nil {
+		return err
+	}
+	publish := func() error {
+		if !mode.write {
+			return nil
+		}
+		if _, err := e.State.PrepareOutbound(ctx, 1000); err != nil {
+			return err
+		}
+		return e.publish(ctx, client, relayURL)
+	}
+	if err := publish(); err != nil {
+		_ = e.State.SetRelaySyncState(context.Background(), relayURL, true, client.Authenticated(), err.Error(), nil, nil)
+	}
+	ticker := time.NewTicker(e.PollInterval)
+	defer ticker.Stop()
+	var frames <-chan nostrwire.SubscriptionFrame
+	var closed <-chan string
+	if live != nil {
+		frames, closed = live.Frames, live.Closed
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case reason := <-closed:
+			return fmt.Errorf("subscription closed: %s", reason)
+		case frame := <-frames:
+			if frame.EOSE {
+				continue
+			}
+			if err := e.receive(ctx, relayURL, frame.Event); err != nil {
+				_ = e.State.SetRelaySyncState(context.Background(), relayURL, true, client.Authenticated(), err.Error(), nil, nil)
+			}
+		case <-ticker.C:
+			if err := publish(); err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (e *Engine) publish(ctx context.Context, client nostrwire.RelayClient, relayURL string) error {
@@ -211,27 +364,16 @@ func isDuplicateOK(message string) bool {
 	return len(message) >= 10 && (message[:10] == "duplicate:" || message[:10] == "duplicate ")
 }
 
-func (e *Engine) read(ctx context.Context, client nostrwire.RelayClient, relayURL string, requireAuth, unsafe bool) error {
+func (e *Engine) openInbox(ctx context.Context, client nostrwire.RelayClient, relayURL string, requireAuth, unsafe bool) (*nostrwire.Subscription, error) {
 	_, publicKey := e.State.InstallationIdentity()
-	if requireAuth {
-		authCtx, cancel := context.WithTimeout(ctx, e.AuthTimeout)
-		err := client.WaitAuth(authCtx)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("NIP-42 authentication required: %w", err)
-		}
-	} else if !unsafe {
-		return errors.New("private subscription without NIP-42 needs the unsafe override")
+	if !requireAuth && !unsafe {
+		return nil, errors.New("private subscription without NIP-42 needs the unsafe override")
 	}
 	sequence := e.sequence.Add(1)
 	liveID := fmt.Sprintf("hq-live-%d", sequence)
-	live, err := client.Subscribe(ctx, liveID, nostrwire.Filter{Kinds: []int{int(nostrwire.KindGiftWrap)}, Tags: map[string][]string{"p": {publicKey}}, Limit: e.PageSize})
+	live, count, oldest, err := e.subscribeCatchUp(ctx, client, liveID, nostrwire.Filter{Kinds: []int{int(nostrwire.KindGiftWrap)}, Tags: map[string][]string{"p": {publicKey}}, Limit: e.PageSize}, relayURL)
 	if err != nil {
-		return err
-	}
-	count, oldest, err := e.consumeUntilEOSE(ctx, live, relayURL)
-	if err != nil {
-		return err
+		return nil, err
 	}
 	until := oldest
 	limit := e.PageSize
@@ -240,19 +382,15 @@ func (e *Engine) read(ctx context.Context, client nostrwire.RelayClient, relayUR
 	for more && until > 0 {
 		page++
 		id := fmt.Sprintf("hq-page-%d-%d", sequence, page)
-		sub, err := client.Subscribe(ctx, id, nostrwire.Filter{Kinds: []int{int(nostrwire.KindGiftWrap)}, Tags: map[string][]string{"p": {publicKey}}, Until: until, Limit: limit})
-		if err != nil {
-			return err
-		}
 		previousOldest := oldest
-		count, oldest, err = e.consumeUntilEOSE(ctx, sub, relayURL)
+		_, count, oldest, err = e.subscribeCatchUp(ctx, client, id, nostrwire.Filter{Kinds: []int{int(nostrwire.KindGiftWrap)}, Tags: map[string][]string{"p": {publicKey}}, Until: until, Limit: limit}, relayURL)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		more = count == limit
 		if count == limit && oldest == previousOldest {
 			if limit > 64_000/2 {
-				return errors.New("relay catch-up cannot advance past one timestamp")
+				return nil, errors.New("relay catch-up cannot advance past one timestamp")
 			}
 			limit *= 2
 			continue
@@ -260,8 +398,47 @@ func (e *Engine) read(ctx context.Context, client nostrwire.RelayClient, relayUR
 		until = oldest
 		limit = e.PageSize
 	}
+	if requireAuth && !client.Authenticated() {
+		authCtx, cancel := context.WithTimeout(ctx, e.AuthTimeout)
+		err := client.WaitAuth(authCtx)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("NIP-42 authentication required: %w", err)
+		}
+	}
+	return live, nil
+}
+
+func (e *Engine) subscribeCatchUp(ctx context.Context, client nostrwire.RelayClient, id string, filter nostrwire.Filter, relayURL string) (*nostrwire.Subscription, int, int64, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		subscriptionID := id
+		if attempt > 0 {
+			subscriptionID += "-auth"
+		}
+		sub, err := client.Subscribe(ctx, subscriptionID, filter)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		count, oldest, err := e.consumeUntilEOSE(ctx, sub, relayURL)
+		var closed subscriptionClosedError
+		if err == nil || !errors.As(err, &closed) || !strings.HasPrefix(closed.reason, "auth-required:") || attempt > 0 {
+			return sub, count, oldest, err
+		}
+		authCtx, cancel := context.WithTimeout(ctx, e.AuthTimeout)
+		authErr := client.WaitAuth(authCtx)
+		cancel()
+		if authErr != nil {
+			return nil, count, oldest, fmt.Errorf("NIP-42 authentication required: %w", authErr)
+		}
+	}
+	return nil, 0, 0, errors.New("subscription authentication retry failed")
+}
+
+func (e *Engine) drainReady(ctx context.Context, live *nostrwire.Subscription, relayURL string, authenticated bool) error {
 	for {
 		select {
+		case reason := <-live.Closed:
+			return fmt.Errorf("subscription closed: %s", reason)
 		case frame := <-live.Frames:
 			if frame.EOSE {
 				continue
@@ -271,10 +448,14 @@ func (e *Engine) read(ctx context.Context, client nostrwire.RelayClient, relayUR
 			}
 		default:
 			now := e.Now().UTC()
-			return e.State.SetRelaySyncState(ctx, relayURL, true, client.Authenticated(), "", &now, nil)
+			return e.State.SetRelaySyncState(ctx, relayURL, true, authenticated, "", &now, nil)
 		}
 	}
 }
+
+type subscriptionClosedError struct{ reason string }
+
+func (e subscriptionClosedError) Error() string { return "subscription closed: " + e.reason }
 
 func (e *Engine) consumeUntilEOSE(ctx context.Context, sub *nostrwire.Subscription, relayURL string) (int, int64, error) {
 	count := 0
@@ -300,11 +481,9 @@ func (e *Engine) consumeUntilEOSE(ctx context.Context, sub *nostrwire.Subscripti
 				oldest = created
 			}
 			count++
-			if err := e.receive(ctx, relayURL, frame.Event); err != nil {
-				return count, oldest, err
-			}
+			_ = e.receive(ctx, relayURL, frame.Event)
 		case reason := <-sub.Closed:
-			return count, oldest, fmt.Errorf("subscription closed: %s", reason)
+			return count, oldest, subscriptionClosedError{reason: reason}
 		case <-ctx.Done():
 			return count, oldest, ctx.Err()
 		}

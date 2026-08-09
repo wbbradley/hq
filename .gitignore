@@ -1,4 +1,6 @@
 /hq
+/deploy/rnostr/data/
+/deploy/rnostr/rnostr.toml
 /dist/
 *.db
 *.db-shm

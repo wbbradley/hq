@@ -1,0 +1,9 @@
+services:
+  relay:
+    image: rnostr/rnostr:v0.4.9@sha256:c022e4384f8fe1eb6023d497fe0c5cf9cd13d239f62160713546de4522f69214
+    restart: unless-stopped
+    ports:
+      - "7447:8080"
+    volumes:
+      - ./rnostr.toml:/rnostr/config/rnostr.toml:ro
+      - ./data:/rnostr/data

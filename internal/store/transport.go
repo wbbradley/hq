@@ -62,6 +62,7 @@ type RelayHealth struct {
 
 type NetworkStatus struct {
 	Queued                int           `json:"queued"`
+	RelayAccepted         int           `json:"relay_accepted"`
 	Rejected              int           `json:"rejected"`
 	Unresolved            int           `json:"unresolved"`
 	Unsupported           int           `json:"unsupported"`
@@ -428,6 +429,7 @@ func (s *SQLite) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 		target *int
 	}{
 		{`SELECT count(*) FROM outbox WHERE state NOT IN ('relay-accepted','revoked')`, &status.Queued},
+		{`SELECT count(*) FROM outbox WHERE state='relay-accepted'`, &status.RelayAccepted},
 		{`SELECT count(*) FROM outbound_relay_attempts WHERE state='rejected'`, &status.Rejected},
 		{`SELECT count(*) FROM canonical_events WHERE reduction_status='unresolved'`, &status.Unresolved},
 		{`SELECT count(*) FROM canonical_events WHERE reduction_status='unsupported'`, &status.Unsupported},

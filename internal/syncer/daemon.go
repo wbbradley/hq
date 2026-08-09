@@ -43,6 +43,14 @@ func (d Daemon) Run(ctx context.Context) error {
 	if control != nil {
 		defer control.Close()
 	}
+	if engine, ok := d.Engine.(WakeSyncEngine); ok {
+		state.Store("running; live relay subscriptions starting")
+		err := engine.RunWithWake(runCtx, wake)
+		if runCtx.Err() != nil {
+			return nil
+		}
+		return err
+	}
 	for {
 		err := d.Engine.RunOnce(runCtx)
 		if runCtx.Err() != nil {

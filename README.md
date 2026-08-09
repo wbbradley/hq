@@ -124,6 +124,8 @@ Both installations must use the same retained relay for network delivery. The ac
 
 The creator installation is the only account administrator in this release. Back up its identity with `hq identity export`. Admin transfer and creator-key rotation are deferred. Agent questions now fan to every active account device. Either machine can show the aggregate inbox and answer an agent on the source machine. The TUI shows the source device and installation for each account message.
 
+See [docs/lan.md](docs/lan.md) for the supported retained-relay setup, systemd and launchd examples, an automated smoke test, and a manual two-machine checklist.
+
 ## Command summary
 
 ```text
@@ -172,7 +174,7 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 `hq list` shows only open messages by default. `--archived` shows archived messages, and `--all` shows both.
 
-The TUI syncs in the background on start, after a reply, and during its one-minute refresh. Active text, focus, and selection survive the reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, account members, pending account fanout, invalid or revoked-device traffic, and event queue counts.
+The TUI syncs in the background on start, after a reply, and during its one-minute refresh. Active text, focus, and selection survive the reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, last receive time, account members, pending account fanout, relay-accepted sends, invalid or revoked-device traffic, and event queue counts.
 
 Schema version 7 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
 

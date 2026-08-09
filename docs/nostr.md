@@ -49,9 +49,9 @@ Bad signatures, MACs, recipients, schemas, sizes, identities, and rights enter b
 
 ## Relay sessions
 
-HQ uses one WebSocket per relay during a sync pass. The client handles `EVENT`, `REQ`, `CLOSE`, `OK`, `EOSE`, `AUTH`, `CLOSED`, and `NOTICE` frames. Publish and subscription work share the connection.
+HQ uses one WebSocket per relay. A foreground sync pass closes the connection after catch-up and publish. The daemon keeps the catch-up subscription open for live events, polls the durable outbox, and reconnects after a failure or config change. The client handles `EVENT`, `REQ`, `CLOSE`, `OK`, `EOSE`, `AUTH`, `CLOSED`, and `NOTICE` frames. Publish and subscription work share the connection.
 
-Private inbox reads require NIP-42 by default. `hq relay add` enables auth. `--unsafe-no-auth` exists only for local development. A positive `OK` or a `duplicate:` response means relay acceptance. HQ keeps trying the other recipient relay hints after one relay accepts.
+Private inbox reads require NIP-42 by default. `hq relay add` enables auth. The client handles a relay challenge sent on connect or after a protected `REQ` or `EVENT`. `--unsafe-no-auth` exists only for local development. A positive `OK` or a `duplicate:` response means relay acceptance. HQ keeps trying the other recipient relay hints after one relay accepts.
 
 Catch-up starts a live kind-1059 subscription filtered by the local root `p` tag, handles stored events through EOSE, and pages older retained events with overlap. HQ deduplicates by outer Nostr event ID and by `(origin installation UUID, canonical HQ event ID)`. Gift-wrap times are random, so HQ does not use a narrow `since` cursor. NIP-77 remains optional future work.
 
@@ -59,7 +59,9 @@ Reconnect uses bounded exponential backoff. One unavailable relay does not remov
 
 Each mutating CLI command commits its canonical event before a bounded foreground sync pass. `--no-sync` is the explicit offline switch. The stable stdout result, including the bare `hq ask` message ID, does not include sync status; a pending notice goes to stderr. `wait` performs bounded passes while it waits.
 
-`hq daemon run` is optional. The daemon holds the sync lock, polls every 15 seconds, and accepts wake, status, and stop commands over a mode-0600 Unix socket next to the database. A lost wake does not lose work because the outbox stays durable and polling continues. The CLI still opens SQLite directly under WAL mode. Windows keeps the same service interfaces but does not yet expose local daemon control.
+`hq daemon run` is optional. The daemon holds the sync lock, keeps live subscriptions open, checks the durable outbox every 30 seconds, and accepts wake, status, and stop commands over a mode-0600 Unix socket next to the database. A lost wake does not lose work because the outbox stays durable and polling continues. The CLI still opens SQLite directly under WAL mode. Windows keeps the same service interfaces but does not yet expose local daemon control.
+
+[lan.md](lan.md) pins the supported rnostr release, configures retained storage and NIP-42 allow-lists, and gives service and outage checks for two machines.
 
 ## Delivery terms
 

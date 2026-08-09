@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -115,6 +116,61 @@ func TestPairingAcceptanceTraversesRetainedRelay(t *testing.T) {
 	}
 	if state != "active" {
 		t.Fatalf("creator device state = %q", state)
+	}
+}
+
+func TestSubscriptionAuthenticatesAfterProtectedRequest(t *testing.T) {
+	relay := newFakeRelay(t)
+	relay.authOnRequest = true
+	receiver := syncStore(t)
+	ctx := context.Background()
+	if err := receiver.AddRelay(ctx, store.RelayConfig{URL: relay.url, Read: true, RequireAuth: true}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &Engine{State: receiver, Codec: receiver.WireCodec(nil, nil), AuthTimeout: time.Second}
+	if err := engine.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if relay.authCount() != 1 {
+		t.Fatalf("request-triggered auth count = %d", relay.authCount())
+	}
+}
+
+func TestSubscriptionReportsRejectedAuthentication(t *testing.T) {
+	relay := newFakeRelay(t)
+	relay.authOnRequest = true
+	relay.rejectAuth = true
+	receiver := syncStore(t)
+	ctx := context.Background()
+	if err := receiver.AddRelay(ctx, store.RelayConfig{URL: relay.url, Read: true, RequireAuth: true}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &Engine{State: receiver, Codec: receiver.WireCodec(nil, nil), AuthTimeout: time.Second}
+	if err := engine.RunOnce(ctx); err == nil || !strings.Contains(err.Error(), "rejected NIP-42 auth") {
+		t.Fatalf("rejected auth error = %v", err)
+	}
+}
+
+func TestPublishAuthenticatesAfterProtectedRequest(t *testing.T) {
+	relay := newFakeRelay(t)
+	relay.authOnPublish = true
+	sender := syncStore(t)
+	receiver := syncStore(t)
+	receiverID, receiverKey := receiver.InstallationIdentity()
+	ctx := context.Background()
+	if err := sender.TrustPeer(ctx, store.Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay.url}}); err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140e02", SenderMailboxID: model.HumanMailboxID, Body: "publish after challenge", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
+		t.Fatal(err)
+	}
+	engine := &Engine{State: sender, Codec: sender.WireCodec(nil, nil), AuthTimeout: time.Second}
+	if err := engine.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if relay.authCount() != 1 || relay.eventCount() != 1 {
+		t.Fatalf("publish auths=%d events=%d", relay.authCount(), relay.eventCount())
 	}
 }
 
@@ -354,6 +410,126 @@ func TestEventAtEOSELiveHandoffIsNotLost(t *testing.T) {
 	}
 }
 
+func TestContinuousEngineReceivesEventAfterEOSE(t *testing.T) {
+	relay := newFakeRelay(t)
+	sender := syncStore(t)
+	receiver := syncStore(t)
+	senderID, senderKey := sender.InstallationIdentity()
+	receiverID, receiverKey := receiver.InstallationIdentity()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sender.TrustPeer(ctx, store.Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay.url}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.TrustPeer(ctx, store.Peer{InstallationID: senderID, SignerKeyID: senderKey, Relays: []string{relay.url}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.AddRelay(ctx, store.RelayConfig{URL: relay.url, Read: true, RequireAuth: true}); err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140da9", SenderMailboxID: model.HumanMailboxID, Body: "late live event", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := sender.RelayJobs(ctx, relay.url, 10, time.Now())
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("live job = %#v, %v", jobs, err)
+	}
+	relay.mu.Lock()
+	relay.holdLive = append([]byte(nil), jobs[0].ExactGiftWrapBytes...)
+	relay.liveDelay = 100 * time.Millisecond
+	relay.mu.Unlock()
+	engine := &Engine{State: receiver, Codec: receiver.WireCodec(nil, nil), AuthTimeout: time.Second, PollInterval: 20 * time.Millisecond, ConfigRefresh: time.Hour}
+	done := make(chan error, 1)
+	go func() { done <- engine.RunWithWake(ctx, nil) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, err := receiver.Get(ctx, message.ID)
+		if err == nil && got.Body == message.Body {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("live event was not received: %#v, %v", got, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("continuous engine stop = %v", err)
+	}
+}
+
+func TestContinuousEngineWakePublishesNewOutbox(t *testing.T) {
+	relay := newFakeRelay(t)
+	sender := syncStore(t)
+	receiver := syncStore(t)
+	receiverID, receiverKey := receiver.InstallationIdentity()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := sender.TrustPeer(ctx, store.Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay.url}}); err != nil {
+		t.Fatal(err)
+	}
+	wake := make(chan struct{}, 1)
+	engine := &Engine{State: sender, Codec: sender.WireCodec(nil, nil), AuthTimeout: time.Second, PollInterval: time.Hour, ConfigRefresh: time.Hour}
+	done := make(chan error, 1)
+	go func() { done <- engine.RunWithWake(ctx, wake) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status, err := sender.NetworkStatus(ctx)
+		if err == nil && len(status.Relays) == 1 && status.Relays[0].Connected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("continuous writer did not connect: %#v, %v", status, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140daa", SenderMailboxID: model.HumanMailboxID, Body: "wake publish", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
+		t.Fatal(err)
+	}
+	wake <- struct{}{}
+	deadline = time.Now().Add(2 * time.Second)
+	for relay.eventCount() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("wake did not publish queued event")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("continuous writer stop = %v", err)
+	}
+}
+
+func TestContinuousEngineReconnectsAfterRelayDisconnect(t *testing.T) {
+	relay := newFakeRelay(t)
+	relay.closeSubscriptions = 1
+	receiver := syncStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := receiver.AddRelay(ctx, store.RelayConfig{URL: relay.url, Read: true, RequireAuth: true}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &Engine{State: receiver, Codec: receiver.WireCodec(nil, nil), AuthTimeout: time.Second, ConfigRefresh: time.Hour, Random: bytes.NewReader(make([]byte, 64))}
+	done := make(chan error, 1)
+	go func() { done <- engine.RunWithWake(ctx, nil) }()
+	deadline := time.Now().Add(3 * time.Second)
+	for relay.authCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("relay reconnect auth count = %d", relay.authCount())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("continuous reconnect stop = %v", err)
+	}
+}
+
 func TestUnavailableRelayLeavesQueuedWork(t *testing.T) {
 	sender := syncStore(t)
 	receiver := syncStore(t)
@@ -464,15 +640,20 @@ func syncStore(t *testing.T) *store.SQLite {
 }
 
 type fakeRelay struct {
-	t               *testing.T
-	server          *httptest.Server
-	url             string
-	mu              sync.Mutex
-	events          map[string]json.RawMessage
-	auths           int
-	rejectEvents    bool
-	closeAfterStore bool
-	holdLive        []byte
+	t                  *testing.T
+	server             *httptest.Server
+	url                string
+	mu                 sync.Mutex
+	events             map[string]json.RawMessage
+	auths              int
+	rejectEvents       bool
+	closeAfterStore    bool
+	authOnRequest      bool
+	authOnPublish      bool
+	rejectAuth         bool
+	holdLive           []byte
+	liveDelay          time.Duration
+	closeSubscriptions int
 }
 
 func newFakeRelay(t *testing.T) *fakeRelay {
@@ -492,7 +673,13 @@ func (r *fakeRelay) serve(writer http.ResponseWriter, request *http.Request) {
 	defer connection.Close(websocket.StatusNormalClosure, "done")
 	ctx := request.Context()
 	challenge := "hq-test-challenge"
-	_ = writeRelay(ctx, connection, []any{"AUTH", challenge})
+	r.mu.Lock()
+	authOnRequest := r.authOnRequest
+	authOnPublish := r.authOnPublish
+	r.mu.Unlock()
+	if !authOnRequest && !authOnPublish {
+		_ = writeRelay(ctx, connection, []any{"AUTH", challenge})
+	}
 	authed := false
 	for {
 		_, raw, err := connection.Read(ctx)
@@ -512,7 +699,10 @@ func (r *fakeRelay) serve(writer http.ResponseWriter, request *http.Request) {
 			}
 			var auth event.NostrEvent
 			_ = json.Unmarshal(parts[1], &auth)
-			accepted := auth.Kind == nostrwire.KindClientAuth && auth.VerifySignature() && hasTag(auth.Tags, "challenge", challenge) && hasTag(auth.Tags, "relay", r.url)
+			r.mu.Lock()
+			rejectAuth := r.rejectAuth
+			r.mu.Unlock()
+			accepted := !rejectAuth && auth.Kind == nostrwire.KindClientAuth && auth.VerifySignature() && hasTag(auth.Tags, "challenge", challenge) && hasTag(auth.Tags, "relay", r.url)
 			authed = accepted
 			if accepted {
 				r.mu.Lock()
@@ -528,6 +718,9 @@ func (r *fakeRelay) serve(writer http.ResponseWriter, request *http.Request) {
 			_ = json.Unmarshal(parts[1], &outer)
 			if !authed {
 				_ = writeRelay(ctx, connection, []any{"OK", outer.ID, false, "auth-required: authenticate first"})
+				if authOnPublish {
+					_ = writeRelay(ctx, connection, []any{"AUTH", challenge})
+				}
 				continue
 			}
 			r.mu.Lock()
@@ -551,6 +744,9 @@ func (r *fakeRelay) serve(writer http.ResponseWriter, request *http.Request) {
 			_ = json.Unmarshal(parts[1], &id)
 			if !authed {
 				_ = writeRelay(ctx, connection, []any{"CLOSED", id, "auth-required: authenticate first"})
+				if authOnRequest {
+					_ = writeRelay(ctx, connection, []any{"AUTH", challenge})
+				}
 				continue
 			}
 			var filter map[string]json.RawMessage
@@ -561,10 +757,31 @@ func (r *fakeRelay) serve(writer http.ResponseWriter, request *http.Request) {
 			_ = writeRelay(ctx, connection, []any{"EOSE", id})
 			r.mu.Lock()
 			live := append([]byte(nil), r.holdLive...)
+			delay := r.liveDelay
+			closeSubscription := r.closeSubscriptions > 0
+			if closeSubscription {
+				r.closeSubscriptions--
+			}
 			r.holdLive = nil
 			r.mu.Unlock()
+			if closeSubscription {
+				_ = connection.Close(websocket.StatusServiceRestart, "relay restart")
+				return
+			}
 			if len(live) > 0 {
-				_ = writeRelay(ctx, connection, []any{"EVENT", id, json.RawMessage(live)})
+				if delay > 0 {
+					go func() {
+						timer := time.NewTimer(delay)
+						defer timer.Stop()
+						select {
+						case <-ctx.Done():
+						case <-timer.C:
+							_ = writeRelay(ctx, connection, []any{"EVENT", id, json.RawMessage(live)})
+						}
+					}()
+				} else {
+					_ = writeRelay(ctx, connection, []any{"EVENT", id, json.RawMessage(live)})
+				}
 			}
 		case "CLOSE":
 			continue
