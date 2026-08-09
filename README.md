@@ -122,7 +122,7 @@ hq human devices
 
 Both installations must use the same retained relay for network delivery. The account creator may run `hq human revoke INSTALLATION_ID`. Device names are signed display text; hostnames, relay URLs, IP addresses, and ports never prove identity.
 
-The creator installation is the only account administrator in this release. Back up its identity with `hq identity export`. Admin transfer and creator-key rotation are deferred. Pairing now proves shared account membership; human inbox fanout across account devices lands in the next protocol step.
+The creator installation is the only account administrator in this release. Back up its identity with `hq identity export`. Admin transfer and creator-key rotation are deferred. Agent questions now fan to every active account device. Either machine can show the aggregate inbox and answer an agent on the source machine. The TUI shows the source device and installation for each account message.
 
 ## Command summary
 
@@ -166,15 +166,15 @@ No daemon is required. `hq daemon run` is an optional foreground service for con
 
 ## Message and delivery rules
 
-Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, external session ID)` binding. The reserved human mailbox is installation-wide. Signed message and mailbox-context events carry directory and Git data; those fields aid display and abandoned-mailbox search but do not grant mailbox access. Replying adds signed answer and archive events in one SQLite transaction.
+Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, external session ID)` binding. Each installation has a reserved human mailbox projection, while the human account is the shared audience. Signed message and mailbox-context events carry directory and Git data; those fields aid display and abandoned-mailbox search but do not grant mailbox access. Replying adds signed answer and archive events in one SQLite transaction and fans both facts to active account devices.
 
 `wait` reads a reply only when the current mailbox sent the first message. `poll` reads every ready message addressed to the current harness mailbox, including unsolicited human messages, without a directory filter. `get` keeps direct-ID access as an explicit path for cooperative cross-mailbox inspection. Delivery leases each row, writes stdout once, and then sets `completed_at` and `archived_at`. A crash after stdout but before the database update can cause one later retry, so consumers can use the message ID as an idempotency key.
 
 `hq list` shows only open messages by default. `--archived` shows archived messages, and `--all` shows both.
 
-The TUI syncs in the background on start, after a reply, and during its one-minute refresh. Active text, focus, and selection survive the reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health and queue, unresolved, unsupported, staging, and quarantine counts.
+The TUI syncs in the background on start, after a reply, and during its one-minute refresh. Active text, focus, and selection survive the reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, account members, pending account fanout, invalid or revoked-device traffic, and event queue counts.
 
-Schema version 6 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
+Schema version 7 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
 
 See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for signed causal state, and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 )
@@ -207,7 +208,8 @@ func TestHumanAccountRequiresGrantAndInvitedKey(t *testing.T) {
 		SignerKeyID: secretB.PublicKeyHex(),
 		Sender:      &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
 		Recipient:   &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		Parents:     []string{create.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, forgedPayload),
+		Audience:    &Audience{HumanAccountID: accountA},
+		Parents:     []string{create.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, forgedPayload),
 	}, secretB, 5)
 	state := Reduce(append(wires(create), forgedRaw), localPolicy())
 	if len(state.Invalid) != 1 || state.Invalid[0].Status != StatusInvalid {
@@ -222,7 +224,8 @@ func TestHumanAccountRequiresGrantAndInvitedKey(t *testing.T) {
 		Type: TypeHumanDeviceAccept, InstallationID: installationB,
 		Sender:    &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		Parents:   []string{grant.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, changed),
+		Audience:  &Audience{HumanAccountID: accountA},
+		Parents:   []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, changed),
 	}, time.Unix(6, 0), secretB)
 	changedState := Reduce(wires(create, grant, changedAcceptance), localPolicy())
 	if changedState.Records[changedAcceptance.ID()].Status != StatusUnresolved || changedState.Accounts[accountA].Devices[installationB].Active {
@@ -249,7 +252,8 @@ func TestHumanDeviceRevokeAndConcurrentAcceptFailClosed(t *testing.T) {
 		Type: TypeHumanDeviceRevoke, InstallationID: installationA,
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
-		Parents:   []string{accept.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+		Audience:  &Audience{HumanAccountID: accountA},
+		Parents:   []string{accept.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
 	}, time.Unix(5, 0), secretA)
 	after := Reduce(wires(create, grant, accept, revokeAfter), localPolicy())
 	if after.Accounts[accountA].Devices[installationB].Active {
@@ -260,11 +264,78 @@ func TestHumanDeviceRevokeAndConcurrentAcceptFailClosed(t *testing.T) {
 		Type: TypeHumanDeviceRevoke, InstallationID: installationA,
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
-		Parents:   []string{grant.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+		Audience:  &Audience{HumanAccountID: accountA},
+		Parents:   []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
 	}, time.Unix(6, 0), secretA)
 	concurrent := Reduce(wires(create, grant, accept, concurrentRevoke), localPolicy())
 	if concurrent.Accounts[accountA].Devices[installationB].Active {
 		t.Fatal("concurrent acceptance and revocation left device active")
+	}
+}
+
+func TestAccountQuestionAnswerAndCancellationConverge(t *testing.T) {
+	create, grant, accept := humanMembershipEvents(t)
+	question := mustSign(t, Content{
+		Type: TypeQuestion, InstallationID: installationB,
+		Sender:   &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
+		Audience: &Audience{HumanAccountID: accountA}, Parents: []string{accept.ID()}, Scope: ScopeAccountAddressed,
+		Payload: mustPayload(t, TextPayload{Body: "account question", ActorLabel: "desktop agent"}),
+	}, time.Unix(4, 0), secretB)
+	answerParents := []string{create.ID(), question.ID()}
+	sort.Strings(answerParents)
+	answer := mustSign(t, Content{
+		Type: TypeAnswer, InstallationID: installationA,
+		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
+		Audience:  &Audience{HumanAccountID: accountA}, ThreadID: question.ID(), Parents: answerParents, Scope: ScopeAccountAddressed,
+		Payload: mustPayload(t, TextPayload{Body: "account answer", ActorLabel: "laptop"}),
+	}, time.Unix(5, 0), secretA)
+	cancelParents := []string{accept.ID(), question.ID()}
+	sort.Strings(cancelParents)
+	cancel := mustSign(t, Content{
+		Type: TypeThreadCancel, InstallationID: installationB,
+		Sender:   &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
+		Audience: &Audience{HumanAccountID: accountA}, ThreadID: question.ID(), Parents: cancelParents, Scope: ScopeAccountAddressed,
+		Payload: mustPayload(t, TargetPayload{Reason: "no longer needed"}),
+	}, time.Unix(6, 0), secretB)
+	reject := mustSign(t, Content{
+		Type: TypeMessageReject, InstallationID: installationA,
+		Sender:   &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Audience: &Audience{HumanAccountID: accountA}, Parents: answerParents, Scope: ScopeAccountAddressed,
+		Payload: mustPayload(t, TargetPayload{TargetEventID: question.ID(), Reason: "not for this account"}),
+	}, time.Unix(7, 0), secretA)
+	want := Reduce(wires(create, grant, accept, question, answer, cancel, reject), localPolicy())
+	thread := want.Threads[question.ID()]
+	if !thread.Answered || !thread.Cancelled || thread.AnswerCancellation[answer.ID()][cancel.ID()] != AnswerConcurrent {
+		t.Fatalf("account thread = %#v", thread)
+	}
+	if got := want.Messages[question.ID()]; got.Recipient.InstallationID != installationA || got.Recipient.MailboxID != mailboxHumanA || got.AudienceAccountID != accountA {
+		t.Fatalf("local account inbox projection = %#v", got)
+	}
+	if got := want.Messages[question.ID()]; !got.Rejected || !got.Archived {
+		t.Fatalf("account rejection = %#v", got)
+	}
+	for range 100 {
+		shuffled := wires(create, grant, accept, question, answer, cancel, reject)
+		rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+		if got := Reduce(shuffled, localPolicy()); !reflect.DeepEqual(got, want) {
+			t.Fatalf("account state changed after shuffle\nwant: %#v\ngot: %#v", want, got)
+		}
+	}
+}
+
+func TestAccountTrafficNeedsMembershipInTheNamedAccount(t *testing.T) {
+	create, grant, accept := humanMembershipEvents(t)
+	otherAccount := "0198c7ec-73b0-7cc3-a5f7-e31c77140d22"
+	question := mustSign(t, Content{
+		Type: TypeQuestion, InstallationID: installationB,
+		Sender:   &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
+		Audience: &Audience{HumanAccountID: otherAccount}, Parents: []string{accept.ID()}, Scope: ScopeAccountAddressed,
+		Payload: mustPayload(t, TextPayload{Body: "wrong account"}),
+	}, time.Unix(4, 0), secretB)
+	state := Reduce(wires(create, grant, accept, question), localPolicy())
+	if state.Records[question.ID()].Status != StatusUnauthorized {
+		t.Fatalf("wrong-account question = %#v", state.Records[question.ID()])
 	}
 }
 
@@ -279,13 +350,15 @@ func humanMembershipEvents(t *testing.T) (SignedEvent, SignedEvent, SignedEvent)
 		Type: TypeHumanDeviceGrant, InstallationID: installationA,
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
-		Parents:   []string{create.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+		Audience:  &Audience{HumanAccountID: accountA},
+		Parents:   []string{create.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
 	}, time.Unix(2, 0), secretA)
 	accept := mustSign(t, Content{
 		Type: TypeHumanDeviceAccept, InstallationID: installationB,
 		Sender:    &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		Parents:   []string{grant.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+		Audience:  &Audience{HumanAccountID: accountA},
+		Parents:   []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
 	}, time.Unix(3, 0), secretB)
 	return create, grant, accept
 }

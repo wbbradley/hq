@@ -157,6 +157,7 @@ func (m app) answer() tea.Msg {
 		RecipientMailboxID: recipient, SenderLabel: "human", RecipientLabel: m.answerQ.SenderLabel, Body: strings.TrimSpace(m.editor.Value()), CreatedAt: time.Now().UTC()}
 	if m.composeTo != "" {
 		message.RecipientMailboxID = m.composeTo
+		message.RecipientInstallationID = agentInstallation(m.answerQ)
 		message.RecipientLabel = agentLabel(m.answerQ)
 		err = m.store.Create(m.ctx, message)
 	} else {
@@ -440,6 +441,16 @@ func agentLabel(message model.Message) string {
 	return ""
 }
 
+func agentInstallation(message model.Message) string {
+	if message.SenderMailboxID != model.HumanMailboxID {
+		return message.SenderInstallationID
+	}
+	if message.RecipientMailboxID != model.HumanMailboxID {
+		return message.RecipientInstallationID
+	}
+	return ""
+}
+
 func (m app) View() tea.View {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("HQ · Mailbox"))
@@ -503,6 +514,14 @@ func (m app) View() tea.View {
 		body.WriteString(titleStyle.Render(detail.Body))
 		body.WriteByte('\n')
 		body.WriteString(dim.Render(detail.SenderLabel + " → " + detail.RecipientLabel + " · " + detail.Context.Directory))
+		if detail.SourceDeviceLabel != "" || detail.SenderInstallationID != "" {
+			body.WriteByte('\n')
+			source := detail.SourceDeviceLabel
+			if source == "" {
+				source = "installation"
+			}
+			body.WriteString(dim.Render("source " + source + " · " + short(detail.SenderInstallationID, 13)))
+		}
 		if detail.ReplyTo != nil {
 			body.WriteByte('\n')
 			body.WriteString(dim.Render("reply to " + *detail.ReplyTo))
@@ -583,6 +602,7 @@ func formatNetworkStatus(status store.NetworkStatus) string {
 	var value strings.Builder
 	value.WriteString(titleStyle.Render("Relay status"))
 	fmt.Fprintf(&value, "\nqueued %d · rejected %d · unresolved %d · unsupported %d · staged %d · quarantined %d", status.Queued, status.Rejected, status.Unresolved, status.Unsupported, status.Staged, status.Quarantined)
+	fmt.Fprintf(&value, "\naccount members %d · pending fanout %d · invalid account %d · revoked device %d", status.AccountMembers, status.PendingAccountFanout, status.InvalidAccountTraffic, status.RevokedDeviceTraffic)
 	for _, relay := range status.Relays {
 		fmt.Fprintf(&value, "\n%s · connected %t · auth %t", relay.URL, relay.Connected, relay.Authenticated)
 		if relay.LastError != "" {

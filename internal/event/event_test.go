@@ -82,8 +82,8 @@ func TestEveryKnownEventTypeValidates(t *testing.T) {
 		{"mailbox share revoke", control(TypeMailboxShareRevoke, mustPayload(t, MailboxSharePayload{MailboxID: mailboxAgentA, PeerInstallationID: installationB}))},
 		{"human account create", control(TypeHumanAccountCreate, mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), Label: "laptop"}))},
 		{"human account select", Content{Type: TypeHumanAccountSelect, InstallationID: installationA, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, HumanAccountSelectionPayload{AccountID: accountA})}},
-		{"human device grant", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Parents: []string{parentA}, Scope: ScopePeerAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}},
-		{"human device revoke", Content{Type: TypeHumanDeviceRevoke, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Parents: []string{parentA}, Scope: ScopePeerAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}},
+		{"human device grant", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}},
+		{"human device revoke", Content{Type: TypeHumanDeviceRevoke, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -96,7 +96,7 @@ func TestEveryKnownEventTypeValidates(t *testing.T) {
 			}
 		})
 	}
-	accept := Content{Type: TypeHumanDeviceAccept, InstallationID: installationB, Sender: remoteAccountHuman, Recipient: localHuman, Parents: []string{parentA}, Scope: ScopePeerAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}
+	accept := Content{Type: TypeHumanDeviceAccept, InstallationID: installationB, Sender: remoteAccountHuman, Recipient: localHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}
 	if _, err := Sign(accept, time.Unix(1_700_000_000, 0), secretB); err != nil {
 		t.Fatalf("human device accept: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestValidationFailures(t *testing.T) {
 	}{
 		{"bad installation", func(content *Content) { content.InstallationID = "no" }, "canonical UUID"},
 		{"public disabled", func(content *Content) { content.Scope = ScopePublic }, "disabled"},
-		{"root parent", func(content *Content) { content.Parents = []string{parentA} }, "omit parents"},
+		{"root parent", func(content *Content) { content.Parents = []string{parentA} }, "account-addressed roots"},
 		{"remote private recipient", func(content *Content) { content.Recipient.InstallationID = installationB }, "remote recipient"},
 		{"empty body", func(content *Content) { content.Payload = mustPayload(t, TextPayload{}) }, "body is empty"},
 		{"large body", func(content *Content) {
@@ -149,14 +149,14 @@ func TestHumanEventValidationFailures(t *testing.T) {
 	}{
 		{"creator mismatch", Content{Type: TypeHumanAccountCreate, InstallationID: installationA, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationB, CreatorSignerKeyID: secretA.PublicKeyHex(), Label: "laptop"})}, secretA, "creator does not match"},
 		{"empty account label", Content{Type: TypeHumanAccountCreate, InstallationID: installationA, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex()})}, secretA, "account label"},
-		{"grant private", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: local, Recipient: remote, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, device)}, secretA, "peer-addressed"},
-		{"grant wrong route", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: remote, Recipient: local, Parents: []string{parentA}, Scope: ScopePeerAddressed, Payload: mustPayload(t, device)}, secretA, "sender installation"},
-		{"bad relay", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: local, Recipient: remote, Parents: []string{parentA}, Scope: ScopePeerAddressed, Payload: mustPayload(t, func() HumanDevicePayload {
+		{"grant private", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: local, Recipient: remote, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, device)}, secretA, "account-addressed"},
+		{"grant wrong route", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: remote, Recipient: local, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, device)}, secretA, "sender installation"},
+		{"bad relay", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: local, Recipient: remote, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, func() HumanDevicePayload {
 			changed := device
 			changed.Relays = []string{"https://relay.example"}
 			return changed
 		}())}, secretA, "invalid device relay"},
-		{"accept wrong key", Content{Type: TypeHumanDeviceAccept, InstallationID: installationB, Sender: remote, Recipient: local, Parents: []string{parentA}, Scope: ScopePeerAddressed, Payload: mustPayload(t, device)}, secretA, "invited event signer"},
+		{"accept wrong key", Content{Type: TypeHumanDeviceAccept, InstallationID: installationB, Sender: remote, Recipient: local, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, device)}, secretA, "invited event signer"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

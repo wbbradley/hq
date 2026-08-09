@@ -144,6 +144,8 @@ func TestSentAndArchivedAreIndependent(t *testing.T) {
 
 func TestRepositoryContextShowsRemotesBeforePullState(t *testing.T) {
 	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", testAgentID, model.HumanMailboxID, "Question")
+	item.SourceDeviceLabel = "desktop"
+	item.SenderInstallationID = "0198c7ec-73b0-7cc3-a5f7-e31c77140d01"
 	m := app{messages: []model.Message{item}, contextID: item.ID}
 	updated, _ := m.Update(branchMsg{message: item, branch: "feature"})
 	m = updated.(app)
@@ -152,6 +154,9 @@ func TestRepositoryContextShowsRemotesBeforePullState(t *testing.T) {
 	updated, _ = m.Update(pullMsg{questionID: item.ID, err: repoctx.ErrUnavailable})
 	m = updated.(app)
 	view := m.View().Content
+	if !strings.Contains(view, "source desktop · 0198c7ec-73b…") {
+		t.Fatalf("source context missing: %q", view)
+	}
 	remoteAt, pullAt := strings.Index(view, "origin: wbbradley/hq"), strings.Index(view, "[gh unavailable]")
 	if remoteAt < 0 || pullAt < 0 || remoteAt > pullAt {
 		t.Fatalf("context order: %q", view)

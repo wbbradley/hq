@@ -586,7 +586,7 @@ func TestStatusCommandWording(t *testing.T) {
 	if err := a.Run(context.Background(), []string{"--db", database, "status"}); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "queued=0 rejected=0 unresolved=0 unsupported=0 staged=0 quarantined=0\n" {
+	if out.String() != "queued=0 rejected=0 unresolved=0 unsupported=0 staged=0 quarantined=0 account_members=1 pending_account_fanout=0 invalid_account_traffic=0 revoked_device_traffic=0\n" {
 		t.Fatalf("status = %q", out.String())
 	}
 }

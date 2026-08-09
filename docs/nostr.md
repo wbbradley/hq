@@ -1,6 +1,6 @@
 # HQ Nostr transport
 
-Status: first-release transport for HQ canonical schema 1 and SQLite schema 5.
+Status: first-release transport for HQ canonical schema 1 and SQLite schema 7.
 
 HQ uses Nostr relays to move already-signed canonical events between trusted installations. Relay events are transport records, not the source of HQ state. [events.md](events.md) defines the canonical event and reducer rules.
 
@@ -14,7 +14,7 @@ The local peer trust event binds a remote installation UUID to one root public k
 
 ## Wire layers
 
-HQ sends one NIP-59 kind-1059 gift wrap per recipient installation:
+HQ sends one NIP-59 kind-1059 gift wrap per recipient installation. A peer-addressed event has one recipient. An account-addressed event has one canonical event and one durable outbox row and wrapper for each active account device:
 
 1. The canonical HQ event remains signed kind 7281 exact bytes.
 2. An unsigned kind-7282 rumor contains schema 1 `hq.canonical` JSON with the origin installation UUID, canonical event ID, and exact canonical event object. The rumor has one encrypted `p` tag for the recipient root key.
@@ -41,8 +41,8 @@ HQ applies checks in this order:
 4. NIP-44 decrypt the seal and verify its ID, signature, kind 13, and empty tags.
 5. NIP-44 decrypt the rumor and require an unsigned kind 7282 whose public key matches the seal and whose `p` tag names the local root.
 6. Parse the strict HQ envelope and verify the exact canonical event ID and signature.
-7. Require the seal signer, envelope origin, canonical signer, canonical installation UUID, and local recipient installation to agree.
-8. Apply local peer trust, signer binding, mailbox share, schema, size, route, and causal checks through the canonical reducer.
+7. Require the seal signer, envelope origin, canonical signer, and canonical installation UUID to agree. Require either a direct local recipient or local membership in the named human account.
+8. Apply peer trust or account membership, signer binding, mailbox route, schema, size, and causal checks through the canonical reducer.
 9. Insert the inbound wrapper, canonical event, projections, and dedup records in one SQLite transaction.
 
 Bad signatures, MACs, recipients, schemas, sizes, identities, and rights enter bounded quarantine. Database lock and other temporary local failures enter staging. Quarantine does not retry on its own; an explicit recheck moves one row to staging.
@@ -63,7 +63,7 @@ Each mutating CLI command commits its canonical event before a bounded foregroun
 
 ## Delivery terms
 
-`queued` means HQ has durable canonical state and, when the peer key is known, durable exact gift-wrap bytes. `rejected` means a relay returned a negative `OK`; HQ keeps the retry schedule. `relay-accepted` means at least one recipient relay returned a positive or duplicate `OK`. `peer-received` requires a later valid causal child from the peer. Relay acceptance is not peer delivery.
+`queued` means HQ has durable canonical state and, when the recipient key is known, durable exact gift-wrap bytes. Account fanout tracks this state per recipient device. `rejected` means a relay returned a negative `OK`; HQ keeps the retry schedule. `relay-accepted` means at least one recipient relay returned a positive or duplicate `OK`. `peer-received` requires a later valid causal child from the peer. Relay acceptance is not peer delivery.
 
 HQ does not send automatic per-message receipts. A causal child proves receipt without extra writes. Batched receipt frontiers remain deferred.
 
@@ -77,6 +77,6 @@ HQ uses configured installation inbox relays and signed per-peer relay hints. Lo
 
 ## Human device pairing
 
-Human account grants, acceptances, and revocations use the same exact-canonical-event and NIP-59 transport path as peer messages. The creator sends a grant to the invited installation. A copied pairing bundle lets the invited installation verify and import that grant even when relay delivery has not run. The invited installation sends its signed acceptance to the creator through the creator relay hints signed in the grant.
+Human account grants, acceptances, and revocations use the same exact-canonical-event and NIP-59 transport path as account messages. The creator sends a grant to the invited installation and every current device. A copied pairing bundle contains the full account authority history so the invited installation can verify prior devices even when relay delivery has not run. The invited installation sends its signed acceptance to every active device. Each prior device then backfills its own account events to the new device.
 
-Pairing adds one-way peer trust on each installation only to carry these addressed events. The human account reducer still checks creator and device signatures, exact grant fields, and causal parents. Peer trust alone cannot create account membership. Account membership alone cannot address an agent mailbox.
+Pairing adds one-way peer trust for direct peer traffic, but account traffic uses account grants rather than peer trust. The human account reducer checks creator and device signatures, exact grant fields, and causal parents. Peer trust alone cannot create account membership. An account answer must name the source agent from its question. An account async message needs an explicit agent address, which the TUI takes from a visible thread; agent mailboxes do not become shared inboxes.

@@ -25,7 +25,7 @@ type State interface {
 	OutboundRelays(context.Context) ([]string, error)
 	PrepareOutbound(context.Context, int) (int, error)
 	RelayJobs(context.Context, string, int, time.Time) ([]store.RelayJob, error)
-	RecordPublish(context.Context, string, string, bool, bool, string, time.Time, time.Time) error
+	RecordPublish(context.Context, string, string, string, bool, bool, string, time.Time, time.Time) error
 	ReceiveGiftWrap(context.Context, []byte, string, time.Time) (store.ReceiveResult, error)
 	SetRelaySyncState(context.Context, string, bool, bool, string, *time.Time, *time.Time) error
 }
@@ -188,7 +188,7 @@ func (e *Engine) publish(ctx context.Context, client nostrwire.RelayClient, rela
 		now := e.Now().UTC()
 		if publishErr != nil {
 			retry := now.Add(nostrwire.BackoffWithJitter(0, e.Random))
-			_ = e.State.RecordPublish(context.Background(), job.CanonicalEventID, relayURL, false, false, publishErr.Error(), now, retry)
+			_ = e.State.RecordPublish(context.Background(), job.CanonicalEventID, job.RecipientInstallation, relayURL, false, false, publishErr.Error(), now, retry)
 			failures = append(failures, publishErr)
 			continue
 		}
@@ -197,7 +197,7 @@ func (e *Engine) publish(ctx context.Context, client nostrwire.RelayClient, rela
 		if !accepted {
 			retry = now.Add(nostrwire.BackoffWithJitter(0, e.Random))
 		}
-		if err := e.State.RecordPublish(ctx, job.CanonicalEventID, relayURL, accepted, !accepted, result.Message, now, retry); err != nil {
+		if err := e.State.RecordPublish(ctx, job.CanonicalEventID, job.RecipientInstallation, relayURL, accepted, !accepted, result.Message, now, retry); err != nil {
 			return err
 		}
 		if !accepted {

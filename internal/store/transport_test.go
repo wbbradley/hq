@@ -53,7 +53,7 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 	if err != nil || duplicate.Status != "duplicate-wrapper" {
 		t.Fatalf("duplicate = %#v, %v", duplicate, err)
 	}
-	if err := sender.RecordPublish(ctx, job.CanonicalEventID, relayOne, true, false, "duplicate: already saved", time.Now(), time.Now()); err != nil {
+	if err := sender.RecordPublish(ctx, job.CanonicalEventID, job.RecipientInstallation, relayOne, true, false, "duplicate: already saved", time.Now(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if jobs, err := sender.RelayJobs(ctx, relayOne, 10, time.Now()); err != nil || len(jobs) != 0 {
@@ -178,7 +178,7 @@ func TestNetworkStatusReportsQueueRejectAndInboundFailures(t *testing.T) {
 		t.Fatalf("jobs = %#v, %v", jobs, err)
 	}
 	now := time.Now().UTC()
-	if err := sender.RecordPublish(ctx, jobs[0].CanonicalEventID, relay, false, true, "rate-limited", now, now.Add(time.Minute)); err != nil {
+	if err := sender.RecordPublish(ctx, jobs[0].CanonicalEventID, jobs[0].RecipientInstallation, relay, false, true, "rate-limited", now, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if err := sender.Stage(ctx, []byte("temporary"), relay, "", "busy", now, now.Add(time.Minute)); err != nil {

@@ -83,6 +83,29 @@ func TestGiftWrapRoundTripAndFreshWrapperKeys(t *testing.T) {
 	}
 }
 
+func TestGiftWrapRoundTripForAccountAudience(t *testing.T) {
+	senderSecret := event.MustSecretKeyFromHex("11")
+	recipientSecret := event.MustSecretKeyFromHex("22")
+	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d71", Body: "account question"})
+	canonical, err := event.Sign(event.Content{
+		Type: event.TypeQuestion, InstallationID: wireInstallationA,
+		Sender:   &event.MailboxAddress{InstallationID: wireInstallationA, MailboxID: wireMailboxA},
+		Audience: &event.Audience{HumanAccountID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d21"},
+		Parents:  []string{strings.Repeat("a", 64)}, Scope: event.ScopeAccountAddressed, Payload: payload,
+	}, time.Unix(1_800_000_000, 0), senderSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := New(senderSecret, nil, nil).Wrap(canonical, recipientSecret.PublicKeyHex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := New(recipientSecret, nil, nil).Unwrap(wrapped.ExactWire)
+	if err != nil || got.CanonicalEvent.ID() != canonical.ID() {
+		t.Fatalf("account unwrap = %#v, %v", got, err)
+	}
+}
+
 func TestGiftWrapProtocolFixture(t *testing.T) {
 	sender := event.MustSecretKeyFromHex("11")
 	recipient := event.MustSecretKeyFromHex("22")

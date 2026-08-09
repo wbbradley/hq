@@ -17,7 +17,7 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 )
 
-const pairingBundleVersion = 1
+const pairingBundleVersion = 2
 
 type HumanAccount struct {
 	ID                    string `json:"id"`
@@ -47,18 +47,19 @@ type HumanInviteRequest struct {
 // PairingBundle carries exact signed account facts plus clear routing fields.
 // The clear fields are checked against the signed facts before any write.
 type PairingBundle struct {
-	Version               int      `json:"version"`
-	AccountID             string   `json:"account_id"`
-	AccountLabel          string   `json:"account_label"`
-	CreatorInstallationID string   `json:"creator_installation_id"`
-	CreatorSignerKeyID    string   `json:"creator_signer_key_id"`
-	CreatorRelays         []string `json:"creator_relays"`
-	TargetInstallationID  string   `json:"target_installation_id"`
-	TargetSignerKeyID     string   `json:"target_signer_key_id"`
-	TargetLabel           string   `json:"target_label"`
-	TargetRelays          []string `json:"target_relays"`
-	AccountCreationEvent  []byte   `json:"account_creation_event"`
-	DeviceGrantEvent      []byte   `json:"device_grant_event"`
+	Version                int      `json:"version"`
+	AccountID              string   `json:"account_id"`
+	AccountLabel           string   `json:"account_label"`
+	CreatorInstallationID  string   `json:"creator_installation_id"`
+	CreatorSignerKeyID     string   `json:"creator_signer_key_id"`
+	CreatorRelays          []string `json:"creator_relays"`
+	TargetInstallationID   string   `json:"target_installation_id"`
+	TargetSignerKeyID      string   `json:"target_signer_key_id"`
+	TargetLabel            string   `json:"target_label"`
+	TargetRelays           []string `json:"target_relays"`
+	AccountCreationEvent   []byte   `json:"account_creation_event"`
+	DeviceGrantEvent       []byte   `json:"device_grant_event"`
+	AccountAuthorityEvents [][]byte `json:"account_authority_events"`
 }
 
 func (s *SQLite) HumanAccount(ctx context.Context) (HumanAccount, error) {
@@ -96,6 +97,49 @@ func (s *SQLite) HumanDevices(ctx context.Context) ([]HumanDevice, error) {
 		devices = append(devices, device)
 	}
 	return devices, rows.Err()
+}
+
+func (s *SQLite) localAccountAction(ctx context.Context, accountID string) (HumanAccount, []string, string, error) {
+	account, err := s.HumanAccount(ctx)
+	if err != nil {
+		return HumanAccount{}, nil, "", err
+	}
+	if accountID != "" && account.ID != accountID {
+		return HumanAccount{}, nil, "", errors.New("message belongs to another human account")
+	}
+	state, err := s.canonicalState(ctx)
+	if err != nil {
+		return HumanAccount{}, nil, "", err
+	}
+	parents, active := state.AccountActionParents(account.ID, s.signer.InstallationID)
+	if !active {
+		return HumanAccount{}, nil, "", errors.New("local installation is not an active human account device")
+	}
+	var label string
+	if err := s.db.QueryRowContext(ctx, `SELECT label FROM human_account_devices WHERE account_id=? AND installation_id=? AND state='active'`, account.ID, s.signer.InstallationID).Scan(&label); err != nil {
+		return HumanAccount{}, nil, "", err
+	}
+	return account, parents, label, nil
+}
+
+func (s *SQLite) canonicalState(ctx context.Context) (event.State, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT raw FROM canonical_events ORDER BY event_id`)
+	if err != nil {
+		return event.State{}, err
+	}
+	defer rows.Close()
+	var raw [][]byte
+	for rows.Next() {
+		var item []byte
+		if err := rows.Scan(&item); err != nil {
+			return event.State{}, err
+		}
+		raw = append(raw, item)
+	}
+	if err := rows.Err(); err != nil {
+		return event.State{}, err
+	}
+	return event.Reduce(raw, s.policy()), nil
 }
 
 func (s *SQLite) CreateHumanInvite(ctx context.Context, request HumanInviteRequest) (PairingBundle, error) {
@@ -147,7 +191,7 @@ func (s *SQLite) CreateHumanInvite(ctx context.Context, request HumanInviteReque
 	grantPayload, _ := event.MarshalPayload(device)
 	contents := []event.Content{
 		{Type: event.TypePeerTrust, Parents: s.peerParents(ctx, request.InstallationID), Scope: event.ScopeInstallationPrivate, Payload: peerPayload},
-		{Type: event.TypeHumanDeviceGrant, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.InstallationID, MailboxID: model.HumanMailboxID}, Parents: parents, Scope: event.ScopePeerAddressed, Payload: grantPayload},
+		{Type: event.TypeHumanDeviceGrant, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.InstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: grantPayload},
 	}
 	signed, err := s.signContents(ctx, contents, nil)
 	if err != nil {
@@ -185,16 +229,53 @@ func (s *SQLite) pairingBundle(ctx context.Context, account HumanAccount, reques
 	if inspection.Status == event.StatusInvalid || json.Unmarshal(inspection.Event.Content.Payload, &device) != nil {
 		return PairingBundle{}, errors.New("stored device grant is invalid")
 	}
+	authority, err := s.accountAuthorityEvents(ctx, account.ID)
+	if err != nil {
+		return PairingBundle{}, err
+	}
 	return PairingBundle{
 		Version: pairingBundleVersion, AccountID: account.ID, AccountLabel: account.Label,
 		CreatorInstallationID: account.CreatorInstallationID, CreatorSignerKeyID: account.CreatorSignerKeyID,
 		CreatorRelays: device.CreatorRelays, TargetInstallationID: device.InstallationID, TargetSignerKeyID: device.SignerKeyID,
 		TargetLabel: device.Label, TargetRelays: device.Relays, AccountCreationEvent: creationRaw, DeviceGrantEvent: grantRaw,
+		AccountAuthorityEvents: authority,
 	}, nil
 }
 
+func (s *SQLite) accountAuthorityEvents(ctx context.Context, accountID string) ([][]byte, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT raw FROM canonical_events WHERE event_type IN (?,?,?,?) ORDER BY event_id`, event.TypeHumanAccountCreate, event.TypeHumanDeviceGrant, event.TypeHumanDeviceAccept, event.TypeHumanDeviceRevoke)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result [][]byte
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		inspection := event.Inspect(raw)
+		if inspection.Status == event.StatusInvalid {
+			continue
+		}
+		matched := false
+		switch inspection.Event.Content.Type {
+		case event.TypeHumanAccountCreate:
+			var payload event.HumanAccountPayload
+			matched = json.Unmarshal(inspection.Event.Content.Payload, &payload) == nil && payload.AccountID == accountID
+		default:
+			var payload event.HumanDevicePayload
+			matched = json.Unmarshal(inspection.Event.Content.Payload, &payload) == nil && payload.AccountID == accountID
+		}
+		if matched {
+			result = append(result, append([]byte(nil), raw...))
+		}
+	}
+	return result, rows.Err()
+}
+
 func (s *SQLite) JoinHumanInvite(ctx context.Context, raw []byte) error {
-	bundle, creation, grant, payload, err := inspectPairingBundle(raw)
+	bundle, _, grant, authority, payload, err := inspectPairingBundle(raw)
 	if err != nil {
 		return err
 	}
@@ -214,7 +295,7 @@ func (s *SQLite) JoinHumanInvite(ctx context.Context, raw []byte) error {
 	now := time.Now().UTC()
 	local, err := s.signContents(ctx, []event.Content{
 		{Type: event.TypePeerTrust, Parents: s.peerParents(ctx, bundle.CreatorInstallationID), Scope: event.ScopeInstallationPrivate, Payload: peerPayload},
-		{Type: event.TypeHumanDeviceAccept, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: bundle.CreatorInstallationID, MailboxID: model.HumanMailboxID}, Parents: []string{grant.ID()}, Scope: event.ScopePeerAddressed, Payload: acceptPayload},
+		{Type: event.TypeHumanDeviceAccept, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: bundle.CreatorInstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: []string{grant.ID()}, Scope: event.ScopeAccountAddressed, Payload: acceptPayload},
 	}, []time.Time{now, now})
 	if err != nil {
 		return err
@@ -231,7 +312,8 @@ func (s *SQLite) JoinHumanInvite(ctx context.Context, raw []byte) error {
 		return err
 	}
 	defer tx.Rollback()
-	additions := []event.SignedEvent{creation, grant, local[0], local[1], selection[0]}
+	additions := append([]event.SignedEvent(nil), authority...)
+	additions = append(additions, local[0], local[1], selection[0])
 	if err := s.appendSignedTx(ctx, tx, additions); err != nil {
 		return err
 	}
@@ -272,44 +354,70 @@ func (s *SQLite) RevokeHumanDevice(ctx context.Context, installationID string) e
 		return errors.New("stored human device grant is invalid")
 	}
 	payload, _ := event.MarshalPayload(exact)
-	content := event.Content{Type: event.TypeHumanDeviceRevoke, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: device.InstallationID, MailboxID: model.HumanMailboxID}, Parents: s.deviceEventIDs(ctx, account.ID, device.InstallationID), Scope: event.ScopePeerAddressed, Payload: payload}
+	content := event.Content{Type: event.TypeHumanDeviceRevoke, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: device.InstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: s.deviceEventIDs(ctx, account.ID, device.InstallationID), Scope: event.ScopeAccountAddressed, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, nil, nil)
 }
 
-func inspectPairingBundle(raw []byte) (PairingBundle, event.SignedEvent, event.SignedEvent, event.HumanDevicePayload, error) {
+func inspectPairingBundle(raw []byte) (PairingBundle, event.SignedEvent, event.SignedEvent, []event.SignedEvent, event.HumanDevicePayload, error) {
 	var bundle PairingBundle
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&bundle); err != nil {
-		return bundle, event.SignedEvent{}, event.SignedEvent{}, event.HumanDevicePayload{}, fmt.Errorf("decode pairing invite: %w", err)
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, event.HumanDevicePayload{}, fmt.Errorf("decode pairing invite: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return bundle, event.SignedEvent{}, event.SignedEvent{}, event.HumanDevicePayload{}, errors.New("pairing invite has trailing data")
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, event.HumanDevicePayload{}, errors.New("pairing invite has trailing data")
 	}
 	if bundle.Version != pairingBundleVersion {
-		return bundle, event.SignedEvent{}, event.SignedEvent{}, event.HumanDevicePayload{}, fmt.Errorf("unsupported pairing invite version %d", bundle.Version)
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, event.HumanDevicePayload{}, fmt.Errorf("unsupported pairing invite version %d", bundle.Version)
 	}
 	created := event.Inspect(bundle.AccountCreationEvent)
 	granted := event.Inspect(bundle.DeviceGrantEvent)
 	if created.Status != event.StatusProjected || created.Event.Content.Type != event.TypeHumanAccountCreate {
-		return bundle, event.SignedEvent{}, event.SignedEvent{}, event.HumanDevicePayload{}, errors.New("pairing invite has an invalid account creation event")
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, event.HumanDevicePayload{}, errors.New("pairing invite has an invalid account creation event")
 	}
 	if granted.Status != event.StatusProjected || granted.Event.Content.Type != event.TypeHumanDeviceGrant {
-		return bundle, event.SignedEvent{}, event.SignedEvent{}, event.HumanDevicePayload{}, errors.New("pairing invite has an invalid device grant event")
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, event.HumanDevicePayload{}, errors.New("pairing invite has an invalid device grant event")
 	}
 	var account event.HumanAccountPayload
 	var device event.HumanDevicePayload
 	if json.Unmarshal(created.Event.Content.Payload, &account) != nil || json.Unmarshal(granted.Event.Content.Payload, &device) != nil {
-		return bundle, event.SignedEvent{}, event.SignedEvent{}, device, errors.New("pairing invite has malformed signed payloads")
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, device, errors.New("pairing invite has malformed signed payloads")
 	}
 	if bundle.AccountID != account.AccountID || bundle.AccountLabel != account.Label || bundle.CreatorInstallationID != account.CreatorInstallationID || bundle.CreatorSignerKeyID != account.CreatorSignerKeyID ||
 		bundle.AccountID != device.AccountID || bundle.CreatorInstallationID != device.CreatorInstallationID || bundle.CreatorSignerKeyID != device.CreatorSignerKeyID || bundle.TargetInstallationID != device.InstallationID || bundle.TargetSignerKeyID != device.SignerKeyID || bundle.TargetLabel != device.Label || !slices.Equal(bundle.TargetRelays, device.Relays) || !slices.Equal(bundle.CreatorRelays, device.CreatorRelays) {
-		return bundle, event.SignedEvent{}, event.SignedEvent{}, device, errors.New("pairing invite fields do not match its signed events")
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, device, errors.New("pairing invite fields do not match its signed events")
 	}
 	if !slices.Contains(granted.Event.Content.Parents, created.Event.ID()) {
-		return bundle, event.SignedEvent{}, event.SignedEvent{}, device, errors.New("device grant does not name the account creation event")
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, device, errors.New("device grant does not name the account creation event")
 	}
-	return bundle, created.Event, granted.Event, device, nil
+	authority := make([]event.SignedEvent, 0, len(bundle.AccountAuthorityEvents))
+	seen := make(map[string]bool)
+	for _, rawEvent := range bundle.AccountAuthorityEvents {
+		inspection := event.Inspect(rawEvent)
+		if inspection.Status == event.StatusInvalid || !isAccountAuthorityEvent(inspection.Event, bundle.AccountID) || seen[inspection.Event.ID()] {
+			return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, device, errors.New("pairing invite has invalid account authority history")
+		}
+		seen[inspection.Event.ID()] = true
+		authority = append(authority, inspection.Event)
+	}
+	if !seen[created.Event.ID()] || !seen[granted.Event.ID()] {
+		return bundle, event.SignedEvent{}, event.SignedEvent{}, nil, device, errors.New("pairing invite authority history omits required events")
+	}
+	return bundle, created.Event, granted.Event, authority, device, nil
+}
+
+func isAccountAuthorityEvent(item event.SignedEvent, accountID string) bool {
+	switch item.Content.Type {
+	case event.TypeHumanAccountCreate:
+		var payload event.HumanAccountPayload
+		return json.Unmarshal(item.Content.Payload, &payload) == nil && payload.AccountID == accountID
+	case event.TypeHumanDeviceGrant, event.TypeHumanDeviceAccept, event.TypeHumanDeviceRevoke:
+		var payload event.HumanDevicePayload
+		return json.Unmarshal(item.Content.Payload, &payload) == nil && payload.AccountID == accountID
+	default:
+		return false
+	}
 }
 
 func normalizeRelayHints(values []string) ([]string, error) {

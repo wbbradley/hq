@@ -57,6 +57,7 @@ type Scope string
 const (
 	ScopeInstallationPrivate Scope = "installation-private"
 	ScopePeerAddressed       Scope = "peer-addressed"
+	ScopeAccountAddressed    Scope = "account-addressed"
 	ScopePublic              Scope = "public"
 )
 
@@ -80,6 +81,10 @@ type Origin struct {
 	EventID        string `json:"event_id"`
 }
 
+type Audience struct {
+	HumanAccountID string `json:"human_account_id"`
+}
+
 // Content is the JSON document signed inside the Nostr event.
 type Content struct {
 	Schema         int             `json:"schema"`
@@ -88,6 +93,7 @@ type Content struct {
 	SignerKeyID    string          `json:"signer_key_id"`
 	Sender         *MailboxAddress `json:"sender,omitempty"`
 	Recipient      *MailboxAddress `json:"recipient,omitempty"`
+	Audience       *Audience       `json:"audience,omitempty"`
 	ThreadID       string          `json:"thread_id,omitempty"`
 	Parents        []string        `json:"parents"`
 	Scope          Scope           `json:"scope"`
@@ -96,10 +102,11 @@ type Content struct {
 }
 
 type TextPayload struct {
-	MessageID string             `json:"message_id,omitempty"`
-	Body      string             `json:"body"`
-	Details   string             `json:"details,omitempty"`
-	Context   *RepositoryContext `json:"context,omitempty"`
+	MessageID  string             `json:"message_id,omitempty"`
+	Body       string             `json:"body"`
+	Details    string             `json:"details,omitempty"`
+	Context    *RepositoryContext `json:"context,omitempty"`
+	ActorLabel string             `json:"actor_label,omitempty"`
 }
 
 type RepositoryContext struct {

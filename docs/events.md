@@ -42,12 +42,11 @@ The Nostr `content` string contains this object in field order when HQ creates a
     "installation_id": "0198c7ec-73b0-7cc3-a5f7-e31c77140d01",
     "mailbox_id": "0198c7ec-73b0-7cc3-a5f7-e31c77140d11"
   },
-  "recipient": {
-    "installation_id": "0198c7ec-73b0-7cc3-a5f7-e31c77140d02",
-    "mailbox_id": "00000000-0000-7000-8000-000000000000"
+  "audience": {
+    "human_account_id": "0198c7ec-73b0-7cc3-a5f7-e31c77140d21"
   },
-  "parents": [],
-  "scope": "peer-addressed",
+  "parents": ["a signed account membership event ID"],
+  "scope": "account-addressed",
   "payload": {
     "body": "Which port should I use?"
   }
@@ -60,10 +59,10 @@ Fields have these rules:
 - `type` selects one payload schema and reducer rule.
 - `installation_id` names the installation that created the event. A message sender must belong to that installation.
 - `signer_key_id` must equal the Nostr event public key until key grants exist.
-- `sender` and `recipient` are present on message events. Each event has at most one recipient.
+- `sender` is present on message events. A direct route has at most one `recipient`. An account question omits `recipient` and names a human account in `audience`.
 - `thread_id` is present on child thread events and absent on a root question or async message.
 - `parents` is a set of causal event IDs in lexical order. It may contain at most 64 IDs and no duplicate.
-- `scope` is `installation-private` or `peer-addressed`. `public` is reserved and rejected in the first release.
+- `scope` is `installation-private`, `peer-addressed`, or `account-addressed`. Account-addressed events require a matching human-account audience. `public` is reserved and rejected in the first release.
 - `origin` may name a source installation and event for an import or forward. An origin is not a causal parent.
 - `payload` is a strict object selected by `type`.
 
@@ -89,21 +88,21 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `mailbox.create` | Installation-private; `mailbox_id`, `kind`, optional `label` | Creates a human or agent mailbox projection. |
 | `mailbox.bind` | Installation-private; `mailbox_id`, `harness`, `external_session_id` | Binds a harness session to a mailbox. |
 | `mailbox.context` | Installation-private; mailbox ID and repository context | Records one signed context snapshot for abandoned-session search. |
-| `question` | Private or peer-addressed; `body`, optional `details` | Starts a question thread. |
-| `answer` | Private or peer-addressed; `body`, optional `details` | Adds one answer to a question thread. |
-| `message` | Private or peer-addressed; `body`, optional `details` | Starts an async message thread. |
-| `thread.cancel` | Private or peer-addressed; optional `reason` | Records cancellation without deleting answers. |
-| `message.archive` | Installation-private; `target_event_id`, optional `reason` | Hides a message from open views. |
-| `message.reject` | Installation-private; `target_event_id`, optional `reason` | Records rejection and archives the message. |
+| `question` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts a question thread. An account question projects into every active device's human mailbox. |
+| `answer` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Adds one answer to a question thread. An account answer directly names the source agent and also replicates account state. |
+| `message` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts an async message thread. |
+| `thread.cancel` | Private, peer-addressed, or account-addressed; optional `reason` | Records cancellation without deleting answers. |
+| `message.archive` | Installation-private or account-addressed; `target_event_id`, optional `reason` | Hides a message from open views. |
+| `message.reject` | Installation-private or account-addressed; `target_event_id`, optional `reason` | Records rejection and archives the message. |
 | `peer.trust` | Installation-private; peer installation ID, signer key ID, optional name and relay hints | Allows signed peer traffic. |
 | `peer.distrust` | Installation-private; peer installation ID | Stops later peer projection. |
 | `mailbox.share` | Installation-private; mailbox ID and peer installation ID | Lets one peer address one agent mailbox. |
 | `mailbox.share.revoke` | Installation-private; mailbox ID and peer installation ID | Stops later direct delivery to that mailbox. |
 | `human.account.create` | Installation-private; account ID, creator installation and key, signed label | Creates a human account and makes its creator the first active device. |
 | `human.account.select` | Installation-private; account ID | Selects one active account as the local default. |
-| `human.device.grant` | Peer-addressed; account, creator, target installation and key, signed label, relay hints | Records creator authority for one device. |
-| `human.device.accept` | Peer-addressed; the exact grant payload | Proves that the invited installation controls its root key and accepts the grant. |
-| `human.device.revoke` | Peer-addressed; the exact device identity | Removes current device authority without erasing history. |
+| `human.device.grant` | Account-addressed with a direct target; account, creator, target installation and key, signed label, relay hints | Records creator authority for one device. |
+| `human.device.accept` | Account-addressed; the exact grant payload | Proves that the invited installation controls its root key and accepts the grant. |
+| `human.device.revoke` | Account-addressed; the exact device identity | Removes current device authority without erasing history. |
 
 Archive, reject, cancel, distrust, and share revoke events are signed tombstones. They change projections but never erase prior canonical bytes.
 
@@ -123,6 +122,8 @@ Trust and share changes use causal parents. The reducer finds maximal facts in t
 Human account authority uses a separate causal graph. The account creator signs grants and revokes. The invited installation signs acceptance with the exact installation key, label, and relay hints from the grant. Membership needs both a grant and a causally later acceptance. A revoke that follows or races with the maximal acceptance makes the device inactive. A later accepted regrant can restore the device only when the new graph descends from the revoke. Missing creation or grant parents remain unresolved. Conflicting account creation events for one UUID do not create an account.
 
 Peer trust and human account authority stay separate. A trusted peer is not an account device. An account device gets no direct access to an agent mailbox. The local default-account selection must be signed by the local root and must causally include that installation's account creation or accepted grant.
+
+Every account action must causally include the current membership frontier for its signer. A receiver checks membership at that causal point, not only the receiver's latest device view. A valid event from before a later revoke stays valid. A revoked device cannot create a valid later account action. One canonical account event fans out through separate encrypted wrappers, but every device reduces the same canonical event ID.
 
 ## Reduction
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -114,6 +115,111 @@ func TestPairingAcceptanceTraversesRetainedRelay(t *testing.T) {
 	}
 	if state != "active" {
 		t.Fatalf("creator device state = %q", state)
+	}
+}
+
+func TestHumanAccountInboxReplicatesAndAnswersFromEitherInstallation(t *testing.T) {
+	relay := newFakeRelay(t)
+	laptop := syncStore(t)
+	desktop := syncStore(t)
+	ctx := context.Background()
+	for _, installation := range []*store.SQLite{laptop, desktop} {
+		if err := installation.AddRelay(ctx, store.RelayConfig{URL: relay.url, Read: true, Write: true, RequireAuth: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	desktopID, desktopKey := desktop.InstallationIdentity()
+	bundle, err := laptop.CreateHumanInvite(ctx, store.HumanInviteRequest{InstallationID: desktopID, SignerKeyID: desktopKey, Name: "desktop", Relays: []string{relay.url}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(bundle)
+	if err := desktop.JoinHumanInvite(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+	laptopEngine := &Engine{State: laptop, Codec: laptop.WireCodec(nil, nil), AuthTimeout: time.Second}
+	desktopEngine := &Engine{State: desktop, Codec: desktop.WireCodec(nil, nil), AuthTimeout: time.Second}
+	runSyncPasses(t, ctx, 2, laptopEngine, desktopEngine)
+
+	repo := model.RepositoryContext{Directory: "/repo", RemoteIdentity: "wbbradley/hq", Branch: "main"}
+	laptopAgent, err := laptop.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "laptop-agent"}, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktopAgent, err := desktop.ResolveMailbox(ctx, model.SessionIdentity{Harness: "claude-code", ExternalSessionID: "desktop-agent"}, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	laptopAgentTwo, err := laptop.ResolveMailbox(ctx, model.SessionIdentity{Harness: "pi", ExternalSessionID: "laptop-agent-two"}, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desktopAgentTwo, err := desktop.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "desktop-agent-two"}, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	questions := []struct {
+		source, answering *store.SQLite
+		agent             model.Mailbox
+		id, body, answer  string
+	}{
+		{laptop, desktop, laptopAgent, "0198c7ec-73b0-7cc3-a5f7-e31c77140dc1", "from laptop", "answered on desktop one"},
+		{desktop, laptop, desktopAgent, "0198c7ec-73b0-7cc3-a5f7-e31c77140dc2", "from desktop", "answered on laptop one"},
+		{laptop, desktop, laptopAgentTwo, "0198c7ec-73b0-7cc3-a5f7-e31c77140dc5", "from laptop two", "answered on desktop two"},
+		{desktop, laptop, desktopAgentTwo, "0198c7ec-73b0-7cc3-a5f7-e31c77140dc6", "from desktop two", "answered on laptop two"},
+	}
+	for _, question := range questions {
+		if err := question.source.Create(ctx, model.Message{ID: question.id, SenderMailboxID: question.agent.ID, RecipientMailboxID: model.HumanMailboxID, Body: question.body, Context: repo, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runSyncPasses(t, ctx, 2, laptopEngine, desktopEngine)
+	for name, installation := range map[string]*store.SQLite{"laptop": laptop, "desktop": desktop} {
+		inbox, err := installation.List(ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Limit: 10})
+		if err != nil || len(inbox) != len(questions) {
+			t.Fatalf("%s aggregate inbox = %#v, %v", name, inbox, err)
+		}
+	}
+
+	desktopQuestion, err := laptop.Get(ctx, questions[1].id)
+	if err != nil || desktopQuestion.SourceDeviceLabel != "desktop" {
+		t.Fatalf("desktop source = %#v, %v", desktopQuestion, err)
+	}
+	for index, question := range questions {
+		answerID := fmt.Sprintf("0198c7ec-73b0-7cc3-a5f7-e31c77140d%02x", 0xc7+index)
+		if err := question.answering.Reply(ctx, question.id, model.Message{ID: answerID, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: question.agent.ID, Body: question.answer, Context: repo, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runSyncPasses(t, ctx, 2, laptopEngine, desktopEngine)
+
+	for index, question := range questions {
+		answer, err := question.source.Claim(ctx, store.Claim{ReplyTo: question.id, RecipientMailboxID: question.agent.ID}, fmt.Sprintf("test-token-%d", index))
+		if err != nil || answer.Body != question.answer {
+			t.Fatalf("cross-device answer = %#v, %v", answer, err)
+		}
+	}
+	for _, installation := range []*store.SQLite{laptop, desktop} {
+		if err := installation.Rebuild(ctx); err != nil {
+			t.Fatal(err)
+		}
+		for _, question := range questions {
+			item, err := installation.Get(ctx, question.id)
+			if err != nil || item.ArchivedAt == nil {
+				t.Fatalf("replicated archive %s = %#v, %v", question.id, item, err)
+			}
+		}
+	}
+}
+
+func runSyncPasses(t *testing.T, ctx context.Context, count int, engines ...*Engine) {
+	t.Helper()
+	for range count {
+		for _, engine := range engines {
+			if err := engine.RunOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 

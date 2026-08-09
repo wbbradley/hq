@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,25 +29,25 @@ func TestPairingBundleFixtureAndMalformedInputs(t *testing.T) {
 	}
 	device := event.HumanDevicePayload{AccountID: accountID, CreatorInstallationID: creatorID, CreatorSignerKeyID: creatorKey.PublicKeyHex(), InstallationID: targetID, SignerKeyID: targetKey.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}, CreatorRelays: []string{"wss://relay.example"}}
 	devicePayload, _ := event.MarshalPayload(device)
-	granted, err := event.Sign(event.Content{Type: event.TypeHumanDeviceGrant, InstallationID: creatorID, Sender: &event.MailboxAddress{InstallationID: creatorID, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: targetID, MailboxID: model.HumanMailboxID}, Parents: []string{created.ID()}, Scope: event.ScopePeerAddressed, Payload: devicePayload}, time.Unix(1_700_000_001, 0), creatorKey)
+	granted, err := event.Sign(event.Content{Type: event.TypeHumanDeviceGrant, InstallationID: creatorID, Sender: &event.MailboxAddress{InstallationID: creatorID, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: targetID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: accountID}, Parents: []string{created.ID()}, Scope: event.ScopeAccountAddressed, Payload: devicePayload}, time.Unix(1_700_000_001, 0), creatorKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundle := PairingBundle{Version: 1, AccountID: accountID, AccountLabel: "laptop", CreatorInstallationID: creatorID, CreatorSignerKeyID: creatorKey.PublicKeyHex(), CreatorRelays: []string{"wss://relay.example"}, TargetInstallationID: targetID, TargetSignerKeyID: targetKey.PublicKeyHex(), TargetLabel: "desktop", TargetRelays: []string{"wss://relay.example"}, AccountCreationEvent: created.Wire, DeviceGrantEvent: granted.Wire}
+	bundle := PairingBundle{Version: 2, AccountID: accountID, AccountLabel: "laptop", CreatorInstallationID: creatorID, CreatorSignerKeyID: creatorKey.PublicKeyHex(), CreatorRelays: []string{"wss://relay.example"}, TargetInstallationID: targetID, TargetSignerKeyID: targetKey.PublicKeyHex(), TargetLabel: "desktop", TargetRelays: []string{"wss://relay.example"}, AccountCreationEvent: created.Wire, DeviceGrantEvent: granted.Wire, AccountAuthorityEvents: [][]byte{created.Wire, granted.Wire}}
 	raw, _ := json.Marshal(bundle)
-	const wantDigest = "92387abf7aef8b05d16370ae1f6ed6bf9199e3e74fa29142ce3e7b0d03ff4190"
+	const wantDigest = "4362fec2f871d282b8a415ea68f50c74bdf7df42055669245e529aefe681c6dd"
 	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != wantDigest {
 		t.Fatalf("bundle fixture digest = %s\nraw = %s", got, raw)
 	}
-	if parsed, parsedCreate, parsedGrant, parsedDevice, err := inspectPairingBundle(raw); err != nil || parsed.AccountID != accountID || !bytes.Equal(parsedCreate.Wire, created.Wire) || !bytes.Equal(parsedGrant.Wire, granted.Wire) || parsedDevice.Label != device.Label {
-		t.Fatalf("inspect fixture = %#v %#v %#v %#v, %v", parsed, parsedCreate, parsedGrant, parsedDevice, err)
+	if parsed, parsedCreate, parsedGrant, history, parsedDevice, err := inspectPairingBundle(raw); err != nil || parsed.AccountID != accountID || !bytes.Equal(parsedCreate.Wire, created.Wire) || !bytes.Equal(parsedGrant.Wire, granted.Wire) || len(history) != 2 || parsedDevice.Label != device.Label {
+		t.Fatalf("inspect fixture = %#v %#v %#v %#v %#v, %v", parsed, parsedCreate, parsedGrant, history, parsedDevice, err)
 	}
 
 	tests := []struct {
 		name string
 		raw  func() []byte
 	}{
-		{"unsupported version", func() []byte { changed := bundle; changed.Version = 2; value, _ := json.Marshal(changed); return value }},
+		{"unsupported version", func() []byte { changed := bundle; changed.Version = 3; value, _ := json.Marshal(changed); return value }},
 		{"changed target", func() []byte {
 			changed := bundle
 			changed.TargetLabel = "other"
@@ -70,7 +71,7 @@ func TestPairingBundleFixtureAndMalformedInputs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, _, _, _, err := inspectPairingBundle(test.raw()); err == nil {
+			if _, _, _, _, _, err := inspectPairingBundle(test.raw()); err == nil {
 				t.Fatal("malformed bundle was accepted")
 			}
 		})
@@ -258,6 +259,27 @@ func TestHumanDeviceRevocationIsIdempotentAndProjectsRemotely(t *testing.T) {
 	if _, err := invited.HumanAccount(ctx); err == nil {
 		t.Fatal("revoked installation retained an active default account")
 	}
+	agent, err := invited.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "revoked-agent"}, model.RepositoryContext{Directory: "/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := event.MarshalPayload(event.TextPayload{MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140df2", Body: "late revoked message"})
+	late, err := invited.signer.Sign(ctx, event.Content{Type: event.TypeQuestion, Sender: invited.localAddress(agent.ID), Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: []string{revocation.ID()}, Scope: event.ScopeAccountAddressed, Payload: text}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, creatorKey := creator.InstallationIdentity()
+	wrapped, err := invited.WireCodec(nil, nil).Wrap(late, creatorKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := creator.ReceiveGiftWrap(ctx, wrapped.ExactWire, "wss://relay.example", time.Now().UTC()); err == nil {
+		t.Fatal("revoked device traffic projected")
+	}
+	status, err := creator.NetworkStatus(ctx)
+	if err != nil || status.RevokedDeviceTraffic != 1 {
+		t.Fatalf("revoked device status = %#v, %v", status, err)
+	}
 	regrant, err := creator.CreateHumanInvite(ctx, HumanInviteRequest{InstallationID: invitedID, SignerKeyID: invitedKey, Name: "desktop"})
 	if err != nil {
 		t.Fatal(err)
@@ -280,10 +302,130 @@ func TestHumanDeviceRevocationIsIdempotentAndProjectsRemotely(t *testing.T) {
 	}
 }
 
+func TestAccountFanoutUsesOneDurableWrapperPerActiveDevice(t *testing.T) {
+	ctx := context.Background()
+	creator := openStore(t, filepath.Join(t.TempDir(), "creator", "hq.db"))
+	desktop := openStore(t, filepath.Join(t.TempDir(), "desktop", "hq.db"))
+	server := openStore(t, filepath.Join(t.TempDir(), "server", "hq.db"))
+	const relay = "wss://relay.example"
+	if err := creator.AddRelay(ctx, RelayConfig{URL: relay, Read: true, Write: true, RequireAuth: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	join := func(target *SQLite, label string) PairingBundle {
+		t.Helper()
+		targetID, targetKey := target.InstallationIdentity()
+		bundle, err := creator.CreateHumanInvite(ctx, HumanInviteRequest{InstallationID: targetID, SignerKeyID: targetKey, Name: label, Relays: []string{relay}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(bundle)
+		if err := target.JoinHumanInvite(ctx, raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := creator.AppendCanonical(ctx, []event.SignedEvent{canonicalEventByTypeAndInstallation(t, target, event.TypeHumanDeviceAccept, targetID)}); err != nil {
+			t.Fatal(err)
+		}
+		return bundle
+	}
+	desktopBundle := join(desktop, "desktop")
+	serverBundle := join(server, "server")
+	serverDevices, err := server.HumanDevices(ctx)
+	if err != nil || len(serverDevices) != 3 {
+		t.Fatalf("new device authority history = %#v, %v", serverDevices, err)
+	}
+
+	agent, err := creator.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "fanout-agent"}, model.RepositoryContext{Directory: "/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	questionID := "0198c7ec-73b0-7cc3-a5f7-e31c77140df1"
+	if err := creator.Create(ctx, model.Message{ID: questionID, SenderMailboxID: agent.ID, RecipientMailboxID: model.HumanMailboxID, Body: "fan out", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	question, err := creator.Get(ctx, questionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := creator.db.Query(`SELECT recipient_installation_id FROM outbox WHERE event_id=? ORDER BY recipient_installation_id`, question.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recipients []string
+	for rows.Next() {
+		var recipient string
+		_ = rows.Scan(&recipient)
+		recipients = append(recipients, recipient)
+	}
+	rows.Close()
+	wantRecipients := []string{desktopBundle.TargetInstallationID, serverBundle.TargetInstallationID}
+	slices.Sort(wantRecipients)
+	if !slices.Equal(recipients, wantRecipients) {
+		t.Fatalf("fanout recipients = %#v, want %#v", recipients, wantRecipients)
+	}
+	if _, err := creator.PrepareOutbound(ctx, 1000); err != nil {
+		t.Fatal(err)
+	}
+	wrappers := make(map[string]string)
+	rows, err = creator.db.Query(`SELECT recipient_installation_id,hex(exact_gift_wrap_bytes) FROM outbox WHERE event_id=?`, question.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var recipient, raw string
+		_ = rows.Scan(&recipient, &raw)
+		wrappers[recipient] = raw
+	}
+	rows.Close()
+	if len(wrappers) != 2 || wrappers[wantRecipients[0]] == "" || wrappers[wantRecipients[0]] == wrappers[wantRecipients[1]] {
+		t.Fatalf("per-device wrappers = %#v", wrappers)
+	}
+	if err := creator.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for recipient, want := range wrappers {
+		var got string
+		if err := creator.db.QueryRow(`SELECT hex(exact_gift_wrap_bytes) FROM outbox WHERE event_id=? AND recipient_installation_id=?`, question.EventID, recipient).Scan(&got); err != nil || got != want {
+			t.Fatalf("wrapper after rebuild for %s changed: %v", recipient, err)
+		}
+	}
+	if err := creator.RevokeHumanDevice(ctx, desktopBundle.TargetInstallationID); err != nil {
+		t.Fatal(err)
+	}
+	states := make(map[string]string)
+	rows, _ = creator.db.Query(`SELECT recipient_installation_id,state FROM outbox WHERE event_id=?`, question.EventID)
+	for rows.Next() {
+		var recipient, state string
+		_ = rows.Scan(&recipient, &state)
+		states[recipient] = state
+	}
+	rows.Close()
+	if states[desktopBundle.TargetInstallationID] != "revoked" || states[serverBundle.TargetInstallationID] != "queued" {
+		t.Fatalf("fanout after revoke = %#v", states)
+	}
+	status, err := creator.NetworkStatus(ctx)
+	if err != nil || status.AccountMembers != 2 || status.PendingAccountFanout == 0 {
+		t.Fatalf("account network status = %#v, %v", status, err)
+	}
+}
+
 func canonicalEventByType(t *testing.T, s *SQLite, kind event.Type) event.SignedEvent {
 	t.Helper()
 	var raw []byte
 	if err := s.db.QueryRow(`SELECT raw FROM canonical_events WHERE event_type=? ORDER BY created_at DESC,event_id DESC LIMIT 1`, kind).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	inspection := event.Inspect(raw)
+	if inspection.Status == event.StatusInvalid {
+		t.Fatal(inspection.Err)
+	}
+	return inspection.Event
+}
+
+func canonicalEventByTypeAndInstallation(t *testing.T, s *SQLite, kind event.Type, installationID string) event.SignedEvent {
+	t.Helper()
+	var raw []byte
+	if err := s.db.QueryRow(`SELECT raw FROM canonical_events WHERE event_type=? AND installation_id=? ORDER BY created_at DESC,event_id DESC LIMIT 1`, kind, installationID).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	inspection := event.Inspect(raw)

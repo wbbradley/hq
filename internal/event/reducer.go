@@ -72,21 +72,23 @@ type HumanDeviceProjection struct {
 }
 
 type MessageProjection struct {
-	ID           string
-	Type         Type
-	Sender       MailboxAddress
-	Recipient    MailboxAddress
-	ThreadID     string
-	Parents      []string
-	Body         string
-	Details      string
-	MessageID    string
-	Context      *RepositoryContext
-	CreatedAt    time.Time
-	Incomplete   bool
-	Archived     bool
-	Rejected     bool
-	PeerReceived bool
+	ID                string
+	Type              Type
+	Sender            MailboxAddress
+	Recipient         MailboxAddress
+	ThreadID          string
+	Parents           []string
+	Body              string
+	Details           string
+	MessageID         string
+	AudienceAccountID string
+	ActorLabel        string
+	Context           *RepositoryContext
+	CreatedAt         time.Time
+	Incomplete        bool
+	Archived          bool
+	Rejected          bool
+	PeerReceived      bool
 }
 
 type CancellationRelation string
@@ -296,6 +298,7 @@ func (s *State) projectAccounts() {
 	}
 	for accountID, account := range s.Accounts {
 		groups := make(map[string][]Record)
+		creator := account.Devices[account.CreatorInstallationID]
 		for _, record := range s.Records {
 			if record.Status != StatusProjected || !isHumanDeviceType(record.Event.Content.Type) {
 				continue
@@ -304,8 +307,15 @@ func (s *State) projectAccounts() {
 			_ = decodePayload(record.Event.Content.Payload, &payload)
 			if payload.AccountID == accountID {
 				groups[payload.InstallationID] = append(groups[payload.InstallationID], record)
+				for _, relay := range payload.CreatorRelays {
+					if !slices.Contains(creator.Relays, relay) {
+						creator.Relays = append(creator.Relays, relay)
+					}
+				}
 			}
 		}
+		sort.Strings(creator.Relays)
+		account.Devices[account.CreatorInstallationID] = creator
 		for installationID, records := range groups {
 			device := HumanDeviceProjection{InstallationID: installationID}
 			var grants, accepts, revokes []Record
@@ -577,6 +587,9 @@ func (s *State) signedByLocalRoot(event SignedEvent) bool {
 }
 
 func (s *State) authorized(event SignedEvent) bool {
+	if event.Content.Scope == ScopeAccountAddressed {
+		return s.authorizedAccountEvent(event)
+	}
 	if s.signedByLocalRoot(event) {
 		return true
 	}
@@ -608,6 +621,74 @@ func (s *State) authorized(event SignedEvent) bool {
 	}
 	share, ok := s.Shares[shareKey(content.Recipient.MailboxID, content.InstallationID)]
 	return ok && share.Active
+}
+
+func (s *State) authorizedAccountEvent(item SignedEvent) bool {
+	content := item.Content
+	if content.Audience == nil || !s.accountMembershipAt(content.Audience.HumanAccountID, content.InstallationID, item.Nostr.PubKey, item.ID()) {
+		return false
+	}
+	humanMailbox := s.Policy.HumanMailboxID
+	switch content.Type {
+	case TypeQuestion:
+		return content.Sender != nil && content.Recipient == nil && content.Sender.InstallationID == content.InstallationID && content.Sender.MailboxID != humanMailbox
+	case TypeMessage:
+		return content.Sender != nil && content.Recipient != nil && content.Sender.InstallationID == content.InstallationID && content.Sender.MailboxID == humanMailbox && content.Recipient.MailboxID != humanMailbox
+	case TypeAnswer:
+		if content.Sender == nil || content.Recipient == nil || content.Sender.InstallationID != content.InstallationID || content.Sender.MailboxID != humanMailbox {
+			return false
+		}
+		root, ok := s.Records[content.ThreadID]
+		return ok && root.Status == StatusProjected && root.Event.Content.Type == TypeQuestion && root.Event.Content.Audience != nil && root.Event.Content.Audience.HumanAccountID == content.Audience.HumanAccountID && root.Event.Content.Sender != nil && *root.Event.Content.Sender == *content.Recipient
+	case TypeThreadCancel:
+		root, ok := s.Records[content.ThreadID]
+		return ok && root.Status == StatusProjected && root.Event.Content.Type == TypeQuestion && root.Event.Content.Audience != nil && root.Event.Content.Audience.HumanAccountID == content.Audience.HumanAccountID && root.Event.Content.Sender != nil && content.Sender != nil && *root.Event.Content.Sender == *content.Sender
+	case TypeMessageArchive, TypeMessageReject:
+		if content.Sender == nil || content.Sender.InstallationID != content.InstallationID || content.Sender.MailboxID != humanMailbox {
+			return false
+		}
+		var payload TargetPayload
+		_ = decodePayload(content.Payload, &payload)
+		target, ok := s.Records[payload.TargetEventID]
+		return ok && target.Event.Content.Audience != nil && target.Event.Content.Audience.HumanAccountID == content.Audience.HumanAccountID
+	default:
+		return false
+	}
+}
+
+func (s *State) accountMembershipAt(accountID, installationID, signerKeyID, eventID string) bool {
+	account, ok := s.Accounts[accountID]
+	if !ok {
+		return false
+	}
+	if installationID == account.CreatorInstallationID {
+		return signerKeyID == account.CreatorSignerKeyID && s.ancestor(account.CreationEventID, eventID)
+	}
+	device, ok := account.Devices[installationID]
+	if !ok || device.SignerKeyID != signerKeyID {
+		return false
+	}
+	var facts []Record
+	for _, record := range s.Records {
+		if record.Status != StatusProjected || !isHumanDeviceType(record.Event.Content.Type) || !s.ancestor(record.Event.ID(), eventID) {
+			continue
+		}
+		var payload HumanDevicePayload
+		_ = decodePayload(record.Event.Content.Payload, &payload)
+		if payload.AccountID == accountID && payload.InstallationID == installationID && payload.SignerKeyID == signerKeyID {
+			facts = append(facts, record)
+		}
+	}
+	maxima := s.maximal(facts)
+	if len(maxima) == 0 {
+		return false
+	}
+	for _, record := range maxima {
+		if record.Event.Content.Type != TypeHumanDeviceAccept {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *State) parentsUsable(event SignedEvent, memo map[string]bool) bool {
@@ -741,10 +822,21 @@ func (s *State) projectMessages() {
 		if threadID == "" {
 			threadID = id
 		}
+		recipient := content.Recipient
+		audienceAccountID := ""
+		if content.Audience != nil {
+			audienceAccountID = content.Audience.HumanAccountID
+			if content.Type == TypeQuestion {
+				recipient = &MailboxAddress{InstallationID: s.Policy.InstallationID, MailboxID: s.Policy.HumanMailboxID}
+			}
+		}
+		if content.Sender == nil || recipient == nil {
+			continue
+		}
 		s.Messages[id] = MessageProjection{
-			ID: id, Type: content.Type, Sender: *content.Sender, Recipient: *content.Recipient,
+			ID: id, Type: content.Type, Sender: *content.Sender, Recipient: *recipient,
 			ThreadID: threadID, Parents: append([]string(nil), content.Parents...), Body: payload.Body,
-			MessageID: payload.MessageID, Context: payload.Context, Details: payload.Details, CreatedAt: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(),
+			MessageID: payload.MessageID, AudienceAccountID: audienceAccountID, ActorLabel: payload.ActorLabel, Context: payload.Context, Details: payload.Details, CreatedAt: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(),
 			Incomplete: record.Status == StatusUnresolved,
 		}
 	}
@@ -890,6 +982,42 @@ func (s State) Poll(mailbox MailboxAddress) []MessageProjection {
 		}
 	}
 	return result
+}
+
+// AccountActionParents returns the current causal membership frontier for an
+// active account device. Callers include these IDs in every account action.
+func (s State) AccountActionParents(accountID, installationID string) ([]string, bool) {
+	account, ok := s.Accounts[accountID]
+	if !ok {
+		return nil, false
+	}
+	if installationID == account.CreatorInstallationID {
+		return []string{account.CreationEventID}, true
+	}
+	var facts []Record
+	for _, record := range s.Records {
+		if record.Status != StatusProjected || !isHumanDeviceType(record.Event.Content.Type) {
+			continue
+		}
+		var payload HumanDevicePayload
+		_ = decodePayload(record.Event.Content.Payload, &payload)
+		if payload.AccountID == accountID && payload.InstallationID == installationID {
+			facts = append(facts, record)
+		}
+	}
+	maxima := s.maximal(facts)
+	if len(maxima) == 0 {
+		return nil, false
+	}
+	parents := make([]string, 0, len(maxima))
+	for _, record := range maxima {
+		if record.Event.Content.Type != TypeHumanDeviceAccept {
+			return nil, false
+		}
+		parents = append(parents, record.Event.ID())
+	}
+	sort.Strings(parents)
+	return parents, true
 }
 
 func (s State) Wait(questionID string, mailbox MailboxAddress) (MessageProjection, error) {

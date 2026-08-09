@@ -29,11 +29,21 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 	if publicKey != "" && content.SignerKeyID != publicKey {
 		return StatusInvalid, errors.New("signer key ID does not match the Nostr public key")
 	}
-	if content.Scope != ScopeInstallationPrivate && content.Scope != ScopePeerAddressed {
+	if content.Scope != ScopeInstallationPrivate && content.Scope != ScopePeerAddressed && content.Scope != ScopeAccountAddressed {
 		if content.Scope == ScopePublic {
 			return StatusInvalid, errors.New("public HQ events are reserved but disabled")
 		}
 		return StatusInvalid, fmt.Errorf("invalid distribution scope %q", content.Scope)
+	}
+	if content.Scope == ScopeAccountAddressed {
+		if content.Audience == nil {
+			return StatusInvalid, errors.New("account-addressed event needs a human account audience")
+		}
+		if err := validUUID("human account audience", content.Audience.HumanAccountID); err != nil {
+			return StatusInvalid, err
+		}
+	} else if content.Audience != nil {
+		return StatusInvalid, errors.New("only account-addressed events may name a human account audience")
 	}
 	if len(content.Parents) > MaxParents {
 		return StatusInvalid, fmt.Errorf("event has %d parents; limit is %d", len(content.Parents), MaxParents)
@@ -67,10 +77,10 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 
 	switch content.Type {
 	case TypeQuestion, TypeMessage:
-		if len(content.Parents) != 0 || content.ThreadID != "" {
-			return StatusInvalid, errors.New("root question and message events must omit parents and thread_id")
+		if content.ThreadID != "" || (content.Scope != ScopeAccountAddressed && len(content.Parents) != 0) || (content.Scope == ScopeAccountAddressed && len(content.Parents) == 0) {
+			return StatusInvalid, errors.New("root question and message events must omit thread_id and account-addressed roots need membership parents")
 		}
-		if err := validateMessageAddresses(content); err != nil {
+		if err := validateMessageAddresses(content, content.Type == TypeQuestion && content.Scope == ScopeAccountAddressed); err != nil {
 			return StatusInvalid, err
 		}
 		if err := validateTextPayload(content.Payload); err != nil {
@@ -80,7 +90,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if len(content.Parents) == 0 || content.ThreadID == "" {
 			return StatusInvalid, errors.New("answer events need a thread ID and at least one parent")
 		}
-		if err := validateMessageAddresses(content); err != nil {
+		if err := validateMessageAddresses(content, false); err != nil {
 			return StatusInvalid, err
 		}
 		if err := validateTextPayload(content.Payload); err != nil {
@@ -106,8 +116,8 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 			return StatusInvalid, err
 		}
 	case TypeMessageArchive, TypeMessageReject:
-		if content.Scope != ScopeInstallationPrivate {
-			return StatusInvalid, errors.New("message state event must be installation-private")
+		if content.Scope != ScopeInstallationPrivate && content.Scope != ScopeAccountAddressed {
+			return StatusInvalid, errors.New("message state event must be installation-private or account-addressed")
 		}
 		if len(content.Parents) == 0 {
 			return StatusInvalid, errors.New("message state event needs a parent")
@@ -242,13 +252,13 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 			return StatusInvalid, err
 		}
 	case TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke:
-		if content.Scope != ScopePeerAddressed {
-			return StatusInvalid, errors.New("human device event must be peer-addressed")
+		if content.Scope != ScopeAccountAddressed || content.Audience == nil {
+			return StatusInvalid, errors.New("human device event must be account-addressed")
 		}
 		if len(content.Parents) == 0 {
 			return StatusInvalid, errors.New("human device event needs a causal parent")
 		}
-		if err := validateMessageAddresses(content); err != nil {
+		if err := validateMessageAddresses(content, false); err != nil {
 			return StatusInvalid, err
 		}
 		var payload HumanDevicePayload
@@ -257,6 +267,9 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		}
 		if err := validateHumanDevicePayload(payload); err != nil {
 			return StatusInvalid, err
+		}
+		if content.Audience.HumanAccountID != payload.AccountID {
+			return StatusInvalid, errors.New("human device audience does not match its account")
 		}
 		if content.Type == TypeHumanDeviceAccept {
 			if payload.InstallationID != content.InstallationID || payload.SignerKeyID != content.SignerKeyID || content.Sender.InstallationID != payload.InstallationID || content.Recipient.InstallationID != payload.CreatorInstallationID {
@@ -331,15 +344,17 @@ func validateHumanDevicePayload(payload HumanDevicePayload) error {
 	return nil
 }
 
-func validateMessageAddresses(content Content) error {
-	if content.Sender == nil || content.Recipient == nil {
-		return errors.New("message event needs one sender and one recipient")
+func validateMessageAddresses(content Content, accountQuestion bool) error {
+	if content.Sender == nil || (content.Recipient == nil && !accountQuestion) {
+		return errors.New("message event needs a sender and its route recipient")
 	}
 	if err := validateAddress("sender", *content.Sender); err != nil {
 		return err
 	}
-	if err := validateAddress("recipient", *content.Recipient); err != nil {
-		return err
+	if content.Recipient != nil {
+		if err := validateAddress("recipient", *content.Recipient); err != nil {
+			return err
+		}
 	}
 	if content.Sender.InstallationID != content.InstallationID {
 		return errors.New("sender installation does not match event installation")
@@ -350,6 +365,9 @@ func validateMessageAddresses(content Content) error {
 	if content.Scope == ScopePeerAddressed && content.Recipient.InstallationID == content.InstallationID {
 		return errors.New("peer-addressed message has a local recipient")
 	}
+	if content.Scope == ScopeAccountAddressed && accountQuestion && content.Recipient != nil {
+		return errors.New("account question must use its audience instead of a recipient")
+	}
 	return nil
 }
 
@@ -357,8 +375,8 @@ func validateControl(content Content) error {
 	if content.Scope != ScopeInstallationPrivate {
 		return errors.New("control event must be installation-private")
 	}
-	if content.Sender != nil || content.Recipient != nil || content.ThreadID != "" {
-		return errors.New("control event must omit sender, recipient, and thread_id")
+	if content.Sender != nil || content.Recipient != nil || content.Audience != nil || content.ThreadID != "" {
+		return errors.New("control event must omit sender, recipient, audience, and thread_id")
 	}
 	return nil
 }

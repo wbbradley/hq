@@ -42,12 +42,13 @@ type ReceiveResult struct {
 }
 
 type RelayAttempt struct {
-	EventID      string
-	RelayURL     string
-	State        string
-	Message      string
-	AttemptCount int
-	AcceptedAt   *time.Time
+	EventID                 string
+	RecipientInstallationID string
+	RelayURL                string
+	State                   string
+	Message                 string
+	AttemptCount            int
+	AcceptedAt              *time.Time
 }
 
 type RelayHealth struct {
@@ -60,13 +61,17 @@ type RelayHealth struct {
 }
 
 type NetworkStatus struct {
-	Queued      int           `json:"queued"`
-	Rejected    int           `json:"rejected"`
-	Unresolved  int           `json:"unresolved"`
-	Unsupported int           `json:"unsupported"`
-	Staged      int           `json:"staged"`
-	Quarantined int           `json:"quarantined"`
-	Relays      []RelayHealth `json:"relays"`
+	Queued                int           `json:"queued"`
+	Rejected              int           `json:"rejected"`
+	Unresolved            int           `json:"unresolved"`
+	Unsupported           int           `json:"unsupported"`
+	Staged                int           `json:"staged"`
+	Quarantined           int           `json:"quarantined"`
+	AccountMembers        int           `json:"account_members"`
+	PendingAccountFanout  int           `json:"pending_account_fanout"`
+	InvalidAccountTraffic int           `json:"invalid_account_traffic"`
+	RevokedDeviceTraffic  int           `json:"revoked_device_traffic"`
+	Relays                []RelayHealth `json:"relays"`
 }
 
 func (s *SQLite) InstallationIdentity() (string, string) {
@@ -143,7 +148,7 @@ func (s *SQLite) ListRelays(ctx context.Context) ([]RelayConfig, error) {
 }
 
 func (s *SQLite) OutboundRelays(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT relays_json FROM peers WHERE trusted=1`)
+	rows, err := s.db.QueryContext(ctx, `SELECT relays_json FROM peers WHERE trusted=1 UNION ALL SELECT recipient_relays_json FROM outbox WHERE state<>'revoked'`)
 	if err != nil {
 		return nil, err
 	}
@@ -189,18 +194,18 @@ func (s *SQLite) prepareOutbound(ctx context.Context, limit int, random io.Reade
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT o.event_id,o.exact_canonical_bytes,p.signer_key_id FROM outbox o JOIN peers p ON p.installation_id=o.recipient_installation_id AND p.trusted=1 WHERE o.gift_wrap_event_id IS NULL ORDER BY o.created_at,o.event_id LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT event_id,recipient_installation_id,exact_canonical_bytes,recipient_public_key FROM outbox WHERE gift_wrap_event_id IS NULL AND state<>'revoked' AND recipient_public_key<>'' ORDER BY created_at,event_id,recipient_installation_id LIMIT ?`, limit)
 	if err != nil {
 		return 0, err
 	}
 	type pending struct {
-		id, recipientKey string
-		raw              []byte
+		id, recipientID, recipientKey string
+		raw                           []byte
 	}
 	var items []pending
 	for rows.Next() {
 		var item pending
-		if err := rows.Scan(&item.id, &item.raw, &item.recipientKey); err != nil {
+		if err := rows.Scan(&item.id, &item.recipientID, &item.raw, &item.recipientKey); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -218,7 +223,7 @@ func (s *SQLite) prepareOutbound(ctx context.Context, limit int, random io.Reade
 		if err != nil {
 			return prepared, err
 		}
-		result, err := s.db.ExecContext(ctx, `UPDATE outbox SET recipient_public_key=?,gift_wrap_event_id=?,exact_gift_wrap_bytes=?,ephemeral_public_key=?,wrapped_at=? WHERE event_id=? AND gift_wrap_event_id IS NULL`, item.recipientKey, wrapped.EventID, wrapped.ExactWire, wrapped.EphemeralKey, now().UTC().UnixMilli(), item.id)
+		result, err := s.db.ExecContext(ctx, `UPDATE outbox SET recipient_public_key=?,gift_wrap_event_id=?,exact_gift_wrap_bytes=?,ephemeral_public_key=?,wrapped_at=? WHERE event_id=? AND recipient_installation_id=? AND gift_wrap_event_id IS NULL`, item.recipientKey, wrapped.EventID, wrapped.ExactWire, wrapped.EphemeralKey, now().UTC().UnixMilli(), item.id, item.recipientID)
 		if err != nil {
 			return prepared, fmt.Errorf("persist exact gift wrap: %w", err)
 		}
@@ -240,7 +245,7 @@ func (s *SQLite) RelayJobs(ctx context.Context, relayURL string, limit int, now 
 	if err := s.db.QueryRowContext(ctx, `SELECT write_enabled FROM relays WHERE url=?`, normalized).Scan(&configuredWrite); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT o.event_id,o.gift_wrap_event_id,o.recipient_installation_id,o.exact_gift_wrap_bytes,p.relays_json,COALESCE(a.state,''),COALESCE(a.next_attempt_at,0) FROM outbox o JOIN peers p ON p.installation_id=o.recipient_installation_id AND p.trusted=1 LEFT JOIN outbound_relay_attempts a ON a.event_id=o.event_id AND a.relay_url=? WHERE o.gift_wrap_event_id IS NOT NULL ORDER BY o.created_at,o.event_id`, normalized)
+	rows, err := s.db.QueryContext(ctx, `SELECT o.event_id,o.gift_wrap_event_id,o.recipient_installation_id,o.exact_gift_wrap_bytes,o.recipient_relays_json,COALESCE(a.state,''),COALESCE(a.next_attempt_at,0) FROM outbox o LEFT JOIN outbound_relay_attempts a ON a.event_id=o.event_id AND a.recipient_installation_id=o.recipient_installation_id AND a.relay_url=? WHERE o.gift_wrap_event_id IS NOT NULL AND o.state<>'revoked' ORDER BY o.created_at,o.event_id,o.recipient_installation_id`, normalized)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +274,7 @@ func (s *SQLite) RelayJobs(ctx context.Context, relayURL string, limit int, now 
 	return jobs, rows.Err()
 }
 
-func (s *SQLite) RecordPublish(ctx context.Context, eventID, relayURL string, accepted, rejected bool, message string, now, retryAt time.Time) error {
+func (s *SQLite) RecordPublish(ctx context.Context, eventID, recipientInstallationID, relayURL string, accepted, rejected bool, message string, now, retryAt time.Time) error {
 	normalized, err := normalizeRelay(relayURL)
 	if err != nil {
 		return err
@@ -286,16 +291,16 @@ func (s *SQLite) RecordPublish(ctx context.Context, eventID, relayURL string, ac
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbound_relay_attempts(event_id,relay_url,state,message,attempt_count,last_attempt_at,next_attempt_at,accepted_at) VALUES (?,?,?,?,1,?,?,?) ON CONFLICT(event_id,relay_url) DO UPDATE SET state=excluded.state,message=excluded.message,attempt_count=outbound_relay_attempts.attempt_count+1,last_attempt_at=excluded.last_attempt_at,next_attempt_at=excluded.next_attempt_at,accepted_at=COALESCE(outbound_relay_attempts.accepted_at,excluded.accepted_at)`, eventID, normalized, state, message, now.UTC().UnixMilli(), retryAt.UTC().UnixMilli(), acceptedAt)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbound_relay_attempts(event_id,recipient_installation_id,relay_url,state,message,attempt_count,last_attempt_at,next_attempt_at,accepted_at) VALUES (?,?,?,?,?,1,?,?,?) ON CONFLICT(event_id,recipient_installation_id,relay_url) DO UPDATE SET state=excluded.state,message=excluded.message,attempt_count=outbound_relay_attempts.attempt_count+1,last_attempt_at=excluded.last_attempt_at,next_attempt_at=excluded.next_attempt_at,accepted_at=COALESCE(outbound_relay_attempts.accepted_at,excluded.accepted_at)`, eventID, recipientInstallationID, normalized, state, message, now.UTC().UnixMilli(), retryAt.UTC().UnixMilli(), acceptedAt)
 	if err != nil {
 		return err
 	}
 	if accepted {
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='relay-accepted' WHERE event_id=?`, eventID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='relay-accepted' WHERE event_id=? AND recipient_installation_id=?`, eventID, recipientInstallationID); err != nil {
 			return err
 		}
 	} else if rejected {
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='rejected' WHERE event_id=? AND state<>'relay-accepted'`, eventID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='rejected' WHERE event_id=? AND recipient_installation_id=? AND state<>'relay-accepted'`, eventID, recipientInstallationID); err != nil {
 			return err
 		}
 	}
@@ -314,8 +319,21 @@ func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL strin
 		return ReceiveResult{}, err
 	}
 	result := ReceiveResult{OuterEventID: unwrapped.Outer.ID, CanonicalEventID: unwrapped.CanonicalEvent.ID(), Status: "projected"}
-	if unwrapped.CanonicalEvent.Content.Recipient == nil || unwrapped.CanonicalEvent.Content.Recipient.InstallationID != s.signer.InstallationID {
-		err := errors.New("canonical recipient installation is not local")
+	content := unwrapped.CanonicalEvent.Content
+	sourceDeviceState := ""
+	localRoute := content.Recipient != nil && content.Recipient.InstallationID == s.signer.InstallationID
+	if content.Scope == event.ScopeAccountAddressed && content.Audience != nil {
+		var active int
+		_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM human_account_devices WHERE account_id=? AND installation_id=? AND state='active'`, content.Audience.HumanAccountID, s.signer.InstallationID).Scan(&active)
+		_ = s.db.QueryRowContext(ctx, `SELECT state FROM human_account_devices WHERE account_id=? AND installation_id=?`, content.Audience.HumanAccountID, content.InstallationID).Scan(&sourceDeviceState)
+		localRoute = active > 0
+	}
+	if !localRoute {
+		reason := "canonical event is not addressed to the local installation or human account"
+		if content.Scope == event.ScopeAccountAddressed {
+			reason = "account traffic: " + reason
+		}
+		err := errors.New(reason)
 		_ = s.Quarantine(context.Background(), raw, normalized, unwrapped.Outer.ID, err.Error(), received)
 		return ReceiveResult{}, err
 	}
@@ -351,7 +369,13 @@ func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL strin
 			if strings.Contains(strings.ToLower(err.Error()), "locked") || strings.Contains(strings.ToLower(err.Error()), "busy") {
 				_ = s.Stage(context.Background(), raw, normalized, unwrapped.Outer.ID, err.Error(), received, received.Add(time.Minute))
 			} else {
-				_ = s.Quarantine(context.Background(), raw, normalized, unwrapped.Outer.ID, err.Error(), received)
+				reason := err.Error()
+				if sourceDeviceState == "revoked" {
+					reason = "revoked account device: " + reason
+				} else if content.Scope == event.ScopeAccountAddressed {
+					reason = "account traffic: " + reason
+				}
+				_ = s.Quarantine(context.Background(), raw, normalized, unwrapped.Outer.ID, reason, received)
 			}
 			return ReceiveResult{}, err
 		}
@@ -376,7 +400,7 @@ func (s *SQLite) SetRelaySyncState(ctx context.Context, relayURL string, connect
 }
 
 func (s *SQLite) RelayAttempts(ctx context.Context, eventID string) ([]RelayAttempt, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT event_id,relay_url,state,message,attempt_count,accepted_at FROM outbound_relay_attempts WHERE event_id=? ORDER BY relay_url`, eventID)
+	rows, err := s.db.QueryContext(ctx, `SELECT event_id,recipient_installation_id,relay_url,state,message,attempt_count,accepted_at FROM outbound_relay_attempts WHERE event_id=? ORDER BY recipient_installation_id,relay_url`, eventID)
 	if err != nil {
 		return nil, err
 	}
@@ -385,7 +409,7 @@ func (s *SQLite) RelayAttempts(ctx context.Context, eventID string) ([]RelayAtte
 	for rows.Next() {
 		var item RelayAttempt
 		var accepted sql.NullInt64
-		if err := rows.Scan(&item.EventID, &item.RelayURL, &item.State, &item.Message, &item.AttemptCount, &accepted); err != nil {
+		if err := rows.Scan(&item.EventID, &item.RecipientInstallationID, &item.RelayURL, &item.State, &item.Message, &item.AttemptCount, &accepted); err != nil {
 			return nil, err
 		}
 		if accepted.Valid {
@@ -403,12 +427,16 @@ func (s *SQLite) NetworkStatus(ctx context.Context) (NetworkStatus, error) {
 		query  string
 		target *int
 	}{
-		{`SELECT count(*) FROM outbox WHERE state<>'relay-accepted'`, &status.Queued},
+		{`SELECT count(*) FROM outbox WHERE state NOT IN ('relay-accepted','revoked')`, &status.Queued},
 		{`SELECT count(*) FROM outbound_relay_attempts WHERE state='rejected'`, &status.Rejected},
 		{`SELECT count(*) FROM canonical_events WHERE reduction_status='unresolved'`, &status.Unresolved},
 		{`SELECT count(*) FROM canonical_events WHERE reduction_status='unsupported'`, &status.Unsupported},
 		{`SELECT count(*) FROM inbound_staging`, &status.Staged},
 		{`SELECT count(*) FROM quarantine`, &status.Quarantined},
+		{`SELECT count(*) FROM human_account_devices d JOIN human_account_default a ON a.account_id=d.account_id WHERE d.state='active'`, &status.AccountMembers},
+		{`SELECT count(*) FROM outbox o JOIN canonical_events c ON c.event_id=o.event_id WHERE c.scope='account-addressed' AND o.state NOT IN ('relay-accepted','revoked')`, &status.PendingAccountFanout},
+		{`SELECT count(*) FROM quarantine WHERE rejection_reason LIKE 'account traffic:%'`, &status.InvalidAccountTraffic},
+		{`SELECT count(*) FROM quarantine WHERE rejection_reason LIKE 'revoked account device:%'`, &status.RevokedDeviceTraffic},
 	}
 	for _, item := range queries {
 		if err := s.db.QueryRowContext(ctx, item.query).Scan(item.target); err != nil {

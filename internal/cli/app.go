@@ -688,7 +688,7 @@ func (a *App) status(ctx context.Context, s store.Store, args []string) error {
 		return writeJSON(a.Out, status)
 	}
 	var output bytes.Buffer
-	fmt.Fprintf(&output, "queued=%d rejected=%d unresolved=%d unsupported=%d staged=%d quarantined=%d\n", status.Queued, status.Rejected, status.Unresolved, status.Unsupported, status.Staged, status.Quarantined)
+	fmt.Fprintf(&output, "queued=%d rejected=%d unresolved=%d unsupported=%d staged=%d quarantined=%d account_members=%d pending_account_fanout=%d invalid_account_traffic=%d revoked_device_traffic=%d\n", status.Queued, status.Rejected, status.Unresolved, status.Unsupported, status.Staged, status.Quarantined, status.AccountMembers, status.PendingAccountFanout, status.InvalidAccountTraffic, status.RevokedDeviceTraffic)
 	for _, relay := range status.Relays {
 		fmt.Fprintf(&output, "%s\tconnected=%t\tauth=%t", relay.URL, relay.Connected, relay.Authenticated)
 		if relay.LastError != "" {

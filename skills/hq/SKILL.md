@@ -14,3 +14,5 @@ hq agents
 ```
 
 Treat that output as the current guide. It lists focused help topics for details such as command output, sync, and delivery behavior. If `hq` is missing or reports a setup error, report the error. Do not install or configure HQ unless the user asks.
+
+HQ may route a human reply from any paired account device back to the current harness mailbox. Use the message ID from `hq ask`; do not infer or manage the human device route.

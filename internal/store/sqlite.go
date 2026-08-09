@@ -20,7 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -81,6 +81,7 @@ CREATE TABLE messages (
     event_id TEXT NOT NULL UNIQUE,
     thread_event_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
+    audience_account_id TEXT NOT NULL DEFAULT '',
     directory TEXT NOT NULL DEFAULT '',
     git_common_dir TEXT NOT NULL DEFAULT '',
     remote_identity TEXT NOT NULL DEFAULT '',
@@ -90,6 +91,7 @@ CREATE TABLE messages (
     recipient_installation_id TEXT NOT NULL,
     sender_mailbox_id TEXT NOT NULL,
     recipient_mailbox_id TEXT NOT NULL,
+    actor_label TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL,
     details TEXT NOT NULL DEFAULT '',
     reply_to TEXT,
@@ -146,16 +148,18 @@ CREATE TABLE human_account_default (
     FOREIGN KEY(account_id) REFERENCES human_accounts(account_id)
 ) STRICT;
 CREATE TABLE outbox (
-    event_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
     recipient_installation_id TEXT NOT NULL,
     exact_canonical_bytes BLOB NOT NULL,
     recipient_public_key TEXT NOT NULL DEFAULT '',
+	recipient_relays_json TEXT NOT NULL DEFAULT '[]',
     gift_wrap_event_id TEXT UNIQUE,
     exact_gift_wrap_bytes BLOB,
     ephemeral_public_key TEXT UNIQUE,
     wrapped_at INTEGER,
     state TEXT NOT NULL DEFAULT 'queued',
     created_at INTEGER NOT NULL,
+	PRIMARY KEY(event_id, recipient_installation_id),
     FOREIGN KEY(event_id) REFERENCES canonical_events(event_id)
 ) STRICT;
 CREATE TABLE relays (
@@ -168,6 +172,7 @@ CREATE TABLE relays (
 ) STRICT;
 CREATE TABLE outbound_relay_attempts (
     event_id TEXT NOT NULL,
+    recipient_installation_id TEXT NOT NULL,
     relay_url TEXT NOT NULL,
     state TEXT NOT NULL,
     message TEXT NOT NULL DEFAULT '',
@@ -175,8 +180,8 @@ CREATE TABLE outbound_relay_attempts (
     last_attempt_at INTEGER NOT NULL,
     next_attempt_at INTEGER NOT NULL,
     accepted_at INTEGER,
-    PRIMARY KEY(event_id, relay_url),
-    FOREIGN KEY(event_id) REFERENCES outbox(event_id)
+	PRIMARY KEY(event_id, recipient_installation_id, relay_url),
+	FOREIGN KEY(event_id, recipient_installation_id) REFERENCES outbox(event_id, recipient_installation_id)
 ) STRICT;
 CREATE TABLE inbound_wrappers (
     outer_event_id TEXT PRIMARY KEY,
@@ -226,7 +231,7 @@ CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, creat
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 6;
+PRAGMA user_version = 7;
 `
 
 const (
@@ -578,8 +583,8 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if message.Archived {
 			archived = archiveTime(state, eventID)
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, body, details, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, eventID, message.ThreadID, message.Type, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.Body, message.Details, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
+		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, eventID, message.ThreadID, message.Type, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
 		if err != nil {
 			return fmt.Errorf("project message: %w", err)
 		}
@@ -624,12 +629,66 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 			return err
 		}
 	}
+	desiredAccountDeliveries := make(map[string]bool)
 	for _, record := range state.Records {
 		content := record.Event.Content
-		if record.Status == event.StatusProjected && content.InstallationID == s.signer.InstallationID && content.Scope == event.ScopePeerAddressed && content.Recipient != nil {
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(event_id, recipient_installation_id, exact_canonical_bytes, created_at) VALUES (?, ?, ?, ?)`, record.Event.ID(), content.Recipient.InstallationID, record.Event.Wire, record.Event.Nostr.CreatedAt); err != nil {
+		if record.Status != event.StatusProjected || content.InstallationID != s.signer.InstallationID {
+			continue
+		}
+		recipients := make(map[string]event.HumanDeviceProjection)
+		if content.Scope == event.ScopePeerAddressed && content.Recipient != nil {
+			peer := state.Peers[content.Recipient.InstallationID]
+			recipients[content.Recipient.InstallationID] = event.HumanDeviceProjection{InstallationID: peer.InstallationID, SignerKeyID: peer.SignerKeyID, Relays: peer.Relays}
+		}
+		if content.Scope == event.ScopeAccountAddressed && content.Audience != nil {
+			if account, ok := state.Accounts[content.Audience.HumanAccountID]; ok {
+				for _, device := range account.Devices {
+					if device.Active && device.InstallationID != s.signer.InstallationID {
+						recipients[device.InstallationID] = device
+					}
+				}
+				if content.Recipient != nil && content.Recipient.InstallationID != s.signer.InstallationID {
+					if device, exists := account.Devices[content.Recipient.InstallationID]; exists {
+						recipients[device.InstallationID] = device
+					}
+				}
+			}
+		}
+		recipientIDs := make([]string, 0, len(recipients))
+		for recipient := range recipients {
+			recipientIDs = append(recipientIDs, recipient)
+		}
+		sort.Strings(recipientIDs)
+		for _, recipient := range recipientIDs {
+			route := recipients[recipient]
+			relays, _ := json.Marshal(route.Relays)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO outbox(event_id, recipient_installation_id, exact_canonical_bytes, recipient_public_key, recipient_relays_json, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(event_id,recipient_installation_id) DO UPDATE SET recipient_public_key=excluded.recipient_public_key,recipient_relays_json=excluded.recipient_relays_json,state=CASE WHEN outbox.state='revoked' THEN 'queued' ELSE outbox.state END`, record.Event.ID(), recipient, record.Event.Wire, route.SignerKeyID, string(relays), record.Event.Nostr.CreatedAt); err != nil {
 				return err
 			}
+			if content.Scope == event.ScopeAccountAddressed {
+				desiredAccountDeliveries[record.Event.ID()+":"+recipient] = true
+			}
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT o.event_id,o.recipient_installation_id FROM outbox o JOIN canonical_events c ON c.event_id=o.event_id WHERE c.scope=?`, event.ScopeAccountAddressed)
+	if err != nil {
+		return err
+	}
+	var revokeDeliveries [][2]string
+	for rows.Next() {
+		var eventID, recipient string
+		if err := rows.Scan(&eventID, &recipient); err != nil {
+			rows.Close()
+			return err
+		}
+		if !desiredAccountDeliveries[eventID+":"+recipient] {
+			revokeDeliveries = append(revokeDeliveries, [2]string{eventID, recipient})
+		}
+	}
+	rows.Close()
+	for _, delivery := range revokeDeliveries {
+		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='revoked' WHERE event_id=? AND recipient_installation_id=? AND state<>'relay-accepted'`, delivery[0], delivery[1]); err != nil {
+			return err
 		}
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO projection_checkpoint(id, event_count, rebuilt_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET event_count = excluded.event_count, rebuilt_at = excluded.rebuilt_at`, len(state.Records), time.Now().UTC().UnixMilli())
@@ -803,12 +862,38 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 		}
 		m.ID = id.String()
 	}
-	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Context: contextPointer(m.Context)})
+	sender, err := s.getMailbox(ctx, m.SenderMailboxID)
+	if err != nil {
+		return err
+	}
+	actorLabel := sender.Label
+	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Context: contextPointer(m.Context), ActorLabel: actorLabel})
 	typeName := event.TypeMessage
+	scope := event.ScopeInstallationPrivate
+	recipientInstallationID := s.signer.InstallationID
+	if m.RecipientInstallationID != "" {
+		recipientInstallationID = m.RecipientInstallationID
+	}
+	var recipient = &event.MailboxAddress{InstallationID: recipientInstallationID, MailboxID: m.RecipientMailboxID}
+	var audience *event.Audience
+	var parents []string
 	if m.RecipientMailboxID == model.HumanMailboxID && m.SenderMailboxID != model.HumanMailboxID {
 		typeName = event.TypeQuestion
+		account, membership, _, err := s.localAccountAction(ctx, "")
+		if err != nil {
+			return err
+		}
+		audience, parents, recipient, scope = &event.Audience{HumanAccountID: account.ID}, membership, nil, event.ScopeAccountAddressed
+	} else if m.SenderMailboxID == model.HumanMailboxID && m.RecipientMailboxID != model.HumanMailboxID {
+		account, membership, deviceLabel, err := s.localAccountAction(ctx, "")
+		if err != nil {
+			return err
+		}
+		actorLabel = deviceLabel
+		payload, _ = event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Context: contextPointer(m.Context), ActorLabel: actorLabel})
+		audience, parents, scope = &event.Audience{HumanAccountID: account.ID}, membership, event.ScopeAccountAddressed
 	}
-	content := event.Content{Type: typeName, Sender: s.localAddress(m.SenderMailboxID), Recipient: s.localAddress(m.RecipientMailboxID), Scope: event.ScopeInstallationPrivate, Payload: payload}
+	content := event.Content{Type: typeName, Sender: s.localAddress(m.SenderMailboxID), Recipient: recipient, Audience: audience, Parents: parents, Scope: scope, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, []time.Time{m.CreatedAt}, nil)
 }
 
@@ -829,10 +914,22 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 	if original.message.ArchivedAt != nil || original.message.RecipientMailboxID != model.HumanMailboxID || reply.SenderMailboxID != model.HumanMailboxID || reply.RecipientMailboxID != original.message.SenderMailboxID {
 		return ErrAlreadyHandled
 	}
-	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: reply.ID, Body: reply.Body, Details: reply.Details, Context: contextPointer(reply.Context)})
-	answer := event.Content{Type: event.TypeAnswer, Sender: s.localAddress(reply.SenderMailboxID), Recipient: s.localAddress(reply.RecipientMailboxID), ThreadID: original.eventID, Parents: []string{original.eventID}, Scope: event.ScopeInstallationPrivate, Payload: payload}
+	scope := event.ScopeInstallationPrivate
+	parents := []string{original.eventID}
+	var audience *event.Audience
+	actorLabel := "human"
+	if original.message.AudienceAccountID != "" {
+		account, membership, deviceLabel, err := s.localAccountAction(ctx, original.message.AudienceAccountID)
+		if err != nil {
+			return err
+		}
+		parents = uniqueSorted(append(parents, membership...))
+		audience, scope, actorLabel = &event.Audience{HumanAccountID: account.ID}, event.ScopeAccountAddressed, deviceLabel
+	}
+	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: reply.ID, Body: reply.Body, Details: reply.Details, Context: contextPointer(reply.Context), ActorLabel: actorLabel})
+	answer := event.Content{Type: event.TypeAnswer, Sender: s.localAddress(reply.SenderMailboxID), Recipient: &event.MailboxAddress{InstallationID: original.message.SenderInstallationID, MailboxID: reply.RecipientMailboxID}, Audience: audience, ThreadID: original.eventID, Parents: parents, Scope: scope, Payload: payload}
 	archivePayload, _ := event.MarshalPayload(event.TargetPayload{TargetEventID: original.eventID})
-	archive := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Parents: []string{original.eventID}, Scope: event.ScopeInstallationPrivate, Payload: archivePayload}
+	archive := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Scope: scope, Payload: archivePayload}
 	return s.appendContents(ctx, []event.Content{answer, archive}, []time.Time{reply.CreatedAt, reply.CreatedAt}, nil)
 }
 
@@ -853,8 +950,8 @@ func (s *SQLite) messageRecord(ctx context.Context, id string) (messageWithEvent
 	return messageWithEvent{message: m, eventID: eventID}, nil
 }
 
-const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 OR o.state='rejected' THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN sb.harness||':'||substr(sm.id,-8) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END, CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN rb.harness||':'||substr(rm.id,-8) ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
-const joins = ` messages msg LEFT JOIN mailboxes sm ON sm.id=msg.sender_mailbox_id AND sm.installation_id=msg.sender_installation_id LEFT JOIN harness_bindings sb ON sb.mailbox_id=sm.id LEFT JOIN mailboxes rm ON rm.id=msg.recipient_mailbox_id AND rm.installation_id=msg.recipient_installation_id LEFT JOIN harness_bindings rb ON rb.mailbox_id=rm.id LEFT JOIN delivery_facts d ON d.message_id=msg.id LEFT JOIN outbox o ON o.event_id=msg.event_id `
+const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 OR o.state='rejected' THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.audience_account_id, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, COALESCE(NULLIF(msg.actor_label,''),CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN sb.harness||':'||substr(sm.id,-8) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END), COALESCE(hd.label,''), CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN rb.harness||':'||substr(rm.id,-8) ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
+const joins = ` messages msg LEFT JOIN mailboxes sm ON sm.id=msg.sender_mailbox_id AND sm.installation_id=msg.sender_installation_id LEFT JOIN harness_bindings sb ON sb.mailbox_id=sm.id LEFT JOIN mailboxes rm ON rm.id=msg.recipient_mailbox_id AND rm.installation_id=msg.recipient_installation_id LEFT JOIN harness_bindings rb ON rb.mailbox_id=rm.id LEFT JOIN human_account_devices hd ON hd.account_id=msg.audience_account_id AND hd.installation_id=msg.sender_installation_id LEFT JOIN delivery_facts d ON d.message_id=msg.id LEFT JOIN (SELECT event_id,CASE WHEN SUM(CASE WHEN state='queued' THEN 1 ELSE 0 END)>0 THEN 'queued' WHEN SUM(CASE WHEN state='relay-accepted' THEN 1 ELSE 0 END)>0 THEN 'relay-accepted' WHEN SUM(CASE WHEN state='rejected' THEN 1 ELSE 0 END)>0 THEN 'rejected' ELSE '' END AS state FROM outbox GROUP BY event_id) o ON o.event_id=msg.event_id `
 
 type scanner interface{ Scan(...any) error }
 
@@ -863,7 +960,7 @@ func scanMessage(row scanner) (model.Message, error) {
 	var reply sql.NullString
 	var created int64
 	var archived, completed sql.NullInt64
-	err := row.Scan(&m.ID, &m.EventID, &m.ThreadID, &m.Incomplete, &m.PeerReceived, &m.Rejected, &m.DeliveryState, &m.Context.Directory, &m.Context.GitCommonDir, &m.Context.RemoteIdentity, &m.Context.Worktree, &m.Context.Branch, &m.SenderInstallationID, &m.RecipientInstallationID, &m.SenderMailboxID, &m.RecipientMailboxID, &m.SenderLabel, &m.RecipientLabel, &m.Body, &m.Details, &reply, &created, &archived, &completed)
+	err := row.Scan(&m.ID, &m.EventID, &m.ThreadID, &m.Incomplete, &m.PeerReceived, &m.Rejected, &m.DeliveryState, &m.AudienceAccountID, &m.Context.Directory, &m.Context.GitCommonDir, &m.Context.RemoteIdentity, &m.Context.Worktree, &m.Context.Branch, &m.SenderInstallationID, &m.RecipientInstallationID, &m.SenderMailboxID, &m.RecipientMailboxID, &m.SenderLabel, &m.SourceDeviceLabel, &m.RecipientLabel, &m.Body, &m.Details, &reply, &created, &archived, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -962,7 +1059,18 @@ func (s *SQLite) Archive(ctx context.Context, id string) error {
 		return ErrAlreadyHandled
 	}
 	payload, _ := event.MarshalPayload(event.TargetPayload{TargetEventID: record.eventID})
-	content := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Parents: []string{record.eventID}, Scope: event.ScopeInstallationPrivate, Payload: payload}
+	parents := []string{record.eventID}
+	scope := event.ScopeInstallationPrivate
+	var audience *event.Audience
+	if record.message.AudienceAccountID != "" {
+		account, membership, _, err := s.localAccountAction(ctx, record.message.AudienceAccountID)
+		if err != nil {
+			return err
+		}
+		parents = uniqueSorted(append(parents, membership...))
+		audience, scope = &event.Audience{HumanAccountID: account.ID}, event.ScopeAccountAddressed
+	}
+	content := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Scope: scope, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, nil, nil)
 }
 

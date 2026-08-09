@@ -42,12 +42,14 @@ type Message struct {
 	PeerReceived            bool              `json:"peer_received,omitempty"`
 	Rejected                bool              `json:"rejected,omitempty"`
 	DeliveryState           string            `json:"delivery_state,omitempty"`
+	AudienceAccountID       string            `json:"audience_account_id,omitempty"`
 	Context                 RepositoryContext `json:"context"`
 	SenderMailboxID         string            `json:"sender_mailbox_id"`
 	RecipientMailboxID      string            `json:"recipient_mailbox_id"`
 	SenderInstallationID    string            `json:"sender_installation_id"`
 	RecipientInstallationID string            `json:"recipient_installation_id"`
 	SenderLabel             string            `json:"sender"`
+	SourceDeviceLabel       string            `json:"source_device,omitempty"`
 	RecipientLabel          string            `json:"recipient"`
 	Body                    string            `json:"body"`
 	Details                 string            `json:"details,omitempty"`

@@ -186,8 +186,17 @@ func (c *Codec) Unwrap(raw []byte) (Unwrapped, error) {
 	if canonical.ID() != envelope.CanonicalEventID || canonical.Nostr.PubKey != seal.PubKey || canonical.Content.InstallationID != envelope.OriginInstallationID {
 		return Unwrapped{}, errors.New("seal, origin, and canonical event identities do not match")
 	}
-	if canonical.Content.Recipient == nil || canonical.Content.Recipient.InstallationID == canonical.Content.InstallationID {
-		return Unwrapped{}, errors.New("canonical event is not peer-addressed")
+	switch canonical.Content.Scope {
+	case event.ScopePeerAddressed:
+		if canonical.Content.Recipient == nil || canonical.Content.Recipient.InstallationID == canonical.Content.InstallationID {
+			return Unwrapped{}, errors.New("canonical event has no remote peer recipient")
+		}
+	case event.ScopeAccountAddressed:
+		if canonical.Content.Audience == nil {
+			return Unwrapped{}, errors.New("canonical account event has no audience")
+		}
+	default:
+		return Unwrapped{}, errors.New("canonical event cannot be relayed")
 	}
 	return Unwrapped{Outer: outer, Seal: seal, Rumor: rumor, Envelope: envelope, CanonicalEvent: canonical}, nil
 }
