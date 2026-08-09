@@ -19,6 +19,8 @@ Treat that output as the source of truth for session scope, commands, output, ex
 
 If `hq` is missing, report that the HQ binary is required. Do not install software unless the user asks.
 
+If HQ says the installation identity is missing, report that the human must run `hq identity init`. Agents must not create, import, export, reset, or read installation keys.
+
 ## Choose the action
 
 - Send a message with `hq ask`. Write a clear body, save the message ID, and report the ID to the user.

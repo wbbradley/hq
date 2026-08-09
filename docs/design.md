@@ -1,50 +1,67 @@
 # HQ design
 
-HQ's durable event format and causal reduction rules are defined in [events.md](events.md). The current version 3 message tables predate that event model; the next storage revision will make signed events authoritative and rebuild the tables below as projections.
+HQ's durable event format and causal reduction rules are defined in [events.md](events.md). Schema version 4 stores exact signed event bytes as the source of truth. Mailbox, message, thread, peer, and share tables are disposable projections.
 
-## Mailboxes and harness bindings
+## Installation identity
 
-HQ gives each mailbox an opaque UUID. One installation-wide mailbox represents the human. Each agent mailbox has one unique binding made from a harness name and the harness's external session ID. Namespacing prevents equal Codex, Claude Code, and Pi IDs from sharing a mailbox.
+One HQ state directory has one stable installation UUID and one secp256k1 root key. `hq identity init` creates `hq.key` with mode `0600`. The sibling SQLite database never stores the secret key. `identity show` prints only the installation UUID and public key.
 
-The resolver checks an explicit `--session` value, then `HQ_SESSION`, then the built-in harness variables. Manual values use the `custom` harness name. Built-in variables are `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, and `PI_SESSION_ID`. HQ rejects a built-in conflict instead of guessing which harness owns the shell.
+State paths use `$XDG_STATE_HOME/hq` or `~/.local/state/hq`. Future relay settings use `$XDG_CONFIG_HOME/hq` or `~/.config/hq`; schema version 4 keeps peer trust and relay hints in signed events instead of a separate config file.
 
-HQ does not show full external harness session IDs in standard CLI or TUI output. Agent labels contain the harness name and the last eight mailbox ID chars, such as `codex:6b906b1a`.
+`identity export` writes a mode-`0600` backup. The backup keeps the installation UUID and encrypts the root key as NIP-49 `ncryptsec` data. Passwords enter through hidden terminal input, never command arguments. `identity import` restores an identity only when no key exists. Running the same imported identity on two active hosts is unsupported.
 
-## Repository context and continuity
+`identity reset --yes` deletes the key, database, and SQLite side files. Schema version 4 also drops older schema data without migration. HQ remains in green-field development.
 
-Directory, Git common directory, compact remote identity, worktree root, and branch are context, not mailbox keys. HQ writes an immutable context snapshot on each message and keeps a context history for each agent mailbox. Each successful mailbox resolve updates `last_seen_at`.
+## Mailboxes and context
 
-A resumed harness session resolves to the same mailbox after a process exit, host restart, or directory change as long as the same HQ database and external harness session ID remain available. HQ never deletes or reassigns a mailbox when a harness process vanishes.
+One signed `mailbox.create` event creates each opaque mailbox UUID. The installation-wide human mailbox uses the reserved UUID. Signed `mailbox.bind` events bind agent mailboxes to unique `(harness, external session ID)` pairs. Namespacing keeps equal Codex, Claude Code, and Pi IDs separate.
 
-`hq mailboxes` searches context history and reports likely mailbox matches. Context matches are only hints. A new harness session gets a new mailbox and cannot claim a match. A later handoff feature must make any mailbox transfer clear. Future process ownership may add host, boot, PID, process start, heartbeat, stale, zombie, and orphan state without changing mailbox IDs.
+The resolver checks `--session`, then `HQ_SESSION`, then `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, and `PI_SESSION_ID`. Manual values use the `custom` harness name. HQ rejects conflicting built-in IDs.
 
-## Message flow
+Signed `mailbox.context` events record directory, Git common directory, compact remote identity, worktree, and branch. Signed message payloads carry the same immutable context. Context aids display and abandoned-mailbox search; context does not grant access. Unsigned `last_seen_at` data records local process activity.
 
-`ask` creates an agent-to-human message. A human reply performs one SQLite transaction:
+## Event-backed writes
 
-1. Archive the inbound human-mailbox row.
-2. Insert a new human-to-agent message with `reply_to` set to the inbound ID.
+Every supported durable domain write follows one path:
 
-An unsolicited human message follows the same outbound path without `reply_to`. `wait` first proves that the resolved agent mailbox sent the given message, then claims a reply addressed to that mailbox. `poll` claims any incomplete message for the resolved mailbox across all directories. `get` keeps direct-ID read access for explicit cooperative inspection. Successful delivery sets both `completed_at` and `archived_at`.
+1. Build typed event content.
+2. Sign canonical bytes with the installation root key.
+3. Start one SQLite transaction.
+4. Insert the exact signed bytes.
+5. reduce the full canonical event set.
+6. Rebuild the affected projections and derive peer-addressed outbox work.
+7. Commit all rows together.
 
-`hq list` filters out archived messages unless the caller uses `--archived` or `--all`. Bare non-TTY `hq` narrows the open human inbox to the current directory. Sent and Archived remain independent TUI filters.
+A reducer or projection error rolls back the event insert. Direct SQLite edits remain outside the supported state model.
 
-## Storage contract
+The current reducer uses the full event set on each write. The simple path gives tests a clear result and suits the current low event count. A later incremental reducer may replace the full pass if the event count makes the cost visible.
 
-`internal/store.Store` owns mailbox resolution, context search, message creation, atomic replies, queries, archival, and leased delivery. SQLite is the first implementation. A future relay-backed service can implement the same interface.
+User commands accept a signed message UUID from the payload. Causal parent links and transport deduplication use the canonical Nostr event ID. An answer points to the root question event and carries the original user message UUID as `reply_to` in the projection.
 
-The SQLite database uses strict tables, foreign keys, WAL journaling, `synchronous=FULL`, a five-second busy timeout, one connection per process, state checks, and indexes for inbox, sent, replies, delivery, and context search. The database file mode is `0600`.
+## SQLite tables
 
-Schema version 3 drops all version 1 and version 2 HQ tables and rows. The project is still in green-field development, so HQ does not preserve or migrate old data.
+`canonical_events` retains exact signed bytes, identity fields, event type, scope, and the last reduction status. `causal_edges` indexes parent links. `projection_checkpoint` records the latest full rebuild.
+
+`mailboxes`, `harness_bindings`, `mailbox_contexts`, `messages`, `threads`, `peers`, and `mailbox_shares` are rebuildable projections. `outbox` stores exact canonical bytes for peer-addressed work; later Nostr transport will add the exact signed outer wrapper before publish.
+
+`delivery_facts`, `mailbox_activity`, and projection checkpoints are unsigned local facts. Delivery claims use a 30-second lease because SQLite and stdout cannot share a transaction. A crash after stdout and before completion can cause one retry.
+
+`inbound_staging` holds temporary receive failures for a later retry. `quarantine` holds permanent failures and never retries them on its own. Quarantine keeps the raw wrapper, relay, event ID, reason, and receive time. The local cap is 1,000 rows, 16 MiB, and 30 days; the oldest row leaves first.
+
+SQLite uses strict tables, foreign keys, WAL mode, `synchronous=FULL`, a five-second busy timeout, one connection per process, and mode `0600` for the database file. HQ does not tail SQLite's WAL and does not add a second file WAL.
+
+## Trust and sharing
+
+`peer add` signs an installation-private trust event. Trust is one-way. The remote installation must add its own trust event. `peer distrust` signs a tombstone and stops future peer projection.
+
+`mailbox share` lets one trusted peer address one agent mailbox. `mailbox revoke` signs a tombstone that stops later projection rights; revocation cannot erase data that the peer already received. A trusted peer may address the human mailbox without a mailbox share.
+
+The first release keeps peer policy local to signed canonical events. Signed invitation flows, key rotation, more than one active host per identity, and a separate signer process remain deferred.
 
 ## Trust boundary
 
-Local actors are cooperative. Mailbox identity is not cryptographic, and direct database access can bypass CLI routing checks. Future work may bind installation and mailbox keys to signed grants, add relay routing and encrypted Nostr events, and isolate keys from a hostile local agent.
-
-## Delivery boundary
-
-HQ leases a message before delivery, builds output in memory, writes stdout once, and then completes the row. SQLite and stdout cannot share one transaction. A process crash after the write and before completion can yield the same message twice. HQ favors retry over message loss.
+Local same-user actors are cooperative. Mode `0600` stops other Unix users but does not stop an agent running as the same user from reading the key or database. Relay transport will use signatures to stop forged traffic from an unknown installation. A later privileged signer can narrow local key access.
 
 ## TUI context
 
-The TUI refreshes every minute without clearing or retargeting an active draft. For the selected message context, HQ loads the branch and shared Git remotes, including linked-worktree settings, then looks up an open pull request in the background. GitHub and GitLab remotes use compact `name: owner/repo` labels. Context failures never block mailbox use.
+The TUI refreshes every minute without clearing or retargeting an active draft. For the selected message, HQ loads the branch and shared Git remotes, then looks up an open pull request in the background. GitHub and GitLab remotes use compact labels. Context failures never block mailbox use.

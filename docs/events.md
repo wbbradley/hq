@@ -67,6 +67,8 @@ Fields have these rules:
 
 Event bodies and details must contain valid UTF-8. A body may not exceed 32,768 bytes. Details may not exceed 16,384 bytes. Schema version 1 does not carry files or binary data.
 
+Local message payloads also carry a stable message UUID and an immutable repository-context snapshot. The UUID is the short user-facing handle accepted by `get`, `wait`, `answer`, and `cancel`. The Nostr event ID remains the signed deduplication key and causal reference. Remote protocol work may change the handle format before HQ 1.0.
+
 ## Threads and causal links
 
 Canonical events form a directed acyclic graph through `parents`. HQ defines no installation-wide or global sequence.
@@ -84,6 +86,7 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `installation.create` | Installation-private; optional `label` | Records installation creation. |
 | `mailbox.create` | Installation-private; `mailbox_id`, `kind`, optional `label` | Creates a human or agent mailbox projection. |
 | `mailbox.bind` | Installation-private; `mailbox_id`, `harness`, `external_session_id` | Binds a harness session to a mailbox. |
+| `mailbox.context` | Installation-private; mailbox ID and repository context | Records one signed context snapshot for abandoned-session search. |
 | `question` | Private or peer-addressed; `body`, optional `details` | Starts a question thread. |
 | `answer` | Private or peer-addressed; `body`, optional `details` | Adds one answer to a question thread. |
 | `message` | Private or peer-addressed; `body`, optional `details` | Starts an async message thread. |

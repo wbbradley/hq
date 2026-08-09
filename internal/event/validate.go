@@ -160,6 +160,20 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if strings.TrimSpace(payload.Harness) == "" || strings.TrimSpace(payload.ExternalSessionID) == "" {
 			return StatusInvalid, errors.New("mailbox binding needs a harness and external session ID")
 		}
+	case TypeMailboxContext:
+		if err := validateControl(content); err != nil {
+			return StatusInvalid, err
+		}
+		var payload MailboxContextPayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validUUID("mailbox ID", payload.MailboxID); err != nil {
+			return StatusInvalid, err
+		}
+		if strings.TrimSpace(payload.Context.Directory) == "" {
+			return StatusInvalid, errors.New("mailbox context needs a directory")
+		}
 	case TypePeerTrust, TypePeerDistrust:
 		if err := validateControl(content); err != nil {
 			return StatusInvalid, err
@@ -202,7 +216,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 
 func knownType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeQuestion, TypeAnswer, TypeMessage,
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeQuestion, TypeAnswer, TypeMessage,
 		TypeThreadCancel, TypeMessageArchive, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
 		TypeMailboxShare, TypeMailboxShareRevoke:
 		return true
@@ -250,6 +264,14 @@ func validateTextPayload(raw json.RawMessage) error {
 	}
 	if strings.TrimSpace(payload.Body) == "" {
 		return errors.New("message body is empty")
+	}
+	if payload.MessageID != "" {
+		if err := validUUID("message ID", payload.MessageID); err != nil {
+			return err
+		}
+	}
+	if payload.Context != nil && strings.TrimSpace(payload.Context.Directory) == "" {
+		return errors.New("message context needs a directory")
 	}
 	if !utf8.ValidString(payload.Body) || !utf8.ValidString(payload.Details) {
 		return errors.New("message text is not valid UTF-8")

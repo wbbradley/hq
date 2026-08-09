@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/repoctx"
 	"github.com/wbbradley/hq/internal/store"
@@ -146,7 +147,15 @@ func TestRefreshSchedulesNextRefresh(t *testing.T) {
 
 func openStore(t *testing.T) (*store.SQLite, context.Context, model.Mailbox) {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "hq.db"))
+	database := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, err := identity.KeyPath(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(database)
 	if err != nil {
 		t.Fatal(err)
 	}

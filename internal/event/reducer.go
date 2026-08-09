@@ -27,10 +27,12 @@ type Record struct {
 }
 
 type MailboxProjection struct {
-	ID      string
-	Kind    string
-	Label   string
-	Harness string
+	ID                string
+	Kind              string
+	Label             string
+	Harness           string
+	ExternalSessionID string
+	Contexts          []RepositoryContext
 }
 
 type PeerProjection struct {
@@ -56,6 +58,8 @@ type MessageProjection struct {
 	Parents      []string
 	Body         string
 	Details      string
+	MessageID    string
+	Context      *RepositoryContext
 	CreatedAt    time.Time
 	Incomplete   bool
 	Archived     bool
@@ -431,7 +435,18 @@ func (s *State) projectMailboxes() {
 			var payload MailboxBindingPayload
 			_ = decodePayload(record.Event.Content.Payload, &payload)
 			mailbox := s.Mailboxes[payload.MailboxID]
-			mailbox.ID, mailbox.Harness = payload.MailboxID, payload.Harness
+			mailbox.ID, mailbox.Harness, mailbox.ExternalSessionID = payload.MailboxID, payload.Harness, payload.ExternalSessionID
+			s.Mailboxes[payload.MailboxID] = mailbox
+		}
+	}
+	for _, id := range ids {
+		record := s.Records[id]
+		if record.Status == StatusProjected && record.Event.Content.Type == TypeMailboxContext {
+			var payload MailboxContextPayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			mailbox := s.Mailboxes[payload.MailboxID]
+			mailbox.ID = payload.MailboxID
+			mailbox.Contexts = append(mailbox.Contexts, payload.Context)
 			s.Mailboxes[payload.MailboxID] = mailbox
 		}
 	}
@@ -455,7 +470,7 @@ func (s *State) projectMessages() {
 		s.Messages[id] = MessageProjection{
 			ID: id, Type: content.Type, Sender: *content.Sender, Recipient: *content.Recipient,
 			ThreadID: threadID, Parents: append([]string(nil), content.Parents...), Body: payload.Body,
-			Details: payload.Details, CreatedAt: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(),
+			MessageID: payload.MessageID, Context: payload.Context, Details: payload.Details, CreatedAt: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(),
 			Incomplete: record.Status == StatusUnresolved,
 		}
 	}
@@ -622,7 +637,7 @@ func (s State) Wait(questionID string, mailbox MailboxAddress) (MessageProjectio
 
 func isControlType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke:
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke:
 		return true
 	default:
 		return false

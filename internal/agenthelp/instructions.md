@@ -53,7 +53,7 @@ Do not use the human `tui`, `list`, `answer`, or `cancel` commands to consume th
 
 HQ threads may contain more than one answer. `wait` returns the first answer available to the current mailbox, not a globally selected answer. Use `poll` to read later answers and async messages.
 
-Network events may arrive before their causal parents. `poll` and `get` can show an addressed message with incomplete causal history, but `wait` requires the original local question so HQ can prove mailbox ownership. Keep the event ID and treat a later copy as the same event.
+Network events may arrive before their causal parents. `poll` prefixes plain output with `[incomplete causal history]` and JSON output sets `incomplete_causal_history`; `get` exposes the same JSON field. `wait` requires the original local question so HQ can prove mailbox ownership. Keep the message ID and treat a later copy with the same canonical `event_id` as the same event.
 
 Cancellation does not erase an answer. A thread may show both facts when an answer arrived after the sender cancelled or when answer and cancellation were concurrent. Read the causal status and handle the answer if it still helps; do not assume that the answerer saw the cancellation.
 

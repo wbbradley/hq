@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/wbbradley/hq/internal/agenthelp"
+	"github.com/wbbradley/hq/internal/event"
+	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
 )
@@ -23,11 +25,38 @@ func testApp(t *testing.T, input string) (*App, *bytes.Buffer) {
 		In: strings.NewReader(input), Out: out, ErrOut: new(bytes.Buffer),
 		Getwd:  func() (string, error) { return "/work/repo", nil },
 		Getenv: func(string) string { return "" },
-		Open:   func(path string) (store.Store, error) { return store.Open(path) },
+		Open: func(path string) (store.Store, error) {
+			initializeTestIdentity(t, path)
+			return store.Open(path)
+		},
+		ReadPassword: func(string) ([]byte, error) { return []byte("test password"), nil },
 		RepoContext: func(_ context.Context, directory string) model.RepositoryContext {
 			return model.RepositoryContext{Directory: directory, GitCommonDir: "/work/main/.git", RemoteIdentity: "origin: team/repo", Worktree: "/work/repo", Branch: "main"}
 		},
 	}, out
+}
+
+func initializeTestIdentity(t *testing.T, database string) {
+	t.Helper()
+	key, err := identity.KeyPath(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.Load(key); errors.Is(err, identity.ErrNotInitialized) {
+		if _, err := identity.Initialize(key, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func openTestStore(t *testing.T, database string) *store.SQLite {
+	t.Helper()
+	initializeTestIdentity(t, database)
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 func TestAgentsPrintsEmbeddedInstructionsWithoutOpeningStore(t *testing.T) {
@@ -60,7 +89,7 @@ func TestBareCommandUsesTUIWhenInteractive(t *testing.T) {
 func TestBareCommandListsOnlyOpenHumanInboxInDirectory(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "hq.db")
 	ctx := context.Background()
-	s, _ := store.Open(db)
+	s := openTestStore(t, db)
 	human, _ := s.HumanMailbox(ctx)
 	agent, _ := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "a"}, model.RepositoryContext{Directory: "/work/repo"})
 	items := []model.Message{
@@ -120,7 +149,7 @@ func TestDetectedHarnessesAskWithoutSetup(t *testing.T) {
 			if out.String() != "reply\n" {
 				t.Fatalf("wait = %q", out.String())
 			}
-			s, _ := store.Open(db)
+			s := openTestStore(t, db)
 			m, err := s.Get(context.Background(), id)
 			if err != nil {
 				t.Fatal(err)
@@ -181,7 +210,7 @@ func TestAskAnswerWaitAndOwnership(t *testing.T) {
 func TestPollIsolatedBySessionAndWorksAcrossDirectory(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "hq.db")
 	ctx := context.Background()
-	s, _ := store.Open(db)
+	s := openTestStore(t, db)
 	human, _ := s.HumanMailbox(ctx)
 	one, _ := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "one"}, model.RepositoryContext{Directory: "/old"})
 	two, _ := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "two"}, model.RepositoryContext{Directory: "/old"})
@@ -220,7 +249,7 @@ func TestExplicitAndEnvironmentOverridesSelectCustomMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondID := strings.TrimSpace(out.String())
-	s, _ := store.Open(db)
+	s := openTestStore(t, db)
 	defer s.Close()
 	first, _ := s.Get(ctx, firstID)
 	second, _ := s.Get(ctx, secondID)
@@ -331,6 +360,79 @@ func TestPollEmpty(t *testing.T) {
 	err := a.Run(context.Background(), []string{"--db", filepath.Join(t.TempDir(), "hq.db"), "poll"})
 	if !errors.Is(err, ErrNoMessages) {
 		t.Fatalf("poll = %v", err)
+	}
+}
+
+func TestIdentityInitBackupResetAndImport(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "state", "hq.db")
+	backup := filepath.Join(dir, "identity-backup.json")
+	a, out := testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "identity", "init"}); err != nil {
+		t.Fatal(err)
+	}
+	initOutput := out.String()
+	if !strings.Contains(initOutput, "installation:") || !strings.Contains(initOutput, "npub:") || strings.Contains(initOutput, "secret_key") {
+		t.Fatalf("identity init output = %q", initOutput)
+	}
+	a, _ = testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "identity", "export", backup}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "identity", "reset"}); err == nil {
+		t.Fatal("unconfirmed identity reset succeeded")
+	}
+	if err := a.Run(context.Background(), []string{"--db", database, "identity", "reset", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	a, out = testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "identity", "import", backup}); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != initOutput {
+		t.Fatalf("restored identity changed\ninit: %q\nimport: %q", initOutput, out.String())
+	}
+}
+
+func TestPeerAndMailboxCommands(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "share"})
+	if err := a.Run(context.Background(), []string{"--db", database, "ask", "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	s := openTestStore(t, database)
+	mailboxes, err := s.FindMailboxes(context.Background(), model.RepositoryContext{Directory: "/work/repo"})
+	if err != nil || len(mailboxes) != 1 {
+		t.Fatalf("mailboxes = %#v, %v", mailboxes, err)
+	}
+	s.Close()
+	peerID := "0198c7ec-73b0-7cc3-a5f7-e31c77140d02"
+	npub, err := identity.EncodePublicKey(event.MustSecretKeyFromHex("42").PublicKeyHex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ = testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "peer", "add", "--name", "server", "--relay", "wss://relay.example", peerID, npub}); err != nil {
+		t.Fatal(err)
+	}
+	a, out := testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "peer", "list"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "trusted\tserver") {
+		t.Fatalf("peer list = %q", out.String())
+	}
+	a, _ = testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "mailbox", "share", mailboxes[0].ID, peerID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Run(context.Background(), []string{"--db", database, "mailbox", "revoke", mailboxes[0].ID, peerID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Run(context.Background(), []string{"--db", database, "peer", "distrust", peerID}); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -34,6 +34,7 @@ const (
 	TypeInstallationCreate Type = "installation.create"
 	TypeMailboxCreate      Type = "mailbox.create"
 	TypeMailboxBind        Type = "mailbox.bind"
+	TypeMailboxContext     Type = "mailbox.context"
 	TypeQuestion           Type = "question"
 	TypeAnswer             Type = "answer"
 	TypeMessage            Type = "message"
@@ -90,8 +91,18 @@ type Content struct {
 }
 
 type TextPayload struct {
-	Body    string `json:"body"`
-	Details string `json:"details,omitempty"`
+	MessageID string             `json:"message_id,omitempty"`
+	Body      string             `json:"body"`
+	Details   string             `json:"details,omitempty"`
+	Context   *RepositoryContext `json:"context,omitempty"`
+}
+
+type RepositoryContext struct {
+	Directory      string `json:"directory"`
+	GitCommonDir   string `json:"git_common_dir,omitempty"`
+	RemoteIdentity string `json:"remote_identity,omitempty"`
+	Worktree       string `json:"worktree,omitempty"`
+	Branch         string `json:"branch,omitempty"`
 }
 
 type InstallationPayload struct {
@@ -108,6 +119,11 @@ type MailboxBindingPayload struct {
 	MailboxID         string `json:"mailbox_id"`
 	Harness           string `json:"harness"`
 	ExternalSessionID string `json:"external_session_id"`
+}
+
+type MailboxContextPayload struct {
+	MailboxID string            `json:"mailbox_id"`
+	Context   RepositoryContext `json:"context"`
 }
 
 type TargetPayload struct {

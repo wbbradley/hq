@@ -18,6 +18,14 @@ From a local checkout:
 go install ./cmd/hq
 ```
 
+Create one installation identity before first use:
+
+```sh
+hq identity init
+```
+
+HQ stores the root key in `~/.local/state/hq/hq.key` with mode `0600` and keeps the key out of SQLite. Same-user processes can still read the key, so this release assumes cooperative local actors.
+
 ## Agent use
 
 Install the HQ agent skill with GitHub CLI:
@@ -90,6 +98,16 @@ hq poll [--session ID] [--dir PATH] [--json]
 hq get MESSAGE_ID
 hq list [--sender MAILBOX] [--recipient MAILBOX] [--dir PATH] [--archived|--all] [--limit N] [--json]
 hq mailboxes [--dir PATH] [--json]
+hq identity init
+hq identity show [--json]
+hq identity export BACKUP_PATH
+hq identity import BACKUP_PATH
+hq identity reset --yes
+hq peer add [--name NAME] [--relay URL] INSTALLATION_ID NPUB
+hq peer list [--json]
+hq peer distrust INSTALLATION_ID
+hq mailbox share MAILBOX_ID PEER_INSTALLATION_ID
+hq mailbox revoke MAILBOX_ID PEER_INSTALLATION_ID
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
 hq tui
@@ -100,15 +118,15 @@ Set `HQ_DB` or pass global `--db PATH` before the command to use another databas
 
 ## Message and delivery rules
 
-Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, external session ID)` binding. The reserved human mailbox is installation-wide. Directory and Git data stay on messages and in mailbox context history; those fields aid display and abandoned-mailbox search but do not grant mailbox access. Replying creates a new human-to-agent message with `reply_to` set and archives the inbound agent-to-human message.
+Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, external session ID)` binding. The reserved human mailbox is installation-wide. Signed message and mailbox-context events carry directory and Git data; those fields aid display and abandoned-mailbox search but do not grant mailbox access. Replying adds signed answer and archive events in one SQLite transaction.
 
 `wait` reads a reply only when the current mailbox sent the first message. `poll` reads every ready message addressed to the current harness mailbox, including unsolicited human messages, without a directory filter. `get` keeps direct-ID access as an explicit path for cooperative cross-mailbox inspection. Delivery leases each row, writes stdout once, and then sets `completed_at` and `archived_at`. A crash after stdout but before the database update can cause one later retry, so consumers can use the message ID as an idempotency key.
 
 `hq list` shows only open messages by default. `--archived` shows archived messages, and `--all` shows both.
 
-The version 3 schema resets all older HQ tables and data when HQ first opens an old database. HQ is still in green-field development and does not migrate version 1 or version 2 rows.
+Schema version 4 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
 
-See [docs/design.md](docs/design.md) for the schema and storage contract, and [docs/events.md](docs/events.md) for the signed event and causal reduction protocol that the next storage revision will adopt.
+See [docs/design.md](docs/design.md) for the schema and storage contract, and [docs/events.md](docs/events.md) for the signed event and causal reduction protocol.
 
 ## Development
 

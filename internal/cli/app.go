@@ -13,14 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/x/term"
+	charmterm "github.com/charmbracelet/x/term"
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/agenthelp"
+	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/repoctx"
 	"github.com/wbbradley/hq/internal/session"
 	"github.com/wbbradley/hq/internal/store"
 	"github.com/wbbradley/hq/internal/tui"
+	systerm "golang.org/x/term"
 )
 
 const usage = `hq delivers messages between agent sessions and a human mailbox.
@@ -44,6 +46,9 @@ Human commands:
 
 Other commands:
   mailboxes  Find agent mailboxes seen in this repository
+  identity   Create, inspect, back up, import, or reset the installation identity
+  peer       Add, list, or distrust peer installations
+  mailbox    Share or revoke a mailbox for one peer
   help       Print command help
   version    Print the version
 
@@ -54,28 +59,37 @@ The default database is $XDG_STATE_HOME/hq/hq.db or ~/.local/state/hq/hq.db.
 var ErrNoMessages = errors.New("no messages ready")
 
 type App struct {
-	In          io.Reader
-	Out         io.Writer
-	ErrOut      io.Writer
-	Getwd       func() (string, error)
-	Getenv      func(string) string
-	IsTTY       func() bool
-	Open        func(string) (store.Store, error)
-	RunTUI      func(context.Context, store.Store, io.Reader, io.Writer) error
-	RepoContext func(context.Context, string) model.RepositoryContext
-	Sessions    session.IdentityResolver
+	In           io.Reader
+	Out          io.Writer
+	ErrOut       io.Writer
+	Getwd        func() (string, error)
+	Getenv       func(string) string
+	IsTTY        func() bool
+	Open         func(string) (store.Store, error)
+	RunTUI       func(context.Context, store.Store, io.Reader, io.Writer) error
+	RepoContext  func(context.Context, string) model.RepositoryContext
+	Sessions     session.IdentityResolver
+	ReadPassword func(string) ([]byte, error)
 }
 
 func New() *App {
 	return &App{
 		In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr, Getwd: os.Getwd, Getenv: os.Getenv,
 		IsTTY: func() bool {
-			return term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd())
+			return charmterm.IsTerminal(os.Stdin.Fd()) && charmterm.IsTerminal(os.Stdout.Fd())
 		},
 		Open:        func(path string) (store.Store, error) { return store.Open(path) },
 		RunTUI:      tui.Run,
 		RepoContext: repoctx.GitHub{}.Snapshot,
 		Sessions:    session.Resolver{Getenv: os.Getenv},
+		ReadPassword: func(prompt string) ([]byte, error) {
+			if _, err := io.WriteString(os.Stderr, prompt); err != nil {
+				return nil, err
+			}
+			password, err := systerm.ReadPassword(int(os.Stdin.Fd()))
+			_, _ = io.WriteString(os.Stderr, "\n")
+			return password, err
+		},
 	}
 }
 
@@ -108,6 +122,9 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		}
 		return writeOnce(a.Out, []byte(agenthelp.Text))
 	}
+	if command == "identity" {
+		return a.identity(dbPath, args)
+	}
 	s, err := a.Open(dbPath)
 	if err != nil {
 		return err
@@ -130,6 +147,10 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.answer(ctx, s, args)
 	case "cancel":
 		return a.cancel(ctx, s, args)
+	case "peer":
+		return a.peer(ctx, s, args)
+	case "mailbox":
+		return a.mailbox(ctx, s, args)
 	case "tui":
 		if len(args) != 0 {
 			return errors.New("tui takes no arguments")
@@ -141,6 +162,200 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", command, usage)
 	}
+}
+
+func (a *App) password(prompt string) ([]byte, error) {
+	if a.ReadPassword == nil {
+		return nil, errors.New("password input is unavailable")
+	}
+	password, err := a.ReadPassword(prompt)
+	if err != nil {
+		return nil, err
+	}
+	if len(password) == 0 {
+		return nil, errors.New("password is required")
+	}
+	return password, nil
+}
+
+func (a *App) identity(databasePath string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("identity needs init, show, export, import, or reset")
+	}
+	resolved, err := identity.ResolveDatabasePath(databasePath)
+	if err != nil {
+		return err
+	}
+	keyPath, err := identity.KeyPath(resolved)
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "init":
+		if len(args) != 1 {
+			return errors.New("identity init takes no arguments")
+		}
+		material, err := identity.Initialize(keyPath, nil)
+		if err != nil {
+			return err
+		}
+		return a.writeIdentity(material, false)
+	case "show":
+		f := flags("identity show")
+		asJSON := f.Bool("json", false, "write JSON")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 0 {
+			return errors.New("identity show takes flags only")
+		}
+		material, err := identity.Load(keyPath)
+		if err != nil {
+			return err
+		}
+		return a.writeIdentity(material, *asJSON)
+	case "export":
+		if len(args) != 2 {
+			return errors.New("identity export needs one backup path")
+		}
+		material, err := identity.Load(keyPath)
+		if err != nil {
+			return err
+		}
+		password, err := a.password("Backup password: ")
+		if err != nil {
+			return err
+		}
+		defer clear(password)
+		confirm, err := a.password("Confirm backup password: ")
+		if err != nil {
+			return err
+		}
+		defer clear(confirm)
+		if !bytes.Equal(password, confirm) {
+			return errors.New("backup passwords do not match")
+		}
+		return identity.WriteBackup(args[1], material, password, nil)
+	case "import":
+		if len(args) != 2 {
+			return errors.New("identity import needs one backup path")
+		}
+		if _, err := identity.Load(keyPath); err == nil {
+			return identity.ErrAlreadyExists
+		} else if !errors.Is(err, identity.ErrNotInitialized) {
+			return err
+		}
+		password, err := a.password("Backup password: ")
+		if err != nil {
+			return err
+		}
+		defer clear(password)
+		material, err := identity.ReadBackup(args[1], password)
+		if err != nil {
+			return err
+		}
+		if err := identity.WriteNew(keyPath, material); err != nil {
+			return err
+		}
+		return a.writeIdentity(material, false)
+	case "reset":
+		f := flags("identity reset")
+		yes := f.Bool("yes", false, "confirm destructive reset")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 0 || !*yes {
+			return errors.New("identity reset deletes the identity and database; pass --yes to confirm")
+		}
+		return identity.Reset(resolved, keyPath)
+	default:
+		return fmt.Errorf("unknown identity command %q", args[0])
+	}
+}
+
+func (a *App) writeIdentity(material identity.Material, asJSON bool) error {
+	npub, err := material.NPub()
+	if err != nil {
+		return err
+	}
+	value := struct {
+		InstallationID string `json:"installation_id"`
+		PublicKey      string `json:"public_key"`
+		NPub           string `json:"npub"`
+	}{material.InstallationID, material.PublicKey(), npub}
+	if asJSON {
+		return writeJSON(a.Out, value)
+	}
+	_, err = fmt.Fprintf(a.Out, "installation: %s\npublic key: %s\nnpub: %s\n", value.InstallationID, value.PublicKey, value.NPub)
+	return err
+}
+
+type stringList []string
+
+func (s *stringList) String() string         { return strings.Join(*s, ",") }
+func (s *stringList) Set(value string) error { *s = append(*s, value); return nil }
+
+func (a *App) peer(ctx context.Context, s store.Store, args []string) error {
+	if len(args) == 0 {
+		return errors.New("peer needs add, list, or distrust")
+	}
+	switch args[0] {
+	case "add":
+		f := flags("peer add")
+		name := f.String("name", "", "local peer name")
+		var relays stringList
+		f.Var(&relays, "relay", "relay hint; may be repeated")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 2 {
+			return errors.New("peer add needs INSTALLATION_ID NPUB")
+		}
+		public, err := identity.DecodePublicKey(f.Args()[1])
+		if err != nil {
+			return err
+		}
+		return s.TrustPeer(ctx, store.Peer{InstallationID: f.Args()[0], SignerKeyID: public, Name: *name, Relays: relays, Trusted: true})
+	case "list":
+		f := flags("peer list")
+		asJSON := f.Bool("json", false, "write JSON")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 0 {
+			return errors.New("peer list takes flags only")
+		}
+		peers, err := s.ListPeers(ctx)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return writeJSON(a.Out, peers)
+		}
+		var b bytes.Buffer
+		for _, peer := range peers {
+			state := "distrusted"
+			if peer.Trusted {
+				state = "trusted"
+			}
+			fmt.Fprintf(&b, "%s\t%s\t%s\n", peer.InstallationID, state, peer.Name)
+		}
+		return writeOnce(a.Out, b.Bytes())
+	case "distrust":
+		if len(args) != 2 {
+			return errors.New("peer distrust needs INSTALLATION_ID")
+		}
+		return s.DistrustPeer(ctx, args[1])
+	default:
+		return fmt.Errorf("unknown peer command %q", args[0])
+	}
+}
+
+func (a *App) mailbox(ctx context.Context, s store.Store, args []string) error {
+	if len(args) != 3 || (args[0] != "share" && args[0] != "revoke") {
+		return errors.New("mailbox needs share or revoke, MAILBOX_ID, and PEER_INSTALLATION_ID")
+	}
+	return s.SetMailboxShare(ctx, args[1], args[2], args[0] == "share")
 }
 
 func globalArgs(args []string, path string) (string, []string, error) {
@@ -259,7 +474,11 @@ func (a *App) ask(ctx context.Context, s store.Store, args []string) error {
 		return err
 	}
 	if *jsonOutput {
-		return writeJSON(a.Out, m)
+		stored, err := s.Get(ctx, m.ID)
+		if err != nil {
+			return err
+		}
+		return writeJSON(a.Out, stored)
 	}
 	return writeOnce(a.Out, []byte(m.ID+"\n"))
 }
@@ -381,7 +600,11 @@ func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
 	} else {
 		var b bytes.Buffer
 		for _, c := range claims {
-			fmt.Fprintf(&b, "%s\t%s\n", c.m.ID, c.m.Body)
+			prefix := ""
+			if c.m.Incomplete {
+				prefix = "[incomplete causal history] "
+			}
+			fmt.Fprintf(&b, "%s\t%s%s\n", c.m.ID, prefix, c.m.Body)
 		}
 		data = b.Bytes()
 	}

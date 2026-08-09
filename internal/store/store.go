@@ -3,9 +3,35 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
+	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/model"
 )
+
+type Signer interface {
+	Sign(context.Context, event.Content, time.Time) (event.SignedEvent, error)
+}
+type EventLog interface {
+	AppendCanonical(context.Context, []event.SignedEvent) error
+	Rebuild(context.Context) error
+}
+type Reducer interface {
+	Reduce([][]byte, event.Policy) event.State
+}
+type ReducerFunc func([][]byte, event.Policy) event.State
+
+func (f ReducerFunc) Reduce(raw [][]byte, policy event.Policy) event.State { return f(raw, policy) }
+
+type OutboundJob struct {
+	EventID                 string
+	RecipientInstallationID string
+	ExactCanonicalBytes     []byte
+	State                   string
+}
+type Outbox interface {
+	PendingOutbox(context.Context, int) ([]OutboundJob, error)
+}
 
 var (
 	ErrNotFound       = errors.New("message not found")
@@ -32,5 +58,10 @@ type Store interface {
 	Claim(context.Context, Claim, string) (model.Message, error)
 	Complete(context.Context, string, string) error
 	Release(context.Context, string, string) error
+	TrustPeer(context.Context, Peer) error
+	DistrustPeer(context.Context, string) error
+	ListPeers(context.Context) ([]Peer, error)
+	SetMailboxShare(context.Context, string, string, bool) error
+	Rebuild(context.Context) error
 	Close() error
 }

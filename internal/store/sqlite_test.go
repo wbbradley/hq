@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wbbradley/hq/internal/event"
+	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	_ "modernc.org/sqlite"
 )
@@ -17,7 +19,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "3"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "4"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -27,7 +29,7 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 			t.Errorf("%s = %q, want %q", query, got, want)
 		}
 	}
-	for _, table := range []string{"mailboxes", "harness_bindings", "mailbox_contexts", "messages"} {
+	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "mailbox_contexts", "messages", "threads", "peers", "mailbox_shares", "outbox", "inbound_staging", "quarantine"} {
 		var strict int
 		if err := s.db.QueryRow(`SELECT strict FROM pragma_table_list WHERE name = ?`, table).Scan(&strict); err != nil {
 			t.Fatal(err)
@@ -36,12 +38,9 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 			t.Fatalf("%s strict = %d", table, strict)
 		}
 	}
-	var pk int
-	if err := s.db.QueryRow(`SELECT pk FROM pragma_table_info('messages') WHERE name = 'id'`).Scan(&pk); err != nil {
-		t.Fatal(err)
-	}
-	if pk != 1 {
-		t.Fatalf("message id pk = %d", pk)
+	var canonical int
+	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&canonical); err != nil || canonical != 2 {
+		t.Fatalf("bootstrap event count = %d, %v", canonical, err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -119,7 +118,7 @@ func TestResolveMailboxIsolationContinuityAndContext(t *testing.T) {
 func TestHarnessBindingIsUnique(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
 	now := time.Now().UTC().UnixMilli()
-	if _, err := s.db.Exec(`INSERT INTO mailboxes(id, kind, created_at, last_seen_at) VALUES ('0198c7ec-73b0-7cc3-a5f7-e31c77140d61', 'agent', ?, ?), ('0198c7ec-73b0-7cc3-a5f7-e31c77140d62', 'agent', ?, ?)`, now, now, now, now); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO mailboxes(id, installation_id, kind, label, created_at) VALUES ('0198c7ec-73b0-7cc3-a5f7-e31c77140d61', 'local', 'agent', '', ?), ('0198c7ec-73b0-7cc3-a5f7-e31c77140d62', 'local', 'agent', '', ?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
 	_, err := s.db.Exec(`INSERT INTO harness_bindings(harness, external_session_id, mailbox_id, created_at) VALUES ('codex', 'one', '0198c7ec-73b0-7cc3-a5f7-e31c77140d61', ?)`, now)
@@ -266,13 +265,257 @@ func TestVersionTwoDataIsDestroyed(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
+	if version != 4 {
 		t.Fatalf("user_version = %d", version)
+	}
+}
+
+func TestOpenRejectsMismatchedIdentityKey(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := identity.KeyPath(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(database); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched identity open = %v", err)
+	}
+}
+
+func TestSignedEventLogRebuildAndTransactionRollback(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "signed", "/repo")
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d71", agent.ID, model.HumanMailboxID, "signed question")
+	if err := s.Create(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.Query(`SELECT event_id, raw, reduction_status FROM canonical_events`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for rows.Next() {
+		var id, status string
+		var raw []byte
+		if err := rows.Scan(&id, &raw, &status); err != nil {
+			t.Fatal(err)
+		}
+		inspection := event.Inspect(raw)
+		if inspection.Event.ID() != id || !inspection.Event.Nostr.VerifySignature() || status != string(event.StatusProjected) {
+			t.Fatalf("canonical row = %s, %s, %#v", id, status, inspection)
+		}
+		count++
+	}
+	rows.Close()
+	if count < 6 {
+		t.Fatalf("canonical row count = %d", count)
+	}
+	if _, err := s.db.Exec(`DELETE FROM messages`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Get(ctx, item.ID); err != nil || got.Body != item.Body {
+		t.Fatalf("rebuilt message = %#v, %v", got, err)
+	}
+	var before int
+	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_projection BEFORE INSERT ON messages BEGIN SELECT RAISE(FAIL, 'forced projection failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	bad := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d72", agent.ID, model.HumanMailboxID, "must roll back")
+	if err := s.Create(ctx, bad); err == nil {
+		t.Fatal("forced projection failure succeeded")
+	}
+	var after int
+	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("failed transaction changed event count from %d to %d", before, after)
+	}
+}
+
+func TestCanonicalAppendDeduplicatesAndRetainsMissingParent(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "orphan", "/repo")
+	var raw []byte
+	if err := s.db.QueryRow(`SELECT raw FROM canonical_events ORDER BY event_id LIMIT 1`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := event.Inspect(raw).Event
+	var before int
+	_ = s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&before)
+	if err := s.AppendCanonical(ctx, []event.SignedEvent{duplicate}); err != nil {
+		t.Fatal(err)
+	}
+	var after int
+	_ = s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&after)
+	if after != before {
+		t.Fatalf("duplicate changed event count from %d to %d", before, after)
+	}
+	missing := strings.Repeat("a", 64)
+	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d77", Body: "orphan answer", Context: &event.RepositoryContext{Directory: "/repo"}})
+	content := event.Content{Type: event.TypeAnswer, Sender: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: agent.ID}, ThreadID: missing, Parents: []string{missing}, Scope: event.ScopeInstallationPrivate, Payload: payload}
+	orphan, err := s.signer.Sign(ctx, content, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCanonical(ctx, []event.SignedEvent{orphan}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, "0198c7ec-73b0-7cc3-a5f7-e31c77140d77")
+	if err != nil || !got.Incomplete || got.EventID != orphan.ID() {
+		t.Fatalf("orphan projection = %#v, %v", got, err)
+	}
+}
+
+func TestUnknownPeerCannotAppendCanonicalState(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	peerSecret := event.MustSecretKeyFromHex("88")
+	peerInstallation := "0198c7ec-73b0-7cc3-a5f7-e31c77140d02"
+	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d78", Body: "forged", Context: &event.RepositoryContext{Directory: "/repo"}})
+	content := event.Content{Type: event.TypeMessage, InstallationID: peerInstallation, Sender: &event.MailboxAddress{InstallationID: peerInstallation, MailboxID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d12"}, Recipient: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: model.HumanMailboxID}, Scope: event.ScopePeerAddressed, Payload: payload}
+	forged, err := event.Sign(content, time.Now().UTC(), peerSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCanonical(context.Background(), []event.SignedEvent{forged}); err == nil {
+		t.Fatal("unknown peer changed canonical state")
+	}
+	if _, err := s.Get(context.Background(), "0198c7ec-73b0-7cc3-a5f7-e31c77140d78"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown peer message = %v", err)
+	}
+}
+
+func TestPeerAddressedAppendDerivesExactOutboxAtomically(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	peerInstallation := "0198c7ec-73b0-7cc3-a5f7-e31c77140d02"
+	peerMailbox := "0198c7ec-73b0-7cc3-a5f7-e31c77140d12"
+	makeEvent := func(messageID, body string) event.SignedEvent {
+		payload, _ := event.MarshalPayload(event.TextPayload{MessageID: messageID, Body: body, Context: &event.RepositoryContext{Directory: "/repo"}})
+		content := event.Content{Type: event.TypeMessage, Sender: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: peerInstallation, MailboxID: peerMailbox}, Scope: event.ScopePeerAddressed, Payload: payload}
+		item, err := s.signer.Sign(ctx, content, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+	first := makeEvent("0198c7ec-73b0-7cc3-a5f7-e31c77140d79", "remote one")
+	if err := s.AppendCanonical(ctx, []event.SignedEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := s.PendingOutbox(ctx, 10)
+	if err != nil || len(jobs) != 1 || jobs[0].EventID != first.ID() || string(jobs[0].ExactCanonicalBytes) != string(first.Wire) {
+		t.Fatalf("outbox = %#v, %v", jobs, err)
+	}
+	var before int
+	_ = s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&before)
+	if _, err := s.db.Exec(`CREATE TRIGGER fail_outbox BEFORE INSERT ON outbox BEGIN SELECT RAISE(FAIL, 'forced outbox failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	second := makeEvent("0198c7ec-73b0-7cc3-a5f7-e31c77140d80", "remote two")
+	if err := s.AppendCanonical(ctx, []event.SignedEvent{second}); err == nil {
+		t.Fatal("forced outbox failure succeeded")
+	}
+	var after int
+	_ = s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&after)
+	if after != before {
+		t.Fatalf("outbox failure changed event count from %d to %d", before, after)
+	}
+}
+
+func TestPeerTrustDistrustAndMailboxShareAreSigned(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "share", "/repo")
+	peerID := "0198c7ec-73b0-7cc3-a5f7-e31c77140d02"
+	peerKey := event.MustSecretKeyFromHex("99").PublicKeyHex()
+	if err := s.TrustPeer(ctx, Peer{InstallationID: peerID, SignerKeyID: peerKey, Name: "server", Relays: []string{"wss://relay.example"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMailboxShare(ctx, agent.ID, peerID, true); err != nil {
+		t.Fatal(err)
+	}
+	var active int
+	if err := s.db.QueryRow(`SELECT active FROM mailbox_shares WHERE mailbox_id=? AND peer_installation_id=?`, agent.ID, peerID).Scan(&active); err != nil || active != 1 {
+		t.Fatalf("active share = %d, %v", active, err)
+	}
+	if err := s.SetMailboxShare(ctx, agent.ID, peerID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DistrustPeer(ctx, peerID); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := s.ListPeers(ctx)
+	if err != nil || len(peers) != 1 || peers[0].Trusted {
+		t.Fatalf("peers = %#v, %v", peers, err)
+	}
+	if err := s.db.QueryRow(`SELECT active FROM mailbox_shares WHERE mailbox_id=? AND peer_installation_id=?`, agent.ID, peerID).Scan(&active); err != nil || active != 0 {
+		t.Fatalf("revoked share = %d, %v", active, err)
+	}
+}
+
+func TestStagingAndBoundedQuarantine(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := s.Stage(ctx, []byte("retry"), "wss://relay", "event", "key locked", now, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < quarantineMaxRows+5; index++ {
+		if err := s.Quarantine(ctx, []byte("bad"), "wss://relay", "event", "bad signature", now.Add(time.Duration(index)*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var staged, quarantined int
+	if err := s.db.QueryRow(`SELECT count(*) FROM inbound_staging`).Scan(&staged); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM quarantine`).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if staged != 1 || quarantined != quarantineMaxRows {
+		t.Fatalf("staging=%d quarantine=%d", staged, quarantined)
+	}
+	var quarantineID int64
+	if err := s.db.QueryRow(`SELECT id FROM quarantine ORDER BY id LIMIT 1`).Scan(&quarantineID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReevaluateQuarantine(ctx, quarantineID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM inbound_staging`).Scan(&staged); err != nil || staged != 2 {
+		t.Fatalf("re-evaluated staging=%d, %v", staged, err)
 	}
 }
 
 func openStore(t *testing.T, path string) *SQLite {
 	t.Helper()
+	key, err := identity.KeyPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.Load(key); errors.Is(err, identity.ErrNotInitialized) {
+		if _, err := identity.Initialize(key, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)

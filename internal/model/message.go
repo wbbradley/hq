@@ -35,18 +35,23 @@ type Mailbox struct {
 }
 
 type Message struct {
-	ID                 string            `json:"id"`
-	Context            RepositoryContext `json:"context"`
-	SenderMailboxID    string            `json:"sender_mailbox_id"`
-	RecipientMailboxID string            `json:"recipient_mailbox_id"`
-	SenderLabel        string            `json:"sender"`
-	RecipientLabel     string            `json:"recipient"`
-	Body               string            `json:"body"`
-	Details            string            `json:"details,omitempty"`
-	ReplyTo            *string           `json:"reply_to,omitempty"`
-	CreatedAt          time.Time         `json:"created_at"`
-	ArchivedAt         *time.Time        `json:"archived_at,omitempty"`
-	CompletedAt        *time.Time        `json:"completed_at,omitempty"`
+	ID                      string            `json:"id"`
+	EventID                 string            `json:"event_id"`
+	ThreadID                string            `json:"thread_id"`
+	Incomplete              bool              `json:"incomplete_causal_history,omitempty"`
+	Context                 RepositoryContext `json:"context"`
+	SenderMailboxID         string            `json:"sender_mailbox_id"`
+	RecipientMailboxID      string            `json:"recipient_mailbox_id"`
+	SenderInstallationID    string            `json:"sender_installation_id"`
+	RecipientInstallationID string            `json:"recipient_installation_id"`
+	SenderLabel             string            `json:"sender"`
+	RecipientLabel          string            `json:"recipient"`
+	Body                    string            `json:"body"`
+	Details                 string            `json:"details,omitempty"`
+	ReplyTo                 *string           `json:"reply_to,omitempty"`
+	CreatedAt               time.Time         `json:"created_at"`
+	ArchivedAt              *time.Time        `json:"archived_at,omitempty"`
+	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
 }
 
 type Filter struct {
