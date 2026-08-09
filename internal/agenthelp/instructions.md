@@ -51,4 +51,10 @@ Do not use the human `tui`, `list`, `answer`, or `cancel` commands to consume th
 
 `wait` checks that the current mailbox sent the given message. `get MESSAGE_ID` is the direct-ID path for a cooperative agent that must inspect a message from another mailbox.
 
+HQ threads may contain more than one answer. `wait` returns the first answer available to the current mailbox, not a globally selected answer. Use `poll` to read later answers and async messages.
+
+Network events may arrive before their causal parents. `poll` and `get` can show an addressed message with incomplete causal history, but `wait` requires the original local question so HQ can prove mailbox ownership. Keep the event ID and treat a later copy as the same event.
+
+Cancellation does not erase an answer. A thread may show both facts when an answer arrived after the sender cancelled or when answer and cancellation were concurrent. Read the causal status and handle the answer if it still helps; do not assume that the answerer saw the cancellation.
+
 Bare `hq` opens the human TUI only when stdin and stdout are terminals. In non-interactive use, bare `hq` lists the open human inbox for the current work directory.

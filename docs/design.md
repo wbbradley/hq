@@ -1,5 +1,7 @@
 # HQ design
 
+HQ's durable event format and causal reduction rules are defined in [events.md](events.md). The current version 3 message tables predate that event model; the next storage revision will make signed events authoritative and rebuild the tables below as projections.
+
 ## Mailboxes and harness bindings
 
 HQ gives each mailbox an opaque UUID. One installation-wide mailbox represents the human. Each agent mailbox has one unique binding made from a harness name and the harness's external session ID. Namespacing prevents equal Codex, Claude Code, and Pi IDs from sharing a mailbox.

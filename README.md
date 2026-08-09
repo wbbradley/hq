@@ -108,7 +108,7 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 The version 3 schema resets all older HQ tables and data when HQ first opens an old database. HQ is still in green-field development and does not migrate version 1 or version 2 rows.
 
-See [docs/design.md](docs/design.md) for the schema and storage contract.
+See [docs/design.md](docs/design.md) for the schema and storage contract, and [docs/events.md](docs/events.md) for the signed event and causal reduction protocol that the next storage revision will adopt.
 
 ## Development
 
