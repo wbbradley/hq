@@ -66,7 +66,7 @@ func TestCodexCommandBuildsBridgeOptions(t *testing.T) {
 	if received.Directory != "/work/repo/child" || received.ResumeThreadID != "thread-42" || received.InitialPrompt != "continue working" {
 		t.Fatalf("options = %#v", received)
 	}
-	if received.Repository.Directory != "/work/repo/child" || received.Store == nil || received.Stderr != a.ErrOut || received.Sync != nil {
+	if received.Repository.Directory != "/work/repo/child" || received.Store == nil || received.Stderr != a.ErrOut || received.Sync != nil || received.LedgerPath != database+".codexbridge.json" {
 		t.Fatalf("dependencies = %#v", received)
 	}
 }

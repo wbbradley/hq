@@ -261,6 +261,11 @@ func (a *App) codex(ctx context.Context, s store.Store, args []string, databaseP
 		InitialPrompt: strings.Join(f.Args(), " "), Repository: a.repositoryContext(ctx, directory),
 		Store: s, Stderr: a.ErrOut,
 	}
+	resolvedDatabasePath, err := identity.ResolveDatabasePath(databasePath)
+	if err != nil {
+		return err
+	}
+	options.LedgerPath = resolvedDatabasePath + ".codexbridge.json"
 	if !noSync {
 		options.Sync = func(syncContext context.Context) error {
 			return a.trySync(syncContext, databasePath, s, false, "Codex bridge status saved")

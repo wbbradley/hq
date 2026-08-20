@@ -230,6 +230,38 @@ func TestMessageReplyAndDeliveryLifecycle(t *testing.T) {
 	}
 }
 
+func TestClaimCanExcludeReservedReplies(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "reserved-reply", "/repo")
+	question := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d71", agent.ID, model.HumanMailboxID, "Approve?")
+	if err := s.Create(ctx, question); err != nil {
+		t.Fatal(err)
+	}
+	reply := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d72", model.HumanMailboxID, agent.ID, "yes")
+	if err := s.Reply(ctx, question.ID, reply); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d73", model.HumanMailboxID, agent.ID, "ordinary")
+	if err := s.Create(ctx, ordinary); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.Claim(ctx, Claim{RecipientMailboxID: agent.ID, ExcludeReplyTo: []string{question.ID}}, "consumer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.ID != ordinary.ID {
+		t.Fatalf("claimed reserved reply %s instead of ordinary message %s", claimed.ID, ordinary.ID)
+	}
+	if err := s.Release(ctx, claimed.ID, "consumer"); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := s.Claim(ctx, Claim{ReplyTo: question.ID, RecipientMailboxID: agent.ID}, "reply-consumer")
+	if err != nil || reserved.ID != reply.ID {
+		t.Fatalf("reserved reply = %#v, %v", reserved, err)
+	}
+}
+
 func TestMailboxFilters(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
 	ctx := context.Background()

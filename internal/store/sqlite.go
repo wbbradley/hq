@@ -1088,6 +1088,14 @@ func (s *SQLite) Claim(ctx context.Context, claim Claim, token string) (model.Me
 	if claim.ReplyTo != "" {
 		where, args = append(where, "m.reply_to = ?"), append(args, claim.ReplyTo)
 	}
+	if len(claim.ExcludeReplyTo) > 0 {
+		placeholders := make([]string, len(claim.ExcludeReplyTo))
+		for index, replyTo := range claim.ExcludeReplyTo {
+			placeholders[index] = "?"
+			args = append(args, replyTo)
+		}
+		where = append(where, "(m.reply_to IS NULL OR m.reply_to NOT IN ("+strings.Join(placeholders, ",")+"))")
+	}
 	if claim.RecipientMailboxID != "" {
 		where, args = append(where, "m.recipient_mailbox_id = ?"), append(args, claim.RecipientMailboxID)
 	}

@@ -70,12 +70,40 @@ type TurnStartParams struct {
 }
 
 type Turn struct {
-	ID     string `json:"id"`
-	Status string `json:"status,omitempty"`
+	ID     string       `json:"id"`
+	Status string       `json:"status,omitempty"`
+	Items  []ThreadItem `json:"items,omitempty"`
 }
 
 type TurnResponse struct {
 	Turn Turn `json:"turn"`
+}
+
+type ThreadItem struct {
+	Type     string `json:"type"`
+	ID       string `json:"id"`
+	ClientID string `json:"clientId,omitempty"`
+}
+
+type ThreadReadParams struct {
+	ThreadID     string `json:"threadId"`
+	IncludeTurns bool   `json:"includeTurns"`
+}
+
+type TurnSteerParams struct {
+	ThreadID            string      `json:"threadId"`
+	ExpectedTurnID      string      `json:"expectedTurnId"`
+	Input               []TextInput `json:"input"`
+	ClientUserMessageID string      `json:"clientUserMessageId,omitempty"`
+}
+
+type TurnSteerResponse struct {
+	TurnID string `json:"turnId"`
+}
+
+type TurnNotification struct {
+	ThreadID string `json:"threadId"`
+	Turn     Turn   `json:"turn"`
 }
 
 type Notification struct {

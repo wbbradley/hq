@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/store"
 )
 
 type fakeMailboxStore struct {
@@ -44,6 +45,13 @@ func (s *fakeMailboxStore) Create(_ context.Context, message model.Message) erro
 	s.created <- struct{}{}
 	return nil
 }
+
+func (s *fakeMailboxStore) Claim(context.Context, store.Claim, string) (model.Message, error) {
+	return model.Message{}, store.ErrNotReady
+}
+
+func (s *fakeMailboxStore) Complete(context.Context, string, string) error { return nil }
+func (s *fakeMailboxStore) Release(context.Context, string, string) error  { return nil }
 
 type fakeProcess struct {
 	clientInput  *io.PipeWriter
@@ -139,7 +147,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	go func() {
 		done <- Run(ctx, Options{
 			Directory: "/work/repo", InitialPrompt: "inspect the queue", Starter: fakeStarter{process}, Store: store,
-			Repository: model.RepositoryContext{Directory: "/work/repo", Branch: "main"}, Stderr: io.Discard,
+			Repository: model.RepositoryContext{Directory: "/work/repo", Branch: "main"}, Stderr: io.Discard, Ledger: NewMemoryLedger(),
 		})
 	}()
 	waitForMessages(t, store, 1)
@@ -195,7 +203,7 @@ func TestRunResumesExplicitThreadWithoutDeveloperInstruction(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, Options{Directory: "/work/other", ResumeThreadID: "thread-existing", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/other"}, Stderr: io.Discard})
+		done <- Run(ctx, Options{Directory: "/work/other", ResumeThreadID: "thread-existing", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/other"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
 	}()
 	waitForMessages(t, store, 1)
 	<-requests
@@ -224,7 +232,7 @@ func TestRunReportsUnexpectedEOF(t *testing.T) {
 	store := newFakeMailboxStore()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(context.Background(), Options{Directory: "/work/repo", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard})
+		done <- Run(context.Background(), Options{Directory: "/work/repo", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
 	}()
 	waitForMessages(t, store, 1)
 	_ = process.clientInput.Close()
@@ -246,7 +254,7 @@ func TestRunReportsChildProcessFailure(t *testing.T) {
 	store := newFakeMailboxStore()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(context.Background(), Options{Directory: "/work/repo", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard})
+		done <- Run(context.Background(), Options{Directory: "/work/repo", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
 	}()
 	waitForMessages(t, store, 1)
 	process.finish(errors.New("exit status 7"))
@@ -262,6 +270,67 @@ func TestRunReportsChildProcessFailure(t *testing.T) {
 	if !strings.Contains(store.messages[1].Details, "exit status 7") {
 		t.Fatalf("terminal message = %#v", store.messages[1])
 	}
+}
+
+func TestBridgeDispatchesHQMessageEndToEnd(t *testing.T) {
+	fixture := newDispatcherFixture(t)
+	process := newFakeProcess()
+	requests := make(chan recordedRequest, 8)
+	runHandshakeServer(t, process, fixture.thread, requests)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
+			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
+			Ledger: NewMemoryLedger(), PollInterval: 2 * time.Millisecond,
+		})
+	}()
+	initialize := <-requests
+	initialized := <-requests
+	startThread := <-requests
+	if initialize.Method != "initialize" || initialized.Method != "initialized" || startThread.Method != "thread/start" {
+		t.Fatalf("handshake = %s, %s, %s", initialize.Method, initialized.Method, startThread.Method)
+	}
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex bridge ready")
+	messageID := "019c0000-0000-7000-8000-000000000117"
+	fixture.addHumanMessage(t, messageID, "from HQ", time.Now().UTC())
+	turn := <-requests
+	if turn.Method != "turn/start" {
+		t.Fatalf("inbound method = %s", turn.Method)
+	}
+	var params TurnStartParams
+	if json.Unmarshal(turn.Params, &params) != nil || params.ClientUserMessageID != messageID || params.Input[0].Text != "from HQ" {
+		t.Fatalf("turn params = %s", turn.Params)
+	}
+	waitForCompleted(t, fixture.store, messageID)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not stop")
+	}
+}
+
+func waitForStoreBody(t *testing.T, databaseStore *store.SQLite, recipientID, body string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		messages, err := databaseStore.List(context.Background(), model.Filter{RecipientMailboxID: recipientID, Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, message := range messages {
+			if message.Body == body {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("message %q was not stored", body)
 }
 
 func waitForMessages(t *testing.T, store *fakeMailboxStore, count int) {

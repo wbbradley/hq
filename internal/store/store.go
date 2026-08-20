@@ -43,6 +43,7 @@ var (
 type Claim struct {
 	MessageID          string
 	ReplyTo            string
+	ExcludeReplyTo     []string
 	RecipientMailboxID string
 }
 
