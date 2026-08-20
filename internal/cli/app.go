@@ -48,7 +48,8 @@ Human commands:
   cancel  Archive one inbox message
 
 Other commands:
-  codex      Bridge a Codex app-server thread through HQ
+  codex [--cwd PATH] [--resume THREAD_ID] [INITIAL PROMPT...]
+             Bridge a Codex app-server thread through HQ
   mailboxes  Find agent mailboxes seen in this repository
   identity   Create, inspect, back up, import, or reset the installation identity
   human      Show, pair, list, or revoke human account devices
@@ -63,6 +64,30 @@ Other commands:
 
 HQ detects Codex, Claude Code, and Pi sessions. HQ_SESSION is an advanced override.
 The default database is $XDG_STATE_HOME/hq/hq.db or ~/.local/state/hq/hq.db.
+`
+
+const codexUsage = `hq codex bridges one Codex app-server thread through an HQ mailbox.
+
+Usage:
+  hq [--db PATH] [--no-sync] codex [--cwd PATH] [--resume THREAD_ID] [INITIAL PROMPT...]
+
+Requirements:
+  Install and authenticate Codex CLI v0.148.0, and run hq identity init once.
+
+Options:
+  --cwd PATH          Thread working directory. Defaults to the current directory;
+                      relative paths are resolved from the current directory.
+  --resume THREAD_ID  Resume this exact Codex thread instead of starting a new one.
+
+Remaining arguments are joined as the optional initial prompt. Without a prompt, the
+bridge waits for HQ input. A new thread receives the structured-human-input instruction;
+a resumed thread keeps its existing instructions. The Codex thread ID is bound to one
+HQ mailbox, and restart/deduplication state is stored beside the HQ database in
+<database>.codexbridge.json.
+
+Questions, approvals, final output, and lifecycle status appear in the human HQ inbox.
+Approval replies must exactly match the choices shown by HQ. Secret-marked requests are
+rejected because HQ persists messages. Run only one bridge process for a thread.
 `
 
 var ErrNoMessages = errors.New("no messages ready")
@@ -137,7 +162,18 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		command, args = args[0], args[1:]
 	}
 	if command == "help" || command == "-h" || command == "--help" {
+		if len(args) == 1 && args[0] == "codex" {
+			_, err := io.WriteString(a.Out, codexUsage)
+			return err
+		}
+		if len(args) != 0 {
+			return fmt.Errorf("help takes no arguments or the topic codex")
+		}
 		_, err := io.WriteString(a.Out, usage)
+		return err
+	}
+	if command == "codex" && hasHelpFlag(args) {
+		_, err := io.WriteString(a.Out, codexUsage)
 		return err
 	}
 	if command == "agents" {
@@ -233,6 +269,18 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		note = "message saved"
 	}
 	return a.trySync(ctx, dbPath, s, false, note)
+}
+
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) codex(ctx context.Context, s store.Store, args []string, databasePath string, noSync bool) error {

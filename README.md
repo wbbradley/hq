@@ -69,6 +69,62 @@ hq poll
 
 The mailbox follows a resumed harness session across process restarts and directory changes. `--session ID` and `HQ_SESSION` select a `custom` mailbox for advanced use; an explicit flag wins. `hq mailboxes` lists mailbox candidates seen in the current directory, Git common directory, worktree, branch, or compact remote identity. The command does not claim or merge a mailbox.
 
+## Codex app-server bridge
+
+`hq codex` runs a Codex app-server thread as an HQ agent mailbox. It requires an installed and authenticated Codex CLI **v0.148.0** on `PATH` and an initialized HQ identity:
+
+```sh
+codex --version
+hq identity init
+```
+
+Start a new thread in the current directory, optionally with an initial prompt:
+
+```sh
+hq codex
+hq codex --cwd . "Inspect the failing tests and propose a fix"
+```
+
+`--cwd` defaults to the current directory; a relative path is resolved from that directory. Without an initial prompt, the bridge reports readiness and waits for HQ input. A new thread receives a narrow instruction to use structured human input whenever it needs an answer.
+
+Resume the exact same Codex conversation without replacing its existing instructions:
+
+```sh
+hq codex --cwd /path/to/repo --resume 019c0000-0000-7000-8000-000000000001
+```
+
+The ready inbox message includes the Codex thread ID and opaque HQ mailbox ID. In another terminal, open `hq`, select a row from that mailbox, and press `n` to send new work. Replies to completed Codex output also become ordinary input. The bridge starts a turn while idle and steers the active turn when Codex permits it.
+
+Structured questions and approvals appear as separate HQ inbox rows with Codex thread, turn, item, request, and HQ message IDs. Reply with exactly one choice shown in the details. Choices such as `acceptForSession`, `grantSession`, or a policy-amendment choice persist more authority than a one-time approval and are labeled `PERSISTS`. Permission denial and cancellation always return an empty turn-scoped profile. MCP form accepts require `accept {"field":"value"}` with a validated primitive JSON object; URL requests use `accept`, `decline`, or `cancel`.
+
+HQ persists message bodies. A Codex input field marked secret is therefore rejected before its label, question, options, or answer can be stored; the inbox receives only a generic diagnostic. Use Codex directly when a workflow genuinely requires non-persistent secret entry.
+
+Only final `item/completed` agent-message content is relayed. Streaming deltas, reasoning, raw events, command output, and tool progress stay out of HQ. Failed or interrupted turns get one concise status after any completed output.
+
+### Restart and delivery boundary
+
+The bridge stores delivery and emitted-output checkpoints beside the resolved HQ database as `<database>.codexbridge.json` with owner-only permissions. Accepted HQ messages carry their HQ ID as Codex `clientUserMessageId`; an uncertain send is reconciled against Codex thread history before retry. Canonical output uses deterministic HQ IDs and reconciles the HQ store before marking its ledger checkpoint, so replay after a normal restart does not duplicate it.
+
+This is an exactly-once recovery boundary for one bridge process and its restarts, not a distributed lock. HQ claims expire after 30 seconds and Codex steering errors are not a stable typed API in v0.148.0. Do not run two bridge processes for the same thread: concurrent processes can race after lease expiry, so cross-process exactly-once delivery is not promised.
+
+On cancellation, EOF, child failure, or a fatal output error, the bridge stops accepting input, releases uncommitted claims, cancels pending structured waits, drains accepted canonical output, emits one terminal HQ status when the store remains available, then closes or kills the child. App-server stderr is written separately as `hq codex: app-server: ...`; it is never parsed as protocol traffic.
+
+Troubleshooting:
+
+- Run `hq help codex` to confirm syntax and `codex --version` to confirm v0.148.0.
+- An unsupported server request stops the bridge with compatibility guidance instead of guessing a permissive response.
+- If the ready message never appears, inspect prefixed app-server stderr and the terminal error. Verify Codex authentication, the working directory, and HQ identity.
+- If relay sync is intentionally unavailable, use global `--no-sync`; local HQ and Codex delivery still operate.
+- Do not delete the sidecar ledger while a bridge is running.
+
+The opt-in smoke test checks the installed v0.148.0 executable and official initialize/initialized handshake without starting a turn or consuming model quota:
+
+```sh
+HQ_CODEX_SMOKE=1 go test ./internal/codexbridge -run '^TestInstalledCodexV01480Smoke$' -count=1 -v
+```
+
+The bridge protocol follows the official [Codex app-server documentation](https://learn.chatgpt.com/docs/app-server).
+
 ## Human use
 
 Run `hq` in a terminal to open the mailbox UI:
@@ -165,6 +221,7 @@ hq sync
 hq daemon run|status|stop
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
+hq codex [--cwd PATH] [--resume THREAD_ID] [INITIAL PROMPT...]
 hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
 ```
