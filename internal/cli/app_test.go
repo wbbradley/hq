@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wbbradley/hq/internal/agenthelp"
+	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
@@ -48,6 +49,42 @@ func initializeTestIdentity(t *testing.T, database string) {
 		if _, err := identity.Initialize(key, nil); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestCodexCommandBuildsBridgeOptions(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	var received codexbridge.Options
+	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error {
+		received = options
+		return nil
+	}
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "codex", "--cwd", "child", "--resume", "thread-42", "continue", "working"}); err != nil {
+		t.Fatal(err)
+	}
+	if received.Directory != "/work/repo/child" || received.ResumeThreadID != "thread-42" || received.InitialPrompt != "continue working" {
+		t.Fatalf("options = %#v", received)
+	}
+	if received.Repository.Directory != "/work/repo/child" || received.Store == nil || received.Stderr != a.ErrOut || received.Sync != nil {
+		t.Fatalf("dependencies = %#v", received)
+	}
+}
+
+func TestCodexCommandDefaultsToCurrentDirectoryAndEnablesSync(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	a.SyncOnce = func(context.Context, string, store.Store) error { return nil }
+	var received codexbridge.Options
+	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error {
+		received = options
+		return options.Sync(context.Background())
+	}
+	if err := a.Run(context.Background(), []string{"--db", database, "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if received.Directory != "/work/repo" || received.InitialPrompt != "" || received.Sync == nil {
+		t.Fatalf("options = %#v", received)
 	}
 }
 

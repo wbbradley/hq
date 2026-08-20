@@ -1,0 +1,1 @@
+{"id":"approval-1","method":"item/commandExecution/requestApproval","params":{"threadId":"019c0000-0000-7000-8000-000000000001","turnId":"019c0000-0000-7000-8000-000000000004","itemId":"item-1","command":"go test ./..."}}

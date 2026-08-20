@@ -16,6 +16,7 @@ import (
 	charmterm "github.com/charmbracelet/x/term"
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/agenthelp"
+	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/repoctx"
@@ -47,6 +48,7 @@ Human commands:
   cancel  Archive one inbox message
 
 Other commands:
+  codex      Bridge a Codex app-server thread through HQ
   mailboxes  Find agent mailboxes seen in this repository
   identity   Create, inspect, back up, import, or reset the installation identity
   human      Show, pair, list, or revoke human account devices
@@ -84,6 +86,7 @@ type App struct {
 	RunDaemon      func(context.Context, string, store.Store) error
 	DaemonStatus   func(string) (string, error)
 	StopDaemon     func(string) error
+	RunCodexBridge func(context.Context, codexbridge.Options) error
 }
 
 func New() *App {
@@ -102,6 +105,7 @@ func New() *App {
 		RunDaemon:      defaultRunDaemon,
 		DaemonStatus:   syncer.DaemonStatus,
 		StopDaemon:     syncer.StopDaemon,
+		RunCodexBridge: codexbridge.Run,
 		ReadPassword: func(prompt string) ([]byte, error) {
 			if _, err := io.WriteString(os.Stderr, prompt); err != nil {
 				return nil, err
@@ -180,6 +184,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		commandErr = a.answer(ctx, s, args)
 	case "cancel":
 		commandErr = a.cancel(ctx, s, args)
+	case "codex":
+		return a.codex(ctx, s, args, dbPath, noSync)
 	case "peer":
 		commandErr = a.peer(ctx, s, args)
 	case "human":
@@ -227,6 +233,40 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		note = "message saved"
 	}
 	return a.trySync(ctx, dbPath, s, false, note)
+}
+
+func (a *App) codex(ctx context.Context, s store.Store, args []string, databasePath string, noSync bool) error {
+	f := flags("codex")
+	workingDirectory := f.String("cwd", "", "Codex thread working directory")
+	resumeThreadID := f.String("resume", "", "existing Codex thread ID")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	baseDirectory, err := a.workDirectory()
+	if err != nil {
+		return err
+	}
+	directory := strings.TrimSpace(*workingDirectory)
+	if directory == "" {
+		directory = baseDirectory
+	} else if !filepath.IsAbs(directory) {
+		directory = filepath.Join(baseDirectory, directory)
+	}
+	directory = filepath.Clean(directory)
+	if a.RunCodexBridge == nil {
+		return errors.New("Codex bridge runner is unavailable")
+	}
+	options := codexbridge.Options{
+		Directory: directory, ResumeThreadID: strings.TrimSpace(*resumeThreadID),
+		InitialPrompt: strings.Join(f.Args(), " "), Repository: a.repositoryContext(ctx, directory),
+		Store: s, Stderr: a.ErrOut,
+	}
+	if !noSync {
+		options.Sync = func(syncContext context.Context) error {
+			return a.trySync(syncContext, databasePath, s, false, "Codex bridge status saved")
+		}
+	}
+	return a.RunCodexBridge(ctx, options)
 }
 
 func defaultRunDaemon(ctx context.Context, databasePath string, s store.Store) error {
