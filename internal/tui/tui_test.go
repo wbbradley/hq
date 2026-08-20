@@ -214,6 +214,36 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	}
 }
 
+func TestEArchivesSelectionWithoutReply(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d69", agent.ID, model.HumanMailboxID, "No reply needed")
+	if err := s.Create(ctx, inbound); err != nil {
+		t.Fatal(err)
+	}
+	m := app{ctx: ctx, store: s, messages: []model.Message{inbound}, editor: textarea.New()}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	if cmd == nil {
+		t.Fatal("e did not archive")
+	}
+	if msg := cmd().(archivedMsg); msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	archived, err := s.Get(ctx, inbound.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.ArchivedAt == nil {
+		t.Fatal("message was not archived")
+	}
+	replies, err := s.List(ctx, model.Filter{ReplyTo: inbound.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replies) != 0 {
+		t.Fatalf("replies = %#v", replies)
+	}
+}
+
 func TestShiftEnterAndCtrlJInsertNewlines(t *testing.T) {
 	editor := textarea.New()
 	editor.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"))

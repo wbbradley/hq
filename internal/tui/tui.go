@@ -67,6 +67,8 @@ type loadedMsg struct {
 
 type answeredMsg struct{ err error }
 
+type archivedMsg struct{ err error }
+
 type refreshMsg struct{}
 
 type syncMsg struct{ err error }
@@ -168,6 +170,12 @@ func (m app) answer() tea.Msg {
 	return answeredMsg{err: err}
 }
 
+func (m app) archive(id string) tea.Cmd {
+	return func() tea.Msg {
+		return archivedMsg{err: m.store.Archive(m.ctx, id)}
+	}
+}
+
 func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -243,6 +251,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor.Reset()
 			return m, tea.Batch(m.load, m.syncNow())
 		}
+	case archivedMsg:
+		m.err = msg.err
+		if msg.err == nil {
+			return m, tea.Batch(m.load, m.syncNow())
+		}
 	case tea.KeyPressMsg:
 		if m.answering {
 			switch msg.String() {
@@ -298,6 +311,10 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.composeTo = ""
 				m.editor.Focus()
 				return m, textarea.Blink
+			}
+		case "e":
+			if len(m.messages) > 0 && canArchive(m.messages[m.cursor]) {
+				return m, m.archive(m.messages[m.cursor].ID)
 			}
 		case "n":
 			if len(m.messages) > 0 {
@@ -419,6 +436,10 @@ func messageIndex(messages []model.Message, id string) int {
 
 func canReply(message model.Message) bool {
 	return message.RecipientMailboxID == model.HumanMailboxID && message.SenderMailboxID != model.HumanMailboxID && message.ArchivedAt == nil
+}
+
+func canArchive(message model.Message) bool {
+	return message.RecipientMailboxID == model.HumanMailboxID && message.ArchivedAt == nil
 }
 
 func agentMailbox(message model.Message) string {
@@ -556,7 +577,7 @@ func (m app) View() tea.View {
 		b.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
 	} else {
 		b.WriteString("\n\n")
-		b.WriteString(dim.Render("j/k move · enter reply · n new message · s sent · x archived · v status · r refresh · q quit · auto-refresh 1m"))
+		b.WriteString(dim.Render("j/k move · enter reply · e archive · n new message · s sent · x archived · v status · r refresh · q quit · auto-refresh 1m"))
 	}
 	view := tea.NewView(b.String())
 	view.AltScreen = true
