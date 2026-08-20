@@ -2,7 +2,7 @@
 
 Run `hq agents` first for the normal workflow.
 
-HQ commits each signed local event before relay sync. A message ID from `hq ask` proves that HQ saved the local message.
+HQ commits each signed local event before relay sync. A message ID from `hq send`, or the ID included in an interrupted `hq ask` error, proves that HQ saved the local message.
 
 After the local save, HQ runs a short relay sync and wakes a running sync daemon. A relay-pending note on stderr does not undo the local save. No daemon is required.
 

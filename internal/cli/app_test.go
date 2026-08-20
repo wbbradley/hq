@@ -73,6 +73,12 @@ func TestAgentsPrintsEmbeddedInstructionsWithoutOpeningStore(t *testing.T) {
 	if strings.Contains(out.String(), "export HQ_SESSION") || strings.Contains(out.String(), "same session ID") {
 		t.Fatal("agent help asks agents to manage session IDs")
 	}
+	if !strings.Contains(out.String(), "reply=$(hq ask") || !strings.Contains(out.String(), "message_id=$(hq send") || !strings.Contains(out.String(), "Do not add a timeout") {
+		t.Fatal("agent help does not teach blocking ask and asynchronous send")
+	}
+	if strings.Contains(out.String(), "wait --timeout") {
+		t.Fatal("agent help encourages routine wait timeouts")
+	}
 }
 
 func TestAgentsPrintsFocusedTopicWithoutOpeningStore(t *testing.T) {
@@ -153,7 +159,7 @@ func TestDetectedHarnessesAskWithoutSetup(t *testing.T) {
 				}
 				return ""
 			}
-			if err := a.Run(context.Background(), []string{"--db", db, "ask", "hello"}); err != nil {
+			if err := a.Run(context.Background(), []string{"--db", db, "send", "hello"}); err != nil {
 				t.Fatal(err)
 			}
 			id := strings.TrimSpace(out.String())
@@ -204,12 +210,92 @@ func TestDetectedHarnessesAskWithoutSetup(t *testing.T) {
 	}
 }
 
+func TestAskWaitsForReplyByDefault(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	initializeTestIdentity(t, database)
+	askStore := openTestStore(t, database)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	a, out := testApp(t, "")
+	a.Open = func(string) (store.Store, error) { return askStore, nil }
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "blocking-ask"})
+	done := make(chan error, 1)
+	go func() {
+		done <- a.Run(ctx, []string{"--no-sync", "--db", database, "ask", "Choose a port"})
+	}()
+
+	var question model.Message
+	deadline := time.Now().Add(time.Second)
+	for question.ID == "" && time.Now().Before(deadline) {
+		select {
+		case err := <-done:
+			t.Fatalf("ask returned before saving its question: %v", err)
+		default:
+		}
+		messages, err := askStore.List(ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Limit: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(messages) == 1 {
+			question = messages[0]
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if question.ID == "" {
+		t.Fatal("ask did not save its question")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("ask returned before a reply: %v", err)
+	default:
+	}
+
+	reply := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d70", "/work/repo", model.HumanMailboxID, question.SenderMailboxID, "8080")
+	if err := askStore.Reply(ctx, question.ID, reply); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("ask did not return the reply")
+	}
+	if out.String() != "8080\n" {
+		t.Fatalf("ask output = %q", out.String())
+	}
+}
+
+func TestAskTimeoutReportsSavedQuestionID(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, out := testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "timed-ask"})
+
+	err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "ask", "--timeout", "20ms", "--interval", "5ms", "Need an answer"})
+	if !errors.Is(err, context.DeadlineExceeded) || out.Len() != 0 {
+		t.Fatalf("ask error = %v, output = %q", err, out.String())
+	}
+	parts := strings.Fields(err.Error())
+	if len(parts) < 2 {
+		t.Fatalf("ask error lacks question ID: %v", err)
+	}
+	s := openTestStore(t, database)
+	defer s.Close()
+	question, getErr := s.Get(context.Background(), strings.TrimSuffix(parts[1], ":"))
+	if getErr != nil || question.Body != "Need an answer" {
+		t.Fatalf("saved question = %#v, %v", question, getErr)
+	}
+}
+
 func TestAskAnswerWaitAndOwnership(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "hq.db")
 	ctx := context.Background()
 	a, out := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "one"})
-	if err := a.Run(ctx, []string{"--db", db, "ask", "Choose a port"}); err != nil {
+	if err := a.Run(ctx, []string{"--db", db, "send", "Choose a port"}); err != nil {
 		t.Fatal(err)
 	}
 	id := strings.TrimSpace(out.String())
@@ -264,13 +350,13 @@ func TestExplicitAndEnvironmentOverridesSelectCustomMailbox(t *testing.T) {
 	ctx := context.Background()
 	a, out := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"HQ_SESSION": "shared", "CODEX_THREAD_ID": "codex"})
-	if err := a.Run(ctx, []string{"--db", db, "ask", "from env"}); err != nil {
+	if err := a.Run(ctx, []string{"--db", db, "send", "from env"}); err != nil {
 		t.Fatal(err)
 	}
 	firstID := strings.TrimSpace(out.String())
 	a, out = testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "other"})
-	if err := a.Run(ctx, []string{"--db", db, "ask", "--session", "shared", "explicit"}); err != nil {
+	if err := a.Run(ctx, []string{"--db", db, "send", "--session", "shared", "explicit"}); err != nil {
 		t.Fatal(err)
 	}
 	secondID := strings.TrimSpace(out.String())
@@ -300,13 +386,13 @@ func TestListArchiveModes(t *testing.T) {
 	ctx := context.Background()
 	a, out := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "one"})
-	if err := a.Run(ctx, []string{"--db", db, "ask", "open"}); err != nil {
+	if err := a.Run(ctx, []string{"--db", db, "send", "open"}); err != nil {
 		t.Fatal(err)
 	}
 	openID := strings.TrimSpace(out.String())
 	a, out = testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "one"})
-	if err := a.Run(ctx, []string{"--db", db, "ask", "closed"}); err != nil {
+	if err := a.Run(ctx, []string{"--db", db, "send", "closed"}); err != nil {
 		t.Fatal(err)
 	}
 	closedID := strings.TrimSpace(out.String())
@@ -343,7 +429,7 @@ func TestMailboxesFindsCandidatesWithoutClaiming(t *testing.T) {
 	ctx := context.Background()
 	a, _ := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "old"})
-	if err := a.Run(ctx, []string{"--db", db, "ask", "old"}); err != nil {
+	if err := a.Run(ctx, []string{"--db", db, "send", "old"}); err != nil {
 		t.Fatal(err)
 	}
 	a, out := testApp(t, "")
@@ -359,7 +445,7 @@ func TestAskReadsBodyFromStdinAndGetIsDirect(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "hq.db")
 	a, out := testApp(t, "Message from a pipe\n")
 	a.Getenv = envMap(map[string]string{"PI_SESSION_ID": "pi"})
-	if err := a.Run(context.Background(), []string{"--db", db, "ask", "--json"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", db, "send", "--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var sent model.Message
@@ -424,7 +510,7 @@ func TestPeerAndMailboxCommands(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "share"})
-	if err := a.Run(context.Background(), []string{"--db", database, "ask", "hello"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", database, "send", "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	s := openTestStore(t, database)
@@ -490,7 +576,7 @@ func TestForegroundSyncNoSyncAndDaemonWake(t *testing.T) {
 		calls++
 		return nil
 	}
-	if err := a.Run(context.Background(), []string{"--db", database, "ask", "sync me"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", database, "send", "sync me"}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 || len(strings.TrimSpace(out.String())) != 36 {
@@ -502,7 +588,7 @@ func TestForegroundSyncNoSyncAndDaemonWake(t *testing.T) {
 		t.Fatal("--no-sync ran sync")
 		return nil
 	}
-	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "ask", "offline"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "send", "offline"}); err != nil {
 		t.Fatal(err)
 	}
 	a, _ = testApp(t, "")
@@ -510,7 +596,7 @@ func TestForegroundSyncNoSyncAndDaemonWake(t *testing.T) {
 	a.SyncOnce = func(context.Context, string, store.Store) error { return syncer.ErrSyncLocked }
 	wakes := 0
 	a.WakeSync = func(string) error { wakes++; return nil }
-	if err := a.Run(context.Background(), []string{"--db", database, "ask", "wake daemon"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", database, "send", "wake daemon"}); err != nil {
 		t.Fatal(err)
 	}
 	if wakes != 1 {
@@ -523,7 +609,7 @@ func TestForegroundRelayFailureKeepsLocalSuccess(t *testing.T) {
 	a, out := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "failure"})
 	a.SyncOnce = func(context.Context, string, store.Store) error { return errors.New("relay offline") }
-	if err := a.Run(context.Background(), []string{"--db", database, "ask", "keep local"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", database, "send", "keep local"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(strings.TrimSpace(out.String())) != 36 || !strings.Contains(a.ErrOut.(*bytes.Buffer).String(), "message saved; relay sync pending") {
@@ -556,7 +642,7 @@ func TestWaitRunsBoundedSyncAndFailedWakeKeepsLocalSuccess(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, out := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "waiting"})
-	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "ask", "wait for me"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "send", "wait for me"}); err != nil {
 		t.Fatal(err)
 	}
 	messageID := strings.TrimSpace(out.String())
@@ -572,7 +658,7 @@ func TestWaitRunsBoundedSyncAndFailedWakeKeepsLocalSuccess(t *testing.T) {
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "failed-wake"})
 	a.SyncOnce = func(context.Context, string, store.Store) error { return syncer.ErrSyncLocked }
 	a.WakeSync = func(string) error { return errors.New("stale socket") }
-	if err := a.Run(context.Background(), []string{"--db", database, "ask", "wake can fail"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", database, "send", "wake can fail"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(strings.TrimSpace(out.String())) != 36 || !strings.Contains(a.ErrOut.(*bytes.Buffer).String(), "relay sync pending") {

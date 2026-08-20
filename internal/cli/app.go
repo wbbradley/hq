@@ -34,7 +34,8 @@ Usage:
 
 Agent commands:
   agents  Print instructions for agents, with optional focused topics
-  ask     Send a message to the human inbox; print its ID
+  ask     Send a question and wait for the human's reply
+  send    Send a message without waiting; print its ID
   wait    Wait for a reply to one message
   poll    Read and complete messages in an agent mailbox
   get     Read one message without changing it
@@ -159,7 +160,9 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	var commandErr error
 	switch command {
 	case "ask":
-		commandErr = a.ask(ctx, s, args)
+		return a.ask(ctx, s, args, dbPath, noSync)
+	case "send":
+		commandErr = a.send(ctx, s, args)
 	case "wait":
 		return a.wait(ctx, s, args, dbPath, noSync)
 	case "poll":
@@ -220,7 +223,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return commandErr
 	}
 	note := "local change saved"
-	if command == "ask" {
+	if command == "send" {
 		note = "message saved"
 	}
 	return a.trySync(ctx, dbPath, s, false, note)
@@ -317,7 +320,7 @@ func (a *App) trySync(ctx context.Context, databasePath string, s store.Store, s
 
 func mutatesState(command string, args []string) bool {
 	switch command {
-	case "ask", "answer", "cancel", "mailbox":
+	case "send", "answer", "cancel", "mailbox":
 		return true
 	case "peer":
 		return len(args) > 0 && args[0] != "list"
@@ -789,43 +792,80 @@ func flags(name string) *flag.FlagSet {
 	return f
 }
 
-func (a *App) ask(ctx context.Context, s store.Store, args []string) error {
-	f := flags("ask")
-	sessionID := f.String("session", "", "advanced session override")
-	directory := f.String("dir", "", "work directory scope")
-	details := f.String("details", "", "extra context")
-	jsonOutput := f.Bool("json", false, "write JSON")
-	if err := f.Parse(args); err != nil {
-		return err
+type questionOptions struct {
+	sessionID  string
+	directory  string
+	details    string
+	message    string
+	jsonOutput bool
+	timeout    time.Duration
+	interval   time.Duration
+}
+
+func (a *App) questionOptions(command string, args []string, waits bool) (questionOptions, error) {
+	f := flags(command)
+	var options questionOptions
+	f.StringVar(&options.sessionID, "session", "", "advanced session override")
+	f.StringVar(&options.directory, "dir", "", "work directory scope")
+	f.StringVar(&options.details, "details", "", "extra context")
+	f.BoolVar(&options.jsonOutput, "json", false, "write JSON")
+	if waits {
+		f.DurationVar(&options.timeout, "timeout", 0, "maximum wait time")
+		f.DurationVar(&options.interval, "interval", 250*time.Millisecond, "poll interval")
 	}
-	mailbox, repo, err := a.resolveMailbox(ctx, s, *sessionID, *directory)
+	if err := f.Parse(args); err != nil {
+		return questionOptions{}, err
+	}
+	options.message = strings.TrimSpace(strings.Join(f.Args(), " "))
+	if options.message == "" {
+		data, err := io.ReadAll(a.In)
+		if err != nil {
+			return questionOptions{}, fmt.Errorf("read message: %w", err)
+		}
+		options.message = strings.TrimSpace(string(data))
+	}
+	if options.message == "" {
+		return questionOptions{}, errors.New("message text is required")
+	}
+	if waits && options.interval <= 0 {
+		return questionOptions{}, errors.New("--interval must be positive")
+	}
+	if options.timeout < 0 {
+		return questionOptions{}, errors.New("--timeout must not be negative")
+	}
+	return options, nil
+}
+
+func (a *App) createQuestion(ctx context.Context, s store.Store, options questionOptions) (model.Message, error) {
+	mailbox, repo, err := a.resolveMailbox(ctx, s, options.sessionID, options.directory)
 	if err != nil {
-		return err
+		return model.Message{}, err
 	}
 	human, err := s.HumanMailbox(ctx)
 	if err != nil {
-		return err
-	}
-	prompt := strings.TrimSpace(strings.Join(f.Args(), " "))
-	if prompt == "" {
-		data, err := io.ReadAll(a.In)
-		if err != nil {
-			return fmt.Errorf("read message: %w", err)
-		}
-		prompt = strings.TrimSpace(string(data))
-	}
-	if prompt == "" {
-		return errors.New("message text is required")
+		return model.Message{}, err
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
-		return fmt.Errorf("make message ID: %w", err)
+		return model.Message{}, fmt.Errorf("make message ID: %w", err)
 	}
-	m := model.Message{ID: id.String(), Context: repo, SenderMailboxID: mailbox.ID, RecipientMailboxID: human.ID, SenderLabel: mailbox.Label, RecipientLabel: human.Label, Body: prompt, Details: *details, CreatedAt: time.Now().UTC()}
+	m := model.Message{ID: id.String(), Context: repo, SenderMailboxID: mailbox.ID, RecipientMailboxID: human.ID, SenderLabel: mailbox.Label, RecipientLabel: human.Label, Body: options.message, Details: options.details, CreatedAt: time.Now().UTC()}
 	if err := s.Create(ctx, m); err != nil {
+		return model.Message{}, err
+	}
+	return m, nil
+}
+
+func (a *App) send(ctx context.Context, s store.Store, args []string) error {
+	options, err := a.questionOptions("send", args, false)
+	if err != nil {
 		return err
 	}
-	if *jsonOutput {
+	m, err := a.createQuestion(ctx, s, options)
+	if err != nil {
+		return err
+	}
+	if options.jsonOutput {
 		stored, err := s.Get(ctx, m.ID)
 		if err != nil {
 			return err
@@ -833,6 +873,27 @@ func (a *App) ask(ctx context.Context, s store.Store, args []string) error {
 		return writeJSON(a.Out, stored)
 	}
 	return writeOnce(a.Out, []byte(m.ID+"\n"))
+}
+
+func (a *App) ask(ctx context.Context, s store.Store, args []string, databasePath string, noSync bool) error {
+	options, err := a.questionOptions("ask", args, true)
+	if err != nil {
+		return err
+	}
+	m, err := a.createQuestion(ctx, s, options)
+	if err != nil {
+		return err
+	}
+	nextSync := time.Time{}
+	if !noSync {
+		a.trySync(ctx, databasePath, s, false, "message saved")
+		nextSync = time.Now().Add(5 * time.Second)
+	}
+	err = a.waitForReply(ctx, s, m.ID, options.sessionID, options.directory, options.jsonOutput, options.timeout, options.interval, databasePath, noSync, nextSync)
+	if err != nil {
+		return fmt.Errorf("ask %s: %w", m.ID, err)
+	}
+	return nil
 }
 
 func (a *App) wait(ctx context.Context, s store.Store, args []string, databasePath string, noSync bool) error {
@@ -851,13 +912,19 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string, databasePa
 	if *interval <= 0 {
 		return errors.New("--interval must be positive")
 	}
-	if *timeout > 0 {
+	if *timeout < 0 {
+		return errors.New("--timeout must not be negative")
+	}
+	return a.waitForReply(ctx, s, f.Args()[0], *sessionID, *directory, *jsonOutput, *timeout, *interval, databasePath, noSync, time.Time{})
+}
+
+func (a *App) waitForReply(ctx context.Context, s store.Store, id, sessionID, directory string, jsonOutput bool, timeout, interval time.Duration, databasePath string, noSync bool, nextSync time.Time) error {
+	if timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	id := f.Args()[0]
-	mailbox, _, err := a.resolveMailbox(ctx, s, *sessionID, *directory)
+	mailbox, _, err := a.resolveMailbox(ctx, s, sessionID, directory)
 	if err != nil {
 		return err
 	}
@@ -871,7 +938,6 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string, databasePa
 	if original.RecipientMailboxID != model.HumanMailboxID {
 		return errors.New("wait needs an agent-to-human message ID")
 	}
-	nextSync := time.Time{}
 	for {
 		if !noSync && !time.Now().Before(nextSync) {
 			a.trySync(ctx, databasePath, s, false, "")
@@ -880,7 +946,7 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string, databasePa
 		token := uuid.NewString()
 		m, err := s.Claim(ctx, store.Claim{ReplyTo: id, RecipientMailboxID: mailbox.ID}, token)
 		if err == nil {
-			if err := deliver(a.Out, m, *jsonOutput); err != nil {
+			if err := deliver(a.Out, m, jsonOutput); err != nil {
 				_ = s.Release(context.Background(), m.ID, token)
 				return err
 			}
@@ -906,7 +972,7 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string, databasePa
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(*interval):
+		case <-time.After(interval):
 		}
 	}
 }

@@ -5,10 +5,18 @@ Run `hq agents` first for the normal workflow.
 ## Ask
 
 ```text
-hq ask [--session ID] [--dir PATH] [--details TEXT] [--json] [MESSAGE]
+hq ask [--session ID] [--dir PATH] [--details TEXT] [--timeout DURATION] [--interval DURATION] [--json] [MESSAGE]
 ```
 
-`ask` reads the message from stdin when no message argument is present. Plain output is the message ID. JSON output is available with `--json`.
+`ask` reads the question from stdin when no message argument is present, sends it, and waits indefinitely for the first reply. Plain output is the reply body. JSON output is the reply message. Do not set `--timeout` unless the human supplied a real deadline. If waiting ends with an error, the error includes the saved question ID for use with `wait`.
+
+## Send
+
+```text
+hq send [--session ID] [--dir PATH] [--details TEXT] [--json] [MESSAGE]
+```
+
+`send` is the asynchronous form. It reads the message from stdin when no message argument is present and returns immediately after saving and attempting delivery. Plain output is the message ID. JSON output is the sent message. Save the ID if you may later call `wait`.
 
 ## Wait
 
@@ -16,7 +24,7 @@ hq ask [--session ID] [--dir PATH] [--details TEXT] [--json] [MESSAGE]
 hq wait [--session ID] [--dir PATH] [--timeout DURATION] [--interval DURATION] [--json] MESSAGE_ID
 ```
 
-Plain output is the first reply body. `wait` checks that the current mailbox sent the given message.
+Plain output is the first reply body. `wait` checks that the current mailbox sent the given message and waits indefinitely by default. Do not set `--timeout` unless the human supplied a real deadline.
 
 ## Poll
 

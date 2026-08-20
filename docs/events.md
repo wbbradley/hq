@@ -68,7 +68,7 @@ Fields have these rules:
 
 Event bodies and details must contain valid UTF-8. A body may not exceed 32,768 bytes. Details may not exceed 16,384 bytes. Schema version 1 does not carry files or binary data.
 
-Local message payloads also carry a stable message UUID and an immutable repository-context snapshot. The UUID is the short user-facing handle accepted by `get`, `wait`, `answer`, and `cancel`. The Nostr event ID remains the signed deduplication key and causal reference. Remote protocol work may change the handle format before HQ 1.0.
+Local message payloads also carry a stable message UUID and an immutable repository-context snapshot. `send` prints this UUID; it is the short user-facing handle accepted by `get`, `wait`, `answer`, and `cancel`. The Nostr event ID remains the signed deduplication key and causal reference. Remote protocol work may change the handle format before HQ 1.0.
 
 ## Threads and causal links
 

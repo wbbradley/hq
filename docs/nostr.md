@@ -57,7 +57,7 @@ Catch-up starts a live kind-1059 subscription filtered by the local root `p` tag
 
 Reconnect uses bounded exponential backoff. One unavailable relay does not remove queued work. Relay attempts, rejection text, retry times, auth state, EOSE time, and connection errors are unsigned node facts.
 
-Each mutating CLI command commits its canonical event before a bounded foreground sync pass. `--no-sync` is the explicit offline switch. The stable stdout result, including the bare `hq ask` message ID, does not include sync status; a pending notice goes to stderr. `wait` performs bounded passes while it waits.
+Each mutating CLI command commits its canonical event before a bounded foreground sync pass. `--no-sync` is the explicit offline switch. The stable stdout result, including the bare `hq send` message ID, does not include sync status; a pending notice goes to stderr. `ask` and `wait` perform bounded passes while they wait indefinitely for a reply unless an explicit timeout is supplied.
 
 `hq daemon run` is optional. The daemon holds the sync lock, keeps live subscriptions open, checks the durable outbox every 30 seconds, and accepts wake, status, and stop commands over a mode-0600 Unix socket next to the database. A lost wake does not lose work because the outbox stays durable and polling continues. The CLI still opens SQLite directly under WAL mode. Windows keeps the same service interfaces but does not yet expose local daemon control.
 

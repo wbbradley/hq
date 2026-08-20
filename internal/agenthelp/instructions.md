@@ -1,26 +1,34 @@
 # HQ instructions for agents
 
-Use HQ for async contact with the human. HQ binds a private mailbox to the current Codex, Claude Code, or Pi session.
+Use HQ to ask the human questions and send asynchronous messages. HQ binds a private mailbox to the current Codex, Claude Code, or Pi session.
 
-## Send a question or work item
+## Ask a question
 
-Write a clear message that states what the human should provide. Put context and tradeoffs in `--details`. Save the message ID printed by `ask`.
+Write a clear question that states what the human should provide. Put context and tradeoffs in `--details`. `ask` waits until the human replies and prints the reply.
 
 ```sh
-message_id=$(hq ask \
+reply=$(hq ask \
   --details "Option A keeps the old API. Option B removes it." \
   "Should I choose option A or option B?")
 ```
 
-## Read messages
+Do not add a timeout. The human may reply much later. Use `--timeout` only when the human has given a real deadline for the answer.
 
-When a reply blocks all useful work, wait for the answer:
+## Send without waiting
+
+Use `send` only when the message is fire-and-forget or useful work can continue before the reply. It prints the saved message ID.
 
 ```sh
-reply=$(hq wait --timeout 30m "$message_id")
+message_id=$(hq send "I finished the migration. Review it when convenient.")
 ```
 
-When other work remains, keep working and check later:
+If a later reply becomes blocking, wait indefinitely for that specific message:
+
+```sh
+reply=$(hq wait "$message_id")
+```
+
+Use `poll` for unsolicited messages and replies that were intentionally left asynchronous:
 
 ```sh
 hq poll

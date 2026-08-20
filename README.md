@@ -53,12 +53,17 @@ hq agents delivery-semantics
 HQ detects `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, or `PI_SESSION_ID` and binds one private mailbox to that namespaced harness session. Agents do not need to manage a session ID. HQ stops with an error if more than one built-in harness ID is present because silent routing could select the wrong mailbox.
 
 ```sh
-message_id=$(hq ask "Which API name should I use?")
-reply=$(hq wait --timeout 30m "$message_id")
+reply=$(hq ask "Which API name should I use?")
+
+# Send asynchronously, then optionally wait for its reply later.
+message_id=$(hq send "Review the completed migration when convenient.")
+later_reply=$(hq wait "$message_id")
 
 # Read replies and unsolicited messages in this agent mailbox.
 hq poll
 ```
+
+`ask` is request-response by default: it waits without a timeout until the human replies. Use `send` when no reply is needed immediately or useful work can continue asynchronously. `wait` also waits indefinitely by default; add `--timeout` only for a real deadline, not as a routine polling bound.
 
 `poll` exits with code 3 and writes nothing when the mailbox has no ready messages.
 
@@ -130,7 +135,8 @@ See [docs/lan.md](docs/lan.md) for the supported retained-relay setup, systemd a
 ## Command summary
 
 ```text
-hq ask [--session ID] [--dir PATH] [--details TEXT] [--json] [MESSAGE]
+hq ask [--session ID] [--dir PATH] [--details TEXT] [--timeout DURATION] [--interval DURATION] [--json] [MESSAGE]
+hq send [--session ID] [--dir PATH] [--details TEXT] [--json] [MESSAGE]
 hq wait [--session ID] [--dir PATH] [--timeout DURATION] [--interval DURATION] [--json] MESSAGE_ID
 hq poll [--session ID] [--dir PATH] [--json]
 hq get MESSAGE_ID
