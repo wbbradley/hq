@@ -236,6 +236,43 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	}
 }
 
+func TestRunReportsInitialTurnFailureWithSingleTerminalStatus(t *testing.T) {
+	process := newFakeProcess()
+	go func() {
+		defer process.finish(nil)
+		scanner := bufio.NewScanner(process.serverInput)
+		for scanner.Scan() {
+			var request recordedRequest
+			if json.Unmarshal(scanner.Bytes(), &request) != nil {
+				return
+			}
+			switch request.Method {
+			case "initialize":
+				_, _ = io.WriteString(process.serverOutput, `{"id":1,"result":{}}`+"\n")
+			case "initialized":
+			case "thread/start":
+				_, _ = io.WriteString(process.serverOutput, `{"id":2,"result":{"thread":{"id":"thread-initial-failure"}}}`+"\n")
+			case "turn/start":
+				_, _ = io.WriteString(process.serverOutput, `{"id":3,"error":{"code":-32000,"message":"model unavailable"}}`+"\n")
+			}
+		}
+	}()
+	store := newFakeMailboxStore()
+	err := Run(context.Background(), Options{
+		Directory: "/work/repo", InitialPrompt: "begin", Starter: fakeStarter{process}, Store: store,
+		Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "model unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+	store.mu.Lock()
+	messages := append([]model.Message(nil), store.messages...)
+	store.mu.Unlock()
+	if len(messages) != 2 || messages[0].Body != "Codex bridge ready" || messages[1].Body != "Codex bridge stopped" || !strings.Contains(messages[1].Details, "model unavailable") {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
 func TestRunResumesExplicitThreadWithoutDeveloperInstruction(t *testing.T) {
 	process := newFakeProcess()
 	requests := make(chan recordedRequest, 4)
@@ -353,6 +390,64 @@ func TestBridgeDispatchesHQMessageEndToEnd(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("bridge did not stop")
+	}
+}
+
+func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
+	fixture := newDispatcherFixture(t)
+	process := newFakeProcess()
+	requests := make(chan recordedRequest, 4)
+	runHandshakeServer(t, process, fixture.thread, requests)
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(context.Background(), Options{
+			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
+			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
+			Ledger: NewMemoryLedger(), PollInterval: 2 * time.Millisecond,
+		})
+	}()
+	<-requests
+	<-requests
+	<-requests
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex bridge ready")
+
+	notifications := []string{
+		`{"method":"item/agentMessage/delta","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","itemId":"agent-output","delta":"partial"}}`,
+		`{"method":"item/completed","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","item":{"type":"reasoning","id":"reason-output","summary":["hidden"]}}}`,
+		`{"method":"item/completed","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","item":{"type":"agentMessage","id":"agent-output","text":"Authoritative answer","phase":"final_answer"}}}`,
+		`{"method":"item/completed","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","item":{"type":"agentMessage","id":"agent-output","text":"Authoritative answer","phase":"final_answer"}}}`,
+		`{"method":"turn/completed","params":{"threadId":"` + fixture.thread + `","turn":{"id":"turn-output","status":"failed","error":{"message":"connection lost"}}}}`,
+	}
+	for _, notification := range notifications {
+		if _, err := io.WriteString(process.serverOutput, notification+"\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	process.finish(errors.New("exit status 9"))
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "exit status 9") {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not stop after child failure")
+	}
+
+	messages, err := fixture.store.List(context.Background(), model.Filter{RecipientMailboxID: model.HumanMailboxID, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bodies []string
+	counts := make(map[string]int)
+	for _, message := range messages {
+		bodies = append(bodies, message.Body)
+		counts[message.Body]++
+	}
+	if counts["Authoritative answer"] != 1 || counts["Codex turn failed"] != 1 || counts["Codex bridge stopped"] != 1 || counts["partial"] != 0 {
+		t.Fatalf("body counts = %#v, all=%#v", counts, bodies)
+	}
+	if len(bodies) != 4 || bodies[0] != "Codex bridge ready" || bodies[1] != "Authoritative answer" || bodies[2] != "Codex turn failed" || bodies[3] != "Codex bridge stopped" {
+		t.Fatalf("message order = %#v", bodies)
 	}
 }
 

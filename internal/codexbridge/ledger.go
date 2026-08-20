@@ -89,6 +89,16 @@ func OpenFileLedger(path string) (*FileLedger, error) {
 			}
 		}
 	}
+	for threadID, outputs := range ledger.state.Outputs {
+		if threadID == "" {
+			return nil, errors.New("delivery ledger contains an empty output thread ID")
+		}
+		for itemID, sent := range outputs {
+			if itemID == "" || !sent {
+				return nil, fmt.Errorf("delivery ledger contains invalid output for thread %q item %q", threadID, itemID)
+			}
+		}
+	}
 	return ledger, nil
 }
 

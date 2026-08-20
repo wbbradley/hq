@@ -53,6 +53,7 @@ func TestFileLedgerRejectsCorruptAndIncompatibleState(t *testing.T) {
 		{name: "corrupt", raw: "{nope", want: "decode delivery ledger"},
 		{name: "version", raw: `{"version":99,"deliveries":{},"outputs":{}}`, want: "version 99 is unsupported"},
 		{name: "state", raw: `{"version":1,"deliveries":{"thread":{"message":{"state":"mystery","updated_at":"2026-08-20T00:00:00Z"}}},"outputs":{}}`, want: "contains invalid record"},
+		{name: "output", raw: `{"version":1,"deliveries":{},"outputs":{"thread":{"item":false}}}`, want: "contains invalid output"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

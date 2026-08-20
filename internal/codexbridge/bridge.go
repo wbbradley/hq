@@ -72,8 +72,9 @@ func Run(ctx context.Context, options Options) error {
 
 	transportContext, cancelTransport := context.WithCancel(context.Background())
 	threadState := NewThreadState("")
-	notifications := NewNotificationHub(threadState)
 	requestRouter := NewRequestRouter(options.Store, replies)
+	outputRelay := NewOutputRelay(options.Store, ledger, options.Sync)
+	notifications := NewNotificationHub(threadState, outputRelay)
 	client := NewClient(transportContext, process.Output(), process.Input(), requestRouter, notifications)
 	var mailbox model.Mailbox
 	shutdown := func() {
@@ -91,6 +92,7 @@ func Run(ctx context.Context, options Options) error {
 		client.StopRequestsAndWait()
 	}
 	defer stopRequests()
+	defer outputRelay.StopAndWait()
 
 	initialize := InitializeParams{
 		ClientInfo:   ClientInfo{Name: "hq", Title: "HQ Codex bridge", Version: TestedCodexVersion},
@@ -138,14 +140,22 @@ func Run(ctx context.Context, options Options) error {
 		return fmt.Errorf("bind Codex thread to HQ mailbox: %w", err)
 	}
 	requestRouter.Bind(threadID, mailbox, options.Repository, options.Sync, options.PollInterval)
+	outputRelay.Bind(threadID, mailbox, options.Repository)
 	if err := sendStatus(ctx, options, mailbox, threadID, "Codex bridge ready", "The Codex app-server thread is connected and waiting for HQ input."); err != nil {
 		return err
+	}
+	finishBeforeDispatcher := func(bridgeErr error, status string) error {
+		stopRequests()
+		outputRelay.StopAndWait()
+		_ = sendStatusAt(context.Background(), options, mailbox, threadID, "Codex bridge stopped", status, outputRelay.nextCreatedAt())
+		return bridgeErr
 	}
 
 	if prompt := strings.TrimSpace(options.InitialPrompt); prompt != "" {
 		messageID, err := uuid.NewV7()
 		if err != nil {
-			return fmt.Errorf("create initial Codex message ID: %w", err)
+			wrapped := fmt.Errorf("create initial Codex message ID: %w", err)
+			return finishBeforeDispatcher(wrapped, wrapped.Error())
 		}
 		params := TurnStartParams{
 			ThreadID: threadID, Input: []TextInput{{Type: "text", Text: prompt}}, ClientUserMessageID: messageID.String(),
@@ -153,10 +163,10 @@ func Run(ctx context.Context, options Options) error {
 		var turnResponse TurnResponse
 		if err := client.Call(ctx, "turn/start", params, &turnResponse); err != nil {
 			if ctx.Err() != nil {
-				_ = sendStatus(context.Background(), options, mailbox, threadID, "Codex bridge stopped", "Bridge cancelled; the app-server process is being terminated.")
-				return nil
+				return finishBeforeDispatcher(nil, "Bridge cancelled; the app-server process is being terminated.")
 			}
-			return fmt.Errorf("start initial Codex turn: %w", err)
+			wrapped := fmt.Errorf("start initial Codex turn: %w", err)
+			return finishBeforeDispatcher(wrapped, wrapped.Error())
 		}
 		threadState.SetActive(turnResponse.Turn.ID)
 	}
@@ -177,37 +187,46 @@ func Run(ctx context.Context, options Options) error {
 		<-dispatcherDone
 	}
 	defer stopDispatcher()
+	stopRuntime := func() {
+		stopDispatcher()
+		stopRequests()
+		outputRelay.StopAndWait()
+	}
+	finish := func(bridgeErr error, status string) error {
+		stopRuntime()
+		_ = sendStatusAt(context.Background(), options, mailbox, threadID, "Codex bridge stopped", status, outputRelay.nextCreatedAt())
+		return bridgeErr
+	}
 
 	select {
 	case <-ctx.Done():
-		stopDispatcher()
-		stopRequests()
-		_ = sendStatus(context.Background(), options, mailbox, threadID, "Codex bridge stopped", "Bridge cancelled; the app-server process is being terminated.")
-		return nil
+		return finish(nil, "Bridge cancelled; the app-server process is being terminated.")
 	case <-client.Done():
-		stopDispatcher()
-		stopRequests()
 		transportErr := client.Err()
 		select {
 		case <-processDone:
 			transportErr = processExitError(processErr)
 		case <-time.After(100 * time.Millisecond):
 		}
-		_ = sendStatus(context.Background(), options, mailbox, threadID, "Codex bridge stopped", transportErr.Error())
-		return transportErr
+		return finish(transportErr, transportErr.Error())
 	case <-processDone:
-		stopDispatcher()
-		stopRequests()
+		select {
+		case <-client.Done():
+		case <-time.After(time.Second):
+		}
 		exitErr := processExitError(processErr)
-		_ = sendStatus(context.Background(), options, mailbox, threadID, "Codex bridge stopped", exitErr.Error())
-		return exitErr
+		return finish(exitErr, exitErr.Error())
 	case <-dispatcherDone:
-		stopRequests()
 		if dispatcherErr == nil {
 			dispatcherErr = errors.New("Codex HQ input dispatcher stopped unexpectedly")
 		}
-		_ = sendStatus(context.Background(), options, mailbox, threadID, "Codex bridge stopped", dispatcherErr.Error())
-		return dispatcherErr
+		return finish(dispatcherErr, dispatcherErr.Error())
+	case <-outputRelay.Done():
+		outputErr := outputRelay.Err()
+		if outputErr == nil {
+			outputErr = errors.New("Codex output relay stopped unexpectedly")
+		}
+		return finish(outputErr, outputErr.Error())
 	}
 }
 
@@ -219,6 +238,10 @@ func processExitError(err error) error {
 }
 
 func sendStatus(ctx context.Context, options Options, mailbox model.Mailbox, threadID, body, status string) error {
+	return sendStatusAt(ctx, options, mailbox, threadID, body, status, time.Now().UTC())
+}
+
+func sendStatusAt(ctx context.Context, options Options, mailbox model.Mailbox, threadID, body, status string, createdAt time.Time) error {
 	human, err := options.Store.HumanMailbox(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve human mailbox: %w", err)
@@ -230,7 +253,7 @@ func sendStatus(ctx context.Context, options Options, mailbox model.Mailbox, thr
 	details := fmt.Sprintf("Codex thread: %s\nHQ mailbox: %s\nStatus: %s", threadID, mailbox.ID, status)
 	message := model.Message{
 		ID: messageID.String(), Context: options.Repository, SenderMailboxID: mailbox.ID,
-		RecipientMailboxID: human.ID, Body: body, Details: details, CreatedAt: time.Now().UTC(),
+		RecipientMailboxID: human.ID, Body: body, Details: details, CreatedAt: createdAt,
 	}
 	if err := options.Store.Create(ctx, message); err != nil {
 		return fmt.Errorf("send Codex bridge status to HQ: %w", err)

@@ -1,0 +1,1 @@
+{"method":"turn/completed","params":{"threadId":"019c0000-0000-7000-8000-000000000001","turn":{"id":"019c0000-0000-7000-8000-000000000004","items":[],"status":"failed","error":{"message":"upstream unavailable","codexErrorInfo":null,"additionalDetails":null}}}}

@@ -73,6 +73,13 @@ type Turn struct {
 	ID     string       `json:"id"`
 	Status string       `json:"status,omitempty"`
 	Items  []ThreadItem `json:"items,omitempty"`
+	Error  *TurnError   `json:"error,omitempty"`
+}
+
+type TurnError struct {
+	Message           string          `json:"message"`
+	CodexErrorInfo    json.RawMessage `json:"codexErrorInfo,omitempty"`
+	AdditionalDetails string          `json:"additionalDetails,omitempty"`
 }
 
 type TurnResponse struct {
@@ -83,6 +90,14 @@ type ThreadItem struct {
 	Type     string `json:"type"`
 	ID       string `json:"id"`
 	ClientID string `json:"clientId,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+}
+
+type ItemCompletedNotification struct {
+	ThreadID string     `json:"threadId"`
+	TurnID   string     `json:"turnId"`
+	Item     ThreadItem `json:"item"`
 }
 
 type ThreadReadParams struct {

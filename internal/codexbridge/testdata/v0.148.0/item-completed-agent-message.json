@@ -1,0 +1,1 @@
+{"method":"item/completed","params":{"threadId":"019c0000-0000-7000-8000-000000000001","turnId":"019c0000-0000-7000-8000-000000000004","item":{"type":"agentMessage","id":"item-agent-1","text":"Canonical answer","phase":"final_answer"},"completedAtMs":1787266800000}}
