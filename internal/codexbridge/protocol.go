@@ -116,3 +116,77 @@ type ServerRequest struct {
 	Method string
 	Params json.RawMessage
 }
+
+type RequestUserInputOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+type RequestUserInputQuestion struct {
+	ID       string                   `json:"id"`
+	Header   string                   `json:"header"`
+	Question string                   `json:"question"`
+	Options  []RequestUserInputOption `json:"options"`
+	IsOther  bool                     `json:"isOther"`
+	IsSecret bool                     `json:"isSecret"`
+}
+
+type RequestUserInputParams struct {
+	ThreadID   string                     `json:"threadId"`
+	TurnID     string                     `json:"turnId"`
+	ItemID     string                     `json:"itemId"`
+	IsBlocking bool                       `json:"isBlocking"`
+	Questions  []RequestUserInputQuestion `json:"questions"`
+}
+
+type NetworkApprovalContext struct {
+	Host     string `json:"host"`
+	Protocol string `json:"protocol"`
+}
+
+type NetworkPolicyAmendment struct {
+	Action string `json:"action"`
+	Host   string `json:"host"`
+}
+
+type CommandApprovalParams struct {
+	ThreadID                        string                  `json:"threadId"`
+	TurnID                          string                  `json:"turnId"`
+	ItemID                          string                  `json:"itemId"`
+	ApprovalID                      string                  `json:"approvalId"`
+	Command                         string                  `json:"command"`
+	CWD                             string                  `json:"cwd"`
+	Reason                          string                  `json:"reason"`
+	CommandActions                  json.RawMessage         `json:"commandActions"`
+	NetworkApprovalContext          *NetworkApprovalContext `json:"networkApprovalContext"`
+	ProposedExecpolicyAmendment     []string                `json:"proposedExecpolicyAmendment"`
+	ProposedNetworkPolicyAmendments []json.RawMessage       `json:"proposedNetworkPolicyAmendments"`
+}
+
+type FileChangeApprovalParams struct {
+	ThreadID  string `json:"threadId"`
+	TurnID    string `json:"turnId"`
+	ItemID    string `json:"itemId"`
+	Reason    string `json:"reason"`
+	GrantRoot string `json:"grantRoot"`
+}
+
+type PermissionApprovalParams struct {
+	ThreadID    string          `json:"threadId"`
+	TurnID      string          `json:"turnId"`
+	ItemID      string          `json:"itemId"`
+	CWD         string          `json:"cwd"`
+	Reason      string          `json:"reason"`
+	Permissions json.RawMessage `json:"permissions"`
+}
+
+type MCPElicitationParams struct {
+	ThreadID        string          `json:"threadId"`
+	TurnID          string          `json:"turnId"`
+	ServerName      string          `json:"serverName"`
+	Mode            string          `json:"mode"`
+	Message         string          `json:"message"`
+	RequestedSchema json.RawMessage `json:"requestedSchema"`
+	URL             string          `json:"url"`
+	ElicitationID   string          `json:"elicitationId"`
+}

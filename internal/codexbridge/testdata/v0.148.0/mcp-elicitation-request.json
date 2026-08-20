@@ -1,0 +1,1 @@
+{"id":"mcp-1","method":"mcpServer/elicitation/request","params":{"threadId":"019c0000-0000-7000-8000-000000000001","turnId":"019c0000-0000-7000-8000-000000000004","serverName":"example","mode":"form","message":"Complete the form","requestedSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}

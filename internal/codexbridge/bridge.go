@@ -16,9 +16,8 @@ const gracefulProcessStop = 2 * time.Second
 
 type MailboxStore interface {
 	DeliveryStore
+	QuestionStore
 	ResolveMailbox(context.Context, model.SessionIdentity, model.RepositoryContext) (model.Mailbox, error)
-	HumanMailbox(context.Context) (model.Mailbox, error)
-	Create(context.Context, model.Message) error
 }
 
 type Options struct {
@@ -72,10 +71,10 @@ func Run(ctx context.Context, options Options) error {
 	go func() { _ = forwardStderr(options.Stderr, process.Errors()) }()
 
 	transportContext, cancelTransport := context.WithCancel(context.Background())
-	defer cancelTransport()
 	threadState := NewThreadState("")
 	notifications := NewNotificationHub(threadState)
-	client := NewClient(transportContext, process.Output(), process.Input(), nil, notifications)
+	requestRouter := NewRequestRouter(options.Store, replies)
+	client := NewClient(transportContext, process.Output(), process.Input(), requestRouter, notifications)
 	var mailbox model.Mailbox
 	shutdown := func() {
 		_ = process.Input().Close()
@@ -87,6 +86,11 @@ func Run(ctx context.Context, options Options) error {
 		}
 	}
 	defer shutdown()
+	stopRequests := func() {
+		cancelTransport()
+		client.StopRequestsAndWait()
+	}
+	defer stopRequests()
 
 	initialize := InitializeParams{
 		ClientInfo:   ClientInfo{Name: "hq", Title: "HQ Codex bridge", Version: TestedCodexVersion},
@@ -133,6 +137,7 @@ func Run(ctx context.Context, options Options) error {
 	if err != nil {
 		return fmt.Errorf("bind Codex thread to HQ mailbox: %w", err)
 	}
+	requestRouter.Bind(threadID, mailbox, options.Repository, options.Sync, options.PollInterval)
 	if err := sendStatus(ctx, options, mailbox, threadID, "Codex bridge ready", "The Codex app-server thread is connected and waiting for HQ input."); err != nil {
 		return err
 	}
@@ -176,10 +181,12 @@ func Run(ctx context.Context, options Options) error {
 	select {
 	case <-ctx.Done():
 		stopDispatcher()
+		stopRequests()
 		_ = sendStatus(context.Background(), options, mailbox, threadID, "Codex bridge stopped", "Bridge cancelled; the app-server process is being terminated.")
 		return nil
 	case <-client.Done():
 		stopDispatcher()
+		stopRequests()
 		transportErr := client.Err()
 		select {
 		case <-processDone:
@@ -190,10 +197,12 @@ func Run(ctx context.Context, options Options) error {
 		return transportErr
 	case <-processDone:
 		stopDispatcher()
+		stopRequests()
 		exitErr := processExitError(processErr)
 		_ = sendStatus(context.Background(), options, mailbox, threadID, "Codex bridge stopped", exitErr.Error())
 		return exitErr
 	case <-dispatcherDone:
+		stopRequests()
 		if dispatcherErr == nil {
 			dispatcherErr = errors.New("Codex HQ input dispatcher stopped unexpectedly")
 		}

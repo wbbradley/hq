@@ -1,0 +1,1 @@
+{"id":"input-1","method":"item/tool/requestUserInput","params":{"threadId":"019c0000-0000-7000-8000-000000000001","turnId":"019c0000-0000-7000-8000-000000000004","itemId":"item-tool-1","isBlocking":true,"questions":[{"id":"choice","header":"Choice","question":"Choose one","options":[{"label":"A","description":"First option"}],"isOther":true,"isSecret":false}]}}

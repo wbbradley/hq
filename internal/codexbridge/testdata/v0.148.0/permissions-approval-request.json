@@ -1,0 +1,1 @@
+{"id":"permissions-1","method":"item/permissions/requestApproval","params":{"threadId":"019c0000-0000-7000-8000-000000000001","turnId":"019c0000-0000-7000-8000-000000000004","itemId":"item-permissions-1","cwd":"/work/repo","reason":"download dependency","permissions":{"network":{"enabled":true}}}}

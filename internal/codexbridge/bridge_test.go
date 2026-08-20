@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -44,6 +45,46 @@ func (s *fakeMailboxStore) Create(_ context.Context, message model.Message) erro
 	s.mu.Unlock()
 	s.created <- struct{}{}
 	return nil
+}
+
+func (s *fakeMailboxStore) Get(_ context.Context, id string) (model.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, message := range s.messages {
+		if message.ID == id {
+			return message, nil
+		}
+	}
+	return model.Message{}, store.ErrNotFound
+}
+
+func (s *fakeMailboxStore) List(_ context.Context, filter model.Filter) ([]model.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var messages []model.Message
+	for _, message := range s.messages {
+		if filter.ReplyTo != "" && (message.ReplyTo == nil || *message.ReplyTo != filter.ReplyTo) {
+			continue
+		}
+		if filter.RecipientMailboxID != "" && message.RecipientMailboxID != filter.RecipientMailboxID {
+			continue
+		}
+		messages = append(messages, message)
+	}
+	return messages, nil
+}
+
+func (s *fakeMailboxStore) Archive(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.messages {
+		if s.messages[index].ID == id {
+			now := time.Now().UTC()
+			s.messages[index].ArchivedAt = &now
+			return nil
+		}
+	}
+	return store.ErrNotFound
 }
 
 func (s *fakeMailboxStore) Claim(context.Context, store.Claim, string) (model.Message, error) {
@@ -315,7 +356,95 @@ func TestBridgeDispatchesHQMessageEndToEnd(t *testing.T) {
 	}
 }
 
+func TestBridgeRoutesServerApprovalThroughTemporaryHQStore(t *testing.T) {
+	fixture := newDispatcherFixture(t)
+	process := newFakeProcess()
+	sendApproval := make(chan struct{})
+	approvalResponse := make(chan rpcEnvelope, 1)
+	serverDone := make(chan error, 1)
+	go func() {
+		defer process.finish(nil)
+		scanner := bufio.NewScanner(process.serverInput)
+		for scanner.Scan() {
+			var envelope rpcEnvelope
+			if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+				serverDone <- err
+				return
+			}
+			switch envelope.Method {
+			case "initialize":
+				_, _ = io.WriteString(process.serverOutput, `{"id":1,"result":{}}`+"\n")
+			case "initialized":
+			case "thread/start":
+				_, _ = io.WriteString(process.serverOutput, `{"id":2,"result":{"thread":{"id":"`+fixture.thread+`"}}}`+"\n")
+				<-sendApproval
+				request := `{"id":"file-approval-1","method":"item/fileChange/requestApproval","params":{"threadId":"` + fixture.thread + `","turnId":"turn-approval","itemId":"item-file","reason":"update generated code","grantRoot":"/work/repo"}}` + "\n"
+				_, _ = io.WriteString(process.serverOutput, request)
+			case "":
+				if string(envelope.ID) == `"file-approval-1"` {
+					approvalResponse <- envelope
+				}
+			default:
+				serverDone <- fmt.Errorf("unexpected bridge method %q", envelope.Method)
+				return
+			}
+		}
+		serverDone <- scanner.Err()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
+			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
+			Ledger: NewMemoryLedger(), Replies: fixture.replies, PollInterval: 2 * time.Millisecond,
+		})
+	}()
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex bridge ready")
+	close(sendApproval)
+
+	question := waitForStoreMessage(t, fixture.store, model.HumanMailboxID, "Codex requests approval for file changes")
+	if !strings.Contains(question.Details, "update generated code") || !strings.Contains(question.Details, "file-approval-1") {
+		t.Fatalf("question = %#v", question)
+	}
+	reply := model.Message{
+		ID: "019c0000-0000-7000-8000-000000000120", Context: question.Context,
+		SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: fixture.agent.ID,
+		Body: "accept", CreatedAt: time.Now().UTC(),
+	}
+	if err := fixture.store.Reply(context.Background(), question.ID, reply); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case response := <-approvalResponse:
+		var result map[string]string
+		if response.Error != nil || json.Unmarshal(response.Result, &result) != nil || result["decision"] != "accept" {
+			t.Fatalf("approval response = %#v", response)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("app-server did not receive approval response")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not stop")
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitForStoreBody(t *testing.T, databaseStore *store.SQLite, recipientID, body string) {
+	_ = waitForStoreMessage(t, databaseStore, recipientID, body)
+}
+
+func waitForStoreMessage(t *testing.T, databaseStore *store.SQLite, recipientID, body string) model.Message {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -325,12 +454,13 @@ func waitForStoreBody(t *testing.T, databaseStore *store.SQLite, recipientID, bo
 		}
 		for _, message := range messages {
 			if message.Body == body {
-				return
+				return message
 			}
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("message %q was not stored", body)
+	return model.Message{}
 }
 
 func waitForMessages(t *testing.T, store *fakeMailboxStore, count int) {

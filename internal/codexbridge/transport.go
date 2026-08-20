@@ -42,13 +42,16 @@ type Client struct {
 	requests      RequestHandler
 	notifications NotificationHandler
 
-	writeMu sync.Mutex
-	stateMu sync.Mutex
-	nextID  int64
-	pending map[int64]chan callResult
-	done    chan struct{}
-	doneErr error
-	stop    sync.Once
+	writeMu        sync.Mutex
+	stateMu        sync.Mutex
+	nextID         int64
+	pending        map[int64]chan callResult
+	done           chan struct{}
+	doneErr        error
+	stop           sync.Once
+	requestMu      sync.Mutex
+	acceptRequests bool
+	requestWG      sync.WaitGroup
 }
 
 func NewClient(ctx context.Context, input io.Reader, output io.Writer, requests RequestHandler, notifications NotificationHandler) *Client {
@@ -58,7 +61,7 @@ func NewClient(ctx context.Context, input io.Reader, output io.Writer, requests 
 func newClient(ctx context.Context, input io.Reader, output io.Writer, requests RequestHandler, notifications NotificationHandler, maximumFrame int) *Client {
 	client := &Client{
 		ctx: ctx, reader: bufio.NewReader(input), writer: output, maximumFrame: maximumFrame,
-		requests: requests, notifications: notifications, pending: make(map[int64]chan callResult), done: make(chan struct{}),
+		requests: requests, notifications: notifications, pending: make(map[int64]chan callResult), done: make(chan struct{}), acceptRequests: true,
 	}
 	go client.readLoop()
 	return client
@@ -150,7 +153,18 @@ func (c *Client) readLoop() {
 				c.rejectUnsupportedRequest(envelope)
 				return
 			}
-			go c.handleServerRequest(envelope)
+			c.requestMu.Lock()
+			if !c.acceptRequests {
+				c.requestMu.Unlock()
+				_ = c.writeResponse(envelope.ID, nil, &RPCError{Code: -32800, Message: "client is shutting down"})
+				continue
+			}
+			c.requestWG.Add(1)
+			c.requestMu.Unlock()
+			go func() {
+				defer c.requestWG.Done()
+				c.handleServerRequest(envelope)
+			}()
 			continue
 		}
 		if envelope.Method != "" {
@@ -181,6 +195,13 @@ func (c *Client) readLoop() {
 			response <- callResult{result: envelope.Result}
 		}
 	}
+}
+
+func (c *Client) StopRequestsAndWait() {
+	c.requestMu.Lock()
+	c.acceptRequests = false
+	c.requestMu.Unlock()
+	c.requestWG.Wait()
 }
 
 func (c *Client) handleServerRequest(envelope rpcEnvelope) {

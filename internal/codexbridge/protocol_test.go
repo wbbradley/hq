@@ -9,7 +9,7 @@ import (
 
 func TestCodexV01480FixturesRemainValidJSONRPC(t *testing.T) {
 	fixtures, err := filepath.Glob("testdata/v0.148.0/*.json")
-	if err != nil || len(fixtures) != 5 {
+	if err != nil || len(fixtures) != 9 {
 		t.Fatalf("fixtures = %v, %v", fixtures, err)
 	}
 	for _, fixture := range fixtures {
