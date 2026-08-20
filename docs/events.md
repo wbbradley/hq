@@ -143,7 +143,7 @@ The display order places parents before children. Among ready concurrent events,
 
 ## Answers and cancellation
 
-A question may have several valid answers. `wait` returns the first locally available, not-yet-consumed answer in display order. The protocol does not name a globally accepted answer.
+A question may have several valid answers. `ask` and `wait` return the first locally available, not-yet-consumed answer in display order. The protocol does not name a globally accepted answer.
 
 Answer and cancellation are independent facts. A thread can be both answered and cancelled. For each answer and cancellation pair, the reducer records one relation:
 
@@ -153,7 +153,7 @@ Answer and cancellation are independent facts. A thread can be both answered and
 
 HQ must not infer why an answer followed or raced with cancellation.
 
-`wait QUESTION_ID` requires the local question event and proof that the calling mailbox sent it. `poll` and `get` may expose a valid addressed answer while its parent is missing, but must mark the causal history incomplete. A later signed causal child from a peer also proves that the peer received its parent; HQ does not need a receipt for that fact.
+The wait phase of `ask`, and `wait QUESTION_ID`, requires the local question event and proof that the calling mailbox sent it. `poll` and `get` may expose a valid addressed answer while its parent is missing, but must mark the causal history incomplete. A later signed causal child from a peer also proves that the peer received its parent; HQ does not need a receipt for that fact.
 
 ## Retention and non-domain state
 

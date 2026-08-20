@@ -71,7 +71,7 @@ Use one daemon per database. `hq daemon status` shows whether the local control 
 
 ## Automated smoke test
 
-The opt-in test builds the current source, creates three temporary state directories, starts the pinned rnostr container with two allowed installations, pairs two human devices, exchanges questions and cross-machine answers, restarts the relay, catches up an offline device, checks duplicate suppression and auth failure, and revokes the second device.
+The opt-in test builds the current source, creates three temporary state directories, starts the pinned rnostr container with two allowed installations, pairs two human devices, sends asynchronous transport probes and cross-machine answers, restarts the relay, catches up an offline device, checks duplicate suppression and auth failure, and revokes the second device.
 
 ```sh
 HQ_RUN_REAL_RELAY_SMOKE=1 ./scripts/lan-smoke.sh
@@ -84,12 +84,12 @@ The test uses local port 17447 and removes its container and temporary files on 
 - Run `hq identity show` on both machines and confirm the installation IDs and public keys differ.
 - Configure both public keys in one retained relay and add the same relay URL to both HQ databases.
 - Create the invitation on the account creator, join on the other machine, sync both, and confirm both devices are active.
-- Start several Codex, Claude Code, or Pi sessions on each host. Ask a distinct question from each session.
+- Start several Codex, Claude Code, or Pi sessions on each host. Use `hq ask` when each session should block for its answer; use `hq send` when testing delivery asynchronously.
 - Open both TUIs. Confirm both TUIs show every question with the source device, installation, repository, worktree, and branch.
 - Answer one question from the source host and one from the other host. Confirm each waiting agent receives the right answer.
-- Stop one HQ daemon. Ask a question on that host, restart the daemon, and confirm the queued fanout clears.
-- Stop the relay. Ask questions on both hosts, restart the relay, and confirm `hq status` moves each send from queued to relay accepted.
-- Stop one machine long enough for several questions to reach the relay. Restart the machine and confirm its TUI catches up without duplicate rows.
+- Stop one HQ daemon. Send a message asynchronously on that host, restart the daemon, and confirm the queued fanout clears.
+- Stop the relay. Send messages asynchronously on both hosts, restart the relay, and confirm `hq status` moves each send from queued to relay accepted.
+- Stop one machine long enough for several asynchronous messages to reach the relay. Restart the machine and confirm its TUI catches up without duplicate rows.
 - Put a bad relay URL in one installation, confirm local use still works, restore the common URL, and confirm recovery.
 - Restart both service-manager jobs and the relay. Confirm the shared inbox remains intact and new live messages arrive without manual `hq sync` calls.
 - Revoke the added device. Confirm the device records the revoke but receives no later account fanout.

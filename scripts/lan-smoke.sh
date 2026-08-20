@@ -96,7 +96,7 @@ done
 "$hq_bin" --db "$laptop_db" daemon status >/dev/null
 "$hq_bin" --db "$desktop_db" daemon status >/dev/null
 
-live_question=$(HQ_SESSION=live-agent "$hq_bin" --db "$laptop_db" ask --dir "$smoke_dir/laptop/worktree" "live daemon question")
+live_question=$(HQ_SESSION=live-agent "$hq_bin" --db "$laptop_db" send --dir "$smoke_dir/laptop/worktree" "live daemon question")
 for ((attempt = 0; attempt < 100; attempt++)); do
   if "$hq_bin" --db "$desktop_db" list --recipient human --json | jq -e '[(. // [])[] | select(.id == "'"$live_question"'")] | length == 1' >/dev/null; then
     break
@@ -111,7 +111,7 @@ HQ_SESSION=live-agent "$hq_bin" --db "$laptop_db" wait --timeout 10s "$live_ques
 "$hq_bin" --db "$desktop_db" daemon stop
 wait "$desktop_daemon_pid"
 desktop_daemon_pid=""
-machine_outage_question=$(HQ_SESSION=machine-outage-agent "$hq_bin" --db "$laptop_db" ask --dir "$smoke_dir/laptop/worktree" "caught after machine outage")
+machine_outage_question=$(HQ_SESSION=machine-outage-agent "$hq_bin" --db "$laptop_db" send --dir "$smoke_dir/laptop/worktree" "caught after machine outage")
 "$hq_bin" --db "$desktop_db" list --recipient human --json | jq -e '[(. // [])[] | select(.id == "'"$machine_outage_question"'")] | length == 0' >/dev/null
 "$hq_bin" --db "$desktop_db" daemon run >>"$smoke_dir/desktop-daemon.log" 2>&1 &
 desktop_daemon_pid=$!
@@ -129,8 +129,8 @@ wait "$desktop_daemon_pid"
 laptop_daemon_pid=""
 desktop_daemon_pid=""
 
-laptop_question=$(HQ_SESSION=laptop-agent "$hq_bin" --db "$laptop_db" ask --dir "$smoke_dir/laptop/worktree" "question from laptop")
-desktop_question=$(HQ_SESSION=desktop-agent "$hq_bin" --db "$desktop_db" ask --dir "$smoke_dir/desktop/worktree" "question from desktop")
+laptop_question=$(HQ_SESSION=laptop-agent "$hq_bin" --db "$laptop_db" send --dir "$smoke_dir/laptop/worktree" "question from laptop")
+desktop_question=$(HQ_SESSION=desktop-agent "$hq_bin" --db "$desktop_db" send --dir "$smoke_dir/desktop/worktree" "question from desktop")
 for _ in 1 2; do
   "$hq_bin" --db "$laptop_db" sync
   "$hq_bin" --db "$desktop_db" sync
@@ -152,7 +152,7 @@ HQ_SESSION=desktop-agent "$hq_bin" --db "$desktop_db" wait --timeout 10s "$deskt
 
 # Keep the desktop offline, restart the retained relay, then prove catch-up.
 docker stop "$container" >/dev/null
-offline_question=$(HQ_SESSION=offline-agent "$hq_bin" --no-sync --db "$laptop_db" ask --dir "$smoke_dir/laptop/worktree" "retained through outage")
+offline_question=$(HQ_SESSION=offline-agent "$hq_bin" --no-sync --db "$laptop_db" send --dir "$smoke_dir/laptop/worktree" "retained through outage")
 docker start "$container" >/dev/null
 for ((attempt = 0; attempt < 100; attempt++)); do
   if curl -fsS "http://127.0.0.1:${port}/" >/dev/null; then
@@ -179,7 +179,7 @@ if "$hq_bin" --db "$desktop_db" human show >/dev/null 2>&1; then
   echo "revoked installation retained an active human account" >&2
   exit 1
 fi
-post_revoke_question=$(HQ_SESSION=post-revoke-agent "$hq_bin" --db "$laptop_db" ask --dir "$smoke_dir/laptop/worktree" "not sent after revoke")
+post_revoke_question=$(HQ_SESSION=post-revoke-agent "$hq_bin" --db "$laptop_db" send --dir "$smoke_dir/laptop/worktree" "not sent after revoke")
 "$hq_bin" --db "$desktop_db" sync || true
 "$hq_bin" --db "$desktop_db" list --recipient human --all --json | jq -e '[(. // [])[] | select(.id == "'"$post_revoke_question"'")] | length == 0' >/dev/null
 
