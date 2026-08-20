@@ -259,6 +259,33 @@ func TestShiftEnterAndCtrlJInsertNewlines(t *testing.T) {
 	}
 }
 
+func TestPasteInsertsTextIntoActiveDraft(t *testing.T) {
+	editor := textarea.New()
+	editor.SetValue("Before ")
+	editor.Focus()
+	m := app{answering: true, answerID: "id", editor: editor}
+
+	updated, _ := m.Update(tea.PasteMsg{Content: "voice-to-text"})
+	m = updated.(app)
+
+	if m.editor.Value() != "Before voice-to-text" {
+		t.Fatalf("value = %q", m.editor.Value())
+	}
+}
+
+func TestPasteIsIgnoredOutsideActiveDraft(t *testing.T) {
+	editor := textarea.New()
+	editor.SetValue("unchanged")
+	m := app{editor: editor}
+
+	updated, _ := m.Update(tea.PasteMsg{Content: "voice-to-text"})
+	m = updated.(app)
+
+	if m.editor.Value() != "unchanged" {
+		t.Fatalf("value = %q", m.editor.Value())
+	}
+}
+
 func TestRefreshSchedulesNextRefresh(t *testing.T) {
 	_, cmd := (app{}).Update(refreshMsg{})
 	if cmd == nil {

@@ -5,10 +5,14 @@ package syncer
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,10 +24,29 @@ type unixControl struct {
 	once     sync.Once
 }
 
-func socketPath(databasePath string) string { return databasePath + ".sync.sock" }
+const maxUnixSocketPath = 103
+
+func socketPath(databasePath string) string {
+	direct := databasePath + ".sync.sock"
+	if len(direct) <= maxUnixSocketPath {
+		return direct
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(databasePath)))
+	name := hex.EncodeToString(sum[:16]) + ".sock"
+	return filepath.Join("/tmp", fmt.Sprintf("hq-%d", os.Getuid()), name)
+}
 
 func startControl(ctx context.Context, databasePath string, wake chan<- struct{}, stop context.CancelFunc, status func() string) (io.Closer, error) {
 	path := socketPath(databasePath)
+	if path != databasePath+".sync.sock" {
+		directory := filepath.Dir(path)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(directory, 0o700); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}

@@ -256,6 +256,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			return m, tea.Batch(m.load, m.syncNow())
 		}
+	case tea.PasteMsg:
+		if m.answering {
+			var cmd tea.Cmd
+			m.editor, cmd = m.editor.Update(msg)
+			return m, cmd
+		}
 	case tea.KeyPressMsg:
 		if m.answering {
 			switch msg.String() {

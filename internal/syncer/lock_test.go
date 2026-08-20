@@ -56,7 +56,10 @@ func (e *countingEngine) Run(ctx context.Context) error {
 
 func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
-	stale := database + ".sync.sock"
+	stale := socketPath(database)
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +111,25 @@ func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 		t.Fatalf("daemon did not release lock: %v", err)
 	}
 	_ = lock.Release()
+}
+
+func TestSocketPathFallsBackWhenDatabasePathIsTooLong(t *testing.T) {
+	shortDatabase := filepath.Join("/tmp", "hq.db")
+	if got, want := socketPath(shortDatabase), shortDatabase+".sync.sock"; got != want {
+		t.Fatalf("short socket path = %q, want %q", got, want)
+	}
+
+	longDatabase := filepath.Join("/tmp", strings.Repeat("nested-path-", 12), "hq.db")
+	got := socketPath(longDatabase)
+	if len(got) > maxUnixSocketPath {
+		t.Fatalf("fallback socket path has %d bytes: %q", len(got), got)
+	}
+	if got == longDatabase+".sync.sock" {
+		t.Fatalf("long database path did not use fallback: %q", got)
+	}
+	if second := socketPath(longDatabase); second != got {
+		t.Fatalf("fallback socket path is unstable: %q, %q", got, second)
+	}
 }
 
 func TestFileLockReleasesWhenOwnerProcessExits(t *testing.T) {

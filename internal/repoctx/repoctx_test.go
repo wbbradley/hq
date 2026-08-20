@@ -71,7 +71,15 @@ func TestRemotesUseMainRepositoryConfigFromWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Directory != worktree || snapshot.Worktree != worktree || gotCommon != common || snapshot.Branch != "linked-test" || snapshot.RemoteIdentity != "origin: wbbradley/hq" {
+	canonicalWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotWorktree, err := filepath.EvalSymlinks(snapshot.Worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Directory != worktree || gotWorktree != canonicalWorktree || gotCommon != common || snapshot.Branch != "linked-test" || snapshot.RemoteIdentity != "origin: wbbradley/hq" {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 }
