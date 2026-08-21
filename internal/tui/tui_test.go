@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/repoctx"
@@ -47,6 +48,42 @@ func TestSyncCompletionPreservesActiveDraft(t *testing.T) {
 	got := updated.(app)
 	if got.editor.Value() != "draft survives" || !got.editor.Focused() || got.answerQ.ID != item.ID || cmd == nil {
 		t.Fatalf("sync changed draft: %#v", got)
+	}
+}
+
+func TestInvalidationReloadPreservesActiveDraftAndRearms(t *testing.T) {
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d68", testAgentID, model.HumanMailboxID, "Question")
+	editor := textarea.New()
+	editor.SetValue("draft survives live update")
+	changes := make(chan domain.Invalidation, 1)
+	m := app{
+		ctx: context.Background(), messages: []model.Message{item}, answering: true,
+		answerID: item.ID, answerQ: item, editor: editor, changes: changes,
+	}
+	changes <- domain.Invalidation{Revision: 2, Topics: []domain.ChangeTopic{domain.TopicMessages}}
+	if msg := m.waitInvalidation()(); msg != (invalidatedMsg{}) {
+		t.Fatalf("invalidation message = %#v", msg)
+	}
+	updated, cmd := m.Update(invalidatedMsg{})
+	got := updated.(app)
+	if cmd == nil || got.editor.Value() != "draft survives live update" || got.answerQ.ID != item.ID {
+		t.Fatalf("invalidation changed draft or did not schedule reload: %#v", got)
+	}
+}
+
+func TestConnectionDiagnosticsArePersistentAndIncompatibilityBlocks(t *testing.T) {
+	drift := app{connection: domain.ConnectionUpdate{Diagnostic: "restart the local HQ node"}}
+	if view := drift.View().Content; !strings.Contains(view, "restart the local HQ node") || strings.Contains(view, "then reopen the TUI") {
+		t.Fatalf("drift view = %q", view)
+	}
+	blocked := app{connection: domain.ConnectionUpdate{Diagnostic: "upgrade this HQ client", Blocking: true}}
+	view := blocked.View().Content
+	if !strings.Contains(view, "upgrade this HQ client") || !strings.Contains(view, "then reopen the TUI") {
+		t.Fatalf("blocked view = %q", view)
+	}
+	updated, cmd := blocked.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if cmd != nil || updated.(app).answering {
+		t.Fatal("incompatible connection accepted an interactive command")
 	}
 }
 
@@ -290,10 +327,10 @@ func TestPasteIsIgnoredOutsideActiveDraft(t *testing.T) {
 	}
 }
 
-func TestRefreshSchedulesNextRefresh(t *testing.T) {
-	_, cmd := (app{}).Update(refreshMsg{})
+func TestRepairSchedulesNextRepair(t *testing.T) {
+	_, cmd := (app{}).Update(repairMsg{})
 	if cmd == nil {
-		t.Fatal("refresh did not schedule commands")
+		t.Fatal("repair did not schedule commands")
 	}
 }
 

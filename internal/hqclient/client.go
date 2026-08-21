@@ -23,6 +23,9 @@ type Client struct {
 	reconnectMu   sync.Mutex
 	subscriptions map[string]*Subscription
 	states        chan ConnectionState
+	state         ConnectionState
+	updates       chan domain.ConnectionUpdate
+	update        domain.ConnectionUpdate
 	lifetime      context.Context
 	cancel        context.CancelFunc
 	closed        bool
@@ -42,6 +45,7 @@ func Open(ctx context.Context, databasePath string) (*Client, error) {
 		return nil, err
 	}
 	client.attach(wireClient)
+	client.publishReady(wireClient)
 	return client, nil
 }
 
@@ -72,12 +76,14 @@ func New(wireClient *localwire.Client) *Client {
 	lifetime, cancel := context.WithCancel(context.Background())
 	client := newClient(lifetime, cancel)
 	client.attach(wireClient)
+	client.publishReady(wireClient)
 	return client
 }
 
 func newClient(lifetime context.Context, cancel context.CancelFunc) *Client {
 	return &Client{
 		subscriptions: make(map[string]*Subscription), states: make(chan ConnectionState, 1),
+		updates:  make(chan domain.ConnectionUpdate, 1),
 		lifetime: lifetime, cancel: cancel,
 	}
 }

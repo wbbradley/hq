@@ -56,7 +56,19 @@ type Subscription struct {
 
 func (c *Client) States() <-chan ConnectionState { return c.states }
 
-func (c *Client) Subscribe(ctx context.Context, topics ...domain.ChangeTopic) (*Subscription, error) {
+func (c *Client) State() ConnectionState {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.state
+}
+
+func (c *Client) Updates() domain.ClientUpdates {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return domain.ClientUpdates{Subscribe: c.Subscribe, Initial: c.update, States: c.updates}
+}
+
+func (c *Client) Subscribe(ctx context.Context, topics ...domain.ChangeTopic) (domain.ChangeSubscription, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, err
@@ -132,13 +144,16 @@ func (c *Client) attach(wireClient *localwire.Client) {
 	}
 	c.wire = wireClient
 	c.mu.Unlock()
+	go c.monitor(wireClient)
+}
+
+func (c *Client) publishReady(wireClient *localwire.Client) {
 	handshake := wireClient.Handshake()
 	phase := ConnectionConnected
 	if wireClient.BinaryDrift() {
 		phase = ConnectionDrift
 	}
 	c.publishState(ConnectionState{Phase: phase, Handshake: handshake})
-	go c.monitor(wireClient)
 }
 
 func (c *Client) monitor(wireClient *localwire.Client) {
@@ -213,6 +228,7 @@ func (c *Client) reconnect(ctx context.Context, failed *localwire.Client) (*loca
 		wireClient.Close()
 		return nil, err
 	}
+	c.publishReady(wireClient)
 	return wireClient, nil
 }
 
@@ -237,12 +253,28 @@ func (c *Client) resubscribe(ctx context.Context, wireClient *localwire.Client) 
 }
 
 func (c *Client) publishState(state ConnectionState) {
+	update := domain.ConnectionUpdate{Diagnostic: state.Diagnostic(), Blocking: state.Phase == ConnectionIncompatible}
+	c.mu.Lock()
+	if state.Phase == ConnectionConnecting && c.update.Blocking {
+		update = c.update
+	}
+	c.state = state
+	c.update = update
+	c.mu.Unlock()
 	select {
 	case <-c.states:
 	default:
 	}
 	select {
 	case c.states <- state:
+	default:
+	}
+	select {
+	case <-c.updates:
+	default:
+	}
+	select {
+	case c.updates <- update:
 	default:
 	}
 }

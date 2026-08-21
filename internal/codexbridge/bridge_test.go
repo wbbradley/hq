@@ -2,6 +2,7 @@ package codexbridge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,9 +13,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
 )
+
+func TestConnectionReporterPrintsConciseDiagnostic(t *testing.T) {
+	var output bytes.Buffer
+	reportConnectionUpdates(context.Background(), &output, domain.ClientUpdates{
+		Initial: domain.ConnectionUpdate{Diagnostic: "HQ client and local node builds differ; restart the local HQ node"},
+	})
+	if got := output.String(); got != "hq codex: HQ client and local node builds differ; restart the local HQ node\n" {
+		t.Fatalf("connection diagnostic = %q", got)
+	}
+}
 
 type fakeMailboxStore struct {
 	mu       sync.Mutex
@@ -361,7 +373,7 @@ func TestBridgeDispatchesHQMessageEndToEnd(t *testing.T) {
 		done <- Run(ctx, Options{
 			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
 			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
-			Ledger: NewMemoryLedger(), PollInterval: 2 * time.Millisecond,
+			Ledger: NewMemoryLedger(), RepairInterval: 2 * time.Millisecond,
 		})
 	}()
 	initialize := <-requests
@@ -403,7 +415,7 @@ func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
 		done <- Run(context.Background(), Options{
 			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
 			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
-			Ledger: NewMemoryLedger(), PollInterval: 2 * time.Millisecond,
+			Ledger: NewMemoryLedger(), RepairInterval: 2 * time.Millisecond,
 		})
 	}()
 	<-requests
@@ -493,7 +505,7 @@ func TestBridgeRoutesServerApprovalThroughTemporaryHQStore(t *testing.T) {
 		done <- Run(ctx, Options{
 			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
 			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
-			Ledger: NewMemoryLedger(), Replies: fixture.replies, PollInterval: 2 * time.Millisecond,
+			Ledger: NewMemoryLedger(), Replies: fixture.replies, RepairInterval: 2 * time.Millisecond,
 		})
 	}()
 	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex bridge ready")

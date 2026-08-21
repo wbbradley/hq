@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
@@ -134,7 +135,7 @@ func (f dispatcherFixture) addHumanMessage(t *testing.T, id, body string, create
 func (f dispatcherFixture) dispatcher(protocol *dispatcherProtocol) *Dispatcher {
 	return &Dispatcher{
 		Client: protocol.client, Store: f.store, Ledger: f.ledger, Replies: f.replies, State: f.state,
-		ThreadID: f.thread, MailboxID: f.agent.ID, PollInterval: 2 * time.Millisecond,
+		ThreadID: f.thread, MailboxID: f.agent.ID, RepairInterval: 2 * time.Millisecond,
 	}
 }
 
@@ -363,13 +364,36 @@ func TestDispatcherCompletesDuplicateAcceptedLeaseWithoutCodexCall(t *testing.T)
 	stopDispatcherTest(t, cancel, done)
 }
 
+func TestDispatcherWakesImmediatelyForMailboxInvalidation(t *testing.T) {
+	fixture := newDispatcherFixture(t)
+	protocol := newDispatcherProtocol(t, fixture.state)
+	dispatcher := fixture.dispatcher(protocol)
+	dispatcher.RepairInterval = time.Hour
+	invalidations := make(chan domain.Invalidation, 1)
+	dispatcher.Invalidations = invalidations
+	cancel, done := runDispatcher(t, dispatcher)
+	time.Sleep(20 * time.Millisecond)
+
+	messageID := "019c0000-0000-7000-8000-000000000118"
+	fixture.addHumanMessage(t, messageID, "live update", time.Now().UTC())
+	started := time.Now()
+	invalidations <- domain.Invalidation{Revision: 2, Topics: []domain.ChangeTopic{domain.TopicMessages}}
+	request := protocol.next(t, "turn/start")
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("mailbox invalidation wake took %s", elapsed)
+	}
+	protocol.result(t, request, `{"turn":{"id":"turn-live"}}`)
+	waitForCompleted(t, fixture.store, messageID)
+	stopDispatcherTest(t, cancel, done)
+}
+
 func TestDispatcherReleasesClaimAfterTransientCodexFailure(t *testing.T) {
 	fixture := newDispatcherFixture(t)
 	messageID := "019c0000-0000-7000-8000-000000000113"
 	fixture.addHumanMessage(t, messageID, "try later", time.Now().UTC())
 	protocol := newDispatcherProtocol(t, fixture.state)
 	dispatcher := fixture.dispatcher(protocol)
-	dispatcher.PollInterval = time.Second
+	dispatcher.RepairInterval = time.Second
 	cancel, done := runDispatcher(t, dispatcher)
 	start := protocol.next(t, "turn/start")
 	protocol.rpcError(t, start, "temporarily unavailable")

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 )
 
@@ -32,7 +33,8 @@ type Options struct {
 	Ledger         DeliveryLedger
 	LedgerPath     string
 	Replies        *ReplyRegistry
-	PollInterval   time.Duration
+	RepairInterval time.Duration
+	Updates        domain.ClientUpdates
 }
 
 func Run(ctx context.Context, options Options) error {
@@ -42,6 +44,25 @@ func Run(ctx context.Context, options Options) error {
 	if options.Store == nil {
 		return errors.New("Codex bridge mailbox store is required")
 	}
+	var subscription domain.ChangeSubscription
+	if options.Updates.Subscribe != nil {
+		var subscribeErr error
+		subscription, subscribeErr = options.Updates.Subscribe(ctx, domain.TopicMessages, domain.TopicMailboxes)
+		if subscribeErr != nil {
+			return fmt.Errorf("subscribe to Codex HQ mailbox: %w", subscribeErr)
+		}
+		defer subscription.Close()
+	}
+	reporterContext, stopReporter := context.WithCancel(ctx)
+	reporterDone := make(chan struct{})
+	go func() {
+		reportConnectionUpdates(reporterContext, options.Stderr, options.Updates)
+		close(reporterDone)
+	}()
+	defer func() {
+		stopReporter()
+		<-reporterDone
+	}()
 	ledger := options.Ledger
 	if ledger == nil {
 		openedLedger, openErr := OpenFileLedger(options.LedgerPath)
@@ -139,7 +160,7 @@ func Run(ctx context.Context, options Options) error {
 	if err != nil {
 		return fmt.Errorf("bind Codex thread to HQ mailbox: %w", err)
 	}
-	requestRouter.Bind(threadID, mailbox, options.Repository, options.Sync, options.PollInterval)
+	requestRouter.Bind(threadID, mailbox, options.Repository, options.Sync, options.Updates.Subscribe, options.RepairInterval)
 	outputRelay.Bind(threadID, mailbox, options.Repository)
 	if err := sendStatus(ctx, options, mailbox, threadID, "Codex bridge ready", "The Codex app-server thread is connected and waiting for HQ input."); err != nil {
 		return err
@@ -176,7 +197,10 @@ func Run(ctx context.Context, options Options) error {
 	var dispatcherErr error
 	dispatcher := &Dispatcher{
 		Client: client, Store: options.Store, Ledger: ledger, Replies: replies, State: threadState,
-		ThreadID: threadID, MailboxID: mailbox.ID, PollInterval: options.PollInterval, Sync: options.Sync,
+		ThreadID: threadID, MailboxID: mailbox.ID, RepairInterval: options.RepairInterval, Sync: options.Sync,
+	}
+	if subscription != nil {
+		dispatcher.Invalidations = subscription.Changes()
 	}
 	go func() {
 		dispatcherErr = dispatcher.Run(dispatcherContext)
@@ -227,6 +251,33 @@ func Run(ctx context.Context, options Options) error {
 			outputErr = errors.New("Codex output relay stopped unexpectedly")
 		}
 		return finish(outputErr, outputErr.Error())
+	}
+}
+
+func reportConnectionUpdates(ctx context.Context, destination io.Writer, updates domain.ClientUpdates) {
+	last := ""
+	write := func(update domain.ConnectionUpdate) {
+		if destination == nil || update.Diagnostic == "" || update.Diagnostic == last {
+			return
+		}
+		last = update.Diagnostic
+		_, _ = fmt.Fprintf(destination, "hq codex: %s\n", update.Diagnostic)
+	}
+	write(updates.Initial)
+	if updates.States == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case update := <-updates.States:
+			if update.Diagnostic == "" {
+				last = ""
+				continue
+			}
+			write(update)
+		}
 	}
 }
 

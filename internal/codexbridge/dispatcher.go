@@ -12,22 +12,23 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 )
 
-const defaultMailboxPollInterval = 250 * time.Millisecond
+const defaultMailboxRepairInterval = 5 * time.Minute
 
 type DeliveryStore interface {
 	ClaimStore
 }
 
 type Dispatcher struct {
-	Client       *Client
-	Store        DeliveryStore
-	Ledger       DeliveryLedger
-	Replies      *ReplyRegistry
-	State        *ThreadState
-	ThreadID     string
-	MailboxID    string
-	PollInterval time.Duration
-	Sync         func(context.Context) error
+	Client         *Client
+	Store          DeliveryStore
+	Ledger         DeliveryLedger
+	Replies        *ReplyRegistry
+	State          *ThreadState
+	ThreadID       string
+	MailboxID      string
+	Invalidations  <-chan domain.Invalidation
+	RepairInterval time.Duration
+	Sync           func(context.Context) error
 }
 
 type claimedDelivery struct {
@@ -39,9 +40,9 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 	if d.Client == nil || d.Store == nil || d.Ledger == nil || d.State == nil || d.ThreadID == "" || d.MailboxID == "" {
 		return errors.New("Codex inbound dispatcher is missing a required dependency")
 	}
-	interval := d.PollInterval
+	interval := d.RepairInterval
 	if interval <= 0 {
-		interval = defaultMailboxPollInterval
+		interval = defaultMailboxRepairInterval
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -63,7 +64,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 		}
 		delivery, err := d.claim(ctx)
 		if errors.Is(err, domain.ErrNotReady) {
-			if !waitContext(ctx, interval) {
+			if !d.waitForMailbox(ctx, interval) {
 				return nil
 			}
 			continue
@@ -80,7 +81,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			if !waitContext(ctx, interval) {
+			if !d.waitForMailbox(ctx, interval) {
 				return nil
 			}
 			continue
@@ -95,6 +96,19 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 				return fmt.Errorf("complete HQ message %s: %w", delivery.message.ID, err)
 			}
 		}
+	}
+}
+
+func (d *Dispatcher) waitForMailbox(ctx context.Context, repairInterval time.Duration) bool {
+	timer := time.NewTimer(repairInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-d.Invalidations:
+		return true
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -246,15 +260,4 @@ func nonSteerableError(err error) bool {
 		}
 	}
 	return false
-}
-
-func waitContext(ctx context.Context, duration time.Duration) bool {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
 }

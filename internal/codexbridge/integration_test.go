@@ -128,7 +128,7 @@ func runFullSessionBridge(t *testing.T, ctx context.Context, fixture dispatcherF
 		done <- Run(ctx, Options{
 			Directory: "/work/repo", ResumeThreadID: resumeThreadID, Starter: fakeStarter{process}, Store: fixture.store,
 			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
-			LedgerPath: ledgerPath, PollInterval: 2 * time.Millisecond,
+			LedgerPath: ledgerPath, RepairInterval: 2 * time.Millisecond,
 		})
 	}()
 	return done

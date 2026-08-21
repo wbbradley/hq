@@ -30,7 +30,7 @@ func newRequestTestFixture(t *testing.T) *requestTestFixture {
 	t.Helper()
 	fixture := newDispatcherFixture(t)
 	router := NewRequestRouter(fixture.store, fixture.replies)
-	router.Bind(fixture.thread, fixture.agent, model.RepositoryContext{Directory: "/work/repo"}, nil, 2*time.Millisecond)
+	router.Bind(fixture.thread, fixture.agent, model.RepositoryContext{Directory: "/work/repo"}, nil, nil, 2*time.Millisecond)
 	return &requestTestFixture{dispatcherFixture: fixture, router: router, seen: make(map[string]bool), t: t}
 }
 

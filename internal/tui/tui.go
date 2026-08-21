@@ -19,7 +19,7 @@ import (
 	"github.com/wbbradley/hq/internal/repoctx"
 )
 
-const refreshInterval = time.Minute
+const repairInterval = 5 * time.Minute
 
 var (
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
@@ -55,6 +55,9 @@ type app struct {
 	sync         func(context.Context) error
 	syncErr      error
 	network      domain.NetworkStatus
+	changes      <-chan domain.Invalidation
+	states       <-chan domain.ConnectionUpdate
+	connection   domain.ConnectionUpdate
 }
 
 type loadedMsg struct {
@@ -69,7 +72,11 @@ type answeredMsg struct{ err error }
 
 type archivedMsg struct{ err error }
 
-type refreshMsg struct{}
+type repairMsg struct{}
+
+type invalidatedMsg struct{}
+
+type connectionMsg struct{ state domain.ConnectionUpdate }
 
 type syncMsg struct{ err error }
 
@@ -93,10 +100,23 @@ type remotesMsg struct {
 }
 
 func Run(ctx context.Context, s domain.Store, in io.Reader, out io.Writer) error {
-	return RunWithSync(ctx, s, in, out, nil)
+	return RunWithClient(ctx, s, in, out, domain.ClientUpdates{}, nil)
 }
 
 func RunWithSync(ctx context.Context, s domain.Store, in io.Reader, out io.Writer, sync func(context.Context) error) error {
+	return RunWithClient(ctx, s, in, out, domain.ClientUpdates{}, sync)
+}
+
+func RunWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Writer, updates domain.ClientUpdates, sync func(context.Context) error) error {
+	var subscription domain.ChangeSubscription
+	var err error
+	if updates.Subscribe != nil {
+		subscription, err = updates.Subscribe(ctx, domain.TopicMessages, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman, domain.TopicRelays)
+		if err != nil {
+			return fmt.Errorf("subscribe to HQ updates: %w", err)
+		}
+		defer subscription.Close()
+	}
 	editor := textarea.New()
 	editor.Placeholder = "Type a message"
 	editor.KeyMap.InsertNewline = key.NewBinding(
@@ -105,15 +125,48 @@ func RunWithSync(ctx context.Context, s domain.Store, in io.Reader, out io.Write
 	)
 	editor.SetWidth(72)
 	editor.SetHeight(6)
-	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync}
-	_, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
+	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync, states: updates.States, connection: updates.Initial}
+	if subscription != nil {
+		m.changes = subscription.Changes()
+	}
+	_, err = tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
 	return err
 }
 
-func (m app) Init() tea.Cmd { return tea.Batch(m.load, m.syncNow(), scheduleRefresh()) }
+func (m app) Init() tea.Cmd {
+	return tea.Batch(m.load, m.syncNow(), m.waitInvalidation(), m.waitConnection(), scheduleRepair())
+}
 
-func scheduleRefresh() tea.Cmd {
-	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return refreshMsg{} })
+func scheduleRepair() tea.Cmd {
+	return tea.Tick(repairInterval, func(time.Time) tea.Msg { return repairMsg{} })
+}
+
+func (m app) waitInvalidation() tea.Cmd {
+	if m.changes == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case <-m.ctx.Done():
+			return nil
+		case <-m.changes:
+			return invalidatedMsg{}
+		}
+	}
+}
+
+func (m app) waitConnection() tea.Cmd {
+	if m.states == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case <-m.ctx.Done():
+			return nil
+		case state := <-m.states:
+			return connectionMsg{state: state}
+		}
+	}
 }
 
 func (m app) syncNow() tea.Cmd {
@@ -191,8 +244,13 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = max(0, len(m.messages)-1)
 		}
 		return m.withContextCommand()
-	case refreshMsg:
-		return m, tea.Batch(m.load, m.syncNow(), scheduleRefresh())
+	case repairMsg:
+		return m, tea.Batch(m.load, m.syncNow(), scheduleRepair())
+	case invalidatedMsg:
+		return m, tea.Batch(m.load, m.waitInvalidation())
+	case connectionMsg:
+		m.connection = msg.state
+		return m, m.waitConnection()
 	case syncMsg:
 		m.syncErr = msg.err
 		if msg.err == nil {
@@ -263,6 +321,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case tea.KeyPressMsg:
+		if m.connection.Blocking {
+			if msg.String() == "q" || msg.String() == "ctrl+c" {
+				return m, tea.Quit
+			}
+			return m, nil
+		}
 		if m.answering {
 			switch msg.String() {
 			case "ctrl+c", "esc":
@@ -496,6 +560,20 @@ func (m app) View() tea.View {
 		b.WriteString(dim.Render("Archived:off"))
 	}
 	b.WriteString("\n\n")
+	if m.connection.Diagnostic != "" {
+		style := dim
+		if m.connection.Blocking {
+			style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+		}
+		b.WriteString(style.Render(m.connection.Diagnostic))
+		b.WriteString("\n\n")
+		if m.connection.Blocking {
+			b.WriteString(dim.Render("Restart or upgrade the indicated HQ component, then reopen the TUI. · q quit"))
+			view := tea.NewView(b.String())
+			view.AltScreen = true
+			return view
+		}
+	}
 	if m.err != nil {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
 		b.WriteString("\n\n")
@@ -583,7 +661,7 @@ func (m app) View() tea.View {
 		b.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
 	} else {
 		b.WriteString("\n\n")
-		b.WriteString(dim.Render("j/k move · enter reply · d archive · n new message · s sent · x archived · v status · r refresh · q quit · auto-refresh 1m"))
+		b.WriteString(dim.Render("j/k move · enter reply · d archive · n new message · s sent · x archived · v status · r refresh · q quit · live updates · repair 5m"))
 	}
 	view := tea.NewView(b.String())
 	view.AltScreen = true

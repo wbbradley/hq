@@ -22,3 +22,23 @@ type Invalidation struct {
 type ChangeLog interface {
 	CurrentRevision(context.Context) (uint64, error)
 }
+
+type ChangeSubscription interface {
+	Changes() <-chan Invalidation
+	Close()
+}
+
+type ChangeSubscriber interface {
+	Subscribe(context.Context, ...ChangeTopic) (ChangeSubscription, error)
+}
+
+type ConnectionUpdate struct {
+	Diagnostic string
+	Blocking   bool
+}
+
+type ClientUpdates struct {
+	Subscribe func(context.Context, ...ChangeTopic) (ChangeSubscription, error)
+	Initial   ConnectionUpdate
+	States    <-chan ConnectionUpdate
+}

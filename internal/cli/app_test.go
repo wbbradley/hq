@@ -16,14 +16,24 @@ import (
 	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
+	"github.com/wbbradley/hq/internal/hqclient"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/node"
 	"github.com/wbbradley/hq/internal/store"
+	"github.com/wbbradley/hq/internal/syncer"
 )
 
 type testDomainStore struct{ *store.SQLite }
 
 func (*testDomainStore) Synchronize(context.Context) error { return nil }
+
+type updatingTestStore struct {
+	*testDomainStore
+	updates domain.ClientUpdates
+}
+
+func (s *updatingTestStore) Updates() domain.ClientUpdates { return s.updates }
 
 func testApp(t *testing.T, input string) (*App, *bytes.Buffer) {
 	t.Helper()
@@ -313,7 +323,7 @@ func TestAskWaitsForReplyByDefault(t *testing.T) {
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "blocking-ask"})
 	done := make(chan error, 1)
 	go func() {
-		done <- a.Run(ctx, []string{"--no-sync", "--db", database, "ask", "Choose a port"})
+		done <- a.Run(ctx, []string{"--no-sync", "--db", database, "ask", "--interval", "5ms", "Choose a port"})
 	}()
 
 	var question model.Message
@@ -785,6 +795,119 @@ func TestNormalCommandsOpenDomainClientButLifecycleAndIdentityDoNot(t *testing.T
 	}
 	if err := a.Run(context.Background(), []string{"--db", filepath.Join(t.TempDir(), "identity.db"), "identity", "init"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOrdinaryCommandPrintsConnectionDiagnostic(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	a.Open = func(context.Context, string) (domain.Store, error) {
+		initializeTestIdentity(t, database)
+		databaseStore, err := store.Open(database)
+		if err != nil {
+			return nil, err
+		}
+		return &updatingTestStore{
+			testDomainStore: &testDomainStore{SQLite: databaseStore},
+			updates:         domain.ClientUpdates{Initial: domain.ConnectionUpdate{Diagnostic: "restart the local HQ node"}},
+		}, nil
+	}
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "list"}); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic := a.ErrOut.(*bytes.Buffer).String(); diagnostic != "hq: restart the local HQ node\n" {
+		t.Fatalf("connection diagnostic = %q", diagnostic)
+	}
+}
+
+func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	initializeTestIdentity(t, database)
+	nodeContext, stopNode := context.WithCancel(context.Background())
+	nodeDone := make(chan error, 1)
+	go func() { nodeDone <- node.Run(nodeContext, database) }()
+	defer func() {
+		stopNode()
+		select {
+		case err := <-nodeDone:
+			if err != nil {
+				t.Errorf("stop test node: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("test node did not stop")
+		}
+	}()
+	paths, err := syncer.ResolveRuntimePaths(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyDeadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, statErr := os.Stat(paths.Socket); statErr == nil {
+			break
+		}
+		if time.Now().After(readyDeadline) {
+			t.Fatal("test node did not create its socket")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	application := New()
+	output := new(bytes.Buffer)
+	application.In = strings.NewReader("")
+	application.Out = output
+	application.ErrOut = new(bytes.Buffer)
+	application.Getwd = func() (string, error) { return "/work/repo", nil }
+	application.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "subscribed-ask"})
+	application.RepoContext = func(context.Context, string) model.RepositoryContext {
+		return model.RepositoryContext{Directory: "/work/repo"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- application.Run(ctx, []string{"--no-sync", "--db", database, "ask", "--interval", "1h", "Live reply?"})
+	}()
+
+	replier, err := hqclient.Open(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replier.Close()
+	var question model.Message
+	deadline := time.Now().Add(2 * time.Second)
+	for question.ID == "" && time.Now().Before(deadline) {
+		messages, listErr := replier.List(ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Limit: 10})
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		for _, candidate := range messages {
+			if candidate.Body == "Live reply?" {
+				question = candidate
+				break
+			}
+		}
+		if question.ID == "" {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if question.ID == "" {
+		t.Fatal("subscribed ask did not publish its question")
+	}
+	reply := message("019c0000-0000-7000-8000-000000000301", "/work/repo", model.HumanMailboxID, question.SenderMailboxID, "Immediately")
+	started := time.Now()
+	if err := replier.Reply(ctx, question.ID, reply); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscribed ask waited for its one-hour repair interval")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second || output.String() != "Immediately\n" {
+		t.Fatalf("subscribed ask elapsed=%s output=%q", elapsed, output.String())
 	}
 }
 

@@ -69,6 +69,7 @@ func newReconnectClient(t *testing.T, handlers ...localwire.Handler) (*Client, *
 		t.Fatal(err)
 	}
 	client.attach(wireClient)
+	client.publishReady(wireClient)
 	t.Cleanup(func() { client.Close() })
 	return client, fixture
 }

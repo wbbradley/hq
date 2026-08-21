@@ -66,6 +66,8 @@ Other commands:
 
 HQ detects Codex, Claude Code, and Pi sessions. HQ_SESSION is an advanced override.
 The default database is $XDG_STATE_HOME/hq/hq.db or ~/.local/state/hq/hq.db.
+--no-sync skips client-requested immediate relay synchronization; the node may still publish
+already-durable outbox work through its configured network engine.
 `
 
 const codexUsage = `hq codex bridges one Codex app-server thread through an HQ mailbox.
@@ -89,31 +91,36 @@ HQ mailbox, and restart/deduplication state is stored beside the HQ database in
 
 Questions, approvals, final output, and lifecycle status appear in the human HQ inbox.
 Approval replies must exactly match the choices shown by HQ. Secret-marked requests are
-rejected because HQ persists messages. Run only one bridge process for a thread.
+rejected because HQ persists messages. Run only one bridge process for a thread. With
+--no-sync, the bridge does not request immediate relay synchronization; node-owned networking
+may still publish durable outbox work.
 `
 
 var ErrNoMessages = errors.New("no messages ready")
 
+const replyRepairInterval = 5 * time.Minute
+
 type App struct {
-	In             io.Reader
-	Out            io.Writer
-	ErrOut         io.Writer
-	Getwd          func() (string, error)
-	Getenv         func(string) string
-	Hostname       func() (string, error)
-	IsTTY          func() bool
-	Open           func(context.Context, string) (domain.Store, error)
-	RunTUI         func(context.Context, domain.Store, io.Reader, io.Writer) error
-	RunTUIWithSync func(context.Context, domain.Store, io.Reader, io.Writer, func(context.Context) error) error
-	RepoContext    func(context.Context, string) model.RepositoryContext
-	Sessions       session.IdentityResolver
-	ReadPassword   func(string) ([]byte, error)
-	Synchronize    func(context.Context, domain.Store) error
-	RunDaemon      func(context.Context, string) error
-	DaemonStatus   func(string) (string, error)
-	StopDaemon     func(string) error
-	RestartDaemon  func(string) error
-	RunCodexBridge func(context.Context, codexbridge.Options) error
+	In               io.Reader
+	Out              io.Writer
+	ErrOut           io.Writer
+	Getwd            func() (string, error)
+	Getenv           func(string) string
+	Hostname         func() (string, error)
+	IsTTY            func() bool
+	Open             func(context.Context, string) (domain.Store, error)
+	RunTUI           func(context.Context, domain.Store, io.Reader, io.Writer) error
+	RunTUIWithSync   func(context.Context, domain.Store, io.Reader, io.Writer, func(context.Context) error) error
+	RunTUIWithClient func(context.Context, domain.Store, io.Reader, io.Writer, domain.ClientUpdates, func(context.Context) error) error
+	RepoContext      func(context.Context, string) model.RepositoryContext
+	Sessions         session.IdentityResolver
+	ReadPassword     func(string) ([]byte, error)
+	Synchronize      func(context.Context, domain.Store) error
+	RunDaemon        func(context.Context, string) error
+	DaemonStatus     func(string) (string, error)
+	StopDaemon       func(string) error
+	RestartDaemon    func(string) error
+	RunCodexBridge   func(context.Context, codexbridge.Options) error
 }
 
 func New() *App {
@@ -123,16 +130,17 @@ func New() *App {
 		IsTTY: func() bool {
 			return charmterm.IsTerminal(os.Stdin.Fd()) && charmterm.IsTerminal(os.Stdout.Fd())
 		},
-		Open:           func(ctx context.Context, path string) (domain.Store, error) { return hqclient.Open(ctx, path) },
-		RunTUIWithSync: tui.RunWithSync,
-		RepoContext:    repoctx.GitHub{}.Snapshot,
-		Sessions:       session.Resolver{Getenv: os.Getenv},
-		Synchronize:    func(ctx context.Context, s domain.Store) error { return s.Synchronize(ctx) },
-		RunDaemon:      node.Run,
-		DaemonStatus:   syncer.DaemonStatus,
-		StopDaemon:     syncer.StopDaemon,
-		RestartDaemon:  syncer.RestartDaemon,
-		RunCodexBridge: codexbridge.Run,
+		Open:             func(ctx context.Context, path string) (domain.Store, error) { return hqclient.Open(ctx, path) },
+		RunTUIWithSync:   tui.RunWithSync,
+		RunTUIWithClient: tui.RunWithClient,
+		RepoContext:      repoctx.GitHub{}.Snapshot,
+		Sessions:         session.Resolver{Getenv: os.Getenv},
+		Synchronize:      func(ctx context.Context, s domain.Store) error { return s.Synchronize(ctx) },
+		RunDaemon:        node.Run,
+		DaemonStatus:     syncer.DaemonStatus,
+		StopDaemon:       syncer.StopDaemon,
+		RestartDaemon:    syncer.RestartDaemon,
+		RunCodexBridge:   codexbridge.Run,
 		ReadPassword: func(prompt string) ([]byte, error) {
 			if _, err := io.WriteString(os.Stderr, prompt); err != nil {
 				return nil, err
@@ -202,6 +210,10 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return err
 	}
 	defer s.Close()
+	updates := clientUpdates(s)
+	if command != "tui" && command != "codex" {
+		a.writeConnectionDiagnostic(updates.Initial)
+	}
 	var commandErr error
 	switch command {
 	case "ask":
@@ -251,6 +263,13 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		}
 		if a.RunTUI != nil {
 			return a.RunTUI(ctx, s, a.In, a.Out)
+		}
+		if a.RunTUIWithClient != nil {
+			var synchronize func(context.Context) error
+			if !noSync {
+				synchronize = func(syncCtx context.Context) error { return a.trySync(syncCtx, s, true, "") }
+			}
+			return a.RunTUIWithClient(ctx, s, a.In, a.Out, updates, synchronize)
 		}
 		if noSync {
 			return tui.Run(ctx, s, a.In, a.Out)
@@ -310,7 +329,7 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, database
 	options := codexbridge.Options{
 		Directory: directory, ResumeThreadID: strings.TrimSpace(*resumeThreadID),
 		InitialPrompt: strings.Join(f.Args(), " "), Repository: a.repositoryContext(ctx, directory),
-		Store: s, Stderr: a.ErrOut,
+		Store: s, Stderr: a.ErrOut, Updates: clientUpdates(s),
 	}
 	resolvedDatabasePath, err := identity.ResolveDatabasePath(databasePath)
 	if err != nil {
@@ -397,6 +416,23 @@ func (a *App) trySync(ctx context.Context, s domain.Store, strict bool, savedNot
 	}
 	_, _ = fmt.Fprintf(a.ErrOut, "hq: %srelay sync pending: %v\n", prefix, err)
 	return nil
+}
+
+type clientUpdateProvider interface {
+	Updates() domain.ClientUpdates
+}
+
+func clientUpdates(store domain.Store) domain.ClientUpdates {
+	if provider, ok := store.(clientUpdateProvider); ok {
+		return provider.Updates()
+	}
+	return domain.ClientUpdates{}
+}
+
+func (a *App) writeConnectionDiagnostic(update domain.ConnectionUpdate) {
+	if update.Diagnostic != "" && a.ErrOut != nil {
+		_, _ = fmt.Fprintf(a.ErrOut, "hq: %s\n", update.Diagnostic)
+	}
 }
 
 func mutatesState(command string, args []string) bool {
@@ -892,7 +928,7 @@ func (a *App) questionOptions(command string, args []string, waits bool) (questi
 	f.BoolVar(&options.jsonOutput, "json", false, "write JSON")
 	if waits {
 		f.DurationVar(&options.timeout, "timeout", 0, "maximum wait time")
-		f.DurationVar(&options.interval, "interval", 250*time.Millisecond, "poll interval")
+		f.DurationVar(&options.interval, "interval", replyRepairInterval, "repair interval")
 	}
 	if err := f.Parse(args); err != nil {
 		return questionOptions{}, err
@@ -983,7 +1019,7 @@ func (a *App) wait(ctx context.Context, s domain.Store, args []string, noSync bo
 	sessionID := f.String("session", "", "advanced session override")
 	directory := f.String("dir", "", "work directory context")
 	jsonOutput := f.Bool("json", false, "write JSON")
-	interval := f.Duration("interval", 250*time.Millisecond, "poll interval")
+	interval := f.Duration("interval", replyRepairInterval, "repair interval")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -1008,6 +1044,14 @@ func (a *App) waitForReply(ctx context.Context, s domain.Store, id, sessionID, d
 	mailbox, _, err := a.resolveMailbox(ctx, s, sessionID, directory)
 	if err != nil {
 		return err
+	}
+	var subscription domain.ChangeSubscription
+	if subscribe := clientUpdates(s).Subscribe; subscribe != nil {
+		subscription, err = subscribe(ctx, domain.TopicMessages, domain.TopicMailboxes)
+		if err != nil {
+			return fmt.Errorf("subscribe while waiting for reply: %w", err)
+		}
+		defer subscription.Close()
 	}
 	original, err := s.Get(ctx, id)
 	if err != nil {
@@ -1050,10 +1094,23 @@ func (a *App) waitForReply(ctx context.Context, s domain.Store, id, sessionID, d
 		if current.ArchivedAt != nil && len(replies) == 0 {
 			return errors.New("message was archived without a reply")
 		}
+		timer := time.NewTimer(interval)
+		var changes <-chan domain.Invalidation
+		if subscription != nil {
+			changes = subscription.Changes()
+		}
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-changes:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
 		}
 	}
 }

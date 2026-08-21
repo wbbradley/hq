@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 )
 
@@ -31,12 +32,12 @@ func NewRequestRouter(store QuestionStore, replies *ReplyRegistry) *RequestRoute
 	return &RequestRouter{store: store, replies: replies}
 }
 
-func (r *RequestRouter) Bind(threadID string, mailbox model.Mailbox, repository model.RepositoryContext, syncMailbox func(context.Context) error, pollInterval time.Duration) {
+func (r *RequestRouter) Bind(threadID string, mailbox model.Mailbox, repository model.RepositoryContext, syncMailbox func(context.Context) error, subscribe func(context.Context, ...domain.ChangeTopic) (domain.ChangeSubscription, error), repairInterval time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.questioner = &Questioner{
 		Store: r.store, Replies: r.replies, Mailbox: mailbox, ThreadID: threadID, Repository: repository,
-		Sync: syncMailbox, PollInterval: pollInterval,
+		Sync: syncMailbox, Subscribe: subscribe, RepairInterval: repairInterval,
 	}
 }
 
