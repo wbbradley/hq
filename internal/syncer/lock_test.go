@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/identity"
+	"github.com/wbbradley/hq/internal/localwire"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
 )
@@ -91,6 +93,37 @@ func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 	}
 	if engine.calls.Load() == before {
 		t.Fatal("wake did not start a sync pass")
+	}
+	connection, err := net.Dial("unix", socketPath(database))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := localwire.NewClient(context.Background(), connection, localwire.ClientOptions{
+		Mode: localwire.LifecycleMode, Supported: localwire.LifecycleVersions,
+		Metadata: localwire.PeerMetadata{Build: "restart-test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldInstance := client.Handshake().Server.InstanceID
+	if err := RestartDaemon(database); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-client.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("restart did not drop an existing control connection")
+	}
+	for {
+		var status lifecycleStatus
+		handshake, statusErr := controlCommand(database, statusMethod, &status)
+		if statusErr == nil && handshake.Server.InstanceID != "" && handshake.Server.InstanceID != oldInstance {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon did not restart with a new instance: %v", statusErr)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if err := StopDaemon(database); err != nil {
 		t.Fatal(err)

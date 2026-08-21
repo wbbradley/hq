@@ -3,28 +3,33 @@
 package syncer
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/wbbradley/hq/internal/buildinfo"
+	"github.com/wbbradley/hq/internal/localwire"
 )
 
-type unixControl struct {
-	listener net.Listener
-	path     string
-	once     sync.Once
-}
-
 const maxUnixSocketPath = 103
+
+type unixControl struct {
+	listener      net.Listener
+	path          string
+	once          sync.Once
+	connectionsMu sync.Mutex
+	connections   map[net.Conn]struct{}
+	closed        bool
+}
 
 func socketPath(databasePath string) string {
 	direct := databasePath + ".sync.sock"
@@ -36,7 +41,7 @@ func socketPath(databasePath string) string {
 	return filepath.Join("/tmp", fmt.Sprintf("hq-%d", os.Getuid()), name)
 }
 
-func startControl(ctx context.Context, databasePath string, wake chan<- struct{}, stop context.CancelFunc, status func() string) (io.Closer, error) {
+func startControl(ctx context.Context, databasePath string, wake chan<- struct{}, stop, restart context.CancelFunc, status func() string, metadata localwire.PeerMetadata) (io.Closer, error) {
 	path := socketPath(databasePath)
 	if path != databasePath+".sync.sock" {
 		directory := filepath.Dir(path)
@@ -59,7 +64,37 @@ func startControl(ctx context.Context, databasePath string, wake chan<- struct{}
 		os.Remove(path)
 		return nil, err
 	}
-	handle := &unixControl{listener: listener, path: path}
+	handler := func(_ context.Context, _ *localwire.Session, method string, _ json.RawMessage) (any, *localwire.RPCError) {
+		switch method {
+		case wakeMethod:
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+			return lifecycleAcknowledgement{State: "awake"}, nil
+		case statusMethod:
+			return lifecycleStatus{State: status()}, nil
+		case stopMethod:
+			return localwire.DeferredResponse{Value: lifecycleAcknowledgement{State: "stopping"}, After: stop}, nil
+		case restartMethod:
+			return localwire.DeferredResponse{Value: lifecycleAcknowledgement{State: "restarting"}, After: restart}, nil
+		default:
+			return nil, &localwire.RPCError{Code: localwire.CodeMethodNotFound, Message: fmt.Sprintf("unknown lifecycle method %q", method)}
+		}
+	}
+	server, err := localwire.NewServer(localwire.ServerOptions{
+		Metadata: metadata,
+		Modes: map[localwire.HandshakeMode]localwire.ModeConfig{
+			localwire.LifecycleMode: {Supported: localwire.LifecycleVersions, Handler: handler},
+		},
+		RequestTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		listener.Close()
+		os.Remove(path)
+		return nil, err
+	}
+	handle := &unixControl{listener: listener, path: path, connections: make(map[net.Conn]struct{})}
 	go func() {
 		<-ctx.Done()
 		_ = handle.Close()
@@ -70,54 +105,57 @@ func startControl(ctx context.Context, databasePath string, wake chan<- struct{}
 			if err != nil {
 				return
 			}
-			go handleControl(connection, wake, stop, status)
+			handle.connectionsMu.Lock()
+			if handle.closed {
+				handle.connectionsMu.Unlock()
+				_ = connection.Close()
+				return
+			}
+			handle.connections[connection] = struct{}{}
+			handle.connectionsMu.Unlock()
+			go func() {
+				_ = server.ServeConn(ctx, connection)
+				handle.connectionsMu.Lock()
+				delete(handle.connections, connection)
+				handle.connectionsMu.Unlock()
+			}()
 		}
 	}()
 	return handle, nil
 }
 
-func handleControl(connection net.Conn, wake chan<- struct{}, stop context.CancelFunc, status func() string) {
-	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
-	command, err := bufio.NewReader(io.LimitReader(connection, 64)).ReadString('\n')
-	if err != nil {
-		return
-	}
-	response := "unknown command"
-	switch strings.TrimSpace(command) {
-	case "wake":
-		select {
-		case wake <- struct{}{}:
-		default:
-		}
-		response = "awake"
-	case "status":
-		response = status()
-	case "stop":
-		response = "stopping"
-		defer stop()
-	}
-	_, _ = io.WriteString(connection, response+"\n")
-}
-
-func controlCommand(databasePath, command string) (string, error) {
+func controlCommand(databasePath, method string, destination any) (localwire.HandshakeResponse, error) {
 	connection, err := net.DialTimeout("unix", socketPath(databasePath), 500*time.Millisecond)
 	if err != nil {
-		return "", err
+		return localwire.HandshakeResponse{}, err
 	}
-	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(time.Second))
-	if _, err := io.WriteString(connection, command+"\n"); err != nil {
-		return "", err
+	_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
+	client, err := localwire.NewClient(context.Background(), connection, localwire.ClientOptions{
+		Mode: localwire.LifecycleMode, Supported: localwire.LifecycleVersions,
+		Metadata: localwire.PeerMetadata{Build: buildinfo.Version},
+	})
+	if err != nil {
+		connection.Close()
+		return localwire.HandshakeResponse{}, err
 	}
-	response, err := bufio.NewReader(io.LimitReader(connection, 4096)).ReadString('\n')
-	return strings.TrimSpace(response), err
+	defer client.Close()
+	callContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = client.Call(callContext, method, nil, destination)
+	return client.Handshake(), err
 }
 
 func (c *unixControl) Close() error {
 	var err error
 	c.once.Do(func() {
 		err = c.listener.Close()
+		c.connectionsMu.Lock()
+		c.closed = true
+		for connection := range c.connections {
+			err = errors.Join(err, connection.Close())
+		}
+		c.connections = make(map[net.Conn]struct{})
+		c.connectionsMu.Unlock()
 		removeErr := os.Remove(c.path)
 		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			err = errors.Join(err, removeErr)

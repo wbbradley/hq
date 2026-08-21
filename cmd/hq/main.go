@@ -8,14 +8,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/wbbradley/hq/internal/buildinfo"
 	"github.com/wbbradley/hq/internal/cli"
 )
 
-var version = "dev"
-
 func main() {
 	if len(os.Args) == 2 && (os.Args[1] == "version" || os.Args[1] == "--version") {
-		fmt.Fprintln(os.Stdout, "hq", version)
+		fmt.Fprintln(os.Stdout, "hq", buildinfo.Version)
 		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

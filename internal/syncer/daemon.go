@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/buildinfo"
+	"github.com/wbbradley/hq/internal/localwire"
 )
 
 var ErrControlUnavailable = errors.New("sync daemon control is unavailable on this platform")
@@ -29,16 +33,31 @@ func (d Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer lock.Release()
+	for {
+		restart, err := d.runRuntime(ctx)
+		if err != nil || !restart {
+			return err
+		}
+	}
+}
+
+func (d Daemon) runRuntime(ctx context.Context) (bool, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var restarting atomic.Bool
+	restart := func() {
+		restarting.Store(true)
+		cancel()
+	}
 	wake := make(chan struct{}, 1)
 	var state atomic.Value
 	state.Store("starting")
-	control, err := startControl(runCtx, d.DatabasePath, wake, cancel, func() string {
+	metadata := localwire.PeerMetadata{Build: buildinfo.Version, InstanceID: uuid.NewString(), StartedAt: time.Now().UTC()}
+	control, err := startControl(runCtx, d.DatabasePath, wake, cancel, restart, func() string {
 		return state.Load().(string)
-	})
+	}, metadata)
 	if err != nil && !errors.Is(err, ErrControlUnavailable) {
-		return err
+		return false, err
 	}
 	if control != nil {
 		defer control.Close()
@@ -46,15 +65,18 @@ func (d Daemon) Run(ctx context.Context) error {
 	if engine, ok := d.Engine.(WakeSyncEngine); ok {
 		state.Store("running; live relay subscriptions starting")
 		err := engine.RunWithWake(runCtx, wake)
-		if runCtx.Err() != nil {
-			return nil
+		if restarting.Load() {
+			return true, nil
 		}
-		return err
+		if runCtx.Err() != nil {
+			return false, nil
+		}
+		return false, err
 	}
 	for {
 		err := d.Engine.RunOnce(runCtx)
 		if runCtx.Err() != nil {
-			return nil
+			return restarting.Load(), nil
 		}
 		if err != nil {
 			state.Store("running; last sync error: " + err.Error())
@@ -65,7 +87,7 @@ func (d Daemon) Run(ctx context.Context) error {
 		select {
 		case <-runCtx.Done():
 			timer.Stop()
-			return nil
+			return restarting.Load(), nil
 		case <-wake:
 			timer.Stop()
 		case <-timer.C:
@@ -74,21 +96,40 @@ func (d Daemon) Run(ctx context.Context) error {
 }
 
 func Wake(databasePath string) error {
-	_, err := controlCommand(databasePath, "wake")
+	var response lifecycleAcknowledgement
+	_, err := controlCommand(databasePath, wakeMethod, &response)
+	if err == nil && response.State != "awake" {
+		return fmt.Errorf("unexpected daemon response %q", response.State)
+	}
 	return err
 }
 
 func DaemonStatus(databasePath string) (string, error) {
-	return controlCommand(databasePath, "status")
+	var response lifecycleStatus
+	_, err := controlCommand(databasePath, statusMethod, &response)
+	return response.State, err
 }
 
 func StopDaemon(databasePath string) error {
-	response, err := controlCommand(databasePath, "stop")
+	var response lifecycleAcknowledgement
+	_, err := controlCommand(databasePath, stopMethod, &response)
 	if err != nil {
 		return err
 	}
-	if response != "stopping" {
-		return fmt.Errorf("unexpected daemon response %q", response)
+	if response.State != "stopping" {
+		return fmt.Errorf("unexpected daemon response %q", response.State)
+	}
+	return nil
+}
+
+func RestartDaemon(databasePath string) error {
+	var response lifecycleAcknowledgement
+	_, err := controlCommand(databasePath, restartMethod, &response)
+	if err != nil {
+		return err
+	}
+	if response.State != "restarting" {
+		return fmt.Errorf("unexpected daemon response %q", response.State)
 	}
 	return nil
 }

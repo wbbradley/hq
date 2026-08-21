@@ -716,6 +716,11 @@ func TestDaemonCLICommands(t *testing.T) {
 	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "stop"}); err != nil || !stopped {
 		t.Fatalf("daemon stop stopped=%t err=%v", stopped, err)
 	}
+	restarted := false
+	a.RestartDaemon = func(string) error { restarted = true; return nil }
+	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "restart"}); err != nil || !restarted {
+		t.Fatalf("daemon restart restarted=%t err=%v", restarted, err)
+	}
 }
 
 func TestWaitRunsBoundedSyncAndFailedWakeKeepsLocalSuccess(t *testing.T) {

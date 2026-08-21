@@ -111,6 +111,7 @@ type App struct {
 	RunDaemon      func(context.Context, string, store.Store) error
 	DaemonStatus   func(string) (string, error)
 	StopDaemon     func(string) error
+	RestartDaemon  func(string) error
 	RunCodexBridge func(context.Context, codexbridge.Options) error
 }
 
@@ -130,6 +131,7 @@ func New() *App {
 		RunDaemon:      defaultRunDaemon,
 		DaemonStatus:   syncer.DaemonStatus,
 		StopDaemon:     syncer.StopDaemon,
+		RestartDaemon:  syncer.RestartDaemon,
 		RunCodexBridge: codexbridge.Run,
 		ReadPassword: func(prompt string) ([]byte, error) {
 			if _, err := io.WriteString(os.Stderr, prompt); err != nil {
@@ -337,7 +339,7 @@ func defaultRunDaemon(ctx context.Context, databasePath string, s store.Store) e
 
 func (a *App) daemon(ctx context.Context, databasePath string, s store.Store, args []string) error {
 	if len(args) != 1 {
-		return errors.New("daemon needs run, status, or stop")
+		return errors.New("daemon needs run, status, stop, or restart")
 	}
 	resolved, err := identity.ResolveDatabasePath(databasePath)
 	if err != nil {
@@ -363,6 +365,11 @@ func (a *App) daemon(ctx context.Context, databasePath string, s store.Store, ar
 			return errors.New("daemon stop is unavailable")
 		}
 		return a.StopDaemon(resolved)
+	case "restart":
+		if a.RestartDaemon == nil {
+			return errors.New("daemon restart is unavailable")
+		}
+		return a.RestartDaemon(resolved)
 	default:
 		return fmt.Errorf("unknown daemon command %q", args[0])
 	}
