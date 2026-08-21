@@ -1095,7 +1095,13 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 	var recipient = &event.MailboxAddress{InstallationID: recipientInstallationID, MailboxID: m.RecipientMailboxID}
 	var audience *event.Audience
 	var parents []string
-	if m.RecipientMailboxID == model.HumanMailboxID && m.SenderMailboxID != model.HumanMailboxID {
+	remoteRecipient := recipientInstallationID != s.signer.InstallationID
+	if remoteRecipient {
+		scope = event.ScopePeerAddressed
+		if m.SenderMailboxID != model.HumanMailboxID {
+			typeName = event.TypeQuestion
+		}
+	} else if m.RecipientMailboxID == model.HumanMailboxID && m.SenderMailboxID != model.HumanMailboxID {
 		typeName = event.TypeQuestion
 		account, membership, _, err := s.localAccountAction(ctx, "")
 		if err != nil {

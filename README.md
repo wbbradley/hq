@@ -1,8 +1,8 @@
 # HQ
 
-HQ is a local message system for agents and a human. Agents send messages to the human inbox, the human replies from a terminal UI, and agents read replies or other mailbox messages later.
+HQ is a local message system for agents and a human. Agents send messages to the human inbox, the human replies from a terminal UI, and agents read replies or other mailbox messages later. One local HQ node owns signing, SQLite state, projections, subscriptions, and remote relay transport; commands are versioned domain clients.
 
-HQ stores messages in SQLite at `~/.local/state/hq/hq.db`, or `$XDG_STATE_HOME/hq/hq.db` when `XDG_STATE_HOME` is set.
+The node stores messages in SQLite at `~/.local/state/hq/hq.db`, or `$XDG_STATE_HOME/hq/hq.db` when `XDG_STATE_HOME` is set. Normal commands coordinate and auto-start the node when needed. On Unix they use a protected local socket; Windows local client transport is not supported yet.
 
 ## Install
 
@@ -24,7 +24,7 @@ Create one installation identity before first use:
 hq identity init
 ```
 
-HQ stores the root key in `~/.local/state/hq/hq.key` with mode `0600` and keeps the key out of SQLite. Same-user processes can still read the key, so this release assumes cooperative local actors.
+The node loads the root key from `~/.local/state/hq/hq.key` with mode `0600` and keeps the key out of SQLite. Same-user processes can still read the key, so this release assumes cooperative local actors.
 
 ## Agent use
 
@@ -75,7 +75,7 @@ The mailbox follows a resumed harness session across process restarts and direct
 
 ```mermaid
 flowchart LR
-    Human[Human using HQ] <--> Store[(HQ mailbox store)]
+    Human[Human using HQ] <--> Node[(HQ local node)]
 
     subgraph Bridge["hq codex bridge process"]
         Lifecycle[Lifecycle and thread state]
@@ -93,9 +93,9 @@ flowchart LR
         Transport -->|final output and turn status| Output
     end
 
-    Store -->|tasks and replies| Dispatcher
-    Requests -->|questions and approval choices| Store
-    Output -->|agent messages and status| Store
+    Node -->|subscribed tasks and replies| Dispatcher
+    Requests -->|questions and approval choices| Node
+    Output -->|agent messages and status| Node
     Transport <--> AppServer[Codex app-server]
 
     Dispatcher -.->|delivery checkpoints| Ledger[(Codex bridge ledger)]
@@ -143,7 +143,7 @@ Troubleshooting:
 - Run `hq help codex` to confirm syntax and `codex --version` to confirm v0.148.0.
 - An unsupported server request stops the bridge with compatibility guidance instead of guessing a permissive response.
 - If the ready message never appears, inspect prefixed app-server stderr and the terminal error. Verify Codex authentication, the working directory, and HQ identity.
-- If relay sync is intentionally unavailable, use global `--no-sync`; local HQ and Codex delivery still operate.
+- If an immediate relay sync request is undesirable, use global `--no-sync`; local HQ and Codex delivery still operate, but a network-enabled node may still publish durable outbox work.
 - Do not delete the sidecar ledger while a bridge is running.
 
 The opt-in smoke test checks the installed v0.148.0 executable and official initialize/initialized handshake without starting a turn or consuming model quota:
@@ -189,7 +189,7 @@ hq cancel MESSAGE_ID
 
 ### Pair another installation
 
-Each machine keeps its own installation ID, root key, SQLite database, and daemon. A signed device grant can place both installations in one logical human account without sharing those files or identities.
+Each machine keeps its own installation ID, root key, SQLite database, and local node. A signed device grant can place both installations in one logical human account without sharing those files or identities.
 
 On the machine being added, get its identity:
 
@@ -247,7 +247,7 @@ hq relay list [--json]
 hq relay remove WSS_URL
 hq status [--json]
 hq sync
-hq daemon run|status|stop
+hq daemon run|status|stop|restart
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
 hq codex [--cwd PATH] [--resume THREAD_ID] [INITIAL PROMPT...]
@@ -255,9 +255,9 @@ hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
 ```
 
-Set `HQ_DB` or pass global `--db PATH` before the command to use another database. Mutating commands commit their signed local event and then run a three-second foreground sync pass. `--no-sync` skips that pass for explicit offline work. Relay errors go to stderr and never undo the local event.
+Set `HQ_DB` or pass global `--db PATH` before the command to use another database. Mutating commands ask the node to commit their signed event and may wait up to three seconds for an immediate relay synchronization request. `--no-sync` skips only that client request; it is not a node-wide offline switch. Relay errors go to stderr and never undo the local event.
 
-No daemon is required. `hq daemon run` is an optional foreground service for continuous polling; a service manager may keep it alive. `hq daemon status` reads its protected local socket, and `hq daemon stop` requests a clean stop. A CLI send wakes the daemon when the daemon owns the sync lock. `hq sync` runs one full pass when no daemon owns the lock.
+The local node is required and normally auto-starts on the first client connection. `hq daemon run` runs it in the foreground; systemd or launchd may keep it warm for uninterrupted relay subscriptions. `hq daemon status` reads the protected lifecycle RPC, `stop` requests a clean stop, and `restart` replaces the instance while connected clients reconnect and resubscribe. `hq sync` asks the owning node to wake its network engine. Build drift is allowed when wire ranges remain compatible and is shown with restart guidance; incompatible ranges identify the stale side.
 
 ## Message and delivery rules
 
@@ -267,9 +267,9 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 `hq list` shows only open messages by default. `--archived` shows archived messages, and `--all` shows both.
 
-The TUI syncs in the background on start, after a reply, and during its one-minute refresh. Active text, focus, and selection survive the reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, last receive time, account members, pending account fanout, relay-accepted sends, invalid or revoked-device traffic, and event queue counts.
+The TUI subscribes before its initial snapshot and reloads immediately after local or remote commits. A five-minute repair refresh remains; active text, focus, and selection survive every reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, last receive time, account members, pending account fanout, relay-accepted sends, invalid or revoked-device traffic, and event queue counts.
 
-Schema version 7 resets every older HQ table when HQ first opens an old database. HQ is still in green-field development and does not migrate old rows.
+SQLite schema 9 includes durable mutation receipts and monotonic change revisions. Schema 7 migrates through versions 8 and 9; unsupported older layouts may still reset during pre-1.0 development.
 
 See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for signed causal state, and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
 

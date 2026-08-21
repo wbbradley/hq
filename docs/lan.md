@@ -1,6 +1,6 @@
 # Two-machine LAN setup
 
-This setup runs one HQ installation and one HQ daemon on each machine. Both daemons connect as clients to one retained Nostr relay. The two daemons do not listen for network peers and do not trust hostnames, IP addresses, or ports.
+This setup runs one HQ installation and one local HQ node on each machine. Both nodes connect as clients to one retained Nostr relay. They do not listen for network peers and do not trust hostnames, IP addresses, or ports.
 
 Each machine keeps a separate root key, installation ID, SQLite database, agent mailboxes, and local delivery leases. A signed human-account grant makes both installations devices of one human account. Each device then projects the same human inbox while agent mailboxes stay local to their harness sessions.
 
@@ -44,9 +44,9 @@ hq human devices
 
 Run `hq sync` once on the creator, then once more on the added machine. Both `hq human devices` outputs should list both installations as active. Each machine can now use `hq` to view and answer the shared human inbox.
 
-## Keep each daemon running
+## Keep each node running
 
-No daemon is needed for local writes. The daemon keeps relay subscriptions open, sends queued events, and reconnects after network or relay loss.
+Every local command uses the node, and the client auto-starts one owner when necessary. A service manager is still recommended: it keeps retained-relay subscriptions warm, sends queued events promptly, and reconnects after network or relay loss without waiting for the next command.
 
 For a systemd user service:
 
@@ -67,7 +67,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.wbbradley.hq.daemon.
 hq daemon status
 ```
 
-Use one daemon per database. `hq daemon status` shows whether the local control socket responds. `hq status` shows account members, pending device fanout, relay-accepted sends, last receive time, invalid account traffic, and revoked-device traffic.
+Use one node per database. `hq daemon status` shows whether lifecycle RPC responds; `hq daemon restart` replaces the node instance and connected clients reconnect/resubscribe. `hq status` uses domain RPC to show account members, pending device fanout, relay-accepted sends, last receive time, invalid account traffic, and revoked-device traffic. Short database paths use a sibling mode-`0600` Unix socket; long paths use a stable hash under the user runtime directory. Windows named-pipe transport is not available yet.
 
 ## Automated smoke test
 
@@ -87,11 +87,12 @@ The test uses local port 17447 and removes its container and temporary files on 
 - Start several Codex, Claude Code, or Pi sessions on each host. Use `hq ask` when each session should block for its answer; use `hq send` when testing delivery asynchronously.
 - Open both TUIs. Confirm both TUIs show every question with the source device, installation, repository, worktree, and branch.
 - Answer one question from the source host and one from the other host. Confirm each waiting agent receives the right answer.
-- Stop one HQ daemon. Send a message asynchronously on that host, restart the daemon, and confirm the queued fanout clears.
+- Stop one HQ node, then run `hq list` and confirm the client auto-starts exactly one replacement owner.
+- Keep a TUI open while running `hq daemon restart`; confirm it reports reconnect state briefly, reloads a full snapshot, and receives later messages.
 - Stop the relay. Send messages asynchronously on both hosts, restart the relay, and confirm `hq status` moves each send from queued to relay accepted.
 - Stop one machine long enough for several asynchronous messages to reach the relay. Restart the machine and confirm its TUI catches up without duplicate rows.
 - Put a bad relay URL in one installation, confirm local use still works, restore the common URL, and confirm recovery.
-- Restart both service-manager jobs and the relay. Confirm the shared inbox remains intact and new live messages arrive without manual `hq sync` calls.
+- Restart both service-manager jobs and the relay. Confirm the shared inbox remains intact, retained catch-up has no duplicate rows, and new messages arrive without manual `hq sync` calls.
 - Revoke the added device. Confirm the device records the revoke but receives no later account fanout.
 - Run `hq identity export` on the creator and store the encrypted backup away from both machines. Do not run the exported identity on two active hosts.
 

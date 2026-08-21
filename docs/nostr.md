@@ -1,84 +1,114 @@
 # HQ Nostr transport
 
-Status: first-release transport for HQ canonical schema 1 and SQLite schema 7.
+Nostr is HQ's remote transport between installation nodes. It is not local IPC and it is not the
+source of application state. Local CLI, TUI, and Codex clients use versioned domain RPC; the node
+signs and stores canonical events, then its continuous network engine moves exact encrypted wrappers
+through retained relays.
 
-HQ uses Nostr relays to move already-signed canonical events between trusted installations. Relay events are transport records, not the source of HQ state. [events.md](events.md) defines the canonical event and reducer rules.
+This release uses canonical schema 1 and SQLite schema 9. The implementation pins
+`fiatjaf.com/nostr` at revision `5fe6a7499d07` behind `internal/nostrwire`; HQ owns the canonical
+schema, wrapper validation, durable outbox, relay interface, and retry rules.
 
-The implementation pins `fiatjaf.com/nostr` at revision `5fe6a7499d07` and keeps its NIP-44 use behind `internal/nostrwire`. HQ owns the rumor schema, gift-wrap validation, relay client interface, and durable sync rules.
+## Addresses and authority
 
-## Address and keys
+A remote mailbox address is `(installation root public key, installation UUID, mailbox UUID)`. The
+root key signs canonical events, opens NIP-44 envelopes, and authenticates to NIP-42 relays. The
+installation UUID is stable application identity. A bare mailbox UUID grants no authority.
 
-A network mailbox address is `(installation root public key, installation UUID, mailbox UUID)`. The Nostr root public key handles encryption, wrapper seals, and NIP-42 relay auth. The installation UUID remains stable application identity. A bare mailbox UUID has no network authority.
+One-way peer trust binds a remote installation UUID to one public key and up to three relay hints.
+The receiver must trust the origin before peer traffic can project. A peer may address the reserved
+human mailbox; an agent mailbox also needs an active signed share. Human-account traffic uses signed
+device grants and account authority rather than mailbox sharing.
 
-The local peer trust event binds a remote installation UUID to one root public key and up to three relay hints. Trust is one-way. The receiver must trust the sender before a remote canonical event can affect a projection. A peer may address the human mailbox by default; an agent mailbox also needs an active signed mailbox share.
+## Exact wire layers
 
-## Wire layers
+HQ creates one NIP-59 kind-1059 gift wrap per recipient installation. Peer-addressed events have one
+recipient. Account-addressed events have one canonical event and one durable outbox row/wrapper per
+active device.
 
-HQ sends one NIP-59 kind-1059 gift wrap per recipient installation. A peer-addressed event has one recipient. An account-addressed event has one canonical event and one durable outbox row and wrapper for each active account device:
+1. Exact signed kind-7281 bytes contain the canonical HQ event.
+2. An unsigned kind-7282 rumor contains schema-1 `hq.canonical` JSON with origin installation UUID,
+   canonical ID, and the exact canonical event. Its `p` tag names the recipient root key.
+3. A sender-signed kind-13 seal contains the NIP-44 v2 encrypted rumor and has no tags.
+4. A kind-1059 gift wrap contains the encrypted seal, a fresh one-use key, and one recipient `p`
+   tag.
 
-1. The canonical HQ event remains signed kind 7281 exact bytes.
-2. An unsigned kind-7282 rumor contains schema 1 `hq.canonical` JSON with the origin installation UUID, canonical event ID, and exact canonical event object. The rumor has one encrypted `p` tag for the recipient root key.
-3. A sender-signed kind-13 seal contains the NIP-44 v2 encrypted rumor. Seal tags are empty.
-4. A kind-1059 gift wrap contains the NIP-44 v2 encrypted seal. The gift wrap uses a fresh one-use key and one `p` tag for the recipient root key.
-
-Seal and gift-wrap timestamps are independently moved to a random time in the prior two days. The canonical event keeps its signed application time.
-
-HQ stores the exact signed gift-wrap bytes before the first publish. A retry sends the same bytes, event ID, timestamp, ciphertext, and one-use public key. HQ rejects one ephemeral public key used by two different wrappers.
+Seal and wrapper timestamps are independently randomized into the prior two days. The canonical
+event retains its signed application time. Before first publish, the node durably stores the exact
+gift-wrap bytes, ID, ciphertext, timestamp, and one-use key. Every retry reuses those exact bytes.
+HQ rejects an ephemeral key reused by different wrappers.
 
 ## Relay-visible data
 
-A relay can see the kind-1059 event ID, one-use public key, recipient root public key in the `p` tag, randomized time, wrapper size, and client network address. A NIP-42 auth exchange also shows the installation root public key to that relay. The relay cannot read the seal, canonical event, mailbox UUID, body, repository context, or causal links without a key compromise.
+A relay sees the kind-1059 ID, one-use public key, recipient root key, randomized time, wrapper size,
+and client network address. NIP-42 also exposes the installation root public key to that relay. The
+relay cannot read the seal, canonical event, mailbox UUID, body, repository context, or causal
+links without a key compromise. NIP-44 provides neither forward secrecy nor post-compromise
+security.
 
-NIP-44 does not add forward secrecy or post-compromise security. A stolen root key can decrypt retained past and future wrappers for that key.
+## Node-owned relay sessions
 
-## Receive validation order
+The node's continuous engine derives write relays from signed peer hints and read/write relays from
+local configuration. It uses one WebSocket per relay for `EVENT`, `REQ`, `CLOSE`, `OK`, `EOSE`,
+`AUTH`, `CLOSED`, and `NOTICE`. Private inbox reads require NIP-42 unless the explicit development
+`--unsafe-no-auth` override is configured.
 
-HQ applies checks in this order:
+Catch-up opens a live kind-1059 subscription filtered by the local root `p` tag, consumes retained
+events through EOSE, and pages older events with overlap. Random wrapper times deliberately rule out
+a narrow `since` cursor. HQ deduplicates outer IDs and `(origin installation UUID, canonical event
+ID)`, so overlap, relay duplicates, restart, and catch-up are safe.
 
-1. Enforce the 256 KiB wrapper input limit and strict JSON.
-2. Verify the outer NIP-01 event ID and Schnorr signature before decryption.
-3. Require kind 1059 and exactly one `p` tag for the local root public key.
-4. NIP-44 decrypt the seal and verify its ID, signature, kind 13, and empty tags.
-5. NIP-44 decrypt the rumor and require an unsigned kind 7282 whose public key matches the seal and whose `p` tag names the local root.
-6. Parse the strict HQ envelope and verify the exact canonical event ID and signature.
-7. Require the seal signer, envelope origin, canonical signer, and canonical installation UUID to agree. Require either a direct local recipient or local membership in the named human account.
-8. Apply peer trust or account membership, signer binding, mailbox route, schema, size, and causal checks through the canonical reducer.
-9. Insert the inbound wrapper, canonical event, projections, and dedup records in one SQLite transaction.
+The same session publishes ready outbox jobs. A positive `OK` or `duplicate:` response records relay
+acceptance; a negative response preserves retry state. Other relay hints remain eligible after one
+accepts. Connection loss uses bounded exponential backoff, and durable queued work survives node,
+host, or relay downtime. Config changes and lifecycle wake requests refresh sessions immediately;
+periodic polling repairs a missed wake.
 
-Bad signatures, MACs, recipients, schemas, sizes, identities, and rights enter bounded quarantine. Database lock and other temporary local failures enter staging. Quarantine does not retry on its own; an explicit recheck moves one row to staging.
+`hq sync` asks the node to wake its engine and run promptly; it does not make the CLI a relay worker.
+Normal mutating commands may request the same immediate synchronization after their local commit.
+Global `--no-sync` only suppresses that client request/wait. It is not an offline guarantee: an
+already running, network-enabled node can still publish durable outbox work. A true node-wide
+offline mode would be a separate future feature.
 
-## Relay sessions
+## Inbound validation and commit
 
-HQ uses one WebSocket per relay. A foreground sync pass closes the connection after catch-up and publish. The daemon keeps the catch-up subscription open for live events, polls the durable outbox, and reconnects after a failure or config change. The client handles `EVENT`, `REQ`, `CLOSE`, `OK`, `EOSE`, `AUTH`, `CLOSED`, and `NOTICE` frames. Publish and subscription work share the connection.
+The node validates in this order:
 
-Private inbox reads require NIP-42 by default. `hq relay add` enables auth. The client handles a relay challenge sent on connect or after a protected `REQ` or `EVENT`. `--unsafe-no-auth` exists only for local development. A positive `OK` or a `duplicate:` response means relay acceptance. HQ keeps trying the other recipient relay hints after one relay accepts.
+1. Enforce the 256 KiB input limit and strict JSON.
+2. Verify outer NIP-01 ID/signature, kind 1059, and exactly one local recipient `p` tag.
+3. Decrypt and verify the kind-13 seal, signer, ID, signature, and empty tags.
+4. Decrypt the unsigned kind-7282 rumor and verify its author and local recipient tag.
+5. Parse the strict HQ envelope and verify exact canonical ID/signature bytes.
+6. Require seal signer, envelope origin, canonical signer, and installation UUID to agree.
+7. Require a direct local route or active membership in the named human account.
+8. Apply peer/account authority, signer binding, mailbox rights, schema, size, and causal rules.
+9. In one SQLite transaction, insert wrapper audit data, append the canonical event, reduce,
+   project, derive any new outbox work, increment the revision, and commit.
+10. Publish a lightweight local invalidation after commit.
 
-Catch-up starts a live kind-1059 subscription filtered by the local root `p` tag, handles stored events through EOSE, and pages older retained events with overlap. HQ deduplicates by outer Nostr event ID and by `(origin installation UUID, canonical HQ event ID)`. Gift-wrap times are random, so HQ does not use a narrow `since` cursor. NIP-77 remains optional future work.
+Local and inbound canonical events therefore take the same reducer and projection path. Bad
+signatures, MACs, recipients, identities, schemas, sizes, or rights enter bounded quarantine.
+Temporary database failures enter staging for retry.
 
-Reconnect uses bounded exponential backoff. One unavailable relay does not remove queued work. Relay attempts, rejection text, retry times, auth state, EOSE time, and connection errors are unsigned node facts.
+## Delivery states and recovery
 
-Each mutating CLI command commits its canonical event before a bounded foreground sync pass. `--no-sync` is the explicit offline switch. The stable stdout result, including the bare `hq send` message ID, does not include sync status; a pending notice goes to stderr. `ask` and `wait` perform bounded passes while they wait indefinitely for a reply unless an explicit timeout is supplied.
+`queued` means canonical state and recipient work are durable; once prepared, exact wrapper bytes
+are durable too. `rejected` means a relay returned a negative `OK` and retry state remains.
+`relay-accepted` means one relay accepted or already retained the wrapper. `peer-received` requires
+a later valid causal event from the peer. Relay acceptance alone is not peer delivery.
 
-`hq daemon run` is optional. The daemon holds the sync lock, keeps live subscriptions open, checks the durable outbox every 30 seconds, and accepts wake, status, and stop commands over a mode-0600 Unix socket next to the database. A lost wake does not lose work because the outbox stays durable and polling continues. The CLI still opens SQLite directly under WAL mode. Windows keeps the same service interfaces but does not yet expose local daemon control.
+The node never relies on relay receipt order for semantic reduction. Canonical IDs, mutation
+receipts, exact wrapper reuse, uniqueness constraints, inbound wrapper audit rows, and logical
+deduplication provide exact-once projection across response loss, concurrent retry, restart, and
+retained catch-up.
 
-[lan.md](lan.md) pins the supported rnostr release, configures retained storage and NIP-42 allow-lists, and gives service and outage checks for two machines.
+## Human device traffic and limits
 
-## Delivery terms
+Human grants, acceptances, revocations, questions, answers, and archive facts use the same exact
+canonical/NIP-59 path. Pairing bundles include signed authority history so initial verification does
+not depend on relay arrival order. Peer trust added during pairing enables direct traffic but cannot
+create account membership.
 
-`queued` means HQ has durable canonical state and, when the recipient key is known, durable exact gift-wrap bytes. Account fanout tracks this state per recipient device. `rejected` means a relay returned a negative `OK`; HQ keeps the retry schedule. `relay-accepted` means at least one recipient relay returned a positive or duplicate `OK`. `peer-received` requires a later valid causal child from the peer. Relay acceptance is not peer delivery.
-
-HQ does not send automatic per-message receipts. A causal child proves receipt without extra writes. Batched receipt frontiers remain deferred.
-
-## Sync lock
-
-One process may own `hq.db.sync.lock` with a nonblocking advisory file lock. HQ never locks the SQLite database file. The lock limits duplicate relay work but does not provide correctness: event IDs, exact wrapper reuse, and SQLite uniqueness still make overlap safe. When the daemon owns the lock, a CLI process sends a wake request and returns. The interface leaves room for per-relay leases or database advisory locks later.
-
-## First-release limits
-
-HQ uses configured installation inbox relays and signed per-peer relay hints. Local bodies remain plaintext in SQLite, and same-user local actors are cooperative. NIP-44 provides neither forward secrecy nor post-compromise security. HQ does not publish kind 10050 relay lists, import generic kind-14 messages, use public events, rotate root keys, or run one installation identity on several active hosts.
-
-## Human device pairing
-
-Human account grants, acceptances, and revocations use the same exact-canonical-event and NIP-59 transport path as account messages. The creator sends a grant to the invited installation and every current device. A copied pairing bundle contains the full account authority history so the invited installation can verify prior devices even when relay delivery has not run. The invited installation sends its signed acceptance to every active device. Each prior device then backfills its own account events to the new device.
-
-Pairing adds one-way peer trust for direct peer traffic, but account traffic uses account grants rather than peer trust. The human account reducer checks creator and device signatures, exact grant fields, and causal parents. Peer trust alone cannot create account membership. An account answer must name the source agent from its question. An account async message needs an explicit agent address, which the TUI takes from a visible thread; agent mailboxes do not become shared inboxes.
+HQ does not publish kind-10050 lists, import generic kind-14 messages, use public events, rotate root
+keys, provide forward secrecy, or support one installation identity on multiple active hosts.
+[lan.md](lan.md) describes the pinned retained relay and two-node operation.

@@ -60,12 +60,14 @@ Other commands:
   relay      Configure installation inbox relays
   status     Show relay and event processing status
   sync       Run one full foreground relay sync pass
-  daemon     Run or control the local HQ node
+  daemon     Run or control the local HQ node (run|status|stop|restart)
   help       Print command help
   version    Print the version
 
 HQ detects Codex, Claude Code, and Pi sessions. HQ_SESSION is an advanced override.
 The default database is $XDG_STATE_HOME/hq/hq.db or ~/.local/state/hq/hq.db.
+Normal commands connect to and, when needed, auto-start the single node that owns that database.
+Local client transport currently requires Unix; Windows named-pipe support is not available yet.
 --no-sync skips client-requested immediate relay synchronization; the node may still publish
 already-durable outbox work through its configured network engine.
 `
@@ -1092,7 +1094,16 @@ func (a *App) waitForReply(ctx context.Context, s domain.Store, id, sessionID, d
 			return getErr
 		}
 		if current.ArchivedAt != nil && len(replies) == 0 {
-			return errors.New("message was archived without a reply")
+			// The reply/archive transaction can commit between the preceding List and Get.
+			// Re-read the reply side before classifying the archive as cancellation.
+			replies, listErr = s.List(ctx, model.Filter{ReplyTo: id, RecipientMailboxID: mailbox.ID, Limit: 1})
+			if listErr != nil {
+				return listErr
+			}
+			if len(replies) == 0 {
+				return errors.New("message was archived without a reply")
+			}
+			continue
 		}
 		timer := time.NewTimer(interval)
 		var changes <-chan domain.Invalidation

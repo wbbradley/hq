@@ -1,5 +1,5 @@
 [Unit]
-Description=HQ relay sync daemon
+Description=HQ local node (domain RPC, SQLite owner, and Nostr transport)
 After=network-online.target
 Wants=network-online.target
 

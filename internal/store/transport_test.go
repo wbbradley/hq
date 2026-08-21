@@ -349,6 +349,54 @@ func TestDistinctWrappersDeduplicateLogicalEventAndRejectReusedKey(t *testing.T)
 	}
 }
 
+func TestDomainCreateRoutesExplicitRemoteRecipientAsPeerAddressed(t *testing.T) {
+	ctx := context.Background()
+	sender := openStore(t, filepath.Join(t.TempDir(), "sender", "hq.db"))
+	receiver := openStore(t, filepath.Join(t.TempDir(), "receiver", "hq.db"))
+	senderID, senderKey := sender.InstallationIdentity()
+	receiverID, receiverKey := receiver.InstallationIdentity()
+	const relay = "wss://relay.test"
+	if err := sender.TrustPeer(ctx, Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey, Relays: []string{relay}}); err != nil {
+		t.Fatal(err)
+	}
+	repository := model.RepositoryContext{Directory: "/repo"}
+	senderMailbox, err := sender.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "sender"}, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiverMailbox, err := receiver.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "receiver"}, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.SetMailboxShare(ctx, receiverMailbox.ID, senderID, true); err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{
+		ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d9f", SenderMailboxID: senderMailbox.ID,
+		RecipientInstallationID: receiverID, RecipientMailboxID: receiverMailbox.ID,
+		Body: "domain remote route", Context: repository, CreatedAt: time.Now().UTC(),
+	}
+	if err := sender.Create(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := sender.RelayJobs(ctx, relay, 10, time.Now())
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("relay jobs = %#v, %v", jobs, err)
+	}
+	if _, err := receiver.ReceiveGiftWrap(ctx, jobs[0].ExactGiftWrapBytes, relay, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := receiver.Get(ctx, message.ID); err != nil || got.Body != message.Body {
+		t.Fatalf("remote domain message = %#v, %v", got, err)
+	}
+}
+
 func TestRevokedAgentMailboxShareRejectsInboundMessage(t *testing.T) {
 	ctx := context.Background()
 	sender := openStore(t, filepath.Join(t.TempDir(), "sender", "hq.db"))
