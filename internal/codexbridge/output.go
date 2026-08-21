@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
-	"github.com/wbbradley/hq/internal/store"
 )
 
 const canonicalOutputQueueSize = 64
@@ -150,7 +150,7 @@ func (r *OutputRelay) publish(output canonicalOutput) error {
 		if existing.CreatedAt.After(r.lastCreatedAt) {
 			r.lastCreatedAt = existing.CreatedAt
 		}
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, domain.ErrNotFound):
 		if err := r.store.Create(context.Background(), message); err != nil {
 			return fmt.Errorf("publish Codex output: %w", err)
 		}

@@ -14,9 +14,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/repoctx"
-	"github.com/wbbradley/hq/internal/store"
 )
 
 const refreshInterval = time.Minute
@@ -30,7 +30,7 @@ var (
 
 type app struct {
 	ctx          context.Context
-	store        store.Store
+	store        domain.Store
 	repo         repoctx.Provider
 	messages     []model.Message
 	inbox        []model.Message
@@ -54,14 +54,14 @@ type app struct {
 	pull         string
 	sync         func(context.Context) error
 	syncErr      error
-	network      store.NetworkStatus
+	network      domain.NetworkStatus
 }
 
 type loadedMsg struct {
 	inbox    []model.Message
 	sent     []model.Message
 	archived []model.Message
-	network  store.NetworkStatus
+	network  domain.NetworkStatus
 	err      error
 }
 
@@ -92,11 +92,11 @@ type remotesMsg struct {
 	err     error
 }
 
-func Run(ctx context.Context, s store.Store, in io.Reader, out io.Writer) error {
+func Run(ctx context.Context, s domain.Store, in io.Reader, out io.Writer) error {
 	return RunWithSync(ctx, s, in, out, nil)
 }
 
-func RunWithSync(ctx context.Context, s store.Store, in io.Reader, out io.Writer, sync func(context.Context) error) error {
+func RunWithSync(ctx context.Context, s domain.Store, in io.Reader, out io.Writer, sync func(context.Context) error) error {
 	editor := textarea.New()
 	editor.Placeholder = "Type a message"
 	editor.KeyMap.InsertNewline = key.NewBinding(
@@ -625,7 +625,7 @@ func deliveryLabel(message model.Message) string {
 	}
 }
 
-func formatNetworkStatus(status store.NetworkStatus) string {
+func formatNetworkStatus(status domain.NetworkStatus) string {
 	var value strings.Builder
 	value.WriteString(titleStyle.Render("Relay status"))
 	fmt.Fprintf(&value, "\nqueued %d · relay accepted %d · rejected %d · unresolved %d · unsupported %d · staged %d · quarantined %d", status.Queued, status.RelayAccepted, status.Rejected, status.Unresolved, status.Unsupported, status.Staged, status.Quarantined)

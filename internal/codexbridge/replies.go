@@ -6,12 +6,12 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
-	"github.com/wbbradley/hq/internal/store"
 )
 
 type ClaimStore interface {
-	Claim(context.Context, store.Claim, string) (model.Message, error)
+	Claim(context.Context, domain.Claim, string) (model.Message, error)
 	Complete(context.Context, string, string) error
 	Release(context.Context, string, string) error
 }
@@ -97,8 +97,8 @@ func (r *ReplyRegistry) ClaimOne(ctx context.Context, claimStore ClaimStore, mai
 		if err != nil {
 			return false, err
 		}
-		message, err := claimStore.Claim(ctx, store.Claim{ReplyTo: registration.questionID, RecipientMailboxID: mailboxID}, token.String())
-		if errors.Is(err, store.ErrNotReady) {
+		message, err := claimStore.Claim(ctx, domain.Claim{ReplyTo: registration.questionID, RecipientMailboxID: mailboxID}, token.String())
+		if errors.Is(err, domain.ErrNotReady) {
 			continue
 		}
 		if err != nil {

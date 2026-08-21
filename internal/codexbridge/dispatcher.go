@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
-	"github.com/wbbradley/hq/internal/store"
 )
 
 const defaultMailboxPollInterval = 250 * time.Millisecond
@@ -62,7 +62,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 			}
 		}
 		delivery, err := d.claim(ctx)
-		if errors.Is(err, store.ErrNotReady) {
+		if errors.Is(err, domain.ErrNotReady) {
 			if !waitContext(ctx, interval) {
 				return nil
 			}
@@ -90,7 +90,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 				d.release(delivery)
 				return nil
 			}
-			if !errors.Is(err, store.ErrNotReady) {
+			if !errors.Is(err, domain.ErrNotReady) {
 				d.release(delivery)
 				return fmt.Errorf("complete HQ message %s: %w", delivery.message.ID, err)
 			}
@@ -103,7 +103,7 @@ func (d *Dispatcher) claim(ctx context.Context) (claimedDelivery, error) {
 	if err != nil {
 		return claimedDelivery{}, err
 	}
-	claim := store.Claim{RecipientMailboxID: d.MailboxID}
+	claim := domain.Claim{RecipientMailboxID: d.MailboxID}
 	if d.Replies != nil {
 		claim.ExcludeReplyTo = d.Replies.OutstandingIDs()
 	}

@@ -199,6 +199,97 @@ func TestLiveNodeDomainRoundTripAndRuntimeOwnership(t *testing.T) {
 	}
 }
 
+func TestCLIAndTUIAndCodexClientsShareOneNodeStore(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
+	databasePath := filepath.Join(root, "installation", "hq.db")
+	keyPath, err := identity.KeyPath(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var opens atomic.Int32
+	runner := node.Runner{Open: func(path string) (*store.SQLite, error) {
+		opens.Add(1)
+		return store.Open(path)
+	}}
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(context.Background(), databasePath) }()
+	waitForNode(t, databasePath)
+	t.Cleanup(func() { _ = syncer.StopDaemon(databasePath) })
+
+	clients := make([]*hqclient.Client, 3)
+	clientRoles := []string{"CLI", "TUI", "Codex"}
+	for index := range clients {
+		clients[index], err = hqclient.Open(context.Background(), databasePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer clients[index].Close()
+	}
+	ctx := context.Background()
+	repository := model.RepositoryContext{Directory: "/shared/repository"}
+	agent, err := clients[0].ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "shared-node"}, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{
+		ID: uuid.Must(uuid.NewV7()).String(), SenderMailboxID: model.HumanMailboxID,
+		RecipientMailboxID: agent.ID, Body: "one node, three clients", Context: repository,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := clients[0].Create(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	for index, client := range clients {
+		got, err := client.Get(ctx, message.ID)
+		if err != nil || got.Body != message.Body {
+			t.Fatalf("%s client read = %#v, %v", clientRoles[index], got, err)
+		}
+		listed, err := client.List(ctx, model.Filter{RecipientMailboxID: agent.ID})
+		if err != nil || len(listed) != 1 || listed[0].ID != message.ID {
+			t.Fatalf("%s client list = %#v, %v", clientRoles[index], listed, err)
+		}
+	}
+	if _, err := clients[1].Claim(ctx, domain.Claim{MessageID: message.ID}, "tui-lease"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clients[2].Claim(ctx, domain.Claim{MessageID: message.ID}, "codex-lease"); !errors.Is(err, domain.ErrNotReady) {
+		t.Fatalf("competing client claim = %v", err)
+	}
+	if err := clients[1].Release(ctx, message.ID, "tui-lease"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clients[2].Claim(ctx, domain.Claim{MessageID: message.ID}, "codex-lease"); err != nil {
+		t.Fatal(err)
+	}
+	if opens.Load() != 1 {
+		t.Fatalf("concrete store opens = %d", opens.Load())
+	}
+
+	for _, client := range clients {
+		if err := client.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := syncer.StopDaemon(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("node did not stop")
+	}
+}
+
 func waitForNode(t *testing.T, databasePath string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

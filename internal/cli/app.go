@@ -17,12 +17,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/agenthelp"
 	"github.com/wbbradley/hq/internal/codexbridge"
+	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/hqclient"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/node"
 	"github.com/wbbradley/hq/internal/repoctx"
 	"github.com/wbbradley/hq/internal/session"
-	"github.com/wbbradley/hq/internal/store"
 	"github.com/wbbradley/hq/internal/syncer"
 	"github.com/wbbradley/hq/internal/tui"
 	systerm "golang.org/x/term"
@@ -101,15 +102,13 @@ type App struct {
 	Getenv         func(string) string
 	Hostname       func() (string, error)
 	IsTTY          func() bool
-	Open           func(string) (store.Store, error)
-	RunTUI         func(context.Context, store.Store, io.Reader, io.Writer) error
-	RunTUIWithSync func(context.Context, store.Store, io.Reader, io.Writer, func(context.Context) error) error
+	Open           func(context.Context, string) (domain.Store, error)
+	RunTUI         func(context.Context, domain.Store, io.Reader, io.Writer) error
+	RunTUIWithSync func(context.Context, domain.Store, io.Reader, io.Writer, func(context.Context) error) error
 	RepoContext    func(context.Context, string) model.RepositoryContext
 	Sessions       session.IdentityResolver
 	ReadPassword   func(string) ([]byte, error)
-	SyncOnce       func(context.Context, string, store.Store) error
-	EnsureNode     func(context.Context, string) error
-	WakeSync       func(string) error
+	Synchronize    func(context.Context, domain.Store) error
 	RunDaemon      func(context.Context, string) error
 	DaemonStatus   func(string) (string, error)
 	StopDaemon     func(string) error
@@ -124,13 +123,11 @@ func New() *App {
 		IsTTY: func() bool {
 			return charmterm.IsTerminal(os.Stdin.Fd()) && charmterm.IsTerminal(os.Stdout.Fd())
 		},
-		Open:           func(path string) (store.Store, error) { return store.Open(path) },
+		Open:           func(ctx context.Context, path string) (domain.Store, error) { return hqclient.Open(ctx, path) },
 		RunTUIWithSync: tui.RunWithSync,
 		RepoContext:    repoctx.GitHub{}.Snapshot,
 		Sessions:       session.Resolver{Getenv: os.Getenv},
-		SyncOnce:       defaultSyncOnce,
-		EnsureNode:     syncer.EnsureNode,
-		WakeSync:       syncer.Wake,
+		Synchronize:    func(ctx context.Context, s domain.Store) error { return s.Synchronize(ctx) },
 		RunDaemon:      node.Run,
 		DaemonStatus:   syncer.DaemonStatus,
 		StopDaemon:     syncer.StopDaemon,
@@ -200,27 +197,22 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if command == "daemon" {
 		return a.daemon(ctx, dbPath, args)
 	}
-	s, err := a.Open(dbPath)
+	s, err := a.Open(ctx, dbPath)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	if autoStartsNode(command) && a.EnsureNode != nil {
-		if err := a.EnsureNode(ctx, dbPath); err != nil {
-			return err
-		}
-	}
 	var commandErr error
 	switch command {
 	case "ask":
-		return a.ask(ctx, s, args, dbPath, noSync)
+		return a.ask(ctx, s, args, noSync)
 	case "send":
 		commandErr = a.send(ctx, s, args)
 	case "wait":
-		return a.wait(ctx, s, args, dbPath, noSync)
+		return a.wait(ctx, s, args, noSync)
 	case "poll":
 		if !noSync {
-			a.trySync(ctx, dbPath, s, false, "")
+			a.trySync(ctx, s, false, "")
 		}
 		return a.poll(ctx, s, args)
 	case "get":
@@ -252,7 +244,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		if noSync {
 			return errors.New("sync cannot be combined with --no-sync")
 		}
-		return a.trySync(ctx, dbPath, s, true, "")
+		return a.trySync(ctx, s, true, "")
 	case "tui":
 		if len(args) != 0 {
 			return errors.New("tui takes no arguments")
@@ -265,7 +257,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		}
 		if a.RunTUIWithSync != nil {
 			return a.RunTUIWithSync(ctx, s, a.In, a.Out, func(syncCtx context.Context) error {
-				return a.trySync(syncCtx, dbPath, s, true, "")
+				return a.trySync(syncCtx, s, true, "")
 			})
 		}
 		return tui.Run(ctx, s, a.In, a.Out)
@@ -279,16 +271,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if command == "send" {
 		note = "message saved"
 	}
-	return a.trySync(ctx, dbPath, s, false, note)
-}
-
-func autoStartsNode(command string) bool {
-	switch command {
-	case "ask", "send", "wait", "poll", "get", "list", "mailboxes", "answer", "cancel", "codex", "peer", "human", "mailbox", "relay", "status", "sync", "tui":
-		return true
-	default:
-		return false
-	}
+	return a.trySync(ctx, s, false, note)
 }
 
 func hasHelpFlag(args []string) bool {
@@ -303,7 +286,7 @@ func hasHelpFlag(args []string) bool {
 	return false
 }
 
-func (a *App) codex(ctx context.Context, s store.Store, args []string, databasePath string, noSync bool) error {
+func (a *App) codex(ctx context.Context, s domain.Store, args []string, databasePath string, noSync bool) error {
 	f := flags("codex")
 	workingDirectory := f.String("cwd", "", "Codex thread working directory")
 	resumeThreadID := f.String("resume", "", "existing Codex thread ID")
@@ -336,7 +319,7 @@ func (a *App) codex(ctx context.Context, s store.Store, args []string, databaseP
 	options.LedgerPath = resolvedDatabasePath + ".codexbridge.json"
 	if !noSync {
 		options.Sync = func(syncContext context.Context) error {
-			return a.trySync(syncContext, databasePath, s, false, "Codex bridge status saved")
+			return a.trySync(syncContext, s, false, "Codex bridge status saved")
 		}
 	}
 	return a.RunCodexBridge(ctx, options)
@@ -392,32 +375,13 @@ func (a *App) daemonControl(databasePath string, args []string) error {
 	}
 }
 
-func defaultSyncOnce(ctx context.Context, databasePath string, s store.Store) error {
-	sqlite, ok := s.(*store.SQLite)
-	if !ok {
-		return errors.New("relay sync needs the SQLite store")
-	}
-	resolved, err := identity.ResolveDatabasePath(databasePath)
-	if err != nil {
-		return err
-	}
-	engine := &syncer.Engine{State: sqlite, Codec: sqlite.WireCodec(nil, nil)}
-	return (syncer.CoordinatedEngine{Engine: engine, Coordinator: syncer.FileCoordinator{DatabasePath: resolved}}).RunOnce(ctx)
-}
-
-func (a *App) trySync(ctx context.Context, databasePath string, s store.Store, strict bool, savedNote string) error {
-	if a.SyncOnce == nil {
+func (a *App) trySync(ctx context.Context, s domain.Store, strict bool, savedNote string) error {
+	if a.Synchronize == nil {
 		return nil
 	}
 	syncCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	err := a.SyncOnce(syncCtx, databasePath, s)
-	if errors.Is(err, syncer.ErrSyncLocked) && a.WakeSync != nil {
-		resolved, resolveErr := identity.ResolveDatabasePath(databasePath)
-		if resolveErr == nil && a.WakeSync(resolved) == nil {
-			return nil
-		}
-	}
+	err := a.Synchronize(syncCtx, s)
 	if err == nil {
 		return nil
 	}
@@ -581,7 +545,7 @@ type stringList []string
 func (s *stringList) String() string         { return strings.Join(*s, ",") }
 func (s *stringList) Set(value string) error { *s = append(*s, value); return nil }
 
-func (a *App) peer(ctx context.Context, s store.Store, args []string) error {
+func (a *App) peer(ctx context.Context, s domain.Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("peer needs add, list, or distrust")
 	}
@@ -601,7 +565,7 @@ func (a *App) peer(ctx context.Context, s store.Store, args []string) error {
 		if err != nil {
 			return err
 		}
-		return s.TrustPeer(ctx, store.Peer{InstallationID: f.Args()[0], SignerKeyID: public, Name: *name, Relays: relays, Trusted: true})
+		return s.TrustPeer(ctx, domain.Peer{InstallationID: f.Args()[0], SignerKeyID: public, Name: *name, Relays: relays, Trusted: true})
 	case "list":
 		f := flags("peer list")
 		asJSON := f.Bool("json", false, "write JSON")
@@ -637,7 +601,7 @@ func (a *App) peer(ctx context.Context, s store.Store, args []string) error {
 	}
 }
 
-func (a *App) human(ctx context.Context, s store.Store, args []string) error {
+func (a *App) human(ctx context.Context, s domain.Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("human needs show, invite, join, devices, or revoke")
 	}
@@ -706,7 +670,7 @@ func (a *App) human(ctx context.Context, s store.Store, args []string) error {
 				return errors.New("--name is required when the hostname is unavailable")
 			}
 		}
-		bundle, err := s.CreateHumanInvite(ctx, store.HumanInviteRequest{InstallationID: f.Args()[0], SignerKeyID: public, Name: *name, Relays: relays})
+		bundle, err := s.CreateHumanInvite(ctx, domain.HumanInviteRequest{InstallationID: f.Args()[0], SignerKeyID: public, Name: *name, Relays: relays})
 		if err != nil {
 			return err
 		}
@@ -736,14 +700,14 @@ func (a *App) human(ctx context.Context, s store.Store, args []string) error {
 	}
 }
 
-func (a *App) mailbox(ctx context.Context, s store.Store, args []string) error {
+func (a *App) mailbox(ctx context.Context, s domain.Store, args []string) error {
 	if len(args) != 3 || (args[0] != "share" && args[0] != "revoke") {
 		return errors.New("mailbox needs share or revoke, MAILBOX_ID, and PEER_INSTALLATION_ID")
 	}
 	return s.SetMailboxShare(ctx, args[1], args[2], args[0] == "share")
 }
 
-func (a *App) relay(ctx context.Context, s store.Store, args []string) error {
+func (a *App) relay(ctx context.Context, s domain.Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("relay needs add, list, or remove")
 	}
@@ -759,7 +723,7 @@ func (a *App) relay(ctx context.Context, s store.Store, args []string) error {
 		if len(f.Args()) != 1 {
 			return errors.New("relay add needs one WebSocket URL")
 		}
-		return s.AddRelay(ctx, store.RelayConfig{URL: f.Args()[0], Read: *read, Write: *write, RequireAuth: *read && !*unsafeNoAuth, UnsafeNoAuth: *unsafeNoAuth})
+		return s.AddRelay(ctx, domain.RelayConfig{URL: f.Args()[0], Read: *read, Write: *write, RequireAuth: *read && !*unsafeNoAuth, UnsafeNoAuth: *unsafeNoAuth})
 	case "list":
 		f := flags("relay list")
 		asJSON := f.Bool("json", false, "write JSON")
@@ -791,7 +755,7 @@ func (a *App) relay(ctx context.Context, s store.Store, args []string) error {
 	}
 }
 
-func (a *App) status(ctx context.Context, s store.Store, args []string) error {
+func (a *App) status(ctx context.Context, s domain.Store, args []string) error {
 	f := flags("status")
 	asJSON := f.Bool("json", false, "write JSON")
 	if err := f.Parse(args); err != nil {
@@ -879,7 +843,7 @@ func (a *App) repositoryContext(ctx context.Context, directory string) model.Rep
 	return repoctx.GitHub{}.Snapshot(ctx, directory)
 }
 
-func (a *App) resolveMailbox(ctx context.Context, s store.Store, explicit, directory string) (model.Mailbox, model.RepositoryContext, error) {
+func (a *App) resolveMailbox(ctx context.Context, s domain.Store, explicit, directory string) (model.Mailbox, model.RepositoryContext, error) {
 	resolver := a.Sessions
 	if resolver == nil {
 		resolver = session.Resolver{Getenv: a.getenv}
@@ -953,7 +917,7 @@ func (a *App) questionOptions(command string, args []string, waits bool) (questi
 	return options, nil
 }
 
-func (a *App) createQuestion(ctx context.Context, s store.Store, options questionOptions) (model.Message, error) {
+func (a *App) createQuestion(ctx context.Context, s domain.Store, options questionOptions) (model.Message, error) {
 	mailbox, repo, err := a.resolveMailbox(ctx, s, options.sessionID, options.directory)
 	if err != nil {
 		return model.Message{}, err
@@ -973,7 +937,7 @@ func (a *App) createQuestion(ctx context.Context, s store.Store, options questio
 	return m, nil
 }
 
-func (a *App) send(ctx context.Context, s store.Store, args []string) error {
+func (a *App) send(ctx context.Context, s domain.Store, args []string) error {
 	options, err := a.questionOptions("send", args, false)
 	if err != nil {
 		return err
@@ -992,7 +956,7 @@ func (a *App) send(ctx context.Context, s store.Store, args []string) error {
 	return writeOnce(a.Out, []byte(m.ID+"\n"))
 }
 
-func (a *App) ask(ctx context.Context, s store.Store, args []string, databasePath string, noSync bool) error {
+func (a *App) ask(ctx context.Context, s domain.Store, args []string, noSync bool) error {
 	options, err := a.questionOptions("ask", args, true)
 	if err != nil {
 		return err
@@ -1003,17 +967,17 @@ func (a *App) ask(ctx context.Context, s store.Store, args []string, databasePat
 	}
 	nextSync := time.Time{}
 	if !noSync {
-		a.trySync(ctx, databasePath, s, false, "message saved")
+		a.trySync(ctx, s, false, "message saved")
 		nextSync = time.Now().Add(5 * time.Second)
 	}
-	err = a.waitForReply(ctx, s, m.ID, options.sessionID, options.directory, options.jsonOutput, options.timeout, options.interval, databasePath, noSync, nextSync)
+	err = a.waitForReply(ctx, s, m.ID, options.sessionID, options.directory, options.jsonOutput, options.timeout, options.interval, noSync, nextSync)
 	if err != nil {
 		return fmt.Errorf("ask %s: %w", m.ID, err)
 	}
 	return nil
 }
 
-func (a *App) wait(ctx context.Context, s store.Store, args []string, databasePath string, noSync bool) error {
+func (a *App) wait(ctx context.Context, s domain.Store, args []string, noSync bool) error {
 	f := flags("wait")
 	timeout := f.Duration("timeout", 0, "maximum wait time")
 	sessionID := f.String("session", "", "advanced session override")
@@ -1032,10 +996,10 @@ func (a *App) wait(ctx context.Context, s store.Store, args []string, databasePa
 	if *timeout < 0 {
 		return errors.New("--timeout must not be negative")
 	}
-	return a.waitForReply(ctx, s, f.Args()[0], *sessionID, *directory, *jsonOutput, *timeout, *interval, databasePath, noSync, time.Time{})
+	return a.waitForReply(ctx, s, f.Args()[0], *sessionID, *directory, *jsonOutput, *timeout, *interval, noSync, time.Time{})
 }
 
-func (a *App) waitForReply(ctx context.Context, s store.Store, id, sessionID, directory string, jsonOutput bool, timeout, interval time.Duration, databasePath string, noSync bool, nextSync time.Time) error {
+func (a *App) waitForReply(ctx context.Context, s domain.Store, id, sessionID, directory string, jsonOutput bool, timeout, interval time.Duration, noSync bool, nextSync time.Time) error {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -1057,11 +1021,11 @@ func (a *App) waitForReply(ctx context.Context, s store.Store, id, sessionID, di
 	}
 	for {
 		if !noSync && !time.Now().Before(nextSync) {
-			a.trySync(ctx, databasePath, s, false, "")
+			a.trySync(ctx, s, false, "")
 			nextSync = time.Now().Add(5 * time.Second)
 		}
 		token := uuid.NewString()
-		m, err := s.Claim(ctx, store.Claim{ReplyTo: id, RecipientMailboxID: mailbox.ID}, token)
+		m, err := s.Claim(ctx, domain.Claim{ReplyTo: id, RecipientMailboxID: mailbox.ID}, token)
 		if err == nil {
 			if err := deliver(a.Out, m, jsonOutput); err != nil {
 				_ = s.Release(context.Background(), m.ID, token)
@@ -1069,7 +1033,7 @@ func (a *App) waitForReply(ctx context.Context, s store.Store, id, sessionID, di
 			}
 			return s.Complete(context.Background(), m.ID, token)
 		}
-		if !errors.Is(err, store.ErrNotReady) && !errors.Is(err, store.ErrClaimed) {
+		if !errors.Is(err, domain.ErrNotReady) && !errors.Is(err, domain.ErrClaimed) {
 			return err
 		}
 		replies, listErr := s.List(ctx, model.Filter{ReplyTo: id, RecipientMailboxID: mailbox.ID, Limit: 1})
@@ -1094,7 +1058,7 @@ func (a *App) waitForReply(ctx context.Context, s store.Store, id, sessionID, di
 	}
 }
 
-func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
+func (a *App) poll(ctx context.Context, s domain.Store, args []string) error {
 	f := flags("poll")
 	sessionID := f.String("session", "", "advanced session override")
 	directory := f.String("dir", "", "work directory scope")
@@ -1121,7 +1085,7 @@ func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
 	var claims []claim
 	for _, candidate := range messages {
 		token := uuid.NewString()
-		m, err := s.Claim(ctx, store.Claim{MessageID: candidate.ID}, token)
+		m, err := s.Claim(ctx, domain.Claim{MessageID: candidate.ID}, token)
 		if err == nil {
 			claims = append(claims, claim{m: m, token: token})
 		}
@@ -1166,7 +1130,7 @@ func (a *App) poll(ctx context.Context, s store.Store, args []string) error {
 	return nil
 }
 
-func (a *App) get(ctx context.Context, s store.Store, args []string) error {
+func (a *App) get(ctx context.Context, s domain.Store, args []string) error {
 	if len(args) != 1 {
 		return errors.New("get needs one message ID")
 	}
@@ -1177,7 +1141,7 @@ func (a *App) get(ctx context.Context, s store.Store, args []string) error {
 	return writeJSON(a.Out, m)
 }
 
-func (a *App) list(ctx context.Context, s store.Store, args []string) error {
+func (a *App) list(ctx context.Context, s domain.Store, args []string) error {
 	f := flags("list")
 	sessionID := f.String("session", "", "recipient mailbox ID")
 	sender := f.String("sender", "", "sender mailbox ID or human")
@@ -1225,7 +1189,7 @@ func (a *App) list(ctx context.Context, s store.Store, args []string) error {
 	return writeOnce(a.Out, b.Bytes())
 }
 
-func (a *App) answer(ctx context.Context, s store.Store, args []string) error {
+func (a *App) answer(ctx context.Context, s domain.Store, args []string) error {
 	f := flags("answer")
 	if err := f.Parse(args); err != nil {
 		return err
@@ -1258,7 +1222,7 @@ func (a *App) answer(ctx context.Context, s store.Store, args []string) error {
 	return s.Reply(ctx, original.ID, reply)
 }
 
-func (a *App) mailboxes(ctx context.Context, s store.Store, args []string) error {
+func (a *App) mailboxes(ctx context.Context, s domain.Store, args []string) error {
 	f := flags("mailboxes")
 	directory := f.String("dir", "", "work directory context")
 	jsonOutput := f.Bool("json", false, "write JSON")
@@ -1294,7 +1258,7 @@ func (a *App) mailboxes(ctx context.Context, s store.Store, args []string) error
 	return writeOnce(a.Out, b.Bytes())
 }
 
-func (a *App) cancel(ctx context.Context, s store.Store, args []string) error {
+func (a *App) cancel(ctx context.Context, s domain.Store, args []string) error {
 	if len(args) != 1 {
 		return errors.New("cancel needs one message ID")
 	}

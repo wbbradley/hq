@@ -12,11 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/localwire"
-	"github.com/wbbradley/hq/internal/model"
-	"github.com/wbbradley/hq/internal/store"
 )
 
 func TestFileCoordinatorContentionReleaseAndStalePath(t *testing.T) {
@@ -218,72 +214,6 @@ func TestLockHelperProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = lock
-}
-
-func TestDaemonAndCLIStoresShareSQLiteWAL(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "hq.db")
-	key, err := identity.KeyPath(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := identity.Initialize(key, nil); err != nil {
-		t.Fatal(err)
-	}
-	daemonStore, err := store.Open(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer daemonStore.Close()
-	engine := &Engine{State: daemonStore, Codec: daemonStore.WireCodec(nil, nil)}
-	daemon := Daemon{Engine: engine, Coordinator: FileCoordinator{DatabasePath: database}, DatabasePath: database, PollInterval: 10 * time.Millisecond}
-	done := make(chan error, 1)
-	go func() { done <- daemon.Run(context.Background()) }()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := DaemonStatus(database); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("daemon did not start")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	cliStore, err := store.Open(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agent, err := cliStore.ResolveMailbox(context.Background(), model.SessionIdentity{Harness: "codex", ExternalSessionID: "wal-test"}, model.RepositoryContext{Directory: "/repo"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for index := 0; index < 20; index++ {
-		id, err := uuid.NewV7()
-		if err != nil {
-			t.Fatal(err)
-		}
-		message := model.Message{ID: id.String(), SenderMailboxID: agent.ID, RecipientMailboxID: model.HumanMailboxID, Body: "concurrent", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-		if err := cliStore.Create(context.Background(), message); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := cliStore.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := StopDaemon(database); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	check, err := store.Open(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer check.Close()
-	items, err := check.List(context.Background(), model.Filter{RecipientMailboxID: model.HumanMailboxID, Limit: 100})
-	if err != nil || len(items) != 20 {
-		t.Fatalf("concurrent messages = %d, %v", len(items), err)
-	}
 }
 
 func TestFileCoordinatorKeepsDatabasesIndependent(t *testing.T) {

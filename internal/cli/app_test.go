@@ -14,12 +14,16 @@ import (
 
 	"github.com/wbbradley/hq/internal/agenthelp"
 	"github.com/wbbradley/hq/internal/codexbridge"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
-	"github.com/wbbradley/hq/internal/syncer"
 )
+
+type testDomainStore struct{ *store.SQLite }
+
+func (*testDomainStore) Synchronize(context.Context) error { return nil }
 
 func testApp(t *testing.T, input string) (*App, *bytes.Buffer) {
 	t.Helper()
@@ -28,9 +32,13 @@ func testApp(t *testing.T, input string) (*App, *bytes.Buffer) {
 		In: strings.NewReader(input), Out: out, ErrOut: new(bytes.Buffer),
 		Getwd:  func() (string, error) { return "/work/repo", nil },
 		Getenv: func(string) string { return "" },
-		Open: func(path string) (store.Store, error) {
+		Open: func(_ context.Context, path string) (domain.Store, error) {
 			initializeTestIdentity(t, path)
-			return store.Open(path)
+			database, err := store.Open(path)
+			if err != nil {
+				return nil, err
+			}
+			return &testDomainStore{SQLite: database}, nil
 		},
 		ReadPassword: func(string) ([]byte, error) { return []byte("test password"), nil },
 		RepoContext: func(_ context.Context, directory string) model.RepositoryContext {
@@ -55,14 +63,6 @@ func initializeTestIdentity(t *testing.T, database string) {
 func TestCodexCommandBuildsBridgeOptions(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	ensured := 0
-	a.EnsureNode = func(_ context.Context, got string) error {
-		ensured++
-		if got != database {
-			t.Fatalf("Codex node database = %q", got)
-		}
-		return nil
-	}
 	var received codexbridge.Options
 	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error {
 		received = options
@@ -77,15 +77,12 @@ func TestCodexCommandBuildsBridgeOptions(t *testing.T) {
 	if received.Repository.Directory != "/work/repo/child" || received.Store == nil || received.Stderr != a.ErrOut || received.Sync != nil || received.LedgerPath != database+".codexbridge.json" {
 		t.Fatalf("dependencies = %#v", received)
 	}
-	if ensured != 1 {
-		t.Fatalf("Codex node ensures = %d", ensured)
-	}
 }
 
 func TestCodexCommandDefaultsToCurrentDirectoryAndEnablesSync(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	a.SyncOnce = func(context.Context, string, store.Store) error { return nil }
+	a.Synchronize = func(context.Context, domain.Store) error { return nil }
 	var received codexbridge.Options
 	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error {
 		received = options
@@ -103,7 +100,7 @@ func TestCodexHelpDoesNotOpenStore(t *testing.T) {
 	var outputs []string
 	for _, args := range [][]string{{"codex", "--help"}, {"help", "codex"}} {
 		a, out := testApp(t, "")
-		a.Open = func(string) (store.Store, error) {
+		a.Open = func(context.Context, string) (domain.Store, error) {
 			t.Fatal("Codex help opened the store")
 			return nil, nil
 		}
@@ -124,7 +121,7 @@ func TestCodexHelpDoesNotOpenStore(t *testing.T) {
 
 func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 	a, out := testApp(t, "")
-	a.Open = func(string) (store.Store, error) { t.Fatal("help opened store"); return nil, nil }
+	a.Open = func(context.Context, string) (domain.Store, error) { t.Fatal("help opened store"); return nil, nil }
 	if err := a.Run(context.Background(), []string{"help"}); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +129,10 @@ func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 		t.Fatalf("global help = %q", out.String())
 	}
 	a, _ = testApp(t, "")
-	a.Open = func(string) (store.Store, error) { t.Fatal("invalid help opened store"); return nil, nil }
+	a.Open = func(context.Context, string) (domain.Store, error) {
+		t.Fatal("invalid help opened store")
+		return nil, nil
+	}
 	err := a.Run(context.Background(), []string{"help", "future"})
 	if err == nil || !strings.Contains(err.Error(), "topic codex") {
 		t.Fatalf("error = %v", err)
@@ -151,7 +151,7 @@ func openTestStore(t *testing.T, database string) *store.SQLite {
 
 func TestAgentsPrintsEmbeddedInstructionsWithoutOpeningStore(t *testing.T) {
 	a, out := testApp(t, "")
-	a.Open = func(string) (store.Store, error) { t.Fatal("agents opened store"); return nil, nil }
+	a.Open = func(context.Context, string) (domain.Store, error) { t.Fatal("agents opened store"); return nil, nil }
 	if err := a.Run(context.Background(), []string{"agents"}); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestAgentsPrintsEmbeddedInstructionsWithoutOpeningStore(t *testing.T) {
 
 func TestAgentsPrintsFocusedTopicWithoutOpeningStore(t *testing.T) {
 	a, out := testApp(t, "")
-	a.Open = func(string) (store.Store, error) { t.Fatal("agents opened store"); return nil, nil }
+	a.Open = func(context.Context, string) (domain.Store, error) { t.Fatal("agents opened store"); return nil, nil }
 	if err := a.Run(context.Background(), []string{"agents", "sync-semantics"}); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestBareCommandUsesTUIWhenInteractive(t *testing.T) {
 	a, _ := testApp(t, "")
 	a.IsTTY = func() bool { return true }
 	called := false
-	a.RunTUI = func(context.Context, store.Store, io.Reader, io.Writer) error { called = true; return nil }
+	a.RunTUI = func(context.Context, domain.Store, io.Reader, io.Writer) error { called = true; return nil }
 	if err := a.Run(context.Background(), []string{"--db", filepath.Join(t.TempDir(), "hq.db")}); err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestAskWaitsForReplyByDefault(t *testing.T) {
 	defer cancel()
 
 	a, out := testApp(t, "")
-	a.Open = func(string) (store.Store, error) { return askStore, nil }
+	a.Open = func(context.Context, string) (domain.Store, error) { return &testDomainStore{SQLite: askStore}, nil }
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "blocking-ask"})
 	done := make(chan error, 1)
 	go func() {
@@ -658,12 +658,12 @@ func TestRelayCommands(t *testing.T) {
 	}
 }
 
-func TestForegroundSyncNoSyncAndDaemonWake(t *testing.T) {
+func TestDomainSynchronizationAndNoSync(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, out := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "foreground"})
 	calls := 0
-	a.SyncOnce = func(context.Context, string, store.Store) error {
+	a.Synchronize = func(context.Context, domain.Store) error {
 		calls++
 		return nil
 	}
@@ -675,23 +675,12 @@ func TestForegroundSyncNoSyncAndDaemonWake(t *testing.T) {
 	}
 	a, _ = testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "offline"})
-	a.SyncOnce = func(context.Context, string, store.Store) error {
+	a.Synchronize = func(context.Context, domain.Store) error {
 		t.Fatal("--no-sync ran sync")
 		return nil
 	}
 	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "send", "offline"}); err != nil {
 		t.Fatal(err)
-	}
-	a, _ = testApp(t, "")
-	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "wake"})
-	a.SyncOnce = func(context.Context, string, store.Store) error { return syncer.ErrSyncLocked }
-	wakes := 0
-	a.WakeSync = func(string) error { wakes++; return nil }
-	if err := a.Run(context.Background(), []string{"--db", database, "send", "wake daemon"}); err != nil {
-		t.Fatal(err)
-	}
-	if wakes != 1 {
-		t.Fatalf("daemon wakes = %d", wakes)
 	}
 }
 
@@ -699,7 +688,7 @@ func TestForegroundRelayFailureKeepsLocalSuccess(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, out := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "failure"})
-	a.SyncOnce = func(context.Context, string, store.Store) error { return errors.New("relay offline") }
+	a.Synchronize = func(context.Context, domain.Store) error { return errors.New("relay offline") }
 	if err := a.Run(context.Background(), []string{"--db", database, "send", "keep local"}); err != nil {
 		t.Fatal(err)
 	}
@@ -717,7 +706,7 @@ func TestForegroundRelayFailureKeepsLocalSuccess(t *testing.T) {
 func TestDaemonCLICommands(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	a.Open = func(string) (store.Store, error) {
+	a.Open = func(context.Context, string) (domain.Store, error) {
 		t.Fatal("daemon run opened SQLite in the CLI")
 		return nil, nil
 	}
@@ -734,7 +723,7 @@ func TestDaemonCLICommands(t *testing.T) {
 	}
 
 	a, out := testApp(t, "")
-	a.Open = func(string) (store.Store, error) {
+	a.Open = func(context.Context, string) (domain.Store, error) {
 		t.Fatal("daemon status opened SQLite")
 		return nil, nil
 	}
@@ -743,7 +732,7 @@ func TestDaemonCLICommands(t *testing.T) {
 		t.Fatalf("daemon status stdout=%q err=%v", out.String(), err)
 	}
 	a, _ = testApp(t, "")
-	a.Open = func(string) (store.Store, error) {
+	a.Open = func(context.Context, string) (domain.Store, error) {
 		t.Fatal("daemon stop opened SQLite")
 		return nil, nil
 	}
@@ -759,29 +748,30 @@ func TestDaemonCLICommands(t *testing.T) {
 	}
 }
 
-func TestNormalCommandsEnsureNodeButLifecycleAndIdentityDoNot(t *testing.T) {
+func TestNormalCommandsOpenDomainClientButLifecycleAndIdentityDoNot(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "autostart"})
-	ensured := 0
-	a.EnsureNode = func(_ context.Context, got string) error {
-		ensured++
+	opens := 0
+	defaultOpen := a.Open
+	a.Open = func(ctx context.Context, got string) (domain.Store, error) {
+		opens++
 		if got != database {
-			t.Fatalf("ensure database = %q", got)
+			t.Fatalf("open database = %q", got)
 		}
-		return nil
+		return defaultOpen(ctx, got)
 	}
 	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "send", "start node"}); err != nil {
 		t.Fatal(err)
 	}
-	if ensured != 1 {
-		t.Fatalf("normal command ensures = %d", ensured)
+	if opens != 1 {
+		t.Fatalf("normal command opens = %d", opens)
 	}
 
 	a, _ = testApp(t, "")
-	a.EnsureNode = func(context.Context, string) error {
-		t.Fatal("daemon lifecycle command auto-started the node")
-		return nil
+	a.Open = func(context.Context, string) (domain.Store, error) {
+		t.Fatal("daemon lifecycle command opened a domain client")
+		return nil, nil
 	}
 	a.DaemonStatus = func(string) (string, error) { return "running", nil }
 	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "status"}); err != nil {
@@ -789,16 +779,16 @@ func TestNormalCommandsEnsureNodeButLifecycleAndIdentityDoNot(t *testing.T) {
 	}
 
 	a, _ = testApp(t, "")
-	a.EnsureNode = func(context.Context, string) error {
-		t.Fatal("identity command auto-started the node")
-		return nil
+	a.Open = func(context.Context, string) (domain.Store, error) {
+		t.Fatal("identity command opened a domain client")
+		return nil, nil
 	}
 	if err := a.Run(context.Background(), []string{"--db", filepath.Join(t.TempDir(), "identity.db"), "identity", "init"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestWaitRunsBoundedSyncAndFailedWakeKeepsLocalSuccess(t *testing.T) {
+func TestWaitRunsBoundedSyncAndSyncFailureKeepsLocalSuccess(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, out := testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "waiting"})
@@ -809,16 +799,15 @@ func TestWaitRunsBoundedSyncAndFailedWakeKeepsLocalSuccess(t *testing.T) {
 	a, _ = testApp(t, "")
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "waiting"})
 	syncCalls := 0
-	a.SyncOnce = func(context.Context, string, store.Store) error { syncCalls++; return nil }
+	a.Synchronize = func(context.Context, domain.Store) error { syncCalls++; return nil }
 	err := a.Run(context.Background(), []string{"--db", database, "wait", "--timeout", "20ms", "--interval", "5ms", messageID})
 	if !errors.Is(err, context.DeadlineExceeded) || syncCalls == 0 {
 		t.Fatalf("wait error=%v sync calls=%d", err, syncCalls)
 	}
 	a, out = testApp(t, "")
-	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "failed-wake"})
-	a.SyncOnce = func(context.Context, string, store.Store) error { return syncer.ErrSyncLocked }
-	a.WakeSync = func(string) error { return errors.New("stale socket") }
-	if err := a.Run(context.Background(), []string{"--db", database, "send", "wake can fail"}); err != nil {
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "failed-sync"})
+	a.Synchronize = func(context.Context, domain.Store) error { return errors.New("node sync unavailable") }
+	if err := a.Run(context.Background(), []string{"--db", database, "send", "sync can fail"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(strings.TrimSpace(out.String())) != 36 || !strings.Contains(a.ErrOut.(*bytes.Buffer).String(), "relay sync pending") {

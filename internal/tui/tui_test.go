@@ -20,6 +20,10 @@ import (
 
 const testAgentID = "0198c7ec-73b0-7cc3-a5f7-e31c77140d60"
 
+type testDomainStore struct{ *store.SQLite }
+
+func (*testDomainStore) Synchronize(context.Context) error { return nil }
+
 func TestRefreshPreservesActiveDraft(t *testing.T) {
 	m1 := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", testAgentID, model.HumanMailboxID, "First")
 	m2 := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d62", testAgentID, model.HumanMailboxID, "Second")
@@ -293,7 +297,7 @@ func TestRefreshSchedulesNextRefresh(t *testing.T) {
 	}
 }
 
-func openStore(t *testing.T) (*store.SQLite, context.Context, model.Mailbox) {
+func openStore(t *testing.T) (*testDomainStore, context.Context, model.Mailbox) {
 	t.Helper()
 	database := filepath.Join(t.TempDir(), "hq.db")
 	keyPath, err := identity.KeyPath(database)
@@ -313,7 +317,7 @@ func openStore(t *testing.T) (*store.SQLite, context.Context, model.Mailbox) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s, ctx, agent
+	return &testDomainStore{SQLite: s}, ctx, agent
 }
 
 func message(id, sender, recipient, body string) model.Message {
