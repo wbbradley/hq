@@ -282,6 +282,10 @@ go vet ./...
 go build ./cmd/hq
 ```
 
+Run `go test -count=1 -v ./e2e` for the isolated black-box CLI test. It builds the real executable,
+uses temporary HOME, XDG, runtime, and database paths, exercises the auto-started node through a
+complete agent-to-human request/reply exchange, and stops the node before cleanup.
+
 Releases use GoReleaser when a `v*` tag reaches GitHub. CI tests Linux, macOS, and Windows.
 
 ## License
