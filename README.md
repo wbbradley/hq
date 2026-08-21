@@ -172,10 +172,11 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - `s`: toggle sent messages
 - `x`: toggle archived inbox messages
 - `v`: toggle relay and event status
+- `i`: toggle technical message IDs and Codex correlation details
 - `r`: refresh
 - `q`: quit
 
-Sent and Archived are independent filters. This lets the human view the open inbox, add sent messages, add archived messages, or show all three sets together. Each detail panel also shows the local git branch, compact remotes, and an asynchronously loaded open pull request when `gh` credentials are available.
+Sent and Archived are independent filters. This lets the human view the open inbox, add sent messages, add archived messages, or show all three sets together. Agent sessions use the repository directory name in friendly labels such as `codex · hq`; opaque mailbox and message IDs stay hidden until technical details are expanded. Codex final answers are emphasized, while progress updates, statuses, and one-shot notices are quieter. Each detail panel also shows the local git branch, compact remotes, and an asynchronously loaded open pull request when `gh` credentials are available.
 
 When stdin or stdout is not a terminal, bare `hq` lists open messages in the human mailbox for the current work directory.
 

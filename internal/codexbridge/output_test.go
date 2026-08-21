@@ -56,7 +56,7 @@ func TestOutputRelayPublishesOnlyCanonicalCompletedAgentMessages(t *testing.T) {
 		t.Fatalf("messages = %#v, %v", messages, err)
 	}
 	message := messages[0]
-	if message.Body != "Canonical final text" || !strings.Contains(message.Details, "Codex turn: turn-1") || !strings.Contains(message.Details, "Codex item: agent-1") || !strings.Contains(message.Details, "Phase: final_answer") {
+	if message.Body != "Canonical final text" || !strings.Contains(message.Details, "Kind: final-answer") || !strings.Contains(message.Details, "Codex turn: turn-1") || !strings.Contains(message.Details, "Codex item: agent-1") || !strings.Contains(message.Details, "Phase: final_answer") {
 		t.Fatalf("message = %#v", message)
 	}
 	if message.ID != stableOutputMessageID(fixture.thread, "agent-1") {
@@ -84,6 +84,9 @@ func TestOutputRelayPublishesFailedAndInterruptedTurnStatusesInOrder(t *testing.
 	}
 	if messages[0].Body != "I got partway there" || messages[1].Body != "Codex turn failed" || messages[2].Body != "Codex turn interrupted" {
 		t.Fatalf("message order = %#v", messages)
+	}
+	if !strings.Contains(messages[0].Details, "Kind: update") || !strings.Contains(messages[1].Details, "Kind: status") || !strings.Contains(messages[2].Details, "Kind: status") {
+		t.Fatalf("message kinds = %#v", messages)
 	}
 	if !strings.Contains(messages[1].Details, "upstream unavailable") || !strings.Contains(messages[1].Details, "retry later") {
 		t.Fatalf("failure = %#v", messages[1])

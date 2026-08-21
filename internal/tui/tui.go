@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -23,41 +24,43 @@ const repairInterval = 5 * time.Minute
 
 var (
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	finalStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	selected   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
 	dim        = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	panel      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
 )
 
 type app struct {
-	ctx          context.Context
-	store        domain.Store
-	repo         repoctx.Provider
-	messages     []model.Message
-	inbox        []model.Message
-	sent         []model.Message
-	archived     []model.Message
-	showSent     bool
-	showArchived bool
-	showStatus   bool
-	cursor       int
-	width        int
-	height       int
-	answering    bool
-	answerID     string
-	answerQ      model.Message
-	composeTo    string
-	editor       textarea.Model
-	err          error
-	contextID    string
-	branch       string
-	remotes      string
-	pull         string
-	sync         func(context.Context) error
-	syncErr      error
-	network      domain.NetworkStatus
-	changes      <-chan domain.Invalidation
-	states       <-chan domain.ConnectionUpdate
-	connection   domain.ConnectionUpdate
+	ctx           context.Context
+	store         domain.Store
+	repo          repoctx.Provider
+	messages      []model.Message
+	inbox         []model.Message
+	sent          []model.Message
+	archived      []model.Message
+	showSent      bool
+	showArchived  bool
+	showStatus    bool
+	showTechnical bool
+	cursor        int
+	width         int
+	height        int
+	answering     bool
+	answerID      string
+	answerQ       model.Message
+	composeTo     string
+	editor        textarea.Model
+	err           error
+	contextID     string
+	branch        string
+	remotes       string
+	pull          string
+	sync          func(context.Context) error
+	syncErr       error
+	network       domain.NetworkStatus
+	changes       <-chan domain.Invalidation
+	states        <-chan domain.ConnectionUpdate
+	connection    domain.ConnectionUpdate
 }
 
 type loadedMsg struct {
@@ -373,6 +376,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "v":
 			m.showStatus = !m.showStatus
 			return m, nil
+		case "i":
+			m.showTechnical = !m.showTechnical
+			return m, nil
 		case "enter", "a":
 			if len(m.messages) > 0 && canReply(m.messages[m.cursor]) {
 				m.answering = true
@@ -542,6 +548,104 @@ func agentInstallation(message model.Message) string {
 	return ""
 }
 
+func displayMailboxLabel(label string, context model.RepositoryContext) string {
+	if label == "human" {
+		return label
+	}
+	harness, _, found := strings.Cut(label, ":")
+	if !found || harness == "" {
+		return label
+	}
+	directory := filepath.Base(filepath.Clean(context.Directory))
+	if context.Directory == "" || directory == "." || directory == string(filepath.Separator) {
+		return harness
+	}
+	return harness + " · " + directory
+}
+
+func presentationKind(message model.Message) string {
+	for _, line := range strings.Split(message.Details, "\n") {
+		value, found := strings.CutPrefix(strings.TrimSpace(line), "Kind:")
+		if found {
+			switch kind := strings.TrimSpace(value); kind {
+			case "final-answer", "update", "status", "notice":
+				return kind
+			}
+		}
+	}
+	for _, line := range strings.Split(message.Details, "\n") {
+		if strings.TrimSpace(line) == "Phase: final_answer" {
+			return "final-answer"
+		}
+	}
+	return ""
+}
+
+func presentationLabel(kind string) string {
+	switch kind {
+	case "final-answer":
+		return "[final answer]"
+	case "update":
+		return "[update]"
+	case "status":
+		return "[status]"
+	case "notice":
+		return "[notice]"
+	default:
+		return ""
+	}
+}
+
+func presentationDetails(raw string, expanded bool) (string, bool) {
+	if expanded || raw == "" {
+		return raw, false
+	}
+	prefixes := []string{
+		"Kind:", "Phase:", "Codex thread:", "Codex turn:", "Codex item:",
+		"Codex request:", "HQ message:", "HQ mailbox:",
+	}
+	visible := make([]string, 0, strings.Count(raw, "\n")+1)
+	hidden := false
+	for _, line := range strings.Split(raw, "\n") {
+		technical := false
+		trimmed := strings.TrimSpace(line)
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(trimmed, prefix) {
+				technical = true
+				break
+			}
+		}
+		if technical {
+			hidden = true
+			continue
+		}
+		visible = append(visible, line)
+	}
+	return strings.TrimSpace(strings.Join(visible, "\n")), hidden
+}
+
+func technicalIdentifiers(message model.Message) string {
+	lines := make([]string, 0, 6)
+	add := func(label, value string) {
+		if value != "" {
+			lines = append(lines, label+": "+value)
+		}
+	}
+	add("message ID", message.ID)
+	add("canonical event ID", message.EventID)
+	add("thread event ID", message.ThreadID)
+	add("sender installation ID", message.SenderInstallationID)
+	add("recipient installation ID", message.RecipientInstallationID)
+	if message.ReplyTo != nil {
+		add("reply-to ID", *message.ReplyTo)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func hasTechnicalIdentifiers(message model.Message) bool {
+	return technicalIdentifiers(message) != ""
+}
+
 func (m app) View() tea.View {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("HQ · Mailbox"))
@@ -590,19 +694,31 @@ func (m app) View() tea.View {
 		b.WriteString(dim.Render("No messages in this view. Press r to refresh."))
 	} else {
 		for i, message := range m.messages {
-			direction := "inbox ← " + short(message.SenderLabel, 16)
+			direction := "inbox ← " + short(displayMailboxLabel(message.SenderLabel, message.Context), 16)
 			if message.SenderMailboxID == model.HumanMailboxID {
-				direction = "sent → " + short(message.RecipientLabel, 16)
+				direction = "sent → " + short(displayMailboxLabel(message.RecipientLabel, message.Context), 16)
+			}
+			kind := presentationKind(message)
+			badge := presentationLabel(kind)
+			if badge != "" {
+				badge += " "
 			}
 			state := deliveryLabel(message)
 			if message.ArchivedAt != nil {
 				state += " [archived]"
 			}
-			line := fmt.Sprintf("%-18s %s%s", direction, singleLine(message.Body), state)
+			line := fmt.Sprintf("%-18s %s%s%s", direction, badge, singleLine(message.Body), state)
 			if i == m.cursor && (!m.answering || message.ID == m.answerQ.ID) {
 				b.WriteString(selected.Render("› " + line))
 			} else {
-				b.WriteString("  " + line)
+				switch kind {
+				case "final-answer":
+					b.WriteString("  " + finalStyle.Render(line))
+				case "update", "status", "notice":
+					b.WriteString("  " + dim.Render(line))
+				default:
+					b.WriteString("  " + line)
+				}
 			}
 			b.WriteByte('\n')
 		}
@@ -616,20 +732,28 @@ func (m app) View() tea.View {
 	if detail.ID != "" {
 		b.WriteString("\n")
 		var body strings.Builder
-		body.WriteString(titleStyle.Render(detail.Body))
+		kind := presentationKind(detail)
+		heading := detail.Body
+		if badge := presentationLabel(kind); badge != "" {
+			heading = badge + " " + heading
+		}
+		switch kind {
+		case "final-answer":
+			body.WriteString(finalStyle.Render(heading))
+		case "update", "status", "notice":
+			body.WriteString(dim.Render(heading))
+		default:
+			body.WriteString(titleStyle.Render(heading))
+		}
 		body.WriteByte('\n')
-		body.WriteString(dim.Render(detail.SenderLabel + " → " + detail.RecipientLabel + " · " + detail.Context.Directory))
+		body.WriteString(dim.Render(displayMailboxLabel(detail.SenderLabel, detail.Context) + " → " + displayMailboxLabel(detail.RecipientLabel, detail.Context) + " · " + detail.Context.Directory))
 		if detail.SourceDeviceLabel != "" || detail.SenderInstallationID != "" {
 			body.WriteByte('\n')
 			source := detail.SourceDeviceLabel
 			if source == "" {
 				source = "installation"
 			}
-			body.WriteString(dim.Render("source " + source + " · " + short(detail.SenderInstallationID, 13)))
-		}
-		if detail.ReplyTo != nil {
-			body.WriteByte('\n')
-			body.WriteString(dim.Render("reply to " + *detail.ReplyTo))
+			body.WriteString(dim.Render("source " + source))
 		}
 		if m.branch != "" {
 			body.WriteByte('\n')
@@ -642,18 +766,28 @@ func (m app) View() tea.View {
 		if m.pull != "" {
 			body.WriteString(dim.Render(" · " + m.pull))
 		}
-		if detail.Details != "" {
+		visibleDetails, metadataHidden := presentationDetails(detail.Details, m.showTechnical)
+		if visibleDetails != "" {
 			body.WriteString("\n\n")
-			body.WriteString(detail.Details)
+			body.WriteString(visibleDetails)
+		}
+		if m.showTechnical {
+			if identifiers := technicalIdentifiers(detail); identifiers != "" {
+				body.WriteString("\n\n")
+				body.WriteString(dim.Render(identifiers))
+			}
+		} else if metadataHidden || hasTechnicalIdentifiers(detail) {
+			body.WriteString("\n\n")
+			body.WriteString(dim.Render("technical details hidden · press i to show"))
 		}
 		b.WriteString(renderMessagePanel(body.String(), m.width))
 	}
 	if m.answering {
 		b.WriteString("\n\n")
 		if m.composeTo != "" {
-			b.WriteString(titleStyle.Render("New message to " + agentLabel(m.answerQ)))
+			b.WriteString(titleStyle.Render("New message to " + displayMailboxLabel(agentLabel(m.answerQ), m.answerQ.Context)))
 		} else {
-			b.WriteString(titleStyle.Render("Reply to " + m.answerQ.SenderLabel))
+			b.WriteString(titleStyle.Render("Reply to " + displayMailboxLabel(m.answerQ.SenderLabel, m.answerQ.Context)))
 		}
 		b.WriteString("\n")
 		b.WriteString(m.editor.View())
@@ -661,7 +795,7 @@ func (m app) View() tea.View {
 		b.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
 	} else {
 		b.WriteString("\n\n")
-		b.WriteString(dim.Render("j/k move · enter reply · d archive · n new message · s sent · x archived · v status · r refresh · q quit · live updates · repair 5m"))
+		b.WriteString(dim.Render("j/k move · enter reply · d archive · n new · s sent · x archived · v status · i details · r refresh · q quit · live · repair 5m"))
 	}
 	view := tea.NewView(b.String())
 	view.AltScreen = true

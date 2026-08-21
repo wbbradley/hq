@@ -179,7 +179,7 @@ func (q *Questioner) Notice(ctx context.Context, body, details string, correlati
 	if strings.TrimSpace(details) != "" {
 		details += "\n\n"
 	}
-	details += correlationDetails(correlation, messageID.String())
+	details += "Kind: notice\n" + correlationDetails(correlation, messageID.String())
 	message := model.Message{
 		ID: messageID.String(), Context: q.Repository, SenderMailboxID: q.Mailbox.ID,
 		RecipientMailboxID: human.ID, Body: body, Details: details, CreatedAt: time.Now().UTC(),

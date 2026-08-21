@@ -230,7 +230,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	if store.identity != (model.SessionIdentity{Harness: "codex", ExternalSessionID: "thread-new"}) || store.repo.Directory != "/work/repo" {
 		t.Fatalf("binding = %#v, %#v", store.identity, store.repo)
 	}
-	if store.messages[0].Body != "Codex bridge ready" || !strings.Contains(store.messages[0].Details, "thread-new") {
+	if store.messages[0].Body != "Codex bridge ready" || !strings.Contains(store.messages[0].Details, "Kind: status") || !strings.Contains(store.messages[0].Details, "thread-new") {
 		t.Fatalf("ready message = %#v", store.messages[0])
 	}
 	cancel()
@@ -243,7 +243,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 		t.Fatal("bridge did not stop after cancellation")
 	}
 	waitForMessages(t, store, 2)
-	if store.messages[1].Body != "Codex bridge stopped" || !strings.Contains(store.messages[1].Details, "cancelled") {
+	if store.messages[1].Body != "Codex bridge stopped" || !strings.Contains(store.messages[1].Details, "Kind: status") || !strings.Contains(store.messages[1].Details, "cancelled") {
 		t.Fatalf("terminal message = %#v", store.messages[1])
 	}
 }

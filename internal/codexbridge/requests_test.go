@@ -160,6 +160,9 @@ func TestRequestUserInputSecretIsNeverPersisted(t *testing.T) {
 		t.Fatalf("messages = %#v, %v", messages, err)
 	}
 	persisted := messages[0].Body + "\n" + messages[0].Details
+	if !strings.Contains(messages[0].Details, "Kind: notice") {
+		t.Fatalf("notice details = %q", messages[0].Details)
+	}
 	for _, secretField := range []string{"Enter swordfish", "Password", "password", "the secret"} {
 		if strings.Contains(persisted, secretField) {
 			t.Fatalf("secret field %q was persisted in %q", secretField, persisted)

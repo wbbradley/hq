@@ -196,16 +196,85 @@ func TestRepositoryContextShowsRemotesBeforePullState(t *testing.T) {
 	updated, _ = m.Update(pullMsg{questionID: item.ID, err: repoctx.ErrUnavailable})
 	m = updated.(app)
 	view := m.View().Content
-	if !strings.Contains(view, "source desktop · 0198c7ec-73b…") {
+	if !strings.Contains(view, "source desktop") || strings.Contains(view, item.SenderInstallationID) {
 		t.Fatalf("source context missing: %q", view)
 	}
 	remoteAt, pullAt := strings.Index(view, "origin: wbbradley/hq"), strings.Index(view, "[gh unavailable]")
 	if remoteAt < 0 || pullAt < 0 || remoteAt > pullAt {
 		t.Fatalf("context order: %q", view)
 	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
+	m = updated.(app)
+	if view = m.View().Content; !strings.Contains(view, "sender installation ID: "+item.SenderInstallationID) {
+		t.Fatalf("expanded source context missing: %q", view)
+	}
 	updated, _ = m.Update(branchMsg{message: model.Message{ID: "stale"}, branch: "wrong", err: errors.New("stale")})
 	if updated.(app).branch != "feature" {
 		t.Fatal("stale context replaced branch")
+	}
+}
+
+func TestMessagePresentationKindsAndFriendlyLabels(t *testing.T) {
+	kinds := []struct {
+		kind  string
+		badge string
+	}{
+		{kind: "final-answer", badge: "[final answer]"},
+		{kind: "update", badge: "[update]"},
+		{kind: "status", badge: "[status]"},
+		{kind: "notice", badge: "[notice]"},
+	}
+	messages := make([]model.Message, 0, len(kinds))
+	for i, test := range kinds {
+		item := message(string(rune('a'+i)), testAgentID, model.HumanMailboxID, test.kind)
+		item.Context.Directory = "/work/repo"
+		item.Details = "Kind: " + test.kind
+		messages = append(messages, item)
+	}
+	view := (app{messages: messages}).View().Content
+	if !strings.Contains(view, "codex · repo") || strings.Contains(view, "codex:0198c7ec") {
+		t.Fatalf("friendly mailbox label missing: %q", view)
+	}
+	for _, test := range kinds {
+		if !strings.Contains(view, test.badge) {
+			t.Fatalf("badge %q missing: %q", test.badge, view)
+		}
+	}
+	legacy := message("legacy", testAgentID, model.HumanMailboxID, "old final")
+	legacy.Details = "Phase: final_answer"
+	if got := presentationKind(legacy); got != "final-answer" {
+		t.Fatalf("legacy kind = %q", got)
+	}
+}
+
+func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
+	replyTo := "reply-id-opaque"
+	item := message("message-id-opaque", testAgentID, model.HumanMailboxID, "Approval needed")
+	item.Context.Directory = "/work/repo"
+	item.EventID = "event-id-opaque"
+	item.ThreadID = "thread-event-id-opaque"
+	item.SenderInstallationID = "sender-installation-opaque"
+	item.RecipientInstallationID = "recipient-installation-opaque"
+	item.ReplyTo = &replyTo
+	item.Details = "Kind: update\nCodex thread: codex-thread-opaque\nCodex turn: turn-opaque\nHQ message: hq-opaque\n\nChoose one:\n- accept\n- decline"
+	m := app{messages: []model.Message{item}}
+
+	view := m.View().Content
+	for _, hidden := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "hq-opaque", "Kind: update"} {
+		if strings.Contains(view, hidden) {
+			t.Fatalf("collapsed view exposed %q: %q", hidden, view)
+		}
+	}
+	if !strings.Contains(view, "Choose one:") || !strings.Contains(view, "- accept") || !strings.Contains(view, "technical details hidden · press i to show") {
+		t.Fatalf("collapsed view lost human details: %q", view)
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
+	view = updated.(app).View().Content
+	for _, shown := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "hq-opaque", "Kind: update"} {
+		if !strings.Contains(view, shown) {
+			t.Fatalf("expanded view omitted %q: %q", shown, view)
+		}
 	}
 }
 
