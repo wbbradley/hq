@@ -14,13 +14,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -227,11 +228,18 @@ CREATE TABLE quarantine (
     rejection_reason TEXT NOT NULL,
     received_at INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE mutation_receipts (
+    mutation_id TEXT PRIMARY KEY,
+    method TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    result BLOB NOT NULL,
+    committed_at INTEGER NOT NULL
+) STRICT;
 CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, created_at, id);
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 7;
+PRAGMA user_version = 8;
 `
 
 const (
@@ -241,9 +249,18 @@ const (
 )
 
 type SQLite struct {
-	db       *sql.DB
-	signer   identity.Material
-	database string
+	db                   *sql.DB
+	signer               identity.Material
+	database             string
+	afterCanonicalCommit func(CanonicalCommit)
+}
+
+type CanonicalCommit struct {
+	EventIDs []string
+}
+
+func (s *SQLite) SetCanonicalCommitObserver(observer func(CanonicalCommit)) {
+	s.afterCanonicalCommit = observer
 }
 
 var resolveMu sync.Mutex
@@ -293,6 +310,12 @@ func (s *SQLite) configure(ctx context.Context) error {
 	var version int
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version == 7 {
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE mutation_receipts (mutation_id TEXT PRIMARY KEY, method TEXT NOT NULL, request_digest TEXT NOT NULL, result BLOB NOT NULL, committed_at INTEGER NOT NULL) STRICT; PRAGMA user_version = 8`); err != nil {
+			return fmt.Errorf("migrate schema to version 8: %w", err)
+		}
+		version = 8
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -395,25 +418,110 @@ func (s *SQLite) policy() event.Policy {
 	return event.Policy{InstallationID: s.signer.InstallationID, RootKeyID: s.signer.PublicKey(), HumanMailboxID: model.HumanMailboxID, SchemaVersions: []int{event.SchemaVersion}}
 }
 
+var errMutationAlreadyCommitted = errors.New("mutation was already committed")
+
+func (s *SQLite) MutationResult(ctx context.Context, mutation domain.Mutation) (json.RawMessage, bool, error) {
+	var method, digest string
+	var result []byte
+	err := s.db.QueryRowContext(ctx, `SELECT method,request_digest,result FROM mutation_receipts WHERE mutation_id=?`, mutation.ID).Scan(&method, &digest, &result)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if method != mutation.Method || digest != mutation.RequestDigest {
+		return nil, false, fmt.Errorf("%w: mutation_id was already used for a different request", domain.ErrMutationConflict)
+	}
+	return json.RawMessage(result), true, nil
+}
+
+func recordMutationTx(ctx context.Context, tx *sql.Tx, result any) error {
+	mutation, ok := domain.MutationFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("encode mutation result: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO mutation_receipts(mutation_id,method,request_digest,result,committed_at) VALUES (?,?,?,?,?)`, mutation.ID, mutation.Method, mutation.RequestDigest, raw, time.Now().UTC().UnixMilli())
+	if err == nil {
+		return nil
+	}
+	var method, digest string
+	if lookupErr := tx.QueryRowContext(ctx, `SELECT method,request_digest FROM mutation_receipts WHERE mutation_id=?`, mutation.ID).Scan(&method, &digest); lookupErr == nil {
+		if method != mutation.Method || digest != mutation.RequestDigest {
+			return fmt.Errorf("%w: mutation_id was already used for a different request", domain.ErrMutationConflict)
+		}
+		return errMutationAlreadyCommitted
+	}
+	return err
+}
+
+func (s *SQLite) recordMutation(ctx context.Context, result any) error {
+	if _, ok := domain.MutationFromContext(ctx); !ok {
+		return nil
+	}
+	_, err := s.commitMutation(ctx, func(*sql.Tx) (any, error) { return result, nil })
+	return err
+}
+
+func (s *SQLite) commitMutation(ctx context.Context, action func(*sql.Tx) (any, error)) (any, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	result, err := action(tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := recordMutationTx(ctx, tx, result); err != nil {
+		return nil, err
+	}
+	return result, tx.Commit()
+}
+
 func (s *SQLite) appendContents(ctx context.Context, contents []event.Content, times []time.Time, after func(*sql.Tx) error) error {
+	_, err := s.appendContentsResult(ctx, contents, times, func(tx *sql.Tx) (any, error) {
+		if after == nil {
+			return nil, nil
+		}
+		return nil, after(tx)
+	})
+	return err
+}
+
+func (s *SQLite) appendContentsResult(ctx context.Context, contents []event.Content, times []time.Time, result func(*sql.Tx) (any, error)) (any, error) {
 	signed, err := s.signContents(ctx, contents, times)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
-	if err := s.appendSignedTx(ctx, tx, signed); err != nil {
-		return err
+	commit, err := s.ingestCanonicalTx(ctx, tx, signed, true)
+	if err != nil {
+		return nil, err
 	}
-	if after != nil {
-		if err := after(tx); err != nil {
-			return err
+	var value any
+	if result != nil {
+		value, err = result(tx)
+		if err != nil {
+			return nil, err
 		}
 	}
-	return tx.Commit()
+	if err := recordMutationTx(ctx, tx, value); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	s.notifyCanonicalCommit(commit)
+	return value, nil
 }
 
 func (s *SQLite) signContents(ctx context.Context, contents []event.Content, times []time.Time) ([]event.SignedEvent, error) {
@@ -443,9 +551,15 @@ func (s *SQLite) appendSignedTx(ctx context.Context, tx *sql.Tx, additions []eve
 }
 
 func (s *SQLite) appendSignedTxMode(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent, requireProjected bool) error {
+	_, err := s.ingestCanonicalTx(ctx, tx, additions, requireProjected)
+	return err
+}
+
+func (s *SQLite) ingestCanonicalTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent, requireProjected bool) (CanonicalCommit, error) {
+	var commit CanonicalCommit
 	rows, err := tx.QueryContext(ctx, `SELECT event_id,raw FROM canonical_events ORDER BY event_id`)
 	if err != nil {
-		return err
+		return commit, err
 	}
 	var raw [][]byte
 	existing := make(map[string]bool)
@@ -454,7 +568,7 @@ func (s *SQLite) appendSignedTxMode(ctx context.Context, tx *sql.Tx, additions [
 		var item []byte
 		if err := rows.Scan(&id, &item); err != nil {
 			rows.Close()
-			return err
+			return commit, err
 		}
 		raw = append(raw, item)
 		existing[id] = true
@@ -474,17 +588,25 @@ func (s *SQLite) appendSignedTxMode(ctx context.Context, tx *sql.Tx, additions [
 		acceptable := ok && (record.Status == event.StatusProjected || (!requireProjected && (record.Status == event.StatusUnresolved || record.Status == event.StatusUnsupported)))
 		if !acceptable {
 			if ok {
-				return fmt.Errorf("new event %s was not projected: %s", item.ID(), record.Reason)
+				return commit, fmt.Errorf("new event %s was not projected: %s", item.ID(), record.Reason)
 			}
-			return fmt.Errorf("new event %s was rejected", item.ID())
+			return commit, fmt.Errorf("new event %s was rejected", item.ID())
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO canonical_events(event_id, raw, created_at, event_type, installation_id, signer_key_id, scope, reduction_status, reduction_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			item.ID(), item.Wire, item.Nostr.CreatedAt, item.Content.Type, item.Content.InstallationID, item.Content.SignerKeyID, item.Content.Scope, record.Status, record.Reason)
 		if err != nil {
-			return fmt.Errorf("append canonical event: %w", err)
+			return commit, fmt.Errorf("append canonical event: %w", err)
 		}
+		commit.EventIDs = append(commit.EventIDs, item.ID())
 	}
-	return s.rebuildTx(ctx, tx, state)
+	return commit, s.rebuildTx(ctx, tx, state)
+}
+
+func (s *SQLite) notifyCanonicalCommit(commit CanonicalCommit) {
+	if len(commit.EventIDs) > 0 && s.afterCanonicalCommit != nil {
+		commit.EventIDs = append([]string(nil), commit.EventIDs...)
+		s.afterCanonicalCommit(commit)
+	}
 }
 
 func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEvent) error {
@@ -496,10 +618,15 @@ func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEv
 		return err
 	}
 	defer tx.Rollback()
-	if err := s.appendSignedTxMode(ctx, tx, additions, false); err != nil {
+	commit, err := s.ingestCanonicalTx(ctx, tx, additions, false)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyCanonicalCommit(commit)
+	return nil
 }
 
 func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) error {
@@ -783,12 +910,27 @@ func (s *SQLite) ResolveMailbox(ctx context.Context, session model.SessionIdenti
 		for i := range times {
 			times[i] = now
 		}
-		if err := s.appendContents(ctx, contents, times, nil); err != nil {
+		value, err := s.appendContentsResult(ctx, contents, times, func(tx *sql.Tx) (any, error) {
+			if _, err := tx.ExecContext(ctx, `UPDATE mailbox_activity SET last_seen_at = ? WHERE mailbox_id = ?`, now.UnixMilli(), id); err != nil {
+				return nil, err
+			}
+			return getMailboxWith(ctx, tx, id)
+		})
+		if err != nil {
 			return model.Mailbox{}, err
 		}
+		return value.(model.Mailbox), nil
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE mailbox_activity SET last_seen_at = ? WHERE mailbox_id = ?`, now.UnixMilli(), id)
-	return s.getMailbox(ctx, id)
+	value, err := s.commitMutation(ctx, func(tx *sql.Tx) (any, error) {
+		if _, err := tx.ExecContext(ctx, `UPDATE mailbox_activity SET last_seen_at = ? WHERE mailbox_id = ?`, now.UnixMilli(), id); err != nil {
+			return nil, err
+		}
+		return getMailboxWith(ctx, tx, id)
+	})
+	if err != nil {
+		return model.Mailbox{}, err
+	}
+	return value.(model.Mailbox), nil
 }
 
 func eventContext(repo model.RepositoryContext) event.RepositoryContext {
@@ -806,10 +948,18 @@ func (s *SQLite) hasContext(ctx context.Context, mailboxID string, repo model.Re
 }
 
 func (s *SQLite) getMailbox(ctx context.Context, id string) (model.Mailbox, error) {
+	return getMailboxWith(ctx, s.db, id)
+}
+
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func getMailboxWith(ctx context.Context, queryer rowQueryer, id string) (model.Mailbox, error) {
 	var m model.Mailbox
 	var harness sql.NullString
 	var created, seen int64
-	err := s.db.QueryRowContext(ctx, `SELECT m.id, m.kind, b.harness, m.created_at, COALESCE(a.last_seen_at, m.created_at) FROM mailboxes m LEFT JOIN harness_bindings b ON b.mailbox_id = m.id LEFT JOIN mailbox_activity a ON a.mailbox_id = m.id WHERE m.id = ?`, id).Scan(&m.ID, &m.Kind, &harness, &created, &seen)
+	err := queryer.QueryRowContext(ctx, `SELECT m.id, m.kind, b.harness, m.created_at, COALESCE(a.last_seen_at, m.created_at) FROM mailboxes m LEFT JOIN harness_bindings b ON b.mailbox_id = m.id LEFT JOIN mailbox_activity a ON a.mailbox_id = m.id WHERE m.id = ?`, id).Scan(&m.ID, &m.Kind, &harness, &created, &seen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -987,7 +1137,11 @@ func scanMessage(row scanner) (model.Message, error) {
 }
 
 func (s *SQLite) Get(ctx context.Context, id string) (model.Message, error) {
-	m, err := scanMessage(s.db.QueryRowContext(ctx, `SELECT `+columns+` FROM `+joins+` WHERE msg.id = ?`, id))
+	return getMessageWith(ctx, s.db, id)
+}
+
+func getMessageWith(ctx context.Context, queryer rowQueryer, id string) (model.Message, error) {
+	m, err := scanMessage(queryer.QueryRowContext(ctx, `SELECT `+columns+` FROM `+joins+` WHERE msg.id = ?`, id))
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return m, fmt.Errorf("get message: %w", err)
 	}
@@ -1103,13 +1257,25 @@ func (s *SQLite) Claim(ctx context.Context, claim Claim, token string) (model.Me
 	args = append(args, now.UnixMilli())
 	query := `UPDATE delivery_facts SET delivery_token=?, delivery_lease_until=? WHERE message_id=(SELECT m.id FROM messages m JOIN delivery_facts d ON d.message_id=m.id WHERE ` + strings.Join(where, " AND ") + ` ORDER BY m.created_at,m.id LIMIT 1) RETURNING message_id`
 	queryArgs := append([]any{token, now.Add(30 * time.Second).UnixMilli()}, args...)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Message{}, err
+	}
+	defer tx.Rollback()
 	var id string
-	if err := s.db.QueryRowContext(ctx, query, queryArgs...).Scan(&id); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, query, queryArgs...).Scan(&id); errors.Is(err, sql.ErrNoRows) {
 		return model.Message{}, ErrNotReady
 	} else if err != nil {
 		return model.Message{}, err
 	}
-	return s.Get(ctx, id)
+	message, err := getMessageWith(ctx, tx, id)
+	if err != nil {
+		return model.Message{}, err
+	}
+	if err := recordMutationTx(ctx, tx, message); err != nil {
+		return model.Message{}, err
+	}
+	return message, tx.Commit()
 }
 
 func (s *SQLite) Complete(ctx context.Context, id, token string) error {
@@ -1138,8 +1304,18 @@ func (s *SQLite) Complete(ctx context.Context, id, token string) error {
 }
 
 func (s *SQLite) Release(ctx context.Context, id, token string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE delivery_facts SET delivery_token=NULL,delivery_lease_until=NULL WHERE message_id=? AND delivery_token=? AND completed_at IS NULL`, id, token)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE delivery_facts SET delivery_token=NULL,delivery_lease_until=NULL WHERE message_id=? AND delivery_token=? AND completed_at IS NULL`, id, token); err != nil {
+		return err
+	}
+	if err := recordMutationTx(ctx, tx, nil); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLite) Rebuild(ctx context.Context) error {

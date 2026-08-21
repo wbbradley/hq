@@ -2,17 +2,23 @@ package node_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"net"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/domainrpc"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/hqclient"
 	"github.com/wbbradley/hq/internal/identity"
+	"github.com/wbbradley/hq/internal/localwire"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/node"
 	"github.com/wbbradley/hq/internal/store"
@@ -288,6 +294,193 @@ func TestCLIAndTUIAndCodexClientsShareOneNodeStore(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("node did not stop")
 	}
+}
+
+func TestMutationRetryReplaysReceiptAcrossNodeRestart(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
+	databasePath := filepath.Join(root, "installation", "hq.db")
+	keyPath, err := identity.KeyPath(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	runner := node.Runner{}
+	start := func() chan error {
+		done := make(chan error, 1)
+		go func() { done <- runner.Run(context.Background(), databasePath) }()
+		waitForNode(t, databasePath)
+		return done
+	}
+	stop := func(done chan error) {
+		if err := syncer.StopDaemon(databasePath); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("node did not stop")
+		}
+	}
+
+	done := start()
+	client, err := hqclient.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := model.RepositoryContext{Directory: "/mutation-retry"}
+	agent, err := client.ResolveMailbox(context.Background(), model.SessionIdentity{Harness: "codex", ExternalSessionID: "retry"}, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Close()
+	message := model.Message{
+		ID: uuid.Must(uuid.NewV7()).String(), SenderMailboxID: model.HumanMailboxID,
+		RecipientMailboxID: agent.ID, Body: "commit before response loss", Context: repository,
+		CreatedAt: time.Now().UTC(),
+	}
+	mutationID := uuid.Must(uuid.NewV7()).String()
+	request := domainrpc.MessageRequest{MutationID: mutationID, Message: message}
+	abandonedConnection := sendMutationWithoutReadingResponse(t, databasePath, request)
+	observer, err := hqclient.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got, getErr := observer.Get(context.Background(), message.ID); getErr == nil && got.Body == message.Body {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("mutation did not commit before the simulated response loss")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	observer.Close()
+	abandonedConnection.Close()
+	stop(done)
+
+	done = start()
+	rawClients := make([]*localwire.Client, 4)
+	for index := range rawClients {
+		rawClients[index] = openRawDomainClient(t, databasePath)
+	}
+	startCalls := make(chan struct{})
+	errorsByClient := make(chan error, len(rawClients))
+	var calls sync.WaitGroup
+	for _, concurrentClient := range rawClients {
+		calls.Add(1)
+		go func() {
+			defer calls.Done()
+			<-startCalls
+			errorsByClient <- concurrentClient.Call(context.Background(), domainrpc.CreateMethod, request, nil)
+		}()
+	}
+	close(startCalls)
+	calls.Wait()
+	close(errorsByClient)
+	for callErr := range errorsByClient {
+		if callErr != nil {
+			t.Fatalf("concurrent mutation retry: %v", callErr)
+		}
+	}
+	for _, concurrentClient := range rawClients {
+		concurrentClient.Close()
+	}
+	rawClient := openRawDomainClient(t, databasePath)
+	if err := rawClient.Call(context.Background(), domainrpc.CreateMethod, request, nil); err != nil {
+		t.Fatalf("retry committed mutation: %v", err)
+	}
+	conflict := request
+	conflict.Message.Body = "different request"
+	conflictErr := rawClient.Call(context.Background(), domainrpc.CreateMethod, conflict, nil)
+	var rpcErr *localwire.RPCError
+	if !errors.As(conflictErr, &rpcErr) || rpcErr.Code != localwire.CodeInvalidRequest {
+		t.Fatalf("mutation key reuse error = %v", conflictErr)
+	}
+	rawClient.Close()
+	stop(done)
+
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var messageFacts, receipts int
+	if err := database.QueryRow(`SELECT count(*) FROM canonical_events WHERE event_type IN ('message','question','answer')`).Scan(&messageFacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM mutation_receipts WHERE mutation_id=?`, mutationID).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if messageFacts != 1 || receipts != 1 {
+		t.Fatalf("message facts=%d receipts=%d", messageFacts, receipts)
+	}
+}
+
+func sendMutationWithoutReadingResponse(t *testing.T, databasePath string, request domainrpc.MessageRequest) net.Conn {
+	t.Helper()
+	paths, err := syncer.ResolveRuntimePaths(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := net.Dial("unix", paths.Socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codec := localwire.NewCodec(connection, connection, localwire.DefaultMaximumFrameBytes)
+	handshake, err := json.Marshal(localwire.HandshakeRequest{
+		Mode: localwire.DomainMode, Supported: localwire.DomainVersions,
+		Client: localwire.PeerMetadata{Build: "lost-response-test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := codec.Write(localwire.Envelope{Kind: localwire.HandshakeKind, Params: handshake}); err != nil {
+		t.Fatal(err)
+	}
+	if response, err := codec.Read(); err != nil || response.Kind != localwire.HandshakeKind {
+		t.Fatalf("mutation handshake = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := codec.Write(localwire.Envelope{
+		Kind: localwire.RequestKind, Version: localwire.CurrentDomainVersion,
+		ID: "intentionally-unread-response", Method: domainrpc.CreateMethod, Params: raw,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return connection
+}
+
+func openRawDomainClient(t *testing.T, databasePath string) *localwire.Client {
+	t.Helper()
+	paths, err := syncer.ResolveRuntimePaths(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := net.Dial("unix", paths.Socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := localwire.NewClient(context.Background(), connection, localwire.ClientOptions{
+		Mode: localwire.DomainMode, Supported: localwire.DomainVersions,
+		Metadata: localwire.PeerMetadata{Build: "mutation-retry-test"},
+	})
+	if err != nil {
+		connection.Close()
+		t.Fatal(err)
+	}
+	return client
 }
 
 func waitForNode(t *testing.T, databasePath string) {

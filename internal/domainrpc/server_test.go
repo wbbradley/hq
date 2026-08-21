@@ -13,10 +13,18 @@ import (
 
 type recordingOperations struct {
 	called string
+	calls  int
 	err    error
 }
 
-func (s *recordingOperations) record(method string) error { s.called = method; return s.err }
+func (s *recordingOperations) MutationResult(_ context.Context, mutation domain.Mutation) (json.RawMessage, bool, error) {
+	if s.called == mutation.Method {
+		return json.RawMessage(`null`), true, nil
+	}
+	return nil, false, nil
+}
+
+func (s *recordingOperations) record(method string) error { s.called = method; s.calls++; return s.err }
 func (s *recordingOperations) HumanMailbox(context.Context) (model.Mailbox, error) {
 	return model.Mailbox{}, s.record(HumanMailboxMethod)
 }
@@ -89,32 +97,33 @@ func (s *recordingOperations) NetworkStatus(context.Context) (domain.NetworkStat
 }
 
 func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
+	mutationID := "0198c7ec-73b0-7cc3-a5f7-e31c77140d60"
 	tests := []struct {
 		method string
 		value  any
 	}{
 		{HumanMailboxMethod, nil},
-		{ResolveMailboxMethod, ResolveMailboxRequest{}},
+		{ResolveMailboxMethod, ResolveMailboxRequest{MutationID: mutationID}},
 		{FindMailboxesMethod, RepositoryRequest{}},
-		{CreateMethod, MessageRequest{}},
-		{ReplyMethod, ReplyRequest{}},
+		{CreateMethod, MessageRequest{MutationID: mutationID}},
+		{ReplyMethod, ReplyRequest{MutationID: mutationID}},
 		{GetMethod, IDRequest{}},
 		{ListMethod, FilterRequest{}},
-		{ArchiveMethod, IDRequest{}},
-		{ClaimMethod, ClaimRequest{}},
-		{CompleteMethod, LeaseRequest{}},
-		{ReleaseMethod, LeaseRequest{}},
-		{TrustPeerMethod, PeerRequest{}},
-		{DistrustPeerMethod, InstallationRequest{}},
+		{ArchiveMethod, MutationIDRequest{MutationID: mutationID}},
+		{ClaimMethod, ClaimRequest{MutationID: mutationID}},
+		{CompleteMethod, LeaseRequest{MutationID: mutationID}},
+		{ReleaseMethod, LeaseRequest{MutationID: mutationID}},
+		{TrustPeerMethod, PeerRequest{MutationID: mutationID}},
+		{DistrustPeerMethod, MutationInstallationRequest{MutationID: mutationID}},
 		{ListPeersMethod, nil},
 		{HumanAccountMethod, nil},
 		{HumanDevicesMethod, nil},
-		{CreateHumanInviteMethod, HumanInviteRequest{}},
-		{JoinHumanInviteMethod, PairingRequest{}},
-		{RevokeHumanDeviceMethod, InstallationRequest{}},
-		{SetMailboxShareMethod, MailboxShareRequest{}},
-		{AddRelayMethod, RelayRequest{}},
-		{RemoveRelayMethod, URLRequest{}},
+		{CreateHumanInviteMethod, HumanInviteRequest{MutationID: mutationID}},
+		{JoinHumanInviteMethod, PairingRequest{MutationID: mutationID}},
+		{RevokeHumanDeviceMethod, MutationInstallationRequest{MutationID: mutationID}},
+		{SetMailboxShareMethod, MailboxShareRequest{MutationID: mutationID}},
+		{AddRelayMethod, RelayRequest{MutationID: mutationID}},
+		{RemoveRelayMethod, MutationURLRequest{MutationID: mutationID}},
 		{ListRelaysMethod, nil},
 		{NetworkStatusMethod, nil},
 	}
@@ -146,6 +155,34 @@ func TestServiceRejectsMalformedAndUnknownRequests(t *testing.T) {
 	}
 	if _, rpcErr := service.Handle(context.Background(), nil, "database/query", nil); rpcErr == nil || rpcErr.Code != localwire.CodeMethodNotFound {
 		t.Fatalf("unknown error = %#v", rpcErr)
+	}
+}
+
+func TestMutationMetadataIsRequiredCanonicalAndReplayed(t *testing.T) {
+	mutationID := "0198c7ec-73b0-7cc3-a5f7-e31c77140d60"
+	first, mutating, err := mutationForRequest(CreateMethod, json.RawMessage(`{"mutation_id":"`+mutationID+`","message":{"body":"hello"}}`))
+	if err != nil || !mutating {
+		t.Fatalf("first mutation = %#v, %t, %v", first, mutating, err)
+	}
+	second, _, err := mutationForRequest(CreateMethod, json.RawMessage(`{"message":{"body":"hello"},"mutation_id":"`+mutationID+`"}`))
+	if err != nil || first.RequestDigest != second.RequestDigest {
+		t.Fatalf("canonical digests = %q, %q, %v", first.RequestDigest, second.RequestDigest, err)
+	}
+	if _, _, err := mutationForRequest(CreateMethod, json.RawMessage(`{"message":{}}`)); err == nil {
+		t.Fatal("missing mutation ID was accepted")
+	}
+
+	operations := &recordingOperations{}
+	service := Service{Store: operations}
+	raw := json.RawMessage(`{"mutation_id":"` + mutationID + `","message":{}}`)
+	if _, rpcErr := service.Handle(context.Background(), nil, CreateMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if _, rpcErr := service.Handle(context.Background(), nil, CreateMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if operations.calls != 1 {
+		t.Fatalf("mutation dispatch calls = %d", operations.calls)
 	}
 }
 

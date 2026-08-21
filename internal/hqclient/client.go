@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/buildinfo"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/domainrpc"
@@ -52,6 +53,14 @@ func (c *Client) call(ctx context.Context, method string, request, response any)
 	return domainrpc.DecodeError(c.wire.Call(ctx, method, request, response))
 }
 
+func (c *Client) mutatingCall(ctx context.Context, method string, request func(string) any, response any) error {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	return c.call(ctx, method, request(id.String()), response)
+}
+
 func (c *Client) HumanMailbox(ctx context.Context) (model.Mailbox, error) {
 	var result model.Mailbox
 	err := c.call(ctx, domainrpc.HumanMailboxMethod, nil, &result)
@@ -60,7 +69,9 @@ func (c *Client) HumanMailbox(ctx context.Context) (model.Mailbox, error) {
 
 func (c *Client) ResolveMailbox(ctx context.Context, session model.SessionIdentity, repository model.RepositoryContext) (model.Mailbox, error) {
 	var result model.Mailbox
-	err := c.call(ctx, domainrpc.ResolveMailboxMethod, domainrpc.ResolveMailboxRequest{Harness: session.Harness, ExternalSessionID: session.ExternalSessionID, Repository: repository}, &result)
+	err := c.mutatingCall(ctx, domainrpc.ResolveMailboxMethod, func(id string) any {
+		return domainrpc.ResolveMailboxRequest{MutationID: id, Harness: session.Harness, ExternalSessionID: session.ExternalSessionID, Repository: repository}
+	}, &result)
 	return result, err
 }
 
@@ -71,11 +82,13 @@ func (c *Client) FindMailboxes(ctx context.Context, repository model.RepositoryC
 }
 
 func (c *Client) Create(ctx context.Context, message model.Message) error {
-	return c.call(ctx, domainrpc.CreateMethod, domainrpc.MessageRequest{Message: message}, nil)
+	return c.mutatingCall(ctx, domainrpc.CreateMethod, func(id string) any { return domainrpc.MessageRequest{MutationID: id, Message: message} }, nil)
 }
 
 func (c *Client) Reply(ctx context.Context, originalID string, reply model.Message) error {
-	return c.call(ctx, domainrpc.ReplyMethod, domainrpc.ReplyRequest{OriginalID: originalID, Reply: reply}, nil)
+	return c.mutatingCall(ctx, domainrpc.ReplyMethod, func(id string) any {
+		return domainrpc.ReplyRequest{MutationID: id, OriginalID: originalID, Reply: reply}
+	}, nil)
 }
 
 func (c *Client) Get(ctx context.Context, id string) (model.Message, error) {
@@ -91,29 +104,35 @@ func (c *Client) List(ctx context.Context, filter model.Filter) ([]model.Message
 }
 
 func (c *Client) Archive(ctx context.Context, id string) error {
-	return c.call(ctx, domainrpc.ArchiveMethod, domainrpc.IDRequest{ID: id}, nil)
+	return c.mutatingCall(ctx, domainrpc.ArchiveMethod, func(mutationID string) any { return domainrpc.MutationIDRequest{MutationID: mutationID, ID: id} }, nil)
 }
 
 func (c *Client) Claim(ctx context.Context, claim domain.Claim, token string) (model.Message, error) {
 	var result model.Message
-	err := c.call(ctx, domainrpc.ClaimMethod, domainrpc.ClaimRequest{Claim: claim, Token: token}, &result)
+	err := c.mutatingCall(ctx, domainrpc.ClaimMethod, func(id string) any { return domainrpc.ClaimRequest{MutationID: id, Claim: claim, Token: token} }, &result)
 	return result, err
 }
 
 func (c *Client) Complete(ctx context.Context, id, token string) error {
-	return c.call(ctx, domainrpc.CompleteMethod, domainrpc.LeaseRequest{ID: id, Token: token}, nil)
+	return c.mutatingCall(ctx, domainrpc.CompleteMethod, func(mutationID string) any {
+		return domainrpc.LeaseRequest{MutationID: mutationID, ID: id, Token: token}
+	}, nil)
 }
 
 func (c *Client) Release(ctx context.Context, id, token string) error {
-	return c.call(ctx, domainrpc.ReleaseMethod, domainrpc.LeaseRequest{ID: id, Token: token}, nil)
+	return c.mutatingCall(ctx, domainrpc.ReleaseMethod, func(mutationID string) any {
+		return domainrpc.LeaseRequest{MutationID: mutationID, ID: id, Token: token}
+	}, nil)
 }
 
 func (c *Client) TrustPeer(ctx context.Context, peer domain.Peer) error {
-	return c.call(ctx, domainrpc.TrustPeerMethod, domainrpc.PeerRequest{Peer: peer}, nil)
+	return c.mutatingCall(ctx, domainrpc.TrustPeerMethod, func(id string) any { return domainrpc.PeerRequest{MutationID: id, Peer: peer} }, nil)
 }
 
 func (c *Client) DistrustPeer(ctx context.Context, installationID string) error {
-	return c.call(ctx, domainrpc.DistrustPeerMethod, domainrpc.InstallationRequest{InstallationID: installationID}, nil)
+	return c.mutatingCall(ctx, domainrpc.DistrustPeerMethod, func(id string) any {
+		return domainrpc.MutationInstallationRequest{MutationID: id, InstallationID: installationID}
+	}, nil)
 }
 
 func (c *Client) ListPeers(ctx context.Context) ([]domain.Peer, error) {
@@ -136,28 +155,32 @@ func (c *Client) HumanDevices(ctx context.Context) ([]domain.HumanDevice, error)
 
 func (c *Client) CreateHumanInvite(ctx context.Context, request domain.HumanInviteRequest) (domain.PairingBundle, error) {
 	var result domain.PairingBundle
-	err := c.call(ctx, domainrpc.CreateHumanInviteMethod, domainrpc.HumanInviteRequest{Invite: request}, &result)
+	err := c.mutatingCall(ctx, domainrpc.CreateHumanInviteMethod, func(id string) any { return domainrpc.HumanInviteRequest{MutationID: id, Invite: request} }, &result)
 	return result, err
 }
 
 func (c *Client) JoinHumanInvite(ctx context.Context, bundle []byte) error {
-	return c.call(ctx, domainrpc.JoinHumanInviteMethod, domainrpc.PairingRequest{Bundle: bundle}, nil)
+	return c.mutatingCall(ctx, domainrpc.JoinHumanInviteMethod, func(id string) any { return domainrpc.PairingRequest{MutationID: id, Bundle: bundle} }, nil)
 }
 
 func (c *Client) RevokeHumanDevice(ctx context.Context, installationID string) error {
-	return c.call(ctx, domainrpc.RevokeHumanDeviceMethod, domainrpc.InstallationRequest{InstallationID: installationID}, nil)
+	return c.mutatingCall(ctx, domainrpc.RevokeHumanDeviceMethod, func(id string) any {
+		return domainrpc.MutationInstallationRequest{MutationID: id, InstallationID: installationID}
+	}, nil)
 }
 
 func (c *Client) SetMailboxShare(ctx context.Context, mailboxID, peerInstallationID string, active bool) error {
-	return c.call(ctx, domainrpc.SetMailboxShareMethod, domainrpc.MailboxShareRequest{MailboxID: mailboxID, PeerInstallationID: peerInstallationID, Active: active}, nil)
+	return c.mutatingCall(ctx, domainrpc.SetMailboxShareMethod, func(id string) any {
+		return domainrpc.MailboxShareRequest{MutationID: id, MailboxID: mailboxID, PeerInstallationID: peerInstallationID, Active: active}
+	}, nil)
 }
 
 func (c *Client) AddRelay(ctx context.Context, relay domain.RelayConfig) error {
-	return c.call(ctx, domainrpc.AddRelayMethod, domainrpc.RelayRequest{Relay: relay}, nil)
+	return c.mutatingCall(ctx, domainrpc.AddRelayMethod, func(id string) any { return domainrpc.RelayRequest{MutationID: id, Relay: relay} }, nil)
 }
 
 func (c *Client) RemoveRelay(ctx context.Context, url string) error {
-	return c.call(ctx, domainrpc.RemoveRelayMethod, domainrpc.URLRequest{URL: url}, nil)
+	return c.mutatingCall(ctx, domainrpc.RemoveRelayMethod, func(id string) any { return domainrpc.MutationURLRequest{MutationID: id, URL: url} }, nil)
 }
 
 func (c *Client) ListRelays(ctx context.Context) ([]domain.RelayConfig, error) {

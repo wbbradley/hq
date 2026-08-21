@@ -3,18 +3,23 @@ package domainrpc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 
+	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/localwire"
 	"github.com/wbbradley/hq/internal/model"
 )
 
 type Service struct {
-	Store       domain.Operations
+	Store interface {
+		domain.Operations
+		domain.MutationLog
+	}
 	Synchronize func(context.Context) error
 }
 
@@ -22,7 +27,28 @@ func (s Service) Handle(ctx context.Context, _ *localwire.Session, method string
 	if s.Store == nil {
 		return nil, &localwire.RPCError{Code: localwire.CodeInternal, Message: "domain store is unavailable"}
 	}
+	mutation, mutating, err := mutationForRequest(method, raw)
+	if err != nil {
+		return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+	}
+	if mutating {
+		if result, found, lookupErr := s.Store.MutationResult(ctx, mutation); lookupErr != nil {
+			return nil, encodeMutationError(lookupErr)
+		} else if found {
+			return result, nil
+		}
+		ctx = domain.WithMutation(ctx, mutation)
+	}
 	result, err := s.dispatch(ctx, method, raw)
+	if mutating {
+		if persisted, found, lookupErr := s.Store.MutationResult(ctx, mutation); lookupErr != nil {
+			return nil, encodeMutationError(lookupErr)
+		} else if found {
+			return persisted, nil
+		} else if err == nil {
+			err = errors.New("mutation completed without a durable receipt")
+		}
+	}
 	var missing *methodNotFoundError
 	if errors.As(err, &missing) {
 		return nil, &localwire.RPCError{Code: localwire.CodeMethodNotFound, Message: err.Error()}
@@ -32,6 +58,46 @@ func (s Service) Handle(ctx context.Context, _ *localwire.Session, method string
 		return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
 	}
 	return result, EncodeError(err)
+}
+
+func encodeMutationError(err error) *localwire.RPCError {
+	if errors.Is(err, domain.ErrMutationConflict) {
+		return &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+	}
+	return EncodeError(err)
+}
+
+var mutationMethods = map[string]bool{
+	ResolveMailboxMethod: true, CreateMethod: true, ReplyMethod: true, ArchiveMethod: true,
+	ClaimMethod: true, CompleteMethod: true, ReleaseMethod: true, TrustPeerMethod: true,
+	DistrustPeerMethod: true, CreateHumanInviteMethod: true, JoinHumanInviteMethod: true,
+	RevokeHumanDeviceMethod: true, SetMailboxShareMethod: true, AddRelayMethod: true,
+	RemoveRelayMethod: true,
+}
+
+func mutationForRequest(method string, raw json.RawMessage) (domain.Mutation, bool, error) {
+	if !mutationMethods[method] {
+		return domain.Mutation{}, false, nil
+	}
+	var header struct {
+		MutationID string `json:"mutation_id"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return domain.Mutation{}, true, fmt.Errorf("decode mutation metadata: %w", err)
+	}
+	if _, err := uuid.Parse(header.MutationID); err != nil {
+		return domain.Mutation{}, true, errors.New("mutation_id must be a UUID")
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return domain.Mutation{}, true, fmt.Errorf("canonicalize mutation request: %w", err)
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return domain.Mutation{}, true, fmt.Errorf("canonicalize mutation request: %w", err)
+	}
+	digest := sha256.Sum256(append([]byte(method+"\x00"), canonical...))
+	return domain.Mutation{ID: header.MutationID, Method: method, RequestDigest: fmt.Sprintf("%x", digest)}, true, nil
 }
 
 func (s Service) dispatch(ctx context.Context, method string, raw json.RawMessage) (any, error) {
@@ -75,7 +141,7 @@ func (s Service) dispatch(ctx context.Context, method string, raw json.RawMessag
 		}
 		return s.Store.List(ctx, request.Filter)
 	case ArchiveMethod:
-		var request IDRequest
+		var request MutationIDRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
@@ -102,7 +168,7 @@ func (s Service) dispatch(ctx context.Context, method string, raw json.RawMessag
 		}
 		return nil, s.Store.TrustPeer(ctx, request.Peer)
 	case DistrustPeerMethod, RevokeHumanDeviceMethod:
-		var request InstallationRequest
+		var request MutationInstallationRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
@@ -141,7 +207,7 @@ func (s Service) dispatch(ctx context.Context, method string, raw json.RawMessag
 		}
 		return nil, s.Store.AddRelay(ctx, request.Relay)
 	case RemoveRelayMethod:
-		var request URLRequest
+		var request MutationURLRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}

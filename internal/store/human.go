@@ -126,7 +126,11 @@ func (s *SQLite) CreateHumanInvite(ctx context.Context, request HumanInviteReque
 		return PairingBundle{}, err
 	}
 	if err == nil && state != "revoked" && grantID != "" {
-		return s.pairingBundle(ctx, account, request, grantID)
+		bundle, err := s.pairingBundle(ctx, account, request, grantID)
+		if err == nil {
+			err = s.recordMutation(ctx, bundle)
+		}
+		return bundle, err
 	}
 
 	creationID, creationRaw, err := s.accountCreation(ctx, account.ID)
@@ -154,22 +158,35 @@ func (s *SQLite) CreateHumanInvite(ctx context.Context, request HumanInviteReque
 	if err != nil {
 		return PairingBundle{}, err
 	}
+	authority, err := s.accountAuthorityEvents(ctx, account.ID)
+	if err != nil {
+		return PairingBundle{}, err
+	}
+	authority = append(authority, append([]byte(nil), signed[1].Wire...))
+	bundle := PairingBundle{
+		Version: pairingBundleVersion, AccountID: account.ID, AccountLabel: account.Label,
+		CreatorInstallationID: account.CreatorInstallationID, CreatorSignerKeyID: account.CreatorSignerKeyID,
+		CreatorRelays: creatorRelays, TargetInstallationID: request.InstallationID, TargetSignerKeyID: request.SignerKeyID,
+		TargetLabel: request.Name, TargetRelays: request.Relays, AccountCreationEvent: creationRaw,
+		DeviceGrantEvent: signed[1].Wire, AccountAuthorityEvents: authority,
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return PairingBundle{}, err
 	}
 	defer tx.Rollback()
-	if err := s.appendSignedTx(ctx, tx, signed); err != nil {
+	commit, err := s.ingestCanonicalTx(ctx, tx, signed, true)
+	if err != nil {
+		return PairingBundle{}, err
+	}
+	if err := recordMutationTx(ctx, tx, bundle); err != nil {
 		return PairingBundle{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return PairingBundle{}, err
 	}
-	bundle, err := s.pairingBundle(ctx, account, request, signed[1].ID())
-	if err == nil {
-		bundle.AccountCreationEvent = creationRaw
-	}
-	return bundle, err
+	s.notifyCanonicalCommit(commit)
+	return bundle, nil
 }
 
 func (s *SQLite) pairingBundle(ctx context.Context, account HumanAccount, request HumanInviteRequest, grantID string) (PairingBundle, error) {
@@ -241,7 +258,7 @@ func (s *SQLite) JoinHumanInvite(ctx context.Context, raw []byte) error {
 	}
 	var active int
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM human_account_devices d JOIN human_account_default a ON a.account_id=d.account_id WHERE d.account_id=? AND d.installation_id=? AND d.signer_key_id=? AND d.state='active'`, bundle.AccountID, s.signer.InstallationID, s.signer.PublicKey()).Scan(&active); err == nil && active > 0 {
-		return nil
+		return s.recordMutation(ctx, nil)
 	}
 	bundle.CreatorRelays, err = normalizeRelayHints(bundle.CreatorRelays)
 	if err != nil {
@@ -271,10 +288,18 @@ func (s *SQLite) JoinHumanInvite(ctx context.Context, raw []byte) error {
 	defer tx.Rollback()
 	additions := append([]event.SignedEvent(nil), authority...)
 	additions = append(additions, local[0], local[1], selection[0])
-	if err := s.appendSignedTx(ctx, tx, additions); err != nil {
+	commit, err := s.ingestCanonicalTx(ctx, tx, additions, true)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := recordMutationTx(ctx, tx, nil); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyCanonicalCommit(commit)
+	return nil
 }
 
 func (s *SQLite) RevokeHumanDevice(ctx context.Context, installationID string) error {
@@ -298,7 +323,7 @@ func (s *SQLite) RevokeHumanDevice(ctx context.Context, installationID string) e
 		return err
 	}
 	if device.State == "revoked" {
-		return nil
+		return s.recordMutation(ctx, nil)
 	}
 	_ = json.Unmarshal([]byte(relays), &device.Relays)
 	var grantRaw []byte

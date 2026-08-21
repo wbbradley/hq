@@ -46,6 +46,7 @@ const (
 )
 
 type ResolveMailboxRequest struct {
+	MutationID        string                  `json:"mutation_id"`
 	Harness           string                  `json:"harness"`
 	ExternalSessionID string                  `json:"external_session_id"`
 	Repository        model.RepositoryContext `json:"repository"`
@@ -56,10 +57,12 @@ type RepositoryRequest struct {
 }
 
 type MessageRequest struct {
-	Message model.Message `json:"message"`
+	MutationID string        `json:"mutation_id"`
+	Message    model.Message `json:"message"`
 }
 
 type ReplyRequest struct {
+	MutationID string        `json:"mutation_id"`
 	OriginalID string        `json:"original_id"`
 	Reply      model.Message `json:"reply"`
 }
@@ -68,48 +71,62 @@ type IDRequest struct {
 	ID string `json:"id"`
 }
 
+type MutationIDRequest struct {
+	MutationID string `json:"mutation_id"`
+	ID         string `json:"id"`
+}
+
 type FilterRequest struct {
 	Filter model.Filter `json:"filter"`
 }
 
 type ClaimRequest struct {
-	Claim domain.Claim `json:"claim"`
-	Token string       `json:"token"`
+	MutationID string       `json:"mutation_id"`
+	Claim      domain.Claim `json:"claim"`
+	Token      string       `json:"token"`
 }
 
 type LeaseRequest struct {
-	ID    string `json:"id"`
-	Token string `json:"token"`
+	MutationID string `json:"mutation_id"`
+	ID         string `json:"id"`
+	Token      string `json:"token"`
 }
 
 type PeerRequest struct {
-	Peer domain.Peer `json:"peer"`
+	MutationID string      `json:"mutation_id"`
+	Peer       domain.Peer `json:"peer"`
 }
 
-type InstallationRequest struct {
+type MutationInstallationRequest struct {
+	MutationID     string `json:"mutation_id"`
 	InstallationID string `json:"installation_id"`
 }
 
 type HumanInviteRequest struct {
-	Invite domain.HumanInviteRequest `json:"invite"`
+	MutationID string                    `json:"mutation_id"`
+	Invite     domain.HumanInviteRequest `json:"invite"`
 }
 
 type PairingRequest struct {
-	Bundle []byte `json:"bundle"`
+	MutationID string `json:"mutation_id"`
+	Bundle     []byte `json:"bundle"`
 }
 
 type MailboxShareRequest struct {
+	MutationID         string `json:"mutation_id"`
 	MailboxID          string `json:"mailbox_id"`
 	PeerInstallationID string `json:"peer_installation_id"`
 	Active             bool   `json:"active"`
 }
 
 type RelayRequest struct {
-	Relay domain.RelayConfig `json:"relay"`
+	MutationID string             `json:"mutation_id"`
+	Relay      domain.RelayConfig `json:"relay"`
 }
 
-type URLRequest struct {
-	URL string `json:"url"`
+type MutationURLRequest struct {
+	MutationID string `json:"mutation_id"`
+	URL        string `json:"url"`
 }
 
 func EncodeError(err error) *localwire.RPCError {

@@ -29,6 +29,9 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey, Name: "sender", Relays: []string{relayOne}}); err != nil {
 		t.Fatal(err)
 	}
+	var senderCommits, receiverCommits []CanonicalCommit
+	sender.SetCanonicalCommitObserver(func(commit CanonicalCommit) { senderCommits = append(senderCommits, commit) })
+	receiver.SetCanonicalCommitObserver(func(commit CanonicalCommit) { receiverCommits = append(receiverCommits, commit) })
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d90", SenderMailboxID: model.HumanMailboxID, Body: "wrapped hello", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
 	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
 		t.Fatal(err)
@@ -41,9 +44,15 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 		t.Fatalf("jobs = %#v, %v", jobs, err)
 	}
 	job := jobs[0]
+	if len(senderCommits) != 1 || len(senderCommits[0].EventIDs) != 1 || senderCommits[0].EventIDs[0] != job.CanonicalEventID {
+		t.Fatalf("local commit notifications = %#v", senderCommits)
+	}
 	result, err := receiver.ReceiveGiftWrap(ctx, job.ExactGiftWrapBytes, relayOne, time.Now().UTC())
 	if err != nil || result.Status != "projected" {
 		t.Fatalf("receive = %#v, %v", result, err)
+	}
+	if len(receiverCommits) != 1 || len(receiverCommits[0].EventIDs) != 1 || receiverCommits[0].EventIDs[0] != job.CanonicalEventID {
+		t.Fatalf("remote commit notifications = %#v", receiverCommits)
 	}
 	got, err := receiver.Get(ctx, message.ID)
 	if err != nil || got.Body != message.Body || got.SenderInstallationID != senderID || got.RecipientInstallationID != receiverID {
@@ -52,6 +61,9 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 	duplicate, err := receiver.ReceiveGiftWrap(ctx, job.ExactGiftWrapBytes, relayOne, time.Now().UTC())
 	if err != nil || duplicate.Status != "duplicate-wrapper" {
 		t.Fatalf("duplicate = %#v, %v", duplicate, err)
+	}
+	if len(receiverCommits) != 1 {
+		t.Fatalf("duplicate wrapper emitted a commit notification: %#v", receiverCommits)
 	}
 	if err := sender.RecordPublish(ctx, job.CanonicalEventID, job.RecipientInstallation, relayOne, true, false, "duplicate: already saved", time.Now(), time.Now()); err != nil {
 		t.Fatal(err)

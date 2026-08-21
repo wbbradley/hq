@@ -86,8 +86,18 @@ func (s *SQLite) AddRelay(ctx context.Context, config RelayConfig) error {
 		return errors.New("private relay reads require auth; set the unsafe development override explicitly")
 	}
 	config.URL = normalized
-	_, err = s.db.ExecContext(ctx, `INSERT INTO relays(url,read_enabled,write_enabled,require_auth,unsafe_no_auth,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET read_enabled=excluded.read_enabled,write_enabled=excluded.write_enabled,require_auth=excluded.require_auth,unsafe_no_auth=excluded.unsafe_no_auth`, config.URL, boolInt(config.Read), boolInt(config.Write), boolInt(config.RequireAuth), boolInt(config.UnsafeNoAuth), time.Now().UTC().UnixMilli())
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO relays(url,read_enabled,write_enabled,require_auth,unsafe_no_auth,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET read_enabled=excluded.read_enabled,write_enabled=excluded.write_enabled,require_auth=excluded.require_auth,unsafe_no_auth=excluded.unsafe_no_auth`, config.URL, boolInt(config.Read), boolInt(config.Write), boolInt(config.RequireAuth), boolInt(config.UnsafeNoAuth), time.Now().UTC().UnixMilli()); err != nil {
+		return err
+	}
+	if err := recordMutationTx(ctx, tx, nil); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLite) RemoveRelay(ctx context.Context, relayURL string) error {
@@ -95,8 +105,18 @@ func (s *SQLite) RemoveRelay(ctx context.Context, relayURL string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM relays WHERE url=?`, normalized)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM relays WHERE url=?`, normalized); err != nil {
+		return err
+	}
+	if err := recordMutationTx(ctx, tx, nil); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLite) ListRelays(ctx context.Context) ([]RelayConfig, error) {
@@ -332,13 +352,16 @@ func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL strin
 	if err != nil {
 		return ReceiveResult{}, err
 	}
+	var canonicalCommit CanonicalCommit
 	if logical == 0 {
-		if err := s.appendSignedTxMode(ctx, tx, []event.SignedEvent{unwrapped.CanonicalEvent}, false); err != nil {
+		var ingestErr error
+		canonicalCommit, ingestErr = s.ingestCanonicalTx(ctx, tx, []event.SignedEvent{unwrapped.CanonicalEvent}, false)
+		if ingestErr != nil {
 			tx.Rollback()
-			if strings.Contains(strings.ToLower(err.Error()), "locked") || strings.Contains(strings.ToLower(err.Error()), "busy") {
-				_ = s.Stage(context.Background(), raw, normalized, unwrapped.Outer.ID, err.Error(), received, received.Add(time.Minute))
+			if strings.Contains(strings.ToLower(ingestErr.Error()), "locked") || strings.Contains(strings.ToLower(ingestErr.Error()), "busy") {
+				_ = s.Stage(context.Background(), raw, normalized, unwrapped.Outer.ID, ingestErr.Error(), received, received.Add(time.Minute))
 			} else {
-				reason := err.Error()
+				reason := ingestErr.Error()
 				if sourceDeviceState == "revoked" {
 					reason = "revoked account device: " + reason
 				} else if content.Scope == event.ScopeAccountAddressed {
@@ -346,13 +369,14 @@ func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL strin
 				}
 				_ = s.Quarantine(context.Background(), raw, normalized, unwrapped.Outer.ID, reason, received)
 			}
-			return ReceiveResult{}, err
+			return ReceiveResult{}, ingestErr
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		_ = s.Stage(context.Background(), raw, normalized, unwrapped.Outer.ID, err.Error(), received, received.Add(time.Minute))
 		return ReceiveResult{}, err
 	}
+	s.notifyCanonicalCommit(canonicalCommit)
 	return result, nil
 }
 

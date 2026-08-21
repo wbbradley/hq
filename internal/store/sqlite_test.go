@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
@@ -19,7 +21,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "7"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "8"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -29,7 +31,7 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 			t.Errorf("%s = %q, want %q", query, got, want)
 		}
 	}
-	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "mailbox_contexts", "messages", "threads", "peers", "mailbox_shares", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine"} {
+	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "mailbox_contexts", "messages", "threads", "peers", "mailbox_shares", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts"} {
 		var strict int
 		if err := s.db.QueryRow(`SELECT strict FROM pragma_table_list WHERE name = ?`, table).Scan(&strict); err != nil {
 			t.Fatal(err)
@@ -318,8 +320,70 @@ func TestVersionTwoDataIsDestroyed(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 7 {
+	if version != 8 {
 		t.Fatalf("user_version = %d", version)
+	}
+}
+
+func TestVersionSevenMigratesWithoutLosingCanonicalState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, path)
+	ctx := context.Background()
+	agent, err := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "migration"}, model.RepositoryContext{Directory: "/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d99", SenderMailboxID: agent.ID, RecipientMailboxID: model.HumanMailboxID, Body: "preserve me", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	if err := s.Create(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE mutation_receipts; PRAGMA user_version = 7`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got, err := reopened.Get(ctx, message.ID); err != nil || got.Body != message.Body {
+		t.Fatalf("migrated message = %#v, %v", got, err)
+	}
+	var version int
+	if err := reopened.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("migrated version = %d, %v", version, err)
+	}
+}
+
+func TestMutationReceiptPersistsResultAndRejectsKeyReuse(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	mutation := domain.Mutation{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d98", Method: "mailbox/resolve", RequestDigest: strings.Repeat("a", 64)}
+	ctx := domain.WithMutation(context.Background(), mutation)
+	mailbox, err := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "receipt"}, model.RepositoryContext{Directory: "/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, found, err := s.MutationResult(context.Background(), mutation)
+	if err != nil || !found {
+		t.Fatalf("mutation result found=%t err=%v", found, err)
+	}
+	var persisted model.Mailbox
+	if err := json.Unmarshal(raw, &persisted); err != nil || persisted.ID != mailbox.ID {
+		t.Fatalf("persisted mailbox = %#v, %v", persisted, err)
+	}
+	conflict := mutation
+	conflict.RequestDigest = strings.Repeat("b", 64)
+	if _, _, err := s.MutationResult(context.Background(), conflict); err == nil || !strings.Contains(err.Error(), "different request") {
+		t.Fatalf("mutation key conflict = %v", err)
 	}
 }
 

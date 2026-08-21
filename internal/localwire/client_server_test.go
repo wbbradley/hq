@@ -218,7 +218,7 @@ func TestDisconnectFailsPendingCall(t *testing.T) {
 		request, _ := codec.Read()
 		var handshake HandshakeRequest
 		_ = json.Unmarshal(request.Params, &handshake)
-		result, _ := json.Marshal(HandshakeResponse{Mode: handshake.Mode, Version: 1, Supported: DomainVersions})
+		result, _ := json.Marshal(HandshakeResponse{Mode: handshake.Mode, Version: CurrentDomainVersion, Supported: DomainVersions})
 		_ = codec.Write(Envelope{Kind: HandshakeKind, Result: result})
 		_, _ = codec.Read()
 		_ = serverConnection.Close()
