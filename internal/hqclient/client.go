@@ -2,7 +2,10 @@ package hqclient
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/buildinfo"
@@ -14,10 +17,35 @@ import (
 )
 
 type Client struct {
-	wire *localwire.Client
+	mu            sync.RWMutex
+	wire          *localwire.Client
+	connect       func(context.Context) (*localwire.Client, error)
+	reconnectMu   sync.Mutex
+	subscriptions map[string]*Subscription
+	states        chan ConnectionState
+	lifetime      context.Context
+	cancel        context.CancelFunc
+	closed        bool
 }
 
 func Open(ctx context.Context, databasePath string) (*Client, error) {
+	lifetime, cancel := context.WithCancel(context.Background())
+	client := newClient(lifetime, cancel)
+	client.connect = func(connectContext context.Context) (*localwire.Client, error) {
+		return openWire(connectContext, lifetime, databasePath)
+	}
+	client.publishState(ConnectionState{Phase: ConnectionConnecting})
+	wireClient, err := client.connect(ctx)
+	if err != nil {
+		cancel()
+		client.publishConnectionError(err)
+		return nil, err
+	}
+	client.attach(wireClient)
+	return client, nil
+}
+
+func openWire(ctx, lifetime context.Context, databasePath string) (*localwire.Client, error) {
 	if err := syncer.EnsureNode(ctx, databasePath); err != nil {
 		return nil, err
 	}
@@ -29,7 +57,7 @@ func Open(ctx context.Context, databasePath string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	wireClient, err := localwire.NewClient(ctx, connection, localwire.ClientOptions{
+	wireClient, err := localwire.NewClient(lifetime, connection, localwire.ClientOptions{
 		Mode: localwire.DomainMode, Supported: localwire.DomainVersions,
 		Metadata: localwire.PeerMetadata{Build: buildinfo.Version},
 	})
@@ -37,20 +65,68 @@ func Open(ctx context.Context, databasePath string) (*Client, error) {
 		connection.Close()
 		return nil, err
 	}
-	return New(wireClient), nil
+	return wireClient, nil
 }
 
-func New(wireClient *localwire.Client) *Client { return &Client{wire: wireClient} }
+func New(wireClient *localwire.Client) *Client {
+	lifetime, cancel := context.WithCancel(context.Background())
+	client := newClient(lifetime, cancel)
+	client.attach(wireClient)
+	return client
+}
+
+func newClient(lifetime context.Context, cancel context.CancelFunc) *Client {
+	return &Client{
+		subscriptions: make(map[string]*Subscription), states: make(chan ConnectionState, 1),
+		lifetime: lifetime, cancel: cancel,
+	}
+}
 
 func (c *Client) Close() error {
-	if c == nil || c.wire == nil {
+	if c == nil {
 		return nil
 	}
-	return c.wire.Close()
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	wireClient := c.wire
+	c.mu.Unlock()
+	c.cancel()
+	c.publishState(ConnectionState{Phase: ConnectionDisconnected, Err: errors.New("domain client closed")})
+	if wireClient == nil {
+		return nil
+	}
+	err := wireClient.Close()
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
 }
 
 func (c *Client) call(ctx context.Context, method string, request, response any) error {
-	return domainrpc.DecodeError(c.wire.Call(ctx, method, request, response))
+	for {
+		wireClient := c.currentWire()
+		if wireClient == nil {
+			var err error
+			wireClient, err = c.reconnect(ctx, nil)
+			if err != nil {
+				return err
+			}
+		}
+		callErr := wireClient.Call(ctx, method, request, response)
+		if callErr == nil {
+			return nil
+		}
+		if !reconnectable(callErr) {
+			return domainrpc.DecodeError(callErr)
+		}
+		if _, reconnectErr := c.reconnect(ctx, wireClient); reconnectErr != nil {
+			return reconnectErr
+		}
+	}
 }
 
 func (c *Client) mutatingCall(ctx context.Context, method string, request func(string) any, response any) error {

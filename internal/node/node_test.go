@@ -249,8 +249,24 @@ func TestCLIAndTUIAndCodexClientsShareOneNodeStore(t *testing.T) {
 		RecipientMailboxID: agent.ID, Body: "one node, three clients", Context: repository,
 		CreatedAt: time.Now().UTC(),
 	}
+	subscription, err := clients[1].Subscribe(ctx, domain.TopicMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if snapshot, err := clients[1].List(ctx, model.Filter{RecipientMailboxID: agent.ID}); err != nil || len(snapshot) != 0 {
+		t.Fatalf("initial subscribed snapshot = %#v, %v", snapshot, err)
+	}
 	if err := clients[0].Create(ctx, message); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case change := <-subscription.Changes():
+		if change.Revision == 0 || len(change.Topics) == 0 || change.Topics[0] != domain.TopicMessages {
+			t.Fatalf("message invalidation = %#v", change)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscribed client did not receive the committed message invalidation")
 	}
 	for index, client := range clients {
 		got, err := client.Get(ctx, message.ID)

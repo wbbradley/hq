@@ -75,9 +75,10 @@ type Session struct {
 	done    <-chan struct{}
 }
 
-func (s *Session) Mode() HandshakeMode  { return s.mode }
-func (s *Session) Version() int         { return s.version }
-func (s *Session) Client() PeerMetadata { return s.client }
+func (s *Session) Mode() HandshakeMode   { return s.mode }
+func (s *Session) Version() int          { return s.version }
+func (s *Session) Client() PeerMetadata  { return s.client }
+func (s *Session) Done() <-chan struct{} { return s.done }
 
 func (s *Session) Notify(method string, params any) error {
 	return s.NotifySubscription("", method, params)

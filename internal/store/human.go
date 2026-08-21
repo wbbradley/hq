@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/model"
 )
@@ -182,10 +183,19 @@ func (s *SQLite) CreateHumanInvite(ctx context.Context, request HumanInviteReque
 	if err := recordMutationTx(ctx, tx, bundle); err != nil {
 		return PairingBundle{}, err
 	}
+	var change domain.Invalidation
+	if len(commit.EventIDs) > 0 {
+		change, err = recordChangeTx(ctx, tx, canonicalChangeTopics)
+		if err != nil {
+			return PairingBundle{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return PairingBundle{}, err
 	}
-	s.notifyCanonicalCommit(commit)
+	if len(commit.EventIDs) > 0 {
+		s.notifyChange(change)
+	}
 	return bundle, nil
 }
 
@@ -295,10 +305,19 @@ func (s *SQLite) JoinHumanInvite(ctx context.Context, raw []byte) error {
 	if err := recordMutationTx(ctx, tx, nil); err != nil {
 		return err
 	}
+	var change domain.Invalidation
+	if len(commit.EventIDs) > 0 {
+		change, err = recordChangeTx(ctx, tx, canonicalChangeTopics)
+		if err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.notifyCanonicalCommit(commit)
+	if len(commit.EventIDs) > 0 {
+		s.notifyChange(change)
+	}
 	return nil
 }
 

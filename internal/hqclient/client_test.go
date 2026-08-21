@@ -43,6 +43,8 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 			return []domain.RelayConfig{}, nil
 		case domainrpc.NetworkStatusMethod:
 			return domain.NetworkStatus{}, nil
+		case domainrpc.SubscribeChangesMethod:
+			return domainrpc.SubscribeChangesResponse{}, nil
 		default:
 			return nil, nil
 		}
@@ -75,6 +77,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_, _ = client.ListRelays(ctx)
 	_, _ = client.NetworkStatus(ctx)
 	_ = client.Synchronize(ctx)
+	_, _ = client.Subscribe(ctx, domain.TopicMessages)
 	want := []string{
 		domainrpc.HumanMailboxMethod, domainrpc.ResolveMailboxMethod, domainrpc.FindMailboxesMethod,
 		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod,
@@ -83,7 +86,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		domainrpc.HumanAccountMethod, domainrpc.HumanDevicesMethod, domainrpc.CreateHumanInviteMethod,
 		domainrpc.JoinHumanInviteMethod, domainrpc.RevokeHumanDeviceMethod, domainrpc.SetMailboxShareMethod,
 		domainrpc.AddRelayMethod, domainrpc.RemoveRelayMethod, domainrpc.ListRelaysMethod,
-		domainrpc.NetworkStatusMethod, domainrpc.SynchronizeMethod,
+		domainrpc.NetworkStatusMethod, domainrpc.SynchronizeMethod, domainrpc.SubscribeChangesMethod,
 	}
 	lock.Lock()
 	defer lock.Unlock()

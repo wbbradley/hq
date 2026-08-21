@@ -19,11 +19,13 @@ type Service struct {
 	Store interface {
 		domain.Operations
 		domain.MutationLog
+		domain.ChangeLog
 	}
-	Synchronize func(context.Context) error
+	Synchronize   func(context.Context) error
+	Subscriptions *SubscriptionHub
 }
 
-func (s Service) Handle(ctx context.Context, _ *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
+func (s Service) Handle(ctx context.Context, session *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
 	if s.Store == nil {
 		return nil, &localwire.RPCError{Code: localwire.CodeInternal, Message: "domain store is unavailable"}
 	}
@@ -39,7 +41,7 @@ func (s Service) Handle(ctx context.Context, _ *localwire.Session, method string
 		}
 		ctx = domain.WithMutation(ctx, mutation)
 	}
-	result, err := s.dispatch(ctx, method, raw)
+	result, err := s.dispatch(ctx, session, method, raw)
 	if mutating {
 		if persisted, found, lookupErr := s.Store.MutationResult(ctx, mutation); lookupErr != nil {
 			return nil, encodeMutationError(lookupErr)
@@ -100,7 +102,7 @@ func mutationForRequest(method string, raw json.RawMessage) (domain.Mutation, bo
 	return domain.Mutation{ID: header.MutationID, Method: method, RequestDigest: fmt.Sprintf("%x", digest)}, true, nil
 }
 
-func (s Service) dispatch(ctx context.Context, method string, raw json.RawMessage) (any, error) {
+func (s Service) dispatch(ctx context.Context, session *localwire.Session, method string, raw json.RawMessage) (any, error) {
 	switch method {
 	case HumanMailboxMethod:
 		return s.Store.HumanMailbox(ctx)
@@ -221,6 +223,27 @@ func (s Service) dispatch(ctx context.Context, method string, raw json.RawMessag
 			return nil, errors.New("node synchronization is unavailable")
 		}
 		return nil, s.Synchronize(ctx)
+	case SubscribeChangesMethod:
+		if s.Subscriptions == nil {
+			return nil, errors.New("change subscriptions are unavailable")
+		}
+		var request SubscribeChangesRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		subscriber, err := s.Subscriptions.Register(session, request.SubscriptionID, request.Topics)
+		if err != nil {
+			return nil, err
+		}
+		revision, err := s.Store.CurrentRevision(ctx)
+		if err != nil {
+			subscriber.Close()
+			return nil, err
+		}
+		return localwire.DeferredResponse{
+			Value: SubscribeChangesResponse{Revision: revision},
+			After: func() { subscriber.Activate(revision) },
+		}, nil
 	default:
 		return nil, &methodNotFoundError{method: method}
 	}

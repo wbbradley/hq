@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/nostrwire"
@@ -97,7 +98,15 @@ func (s *SQLite) AddRelay(ctx context.Context, config RelayConfig) error {
 	if err := recordMutationTx(ctx, tx, nil); err != nil {
 		return err
 	}
-	return tx.Commit()
+	change, err := recordChangeTx(ctx, tx, []domain.ChangeTopic{domain.TopicRelays, domain.TopicNetwork})
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyChange(change)
+	return nil
 }
 
 func (s *SQLite) RemoveRelay(ctx context.Context, relayURL string) error {
@@ -116,7 +125,15 @@ func (s *SQLite) RemoveRelay(ctx context.Context, relayURL string) error {
 	if err := recordMutationTx(ctx, tx, nil); err != nil {
 		return err
 	}
-	return tx.Commit()
+	change, err := recordChangeTx(ctx, tx, []domain.ChangeTopic{domain.TopicRelays, domain.TopicNetwork})
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyChange(change)
+	return nil
 }
 
 func (s *SQLite) ListRelays(ctx context.Context) ([]RelayConfig, error) {
@@ -293,7 +310,15 @@ func (s *SQLite) RecordPublish(ctx context.Context, eventID, recipientInstallati
 			return err
 		}
 	}
-	return tx.Commit()
+	change, err := recordChangeTx(ctx, tx, []domain.ChangeTopic{domain.TopicNetwork, domain.TopicMessages})
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyChange(change)
+	return nil
 }
 
 func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL string, received time.Time) (ReceiveResult, error) {
@@ -352,7 +377,8 @@ func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL strin
 	if err != nil {
 		return ReceiveResult{}, err
 	}
-	var canonicalCommit CanonicalCommit
+	var canonicalCommit canonicalIngest
+	var canonicalChange domain.Invalidation
 	if logical == 0 {
 		var ingestErr error
 		canonicalCommit, ingestErr = s.ingestCanonicalTx(ctx, tx, []event.SignedEvent{unwrapped.CanonicalEvent}, false)
@@ -371,12 +397,20 @@ func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL strin
 			}
 			return ReceiveResult{}, ingestErr
 		}
+		if len(canonicalCommit.EventIDs) > 0 {
+			canonicalChange, err = recordChangeTx(ctx, tx, canonicalChangeTopics)
+			if err != nil {
+				return ReceiveResult{}, err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		_ = s.Stage(context.Background(), raw, normalized, unwrapped.Outer.ID, err.Error(), received, received.Add(time.Minute))
 		return ReceiveResult{}, err
 	}
-	s.notifyCanonicalCommit(canonicalCommit)
+	if len(canonicalCommit.EventIDs) > 0 {
+		s.notifyChange(canonicalChange)
+	}
 	return result, nil
 }
 
@@ -388,8 +422,23 @@ func (s *SQLite) SetRelaySyncState(ctx context.Context, relayURL string, connect
 	if eventAt != nil {
 		eventValue = eventAt.UTC().UnixMilli()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO relay_sync_state(relay_url,connected,authenticated,last_eose_at,last_event_at,last_error) VALUES (?,?,?,?,?,?) ON CONFLICT(relay_url) DO UPDATE SET connected=excluded.connected,authenticated=excluded.authenticated,last_eose_at=COALESCE(excluded.last_eose_at,relay_sync_state.last_eose_at),last_event_at=COALESCE(excluded.last_event_at,relay_sync_state.last_event_at),last_error=excluded.last_error`, relayURL, boolInt(connected), boolInt(authenticated), eoseValue, eventValue, lastError)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO relay_sync_state(relay_url,connected,authenticated,last_eose_at,last_event_at,last_error) VALUES (?,?,?,?,?,?) ON CONFLICT(relay_url) DO UPDATE SET connected=excluded.connected,authenticated=excluded.authenticated,last_eose_at=COALESCE(excluded.last_eose_at,relay_sync_state.last_eose_at),last_event_at=COALESCE(excluded.last_event_at,relay_sync_state.last_event_at),last_error=excluded.last_error`, relayURL, boolInt(connected), boolInt(authenticated), eoseValue, eventValue, lastError); err != nil {
+		return err
+	}
+	change, err := recordChangeTx(ctx, tx, []domain.ChangeTopic{domain.TopicNetwork})
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyChange(change)
+	return nil
 }
 
 func (s *SQLite) RelayAttempts(ctx context.Context, eventID string) ([]RelayAttempt, error) {

@@ -23,6 +23,7 @@ func (s *recordingOperations) MutationResult(_ context.Context, mutation domain.
 	}
 	return nil, false, nil
 }
+func (*recordingOperations) CurrentRevision(context.Context) (uint64, error) { return 0, nil }
 
 func (s *recordingOperations) record(method string) error { s.called = method; s.calls++; return s.err }
 func (s *recordingOperations) HumanMailbox(context.Context) (model.Mailbox, error) {

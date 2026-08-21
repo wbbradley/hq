@@ -21,7 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -235,11 +235,16 @@ CREATE TABLE mutation_receipts (
     result BLOB NOT NULL,
     committed_at INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE change_revision (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    revision INTEGER NOT NULL
+) STRICT;
+INSERT INTO change_revision(id,revision) VALUES (1,0);
 CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, created_at, id);
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;
 `
 
 const (
@@ -249,18 +254,22 @@ const (
 )
 
 type SQLite struct {
-	db                   *sql.DB
-	signer               identity.Material
-	database             string
-	afterCanonicalCommit func(CanonicalCommit)
+	db          *sql.DB
+	signer      identity.Material
+	database    string
+	afterChange func(domain.Invalidation)
 }
 
-type CanonicalCommit struct {
+type canonicalIngest struct {
 	EventIDs []string
 }
 
-func (s *SQLite) SetCanonicalCommitObserver(observer func(CanonicalCommit)) {
-	s.afterCanonicalCommit = observer
+var canonicalChangeTopics = []domain.ChangeTopic{
+	domain.TopicMessages, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman,
+}
+
+func (s *SQLite) SetChangeObserver(observer func(domain.Invalidation)) {
+	s.afterChange = observer
 }
 
 var resolveMu sync.Mutex
@@ -316,6 +325,12 @@ func (s *SQLite) configure(ctx context.Context) error {
 			return fmt.Errorf("migrate schema to version 8: %w", err)
 		}
 		version = 8
+	}
+	if version == 8 {
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE change_revision (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL) STRICT; INSERT INTO change_revision(id,revision) VALUES (1,0); PRAGMA user_version = 9`); err != nil {
+			return fmt.Errorf("migrate schema to version 9: %w", err)
+		}
+		version = 9
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -418,6 +433,38 @@ func (s *SQLite) policy() event.Policy {
 	return event.Policy{InstallationID: s.signer.InstallationID, RootKeyID: s.signer.PublicKey(), HumanMailboxID: model.HumanMailboxID, SchemaVersions: []int{event.SchemaVersion}}
 }
 
+func (s *SQLite) CurrentRevision(ctx context.Context) (uint64, error) {
+	var revision uint64
+	err := s.db.QueryRowContext(ctx, `SELECT revision FROM change_revision WHERE id=1`).Scan(&revision)
+	return revision, err
+}
+
+func recordChangeTx(ctx context.Context, tx *sql.Tx, topics []domain.ChangeTopic) (domain.Invalidation, error) {
+	if len(topics) == 0 {
+		return domain.Invalidation{}, nil
+	}
+	seen := make(map[domain.ChangeTopic]bool)
+	unique := make([]domain.ChangeTopic, 0, len(topics))
+	for _, topic := range topics {
+		if topic != "" && !seen[topic] {
+			seen[topic] = true
+			unique = append(unique, topic)
+		}
+	}
+	var revision uint64
+	if err := tx.QueryRowContext(ctx, `UPDATE change_revision SET revision=revision+1 WHERE id=1 RETURNING revision`).Scan(&revision); err != nil {
+		return domain.Invalidation{}, err
+	}
+	return domain.Invalidation{Revision: revision, Topics: unique}, nil
+}
+
+func (s *SQLite) notifyChange(change domain.Invalidation) {
+	if change.Revision != 0 && s.afterChange != nil {
+		change.Topics = append([]domain.ChangeTopic(nil), change.Topics...)
+		s.afterChange(change)
+	}
+}
+
 var errMutationAlreadyCommitted = errors.New("mutation was already committed")
 
 func (s *SQLite) MutationResult(ctx context.Context, mutation domain.Mutation) (json.RawMessage, bool, error) {
@@ -463,11 +510,11 @@ func (s *SQLite) recordMutation(ctx context.Context, result any) error {
 	if _, ok := domain.MutationFromContext(ctx); !ok {
 		return nil
 	}
-	_, err := s.commitMutation(ctx, func(*sql.Tx) (any, error) { return result, nil })
+	_, err := s.commitMutation(ctx, nil, func(*sql.Tx) (any, error) { return result, nil })
 	return err
 }
 
-func (s *SQLite) commitMutation(ctx context.Context, action func(*sql.Tx) (any, error)) (any, error) {
+func (s *SQLite) commitMutation(ctx context.Context, topics []domain.ChangeTopic, action func(*sql.Tx) (any, error)) (any, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -480,7 +527,15 @@ func (s *SQLite) commitMutation(ctx context.Context, action func(*sql.Tx) (any, 
 	if err := recordMutationTx(ctx, tx, result); err != nil {
 		return nil, err
 	}
-	return result, tx.Commit()
+	change, err := recordChangeTx(ctx, tx, topics)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	s.notifyChange(change)
+	return result, nil
 }
 
 func (s *SQLite) appendContents(ctx context.Context, contents []event.Content, times []time.Time, after func(*sql.Tx) error) error {
@@ -517,10 +572,17 @@ func (s *SQLite) appendContentsResult(ctx context.Context, contents []event.Cont
 	if err := recordMutationTx(ctx, tx, value); err != nil {
 		return nil, err
 	}
+	var change domain.Invalidation
+	if len(commit.EventIDs) > 0 {
+		change, err = recordChangeTx(ctx, tx, canonicalChangeTopics)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	s.notifyCanonicalCommit(commit)
+	s.notifyChange(change)
 	return value, nil
 }
 
@@ -555,8 +617,8 @@ func (s *SQLite) appendSignedTxMode(ctx context.Context, tx *sql.Tx, additions [
 	return err
 }
 
-func (s *SQLite) ingestCanonicalTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent, requireProjected bool) (CanonicalCommit, error) {
-	var commit CanonicalCommit
+func (s *SQLite) ingestCanonicalTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent, requireProjected bool) (canonicalIngest, error) {
+	var commit canonicalIngest
 	rows, err := tx.QueryContext(ctx, `SELECT event_id,raw FROM canonical_events ORDER BY event_id`)
 	if err != nil {
 		return commit, err
@@ -602,13 +664,6 @@ func (s *SQLite) ingestCanonicalTx(ctx context.Context, tx *sql.Tx, additions []
 	return commit, s.rebuildTx(ctx, tx, state)
 }
 
-func (s *SQLite) notifyCanonicalCommit(commit CanonicalCommit) {
-	if len(commit.EventIDs) > 0 && s.afterCanonicalCommit != nil {
-		commit.EventIDs = append([]string(nil), commit.EventIDs...)
-		s.afterCanonicalCommit(commit)
-	}
-}
-
 func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEvent) error {
 	if len(additions) == 0 {
 		return errors.New("at least one canonical event is required")
@@ -622,10 +677,19 @@ func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEv
 	if err != nil {
 		return err
 	}
+	var change domain.Invalidation
+	if len(commit.EventIDs) > 0 {
+		change, err = recordChangeTx(ctx, tx, canonicalChangeTopics)
+		if err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.notifyCanonicalCommit(commit)
+	if len(commit.EventIDs) > 0 {
+		s.notifyChange(change)
+	}
 	return nil
 }
 
@@ -921,7 +985,7 @@ func (s *SQLite) ResolveMailbox(ctx context.Context, session model.SessionIdenti
 		}
 		return value.(model.Mailbox), nil
 	}
-	value, err := s.commitMutation(ctx, func(tx *sql.Tx) (any, error) {
+	value, err := s.commitMutation(ctx, []domain.ChangeTopic{domain.TopicMailboxes}, func(tx *sql.Tx) (any, error) {
 		if _, err := tx.ExecContext(ctx, `UPDATE mailbox_activity SET last_seen_at = ? WHERE mailbox_id = ?`, now.UnixMilli(), id); err != nil {
 			return nil, err
 		}
@@ -1275,7 +1339,15 @@ func (s *SQLite) Claim(ctx context.Context, claim Claim, token string) (model.Me
 	if err := recordMutationTx(ctx, tx, message); err != nil {
 		return model.Message{}, err
 	}
-	return message, tx.Commit()
+	change, err := recordChangeTx(ctx, tx, []domain.ChangeTopic{domain.TopicMessages})
+	if err != nil {
+		return model.Message{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Message{}, err
+	}
+	s.notifyChange(change)
+	return message, nil
 }
 
 func (s *SQLite) Complete(ctx context.Context, id, token string) error {
@@ -1315,7 +1387,15 @@ func (s *SQLite) Release(ctx context.Context, id, token string) error {
 	if err := recordMutationTx(ctx, tx, nil); err != nil {
 		return err
 	}
-	return tx.Commit()
+	change, err := recordChangeTx(ctx, tx, []domain.ChangeTopic{domain.TopicMessages})
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyChange(change)
+	return nil
 }
 
 func (s *SQLite) Rebuild(ctx context.Context) error {

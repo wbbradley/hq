@@ -21,7 +21,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "8"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "9"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -31,7 +31,7 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 			t.Errorf("%s = %q, want %q", query, got, want)
 		}
 	}
-	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "mailbox_contexts", "messages", "threads", "peers", "mailbox_shares", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts"} {
+	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "mailbox_contexts", "messages", "threads", "peers", "mailbox_shares", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts", "change_revision"} {
 		var strict int
 		if err := s.db.QueryRow(`SELECT strict FROM pragma_table_list WHERE name = ?`, table).Scan(&strict); err != nil {
 			t.Fatal(err)
@@ -320,7 +320,7 @@ func TestVersionTwoDataIsDestroyed(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 8 {
+	if version != 9 {
 		t.Fatalf("user_version = %d", version)
 	}
 }
@@ -344,7 +344,7 @@ func TestVersionSevenMigratesWithoutLosingCanonicalState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DROP TABLE mutation_receipts; PRAGMA user_version = 7`); err != nil {
+	if _, err := db.Exec(`DROP TABLE mutation_receipts; DROP TABLE change_revision; PRAGMA user_version = 7`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -384,6 +384,36 @@ func TestMutationReceiptPersistsResultAndRejectsKeyReuse(t *testing.T) {
 	conflict.RequestDigest = strings.Repeat("b", 64)
 	if _, _, err := s.MutationResult(context.Background(), conflict); err == nil || !strings.Contains(err.Error(), "different request") {
 		t.Fatalf("mutation key conflict = %v", err)
+	}
+}
+
+func TestChangeRevisionAdvancesWithCommittedTopics(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	if revision, err := s.CurrentRevision(ctx); err != nil || revision != 0 {
+		t.Fatalf("initial revision = %d, %v", revision, err)
+	}
+	var changes []domain.Invalidation
+	s.SetChangeObserver(func(change domain.Invalidation) { changes = append(changes, change) })
+	agent, err := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "revision"}, model.RepositoryContext{Directory: "/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d97", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.ID, Body: "revision", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	if err := s.Create(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claim(ctx, Claim{MessageID: message.ID}, "revision-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release(ctx, message.ID, "revision-token"); err != nil {
+		t.Fatal(err)
+	}
+	if revision, err := s.CurrentRevision(ctx); err != nil || revision != 4 {
+		t.Fatalf("final revision = %d, %v", revision, err)
+	}
+	if len(changes) != 4 || changes[0].Topics[0] != domain.TopicMessages || changes[2].Topics[0] != domain.TopicMessages {
+		t.Fatalf("changes = %#v", changes)
 	}
 }
 

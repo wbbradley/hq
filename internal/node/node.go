@@ -34,8 +34,10 @@ func (r Runner) Run(ctx context.Context, databasePath string) error {
 			return syncer.Runtime{}, err
 		}
 		engine := &syncer.Engine{State: database, Codec: database.WireCodec(nil, nil)}
+		subscriptions := domainrpc.NewSubscriptionHub()
+		database.SetChangeObserver(subscriptions.Publish)
 		service := domainrpc.Service{
-			Store: database,
+			Store: database, Subscriptions: subscriptions,
 			Synchronize: func(context.Context) error {
 				return syncer.Wake(paths.Database)
 			},

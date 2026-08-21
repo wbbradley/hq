@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/model"
 )
@@ -29,9 +30,9 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey, Name: "sender", Relays: []string{relayOne}}); err != nil {
 		t.Fatal(err)
 	}
-	var senderCommits, receiverCommits []CanonicalCommit
-	sender.SetCanonicalCommitObserver(func(commit CanonicalCommit) { senderCommits = append(senderCommits, commit) })
-	receiver.SetCanonicalCommitObserver(func(commit CanonicalCommit) { receiverCommits = append(receiverCommits, commit) })
+	var senderCommits, receiverCommits []domain.Invalidation
+	sender.SetChangeObserver(func(commit domain.Invalidation) { senderCommits = append(senderCommits, commit) })
+	receiver.SetChangeObserver(func(commit domain.Invalidation) { receiverCommits = append(receiverCommits, commit) })
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d90", SenderMailboxID: model.HumanMailboxID, Body: "wrapped hello", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
 	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
 		t.Fatal(err)
@@ -44,14 +45,14 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 		t.Fatalf("jobs = %#v, %v", jobs, err)
 	}
 	job := jobs[0]
-	if len(senderCommits) != 1 || len(senderCommits[0].EventIDs) != 1 || senderCommits[0].EventIDs[0] != job.CanonicalEventID {
+	if len(senderCommits) != 1 || senderCommits[0].Revision == 0 {
 		t.Fatalf("local commit notifications = %#v", senderCommits)
 	}
 	result, err := receiver.ReceiveGiftWrap(ctx, job.ExactGiftWrapBytes, relayOne, time.Now().UTC())
 	if err != nil || result.Status != "projected" {
 		t.Fatalf("receive = %#v, %v", result, err)
 	}
-	if len(receiverCommits) != 1 || len(receiverCommits[0].EventIDs) != 1 || receiverCommits[0].EventIDs[0] != job.CanonicalEventID {
+	if len(receiverCommits) != 1 || receiverCommits[0].Revision == 0 {
 		t.Fatalf("remote commit notifications = %#v", receiverCommits)
 	}
 	got, err := receiver.Get(ctx, message.ID)

@@ -35,6 +35,8 @@ const (
 	ListRelaysMethod        = "relay/list"
 	NetworkStatusMethod     = "status/network"
 	SynchronizeMethod       = "sync/request"
+	SubscribeChangesMethod  = "changes/subscribe"
+	InvalidatedMethod       = "changes/invalidated"
 )
 
 const (
@@ -127,6 +129,15 @@ type RelayRequest struct {
 type MutationURLRequest struct {
 	MutationID string `json:"mutation_id"`
 	URL        string `json:"url"`
+}
+
+type SubscribeChangesRequest struct {
+	SubscriptionID string               `json:"subscription_id"`
+	Topics         []domain.ChangeTopic `json:"topics,omitempty"`
+}
+
+type SubscribeChangesResponse struct {
+	Revision uint64 `json:"revision"`
 }
 
 func EncodeError(err error) *localwire.RPCError {
