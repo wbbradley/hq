@@ -166,7 +166,7 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 
 - `j` / `k`: move
 - Enter: reply to an open inbox message; Enter again submits
-- `e`: archive the selected open inbox message without replying
+- `d`: archive the selected open inbox message without replying
 - `n`: write a new message to the agent session tied to the selected row
 - Shift+Enter / Ctrl+J: add a line break while editing
 - `s`: toggle sent messages

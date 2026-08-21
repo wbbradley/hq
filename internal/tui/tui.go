@@ -318,7 +318,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editor.Focus()
 				return m, textarea.Blink
 			}
-		case "e":
+		case "d":
 			if len(m.messages) > 0 && canArchive(m.messages[m.cursor]) {
 				return m, m.archive(m.messages[m.cursor].ID)
 			}
@@ -583,7 +583,7 @@ func (m app) View() tea.View {
 		b.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
 	} else {
 		b.WriteString("\n\n")
-		b.WriteString(dim.Render("j/k move · enter reply · e archive · n new message · s sent · x archived · v status · r refresh · q quit · auto-refresh 1m"))
+		b.WriteString(dim.Render("j/k move · enter reply · d archive · n new message · s sent · x archived · v status · r refresh · q quit · auto-refresh 1m"))
 	}
 	view := tea.NewView(b.String())
 	view.AltScreen = true

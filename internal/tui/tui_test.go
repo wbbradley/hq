@@ -214,16 +214,16 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	}
 }
 
-func TestEArchivesSelectionWithoutReply(t *testing.T) {
+func TestDArchivesSelectionWithoutReply(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d69", agent.ID, model.HumanMailboxID, "No reply needed")
 	if err := s.Create(ctx, inbound); err != nil {
 		t.Fatal(err)
 	}
 	m := app{ctx: ctx, store: s, messages: []model.Message{inbound}, editor: textarea.New()}
-	_, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
 	if cmd == nil {
-		t.Fatal("e did not archive")
+		t.Fatal("d did not archive")
 	}
 	if msg := cmd().(archivedMsg); msg.err != nil {
 		t.Fatal(msg.err)
