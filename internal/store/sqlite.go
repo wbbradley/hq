@@ -1189,14 +1189,6 @@ func sqliteBusy(err error) bool {
 	return strings.Contains(message, "locked") || strings.Contains(message, "busy")
 }
 
-type Peer struct {
-	InstallationID string   `json:"installation_id"`
-	SignerKeyID    string   `json:"signer_key_id"`
-	Name           string   `json:"name,omitempty"`
-	Relays         []string `json:"relays,omitempty"`
-	Trusted        bool     `json:"trusted"`
-}
-
 func (s *SQLite) TrustPeer(ctx context.Context, peer Peer) error {
 	if len(peer.Relays) > 3 {
 		return errors.New("a peer may have at most three relay hints")

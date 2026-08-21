@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
 
@@ -15,15 +16,25 @@ import (
 var ErrControlUnavailable = errors.New("sync daemon control is unavailable on this platform")
 
 type Daemon struct {
-	Engine       SyncEngine
-	Coordinator  SyncCoordinator
-	DatabasePath string
-	PollInterval time.Duration
+	Engine         SyncEngine
+	Domain         *localwire.ModeConfig
+	RuntimeFactory RuntimeFactory
+	Coordinator    SyncCoordinator
+	DatabasePath   string
+	PollInterval   time.Duration
 }
 
+type Runtime struct {
+	Engine SyncEngine
+	Domain *localwire.ModeConfig
+	Closer io.Closer
+}
+
+type RuntimeFactory func(context.Context) (Runtime, error)
+
 func (d Daemon) Run(ctx context.Context) error {
-	if d.Engine == nil || d.Coordinator == nil || d.DatabasePath == "" {
-		return errors.New("daemon needs an engine, coordinator, and database path")
+	if (d.Engine == nil && d.RuntimeFactory == nil) || d.Coordinator == nil || d.DatabasePath == "" {
+		return errors.New("daemon needs an engine or runtime factory, coordinator, and database path")
 	}
 	if d.PollInterval <= 0 {
 		d.PollInterval = 15 * time.Second
@@ -37,6 +48,22 @@ func (d Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer lock.Release()
+	if d.RuntimeFactory != nil {
+		runtime, err := d.RuntimeFactory(ctx)
+		if err != nil {
+			return err
+		}
+		if runtime.Engine == nil {
+			if runtime.Closer != nil {
+				_ = runtime.Closer.Close()
+			}
+			return errors.New("daemon runtime factory returned no engine")
+		}
+		d.Engine, d.Domain = runtime.Engine, runtime.Domain
+		if runtime.Closer != nil {
+			defer runtime.Closer.Close()
+		}
+	}
 	for {
 		restart, err := d.runRuntime(ctx, paths)
 		if err != nil || !restart {
@@ -59,7 +86,7 @@ func (d Daemon) runRuntime(ctx context.Context, paths RuntimePaths) (bool, error
 	metadata := localwire.PeerMetadata{Build: buildinfo.Version, InstanceID: uuid.NewString(), StartedAt: time.Now().UTC()}
 	control, err := startControl(runCtx, paths, wake, cancel, restart, func() string {
 		return state.Load().(string)
-	}, metadata)
+	}, metadata, d.Domain)
 	if err != nil && !errors.Is(err, ErrControlUnavailable) {
 		return false, err
 	}

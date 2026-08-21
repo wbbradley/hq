@@ -19,6 +19,7 @@ import (
 	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/node"
 	"github.com/wbbradley/hq/internal/repoctx"
 	"github.com/wbbradley/hq/internal/session"
 	"github.com/wbbradley/hq/internal/store"
@@ -109,7 +110,7 @@ type App struct {
 	SyncOnce       func(context.Context, string, store.Store) error
 	EnsureNode     func(context.Context, string) error
 	WakeSync       func(string) error
-	RunDaemon      func(context.Context, string, store.Store) error
+	RunDaemon      func(context.Context, string) error
 	DaemonStatus   func(string) (string, error)
 	StopDaemon     func(string) error
 	RestartDaemon  func(string) error
@@ -130,7 +131,7 @@ func New() *App {
 		SyncOnce:       defaultSyncOnce,
 		EnsureNode:     syncer.EnsureNode,
 		WakeSync:       syncer.Wake,
-		RunDaemon:      defaultRunDaemon,
+		RunDaemon:      node.Run,
 		DaemonStatus:   syncer.DaemonStatus,
 		StopDaemon:     syncer.StopDaemon,
 		RestartDaemon:  syncer.RestartDaemon,
@@ -196,8 +197,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if command == "identity" {
 		return a.identity(dbPath, args)
 	}
-	if command == "daemon" && (len(args) != 1 || args[0] != "run") {
-		return a.daemonControl(dbPath, args)
+	if command == "daemon" {
+		return a.daemon(ctx, dbPath, args)
 	}
 	s, err := a.Open(dbPath)
 	if err != nil {
@@ -252,8 +253,6 @@ func (a *App) Run(ctx context.Context, args []string) error {
 			return errors.New("sync cannot be combined with --no-sync")
 		}
 		return a.trySync(ctx, dbPath, s, true, "")
-	case "daemon":
-		return a.daemon(ctx, dbPath, s, args)
 	case "tui":
 		if len(args) != 0 {
 			return errors.New("tui takes no arguments")
@@ -343,20 +342,7 @@ func (a *App) codex(ctx context.Context, s store.Store, args []string, databaseP
 	return a.RunCodexBridge(ctx, options)
 }
 
-func defaultRunDaemon(ctx context.Context, databasePath string, s store.Store) error {
-	sqlite, ok := s.(*store.SQLite)
-	if !ok {
-		return errors.New("relay daemon needs the SQLite store")
-	}
-	resolved, err := identity.ResolveDatabasePath(databasePath)
-	if err != nil {
-		return err
-	}
-	engine := &syncer.Engine{State: sqlite, Codec: sqlite.WireCodec(nil, nil)}
-	return (syncer.Daemon{Engine: engine, Coordinator: syncer.FileCoordinator{DatabasePath: resolved}, DatabasePath: resolved}).Run(ctx)
-}
-
-func (a *App) daemon(ctx context.Context, databasePath string, s store.Store, args []string) error {
+func (a *App) daemon(ctx context.Context, databasePath string, args []string) error {
 	if len(args) == 1 && args[0] != "run" {
 		return a.daemonControl(databasePath, args)
 	}
@@ -370,7 +356,7 @@ func (a *App) daemon(ctx context.Context, databasePath string, s store.Store, ar
 	if err != nil {
 		return err
 	}
-	return a.RunDaemon(ctx, resolved, s)
+	return a.RunDaemon(ctx, resolved)
 }
 
 func (a *App) daemonControl(databasePath string, args []string) error {

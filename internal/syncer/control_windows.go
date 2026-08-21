@@ -9,7 +9,7 @@ import (
 	"github.com/wbbradley/hq/internal/localwire"
 )
 
-func startControl(context.Context, RuntimePaths, chan<- struct{}, context.CancelFunc, context.CancelFunc, func() string, localwire.PeerMetadata) (io.Closer, error) {
+func startControl(context.Context, RuntimePaths, chan<- struct{}, context.CancelFunc, context.CancelFunc, func() string, localwire.PeerMetadata, *localwire.ModeConfig) (io.Closer, error) {
 	return nil, ErrControlUnavailable
 }
 

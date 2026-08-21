@@ -60,12 +60,12 @@ type Message struct {
 }
 
 type Filter struct {
-	Directory          string
-	SenderMailboxID    string
-	RecipientMailboxID string
-	ReplyTo            string
-	Archived           *bool
-	Completed          *bool
-	Limit              int
-	NewestFirst        bool
+	Directory          string `json:"directory,omitempty"`
+	SenderMailboxID    string `json:"sender_mailbox_id,omitempty"`
+	RecipientMailboxID string `json:"recipient_mailbox_id,omitempty"`
+	ReplyTo            string `json:"reply_to,omitempty"`
+	Archived           *bool  `json:"archived,omitempty"`
+	Completed          *bool  `json:"completed,omitempty"`
+	Limit              int    `json:"limit,omitempty"`
+	NewestFirst        bool   `json:"newest_first,omitempty"`
 }

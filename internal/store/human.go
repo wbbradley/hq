@@ -19,49 +19,6 @@ import (
 
 const pairingBundleVersion = 2
 
-type HumanAccount struct {
-	ID                    string `json:"id"`
-	Label                 string `json:"label"`
-	CreatorInstallationID string `json:"creator_installation_id"`
-	CreatorSignerKeyID    string `json:"creator_signer_key_id"`
-	LocalInstallationID   string `json:"local_installation_id"`
-	Creator               bool   `json:"creator"`
-}
-
-type HumanDevice struct {
-	AccountID      string   `json:"account_id"`
-	InstallationID string   `json:"installation_id"`
-	SignerKeyID    string   `json:"signer_key_id"`
-	Label          string   `json:"label"`
-	Relays         []string `json:"relays,omitempty"`
-	State          string   `json:"state"`
-}
-
-type HumanInviteRequest struct {
-	InstallationID string
-	SignerKeyID    string
-	Name           string
-	Relays         []string
-}
-
-// PairingBundle carries exact signed account facts plus clear routing fields.
-// The clear fields are checked against the signed facts before any write.
-type PairingBundle struct {
-	Version                int      `json:"version"`
-	AccountID              string   `json:"account_id"`
-	AccountLabel           string   `json:"account_label"`
-	CreatorInstallationID  string   `json:"creator_installation_id"`
-	CreatorSignerKeyID     string   `json:"creator_signer_key_id"`
-	CreatorRelays          []string `json:"creator_relays"`
-	TargetInstallationID   string   `json:"target_installation_id"`
-	TargetSignerKeyID      string   `json:"target_signer_key_id"`
-	TargetLabel            string   `json:"target_label"`
-	TargetRelays           []string `json:"target_relays"`
-	AccountCreationEvent   []byte   `json:"account_creation_event"`
-	DeviceGrantEvent       []byte   `json:"device_grant_event"`
-	AccountAuthorityEvents [][]byte `json:"account_authority_events"`
-}
-
 func (s *SQLite) HumanAccount(ctx context.Context) (HumanAccount, error) {
 	var account HumanAccount
 	err := s.db.QueryRowContext(ctx, `SELECT a.account_id,a.label,a.creator_installation_id,a.creator_signer_key_id FROM human_account_default d JOIN human_accounts a ON a.account_id=d.account_id WHERE d.id=1`).Scan(&account.ID, &account.Label, &account.CreatorInstallationID, &account.CreatorSignerKeyID)

@@ -19,14 +19,6 @@ import (
 	"github.com/wbbradley/hq/internal/nostrwire"
 )
 
-type RelayConfig struct {
-	URL          string `json:"url"`
-	Read         bool   `json:"read"`
-	Write        bool   `json:"write"`
-	RequireAuth  bool   `json:"require_auth"`
-	UnsafeNoAuth bool   `json:"unsafe_no_auth"`
-}
-
 type RelayJob struct {
 	CanonicalEventID      string
 	GiftWrapEventID       string
@@ -49,30 +41,6 @@ type RelayAttempt struct {
 	Message                 string
 	AttemptCount            int
 	AcceptedAt              *time.Time
-}
-
-type RelayHealth struct {
-	URL           string     `json:"url"`
-	Connected     bool       `json:"connected"`
-	Authenticated bool       `json:"authenticated"`
-	LastEOSE      *time.Time `json:"last_eose,omitempty"`
-	LastEvent     *time.Time `json:"last_event,omitempty"`
-	LastError     string     `json:"last_error,omitempty"`
-}
-
-type NetworkStatus struct {
-	Queued                int           `json:"queued"`
-	RelayAccepted         int           `json:"relay_accepted"`
-	Rejected              int           `json:"rejected"`
-	Unresolved            int           `json:"unresolved"`
-	Unsupported           int           `json:"unsupported"`
-	Staged                int           `json:"staged"`
-	Quarantined           int           `json:"quarantined"`
-	AccountMembers        int           `json:"account_members"`
-	PendingAccountFanout  int           `json:"pending_account_fanout"`
-	InvalidAccountTraffic int           `json:"invalid_account_traffic"`
-	RevokedDeviceTraffic  int           `json:"revoked_device_traffic"`
-	Relays                []RelayHealth `json:"relays"`
 }
 
 func (s *SQLite) InstallationIdentity() (string, string) {

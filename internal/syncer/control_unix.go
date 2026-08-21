@@ -29,7 +29,7 @@ type unixControl struct {
 	instanceID    string
 }
 
-func startControl(ctx context.Context, paths RuntimePaths, wake chan<- struct{}, stop, restart context.CancelFunc, status func() string, metadata localwire.PeerMetadata) (io.Closer, error) {
+func startControl(ctx context.Context, paths RuntimePaths, wake chan<- struct{}, stop, restart context.CancelFunc, status func() string, metadata localwire.PeerMetadata, domainMode *localwire.ModeConfig) (io.Closer, error) {
 	if err := paths.EnsureDirectories(); err != nil {
 		return nil, err
 	}
@@ -60,11 +60,15 @@ func startControl(ctx context.Context, paths RuntimePaths, wake chan<- struct{},
 			return nil, &localwire.RPCError{Code: localwire.CodeMethodNotFound, Message: fmt.Sprintf("unknown lifecycle method %q", method)}
 		}
 	}
+	modes := map[localwire.HandshakeMode]localwire.ModeConfig{
+		localwire.LifecycleMode: {Supported: localwire.LifecycleVersions, Handler: handler},
+	}
+	if domainMode != nil {
+		modes[localwire.DomainMode] = *domainMode
+	}
 	server, err := localwire.NewServer(localwire.ServerOptions{
-		Metadata: metadata,
-		Modes: map[localwire.HandshakeMode]localwire.ModeConfig{
-			localwire.LifecycleMode: {Supported: localwire.LifecycleVersions, Handler: handler},
-		},
+		Metadata:       metadata,
+		Modes:          modes,
 		RequestTimeout: 2 * time.Second,
 	})
 	if err != nil {

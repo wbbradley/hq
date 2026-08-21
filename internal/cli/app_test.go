@@ -716,6 +716,23 @@ func TestForegroundRelayFailureKeepsLocalSuccess(t *testing.T) {
 
 func TestDaemonCLICommands(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	a.Open = func(string) (store.Store, error) {
+		t.Fatal("daemon run opened SQLite in the CLI")
+		return nil, nil
+	}
+	runs := 0
+	a.RunDaemon = func(_ context.Context, got string) error {
+		runs++
+		if got != database {
+			t.Fatalf("daemon database = %q", got)
+		}
+		return nil
+	}
+	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "run"}); err != nil || runs != 1 {
+		t.Fatalf("daemon runs=%d err=%v", runs, err)
+	}
+
 	a, out := testApp(t, "")
 	a.Open = func(string) (store.Store, error) {
 		t.Fatal("daemon status opened SQLite")

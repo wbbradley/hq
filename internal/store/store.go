@@ -2,9 +2,9 @@ package store
 
 import (
 	"context"
-	"errors"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/model"
 )
@@ -34,18 +34,21 @@ type Outbox interface {
 }
 
 var (
-	ErrNotFound       = errors.New("message not found")
-	ErrAlreadyHandled = errors.New("message has already been handled")
-	ErrNotReady       = errors.New("no message is ready")
-	ErrClaimed        = errors.New("message is being delivered by another process")
+	ErrNotFound       = domain.ErrNotFound
+	ErrAlreadyHandled = domain.ErrAlreadyHandled
+	ErrNotReady       = domain.ErrNotReady
+	ErrClaimed        = domain.ErrClaimed
 )
 
-type Claim struct {
-	MessageID          string
-	ReplyTo            string
-	ExcludeReplyTo     []string
-	RecipientMailboxID string
-}
+type Claim = domain.Claim
+type Peer = domain.Peer
+type HumanAccount = domain.HumanAccount
+type HumanDevice = domain.HumanDevice
+type HumanInviteRequest = domain.HumanInviteRequest
+type PairingBundle = domain.PairingBundle
+type RelayConfig = domain.RelayConfig
+type RelayHealth = domain.RelayHealth
+type NetworkStatus = domain.NetworkStatus
 
 type Store interface {
 	HumanMailbox(context.Context) (model.Mailbox, error)
