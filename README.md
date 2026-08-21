@@ -73,6 +73,35 @@ The mailbox follows a resumed harness session across process restarts and direct
 
 `hq codex` runs a Codex app-server thread as an HQ agent mailbox. It requires an installed and authenticated Codex CLI **v0.148.0** on `PATH` and an initialized HQ identity:
 
+```mermaid
+flowchart LR
+    Human[Human using HQ] <--> Store[(HQ mailbox store)]
+
+    subgraph Bridge["hq codex bridge process"]
+        Lifecycle[Lifecycle and thread state]
+        Dispatcher[HQ input dispatcher]
+        Replies[Pending reply registry]
+        Requests[Question and approval router]
+        Output[Canonical output relay]
+        Transport[JSON-RPC transport]
+
+        Lifecycle --> Transport
+        Dispatcher -->|turn/start or turn/steer| Transport
+        Dispatcher -->|structured replies| Replies
+        Replies -->|validated answer| Requests
+        Transport -->|server requests| Requests
+        Transport -->|final output and turn status| Output
+    end
+
+    Store -->|tasks and replies| Dispatcher
+    Requests -->|questions and approval choices| Store
+    Output -->|agent messages and status| Store
+    Transport <--> AppServer[Codex app-server]
+
+    Dispatcher -.->|delivery checkpoints| Ledger[(Codex bridge ledger)]
+    Output -.->|output checkpoints| Ledger
+```
+
 ```sh
 codex --version
 hq identity init
