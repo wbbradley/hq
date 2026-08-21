@@ -5,7 +5,11 @@ import (
 	"errors"
 )
 
-var ErrSyncLocked = errors.New("another sync worker owns this database")
+var ErrNodeOwned = errors.New("another local HQ node owns this database")
+
+// ErrSyncLocked is retained while foreground sync still shares the ownership
+// coordinator. Domain RPC removes that transitional path in the next migration.
+var ErrSyncLocked = ErrNodeOwned
 
 type Lock interface {
 	Release() error
@@ -17,7 +21,13 @@ type SyncCoordinator interface {
 
 type FileCoordinator struct{ DatabasePath string }
 
-func (c FileCoordinator) LockPath() string { return c.DatabasePath + ".sync.lock" }
+func (c FileCoordinator) LockPath() string {
+	paths, err := ResolveRuntimePaths(c.DatabasePath)
+	if err != nil {
+		return c.DatabasePath + ".sync.lock"
+	}
+	return paths.OwnershipLock
+}
 
 type CoordinatedEngine struct {
 	Engine      SyncEngine

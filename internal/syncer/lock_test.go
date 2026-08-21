@@ -58,11 +58,18 @@ func (e *countingEngine) Run(ctx context.Context) error {
 
 func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
-	stale := socketPath(database)
+	stale := resolvedSocketPath(t, database)
 	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
+	staleListener, err := net.Listen("unix", stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unixListener, ok := staleListener.(*net.UnixListener); ok {
+		unixListener.SetUnlinkOnClose(false)
+	}
+	if err := staleListener.Close(); err != nil {
 		t.Fatal(err)
 	}
 	engine := &countingEngine{}
@@ -94,7 +101,7 @@ func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 	if engine.calls.Load() == before {
 		t.Fatal("wake did not start a sync pass")
 	}
-	connection, err := net.Dial("unix", socketPath(database))
+	connection, err := net.Dial("unix", resolvedSocketPath(t, database))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,16 +121,26 @@ func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("restart did not drop an existing control connection")
 	}
+	newInstance := ""
 	for {
 		var status lifecycleStatus
 		handshake, statusErr := controlCommand(database, statusMethod, &status)
 		if statusErr == nil && handshake.Server.InstanceID != "" && handshake.Server.InstanceID != oldInstance {
+			newInstance = handshake.Server.InstanceID
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("daemon did not restart with a new instance: %v", statusErr)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	paths, err := ResolveRuntimePaths(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := ReadInstanceMetadata(paths)
+	if err != nil || metadata.InstanceID != newInstance {
+		t.Fatalf("restarted metadata = %#v, %v", metadata, err)
 	}
 	if err := StopDaemon(database); err != nil {
 		t.Fatal(err)
@@ -139,6 +156,9 @@ func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("socket remains after stop: %v", err)
 	}
+	if _, err := os.Stat(paths.InstanceMetadata); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime metadata remains after stop: %v", err)
+	}
 	lock, err := (FileCoordinator{DatabasePath: database}).TryAcquire()
 	if err != nil {
 		t.Fatalf("daemon did not release lock: %v", err)
@@ -148,21 +168,30 @@ func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 
 func TestSocketPathFallsBackWhenDatabasePathIsTooLong(t *testing.T) {
 	shortDatabase := filepath.Join("/tmp", "hq.db")
-	if got, want := socketPath(shortDatabase), shortDatabase+".sync.sock"; got != want {
+	if got, want := resolvedSocketPath(t, shortDatabase), shortDatabase+".sync.sock"; got != want {
 		t.Fatalf("short socket path = %q, want %q", got, want)
 	}
 
 	longDatabase := filepath.Join("/tmp", strings.Repeat("nested-path-", 12), "hq.db")
-	got := socketPath(longDatabase)
+	got := resolvedSocketPath(t, longDatabase)
 	if len(got) > maxUnixSocketPath {
 		t.Fatalf("fallback socket path has %d bytes: %q", len(got), got)
 	}
 	if got == longDatabase+".sync.sock" {
 		t.Fatalf("long database path did not use fallback: %q", got)
 	}
-	if second := socketPath(longDatabase); second != got {
+	if second := resolvedSocketPath(t, longDatabase); second != got {
 		t.Fatalf("fallback socket path is unstable: %q, %q", got, second)
 	}
+}
+
+func resolvedSocketPath(t *testing.T, database string) string {
+	t.Helper()
+	paths, err := ResolveRuntimePaths(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return paths.Socket
 }
 
 func TestFileLockReleasesWhenOwnerProcessExits(t *testing.T) {

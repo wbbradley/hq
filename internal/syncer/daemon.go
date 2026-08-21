@@ -28,20 +28,24 @@ func (d Daemon) Run(ctx context.Context) error {
 	if d.PollInterval <= 0 {
 		d.PollInterval = 15 * time.Second
 	}
+	paths, err := ResolveRuntimePaths(d.DatabasePath)
+	if err != nil {
+		return err
+	}
 	lock, err := d.Coordinator.TryAcquire()
 	if err != nil {
 		return err
 	}
 	defer lock.Release()
 	for {
-		restart, err := d.runRuntime(ctx)
+		restart, err := d.runRuntime(ctx, paths)
 		if err != nil || !restart {
 			return err
 		}
 	}
 }
 
-func (d Daemon) runRuntime(ctx context.Context) (bool, error) {
+func (d Daemon) runRuntime(ctx context.Context, paths RuntimePaths) (bool, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var restarting atomic.Bool
@@ -53,7 +57,7 @@ func (d Daemon) runRuntime(ctx context.Context) (bool, error) {
 	var state atomic.Value
 	state.Store("starting")
 	metadata := localwire.PeerMetadata{Build: buildinfo.Version, InstanceID: uuid.NewString(), StartedAt: time.Now().UTC()}
-	control, err := startControl(runCtx, d.DatabasePath, wake, cancel, restart, func() string {
+	control, err := startControl(runCtx, paths, wake, cancel, restart, func() string {
 		return state.Load().(string)
 	}, metadata)
 	if err != nil && !errors.Is(err, ErrControlUnavailable) {

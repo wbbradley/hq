@@ -5,7 +5,6 @@ package syncer
 import (
 	"errors"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
@@ -16,13 +15,14 @@ type fileLock struct {
 }
 
 func (c FileCoordinator) TryAcquire() (Lock, error) {
-	if c.DatabasePath == "" {
-		return nil, errors.New("database path is required")
-	}
-	if err := os.MkdirAll(filepath.Dir(c.LockPath()), 0o700); err != nil {
+	paths, err := ResolveRuntimePaths(c.DatabasePath)
+	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(c.LockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err := paths.EnsureDirectories(); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(paths.OwnershipLock, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +31,7 @@ func (c FileCoordinator) TryAcquire() (Lock, error) {
 	if err != nil {
 		file.Close()
 		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			return nil, ErrSyncLocked
+			return nil, ErrNodeOwned
 		}
 		return nil, err
 	}

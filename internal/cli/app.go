@@ -58,7 +58,7 @@ Other commands:
   relay      Configure installation inbox relays
   status     Show relay and event processing status
   sync       Run one full foreground relay sync pass
-  daemon     Run or control the optional relay sync daemon
+  daemon     Run or control the local HQ node
   help       Print command help
   version    Print the version
 
@@ -107,6 +107,7 @@ type App struct {
 	Sessions       session.IdentityResolver
 	ReadPassword   func(string) ([]byte, error)
 	SyncOnce       func(context.Context, string, store.Store) error
+	EnsureNode     func(context.Context, string) error
 	WakeSync       func(string) error
 	RunDaemon      func(context.Context, string, store.Store) error
 	DaemonStatus   func(string) (string, error)
@@ -127,6 +128,7 @@ func New() *App {
 		RepoContext:    repoctx.GitHub{}.Snapshot,
 		Sessions:       session.Resolver{Getenv: os.Getenv},
 		SyncOnce:       defaultSyncOnce,
+		EnsureNode:     syncer.EnsureNode,
 		WakeSync:       syncer.Wake,
 		RunDaemon:      defaultRunDaemon,
 		DaemonStatus:   syncer.DaemonStatus,
@@ -194,11 +196,19 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	if command == "identity" {
 		return a.identity(dbPath, args)
 	}
+	if command == "daemon" && (len(args) != 1 || args[0] != "run") {
+		return a.daemonControl(dbPath, args)
+	}
 	s, err := a.Open(dbPath)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+	if autoStartsNode(command) && a.EnsureNode != nil {
+		if err := a.EnsureNode(ctx, dbPath); err != nil {
+			return err
+		}
+	}
 	var commandErr error
 	switch command {
 	case "ask":
@@ -273,6 +283,15 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	return a.trySync(ctx, dbPath, s, false, note)
 }
 
+func autoStartsNode(command string) bool {
+	switch command {
+	case "ask", "send", "wait", "poll", "get", "list", "mailboxes", "answer", "cancel", "codex", "peer", "human", "mailbox", "relay", "status", "sync", "tui":
+		return true
+	default:
+		return false
+	}
+}
+
 func hasHelpFlag(args []string) bool {
 	for _, arg := range args {
 		if arg == "--" {
@@ -338,6 +357,23 @@ func defaultRunDaemon(ctx context.Context, databasePath string, s store.Store) e
 }
 
 func (a *App) daemon(ctx context.Context, databasePath string, s store.Store, args []string) error {
+	if len(args) == 1 && args[0] != "run" {
+		return a.daemonControl(databasePath, args)
+	}
+	if len(args) != 1 {
+		return errors.New("daemon needs run, status, stop, or restart")
+	}
+	if a.RunDaemon == nil {
+		return errors.New("daemon runner is unavailable")
+	}
+	resolved, err := identity.ResolveDatabasePath(databasePath)
+	if err != nil {
+		return err
+	}
+	return a.RunDaemon(ctx, resolved, s)
+}
+
+func (a *App) daemonControl(databasePath string, args []string) error {
 	if len(args) != 1 {
 		return errors.New("daemon needs run, status, stop, or restart")
 	}
@@ -346,11 +382,6 @@ func (a *App) daemon(ctx context.Context, databasePath string, s store.Store, ar
 		return err
 	}
 	switch args[0] {
-	case "run":
-		if a.RunDaemon == nil {
-			return errors.New("daemon runner is unavailable")
-		}
-		return a.RunDaemon(ctx, resolved, s)
 	case "status":
 		if a.DaemonStatus == nil {
 			return errors.New("daemon status is unavailable")

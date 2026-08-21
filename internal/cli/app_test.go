@@ -55,6 +55,14 @@ func initializeTestIdentity(t *testing.T, database string) {
 func TestCodexCommandBuildsBridgeOptions(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
+	ensured := 0
+	a.EnsureNode = func(_ context.Context, got string) error {
+		ensured++
+		if got != database {
+			t.Fatalf("Codex node database = %q", got)
+		}
+		return nil
+	}
 	var received codexbridge.Options
 	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error {
 		received = options
@@ -68,6 +76,9 @@ func TestCodexCommandBuildsBridgeOptions(t *testing.T) {
 	}
 	if received.Repository.Directory != "/work/repo/child" || received.Store == nil || received.Stderr != a.ErrOut || received.Sync != nil || received.LedgerPath != database+".codexbridge.json" {
 		t.Fatalf("dependencies = %#v", received)
+	}
+	if ensured != 1 {
+		t.Fatalf("Codex node ensures = %d", ensured)
 	}
 }
 
@@ -706,11 +717,19 @@ func TestForegroundRelayFailureKeepsLocalSuccess(t *testing.T) {
 func TestDaemonCLICommands(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, out := testApp(t, "")
+	a.Open = func(string) (store.Store, error) {
+		t.Fatal("daemon status opened SQLite")
+		return nil, nil
+	}
 	a.DaemonStatus = func(string) (string, error) { return "running test", nil }
 	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "status"}); err != nil || out.String() != "running test\n" {
 		t.Fatalf("daemon status stdout=%q err=%v", out.String(), err)
 	}
 	a, _ = testApp(t, "")
+	a.Open = func(string) (store.Store, error) {
+		t.Fatal("daemon stop opened SQLite")
+		return nil, nil
+	}
 	stopped := false
 	a.StopDaemon = func(string) error { stopped = true; return nil }
 	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "stop"}); err != nil || !stopped {
@@ -720,6 +739,45 @@ func TestDaemonCLICommands(t *testing.T) {
 	a.RestartDaemon = func(string) error { restarted = true; return nil }
 	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "restart"}); err != nil || !restarted {
 		t.Fatalf("daemon restart restarted=%t err=%v", restarted, err)
+	}
+}
+
+func TestNormalCommandsEnsureNodeButLifecycleAndIdentityDoNot(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "autostart"})
+	ensured := 0
+	a.EnsureNode = func(_ context.Context, got string) error {
+		ensured++
+		if got != database {
+			t.Fatalf("ensure database = %q", got)
+		}
+		return nil
+	}
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "send", "start node"}); err != nil {
+		t.Fatal(err)
+	}
+	if ensured != 1 {
+		t.Fatalf("normal command ensures = %d", ensured)
+	}
+
+	a, _ = testApp(t, "")
+	a.EnsureNode = func(context.Context, string) error {
+		t.Fatal("daemon lifecycle command auto-started the node")
+		return nil
+	}
+	a.DaemonStatus = func(string) (string, error) { return "running", nil }
+	if err := a.Run(context.Background(), []string{"--db", database, "daemon", "status"}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, _ = testApp(t, "")
+	a.EnsureNode = func(context.Context, string) error {
+		t.Fatal("identity command auto-started the node")
+		return nil
+	}
+	if err := a.Run(context.Background(), []string{"--db", filepath.Join(t.TempDir(), "identity.db"), "identity", "init"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
