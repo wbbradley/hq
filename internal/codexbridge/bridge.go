@@ -25,6 +25,7 @@ type Options struct {
 	Directory      string
 	ResumeThreadID string
 	InitialPrompt  string
+	Yolo           bool
 	Repository     model.RepositoryContext
 	Store          MailboxStore
 	Starter        ProcessStarter
@@ -77,7 +78,7 @@ func Run(ctx context.Context, options Options) error {
 	}
 	starter := options.Starter
 	if starter == nil {
-		starter = ExecStarter{}
+		starter = ExecStarter{Yolo: options.Yolo}
 	}
 	process, err := starter.Start(options.Directory)
 	if err != nil {

@@ -2,9 +2,19 @@ package codexbridge
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestExecStarterArguments(t *testing.T) {
+	if got, want := (ExecStarter{}).arguments(), []string{"app-server", "--stdio"}; !slices.Equal(got, want) {
+		t.Fatalf("default arguments = %#v; want %#v", got, want)
+	}
+	if got, want := (ExecStarter{Yolo: true}).arguments(), []string{"--yolo", "app-server", "--stdio"}; !slices.Equal(got, want) {
+		t.Fatalf("yolo arguments = %#v; want %#v", got, want)
+	}
+}
 
 func TestForwardStderrAnnotatesEveryLine(t *testing.T) {
 	var output bytes.Buffer

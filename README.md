@@ -116,6 +116,8 @@ hq codex --cwd . "Inspect the failing tests and propose a fix"
 
 `--cwd` defaults to the current directory; a relative path is resolved from that directory. Without an initial prompt, the bridge reports readiness and waits for HQ input. A new thread receives a narrow instruction to use structured human input whenever it needs an answer.
 
+`hq codex --yolo` starts `codex --yolo app-server --stdio`, disabling Codex approvals and sandboxing for that bridge process. Use it only when the surrounding environment provides the required isolation.
+
 Resume the exact same Codex conversation without replacing its existing instructions:
 
 ```sh
@@ -258,7 +260,7 @@ hq sync
 hq daemon run|status|stop|restart
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
-hq codex [--cwd PATH] [--resume THREAD_ID] [INITIAL PROMPT...]
+hq codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
 hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
 ```

@@ -50,7 +50,7 @@ Human commands:
   cancel  Archive one inbox message
 
 Other commands:
-  codex [--cwd PATH] [--resume THREAD_ID] [INITIAL PROMPT...]
+  codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
              Bridge a Codex app-server thread through HQ
   mailboxes  Find agent mailboxes seen in this repository
   identity   Create, inspect, back up, import, or reset the installation identity
@@ -75,7 +75,7 @@ already-durable outbox work through its configured network engine.
 const codexUsage = `hq codex bridges one Codex app-server thread through an HQ mailbox.
 
 Usage:
-  hq [--db PATH] [--no-sync] codex [--cwd PATH] [--resume THREAD_ID] [INITIAL PROMPT...]
+  hq [--db PATH] [--no-sync] codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
 
 Requirements:
   Install and authenticate Codex CLI v0.148.0, and run hq identity init once.
@@ -84,6 +84,8 @@ Options:
   --cwd PATH          Thread working directory. Defaults to the current directory;
                       relative paths are resolved from the current directory.
   --resume THREAD_ID  Resume this exact Codex thread instead of starting a new one.
+  --yolo              Pass Codex's --yolo mode to app-server; disables approvals and sandboxing.
+                      Use only inside an externally secured environment.
 
 Remaining arguments are joined as the optional initial prompt. Without a prompt, the
 bridge waits for HQ input. A new thread receives the structured-human-input instruction;
@@ -311,6 +313,7 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, database
 	f := flags("codex")
 	workingDirectory := f.String("cwd", "", "Codex thread working directory")
 	resumeThreadID := f.String("resume", "", "existing Codex thread ID")
+	yolo := f.Bool("yolo", false, "disable Codex approvals and sandboxing")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -331,7 +334,7 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, database
 	options := codexbridge.Options{
 		Directory: directory, ResumeThreadID: strings.TrimSpace(*resumeThreadID),
 		InitialPrompt: strings.Join(f.Args(), " "), Repository: a.repositoryContext(ctx, directory),
-		Store: s, Stderr: a.ErrOut, Updates: clientUpdates(s),
+		Store: s, Stderr: a.ErrOut, Updates: clientUpdates(s), Yolo: *yolo,
 	}
 	resolvedDatabasePath, err := identity.ResolveDatabasePath(databasePath)
 	if err != nil {

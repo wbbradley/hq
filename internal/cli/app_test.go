@@ -78,13 +78,13 @@ func TestCodexCommandBuildsBridgeOptions(t *testing.T) {
 		received = options
 		return nil
 	}
-	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "codex", "--cwd", "child", "--resume", "thread-42", "continue", "working"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "codex", "--cwd", "child", "--resume", "thread-42", "--yolo", "continue", "working"}); err != nil {
 		t.Fatal(err)
 	}
 	if received.Directory != "/work/repo/child" || received.ResumeThreadID != "thread-42" || received.InitialPrompt != "continue working" {
 		t.Fatalf("options = %#v", received)
 	}
-	if received.Repository.Directory != "/work/repo/child" || received.Store == nil || received.Stderr != a.ErrOut || received.Sync != nil || received.LedgerPath != database+".codexbridge.json" {
+	if received.Repository.Directory != "/work/repo/child" || received.Store == nil || received.Stderr != a.ErrOut || received.Sync != nil || received.LedgerPath != database+".codexbridge.json" || !received.Yolo {
 		t.Fatalf("dependencies = %#v", received)
 	}
 }
@@ -101,7 +101,7 @@ func TestCodexCommandDefaultsToCurrentDirectoryAndEnablesSync(t *testing.T) {
 	if err := a.Run(context.Background(), []string{"--db", database, "codex"}); err != nil {
 		t.Fatal(err)
 	}
-	if received.Directory != "/work/repo" || received.InitialPrompt != "" || received.Sync == nil {
+	if received.Directory != "/work/repo" || received.InitialPrompt != "" || received.Sync == nil || received.Yolo {
 		t.Fatalf("options = %#v", received)
 	}
 }
@@ -122,7 +122,7 @@ func TestCodexHelpDoesNotOpenStore(t *testing.T) {
 	if outputs[0] != outputs[1] || outputs[0] != codexUsage {
 		t.Fatalf("help outputs differ:\n%s\n---\n%s", outputs[0], outputs[1])
 	}
-	for _, required := range []string{"Codex CLI v0.148.0", "--resume THREAD_ID", "<database>.codexbridge.json", "Secret-marked", "one bridge process"} {
+	for _, required := range []string{"Codex CLI v0.148.0", "--resume THREAD_ID", "--yolo", "disables approvals and sandboxing", "<database>.codexbridge.json", "Secret-marked", "one bridge process"} {
 		if !strings.Contains(outputs[0], required) {
 			t.Fatalf("Codex help is missing %q", required)
 		}
@@ -135,7 +135,7 @@ func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 	if err := a.Run(context.Background(), []string{"help"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "codex [--cwd PATH] [--resume THREAD_ID] [INITIAL PROMPT...]") {
+	if !strings.Contains(out.String(), "codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]") {
 		t.Fatalf("global help = %q", out.String())
 	}
 	a, _ = testApp(t, "")

@@ -22,6 +22,7 @@ type ProcessStarter interface {
 
 type ExecStarter struct {
 	Path string
+	Yolo bool
 }
 
 func (s ExecStarter) Start(directory string) (Process, error) {
@@ -29,7 +30,7 @@ func (s ExecStarter) Start(directory string) (Process, error) {
 	if path == "" {
 		path = "codex"
 	}
-	command := exec.Command(path, "app-server", "--stdio")
+	command := exec.Command(path, s.arguments()...)
 	command.Dir = directory
 	input, err := command.StdinPipe()
 	if err != nil {
@@ -47,6 +48,14 @@ func (s ExecStarter) Start(directory string) (Process, error) {
 		return nil, fmt.Errorf("start Codex app-server: %w", err)
 	}
 	return &execProcess{command: command, input: input, output: output, errors: errorsPipe}, nil
+}
+
+func (s ExecStarter) arguments() []string {
+	arguments := make([]string, 0, 3)
+	if s.Yolo {
+		arguments = append(arguments, "--yolo")
+	}
+	return append(arguments, "app-server", "--stdio")
 }
 
 type execProcess struct {
