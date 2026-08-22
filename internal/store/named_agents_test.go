@@ -59,6 +59,10 @@ func TestNamedAgentRetainsHistoricalSessionsAndSelectedSession(t *testing.T) {
 			t.Fatalf("selected session = %q", selected.CurrentSessionID)
 		}
 	}
+	renamed, err := s.RenameNamedAgentSession(ctx, "fred", model.SessionIdentity{Harness: "codex", ExternalSessionID: "thread-one"}, "Build auth")
+	if err != nil || renamed.ThreadName != "Build auth" || renamed.Current {
+		t.Fatalf("renamed session = %#v, %v", renamed, err)
+	}
 	if _, err := s.AcquireNamedAgent(ctx, "fred", "history-test", time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +74,7 @@ func TestNamedAgentRetainsHistoricalSessionsAndSelectedSession(t *testing.T) {
 	for _, session := range sessions {
 		byID[session.SessionID] = session
 	}
-	if byID["thread-one"].Context.Directory != "/repo/thread-one" || byID["thread-one"].Current || !byID["thread-two"].Current || !byID["thread-two"].AgentActive || !byID["thread-two"].LastSelectedAt.After(byID["thread-one"].LastSelectedAt) {
+	if byID["thread-one"].ThreadName != "Build auth" || byID["thread-one"].Context.Directory != "/repo/thread-one" || byID["thread-one"].Current || !byID["thread-two"].Current || !byID["thread-two"].AgentActive || !byID["thread-two"].LastSelectedAt.After(byID["thread-one"].LastSelectedAt) {
 		t.Fatalf("session history = %#v", sessions)
 	}
 	var bindings int
@@ -85,7 +89,7 @@ func TestNamedAgentRetainsHistoricalSessionsAndSelectedSession(t *testing.T) {
 		t.Fatalf("rebuilt = %#v, %v", rebuilt, err)
 	}
 	rebuiltSessions, err := s.ListNamedAgentSessions(ctx, "fred")
-	if err != nil || len(rebuiltSessions) != 2 || rebuiltSessions[0].Context.Directory != "/repo/thread-two" || !rebuiltSessions[0].Current {
+	if err != nil || len(rebuiltSessions) != 2 || rebuiltSessions[0].Context.Directory != "/repo/thread-two" || !rebuiltSessions[0].Current || rebuiltSessions[1].ThreadName != "Build auth" {
 		t.Fatalf("rebuilt sessions = %#v, %v", rebuiltSessions, err)
 	}
 }

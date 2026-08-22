@@ -31,15 +31,16 @@ type Claim struct {
 }
 
 type NamedAgent struct {
-	Name             string                  `json:"name"`
-	MailboxID        string                  `json:"mailbox_id"`
-	Retired          bool                    `json:"retired"`
-	Harness          string                  `json:"harness,omitempty"`
-	CurrentSessionID string                  `json:"current_session_id,omitempty"`
-	Context          model.RepositoryContext `json:"context,omitempty"`
-	Active           bool                    `json:"active"`
-	LeaseExpiresAt   *time.Time              `json:"lease_expires_at,omitempty"`
-	LastActiveAt     *time.Time              `json:"last_active_at,omitempty"`
+	Name              string                  `json:"name"`
+	MailboxID         string                  `json:"mailbox_id"`
+	Retired           bool                    `json:"retired"`
+	Harness           string                  `json:"harness,omitempty"`
+	CurrentSessionID  string                  `json:"current_session_id,omitempty"`
+	CurrentThreadName string                  `json:"current_thread_name,omitempty"`
+	Context           model.RepositoryContext `json:"context,omitempty"`
+	Active            bool                    `json:"active"`
+	LeaseExpiresAt    *time.Time              `json:"lease_expires_at,omitempty"`
+	LastActiveAt      *time.Time              `json:"last_active_at,omitempty"`
 }
 
 // AgentSession is the durable, installation-private projection of one harness
@@ -50,6 +51,7 @@ type AgentSession struct {
 	MailboxID      string                  `json:"mailbox_id"`
 	Harness        string                  `json:"harness"`
 	SessionID      string                  `json:"session_id"`
+	ThreadName     string                  `json:"thread_name,omitempty"`
 	Context        model.RepositoryContext `json:"context"`
 	CreatedAt      time.Time               `json:"created_at"`
 	LastSelectedAt time.Time               `json:"last_selected_at"`
@@ -156,6 +158,7 @@ type Operations interface {
 	GetNamedAgent(context.Context, string) (NamedAgent, error)
 	ListNamedAgents(context.Context) ([]NamedAgent, error)
 	ListNamedAgentSessions(context.Context, string) ([]AgentSession, error)
+	RenameNamedAgentSession(context.Context, string, model.SessionIdentity, string) (AgentSession, error)
 	RetireNamedAgent(context.Context, string) error
 	SelectNamedAgentSession(context.Context, string, model.SessionIdentity, model.RepositoryContext) (NamedAgent, error)
 	AcquireNamedAgent(context.Context, string, string, time.Duration) (NamedAgent, error)

@@ -70,6 +70,7 @@ func TestEveryKnownEventTypeValidates(t *testing.T) {
 		{"mailbox create", control(TypeMailboxCreate, mustPayload(t, MailboxPayload{MailboxID: mailboxAgentA, Kind: "agent", Label: "codex"}))},
 		{"mailbox bind", control(TypeMailboxBind, mustPayload(t, MailboxBindingPayload{MailboxID: mailboxAgentA, Harness: "codex", ExternalSessionID: "thread"}))},
 		{"mailbox context", control(TypeMailboxContext, mustPayload(t, MailboxContextPayload{MailboxID: mailboxAgentA, Context: RepositoryContext{Directory: "/repo"}}))},
+		{"agent session rename", control(TypeAgentSessionRename, mustPayload(t, AgentSessionRenamePayload{Name: "fred", MailboxID: mailboxAgentA, Harness: "codex", ExternalSessionID: "thread", ThreadName: "Build auth"}))},
 		{"question", Content{Type: TypeQuestion, InstallationID: installationA, Sender: localSender, Recipient: localHuman, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TextPayload{Body: "question"})}},
 		{"answer", Content{Type: TypeAnswer, InstallationID: installationA, Sender: localHuman, Recipient: localSender, ThreadID: threadB, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TextPayload{Body: "answer"})}},
 		{"message", Content{Type: TypeMessage, InstallationID: installationA, Sender: localSender, Recipient: remoteHuman, Scope: ScopePeerAddressed, Payload: mustPayload(t, TextPayload{Body: "message"})}},

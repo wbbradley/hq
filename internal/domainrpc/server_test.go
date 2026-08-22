@@ -69,6 +69,9 @@ func (s *recordingOperations) RetireNamedAgent(context.Context, string) error {
 func (s *recordingOperations) SelectNamedAgentSession(context.Context, string, model.SessionIdentity, model.RepositoryContext) (domain.NamedAgent, error) {
 	return domain.NamedAgent{}, s.record(SelectAgentSessionMethod)
 }
+func (s *recordingOperations) RenameNamedAgentSession(context.Context, string, model.SessionIdentity, string) (domain.AgentSession, error) {
+	return domain.AgentSession{}, s.record(RenameAgentSessionMethod)
+}
 func (s *recordingOperations) AcquireNamedAgent(context.Context, string, string, time.Duration) (domain.NamedAgent, error) {
 	return domain.NamedAgent{}, s.record(AcquireAgentMethod)
 }
@@ -154,6 +157,7 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{GetNamedAgentMethod, NamedAgentRequest{}},
 		{ListNamedAgentsMethod, nil},
 		{ListAgentSessionsMethod, NamedAgentRequest{}},
+		{RenameAgentSessionMethod, AgentSessionRenameRequest{MutationID: mutationID}},
 		{RetireNamedAgentMethod, NamedAgentRequest{MutationID: mutationID}},
 		{SelectAgentSessionMethod, AgentSessionRequest{MutationID: mutationID}},
 		{AcquireAgentMethod, AgentOwnershipRequest{MutationID: mutationID}},

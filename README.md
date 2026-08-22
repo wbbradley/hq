@@ -119,7 +119,7 @@ The CLI waits for a definitive running or failed acknowledgement, prints the age
 
 A newly created agent has no selected session until its first successful `thread/start`. New threads receive developer instructions naming the durable agent and requiring structured human input; exact resumes do not replace the thread's instructions. Starting another thread preserves historical bindings and their exact repository/directory context, creation time, and most-recent selection time. One thread can never be reassigned to another agent.
 
-Press `g` in the TUI to search non-retired agents, inspect active/offline state and current and historical sessions, resume an exact thread, start a new thread with a directory input, or stop a local worker. Switching a live worker requires confirmation and all operations run asynchronously without discarding inbox position, focus, or drafts.
+Press `g` in the TUI to search non-retired agents, inspect active/offline state and current and historical sessions, resume an exact thread, start a new thread with a directory input, rename a thread with `r`, or stop a local worker. Thread names are mutable installation-private metadata: they do not change the immutable Codex thread ID, select the thread, or restart its worker. Session rows show the friendly name with a shortened ID, exact directory, and last-selection time; unnamed sessions fall back to the shortened ID. Switching a live worker requires confirmation and all operations run asynchronously without discarding inbox position, focus, or drafts.
 
 Named bridges hold a local 30-second ownership lease renewed every 10 seconds as the final exclusion boundary. A conflicting independently owned lease is reported rather than killed. Repeated local launch request IDs are idempotent, different named agents may run concurrently, and one daemon-shared ledger serializes their delivery checkpoints.
 
@@ -177,6 +177,7 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - `x`: toggle archived inbox messages
 - `v`: toggle relay and event status
 - `i`: toggle technical message IDs and Codex correlation details
+- `g`: manage named Codex agents and sessions; use `r` on a session to rename it
 - `r`: refresh
 - `q`: quit
 
@@ -186,7 +187,7 @@ The `n` picker is searchable and lists `self` plus non-retired named agents from
 
 The TUI always fits its terminal viewport. The full-width inbox is a fixed, selection-scrolling pane occupying 25% of terminal height. The full-width message and reply panes are always stacked beneath it. The reply pane uses 15% of terminal height with a six-line minimum, including its border, and the message pane receives the remaining space. Tab and Shift+Tab move focus among the three panes; leaving an active composer stows it as a resumable draft, returns inbox navigation to normal, marks reply drafts on their thread, and gives new-message drafts their own outbound inbox row. Unfocused outlines use a subdued frame while the active pane uses a brighter purple. Page Up, Page Down, and `j`/`k` act on the focused pane; the reply textarea manages its own cursor and scrolling while focused.
 
-Incoming rows begin directly with a friendly sender label such as `codex · hq`. Detail panels combine the message kind and sender in the upper border, for example `[an update from codex · hq]` or `[a final answer from codex · hq]`. Each message body is rendered as terminal Markdown, including emphasis, headings, lists, links, code, and width-aware GFM tables; timestamp dividers and technical metadata remain literal TUI content. The source device, repository path, git branch, compact remotes, asynchronously loaded open pull request, and opaque message identifiers stay hidden until technical details are expanded with `i`; the collapsed-state hint is right-aligned in the panel's lower border. Codex final answers retain their green treatment, while progress updates, statuses, and one-shot notices use the normal body color.
+Incoming rows begin directly with a friendly sender label such as `codex · hq`. Detail panels combine the message kind and sender in the upper border, for example `[an update from codex · hq]` or `[a final answer from codex · hq]`. Each message body is rendered as terminal Markdown, including emphasis, headings, lists, links, code, and width-aware GFM tables; timestamp dividers and technical metadata remain literal TUI content. The source device, repository path, git branch, compact remotes, asynchronously loaded open pull request, and opaque message identifiers stay hidden until technical details are expanded with `i`; known Codex thread IDs are annotated with their mutable thread names while the immutable ID remains visible. The collapsed-state hint is right-aligned in the panel's lower border. Codex final answers retain their green treatment, while progress updates, statuses, and one-shot notices use the normal body color.
 
 When stdin or stdout is not a terminal, bare `hq` lists open messages in the human mailbox for the current work directory.
 

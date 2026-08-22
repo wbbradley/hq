@@ -61,6 +61,7 @@ type app struct {
 	composeContext    model.RepositoryContext
 	composeNamed      bool
 	agents            []domain.NamedAgent
+	threadSessions    map[string]domain.AgentSession
 	pickingRecipient  bool
 	pickerQuery       string
 	pickerCursor      int
@@ -96,19 +97,22 @@ const (
 	chooseRuntimeSession
 	enterRuntimeDirectory
 	confirmRuntimeSwitch
+	enterThreadName
 )
 
 type agentManager struct {
-	stage     agentManagerStage
-	query     string
-	cursor    int
-	agent     domain.NamedAgent
-	sessions  []domain.AgentSession
-	runtime   domain.CodexRuntime
-	directory string
-	pending   domain.CodexLaunchRequest
-	busy      bool
-	status    string
+	stage         agentManagerStage
+	query         string
+	cursor        int
+	agent         domain.NamedAgent
+	sessions      []domain.AgentSession
+	runtime       domain.CodexRuntime
+	directory     string
+	threadName    string
+	renameSession domain.AgentSession
+	pending       domain.CodexLaunchRequest
+	busy          bool
+	status        string
 }
 
 type paneFocus int
@@ -170,6 +174,7 @@ type loadedMsg struct {
 	archived []model.Message
 	network  domain.NetworkStatus
 	agents   []domain.NamedAgent
+	sessions map[string]domain.AgentSession
 	err      error
 }
 
@@ -208,6 +213,11 @@ type agentSessionsMsg struct {
 
 type codexRuntimeMsg struct {
 	runtime domain.CodexRuntime
+	err     error
+}
+
+type renamedAgentSessionMsg struct {
+	session domain.AgentSession
 	err     error
 }
 
@@ -336,8 +346,18 @@ func (m app) load() tea.Msg {
 	if err != nil {
 		return loadedMsg{err: err}
 	}
+	sessions := make(map[string]domain.AgentSession)
+	for _, agent := range agents {
+		history, historyErr := m.store.ListNamedAgentSessions(m.ctx, agent.Name)
+		if historyErr != nil {
+			return loadedMsg{err: historyErr}
+		}
+		for _, session := range history {
+			sessions[session.Harness+"\x00"+session.SessionID] = session
+		}
+	}
 	network, err := m.store.NetworkStatus(m.ctx)
-	return loadedMsg{inbox: inbox, sent: sent, archived: archived, agents: agents, network: network, err: err}
+	return loadedMsg{inbox: inbox, sent: sent, archived: archived, agents: agents, sessions: sessions, network: network, err: err}
 }
 
 func (m app) answer() tea.Msg {
@@ -454,7 +474,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetHeight(max(1, layout.replyHeight-4))
 	case loadedMsg:
 		selectedKey := m.selectedGroupKey()
-		m.inbox, m.sent, m.archived, m.agents, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.agents, msg.network, msg.err
+		m.inbox, m.sent, m.archived, m.agents, m.threadSessions, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.agents, msg.sessions, msg.network, msg.err
 		if choices := m.filteredRecipients(); m.pickerCursor >= len(choices) {
 			m.pickerCursor = max(0, len(choices)-1)
 		}
@@ -491,8 +511,25 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.agentManager.status = msg.err.Error()
 		} else {
-			m.agentManager.status = fmt.Sprintf("%s · %s · %s", msg.runtime.Phase, shortThreadID(msg.runtime.ThreadID), msg.runtime.Directory)
+			m.agentManager.status = fmt.Sprintf("%s · %s · %s", msg.runtime.Phase, threadLabel(m.managedThreadName(msg.runtime.ThreadID), msg.runtime.ThreadID), msg.runtime.Directory)
 		}
+		return m, m.load
+	case renamedAgentSessionMsg:
+		m.agentManager.busy = false
+		if msg.err != nil {
+			m.agentManager.status = msg.err.Error()
+			return m, nil
+		}
+		for index := range m.agentManager.sessions {
+			if m.agentManager.sessions[index].Harness == msg.session.Harness && m.agentManager.sessions[index].SessionID == msg.session.SessionID {
+				m.agentManager.sessions[index] = msg.session
+			}
+		}
+		if msg.session.Current {
+			m.agentManager.agent.CurrentThreadName = msg.session.ThreadName
+		}
+		m.agentManager.stage = chooseRuntimeSession
+		m.agentManager.status = "thread renamed"
 		return m, m.load
 	case syncMsg:
 		m.syncErr = msg.err
@@ -884,6 +921,11 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.agentManager.stage == chooseRuntimeAgent {
 			m.managingAgents = false
+		} else if m.agentManager.stage == enterRuntimeDirectory || m.agentManager.stage == confirmRuntimeSwitch || m.agentManager.stage == enterThreadName {
+			m.agentManager.stage = chooseRuntimeSession
+			m.agentManager.pending = domain.CodexLaunchRequest{}
+			m.agentManager.renameSession = domain.AgentSession{}
+			m.agentManager.status = ""
 		} else {
 			m.agentManager = agentManager{stage: chooseRuntimeAgent}
 		}
@@ -926,6 +968,13 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "s":
 			m.agentManager.busy = true
 			return m, m.stopManagedAgent()
+		case "r":
+			if m.agentManager.cursor > 0 && m.agentManager.cursor <= len(m.agentManager.sessions) {
+				m.agentManager.renameSession = m.agentManager.sessions[m.agentManager.cursor-1]
+				m.agentManager.threadName = m.agentManager.renameSession.ThreadName
+				m.agentManager.stage = enterThreadName
+				m.agentManager.status = ""
+			}
 		case "enter":
 			if m.agentManager.cursor == 0 {
 				m.beginNewRuntimeDirectory()
@@ -979,6 +1028,22 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.agentManager.stage = chooseRuntimeSession
 			m.agentManager.pending = domain.CodexLaunchRequest{}
+		}
+	case enterThreadName:
+		switch key.String() {
+		case "enter":
+			m.agentManager.busy = true
+			m.agentManager.status = "renaming thread…"
+			return m, m.renameManagedThread(m.agentManager.renameSession, m.agentManager.threadName)
+		case "backspace":
+			runes := []rune(m.agentManager.threadName)
+			if len(runes) > 0 {
+				m.agentManager.threadName = string(runes[:len(runes)-1])
+			}
+		default:
+			if key.Text != "" && !strings.ContainsAny(key.Text, "\r\n\t") {
+				m.agentManager.threadName += key.Text
+			}
 		}
 	}
 	return m, nil
@@ -1078,11 +1143,34 @@ func (m app) stopManagedAgent() tea.Cmd {
 	}
 }
 
+func (m app) renameManagedThread(session domain.AgentSession, threadName string) tea.Cmd {
+	return func() tea.Msg {
+		renamed, err := m.store.RenameNamedAgentSession(m.ctx, session.AgentName, model.SessionIdentity{Harness: session.Harness, ExternalSessionID: session.SessionID}, threadName)
+		return renamedAgentSessionMsg{session: renamed, err: err}
+	}
+}
+
 func shortThreadID(id string) string {
 	if len(id) <= 12 {
 		return id
 	}
 	return id[:8] + "…" + id[len(id)-4:]
+}
+
+func (m app) managedThreadName(id string) string {
+	for _, session := range m.agentManager.sessions {
+		if session.Harness == "codex" && session.SessionID == id {
+			return session.ThreadName
+		}
+	}
+	return ""
+}
+
+func threadLabel(name, id string) string {
+	if strings.TrimSpace(name) == "" {
+		return shortThreadID(id)
+	}
+	return name + " (" + shortThreadID(id) + ")"
 }
 
 func (m app) filteredRecipients() []recipientChoice {
@@ -1529,9 +1617,23 @@ func presentationPanelLabel(kind, sender string) string {
 	}
 }
 
-func presentationDetails(raw string, expanded bool) (string, bool) {
+func (m app) presentationDetails(raw string, expanded bool) (string, bool) {
 	if expanded || raw == "" {
-		return raw, false
+		if !expanded {
+			return raw, false
+		}
+		lines := strings.Split(raw, "\n")
+		for index, line := range lines {
+			value, found := strings.CutPrefix(strings.TrimSpace(line), "Codex thread:")
+			if !found {
+				continue
+			}
+			threadID := strings.TrimSpace(value)
+			if session, ok := m.threadSessions["codex\x00"+threadID]; ok && session.ThreadName != "" {
+				lines[index] = "Codex thread: " + threadLabel(session.ThreadName, threadID)
+			}
+		}
+		return strings.Join(lines, "\n"), false
 	}
 	prefixes := []string{
 		"Kind:", "Phase:", "Codex thread:", "Codex turn:", "Codex item:",
@@ -1624,7 +1726,7 @@ func (m app) renderAgentManager() string {
 			if agent.Active {
 				state = "active"
 			}
-			thread := shortThreadID(agent.CurrentSessionID)
+			thread := threadLabel(agent.CurrentThreadName, agent.CurrentSessionID)
 			if thread == "" {
 				thread = "no session"
 			}
@@ -1647,7 +1749,7 @@ func (m app) renderAgentManager() string {
 			if session.Current {
 				marker = "*"
 			}
-			line := fmt.Sprintf("%s %s · %s · %s", marker, shortThreadID(session.SessionID), session.Context.Directory, session.LastSelectedAt.Local().Format("2006-01-02 15:04"))
+			line := fmt.Sprintf("%s %s · %s · %s", marker, threadLabel(session.ThreadName, session.SessionID), session.Context.Directory, session.LastSelectedAt.Local().Format("2006-01-02 15:04"))
 			if index+1 == m.agentManager.cursor {
 				line = selected.Render(line)
 			}
@@ -1659,6 +1761,10 @@ func (m app) renderAgentManager() string {
 	case confirmRuntimeSwitch:
 		body.WriteString("Agent " + m.agentManager.agent.Name + " is running.\n")
 		body.WriteString("Stop it and switch to the requested session? y/n\n")
+	case enterThreadName:
+		body.WriteString("Rename " + threadLabel(m.agentManager.renameSession.ThreadName, m.agentManager.renameSession.SessionID) + "\n\n")
+		body.WriteString("Thread name: " + m.agentManager.threadName + "\n")
+		body.WriteString(dim.Render("Leave empty to clear the name."))
 	}
 	if m.agentManager.busy {
 		body.WriteString("\n" + dim.Render("Working…"))
@@ -1668,11 +1774,13 @@ func (m app) renderAgentManager() string {
 	}
 	help := "type to search · j/k move · enter select · esc back"
 	if m.agentManager.stage == chooseRuntimeSession {
-		help = "j/k move · enter resume/new · n new · s stop · esc back"
+		help = "j/k move · enter resume/new · r rename · n new · s stop · esc back"
 	} else if m.agentManager.stage == enterRuntimeDirectory {
 		help = "type directory · enter launch · esc back"
 	} else if m.agentManager.stage == confirmRuntimeSwitch {
 		help = "y confirm · n cancel · esc back"
+	} else if m.agentManager.stage == enterThreadName {
+		help = "type name · enter save · esc back"
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, panel.Width(max(1, width-panel.GetHorizontalFrameSize())).Render(body.String()), dim.Render(help))
 }
@@ -1892,7 +2000,7 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 		body.WriteString(dim.Render("── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM") + " ──"))
 		body.WriteByte('\n')
 		body.WriteString(m.markdown.Render(message, markdownWidth))
-		visibleDetails, hidden := presentationDetails(message.Details, m.showTechnical)
+		visibleDetails, hidden := m.presentationDetails(message.Details, m.showTechnical)
 		metadataHidden = metadataHidden || hidden
 		if visibleDetails != "" {
 			body.WriteString("\n\n")

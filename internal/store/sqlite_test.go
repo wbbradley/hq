@@ -21,7 +21,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "11"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "12"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {

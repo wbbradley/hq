@@ -121,9 +121,12 @@ legacy owner. One shared thread-keyed ledger supports concurrent agents without 
 The caller environment exists only long enough to construct the child environment. It is excluded
 from canonical events, projections, mutation receipts, Nostr, the ledger, logs, diagnostics, status,
 and RPC results. Process ownership, paths, presence, and runtime phases are also installation-local
-and never enter Nostr. Durable names, thread bindings, selections, and per-session repository context
-are signed installation-private facts. Mailbox questions, answers, messages, and relay delivery are
-the Nostr data plane.
+and never enter Nostr. Durable agent names, thread bindings, selections, mutable thread names, and
+per-session repository context are signed installation-private facts. A thread-name change is
+separate from selection and runtime state: it updates the session projection without starting,
+stopping, or switching a worker. Presentation code resolves names through the agent-session domain
+abstraction instead of copying mutable labels into immutable messages or runtime records. Mailbox
+questions, answers, messages, and relay delivery are the Nostr data plane.
 
 Node stop or restart cancels every worker and leaves its durable selection intact and offline;
 workers are not automatically restarted. A future remote controller must address the owning node's

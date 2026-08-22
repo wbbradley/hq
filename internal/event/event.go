@@ -38,6 +38,7 @@ const (
 	TypeAgentNameClaim     Type = "agent.name.claim"
 	TypeAgentRetire        Type = "agent.retire"
 	TypeAgentSessionSelect Type = "agent.session.select"
+	TypeAgentSessionRename Type = "agent.session.rename"
 	TypeQuestion           Type = "question"
 	TypeAnswer             Type = "answer"
 	TypeMessage            Type = "message"
@@ -153,6 +154,14 @@ type AgentSessionPayload struct {
 	Harness           string            `json:"harness"`
 	ExternalSessionID string            `json:"external_session_id"`
 	Context           RepositoryContext `json:"context"`
+}
+
+type AgentSessionRenamePayload struct {
+	Name              string `json:"name"`
+	MailboxID         string `json:"mailbox_id"`
+	Harness           string `json:"harness"`
+	ExternalSessionID string `json:"external_session_id"`
+	ThreadName        string `json:"thread_name"`
 }
 
 type TargetPayload struct {

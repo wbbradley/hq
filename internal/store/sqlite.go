@@ -21,7 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 11
+const schemaVersion = 12
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -86,6 +86,7 @@ CREATE TABLE agent_sessions (
     mailbox_id TEXT NOT NULL,
     harness TEXT NOT NULL,
     external_session_id TEXT NOT NULL,
+    thread_name TEXT NOT NULL DEFAULT '',
     directory TEXT NOT NULL,
     git_common_dir TEXT NOT NULL DEFAULT '',
     remote_identity TEXT NOT NULL DEFAULT '',
@@ -275,7 +276,7 @@ CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, creat
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 11;
+PRAGMA user_version = 12;
 `
 
 const (
@@ -386,6 +387,21 @@ PRAGMA foreign_keys = ON;`
 			return fmt.Errorf("migrate schema to version 11: %w", err)
 		}
 		version = 11
+	}
+	if version == 11 {
+		var threadNameColumns int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('agent_sessions') WHERE name='thread_name'`).Scan(&threadNameColumns); err != nil {
+			return fmt.Errorf("inspect schema version 11: %w", err)
+		}
+		if threadNameColumns == 0 {
+			if _, err := s.db.ExecContext(ctx, `ALTER TABLE agent_sessions ADD COLUMN thread_name TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("add thread name column: %w", err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE projection_checkpoint SET event_count=-1 WHERE id=1; PRAGMA user_version = 12;`); err != nil {
+			return fmt.Errorf("migrate schema to version 12: %w", err)
+		}
+		version = 12
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -849,7 +865,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 			}
 		}
 		for _, session := range agent.Sessions {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(agent_name,mailbox_id,harness,external_session_id,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, agent.Name, agent.MailboxID, session.Harness, session.ExternalSessionID, session.Context.Directory, session.Context.GitCommonDir, session.Context.RemoteIdentity, session.Context.Worktree, session.Context.Branch, time.Unix(session.CreatedAt, 0).UTC().UnixMilli(), time.Unix(session.LastSelectedAt, 0).UTC().UnixMilli()); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(agent_name,mailbox_id,harness,external_session_id,thread_name,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, agent.Name, agent.MailboxID, session.Harness, session.ExternalSessionID, session.ThreadName, session.Context.Directory, session.Context.GitCommonDir, session.Context.RemoteIdentity, session.Context.Worktree, session.Context.Branch, time.Unix(session.CreatedAt, 0).UTC().UnixMilli(), time.Unix(session.LastSelectedAt, 0).UTC().UnixMilli()); err != nil {
 				return fmt.Errorf("project named agent session: %w", err)
 			}
 		}

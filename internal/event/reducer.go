@@ -51,6 +51,9 @@ type NamedAgentProjection struct {
 type AgentSessionProjection struct {
 	Harness           string
 	ExternalSessionID string
+	ThreadName        string
+	NameUpdatedAt     int64
+	NameEventID       string
 	Context           RepositoryContext
 	CreatedAt         int64
 	LastSelectedAt    int64
@@ -860,7 +863,7 @@ func (s *State) classifyNamedAgents() {
 	}
 	for _, id := range sortedRecordIDs(s.Records) {
 		record := s.Records[id]
-		if record.Status != StatusProjected || (record.Event.Content.Type != TypeAgentRetire && record.Event.Content.Type != TypeAgentSessionSelect) {
+		if record.Status != StatusProjected || (record.Event.Content.Type != TypeAgentRetire && record.Event.Content.Type != TypeAgentSessionSelect && record.Event.Content.Type != TypeAgentSessionRename) {
 			continue
 		}
 		var name, mailboxID string
@@ -868,7 +871,7 @@ func (s *State) classifyNamedAgents() {
 			var payload AgentNamePayload
 			_ = decodePayload(record.Event.Content.Payload, &payload)
 			name, mailboxID = payload.Name, payload.MailboxID
-		} else {
+		} else if record.Event.Content.Type == TypeAgentSessionSelect {
 			var payload AgentSessionPayload
 			_ = decodePayload(record.Event.Content.Payload, &payload)
 			name, mailboxID = payload.Name, payload.MailboxID
@@ -881,6 +884,22 @@ func (s *State) classifyNamedAgents() {
 			}
 			if !matchedBinding {
 				record.Status, record.Reason = StatusUnresolved, "agent session selection has no matching mailbox binding"
+				s.Records[id] = record
+				continue
+			}
+		} else {
+			var payload AgentSessionRenamePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			name, mailboxID = payload.Name, payload.MailboxID
+			matchedSession := false
+			for _, binding := range s.Mailboxes[mailboxID].Bindings {
+				if binding.Harness == payload.Harness && binding.ExternalSessionID == payload.ExternalSessionID {
+					matchedSession = true
+					break
+				}
+			}
+			if !matchedSession {
+				record.Status, record.Reason = StatusUnresolved, "agent session rename has no matching mailbox binding"
 				s.Records[id] = record
 				continue
 			}
@@ -933,6 +952,22 @@ func (s *State) projectNamedAgents() {
 				agent.SelectedAt, agent.SelectionEventID = created, id
 			}
 			s.NamedAgents[payload.Name] = agent
+		}
+	}
+	for _, id := range ids {
+		record := s.Records[id]
+		if record.Status == StatusProjected && record.Event.Content.Type == TypeAgentSessionRename {
+			var payload AgentSessionRenamePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			agent := s.NamedAgents[payload.Name]
+			key := payload.Harness + "\x00" + payload.ExternalSessionID
+			session := agent.Sessions[key]
+			created := record.Event.Nostr.CreatedAt
+			if session.NameEventID == "" || s.ancestor(session.NameEventID, id) || (created > session.NameUpdatedAt && !s.ancestor(id, session.NameEventID)) || (created == session.NameUpdatedAt && !s.ancestor(id, session.NameEventID) && id > session.NameEventID) {
+				session.ThreadName, session.NameUpdatedAt, session.NameEventID = payload.ThreadName, created, id
+				agent.Sessions[key] = session
+				s.NamedAgents[payload.Name] = agent
+			}
 		}
 	}
 }
@@ -1190,7 +1225,7 @@ func (s State) Wait(questionID string, mailbox MailboxAddress) (MessageProjectio
 
 func isControlType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountSelect:
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeAgentSessionRename, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountSelect:
 		return true
 	default:
 		return false

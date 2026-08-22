@@ -18,6 +18,7 @@ const (
 	GetNamedAgentMethod      = "agent/get"
 	ListNamedAgentsMethod    = "agent/list"
 	ListAgentSessionsMethod  = "agent/session/list"
+	RenameAgentSessionMethod = "agent/session/rename"
 	RetireNamedAgentMethod   = "agent/retire"
 	SelectAgentSessionMethod = "agent/session/select"
 	AcquireAgentMethod       = "agent/ownership/acquire"
@@ -89,6 +90,14 @@ type AgentSessionRequest struct {
 	Harness    string                  `json:"harness"`
 	SessionID  string                  `json:"session_id"`
 	Repository model.RepositoryContext `json:"repository"`
+}
+
+type AgentSessionRenameRequest struct {
+	MutationID string `json:"mutation_id"`
+	Name       string `json:"name"`
+	Harness    string `json:"harness"`
+	SessionID  string `json:"session_id"`
+	ThreadName string `json:"thread_name"`
 }
 
 type CodexAgentRequest struct {

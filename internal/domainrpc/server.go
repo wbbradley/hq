@@ -72,7 +72,7 @@ func encodeMutationError(err error) *localwire.RPCError {
 
 var mutationMethods = map[string]bool{
 	ResolveMailboxMethod: true, CreateMethod: true, ReplyMethod: true, ArchiveMethod: true, RestoreMethod: true,
-	CreateNamedAgentMethod: true, RetireNamedAgentMethod: true, SelectAgentSessionMethod: true,
+	CreateNamedAgentMethod: true, RetireNamedAgentMethod: true, SelectAgentSessionMethod: true, RenameAgentSessionMethod: true,
 	AcquireAgentMethod: true, RenewAgentMethod: true, ReleaseAgentMethod: true,
 	ClaimMethod: true, CompleteMethod: true, ReleaseMethod: true, TrustPeerMethod: true,
 	DistrustPeerMethod: true, CreateHumanInviteMethod: true, JoinHumanInviteMethod: true,
@@ -153,6 +153,12 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return s.Store.SelectNamedAgentSession(ctx, request.Name, model.SessionIdentity{Harness: request.Harness, ExternalSessionID: request.SessionID}, request.Repository)
+	case RenameAgentSessionMethod:
+		var request AgentSessionRenameRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.RenameNamedAgentSession(ctx, request.Name, model.SessionIdentity{Harness: request.Harness, ExternalSessionID: request.SessionID}, request.ThreadName)
 	case AcquireAgentMethod, RenewAgentMethod:
 		var request AgentOwnershipRequest
 		if err := decodeRequest(raw, &request); err != nil {

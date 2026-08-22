@@ -190,6 +190,14 @@ func (c *Client) ListNamedAgentSessions(ctx context.Context, name string) ([]dom
 	return result, err
 }
 
+func (c *Client) RenameNamedAgentSession(ctx context.Context, name string, session model.SessionIdentity, threadName string) (domain.AgentSession, error) {
+	var result domain.AgentSession
+	err := c.mutatingCall(ctx, domainrpc.RenameAgentSessionMethod, func(id string) any {
+		return domainrpc.AgentSessionRenameRequest{MutationID: id, Name: name, Harness: session.Harness, SessionID: session.ExternalSessionID, ThreadName: threadName}
+	}, &result)
+	return result, err
+}
+
 func (c *Client) LaunchCodexAgent(ctx context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
 	var result domain.CodexRuntime
 	if request.RequestID == "" {

@@ -215,6 +215,26 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if strings.TrimSpace(payload.Harness) == "" || strings.TrimSpace(payload.ExternalSessionID) == "" {
 			return StatusInvalid, errors.New("agent session selection needs a harness and external session ID")
 		}
+	case TypeAgentSessionRename:
+		if err := validateControl(content); err != nil {
+			return StatusInvalid, err
+		}
+		var payload AgentSessionRenamePayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validAgentName(payload.Name); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validUUID("mailbox ID", payload.MailboxID); err != nil {
+			return StatusInvalid, err
+		}
+		if strings.TrimSpace(payload.Harness) == "" || strings.TrimSpace(payload.ExternalSessionID) == "" {
+			return StatusInvalid, errors.New("agent session rename needs a harness and external session ID")
+		}
+		if payload.ThreadName != strings.TrimSpace(payload.ThreadName) || !utf8.ValidString(payload.ThreadName) || len(payload.ThreadName) > 200 || strings.ContainsAny(payload.ThreadName, "\r\n\x00") {
+			return StatusInvalid, errors.New("thread name must be trimmed valid UTF-8 of at most 200 bytes without line breaks")
+		}
 	case TypePeerTrust, TypePeerDistrust:
 		if err := validateControl(content); err != nil {
 			return StatusInvalid, err
@@ -315,7 +335,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 
 func knownType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeQuestion, TypeAnswer, TypeMessage,
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeAgentSessionRename, TypeQuestion, TypeAnswer, TypeMessage,
 		TypeThreadCancel, TypeMessageArchive, TypeMessageRestore, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
 		TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountCreate, TypeHumanAccountSelect,
 		TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke:

@@ -375,7 +375,16 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, _ string
 	if err != nil {
 		return err
 	}
-	if _, err = fmt.Fprintf(a.Out, "agent=%s thread=%s directory=%s status=%s\n", result.AgentName, result.ThreadID, result.Directory, result.Phase); err != nil {
+	threadName := ""
+	if sessions, listErr := s.ListNamedAgentSessions(ctx, result.AgentName); listErr == nil {
+		for _, session := range sessions {
+			if session.Harness == "codex" && session.SessionID == result.ThreadID {
+				threadName = session.ThreadName
+				break
+			}
+		}
+	}
+	if _, err = fmt.Fprintf(a.Out, "agent=%s thread=%s thread_name=%q directory=%s status=%s\n", result.AgentName, result.ThreadID, threadName, result.Directory, result.Phase); err != nil {
 		return err
 	}
 	if result.Phase != domain.CodexRuntimeRunning {
@@ -837,6 +846,9 @@ func (a *App) agent(ctx context.Context, s domain.Store, args []string) error {
 			session := "-"
 			if agent.CurrentSessionID != "" {
 				session = agent.Harness + ":" + agent.CurrentSessionID
+				if agent.CurrentThreadName != "" {
+					session = agent.Harness + ":" + agent.CurrentThreadName + " (" + agent.CurrentSessionID + ")"
+				}
 			}
 			lastActive := "-"
 			if agent.LastActiveAt != nil {

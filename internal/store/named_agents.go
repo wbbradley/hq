@@ -140,7 +140,7 @@ func (s *SQLite) ListNamedAgentSessions(ctx context.Context, name string) ([]dom
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT mailbox_id,harness,external_session_id,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at FROM agent_sessions WHERE agent_name=? ORDER BY last_selected_at DESC,harness,external_session_id`, name)
+	rows, err := s.db.QueryContext(ctx, `SELECT mailbox_id,harness,external_session_id,thread_name,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at FROM agent_sessions WHERE agent_name=? ORDER BY last_selected_at DESC,harness,external_session_id`, name)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +149,7 @@ func (s *SQLite) ListNamedAgentSessions(ctx context.Context, name string) ([]dom
 	for rows.Next() {
 		var session domain.AgentSession
 		var created, selected int64
-		if err := rows.Scan(&session.MailboxID, &session.Harness, &session.SessionID, &session.Context.Directory, &session.Context.GitCommonDir, &session.Context.RemoteIdentity, &session.Context.Worktree, &session.Context.Branch, &created, &selected); err != nil {
+		if err := rows.Scan(&session.MailboxID, &session.Harness, &session.SessionID, &session.ThreadName, &session.Context.Directory, &session.Context.GitCommonDir, &session.Context.RemoteIdentity, &session.Context.Worktree, &session.Context.Branch, &created, &selected); err != nil {
 			return nil, err
 		}
 		session.AgentName = name
@@ -166,14 +166,15 @@ func getNamedAgentWith(ctx context.Context, queryer rowQueryer, name string, now
 	var agent domain.NamedAgent
 	var retired int
 	var lease, active sql.NullInt64
-	err := queryer.QueryRowContext(ctx, `SELECT a.name,a.mailbox_id,a.retired,a.current_harness,a.current_session_id,a.last_active_at,o.lease_expires_at,
+	err := queryer.QueryRowContext(ctx, `SELECT a.name,a.mailbox_id,a.retired,a.current_harness,a.current_session_id,
+COALESCE((SELECT s.thread_name FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),a.last_active_at,o.lease_expires_at,
 COALESCE((SELECT s.directory FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
 COALESCE((SELECT s.git_common_dir FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
 COALESCE((SELECT s.remote_identity FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
 COALESCE((SELECT s.worktree FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
 COALESCE((SELECT s.branch FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),'')
 FROM named_agents a LEFT JOIN agent_ownership o ON o.name=a.name WHERE a.name=?`, name).Scan(
-		&agent.Name, &agent.MailboxID, &retired, &agent.Harness, &agent.CurrentSessionID, &active, &lease,
+		&agent.Name, &agent.MailboxID, &retired, &agent.Harness, &agent.CurrentSessionID, &agent.CurrentThreadName, &active, &lease,
 		&agent.Context.Directory, &agent.Context.GitCommonDir, &agent.Context.RemoteIdentity, &agent.Context.Worktree, &agent.Context.Branch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return agent, domain.ErrAgentNotFound
@@ -259,6 +260,107 @@ func (s *SQLite) SelectNamedAgentSession(ctx context.Context, name string, sessi
 		return domain.NamedAgent{}, err
 	}
 	return value.(domain.NamedAgent), nil
+}
+
+func (s *SQLite) RenameNamedAgentSession(ctx context.Context, name string, identity model.SessionIdentity, threadName string) (domain.AgentSession, error) {
+	threadName = strings.TrimSpace(threadName)
+	if strings.TrimSpace(identity.Harness) == "" || strings.TrimSpace(identity.ExternalSessionID) == "" {
+		return domain.AgentSession{}, errors.New("harness and external session ID are required")
+	}
+	if len(threadName) > 200 || strings.ContainsAny(threadName, "\r\n\x00") {
+		return domain.AgentSession{}, errors.New("thread name must be at most 200 bytes without line breaks")
+	}
+	resolveMu.Lock()
+	defer resolveMu.Unlock()
+	agent, err := s.GetNamedAgent(ctx, name)
+	if err != nil {
+		return domain.AgentSession{}, err
+	}
+	if agent.Retired {
+		return domain.AgentSession{}, fmt.Errorf("%w: %s", domain.ErrAgentRetired, name)
+	}
+	current, err := s.getNamedAgentSession(ctx, name, identity)
+	if err != nil {
+		return domain.AgentSession{}, err
+	}
+	if current.ThreadName == threadName {
+		return current, s.recordMutation(ctx, current)
+	}
+	payload, _ := event.MarshalPayload(event.AgentSessionRenamePayload{
+		Name: name, MailboxID: agent.MailboxID, Harness: identity.Harness,
+		ExternalSessionID: identity.ExternalSessionID, ThreadName: threadName,
+	})
+	content := event.Content{Type: event.TypeAgentSessionRename, Scope: event.ScopeInstallationPrivate, Payload: payload}
+	if parent, parentErr := s.currentAgentSessionMetadataEvent(ctx, name, identity); parentErr != nil {
+		return domain.AgentSession{}, parentErr
+	} else if parent != "" {
+		content.Parents = []string{parent}
+	}
+	value, err := s.appendContentsResult(ctx, []event.Content{content}, []time.Time{s.clockNow()}, func(tx *sql.Tx) (any, error) {
+		return getNamedAgentSessionWith(ctx, tx, name, identity, s.clockNow())
+	})
+	if err != nil {
+		return domain.AgentSession{}, err
+	}
+	return value.(domain.AgentSession), nil
+}
+
+func (s *SQLite) getNamedAgentSession(ctx context.Context, name string, identity model.SessionIdentity) (domain.AgentSession, error) {
+	return getNamedAgentSessionWith(ctx, s.db, name, identity, s.clockNow())
+}
+
+func getNamedAgentSessionWith(ctx context.Context, queryer rowQueryer, name string, identity model.SessionIdentity, now time.Time) (domain.AgentSession, error) {
+	agent, err := getNamedAgentWith(ctx, queryer, name, now)
+	if err != nil {
+		return domain.AgentSession{}, err
+	}
+	var session domain.AgentSession
+	var created, selected int64
+	err = queryer.QueryRowContext(ctx, `SELECT mailbox_id,thread_name,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at FROM agent_sessions WHERE agent_name=? AND harness=? AND external_session_id=?`, name, identity.Harness, identity.ExternalSessionID).Scan(
+		&session.MailboxID, &session.ThreadName, &session.Context.Directory, &session.Context.GitCommonDir, &session.Context.RemoteIdentity, &session.Context.Worktree, &session.Context.Branch, &created, &selected)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.AgentSession{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.AgentSession{}, err
+	}
+	session.AgentName, session.Harness, session.SessionID = name, identity.Harness, identity.ExternalSessionID
+	session.CreatedAt, session.LastSelectedAt = time.UnixMilli(created).UTC(), time.UnixMilli(selected).UTC()
+	session.Current = agent.Harness == identity.Harness && agent.CurrentSessionID == identity.ExternalSessionID
+	session.AgentActive = agent.Active
+	return session, nil
+}
+
+func (s *SQLite) currentAgentSessionMetadataEvent(ctx context.Context, name string, identity model.SessionIdentity) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT raw,event_type FROM canonical_events WHERE event_type IN (?,?) ORDER BY created_at,event_id`, event.TypeAgentSessionSelect, event.TypeAgentSessionRename)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var latest string
+	for rows.Next() {
+		var raw []byte
+		var kind event.Type
+		if err := rows.Scan(&raw, &kind); err != nil {
+			return "", err
+		}
+		inspection := event.Inspect(raw)
+		if inspection.Status != event.StatusProjected {
+			continue
+		}
+		matches := false
+		if kind == event.TypeAgentSessionSelect {
+			var payload event.AgentSessionPayload
+			matches = json.Unmarshal(inspection.Event.Content.Payload, &payload) == nil && payload.Name == name && payload.Harness == identity.Harness && payload.ExternalSessionID == identity.ExternalSessionID
+		} else {
+			var payload event.AgentSessionRenamePayload
+			matches = json.Unmarshal(inspection.Event.Content.Payload, &payload) == nil && payload.Name == name && payload.Harness == identity.Harness && payload.ExternalSessionID == identity.ExternalSessionID
+		}
+		if matches {
+			latest = inspection.Event.ID()
+		}
+	}
+	return latest, rows.Err()
 }
 
 func (s *SQLite) currentAgentSelectionEvent(ctx context.Context, name, harness, sessionID string) (string, error) {

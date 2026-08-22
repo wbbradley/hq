@@ -91,6 +91,7 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `agent.name.claim` | Installation-private; `name`, `mailbox_id` | Permanently claims a local lowercase agent name for one agent mailbox. |
 | `agent.retire` | Installation-private; `name`, `mailbox_id` | Retires a name and mailbox without permitting later reuse. |
 | `agent.session.select` | Installation-private; name, mailbox, harness, external session ID, and exact repository context | Selects the named agent's current harness session while retaining rebuildable per-session directory history and selection times. |
+| `agent.session.rename` | Installation-private; agent name, mailbox, harness, external session ID, and thread name | Sets or clears mutable display metadata for an existing bound session without selecting it or changing runtime state. |
 | `question` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts a question thread. An account question projects into every active device's human mailbox. |
 | `answer` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Adds one answer to a question thread. An account answer directly names the source agent and also replicates account state. |
 | `message` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts an async message thread. |

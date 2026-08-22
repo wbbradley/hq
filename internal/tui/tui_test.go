@@ -864,6 +864,68 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 	}
 }
 
+func TestAgentManagerRenamesThreadWithoutSelectingOrLaunchingIt(t *testing.T) {
+	base, ctx, mailbox := openStore(t)
+	directory := t.TempDir()
+	if _, err := base.CreateNamedAgent(ctx, "fred", mailbox.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"thread-one", "thread-two"} {
+		if _, err := base.SelectNamedAgentSession(ctx, "fred", model.SessionIdentity{Harness: "codex", ExternalSessionID: id}, model.RepositoryContext{Directory: directory + "/" + id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent, _ := base.GetNamedAgent(ctx, "fred")
+	sessions, _ := base.ListNamedAgentSessions(ctx, "fred")
+	m := app{ctx: ctx, store: &runtimeTestStore{testDomainStore: base}, managingAgents: true, editor: textarea.New(), agentManager: agentManager{stage: chooseRuntimeSession, agent: agent, sessions: sessions}}
+	for index, session := range sessions {
+		if session.SessionID == "thread-one" {
+			m.agentManager.cursor = index + 1
+		}
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = updated.(app)
+	if cmd != nil || m.agentManager.stage != enterThreadName {
+		t.Fatalf("rename stage = %v, cmd=%v", m.agentManager.stage, cmd)
+	}
+	for _, character := range "Build auth" {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: character, Text: string(character)})
+		m = updated.(app)
+	}
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if cmd == nil {
+		t.Fatal("rename did not run asynchronously")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(app)
+	renamed, err := base.ListNamedAgentSessions(ctx, "fred")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found domain.AgentSession
+	for _, session := range renamed {
+		if session.SessionID == "thread-one" {
+			found = session
+		}
+	}
+	if found.ThreadName != "Build auth" || found.Current || agent.CurrentSessionID != "thread-two" || len(m.store.(*runtimeTestStore).launches) != 0 {
+		t.Fatalf("rename result = %#v, agent=%#v", found, agent)
+	}
+	view := m.renderAgentManager()
+	if !strings.Contains(view, "Build auth") || !strings.Contains(view, "thread-one") || !strings.Contains(view, filepath.Base(directory)) {
+		t.Fatalf("renamed session details missing: %q", view)
+	}
+}
+
+func TestThreadNameAnnotatesExpandedCodexDetails(t *testing.T) {
+	m := app{threadSessions: map[string]domain.AgentSession{"codex\x00thread-123": {Harness: "codex", SessionID: "thread-123", ThreadName: "Fix login", Context: model.RepositoryContext{Directory: "/repo"}}}}
+	details, hidden := m.presentationDetails("Kind: status\nCodex thread: thread-123", true)
+	if hidden || !strings.Contains(details, "Codex thread: Fix login (thread-123)") {
+		t.Fatalf("expanded details = %q, hidden=%t", details, hidden)
+	}
+}
+
 func TestNewMessageToSelfIsRootNoteAndDoesNotArchiveSelection(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d81", agent.ID, model.HumanMailboxID, "Keep this visible")

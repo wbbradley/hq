@@ -33,6 +33,8 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 			return []domain.NamedAgent{}, nil
 		case domainrpc.ListAgentSessionsMethod:
 			return []domain.AgentSession{}, nil
+		case domainrpc.RenameAgentSessionMethod:
+			return domain.AgentSession{}, nil
 		case domainrpc.LaunchCodexAgentMethod, domainrpc.StopCodexAgentMethod, domainrpc.CodexRuntimeMethod:
 			return domain.CodexRuntime{}, nil
 		case domainrpc.GetMethod, domainrpc.ClaimMethod:
@@ -67,6 +69,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_, _ = client.GetNamedAgent(ctx, "fred")
 	_, _ = client.ListNamedAgents(ctx)
 	_, _ = client.ListNamedAgentSessions(ctx, "fred")
+	_, _ = client.RenameNamedAgentSession(ctx, "fred", model.SessionIdentity{Harness: "codex", ExternalSessionID: "thread"}, "Build auth")
 	_ = client.RetireNamedAgent(ctx, "fred")
 	_, _ = client.SelectNamedAgentSession(ctx, "fred", model.SessionIdentity{}, model.RepositoryContext{})
 	_, _ = client.AcquireNamedAgent(ctx, "fred", "owner", time.Minute)
@@ -101,7 +104,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_, _ = client.Subscribe(ctx, domain.TopicMessages)
 	want := []string{
 		domainrpc.HumanMailboxMethod, domainrpc.ResolveMailboxMethod, domainrpc.FindMailboxesMethod,
-		domainrpc.CreateNamedAgentMethod, domainrpc.GetNamedAgentMethod, domainrpc.ListNamedAgentsMethod, domainrpc.ListAgentSessionsMethod,
+		domainrpc.CreateNamedAgentMethod, domainrpc.GetNamedAgentMethod, domainrpc.ListNamedAgentsMethod, domainrpc.ListAgentSessionsMethod, domainrpc.RenameAgentSessionMethod,
 		domainrpc.RetireNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod, domainrpc.ReleaseAgentMethod,
 		domainrpc.LaunchCodexAgentMethod, domainrpc.StopCodexAgentMethod, domainrpc.CodexRuntimeMethod,
 		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod,
