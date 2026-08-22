@@ -75,6 +75,7 @@ func TestEveryKnownEventTypeValidates(t *testing.T) {
 		{"message", Content{Type: TypeMessage, InstallationID: installationA, Sender: localSender, Recipient: remoteHuman, Scope: ScopePeerAddressed, Payload: mustPayload(t, TextPayload{Body: "message"})}},
 		{"cancel", Content{Type: TypeThreadCancel, InstallationID: installationA, Sender: localSender, ThreadID: threadB, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TargetPayload{Reason: "done"})}},
 		{"archive", Content{Type: TypeMessageArchive, InstallationID: installationA, Sender: localSender, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TargetPayload{TargetEventID: parentA})}},
+		{"restore", Content{Type: TypeMessageRestore, InstallationID: installationA, Sender: localSender, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TargetPayload{TargetEventID: parentA})}},
 		{"reject", Content{Type: TypeMessageReject, InstallationID: installationA, Sender: localSender, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TargetPayload{TargetEventID: parentA, Reason: "wrong target"})}},
 		{"peer trust", control(TypePeerTrust, mustPayload(t, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Name: "desktop", Relays: []string{"wss://relay.example"}}))},
 		{"peer distrust", control(TypePeerDistrust, mustPayload(t, PeerPayload{InstallationID: installationB}))},

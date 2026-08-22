@@ -70,7 +70,7 @@ func encodeMutationError(err error) *localwire.RPCError {
 }
 
 var mutationMethods = map[string]bool{
-	ResolveMailboxMethod: true, CreateMethod: true, ReplyMethod: true, ArchiveMethod: true,
+	ResolveMailboxMethod: true, CreateMethod: true, ReplyMethod: true, ArchiveMethod: true, RestoreMethod: true,
 	ClaimMethod: true, CompleteMethod: true, ReleaseMethod: true, TrustPeerMethod: true,
 	DistrustPeerMethod: true, CreateHumanInviteMethod: true, JoinHumanInviteMethod: true,
 	RevokeHumanDeviceMethod: true, SetMailboxShareMethod: true, AddRelayMethod: true,
@@ -148,6 +148,12 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return nil, s.Store.Archive(ctx, request.ID)
+	case RestoreMethod:
+		var request MutationIDRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return nil, s.Store.Restore(ctx, request.ID)
 	case ClaimMethod:
 		var request ClaimRequest
 		if err := decodeRequest(raw, &request); err != nil {

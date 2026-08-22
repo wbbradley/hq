@@ -112,6 +112,7 @@ type Operations interface {
 	Get(context.Context, string) (model.Message, error)
 	List(context.Context, model.Filter) ([]model.Message, error)
 	Archive(context.Context, string) error
+	Restore(context.Context, string) error
 	Claim(context.Context, Claim, string) (model.Message, error)
 	Complete(context.Context, string, string) error
 	Release(context.Context, string, string) error

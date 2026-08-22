@@ -18,6 +18,7 @@ const (
 	GetMethod               = "message/get"
 	ListMethod              = "message/list"
 	ArchiveMethod           = "message/archive"
+	RestoreMethod           = "message/restore"
 	ClaimMethod             = "delivery/claim"
 	CompleteMethod          = "delivery/complete"
 	ReleaseMethod           = "delivery/release"

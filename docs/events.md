@@ -93,6 +93,7 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `message` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts an async message thread. |
 | `thread.cancel` | Private, peer-addressed, or account-addressed; optional `reason` | Records cancellation without deleting answers. |
 | `message.archive` | Installation-private or account-addressed; `target_event_id`, optional `reason` | Hides a message from open views. |
+| `message.restore` | Installation-private or account-addressed; `target_event_id` | Causally supersedes an archive and returns the message to open views. |
 | `message.reject` | Installation-private or account-addressed; `target_event_id`, optional `reason` | Records rejection and archives the message. |
 | `peer.trust` | Installation-private; peer installation ID, signer key ID, optional name and relay hints | Allows signed peer traffic. |
 | `peer.distrust` | Installation-private; peer installation ID | Stops later peer projection. |

@@ -165,8 +165,9 @@ hq
 The default view shows open messages in the reserved `human` mailbox. Use these keys:
 
 - `j` / `k`: move
-- Enter: reply to an open inbox message; Enter again submits
-- `d`: archive the selected open inbox message without replying
+- Enter: reply to the selected open Codex turn; Enter again submits
+- `d`: archive all visible messages in the selected turn without replying
+- `u`: undo the most recent archive action
 - `n`: write a new message to the agent session tied to the selected row
 - Shift+Enter / Ctrl+J: add a line break while editing
 - `s`: toggle sent messages
@@ -176,7 +177,9 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - `r`: refresh
 - `q`: quit
 
-Sent and Archived are independent filters. This lets the human view the open inbox, add sent messages, add archived messages, or show all three sets together. Agent sessions use the repository directory name in friendly labels such as `codex · hq`; opaque mailbox and message IDs stay hidden until technical details are expanded. Codex final answers are emphasized, while progress updates, statuses, and one-shot notices are quieter. Each detail panel also shows the local git branch, compact remotes, and an asynchronously loaded open pull request when `gh` credentials are available.
+Sent and Archived are independent filters. This lets the human view the open inbox, add sent messages, add archived messages, or show all three sets together. Messages carrying the same Codex thread and turn correlation are coalesced into one incoming row, including the final answer. The selected turn's detail pane shows every part chronologically beneath a timestamp divider and updates live as new parts arrive, without disturbing an active draft. Replies retain the Codex thread and turn correlation and remain bound to the turn's reply target. The inbox region is capped at 60% of terminal height; while composing on a sufficiently wide terminal, the reply pane sits to the right of the message pane.
+
+Incoming rows begin directly with a friendly sender label such as `codex · hq`. Detail panels combine the message kind and sender in the upper border, for example `[an update from codex · hq]` or `[a final answer from codex · hq]`. The source device, repository path, git branch, compact remotes, asynchronously loaded open pull request, and opaque message identifiers stay hidden until technical details are expanded with `i`; the collapsed-state hint is right-aligned in the panel's lower border. Codex final answers are emphasized, while progress updates, statuses, and one-shot notices are quieter.
 
 When stdin or stdout is not a terminal, bare `hq` lists open messages in the human mailbox for the current work directory.
 

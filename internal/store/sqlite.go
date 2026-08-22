@@ -776,7 +776,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		}
 		var archived any
 		if message.Archived {
-			archived = archiveTime(state, eventID)
+			archived = message.ArchivedAt.UnixMilli()
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, eventID, message.ThreadID, message.Type, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
@@ -909,20 +909,6 @@ func firstMailboxTime(state event.State, mailboxID string) int64 {
 		}
 	}
 	return time.Unix(first, 0).UTC().UnixMilli()
-}
-
-func archiveTime(state event.State, target string) int64 {
-	var latest int64
-	for _, record := range state.Records {
-		if record.Status != event.StatusProjected || (record.Event.Content.Type != event.TypeMessageArchive && record.Event.Content.Type != event.TypeMessageReject) {
-			continue
-		}
-		var payload event.TargetPayload
-		if json.Unmarshal(record.Event.Content.Payload, &payload) == nil && payload.TargetEventID == target && record.Event.Nostr.CreatedAt > latest {
-			latest = record.Event.Nostr.CreatedAt
-		}
-	}
-	return time.Unix(latest, 0).UTC().UnixMilli()
 }
 
 func mailboxLabel(kind model.MailboxKind, harness, id string) string {
@@ -1287,7 +1273,11 @@ func (s *SQLite) Archive(ctx context.Context, id string) error {
 		return ErrAlreadyHandled
 	}
 	payload, _ := event.MarshalPayload(event.TargetPayload{TargetEventID: record.eventID})
-	parents := []string{record.eventID}
+	stateParents, err := s.messageStateParents(ctx, record.eventID)
+	if err != nil {
+		return err
+	}
+	parents := uniqueSorted(append([]string{record.eventID}, stateParents...))
 	scope := event.ScopeInstallationPrivate
 	var audience *event.Audience
 	if record.message.AudienceAccountID != "" {
@@ -1300,6 +1290,97 @@ func (s *SQLite) Archive(ctx context.Context, id string) error {
 	}
 	content := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Scope: scope, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, nil, nil)
+}
+
+func (s *SQLite) Restore(ctx context.Context, id string) error {
+	record, err := s.messageRecord(ctx, id)
+	if err != nil {
+		return err
+	}
+	if record.message.ArchivedAt == nil || record.message.Rejected || record.message.RecipientMailboxID != model.HumanMailboxID {
+		return ErrAlreadyHandled
+	}
+	stateParents, err := s.messageStateParents(ctx, record.eventID)
+	if err != nil {
+		return err
+	}
+	parents := uniqueSorted(append([]string{record.eventID}, stateParents...))
+	payload, _ := event.MarshalPayload(event.TargetPayload{TargetEventID: record.eventID})
+	scope := event.ScopeInstallationPrivate
+	var audience *event.Audience
+	if record.message.AudienceAccountID != "" {
+		account, membership, _, err := s.localAccountAction(ctx, record.message.AudienceAccountID)
+		if err != nil {
+			return err
+		}
+		parents = uniqueSorted(append(parents, membership...))
+		audience, scope = &event.Audience{HumanAccountID: account.ID}, event.ScopeAccountAddressed
+	}
+	content := event.Content{Type: event.TypeMessageRestore, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Scope: scope, Payload: payload}
+	return s.appendContents(ctx, []event.Content{content}, nil, nil)
+}
+
+func (s *SQLite) messageStateParents(ctx context.Context, targetEventID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT raw FROM canonical_events WHERE reduction_status = ?`, event.StatusProjected)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	parents := make(map[string][]string)
+	var candidates []string
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		inspection := event.Inspect(raw)
+		if inspection.Status != event.StatusProjected {
+			continue
+		}
+		item := inspection.Event
+		parents[item.ID()] = item.Content.Parents
+		if item.Content.Type != event.TypeMessageArchive && item.Content.Type != event.TypeMessageRestore && item.Content.Type != event.TypeMessageReject {
+			continue
+		}
+		var payload event.TargetPayload
+		if json.Unmarshal(item.Content.Payload, &payload) == nil && payload.TargetEventID == targetEventID {
+			candidates = append(candidates, item.ID())
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	isAncestor := func(ancestor, descendant string) bool {
+		seen := make(map[string]bool)
+		stack := append([]string(nil), parents[descendant]...)
+		for len(stack) > 0 {
+			id := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if id == ancestor {
+				return true
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			stack = append(stack, parents[id]...)
+		}
+		return false
+	}
+	var maximal []string
+	for _, candidate := range candidates {
+		shadowed := false
+		for _, other := range candidates {
+			if candidate != other && isAncestor(candidate, other) {
+				shadowed = true
+				break
+			}
+		}
+		if !shadowed {
+			maximal = append(maximal, candidate)
+		}
+	}
+	return uniqueSorted(maximal), nil
 }
 
 func (s *SQLite) Claim(ctx context.Context, claim Claim, token string) (model.Message, error) {

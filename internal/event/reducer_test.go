@@ -385,6 +385,23 @@ func TestArchiveAndRejectRetainCanonicalMessage(t *testing.T) {
 	}
 }
 
+func TestRestoreSupersedesArchiveAndCanBeArchivedAgain(t *testing.T) {
+	message := signedText(t, TypeMessage, installationA, secretA,
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "message", "", nil, 1)
+	archive := localMessageState(t, TypeMessageArchive, message.ID(), []string{message.ID()}, 2)
+	restore := localMessageState(t, TypeMessageRestore, message.ID(), []string{message.ID(), archive.ID()}, 3)
+	state := Reduce(wires(message, archive, restore), localPolicy())
+	if projected := state.Messages[message.ID()]; projected.Archived || !projected.ArchivedAt.IsZero() {
+		t.Fatalf("restored message = %#v", projected)
+	}
+	rearchive := localMessageState(t, TypeMessageArchive, message.ID(), []string{message.ID(), restore.ID()}, 4)
+	state = Reduce(wires(message, archive, restore, rearchive), localPolicy())
+	if projected := state.Messages[message.ID()]; !projected.Archived || !projected.ArchivedAt.Equal(time.Unix(4, 0).UTC()) {
+		t.Fatalf("rearchived message = %#v", projected)
+	}
+}
+
 func TestMessageStateTargetMustBeItsCausalAncestor(t *testing.T) {
 	first := signedText(t, TypeMessage, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},

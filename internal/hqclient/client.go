@@ -189,6 +189,10 @@ func (c *Client) Archive(ctx context.Context, id string) error {
 	return c.mutatingCall(ctx, domainrpc.ArchiveMethod, func(mutationID string) any { return domainrpc.MutationIDRequest{MutationID: mutationID, ID: id} }, nil)
 }
 
+func (c *Client) Restore(ctx context.Context, id string) error {
+	return c.mutatingCall(ctx, domainrpc.RestoreMethod, func(mutationID string) any { return domainrpc.MutationIDRequest{MutationID: mutationID, ID: id} }, nil)
+}
+
 func (c *Client) Claim(ctx context.Context, claim domain.Claim, token string) (model.Message, error) {
 	var result model.Message
 	err := c.mutatingCall(ctx, domainrpc.ClaimMethod, func(id string) any { return domainrpc.ClaimRequest{MutationID: id, Claim: claim, Token: token} }, &result)

@@ -60,6 +60,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_, _ = client.Get(ctx, "message")
 	_, _ = client.List(ctx, model.Filter{})
 	_ = client.Archive(ctx, "message")
+	_ = client.Restore(ctx, "message")
 	_, _ = client.Claim(ctx, domain.Claim{}, "token")
 	_ = client.Complete(ctx, "message", "token")
 	_ = client.Release(ctx, "message", "token")
@@ -81,7 +82,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	want := []string{
 		domainrpc.HumanMailboxMethod, domainrpc.ResolveMailboxMethod, domainrpc.FindMailboxesMethod,
 		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod,
-		domainrpc.ArchiveMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
+		domainrpc.ArchiveMethod, domainrpc.RestoreMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
 		domainrpc.TrustPeerMethod, domainrpc.DistrustPeerMethod, domainrpc.ListPeersMethod,
 		domainrpc.HumanAccountMethod, domainrpc.HumanDevicesMethod, domainrpc.CreateHumanInviteMethod,
 		domainrpc.JoinHumanInviteMethod, domainrpc.RevokeHumanDeviceMethod, domainrpc.SetMailboxShareMethod,

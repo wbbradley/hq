@@ -48,6 +48,7 @@ func (s *recordingOperations) List(context.Context, model.Filter) ([]model.Messa
 	return nil, s.record(ListMethod)
 }
 func (s *recordingOperations) Archive(context.Context, string) error { return s.record(ArchiveMethod) }
+func (s *recordingOperations) Restore(context.Context, string) error { return s.record(RestoreMethod) }
 func (s *recordingOperations) Claim(context.Context, domain.Claim, string) (model.Message, error) {
 	return model.Message{}, s.record(ClaimMethod)
 }
@@ -111,6 +112,7 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{GetMethod, IDRequest{}},
 		{ListMethod, FilterRequest{}},
 		{ArchiveMethod, MutationIDRequest{MutationID: mutationID}},
+		{RestoreMethod, MutationIDRequest{MutationID: mutationID}},
 		{ClaimMethod, ClaimRequest{MutationID: mutationID}},
 		{CompleteMethod, LeaseRequest{MutationID: mutationID}},
 		{ReleaseMethod, LeaseRequest{MutationID: mutationID}},

@@ -196,16 +196,24 @@ func TestRepositoryContextShowsRemotesBeforePullState(t *testing.T) {
 	updated, _ = m.Update(pullMsg{questionID: item.ID, err: repoctx.ErrUnavailable})
 	m = updated.(app)
 	view := m.View().Content
-	if !strings.Contains(view, "source desktop") || strings.Contains(view, item.SenderInstallationID) {
-		t.Fatalf("source context missing: %q", view)
+	for _, hidden := range []string{"source desktop", "git feature", "origin: wbbradley/hq", "[gh unavailable]", item.Context.Directory, item.SenderInstallationID} {
+		if strings.Contains(view, hidden) {
+			t.Fatalf("collapsed context exposed %q: %q", hidden, view)
+		}
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
+	m = updated.(app)
+	view = m.View().Content
+	for _, shown := range []string{"source desktop", "git feature", "origin: wbbradley/hq", "[gh unavailable]", item.Context.Directory, "sender installation ID: " + item.SenderInstallationID} {
+		if !strings.Contains(view, shown) {
+			t.Fatalf("expanded context omitted %q: %q", shown, view)
+		}
 	}
 	remoteAt, pullAt := strings.Index(view, "origin: wbbradley/hq"), strings.Index(view, "[gh unavailable]")
 	if remoteAt < 0 || pullAt < 0 || remoteAt > pullAt {
 		t.Fatalf("context order: %q", view)
 	}
-	updated, _ = m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
-	m = updated.(app)
-	if view = m.View().Content; !strings.Contains(view, "sender installation ID: "+item.SenderInstallationID) {
+	if !strings.Contains(view, "sender installation ID: "+item.SenderInstallationID) {
 		t.Fatalf("expanded source context missing: %q", view)
 	}
 	updated, _ = m.Update(branchMsg{message: model.Message{ID: "stale"}, branch: "wrong", err: errors.New("stale")})
@@ -268,6 +276,14 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 	if !strings.Contains(view, "Choose one:") || !strings.Contains(view, "- accept") || !strings.Contains(view, "technical details hidden · press i to show") {
 		t.Fatalf("collapsed view lost human details: %q", view)
 	}
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "technical details hidden · press i to show") {
+			labelEnd := strings.Index(line, "technical details hidden") + len("technical details hidden · press i to show")
+			if !strings.Contains(line, "╰") || lipgloss.Width(line[labelEnd:]) > 3 {
+				t.Fatalf("technical-details hint is not right-aligned on bottom border: %q", line)
+			}
+		}
+	}
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
 	view = updated.(app).View().Content
@@ -278,10 +294,116 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 	}
 }
 
+func TestMessagePanelCombinesKindAndSenderInBorder(t *testing.T) {
+	item := message("message-id", testAgentID, model.HumanMailboxID, "Working on it")
+	item.Context.Directory = "/work/repo"
+	item.Details = "Kind: update"
+	view := (app{messages: []model.Message{item}}).View().Content
+	lines := strings.Split(view, "\n")
+	bodyLine := -1
+	titleOnBorder := false
+	for i, line := range lines {
+		switch {
+		case strings.Contains(line, "╭") && strings.Contains(line, "[an update from codex · repo]"):
+			titleOnBorder = true
+		case strings.Contains(line, "Working on it") && strings.Contains(line, "│"):
+			bodyLine = i
+		}
+	}
+	if !titleOnBorder || bodyLine < 0 {
+		t.Fatalf("message panel did not combine kind and sender in border: %q", view)
+	}
+	if strings.Contains(lines[bodyLine], "[update]") || strings.Contains(view, "From: codex · repo") {
+		t.Fatalf("presentation kind remained inline with body: %q", view)
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "›") && strings.Contains(line, "codex · repo") && strings.Contains(line, "inbox ←") {
+			t.Fatalf("incoming row retained inbox arrow: %q", line)
+		}
+	}
+
+	item.Details = "Kind: final-answer"
+	view = (app{messages: []model.Message{item}}).View().Content
+	if !strings.Contains(view, "[a final answer from codex · repo]") || strings.Contains(view, "From: codex · repo") {
+		t.Fatalf("final-answer border title: %q", view)
+	}
+}
+
+func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
+	created := time.Date(2026, 8, 21, 15, 4, 5, 0, time.Local)
+	question := message("question", testAgentID, model.HumanMailboxID, "Which approach?")
+	question.CreatedAt = created
+	question.Details = "Codex thread: thread-1\nCodex turn: turn-1\nCodex request: request-1"
+	update := message("update", testAgentID, model.HumanMailboxID, "First update")
+	update.CreatedAt = created.Add(time.Second)
+	update.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	final := message("final", testAgentID, model.HumanMailboxID, "Finished")
+	final.CreatedAt = created.Add(2 * time.Second)
+	final.Details = "Kind: final-answer\nCodex thread: thread-1\nCodex turn: turn-1"
+
+	m := app{inbox: []model.Message{final, update, question}, editor: textarea.New(), width: 120, height: 30}
+	m.setMessages()
+	if len(m.groups) != 1 || len(m.messages) != 1 || m.messages[0].ID != final.ID {
+		t.Fatalf("turn grouping = %#v, representatives = %#v", m.groups, m.messages)
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if !m.answering || m.answerID != question.ID {
+		t.Fatalf("reply target = %q; want correlated question %q", m.answerID, question.ID)
+	}
+	m.editor.SetValue("draft survives")
+
+	late := message("late", testAgentID, model.HumanMailboxID, "Late update")
+	late.CreatedAt = created.Add(3 * time.Second)
+	late.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	updated, _ = m.Update(loadedMsg{inbox: []model.Message{late, final, update, question}})
+	m = updated.(app)
+	view := m.View().Content
+	if m.editor.Value() != "draft survives" || m.answerID != question.ID || !strings.Contains(view, "Late update") {
+		t.Fatalf("live turn refresh lost draft, binding, or update: %q", view)
+	}
+	for _, part := range []model.Message{question, update, final, late} {
+		if timestamp := part.CreatedAt.Local().Format("Jan 2, 3:04:05 PM"); !strings.Contains(view, timestamp) {
+			t.Fatalf("turn view omitted timestamp %q: %q", timestamp, view)
+		}
+	}
+	if !strings.Contains(view, "[a final answer from codex · repo]") {
+		t.Fatalf("coalesced final answer did not determine turn treatment: %q", view)
+	}
+}
+
+func TestListHeightAndHorizontalReplyLayout(t *testing.T) {
+	if start, end := listWindow(100, 50, 20); end-start > 10 {
+		t.Fatalf("20-row TUI displayed %d inbox rows; want at most 10 after header", end-start)
+	}
+	item := message("message", testAgentID, model.HumanMailboxID, "Body")
+	item.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	editor := textarea.New()
+	editor.Focus()
+	m := app{
+		messages: []model.Message{item}, answering: true, answerID: item.ID,
+		answerGroupKey: messageGroupKey(item), answerQ: item, editor: editor, width: 120, height: 30,
+	}
+	view := m.View().Content
+	foundSideBySide := false
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Count(line, "╭") == 2 && strings.Contains(line, "[reply]") {
+			foundSideBySide = true
+			if lipgloss.Width(line) > m.width {
+				t.Fatalf("side-by-side panes width = %d; want at most %d", lipgloss.Width(line), m.width)
+			}
+		}
+	}
+	if !foundSideBySide {
+		t.Fatalf("reply pane was not rendered to the right of message pane: %q", view)
+	}
+}
+
 func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", agent.ID, model.HumanMailboxID, "Question")
 	inbound.SenderLabel = agent.Label
+	inbound.Details = "Codex thread: thread-1\nCodex turn: turn-1\nCodex request: request-1"
 	if err := s.Create(ctx, inbound); err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +421,7 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(replies) != 1 || replies[0].RecipientMailboxID != agent.ID || replies[0].Body != "Answer" {
+	if len(replies) != 1 || replies[0].RecipientMailboxID != agent.ID || replies[0].Body != "Answer" || replies[0].Details != "Codex thread: thread-1\nCodex turn: turn-1" {
 		t.Fatalf("replies = %#v", replies)
 	}
 
@@ -351,6 +473,56 @@ func TestDArchivesSelectionWithoutReply(t *testing.T) {
 	}
 	if len(replies) != 0 {
 		t.Fatalf("replies = %#v", replies)
+	}
+}
+
+func TestUUndoesTurnArchive(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d70", agent.ID, model.HumanMailboxID, "First")
+	first.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	second := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d71", agent.ID, model.HumanMailboxID, "Second")
+	second.CreatedAt = first.CreatedAt.Add(time.Second)
+	second.Details = "Kind: final-answer\nCodex thread: thread-1\nCodex turn: turn-1"
+	for _, item := range []model.Message{first, second} {
+		if err := s.Create(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := app{ctx: ctx, store: s, inbox: []model.Message{second, first}, editor: textarea.New()}
+	m.setMessages()
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if cmd == nil {
+		t.Fatal("d did not schedule grouped archive")
+	}
+	m = updated.(app)
+	archiveResult := cmd().(archivedMsg)
+	if archiveResult.err != nil || len(archiveResult.messageIDs) != 2 {
+		t.Fatalf("archive result = %#v", archiveResult)
+	}
+	updated, _ = m.Update(archiveResult)
+	m = updated.(app)
+	if len(m.undoStack) != 1 || !strings.Contains(m.undoNotice, "press u to undo") {
+		t.Fatalf("undo state after archive = %#v, %q", m.undoStack, m.undoNotice)
+	}
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: 'u', Text: "u"})
+	if cmd == nil {
+		t.Fatal("u did not schedule restore")
+	}
+	m = updated.(app)
+	restoreResult := cmd().(restoredMsg)
+	if restoreResult.err != nil {
+		t.Fatal(restoreResult.err)
+	}
+	updated, _ = m.Update(restoreResult)
+	m = updated.(app)
+	if len(m.undoStack) != 0 || !strings.Contains(m.undoNotice, "restored 2") {
+		t.Fatalf("undo state after restore = %#v, %q", m.undoStack, m.undoNotice)
+	}
+	for _, item := range []model.Message{first, second} {
+		restored, err := s.Get(ctx, item.ID)
+		if err != nil || restored.ArchivedAt != nil {
+			t.Fatalf("message %s was not restored: %#v, %v", item.ID, restored, err)
+		}
 	}
 }
 

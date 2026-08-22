@@ -115,7 +115,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if err := validateTargetPayload(content.Payload, false); err != nil {
 			return StatusInvalid, err
 		}
-	case TypeMessageArchive, TypeMessageReject:
+	case TypeMessageArchive, TypeMessageRestore, TypeMessageReject:
 		if content.Scope != ScopeInstallationPrivate && content.Scope != ScopeAccountAddressed {
 			return StatusInvalid, errors.New("message state event must be installation-private or account-addressed")
 		}
@@ -285,7 +285,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 func knownType(kind Type) bool {
 	switch kind {
 	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeQuestion, TypeAnswer, TypeMessage,
-		TypeThreadCancel, TypeMessageArchive, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
+		TypeThreadCancel, TypeMessageArchive, TypeMessageRestore, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
 		TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountCreate, TypeHumanAccountSelect,
 		TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke:
 		return true

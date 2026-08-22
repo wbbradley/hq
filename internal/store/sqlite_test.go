@@ -293,6 +293,22 @@ func TestMailboxFilters(t *testing.T) {
 	if err := s.Archive(ctx, outbound.ID); !errors.Is(err, ErrAlreadyHandled) {
 		t.Fatalf("archive agent message = %v", err)
 	}
+	if err := s.Archive(ctx, inbound.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Restore(ctx, inbound.ID); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := s.Get(ctx, inbound.ID)
+	if err != nil || restored.ArchivedAt != nil {
+		t.Fatalf("restored message = %#v, %v", restored, err)
+	}
+	if err := s.Restore(ctx, inbound.ID); !errors.Is(err, ErrAlreadyHandled) {
+		t.Fatalf("restore open message = %v", err)
+	}
+	if err := s.Archive(ctx, inbound.ID); err != nil {
+		t.Fatalf("rearchive restored message: %v", err)
+	}
 }
 
 func TestVersionTwoDataIsDestroyed(t *testing.T) {

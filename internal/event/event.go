@@ -40,6 +40,7 @@ const (
 	TypeMessage            Type = "message"
 	TypeThreadCancel       Type = "thread.cancel"
 	TypeMessageArchive     Type = "message.archive"
+	TypeMessageRestore     Type = "message.restore"
 	TypeMessageReject      Type = "message.reject"
 	TypePeerTrust          Type = "peer.trust"
 	TypePeerDistrust       Type = "peer.distrust"

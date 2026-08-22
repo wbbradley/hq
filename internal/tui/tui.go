@@ -27,40 +27,59 @@ var (
 	finalStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	selected   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
 	dim        = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	panelEdge  = lipgloss.NewStyle().Foreground(lipgloss.Color("62"))
 	panel      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
 )
 
 type app struct {
-	ctx           context.Context
-	store         domain.Store
-	repo          repoctx.Provider
-	messages      []model.Message
-	inbox         []model.Message
-	sent          []model.Message
-	archived      []model.Message
-	showSent      bool
-	showArchived  bool
-	showStatus    bool
-	showTechnical bool
-	cursor        int
-	width         int
-	height        int
-	answering     bool
-	answerID      string
-	answerQ       model.Message
-	composeTo     string
-	editor        textarea.Model
-	err           error
-	contextID     string
-	branch        string
-	remotes       string
-	pull          string
-	sync          func(context.Context) error
-	syncErr       error
-	network       domain.NetworkStatus
-	changes       <-chan domain.Invalidation
-	states        <-chan domain.ConnectionUpdate
-	connection    domain.ConnectionUpdate
+	ctx            context.Context
+	store          domain.Store
+	repo           repoctx.Provider
+	messages       []model.Message
+	groups         []messageGroup
+	inbox          []model.Message
+	sent           []model.Message
+	archived       []model.Message
+	showSent       bool
+	showArchived   bool
+	showStatus     bool
+	showTechnical  bool
+	cursor         int
+	width          int
+	height         int
+	answering      bool
+	answerID       string
+	answerGroupKey string
+	answerQ        model.Message
+	composeTo      string
+	editor         textarea.Model
+	err            error
+	contextID      string
+	branch         string
+	remotes        string
+	pull           string
+	sync           func(context.Context) error
+	syncErr        error
+	network        domain.NetworkStatus
+	changes        <-chan domain.Invalidation
+	states         <-chan domain.ConnectionUpdate
+	connection     domain.ConnectionUpdate
+	undoStack      []undoAction
+	nextUndoID     uint64
+	undoing        bool
+	undoNotice     string
+}
+
+type messageGroup struct {
+	key      string
+	messages []model.Message
+}
+
+func (g messageGroup) latest() model.Message {
+	if len(g.messages) == 0 {
+		return model.Message{}
+	}
+	return g.messages[len(g.messages)-1]
 }
 
 type loadedMsg struct {
@@ -73,7 +92,20 @@ type loadedMsg struct {
 
 type answeredMsg struct{ err error }
 
-type archivedMsg struct{ err error }
+type undoAction struct {
+	id         uint64
+	messageIDs []string
+}
+
+type archivedMsg struct {
+	messageIDs []string
+	err        error
+}
+
+type restoredMsg struct {
+	action undoAction
+	err    error
+}
 
 type repairMsg struct{}
 
@@ -221,14 +253,55 @@ func (m app) answer() tea.Msg {
 	} else {
 		replyTo := m.answerID
 		message.ReplyTo = &replyTo
+		message.Details = turnCorrelationDetails(m.answerQ)
 		err = m.store.Reply(m.ctx, m.answerID, message)
 	}
 	return answeredMsg{err: err}
 }
 
-func (m app) archive(id string) tea.Cmd {
+func turnCorrelationDetails(message model.Message) string {
+	thread := detailValue(message.Details, "Codex thread:")
+	turn := detailValue(message.Details, "Codex turn:")
+	var lines []string
+	if thread != "" {
+		lines = append(lines, "Codex thread: "+thread)
+	}
+	if turn != "" {
+		lines = append(lines, "Codex turn: "+turn)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m app) archiveGroup(group messageGroup) tea.Cmd {
 	return func() tea.Msg {
-		return archivedMsg{err: m.store.Archive(m.ctx, id)}
+		var archived []string
+		for _, message := range group.messages {
+			if canArchive(message) {
+				if err := m.store.Archive(m.ctx, message.ID); err != nil {
+					return archivedMsg{messageIDs: archived, err: err}
+				}
+				archived = append(archived, message.ID)
+			}
+		}
+		return archivedMsg{messageIDs: archived}
+	}
+}
+
+func (m app) restoreAction(action undoAction) tea.Cmd {
+	return func() tea.Msg {
+		for i := len(action.messageIDs) - 1; i >= 0; i-- {
+			id := action.messageIDs[i]
+			if err := m.store.Restore(m.ctx, id); err != nil {
+				if errors.Is(err, domain.ErrAlreadyHandled) {
+					message, getErr := m.store.Get(m.ctx, id)
+					if getErr == nil && message.ArchivedAt == nil {
+						continue
+					}
+				}
+				return restoredMsg{action: action, err: err}
+			}
+		}
+		return restoredMsg{action: action}
 	}
 }
 
@@ -236,12 +309,13 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.editor.SetWidth(max(20, min(72, msg.Width-6)))
+		_, replyWidth, _ := horizontalPaneWidths(msg.Width)
+		m.editor.SetWidth(max(20, replyWidth-4))
 	case loadedMsg:
-		selectedID := m.selectedID()
+		selectedKey := m.selectedGroupKey()
 		m.inbox, m.sent, m.archived, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.network, msg.err
 		m.setMessages()
-		if index := messageIndex(m.messages, selectedID); index >= 0 {
+		if index := groupIndex(m.groups, selectedKey); index >= 0 {
 			m.cursor = index
 		} else if m.cursor >= len(m.messages) {
 			m.cursor = max(0, len(m.messages)-1)
@@ -307,6 +381,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.answering = false
 			m.answerID = ""
+			m.answerGroupKey = ""
 			m.answerQ = model.Message{}
 			m.composeTo = ""
 			m.editor.Reset()
@@ -314,7 +389,28 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case archivedMsg:
 		m.err = msg.err
+		if len(msg.messageIDs) > 0 {
+			m.nextUndoID++
+			m.undoStack = append(m.undoStack, undoAction{id: m.nextUndoID, messageIDs: msg.messageIDs})
+			if len(m.undoStack) > 20 {
+				m.undoStack = append([]undoAction(nil), m.undoStack[len(m.undoStack)-20:]...)
+			}
+			m.undoNotice = fmt.Sprintf("archived %d message(s) · press u to undo", len(msg.messageIDs))
+		}
+		if msg.err == nil || len(msg.messageIDs) > 0 {
+			return m, tea.Batch(m.load, m.syncNow())
+		}
+	case restoredMsg:
+		m.undoing = false
+		m.err = msg.err
 		if msg.err == nil {
+			for i := len(m.undoStack) - 1; i >= 0; i-- {
+				if m.undoStack[i].id == msg.action.id {
+					m.undoStack = append(m.undoStack[:i], m.undoStack[i+1:]...)
+					break
+				}
+			}
+			m.undoNotice = fmt.Sprintf("restored %d message(s)", len(msg.action.messageIDs))
 			return m, tea.Batch(m.load, m.syncNow())
 		}
 	case tea.PasteMsg:
@@ -335,6 +431,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c", "esc":
 				m.answering = false
 				m.answerID = ""
+				m.answerGroupKey = ""
 				m.answerQ = model.Message{}
 				m.composeTo = ""
 				m.editor.Blur()
@@ -380,25 +477,38 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showTechnical = !m.showTechnical
 			return m, nil
 		case "enter", "a":
-			if len(m.messages) > 0 && canReply(m.messages[m.cursor]) {
+			if group, ok := m.groupAtCursor(); ok && canReplyGroup(group) {
 				m.answering = true
-				m.answerQ = m.messages[m.cursor]
+				m.answerQ = replyTarget(group)
 				m.answerID = m.answerQ.ID
+				m.answerGroupKey = group.key
 				m.composeTo = ""
 				m.editor.Focus()
 				return m, textarea.Blink
 			}
 		case "d":
-			if len(m.messages) > 0 && canArchive(m.messages[m.cursor]) {
-				return m, m.archive(m.messages[m.cursor].ID)
+			if group, ok := m.groupAtCursor(); ok && canArchiveGroup(group) {
+				return m, m.archiveGroup(group)
+			}
+		case "u":
+			if !m.undoing && len(m.undoStack) > 0 {
+				action := m.undoStack[len(m.undoStack)-1]
+				m.undoing = true
+				m.undoNotice = "restoring archived messages…"
+				return m, m.restoreAction(action)
+			}
+			if len(m.undoStack) == 0 {
+				m.undoNotice = "nothing to undo"
 			}
 		case "n":
-			if len(m.messages) > 0 {
-				target := agentMailbox(m.messages[m.cursor])
+			if group, ok := m.groupAtCursor(); ok {
+				representative := group.latest()
+				target := agentMailbox(representative)
 				if target != "" {
 					m.answering = true
-					m.answerQ = m.messages[m.cursor]
+					m.answerQ = representative
 					m.answerID = ""
+					m.answerGroupKey = group.key
 					m.composeTo = target
 					m.editor.Focus()
 					return m, textarea.Blink
@@ -413,12 +523,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *app) setMessages() {
 	seen := make(map[string]bool)
-	m.messages = nil
-	add := func(messages []model.Message) {
-		for _, message := range messages {
+	var allMessages []model.Message
+	add := func(batch []model.Message) {
+		for _, message := range batch {
 			if !seen[message.ID] {
 				seen[message.ID] = true
-				m.messages = append(m.messages, message)
+				allMessages = append(allMessages, message)
 			}
 		}
 	}
@@ -433,20 +543,88 @@ func (m *app) setMessages() {
 	if m.showArchived {
 		add(m.archived)
 	}
-	sort.Slice(m.messages, func(i, j int) bool {
-		if m.messages[i].CreatedAt.Equal(m.messages[j].CreatedAt) {
-			return m.messages[i].ID > m.messages[j].ID
+	m.groups = groupMessages(allMessages)
+	m.messages = make([]model.Message, 0, len(m.groups))
+	for _, group := range m.groups {
+		m.messages = append(m.messages, group.latest())
+	}
+}
+
+func groupMessages(messages []model.Message) []messageGroup {
+	byKey := make(map[string]int)
+	groups := make([]messageGroup, 0, len(messages))
+	for _, message := range messages {
+		key := messageGroupKey(message)
+		index, found := byKey[key]
+		if !found {
+			index = len(groups)
+			byKey[key] = index
+			groups = append(groups, messageGroup{key: key})
 		}
-		return m.messages[i].CreatedAt.After(m.messages[j].CreatedAt)
+		groups[index].messages = append(groups[index].messages, message)
+	}
+	for i := range groups {
+		sort.Slice(groups[i].messages, func(a, b int) bool {
+			left, right := groups[i].messages[a], groups[i].messages[b]
+			if left.CreatedAt.Equal(right.CreatedAt) {
+				return left.ID < right.ID
+			}
+			return left.CreatedAt.Before(right.CreatedAt)
+		})
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		left, right := groups[i].latest(), groups[j].latest()
+		if left.CreatedAt.Equal(right.CreatedAt) {
+			return left.ID > right.ID
+		}
+		return left.CreatedAt.After(right.CreatedAt)
 	})
+	return groups
+}
+
+func messageGroupKey(message model.Message) string {
+	turn := detailValue(message.Details, "Codex turn:")
+	if turn == "" || turn == "(none)" {
+		return "message:" + message.ID
+	}
+	thread := detailValue(message.Details, "Codex thread:")
+	return "turn:" + message.SenderMailboxID + ":" + thread + ":" + turn
+}
+
+func detailValue(details, prefix string) string {
+	for _, line := range strings.Split(details, "\n") {
+		if value, found := strings.CutPrefix(strings.TrimSpace(line), prefix); found {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func (m app) visibleGroups() []messageGroup {
+	if len(m.groups) > 0 || len(m.messages) == 0 {
+		return m.groups
+	}
+	return groupMessages(m.messages)
+}
+
+func (m app) groupAtCursor() (messageGroup, bool) {
+	groups := m.visibleGroups()
+	if m.cursor < 0 || m.cursor >= len(groups) {
+		return messageGroup{}, false
+	}
+	return groups[m.cursor], true
 }
 
 func (m app) withContextCommand() (tea.Model, tea.Cmd) {
 	var q model.Message
 	if m.answering {
-		q = m.answerQ
-	} else if len(m.messages) > 0 {
-		q = m.messages[m.cursor]
+		if group, found := m.groupByKey(m.selectedGroupKey()); found {
+			q = group.latest()
+		} else {
+			q = m.answerQ
+		}
+	} else if group, found := m.groupAtCursor(); found {
+		q = group.latest()
 	}
 	if q.ID == "" || m.repo == nil {
 		m.contextID, m.branch, m.remotes, m.pull = "", "", "", ""
@@ -491,23 +669,34 @@ func formatRemotes(remotes []repoctx.Remote) string {
 	return strings.Join(parts, " · ")
 }
 
-func (m app) selectedID() string {
+func (m app) selectedGroupKey() string {
 	if m.answering {
-		return m.answerQ.ID
+		if m.answerGroupKey == "" && m.answerQ.ID != "" {
+			return messageGroupKey(m.answerQ)
+		}
+		return m.answerGroupKey
 	}
-	if m.cursor >= 0 && m.cursor < len(m.messages) {
-		return m.messages[m.cursor].ID
+	if group, found := m.groupAtCursor(); found {
+		return group.key
 	}
 	return ""
 }
 
-func messageIndex(messages []model.Message, id string) int {
-	for i := range messages {
-		if messages[i].ID == id {
+func groupIndex(groups []messageGroup, key string) int {
+	for i := range groups {
+		if groups[i].key == key {
 			return i
 		}
 	}
 	return -1
+}
+
+func (m app) groupByKey(key string) (messageGroup, bool) {
+	groups := m.visibleGroups()
+	if index := groupIndex(groups, key); index >= 0 {
+		return groups[index], true
+	}
+	return messageGroup{}, false
 }
 
 func canReply(message model.Message) bool {
@@ -516,6 +705,32 @@ func canReply(message model.Message) bool {
 
 func canArchive(message model.Message) bool {
 	return message.RecipientMailboxID == model.HumanMailboxID && message.ArchivedAt == nil
+}
+
+func replyTarget(group messageGroup) model.Message {
+	for i := len(group.messages) - 1; i >= 0; i-- {
+		message := group.messages[i]
+		if canReply(message) && detailValue(message.Details, "Codex request:") != "" {
+			return message
+		}
+	}
+	for i := len(group.messages) - 1; i >= 0; i-- {
+		if canReply(group.messages[i]) {
+			return group.messages[i]
+		}
+	}
+	return model.Message{}
+}
+
+func canReplyGroup(group messageGroup) bool { return replyTarget(group).ID != "" }
+
+func canArchiveGroup(group messageGroup) bool {
+	for _, message := range group.messages {
+		if canArchive(message) {
+			return true
+		}
+	}
+	return false
 }
 
 func agentMailbox(message model.Message) string {
@@ -596,6 +811,21 @@ func presentationLabel(kind string) string {
 	}
 }
 
+func presentationPanelLabel(kind, sender string) string {
+	switch kind {
+	case "update":
+		return "[an update from " + sender + "]"
+	case "final-answer":
+		return "[a final answer from " + sender + "]"
+	case "status":
+		return "[a status from " + sender + "]"
+	case "notice":
+		return "[a notice from " + sender + "]"
+	default:
+		return ""
+	}
+}
+
 func presentationDetails(raw string, expanded bool) (string, bool) {
 	if expanded || raw == "" {
 		return raw, false
@@ -646,6 +876,34 @@ func hasTechnicalIdentifiers(message model.Message) bool {
 	return technicalIdentifiers(message) != ""
 }
 
+func (m app) technicalContext(message model.Message) string {
+	lines := make([]string, 0, 5)
+	if recipient := displayMailboxLabel(message.RecipientLabel, message.Context); recipient != "" {
+		lines = append(lines, "to "+recipient)
+	}
+	if message.Context.Directory != "" {
+		lines = append(lines, "directory "+message.Context.Directory)
+	}
+	if message.SourceDeviceLabel != "" || message.SenderInstallationID != "" {
+		source := message.SourceDeviceLabel
+		if source == "" {
+			source = "installation"
+		}
+		lines = append(lines, "source "+source)
+	}
+	if m.branch != "" {
+		lines = append(lines, "git "+m.branch)
+	}
+	if m.remotes != "" {
+		remote := m.remotes
+		if m.pull != "" {
+			remote += " · " + m.pull
+		}
+		lines = append(lines, remote)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m app) View() tea.View {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("HQ · Mailbox"))
@@ -690,15 +948,18 @@ func (m app) View() tea.View {
 		b.WriteString(panel.Render(formatNetworkStatus(m.network)))
 		b.WriteString("\n\n")
 	}
-	if len(m.messages) == 0 {
+	groups := m.visibleGroups()
+	if len(groups) == 0 {
 		b.WriteString(dim.Render("No messages in this view. Press r to refresh."))
 	} else {
-		for i, message := range m.messages {
-			direction := "inbox ← " + short(displayMailboxLabel(message.SenderLabel, message.Context), 16)
+		start, end := listWindow(len(groups), m.cursor, m.height)
+		for i := start; i < end; i++ {
+			message := groups[i].latest()
+			direction := short(displayMailboxLabel(message.SenderLabel, message.Context), 18)
 			if message.SenderMailboxID == model.HumanMailboxID {
 				direction = "sent → " + short(displayMailboxLabel(message.RecipientLabel, message.Context), 16)
 			}
-			kind := presentationKind(message)
+			kind := groupPresentationKind(groups[i])
 			badge := presentationLabel(kind)
 			if badge != "" {
 				badge += " "
@@ -708,7 +969,7 @@ func (m app) View() tea.View {
 				state += " [archived]"
 			}
 			line := fmt.Sprintf("%-18s %s%s%s", direction, badge, singleLine(message.Body), state)
-			if i == m.cursor && (!m.answering || message.ID == m.answerQ.ID) {
+			if i == m.cursor {
 				b.WriteString(selected.Render("› " + line))
 			} else {
 				switch kind {
@@ -723,83 +984,163 @@ func (m app) View() tea.View {
 			b.WriteByte('\n')
 		}
 	}
-	var detail model.Message
+	var detailGroup messageGroup
+	hasDetail := false
 	if m.answering {
-		detail = m.answerQ
-	} else if len(m.messages) > 0 {
-		detail = m.messages[m.cursor]
+		detailGroup, hasDetail = m.groupByKey(m.selectedGroupKey())
+		if !hasDetail && m.answerQ.ID != "" {
+			detailGroup, hasDetail = messageGroup{key: messageGroupKey(m.answerQ), messages: []model.Message{m.answerQ}}, true
+		}
+	} else {
+		detailGroup, hasDetail = m.groupAtCursor()
 	}
-	if detail.ID != "" {
+	if hasDetail {
 		b.WriteString("\n")
-		var body strings.Builder
-		kind := presentationKind(detail)
-		heading := detail.Body
-		if badge := presentationLabel(kind); badge != "" {
-			heading = badge + " " + heading
+		messageWidth, replyWidth, horizontal := horizontalPaneWidths(m.width)
+		if !m.answering || !horizontal {
+			messageWidth = m.width
 		}
-		switch kind {
-		case "final-answer":
-			body.WriteString(finalStyle.Render(heading))
-		case "update", "status", "notice":
-			body.WriteString(dim.Render(heading))
-		default:
-			body.WriteString(titleStyle.Render(heading))
-		}
-		body.WriteByte('\n')
-		body.WriteString(dim.Render(displayMailboxLabel(detail.SenderLabel, detail.Context) + " → " + displayMailboxLabel(detail.RecipientLabel, detail.Context) + " · " + detail.Context.Directory))
-		if detail.SourceDeviceLabel != "" || detail.SenderInstallationID != "" {
-			body.WriteByte('\n')
-			source := detail.SourceDeviceLabel
-			if source == "" {
-				source = "installation"
+		messagePane := m.renderGroupPanel(detailGroup, messageWidth)
+		if m.answering {
+			replyPane := m.renderReplyPane(replyWidth)
+			if horizontal {
+				b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, messagePane, "  ", replyPane))
+			} else {
+				b.WriteString(messagePane)
+				b.WriteString("\n\n")
+				b.WriteString(replyPane)
 			}
-			body.WriteString(dim.Render("source " + source))
+		} else {
+			b.WriteString(messagePane)
 		}
-		if m.branch != "" {
-			body.WriteByte('\n')
-			body.WriteString(dim.Render("git " + m.branch))
+	}
+	if m.undoNotice != "" {
+		b.WriteString("\n\n")
+		b.WriteString(dim.Render(m.undoNotice))
+	}
+	if !m.answering {
+		b.WriteString("\n\n")
+		b.WriteString(dim.Render("j/k move · enter reply · d archive · u undo · n new · s sent · x archived · v status · i details · r refresh · q quit · live · repair 5m"))
+	}
+	view := tea.NewView(b.String())
+	view.AltScreen = true
+	return view
+}
+
+func listWindow(total, cursor, terminalHeight int) (int, int) {
+	if total == 0 {
+		return 0, 0
+	}
+	limit := total
+	if terminalHeight > 0 {
+		limit = min(total, max(1, terminalHeight*3/5-2))
+	}
+	start := max(0, cursor-limit/2)
+	if start+limit > total {
+		start = total - limit
+	}
+	return start, start + limit
+}
+
+func horizontalPaneWidths(terminalWidth int) (messageWidth, replyWidth int, horizontal bool) {
+	const gap = 2
+	if terminalWidth < 66 {
+		return terminalWidth, max(24, terminalWidth), false
+	}
+	replyWidth = min(72, max(28, terminalWidth*2/5))
+	return terminalWidth - gap - replyWidth, replyWidth, true
+}
+
+func groupPresentationKind(group messageGroup) string {
+	for i := len(group.messages) - 1; i >= 0; i-- {
+		if presentationKind(group.messages[i]) == "final-answer" {
+			return "final-answer"
 		}
-		if m.remotes != "" {
-			body.WriteByte('\n')
-			body.WriteString(dim.Render(m.remotes))
+	}
+	for i := len(group.messages) - 1; i >= 0; i-- {
+		if kind := presentationKind(group.messages[i]); kind != "" {
+			return kind
 		}
-		if m.pull != "" {
-			body.WriteString(dim.Render(" · " + m.pull))
+	}
+	return ""
+}
+
+func (m app) renderGroupPanel(group messageGroup, width int) string {
+	latest := group.latest()
+	kind := groupPresentationKind(group)
+	sender := displayMailboxLabel(latest.SenderLabel, latest.Context)
+	topLabel := presentationPanelLabel(kind, sender)
+	var body strings.Builder
+	if topLabel == "" {
+		body.WriteString(dim.Render("From: " + sender))
+		body.WriteString("\n\n")
+	}
+	metadataHidden := false
+	for i, message := range group.messages {
+		if i > 0 {
+			body.WriteString("\n\n")
 		}
-		visibleDetails, metadataHidden := presentationDetails(detail.Details, m.showTechnical)
+		body.WriteString(dim.Render("── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM") + " ──"))
+		body.WriteByte('\n')
+		switch presentationKind(message) {
+		case "final-answer":
+			body.WriteString(finalStyle.Render(message.Body))
+		case "update", "status", "notice":
+			body.WriteString(message.Body)
+		default:
+			body.WriteString(titleStyle.Render(message.Body))
+		}
+		visibleDetails, hidden := presentationDetails(message.Details, m.showTechnical)
+		metadataHidden = metadataHidden || hidden
 		if visibleDetails != "" {
 			body.WriteString("\n\n")
 			body.WriteString(visibleDetails)
 		}
 		if m.showTechnical {
-			if identifiers := technicalIdentifiers(detail); identifiers != "" {
+			if identifiers := technicalIdentifiers(message); identifiers != "" {
 				body.WriteString("\n\n")
 				body.WriteString(dim.Render(identifiers))
 			}
-		} else if metadataHidden || hasTechnicalIdentifiers(detail) {
+		}
+	}
+	if m.showTechnical {
+		if context := m.technicalContext(latest); context != "" {
 			body.WriteString("\n\n")
-			body.WriteString(dim.Render("technical details hidden · press i to show"))
+			body.WriteString(dim.Render(context))
 		}
-		b.WriteString(renderMessagePanel(body.String(), m.width))
 	}
-	if m.answering {
-		b.WriteString("\n\n")
-		if m.composeTo != "" {
-			b.WriteString(titleStyle.Render("New message to " + displayMailboxLabel(agentLabel(m.answerQ), m.answerQ.Context)))
-		} else {
-			b.WriteString(titleStyle.Render("Reply to " + displayMailboxLabel(m.answerQ.SenderLabel, m.answerQ.Context)))
+	bottomLabel := ""
+	if !m.showTechnical && (metadataHidden || groupHasTechnicalIdentifiers(group) || m.technicalContext(latest) != "") {
+		bottomLabel = "technical details hidden · press i to show"
+	}
+	return renderMessagePanel(body.String(), width, topLabel, bottomLabel)
+}
+
+func groupHasTechnicalIdentifiers(group messageGroup) bool {
+	for _, message := range group.messages {
+		if hasTechnicalIdentifiers(message) {
+			return true
 		}
-		b.WriteString("\n")
-		b.WriteString(m.editor.View())
-		b.WriteString("\n")
-		b.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
+	}
+	return false
+}
+
+func (m app) renderReplyPane(width int) string {
+	var body strings.Builder
+	if m.composeTo != "" {
+		body.WriteString(titleStyle.Render("New message to " + displayMailboxLabel(agentLabel(m.answerQ), m.answerQ.Context)))
 	} else {
-		b.WriteString("\n\n")
-		b.WriteString(dim.Render("j/k move · enter reply · d archive · n new · s sent · x archived · v status · i details · r refresh · q quit · live · repair 5m"))
+		body.WriteString(titleStyle.Render("Reply to this turn"))
 	}
-	view := tea.NewView(b.String())
-	view.AltScreen = true
-	return view
+	body.WriteByte('\n')
+	editor := m.editor
+	if width > 0 {
+		editor.SetWidth(max(20, width-panel.GetHorizontalFrameSize()))
+	}
+	body.WriteString(editor.View())
+	body.WriteByte('\n')
+	body.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
+	return renderMessagePanel(body.String(), width, "[reply]", "")
 }
 
 func short(s string, n int) string {
@@ -811,12 +1152,56 @@ func short(s string, n int) string {
 
 func singleLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-func renderMessagePanel(content string, terminalWidth int) string {
+func renderMessagePanel(content string, terminalWidth int, topLabel, bottomLabel string) string {
 	rendered := panel.Render(content)
-	if terminalWidth <= panel.GetHorizontalFrameSize() || lipgloss.Width(rendered) <= terminalWidth {
+	width := lipgloss.Width(rendered)
+	minimumWidth := max(lipgloss.Width(topLabel), lipgloss.Width(bottomLabel)) + 6
+	if (topLabel != "" || bottomLabel != "") && width < minimumWidth && (terminalWidth <= 0 || minimumWidth <= terminalWidth) {
+		width = minimumWidth
+		rendered = panel.Width(width).Render(content)
+	}
+	if terminalWidth > panel.GetHorizontalFrameSize() && width > terminalWidth {
+		rendered = panel.Width(terminalWidth).Render(content)
+	}
+	if topLabel == "" && bottomLabel == "" {
 		return rendered
 	}
-	return panel.Width(terminalWidth).Render(content)
+	lines := strings.Split(rendered, "\n")
+	bottomWidth := lipgloss.Width(lines[len(lines)-1])
+	if bottomWidth < 4 {
+		return rendered
+	}
+	if topLabel != "" {
+		label := truncateDisplay(topLabel, bottomWidth-6)
+		right := bottomWidth - lipgloss.Width(label) - 5
+		lines[0] = panelEdge.Render("╭─" + " " + label + " " + strings.Repeat("─", right) + "╮")
+	}
+	if bottomLabel != "" {
+		label := truncateDisplay(bottomLabel, bottomWidth-6)
+		left := bottomWidth - lipgloss.Width(label) - 5
+		lines[len(lines)-1] = panelEdge.Render("╰"+strings.Repeat("─", left)) + panelEdge.Render(" "+label+" ") + panelEdge.Render("─╯")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func truncateDisplay(value string, width int) string {
+	if lipgloss.Width(value) <= width {
+		return value
+	}
+	if width <= 0 {
+		return ""
+	}
+	if width == 1 {
+		return "…"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		if lipgloss.Width(b.String()+string(r))+1 > width {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + "…"
 }
 
 func deliveryLabel(message model.Message) string {

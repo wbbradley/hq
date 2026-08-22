@@ -87,6 +87,7 @@ type MessageProjection struct {
 	CreatedAt         time.Time
 	Incomplete        bool
 	Archived          bool
+	ArchivedAt        time.Time
 	Rejected          bool
 	PeerReceived      bool
 }
@@ -560,7 +561,7 @@ func (s *State) classifyDomainEvents() {
 	}
 	for id, record := range s.Records {
 		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) && !isAccountAuthorityType(record.Event.Content.Type) {
-			if record.Event.Content.Type == TypeMessageArchive || record.Event.Content.Type == TypeMessageReject {
+			if record.Event.Content.Type == TypeMessageArchive || record.Event.Content.Type == TypeMessageRestore || record.Event.Content.Type == TypeMessageReject {
 				var payload TargetPayload
 				_ = decodePayload(record.Event.Content.Payload, &payload)
 				if !s.ancestor(payload.TargetEventID, id) {
@@ -643,7 +644,7 @@ func (s *State) authorizedAccountEvent(item SignedEvent) bool {
 	case TypeThreadCancel:
 		root, ok := s.Records[content.ThreadID]
 		return ok && root.Status == StatusProjected && root.Event.Content.Type == TypeQuestion && root.Event.Content.Audience != nil && root.Event.Content.Audience.HumanAccountID == content.Audience.HumanAccountID && root.Event.Content.Sender != nil && content.Sender != nil && *root.Event.Content.Sender == *content.Sender
-	case TypeMessageArchive, TypeMessageReject:
+	case TypeMessageArchive, TypeMessageRestore, TypeMessageReject:
 		if content.Sender == nil || content.Sender.InstallationID != content.InstallationID || content.Sender.MailboxID != humanMailbox {
 			return false
 		}
@@ -856,24 +857,45 @@ func (s *State) projectMessages() {
 }
 
 func (s *State) applyMessageState() {
+	groups := make(map[string][]Record)
 	for _, record := range s.Records {
 		if record.Status != StatusProjected {
 			continue
 		}
-		if record.Event.Content.Type != TypeMessageArchive && record.Event.Content.Type != TypeMessageReject {
+		if record.Event.Content.Type != TypeMessageArchive && record.Event.Content.Type != TypeMessageRestore && record.Event.Content.Type != TypeMessageReject {
 			continue
 		}
 		var payload TargetPayload
 		_ = decodePayload(record.Event.Content.Payload, &payload)
-		message, ok := s.Messages[payload.TargetEventID]
+		if _, ok := s.Messages[payload.TargetEventID]; ok {
+			groups[payload.TargetEventID] = append(groups[payload.TargetEventID], record)
+		}
+	}
+	for target, records := range groups {
+		message, ok := s.Messages[target]
 		if !ok {
 			continue
 		}
-		message.Archived = true
-		if record.Event.Content.Type == TypeMessageReject {
-			message.Rejected = true
+		for _, record := range records {
+			if record.Event.Content.Type == TypeMessageReject {
+				message.Rejected = true
+				message.Archived = true
+				if at := time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(); at.After(message.ArchivedAt) {
+					message.ArchivedAt = at
+				}
+			}
 		}
-		s.Messages[payload.TargetEventID] = message
+		if !message.Rejected {
+			for _, record := range s.maximal(records) {
+				if record.Event.Content.Type == TypeMessageArchive {
+					message.Archived = true
+					if at := time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(); at.After(message.ArchivedAt) {
+						message.ArchivedAt = at
+					}
+				}
+			}
+		}
+		s.Messages[target] = message
 	}
 }
 
