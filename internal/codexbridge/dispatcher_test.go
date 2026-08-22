@@ -115,6 +115,9 @@ func newDispatcherFixture(t *testing.T) dispatcherFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := databaseStore.CreateNamedAgent(context.Background(), "test-agent", agent.ID); err != nil {
+		t.Fatal(err)
+	}
 	return dispatcherFixture{
 		store: databaseStore, agent: agent, thread: threadID, state: NewThreadState(threadID),
 		ledger: NewMemoryLedger(), replies: NewReplyRegistry(),

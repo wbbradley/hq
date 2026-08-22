@@ -248,6 +248,13 @@ func jsonNumber(value int64) string {
 	return string(raw)
 }
 
+func TestRunRequiresNamedAgent(t *testing.T) {
+	err := Run(context.Background(), Options{Directory: "/work", Store: newFakeMailboxStore()})
+	if err == nil || !strings.Contains(err.Error(), "durable agent name") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	process := newFakeProcess()
 	requests := make(chan recordedRequest, 5)
@@ -257,7 +264,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(ctx, Options{
-			Directory: "/work/repo", InitialPrompt: "inspect the queue", Starter: fakeStarter{process}, Store: store,
+			Directory: "/work/repo", AgentName: "test-agent", InitialPrompt: "inspect the queue", Starter: fakeStarter{process}, Store: store,
 			Repository: model.RepositoryContext{Directory: "/work/repo", Branch: "main"}, Stderr: io.Discard, Ledger: NewMemoryLedger(),
 		})
 	}()
@@ -278,7 +285,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 		t.Fatalf("initialize params = %s", initialize.Params)
 	}
 	var startParams ThreadStartParams
-	if start.Method != "thread/start" || json.Unmarshal(start.Params, &startParams) != nil || startParams.CWD != "/work/repo" || startParams.DeveloperInstructions != RequireStructuredHumanInput {
+	if start.Method != "thread/start" || json.Unmarshal(start.Params, &startParams) != nil || startParams.CWD != "/work/repo" || startParams.DeveloperInstructions != NamedAgentDeveloperInstructions("test-agent") {
 		t.Fatalf("thread start = %s %s", start.Method, start.Params)
 	}
 	var turnParams TurnStartParams
@@ -288,7 +295,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	if store.identity != (model.SessionIdentity{Harness: "codex", ExternalSessionID: "thread-new"}) || store.repo.Directory != "/work/repo" {
 		t.Fatalf("binding = %#v, %#v", store.identity, store.repo)
 	}
-	if store.messages[0].Body != "Codex ready in /work/repo" || !strings.Contains(store.messages[0].Details, "Kind: status") || !strings.Contains(store.messages[0].Details, "thread-new") {
+	if store.messages[0].Body != "test-agent ready in /work/repo" || !strings.Contains(store.messages[0].Details, "Kind: status") || !strings.Contains(store.messages[0].Details, "thread-new") {
 		t.Fatalf("ready message = %#v", store.messages[0])
 	}
 	cancel()
@@ -329,7 +336,7 @@ func TestRunReportsInitialTurnFailureWithSingleTerminalStatus(t *testing.T) {
 	}()
 	store := newFakeMailboxStore()
 	err := Run(context.Background(), Options{
-		Directory: "/work/repo", InitialPrompt: "begin", Starter: fakeStarter{process}, Store: store,
+		Directory: "/work/repo", AgentName: "test-agent", InitialPrompt: "begin", Starter: fakeStarter{process}, Store: store,
 		Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "model unavailable") {
@@ -338,7 +345,7 @@ func TestRunReportsInitialTurnFailureWithSingleTerminalStatus(t *testing.T) {
 	store.mu.Lock()
 	messages := append([]model.Message(nil), store.messages...)
 	store.mu.Unlock()
-	if len(messages) != 2 || messages[0].Body != "Codex ready in /work/repo" || messages[1].Body != "Codex bridge stopped" || !strings.Contains(messages[1].Details, "model unavailable") {
+	if len(messages) != 2 || messages[0].Body != "test-agent ready in /work/repo" || messages[1].Body != "Codex bridge stopped" || !strings.Contains(messages[1].Details, "model unavailable") {
 		t.Fatalf("messages = %#v", messages)
 	}
 }
@@ -351,7 +358,7 @@ func TestRunResumesExplicitThreadWithoutDeveloperInstruction(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, Options{Directory: "/work/other", ResumeThreadID: "thread-existing", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/other"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+		done <- Run(ctx, Options{Directory: "/work/other", AgentName: "test-agent", ResumeThreadID: "thread-existing", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/other"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
 	}()
 	waitForMessages(t, store, 1)
 	<-requests
@@ -652,7 +659,7 @@ func TestRunReportsUnexpectedEOF(t *testing.T) {
 	store := newFakeMailboxStore()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(context.Background(), Options{Directory: "/work/repo", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+		done <- Run(context.Background(), Options{Directory: "/work/repo", AgentName: "test-agent", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
 	}()
 	waitForMessages(t, store, 1)
 	_ = process.clientInput.Close()
@@ -674,7 +681,7 @@ func TestRunReportsChildProcessFailure(t *testing.T) {
 	store := newFakeMailboxStore()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(context.Background(), Options{Directory: "/work/repo", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+		done <- Run(context.Background(), Options{Directory: "/work/repo", AgentName: "test-agent", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
 	}()
 	waitForMessages(t, store, 1)
 	process.finish(errors.New("exit status 7"))
@@ -701,7 +708,7 @@ func TestBridgeDispatchesHQMessageEndToEnd(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(ctx, Options{
-			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
+			Directory: "/work/repo", AgentName: "test-agent", Starter: fakeStarter{process}, Store: fixture.store,
 			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
 			Ledger: NewMemoryLedger(), RepairInterval: 2 * time.Millisecond,
 		})
@@ -712,7 +719,7 @@ func TestBridgeDispatchesHQMessageEndToEnd(t *testing.T) {
 	if initialize.Method != "initialize" || initialized.Method != "initialized" || startThread.Method != "thread/start" {
 		t.Fatalf("handshake = %s, %s, %s", initialize.Method, initialized.Method, startThread.Method)
 	}
-	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex ready in /work/repo")
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "test-agent ready in /work/repo")
 	messageID := "019c0000-0000-7000-8000-000000000117"
 	fixture.addHumanMessage(t, messageID, "from HQ", time.Now().UTC())
 	turn := <-requests
@@ -743,7 +750,7 @@ func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(context.Background(), Options{
-			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
+			Directory: "/work/repo", AgentName: "test-agent", Starter: fakeStarter{process}, Store: fixture.store,
 			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
 			Ledger: NewMemoryLedger(), RepairInterval: 2 * time.Millisecond,
 		})
@@ -751,7 +758,7 @@ func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
 	<-requests
 	<-requests
 	<-requests
-	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex ready in /work/repo")
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "test-agent ready in /work/repo")
 
 	notifications := []string{
 		`{"method":"item/agentMessage/delta","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","itemId":"agent-output","delta":"partial"}}`,
@@ -788,7 +795,7 @@ func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
 	if counts["Authoritative answer"] != 1 || counts["Codex turn failed"] != 1 || counts["Codex bridge stopped"] != 1 || counts["partial"] != 0 {
 		t.Fatalf("body counts = %#v, all=%#v", counts, bodies)
 	}
-	if len(bodies) != 4 || bodies[0] != "Codex ready in /work/repo" || bodies[1] != "Authoritative answer" || bodies[2] != "Codex turn failed" || bodies[3] != "Codex bridge stopped" {
+	if len(bodies) != 4 || bodies[0] != "test-agent ready in /work/repo" || bodies[1] != "Authoritative answer" || bodies[2] != "Codex turn failed" || bodies[3] != "Codex bridge stopped" {
 		t.Fatalf("message order = %#v", bodies)
 	}
 }
@@ -833,12 +840,12 @@ func TestBridgeRoutesServerApprovalThroughTemporaryHQStore(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(ctx, Options{
-			Directory: "/work/repo", Starter: fakeStarter{process}, Store: fixture.store,
+			Directory: "/work/repo", AgentName: "test-agent", Starter: fakeStarter{process}, Store: fixture.store,
 			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard,
 			Ledger: NewMemoryLedger(), Replies: fixture.replies, RepairInterval: 2 * time.Millisecond,
 		})
 	}()
-	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex ready in /work/repo")
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "test-agent ready in /work/repo")
 	close(sendApproval)
 
 	question := waitForStoreMessage(t, fixture.store, model.HumanMailboxID, "Codex requests approval for file changes")
