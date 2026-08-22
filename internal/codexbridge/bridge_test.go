@@ -29,11 +29,17 @@ func TestConnectionReporterPrintsConciseDiagnostic(t *testing.T) {
 }
 
 type fakeMailboxStore struct {
-	mu       sync.Mutex
-	identity model.SessionIdentity
-	repo     model.RepositoryContext
-	messages []model.Message
-	created  chan struct{}
+	mu         sync.Mutex
+	identity   model.SessionIdentity
+	repo       model.RepositoryContext
+	messages   []model.Message
+	created    chan struct{}
+	namedAgent domain.NamedAgent
+	ownerToken string
+	acquireErr error
+	renewErr   error
+	renewals   int
+	releases   int
 }
 
 func newFakeMailboxStore() *fakeMailboxStore {
@@ -45,6 +51,58 @@ func (s *fakeMailboxStore) ResolveMailbox(_ context.Context, identity model.Sess
 	defer s.mu.Unlock()
 	s.identity, s.repo = identity, repo
 	return model.Mailbox{ID: "agent-mailbox", Kind: model.MailboxAgent, Harness: identity.Harness}, nil
+}
+
+func (s *fakeMailboxStore) CreateNamedAgent(_ context.Context, name, _ string) (domain.NamedAgent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.namedAgent.Name == "" {
+		s.namedAgent = domain.NamedAgent{Name: name, MailboxID: "named-mailbox"}
+	}
+	return s.namedAgent, nil
+}
+
+func (s *fakeMailboxStore) SelectNamedAgentSession(_ context.Context, name string, identity model.SessionIdentity, repo model.RepositoryContext) (domain.NamedAgent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.identity, s.repo = identity, repo
+	s.namedAgent.Name, s.namedAgent.Harness, s.namedAgent.CurrentSessionID = name, identity.Harness, identity.ExternalSessionID
+	if s.namedAgent.MailboxID == "" {
+		s.namedAgent.MailboxID = "named-mailbox"
+	}
+	return s.namedAgent, nil
+}
+
+func (s *fakeMailboxStore) AcquireNamedAgent(_ context.Context, _ string, token string, _ time.Duration) (domain.NamedAgent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.acquireErr != nil {
+		return domain.NamedAgent{}, s.acquireErr
+	}
+	s.ownerToken = token
+	return s.namedAgent, nil
+}
+
+func (s *fakeMailboxStore) RenewNamedAgent(_ context.Context, _ string, token string, _ time.Duration) (domain.NamedAgent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.renewErr != nil {
+		return domain.NamedAgent{}, s.renewErr
+	}
+	if token != s.ownerToken {
+		return domain.NamedAgent{}, domain.ErrAgentOwned
+	}
+	s.renewals++
+	return s.namedAgent, nil
+}
+
+func (s *fakeMailboxStore) ReleaseNamedAgent(_ context.Context, _ string, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if token == s.ownerToken {
+		s.releases++
+	}
+	return nil
 }
 
 func (s *fakeMailboxStore) HumanMailbox(context.Context) (model.Mailbox, error) {
@@ -312,6 +370,207 @@ func TestRunResumesExplicitThreadWithoutDeveloperInstruction(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunNamedAgentStartsSelectsRenewsAndReleases(t *testing.T) {
+	process := newFakeProcess()
+	requests := make(chan recordedRequest, 8)
+	runHandshakeServer(t, process, "thread-named", requests)
+	store := newFakeMailboxStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			Directory: "/work/named", AgentName: "fred", Starter: fakeStarter{process}, Store: store,
+			Repository: model.RepositoryContext{Directory: "/work/named"}, Stderr: io.Discard, Ledger: NewMemoryLedger(),
+			AgentLeaseDuration: 30 * time.Millisecond, AgentRenewInterval: 5 * time.Millisecond,
+		})
+	}()
+	waitForMessages(t, store, 1)
+	<-requests
+	<-requests
+	start := <-requests
+	if start.Method != "thread/start" {
+		t.Fatalf("thread request = %s", start.Method)
+	}
+	time.Sleep(15 * time.Millisecond)
+	store.mu.Lock()
+	selected, renewals := store.namedAgent, store.renewals
+	store.mu.Unlock()
+	if selected.Name != "fred" || selected.MailboxID != "named-mailbox" || selected.CurrentSessionID != "thread-named" || renewals == 0 {
+		t.Fatalf("selected=%#v renewals=%d", selected, renewals)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	releases := store.releases
+	store.mu.Unlock()
+	if releases != 1 {
+		t.Fatalf("releases = %d", releases)
+	}
+}
+
+func TestRunNamedAgentAutomaticallyResumesOrExplicitlyRotates(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		newThread  bool
+		returnedID string
+		method     string
+	}{
+		{name: "resume", returnedID: "thread-existing", method: "thread/resume"},
+		{name: "rotate", newThread: true, returnedID: "thread-replacement", method: "thread/start"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			process := newFakeProcess()
+			requests := make(chan recordedRequest, 8)
+			runHandshakeServer(t, process, test.returnedID, requests)
+			store := newFakeMailboxStore()
+			store.namedAgent = domain.NamedAgent{Name: "fred", MailboxID: "named-mailbox", Harness: "codex", CurrentSessionID: "thread-existing"}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				done <- Run(ctx, Options{Directory: "/work", AgentName: "fred", NewThread: test.newThread, Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+			}()
+			waitForMessages(t, store, 1)
+			<-requests
+			<-requests
+			threadRequest := <-requests
+			if threadRequest.Method != test.method {
+				t.Fatalf("thread request = %s", threadRequest.Method)
+			}
+			if test.method == "thread/resume" && !strings.Contains(string(threadRequest.Params), "thread-existing") {
+				t.Fatalf("resume params = %s", threadRequest.Params)
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			store.mu.Lock()
+			selected := store.namedAgent.CurrentSessionID
+			store.mu.Unlock()
+			if selected != test.returnedID {
+				t.Fatalf("selected = %q", selected)
+			}
+		})
+	}
+}
+
+func TestRunNamedAgentDrainsOfflineRootMessages(t *testing.T) {
+	fixture := newDispatcherFixture(t)
+	agent, err := fixture.store.CreateNamedAgent(context.Background(), "fred", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedID := "019c0000-0000-7000-8000-000000000301"
+	if err := fixture.store.Create(context.Background(), model.Message{
+		ID: queuedID, Context: model.RepositoryContext{Directory: "/work/repo"}, SenderMailboxID: model.HumanMailboxID,
+		RecipientMailboxID: agent.MailboxID, Body: "queued while offline", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	process := newFakeProcess()
+	requests := make(chan recordedRequest, 8)
+	runHandshakeServer(t, process, "thread-offline", requests)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			Directory: "/work/repo", AgentName: "fred", Store: fixture.store, Starter: fakeStarter{process},
+			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger(), RepairInterval: 2 * time.Millisecond,
+		})
+	}()
+	<-requests
+	<-requests
+	if request := <-requests; request.Method != "thread/start" {
+		t.Fatalf("thread request = %s", request.Method)
+	}
+	delivery := <-requests
+	var params TurnStartParams
+	if delivery.Method != "turn/start" || json.Unmarshal(delivery.Params, &params) != nil || params.ClientUserMessageID != queuedID || params.Input[0].Text != "queued while offline" {
+		t.Fatalf("delivery = %s %s", delivery.Method, delivery.Params)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunNamedAgentRejectsCompetingOwnerBeforeStartingProcess(t *testing.T) {
+	store := newFakeMailboxStore()
+	store.namedAgent = domain.NamedAgent{Name: "fred", MailboxID: "named-mailbox"}
+	store.acquireErr = &domain.AgentOwnershipConflict{Name: "fred", ExpiresAt: time.Now().Add(time.Minute)}
+	err := Run(context.Background(), Options{Directory: "/work", AgentName: "fred", Store: store, Starter: fakeStarter{newFakeProcess()}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+	if !errors.Is(err, domain.ErrAgentOwned) || !strings.Contains(err.Error(), "fred") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunNamedAgentRejectsCrossHarnessSelectionWithoutRotation(t *testing.T) {
+	store := newFakeMailboxStore()
+	store.namedAgent = domain.NamedAgent{Name: "fred", MailboxID: "named-mailbox", Harness: "claude-code", CurrentSessionID: "claude-session"}
+	err := Run(context.Background(), Options{Directory: "/work", AgentName: "fred", Store: store, Starter: fakeStarter{newFakeProcess()}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+	if err == nil || !strings.Contains(err.Error(), "--new-thread") || !strings.Contains(err.Error(), "claude-code") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunNamedAgentStopsWhenLeaseRenewalFails(t *testing.T) {
+	process := newFakeProcess()
+	requests := make(chan recordedRequest, 8)
+	runHandshakeServer(t, process, "thread-owned", requests)
+	store := newFakeMailboxStore()
+	store.renewErr = domain.ErrAgentOwned
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(context.Background(), Options{
+			Directory: "/work", AgentName: "fred", Store: store, Starter: fakeStarter{process}, Stderr: io.Discard, Ledger: NewMemoryLedger(),
+			AgentLeaseDuration: 30 * time.Millisecond, AgentRenewInterval: 5 * time.Millisecond,
+		})
+	}()
+	waitForMessages(t, store, 1)
+	select {
+	case err := <-done:
+		if !errors.Is(err, domain.ErrAgentOwned) || !strings.Contains(err.Error(), "ownership lost") {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not stop after lease loss")
+	}
+}
+
+func TestRunNamedAgentResumeFailureRequiresExplicitRotation(t *testing.T) {
+	process := newFakeProcess()
+	go func() {
+		defer process.finish(nil)
+		scanner := bufio.NewScanner(process.serverInput)
+		for scanner.Scan() {
+			var request recordedRequest
+			if json.Unmarshal(scanner.Bytes(), &request) != nil {
+				return
+			}
+			switch request.Method {
+			case "initialize":
+				_, _ = io.WriteString(process.serverOutput, `{"id":1,"result":{}}`+"\n")
+			case "initialized":
+			case "thread/resume":
+				_, _ = io.WriteString(process.serverOutput, `{"id":2,"error":{"code":-32000,"message":"missing thread"}}`+"\n")
+			}
+		}
+	}()
+	store := newFakeMailboxStore()
+	store.namedAgent = domain.NamedAgent{Name: "fred", MailboxID: "named-mailbox", Harness: "codex", CurrentSessionID: "thread-missing"}
+	err := Run(context.Background(), Options{Directory: "/work", AgentName: "fred", Store: store, Starter: fakeStarter{process}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+	if err == nil || !strings.Contains(err.Error(), "--new-thread") || !strings.Contains(err.Error(), "thread-missing") {
+		t.Fatalf("error = %v", err)
+	}
+	store.mu.Lock()
+	selected, releases := store.namedAgent.CurrentSessionID, store.releases
+	store.mu.Unlock()
+	if selected != "thread-missing" || releases != 1 {
+		t.Fatalf("selected=%q releases=%d", selected, releases)
 	}
 }
 

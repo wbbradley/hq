@@ -121,6 +121,8 @@ Start a new thread in the current directory, optionally with an initial prompt:
 ```sh
 hq codex
 hq codex --cwd . "Inspect the failing tests and propose a fix"
+hq codex --agent fred
+hq codex --agent fred --new-thread
 ```
 
 `--cwd` defaults to the current directory; a relative path is resolved from that directory. Without an initial prompt, the bridge reports readiness and waits for HQ input. A new thread receives a narrow instruction to use structured human input whenever it needs an answer.
@@ -133,7 +135,11 @@ Resume the exact same Codex conversation without replacing its existing instruct
 hq codex --cwd /path/to/repo --resume 019c0000-0000-7000-8000-000000000001
 ```
 
-The ready inbox message includes the Codex thread ID and opaque HQ mailbox ID. In another terminal, open `hq`, select a row from that mailbox, and press `n` to send new work. Replies to completed Codex output also become ordinary input. The bridge starts a turn while idle and steers the active turn when Codex permits it.
+`--agent NAME` uses a durable installation-local mailbox. The first run creates the agent and a Codex thread; later runs automatically resume its selected thread and drain root messages queued while it was offline. `--new-thread` explicitly starts and selects a replacement while retaining the mailbox and historical bindings. A failed automatic resume leaves the selection unchanged and requires `--new-thread`; `--agent` cannot be combined with legacy `--resume`.
+
+Named bridges hold a local 30-second ownership lease renewed every 10 seconds. A competing live bridge is rejected, clean shutdown releases the lease, and a crashed owner becomes replaceable after expiry. This ownership is local to one HQ installation and is not a distributed relay heartbeat.
+
+The ready inbox message includes the named agent when present, Codex thread ID, and opaque HQ mailbox ID. In another terminal, open `hq` and send a root message to that mailbox. Replies remain bound to the turn they answer and are not treated as ordinary input for a replacement thread. The bridge starts a turn while idle and steers the active turn when Codex permits it.
 
 Structured questions and approvals appear as separate HQ inbox rows with Codex thread, turn, item, request, and HQ message IDs. Reply with exactly one choice shown in the details. Choices such as `acceptForSession`, `grantSession`, or a policy-amendment choice persist more authority than a one-time approval and are labeled `PERSISTS`. Permission denial and cancellation always return an empty turn-scoped profile. MCP form accepts require `accept {"field":"value"}` with a validated primitive JSON object; URL requests use `accept`, `decline`, or `cancel`.
 
@@ -145,7 +151,7 @@ Only final `item/completed` agent-message content is relayed. Streaming deltas, 
 
 The bridge stores delivery and emitted-output checkpoints beside the resolved HQ database as `<database>.codexbridge.json` with owner-only permissions. Accepted HQ messages carry their HQ ID as Codex `clientUserMessageId`; an uncertain send is reconciled against Codex thread history before retry. Canonical output uses deterministic HQ IDs and reconciles the HQ store before marking its ledger checkpoint, so replay after a normal restart does not duplicate it.
 
-This is an exactly-once recovery boundary for one bridge process and its restarts, not a distributed lock. HQ claims expire after 30 seconds and Codex steering errors are not a stable typed API in v0.148.0. Do not run two bridge processes for the same thread: concurrent processes can race after lease expiry, so cross-process exactly-once delivery is not promised.
+This is an exactly-once recovery boundary for one bridge process and its restarts, not a distributed lock. Named agents add installation-local process exclusion; legacy anonymous `--resume` sessions do not. HQ claims expire after 30 seconds and Codex steering errors are not a stable typed API in v0.148.0.
 
 On cancellation, EOF, child failure, or a fatal output error, the bridge stops accepting input, releases uncommitted claims, cancels pending structured waits, drains accepted canonical output, emits one terminal HQ status when the store remains available, then closes or kills the child. App-server stderr is written separately as `hq codex: app-server: ...`; it is never parsed as protocol traffic.
 
@@ -272,7 +278,7 @@ hq sync
 hq daemon run|status|stop|restart
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
-hq codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
+hq codex [--cwd PATH] [--agent NAME [--new-thread] | --resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
 hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
 ```

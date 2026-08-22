@@ -15,27 +15,44 @@ import (
 
 const gracefulProcessStop = 2 * time.Second
 
+const (
+	defaultAgentLeaseDuration = 30 * time.Second
+	defaultAgentRenewInterval = 10 * time.Second
+)
+
 type MailboxStore interface {
 	DeliveryStore
 	QuestionStore
 	ResolveMailbox(context.Context, model.SessionIdentity, model.RepositoryContext) (model.Mailbox, error)
 }
 
+type NamedAgentStore interface {
+	CreateNamedAgent(context.Context, string, string) (domain.NamedAgent, error)
+	SelectNamedAgentSession(context.Context, string, model.SessionIdentity, model.RepositoryContext) (domain.NamedAgent, error)
+	AcquireNamedAgent(context.Context, string, string, time.Duration) (domain.NamedAgent, error)
+	RenewNamedAgent(context.Context, string, string, time.Duration) (domain.NamedAgent, error)
+	ReleaseNamedAgent(context.Context, string, string) error
+}
+
 type Options struct {
-	Directory      string
-	ResumeThreadID string
-	InitialPrompt  string
-	Yolo           bool
-	Repository     model.RepositoryContext
-	Store          MailboxStore
-	Starter        ProcessStarter
-	Stderr         io.Writer
-	Sync           func(context.Context) error
-	Ledger         DeliveryLedger
-	LedgerPath     string
-	Replies        *ReplyRegistry
-	RepairInterval time.Duration
-	Updates        domain.ClientUpdates
+	Directory          string
+	ResumeThreadID     string
+	AgentName          string
+	NewThread          bool
+	InitialPrompt      string
+	Yolo               bool
+	Repository         model.RepositoryContext
+	Store              MailboxStore
+	Starter            ProcessStarter
+	Stderr             io.Writer
+	Sync               func(context.Context) error
+	Ledger             DeliveryLedger
+	LedgerPath         string
+	Replies            *ReplyRegistry
+	RepairInterval     time.Duration
+	Updates            domain.ClientUpdates
+	AgentLeaseDuration time.Duration
+	AgentRenewInterval time.Duration
 }
 
 func Run(ctx context.Context, options Options) error {
@@ -44,6 +61,41 @@ func Run(ctx context.Context, options Options) error {
 	}
 	if options.Store == nil {
 		return errors.New("Codex bridge mailbox store is required")
+	}
+	if options.AgentName != "" && options.ResumeThreadID != "" {
+		return errors.New("named Codex agents cannot use an explicit resume thread")
+	}
+	if options.NewThread && options.AgentName == "" {
+		return errors.New("starting a replacement thread requires a named Codex agent")
+	}
+	resumeThreadID := options.ResumeThreadID
+	var namedAgent domain.NamedAgent
+	var namedStore NamedAgentStore
+	var stopOwnership func()
+	var ownershipErrors <-chan error
+	if options.AgentName != "" {
+		var ok bool
+		namedStore, ok = options.Store.(NamedAgentStore)
+		if !ok {
+			return errors.New("Codex bridge store does not support named agents")
+		}
+		var err error
+		namedAgent, err = namedStore.CreateNamedAgent(ctx, options.AgentName, "")
+		if err != nil {
+			return fmt.Errorf("resolve named agent %s: %w", options.AgentName, err)
+		}
+		if !options.NewThread && namedAgent.CurrentSessionID != "" {
+			if namedAgent.Harness != "codex" {
+				return fmt.Errorf("named agent %s currently selects %s session %s; use --new-thread to attach Codex", options.AgentName, namedAgent.Harness, namedAgent.CurrentSessionID)
+			}
+			resumeThreadID = namedAgent.CurrentSessionID
+		}
+		var leaseErr error
+		stopOwnership, ownershipErrors, leaseErr = holdNamedAgent(ctx, namedStore, options, options.AgentName)
+		if leaseErr != nil {
+			return fmt.Errorf("acquire named agent %s: %w", options.AgentName, leaseErr)
+		}
+		defer stopOwnership()
 	}
 	var subscription domain.ChangeSubscription
 	if options.Updates.Subscribe != nil {
@@ -131,7 +183,7 @@ func Run(ctx context.Context, options Options) error {
 	}
 
 	var threadResponse ThreadResponse
-	if options.ResumeThreadID == "" {
+	if resumeThreadID == "" {
 		params := ThreadStartParams{CWD: options.Directory, DeveloperInstructions: RequireStructuredHumanInput}
 		if err := client.Call(ctx, "thread/start", params, &threadResponse); err != nil {
 			if ctx.Err() != nil {
@@ -140,26 +192,38 @@ func Run(ctx context.Context, options Options) error {
 			return fmt.Errorf("start Codex thread: %w", err)
 		}
 	} else {
-		params := ThreadResumeParams{ThreadID: options.ResumeThreadID, CWD: options.Directory}
+		params := ThreadResumeParams{ThreadID: resumeThreadID, CWD: options.Directory}
 		if err := client.Call(ctx, "thread/resume", params, &threadResponse); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("resume Codex thread %s: %w", options.ResumeThreadID, err)
+			if options.AgentName != "" {
+				return fmt.Errorf("resume Codex thread %s for named agent %s: %w; use --new-thread to rotate explicitly", resumeThreadID, options.AgentName, err)
+			}
+			return fmt.Errorf("resume Codex thread %s: %w", resumeThreadID, err)
 		}
 	}
 	threadID := strings.TrimSpace(threadResponse.Thread.ID)
 	if threadID == "" {
 		return errors.New("Codex app-server returned an empty thread ID")
 	}
-	if options.ResumeThreadID != "" && threadID != options.ResumeThreadID {
-		return fmt.Errorf("Codex app-server resumed thread %s instead of requested thread %s", threadID, options.ResumeThreadID)
+	if resumeThreadID != "" && threadID != resumeThreadID {
+		return fmt.Errorf("Codex app-server resumed thread %s instead of requested thread %s", threadID, resumeThreadID)
 	}
 	threadState.BindThread(threadID)
 	threadState.UpdateThread(threadResponse.Thread)
-	mailbox, err = options.Store.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: threadID}, options.Repository)
-	if err != nil {
-		return fmt.Errorf("bind Codex thread to HQ mailbox: %w", err)
+	if options.AgentName != "" {
+		selected, selectErr := namedStore.SelectNamedAgentSession(ctx, options.AgentName, model.SessionIdentity{Harness: "codex", ExternalSessionID: threadID}, options.Repository)
+		if selectErr != nil {
+			return fmt.Errorf("select Codex thread for named agent %s: %w", options.AgentName, selectErr)
+		}
+		namedAgent = selected
+		mailbox = model.Mailbox{ID: namedAgent.MailboxID, Kind: model.MailboxAgent, Harness: "codex", Label: namedAgent.Name, Context: options.Repository}
+	} else {
+		mailbox, err = options.Store.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: threadID}, options.Repository)
+		if err != nil {
+			return fmt.Errorf("bind Codex thread to HQ mailbox: %w", err)
+		}
 	}
 	requestRouter.Bind(threadID, mailbox, options.Repository, options.Sync, options.Updates.Subscribe, options.RepairInterval)
 	outputRelay.Bind(threadID, mailbox, options.Repository)
@@ -224,6 +288,8 @@ func Run(ctx context.Context, options Options) error {
 	}
 
 	select {
+	case ownershipErr := <-ownershipErrors:
+		return finish(fmt.Errorf("named agent ownership lost: %w", ownershipErr), ownershipErr.Error())
 	case <-ctx.Done():
 		return finish(nil, "Bridge cancelled; the app-server process is being terminated.")
 	case <-client.Done():
@@ -253,6 +319,51 @@ func Run(ctx context.Context, options Options) error {
 		}
 		return finish(outputErr, outputErr.Error())
 	}
+}
+
+func holdNamedAgent(ctx context.Context, store NamedAgentStore, options Options, name string) (func(), <-chan error, error) {
+	duration := options.AgentLeaseDuration
+	if duration <= 0 {
+		duration = defaultAgentLeaseDuration
+	}
+	interval := options.AgentRenewInterval
+	if interval <= 0 {
+		interval = defaultAgentRenewInterval
+	}
+	token := uuid.NewString()
+	if _, err := store.AcquireNamedAgent(ctx, name, token, duration); err != nil {
+		return nil, nil, err
+	}
+	leaseContext, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	errorsChannel := make(chan error, 1)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseContext.Done():
+				return
+			case <-ticker.C:
+				if _, err := store.RenewNamedAgent(leaseContext, name, token, duration); err != nil {
+					select {
+					case errorsChannel <- err:
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
+	stop := func() {
+		cancel()
+		<-done
+		releaseContext, releaseCancel := context.WithTimeout(context.Background(), gracefulProcessStop)
+		defer releaseCancel()
+		_ = store.ReleaseNamedAgent(releaseContext, name, token)
+	}
+	return stop, errorsChannel, nil
 }
 
 func reportConnectionUpdates(ctx context.Context, destination io.Writer, updates domain.ClientUpdates) {

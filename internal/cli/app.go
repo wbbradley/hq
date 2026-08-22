@@ -50,7 +50,7 @@ Human commands:
   cancel  Archive one inbox message
 
 Other commands:
-  codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
+  codex [--cwd PATH] [--agent NAME [--new-thread] | --resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
              Bridge a Codex app-server thread through HQ
   agent      Create, list, or retire durable named agents
   mailboxes  Find agent mailboxes seen in this repository
@@ -76,7 +76,7 @@ already-durable outbox work through its configured network engine.
 const codexUsage = `hq codex bridges one Codex app-server thread through an HQ mailbox.
 
 Usage:
-  hq [--db PATH] [--no-sync] codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
+  hq [--db PATH] [--no-sync] codex [--cwd PATH] [--agent NAME [--new-thread] | --resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
 
 Requirements:
   Install and authenticate Codex CLI v0.148.0, and run hq identity init once.
@@ -85,6 +85,10 @@ Options:
   --cwd PATH          Thread working directory. Defaults to the current directory;
                       relative paths are resolved from the current directory.
   --resume THREAD_ID  Resume this exact Codex thread instead of starting a new one.
+  --agent NAME        Attach to a durable installation-local named agent. Creates it
+                      when absent and automatically resumes its selected Codex thread.
+  --new-thread        Start and select a replacement thread for --agent while retaining
+                      its mailbox, queued root messages, and historical thread bindings.
   --yolo              Pass Codex's --yolo mode to app-server; disables approvals and sandboxing.
                       Use only inside an externally secured environment.
 
@@ -316,9 +320,17 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, database
 	f := flags("codex")
 	workingDirectory := f.String("cwd", "", "Codex thread working directory")
 	resumeThreadID := f.String("resume", "", "existing Codex thread ID")
+	agentName := f.String("agent", "", "durable named agent")
+	newThread := f.Bool("new-thread", false, "start and select a replacement named-agent thread")
 	yolo := f.Bool("yolo", false, "disable Codex approvals and sandboxing")
 	if err := f.Parse(args); err != nil {
 		return err
+	}
+	if strings.TrimSpace(*agentName) != "" && strings.TrimSpace(*resumeThreadID) != "" {
+		return errors.New("codex cannot combine --agent and --resume")
+	}
+	if *newThread && strings.TrimSpace(*agentName) == "" {
+		return errors.New("codex --new-thread requires --agent NAME")
 	}
 	baseDirectory, err := a.workDirectory()
 	if err != nil {
@@ -335,7 +347,7 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, database
 		return errors.New("Codex bridge runner is unavailable")
 	}
 	options := codexbridge.Options{
-		Directory: directory, ResumeThreadID: strings.TrimSpace(*resumeThreadID),
+		Directory: directory, ResumeThreadID: strings.TrimSpace(*resumeThreadID), AgentName: strings.TrimSpace(*agentName), NewThread: *newThread,
 		InitialPrompt: strings.Join(f.Args(), " "), Repository: a.repositoryContext(ctx, directory),
 		Store: s, Stderr: a.ErrOut, Updates: clientUpdates(s), Yolo: *yolo,
 	}

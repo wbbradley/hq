@@ -122,7 +122,7 @@ func TestCodexHelpDoesNotOpenStore(t *testing.T) {
 	if outputs[0] != outputs[1] || outputs[0] != codexUsage {
 		t.Fatalf("help outputs differ:\n%s\n---\n%s", outputs[0], outputs[1])
 	}
-	for _, required := range []string{"Codex CLI v0.148.0", "--resume THREAD_ID", "--yolo", "disables approvals and sandboxing", "<database>.codexbridge.json", "Secret-marked", "one bridge process"} {
+	for _, required := range []string{"Codex CLI v0.148.0", "--resume THREAD_ID", "--agent NAME", "--new-thread", "--yolo", "disables approvals and sandboxing", "<database>.codexbridge.json", "Secret-marked", "one bridge process"} {
 		if !strings.Contains(outputs[0], required) {
 			t.Fatalf("Codex help is missing %q", required)
 		}
@@ -135,7 +135,7 @@ func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 	if err := a.Run(context.Background(), []string{"help"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]") {
+	if !strings.Contains(out.String(), "codex [--cwd PATH] [--agent NAME [--new-thread] | --resume THREAD_ID] [--yolo] [INITIAL PROMPT...]") {
 		t.Fatalf("global help = %q", out.String())
 	}
 	a, _ = testApp(t, "")
@@ -146,6 +146,29 @@ func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 	err := a.Run(context.Background(), []string{"help", "future"})
 	if err == nil || !strings.Contains(err.Error(), "topic codex") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCodexNamedAgentOptionsAndConflicts(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	var received codexbridge.Options
+	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error { received = options; return nil }
+	if err := a.Run(context.Background(), []string{"--db", database, "codex", "--agent", "fred", "--new-thread", "continue"}); err != nil {
+		t.Fatal(err)
+	}
+	if received.AgentName != "fred" || !received.NewThread || received.InitialPrompt != "continue" {
+		t.Fatalf("options = %#v", received)
+	}
+	for _, args := range [][]string{
+		{"--db", database, "codex", "--agent", "fred", "--resume", "thread"},
+		{"--db", database, "codex", "--new-thread"},
+	} {
+		a, _ := testApp(t, "")
+		a.RunCodexBridge = func(context.Context, codexbridge.Options) error { t.Fatal("invalid options ran bridge"); return nil }
+		if err := a.Run(context.Background(), args); err == nil {
+			t.Fatalf("args %#v succeeded", args)
+		}
 	}
 }
 
