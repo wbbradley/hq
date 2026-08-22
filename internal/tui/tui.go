@@ -34,45 +34,52 @@ var (
 )
 
 type app struct {
-	ctx            context.Context
-	store          domain.Store
-	repo           repoctx.Provider
-	messages       []model.Message
-	groups         []messageGroup
-	inbox          []model.Message
-	sent           []model.Message
-	archived       []model.Message
-	showSent       bool
-	showArchived   bool
-	showStatus     bool
-	showTechnical  bool
-	cursor         int
-	width          int
-	height         int
-	answering      bool
-	answerID       string
-	answerGroupKey string
-	answerQ        model.Message
-	composeTo      string
-	editor         textarea.Model
-	err            error
-	contextID      string
-	branch         string
-	remotes        string
-	pull           string
-	sync           func(context.Context) error
-	syncErr        error
-	network        domain.NetworkStatus
-	changes        <-chan domain.Invalidation
-	states         <-chan domain.ConnectionUpdate
-	connection     domain.ConnectionUpdate
-	undoStack      []undoAction
-	nextUndoID     uint64
-	undoing        bool
-	undoNotice     string
-	messageScroll  int
-	paneFocus      paneFocus
-	markdown       *messageMarkdownRenderer
+	ctx              context.Context
+	store            domain.Store
+	repo             repoctx.Provider
+	messages         []model.Message
+	groups           []messageGroup
+	inbox            []model.Message
+	sent             []model.Message
+	archived         []model.Message
+	showSent         bool
+	showArchived     bool
+	showStatus       bool
+	showTechnical    bool
+	cursor           int
+	width            int
+	height           int
+	answering        bool
+	answerID         string
+	answerGroupKey   string
+	answerQ          model.Message
+	composeTo        string
+	composeName      string
+	composeContext   model.RepositoryContext
+	composeNamed     bool
+	agents           []domain.NamedAgent
+	pickingRecipient bool
+	pickerQuery      string
+	pickerCursor     int
+	editor           textarea.Model
+	err              error
+	contextID        string
+	branch           string
+	remotes          string
+	pull             string
+	sync             func(context.Context) error
+	syncErr          error
+	network          domain.NetworkStatus
+	changes          <-chan domain.Invalidation
+	states           <-chan domain.ConnectionUpdate
+	connection       domain.ConnectionUpdate
+	undoStack        []undoAction
+	nextUndoID       uint64
+	undoing          bool
+	undoNotice       string
+	messageScroll    int
+	paneFocus        paneFocus
+	markdown         *messageMarkdownRenderer
 }
 
 type paneFocus int
@@ -86,6 +93,15 @@ const (
 type messageGroup struct {
 	key      string
 	messages []model.Message
+}
+
+type recipientChoice struct {
+	name         string
+	mailboxID    string
+	active       bool
+	lastActiveAt *time.Time
+	context      model.RepositoryContext
+	named        bool
 }
 
 type paneLayout struct {
@@ -110,6 +126,7 @@ type loadedMsg struct {
 	sent     []model.Message
 	archived []model.Message
 	network  domain.NetworkStatus
+	agents   []domain.NamedAgent
 	err      error
 }
 
@@ -172,7 +189,7 @@ func RunWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Wri
 	var subscription domain.ChangeSubscription
 	var err error
 	if updates.Subscribe != nil {
-		subscription, err = updates.Subscribe(ctx, domain.TopicMessages, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman, domain.TopicRelays)
+		subscription, err = updates.Subscribe(ctx, domain.TopicMessages, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman, domain.TopicRelays, domain.TopicAgents)
 		if err != nil {
 			return fmt.Errorf("subscribe to HQ updates: %w", err)
 		}
@@ -256,8 +273,12 @@ func (m app) load() tea.Msg {
 	if err != nil {
 		return loadedMsg{err: err}
 	}
+	agents, err := m.store.ListNamedAgents(m.ctx)
+	if err != nil {
+		return loadedMsg{err: err}
+	}
 	network, err := m.store.NetworkStatus(m.ctx)
-	return loadedMsg{inbox: inbox, sent: sent, archived: archived, network: network, err: err}
+	return loadedMsg{inbox: inbox, sent: sent, archived: archived, agents: agents, network: network, err: err}
 }
 
 func (m app) answer() tea.Msg {
@@ -272,9 +293,19 @@ func (m app) answer() tea.Msg {
 	message := model.Message{ID: id.String(), Context: m.answerQ.Context, SenderMailboxID: model.HumanMailboxID,
 		RecipientMailboxID: recipient, SenderLabel: "human", RecipientLabel: m.answerQ.SenderLabel, Body: strings.TrimSpace(m.editor.Value()), CreatedAt: time.Now().UTC()}
 	if m.composeTo != "" {
+		if m.composeNamed {
+			agent, lookupErr := m.store.GetNamedAgent(m.ctx, m.composeName)
+			if lookupErr != nil || agent.Retired || agent.MailboxID != m.composeTo {
+				cause := lookupErr
+				if cause == nil {
+					cause = domain.ErrAgentRetired
+				}
+				return answeredMsg{err: fmt.Errorf("recipient %s is no longer available; choose a recipient again: %w", m.composeName, cause)}
+			}
+		}
 		message.RecipientMailboxID = m.composeTo
-		message.RecipientInstallationID = agentInstallation(m.answerQ)
-		message.RecipientLabel = agentLabel(m.answerQ)
+		message.Context = m.composeContext
+		message.RecipientLabel = m.composeName
 		err = m.store.Create(m.ctx, message)
 	} else {
 		replyTo := m.answerID
@@ -364,7 +395,10 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetHeight(max(1, layout.replyHeight-4))
 	case loadedMsg:
 		selectedKey := m.selectedGroupKey()
-		m.inbox, m.sent, m.archived, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.network, msg.err
+		m.inbox, m.sent, m.archived, m.agents, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.agents, msg.network, msg.err
+		if choices := m.filteredRecipients(); m.pickerCursor >= len(choices) {
+			m.pickerCursor = max(0, len(choices)-1)
+		}
 		m.setMessages()
 		if m.markdown != nil {
 			m.markdown.Reset()
@@ -438,9 +472,24 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.answerGroupKey = ""
 			m.answerQ = model.Message{}
 			m.composeTo = ""
+			m.composeName = ""
+			m.composeContext = model.RepositoryContext{}
+			m.composeNamed = false
 			m.paneFocus = focusInbox
 			m.editor.Reset()
 			return m, tea.Batch(m.load, m.syncNow())
+		}
+		if errors.Is(msg.err, domain.ErrAgentRetired) || errors.Is(msg.err, domain.ErrAgentNotFound) {
+			m.answering = false
+			m.pickingRecipient = true
+			m.pickerQuery = ""
+			m.pickerCursor = 0
+			m.composeTo = ""
+			m.composeName = ""
+			m.composeContext = model.RepositoryContext{}
+			m.composeNamed = false
+			m.paneFocus = focusReply
+			m.editor.Blur()
 		}
 	case archivedMsg:
 		m.err = msg.err
@@ -480,6 +529,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			return m, nil
+		}
+		if m.pickingRecipient {
+			return m.updateRecipientPicker(msg)
 		}
 		switch msg.String() {
 		case "tab":
@@ -545,6 +597,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.answerGroupKey = ""
 				m.answerQ = model.Message{}
 				m.composeTo = ""
+				m.composeName = ""
+				m.composeContext = model.RepositoryContext{}
+				m.composeNamed = false
 				m.paneFocus = focusInbox
 				m.editor.Blur()
 				m.editor.Reset()
@@ -637,6 +692,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.answerID = m.answerQ.ID
 				m.answerGroupKey = group.key
 				m.composeTo = ""
+				m.composeName = ""
+				m.composeContext = model.RepositoryContext{}
+				m.composeNamed = false
 				m.paneFocus = focusReply
 				m.resizeEditor()
 				m.editor.Focus()
@@ -657,24 +715,100 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.undoNotice = "nothing to undo"
 			}
 		case "n":
-			if group, ok := m.groupAtCursor(); ok {
-				representative := group.latest()
-				target := agentMailbox(representative)
-				if target != "" {
-					m.answering = true
-					m.answerQ = representative
-					m.answerID = ""
-					m.answerGroupKey = group.key
-					m.composeTo = target
-					m.paneFocus = focusReply
-					m.resizeEditor()
-					m.editor.Focus()
-					return m, textarea.Blink
-				}
-			}
+			m.pickingRecipient = true
+			m.pickerQuery = ""
+			m.pickerCursor = 0
+			m.paneFocus = focusReply
+			m.editor.Blur()
+			return m, nil
 		case "r":
 			return m, m.load
 		}
+	}
+	return m, nil
+}
+
+func (m app) recipients() []recipientChoice {
+	choices := []recipientChoice{{name: "self", mailboxID: model.HumanMailboxID, active: true}}
+	for _, agent := range m.agents {
+		if agent.Retired {
+			continue
+		}
+		choices = append(choices, recipientChoice{
+			name: agent.Name, mailboxID: agent.MailboxID, active: agent.Active,
+			lastActiveAt: agent.LastActiveAt, context: agent.Context, named: true,
+		})
+	}
+	sort.SliceStable(choices, func(left, right int) bool {
+		if choices[left].active != choices[right].active {
+			return choices[left].active
+		}
+		return choices[left].name < choices[right].name
+	})
+	return choices
+}
+
+func (m app) filteredRecipients() []recipientChoice {
+	query := strings.ToLower(strings.TrimSpace(m.pickerQuery))
+	choices := m.recipients()
+	if query == "" {
+		return choices
+	}
+	filtered := make([]recipientChoice, 0, len(choices))
+	for _, choice := range choices {
+		if strings.Contains(strings.ToLower(choice.name), query) {
+			filtered = append(filtered, choice)
+		}
+	}
+	return filtered
+}
+
+func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	choices := m.filteredRecipients()
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.pickingRecipient = false
+		m.pickerQuery = ""
+		m.pickerCursor = 0
+		m.paneFocus = focusInbox
+		return m, nil
+	case "j", "down":
+		if m.pickerCursor+1 < len(choices) {
+			m.pickerCursor++
+		}
+		return m, nil
+	case "k", "up":
+		if m.pickerCursor > 0 {
+			m.pickerCursor--
+		}
+		return m, nil
+	case "enter":
+		if len(choices) == 0 {
+			return m, nil
+		}
+		choice := choices[min(m.pickerCursor, len(choices)-1)]
+		m.pickingRecipient = false
+		m.answering = true
+		m.answerID = ""
+		m.answerGroupKey = ""
+		m.answerQ = model.Message{}
+		m.composeTo, m.composeName = choice.mailboxID, choice.name
+		m.composeContext, m.composeNamed = choice.context, choice.named
+		m.paneFocus = focusReply
+		m.resizeEditor()
+		m.editor.Focus()
+		return m, textarea.Blink
+	case "backspace":
+		runes := []rune(m.pickerQuery)
+		if len(runes) > 0 {
+			m.pickerQuery = string(runes[:len(runes)-1])
+			m.pickerCursor = 0
+		}
+		return m, nil
+	}
+	if msg.Text != "" && !strings.ContainsAny(msg.Text, "\r\n\t") {
+		m.pickerQuery += msg.Text
+		m.pickerCursor = 0
 	}
 	return m, nil
 }
@@ -908,36 +1042,6 @@ func canArchiveGroup(group messageGroup) bool {
 	return false
 }
 
-func agentMailbox(message model.Message) string {
-	if message.SenderMailboxID != model.HumanMailboxID {
-		return message.SenderMailboxID
-	}
-	if message.RecipientMailboxID != model.HumanMailboxID {
-		return message.RecipientMailboxID
-	}
-	return ""
-}
-
-func agentLabel(message model.Message) string {
-	if message.SenderMailboxID != model.HumanMailboxID {
-		return message.SenderLabel
-	}
-	if message.RecipientMailboxID != model.HumanMailboxID {
-		return message.RecipientLabel
-	}
-	return ""
-}
-
-func agentInstallation(message model.Message) string {
-	if message.SenderMailboxID != model.HumanMailboxID {
-		return message.SenderInstallationID
-	}
-	if message.RecipientMailboxID != model.HumanMailboxID {
-		return message.RecipientInstallationID
-	}
-	return ""
-}
-
 func displayMailboxLabel(label string, context model.RepositoryContext) string {
 	if label == "human" {
 		return label
@@ -1100,13 +1204,17 @@ func (m app) View() tea.View {
 	}
 	messagePane = fitRenderedPane(messagePane, layout.messageWidth, layout.messageHeight, m.messageScroll, messageFocused)
 	replyPane := renderMessagePanel("Press Enter to reply to the selected turn.", layout.replyWidth, "[reply]", "", replyFocused)
-	if m.answering {
+	if m.pickingRecipient {
+		replyPane = m.renderRecipientPicker(layout.replyWidth, layout.replyHeight)
+	} else if m.answering {
 		replyPane = m.renderReplyPane(layout.replyWidth)
 	}
 	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0, replyFocused)
 	bottom := lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
-	help := "tab/shift+tab focus · j/k navigate · pgup/pgdown message · enter reply · d archive · u undo · i details · q quit"
-	if m.answering {
+	help := "tab/shift+tab focus · j/k navigate · pgup/pgdown message · enter reply · n new · d archive · u undo · i details · q quit"
+	if m.pickingRecipient {
+		help = "type to filter recipients · j/k or arrows move · enter select · esc cancel"
+	} else if m.answering {
 		help = "tab/shift+tab focus · pgup/pgdown message · enter submit · shift+enter/ctrl+j newline · esc cancel"
 	}
 	if m.undoNotice != "" {
@@ -1302,7 +1410,7 @@ func groupHasTechnicalIdentifiers(group messageGroup) bool {
 func (m app) renderReplyPane(width int) string {
 	var body strings.Builder
 	if m.composeTo != "" {
-		body.WriteString(titleStyle.Render("New message to " + displayMailboxLabel(agentLabel(m.answerQ), m.answerQ.Context)))
+		body.WriteString(titleStyle.Render("New message to " + m.composeName))
 	} else {
 		body.WriteString(titleStyle.Render("Reply to this turn"))
 	}
@@ -1315,6 +1423,44 @@ func (m app) renderReplyPane(width int) string {
 	body.WriteByte('\n')
 	body.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
 	return renderMessagePanel(body.String(), width, "[reply]", "", m.paneFocused(focusReply))
+}
+
+func (m app) renderRecipientPicker(width, height int) string {
+	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
+	var body strings.Builder
+	body.WriteString(titleStyle.Render("New message — choose a local recipient"))
+	body.WriteByte('\n')
+	query := m.pickerQuery
+	if query == "" {
+		query = "type to filter"
+	}
+	body.WriteString(dim.Render("Search: " + query))
+	choices := m.filteredRecipients()
+	rows := max(1, height-5)
+	start, end := listWindow(len(choices), m.pickerCursor, rows)
+	for index := start; index < end; index++ {
+		choice := choices[index]
+		presence := "offline"
+		if choice.active {
+			presence = "active"
+		}
+		metadata := presence
+		if !choice.active && choice.lastActiveAt != nil {
+			metadata += " · last active " + choice.lastActiveAt.Local().Format("Jan 2 3:04 PM")
+		}
+		line := truncateDisplay(fmt.Sprintf("%-16s %s", choice.name, metadata), innerWidth-2)
+		body.WriteByte('\n')
+		if index == m.pickerCursor {
+			body.WriteString(selected.Render("› " + line))
+		} else {
+			body.WriteString("  " + line)
+		}
+	}
+	if len(choices) == 0 {
+		body.WriteByte('\n')
+		body.WriteString(dim.Render("No matching recipients."))
+	}
+	return renderMessagePanel(body.String(), width, "[recipient]", "", m.paneFocused(focusReply))
 }
 
 func short(s string, n int) string {

@@ -187,7 +187,7 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - Enter: reply to the selected open Codex turn; Enter again submits
 - `d`: archive all visible messages in the selected turn without replying
 - `u`: undo the most recent archive action
-- `n`: write a new message to the agent session tied to the selected row
+- `n`: choose a local named agent (or `self`) and write a new root message independently of the selected row
 - Shift+Enter / Ctrl+J: add a line break while editing
 - `s`: toggle sent messages
 - `x`: toggle archived inbox messages
@@ -197,6 +197,8 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - `q`: quit
 
 Sent and Archived are independent filters. This lets the human view the open inbox, add sent messages, add archived messages, or show all three sets together. Messages carrying the same Codex thread and turn correlation are coalesced into one incoming row, including the final answer. The selected turn's detail pane shows every part chronologically beneath a timestamp divider and updates live as new parts arrive, without disturbing an active draft. Replies retain the Codex thread and turn correlation, remain bound to the turn's reply target, and archive every archiveable message currently shown for that turn.
+
+The `n` picker is searchable and lists `self` plus non-retired named agents from this HQ installation, with advisory active/offline and last-active state. Offline agents remain selectable and receive durable queued root messages; selecting `self` creates a durable note in the human inbox. New-message drafts do not archive or inherit reply correlation from the selected turn. Remote agent discovery and qualified addresses such as `fred@laptop` are future work and are not inferred from relay presence.
 
 The TUI always fits its terminal viewport. The full-width inbox is a fixed, selection-scrolling pane occupying 25% of terminal height. The full-width message and reply panes are always stacked beneath it. The reply pane uses 10% of terminal height with a six-line minimum, including its border, and the message pane receives the remaining space. Tab and Shift+Tab move focus among the three panes; unfocused outlines use a subdued frame while the active pane uses a brighter purple. Page Up, Page Down, and `j`/`k` act on the focused pane; the reply textarea manages its own cursor and scrolling while focused.
 

@@ -628,10 +628,18 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 
 	now := time.Now().UTC()
 	inbound.ArchivedAt = &now
-	m = app{ctx: ctx, store: s, messages: []model.Message{inbound}, editor: textarea.New()}
+	named, err := s.CreateNamedAgent(ctx, "fred", agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = app{ctx: ctx, store: s, messages: []model.Message{inbound}, agents: []domain.NamedAgent{named}, editor: textarea.New()}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	m = updated.(app)
-	if !m.answering || m.composeTo != agent.ID {
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = updated.(app)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if !m.answering || m.composeTo != agent.ID || m.composeName != "fred" {
 		t.Fatalf("compose state = %#v", m)
 	}
 	m.editor.SetValue("More detail")
@@ -644,6 +652,132 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	}
 	if len(sent) != 2 || sent[1].ReplyTo != nil || sent[1].Body != "More detail" {
 		t.Fatalf("sent = %#v", sent)
+	}
+}
+
+func TestRecipientPickerIsIndependentSearchableAndOrdered(t *testing.T) {
+	now := time.Now().UTC()
+	m := app{
+		agents: []domain.NamedAgent{
+			{Name: "bob", MailboxID: "bob-id", LastActiveAt: &now},
+			{Name: "retired", MailboxID: "retired-id", Retired: true},
+			{Name: "alice", MailboxID: "alice-id", Active: true},
+		},
+		cursor: 4, messageScroll: 3, showSent: true, editor: textarea.New(), width: 70, height: 18,
+	}
+	choices := m.recipients()
+	if len(choices) != 3 || choices[0].name != "alice" || choices[1].name != "self" || choices[2].name != "bob" {
+		t.Fatalf("choices = %#v", choices)
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	m = updated.(app)
+	if !m.pickingRecipient || m.answering {
+		t.Fatalf("picker state = %#v", m)
+	}
+	for _, character := range []rune{'b', 'o'} {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: character, Text: string(character)})
+		m = updated.(app)
+	}
+	if filtered := m.filteredRecipients(); len(filtered) != 1 || filtered[0].name != "bob" {
+		t.Fatalf("filtered = %#v", filtered)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if !m.answering || m.pickingRecipient || m.composeTo != "bob-id" || m.composeName != "bob" || m.paneFocus != focusReply {
+		t.Fatalf("composition = %#v", m)
+	}
+
+	m.answering = false
+	m.pickingRecipient = true
+	m.pickerQuery = "alice"
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = updated.(app)
+	if m.pickingRecipient || m.cursor != 4 || m.messageScroll != 3 || !m.showSent {
+		t.Fatalf("escape changed inbox state = %#v", m)
+	}
+}
+
+func TestNewMessageToSelfIsRootNoteAndDoesNotArchiveSelection(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d81", agent.ID, model.HumanMailboxID, "Keep this visible")
+	if err := s.Create(ctx, inbound); err != nil {
+		t.Fatal(err)
+	}
+	m := app{ctx: ctx, store: s, inbox: []model.Message{inbound}, editor: textarea.New()}
+	m.setMessages()
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	m = updated.(app)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.composeTo != model.HumanMailboxID || m.composeName != "self" {
+		t.Fatalf("recipient = %#v", m)
+	}
+	m.editor.SetValue("remember this")
+	result := m.answer().(answeredMsg)
+	if result.err != nil || !result.sent {
+		t.Fatalf("send = %v, sent=%t", result.err, result.sent)
+	}
+	notes, err := s.List(ctx, model.Filter{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: model.HumanMailboxID})
+	if err != nil || len(notes) != 1 || notes[0].ReplyTo != nil || notes[0].Body != "remember this" {
+		t.Fatalf("notes = %#v, %v", notes, err)
+	}
+	stillOpen, err := s.Get(ctx, inbound.ID)
+	if err != nil || stillOpen.ArchivedAt != nil {
+		t.Fatalf("selection archived = %#v, %v", stillOpen, err)
+	}
+}
+
+func TestRetiredRecipientKeepsDraftAndShowsActionableError(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	named, err := s.CreateNamedAgent(ctx, "fred", agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editor := textarea.New()
+	m := app{ctx: ctx, store: s, agents: []domain.NamedAgent{named}, editor: editor}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	m = updated.(app)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'r', Text: "r"})
+	m = updated.(app)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	m.editor.SetValue("draft survives retirement")
+	if err := s.RetireNamedAgent(ctx, "fred"); err != nil {
+		t.Fatal(err)
+	}
+	result := m.answer().(answeredMsg)
+	updated, _ = m.Update(result)
+	m = updated.(app)
+	if m.answering || !m.pickingRecipient || m.editor.Value() != "draft survives retirement" || m.err == nil || !strings.Contains(m.err.Error(), "choose a recipient again") {
+		t.Fatalf("retirement result = %#v", m)
+	}
+}
+
+func TestAgentReloadPreservesPickerAndComposerState(t *testing.T) {
+	editor := textarea.New()
+	m := app{pickingRecipient: true, pickerQuery: "r", pickerCursor: 2, cursor: 3, editor: editor}
+	updated, _ := m.Update(loadedMsg{agents: []domain.NamedAgent{{Name: "fred", MailboxID: "fred-id"}}})
+	m = updated.(app)
+	if !m.pickingRecipient || m.pickerQuery != "r" || m.pickerCursor != 0 || m.cursor != 0 {
+		t.Fatalf("picker reload = %#v", m)
+	}
+	m.pickingRecipient = false
+	m.answering = true
+	m.composeTo, m.composeName, m.composeNamed = "fred-id", "fred", true
+	m.editor.SetValue("unfinished")
+	updated, _ = m.Update(loadedMsg{agents: nil})
+	m = updated.(app)
+	if !m.answering || m.composeTo != "fred-id" || m.editor.Value() != "unfinished" {
+		t.Fatalf("composer reload = %#v", m)
+	}
+}
+
+func TestRecipientPickerFitsSmallTerminal(t *testing.T) {
+	m := app{agents: []domain.NamedAgent{{Name: "fred", MailboxID: "fred-id"}}, pickingRecipient: true, paneFocus: focusReply, editor: textarea.New(), width: 38, height: 12}
+	view := m.View().Content
+	lines := strings.Split(view, "\n")
+	if len(lines) > 12 || !strings.Contains(view, "recipient") || !strings.Contains(view, "choose a local") {
+		t.Fatalf("small picker = %q", view)
 	}
 }
 

@@ -1186,6 +1186,9 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 }
 
 func contextPointer(repo model.RepositoryContext) *event.RepositoryContext {
+	if repo == (model.RepositoryContext{}) {
+		return nil
+	}
 	context := eventContext(repo)
 	return &context
 }
