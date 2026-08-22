@@ -53,6 +53,8 @@ type app struct {
 	answerID         string
 	answerGroupKey   string
 	answerQ          model.Message
+	drafts           map[string]messageDraft
+	activeDraftKey   string
 	composeTo        string
 	composeName      string
 	composeContext   model.RepositoryContext
@@ -93,6 +95,20 @@ const (
 type messageGroup struct {
 	key      string
 	messages []model.Message
+	draft    *messageDraft
+}
+
+type messageDraft struct {
+	key            string
+	body           string
+	answerID       string
+	answerGroupKey string
+	answerQ        model.Message
+	composeTo      string
+	composeName    string
+	composeContext model.RepositoryContext
+	composeNamed   bool
+	updatedAt      time.Time
 }
 
 type recipientChoice struct {
@@ -403,10 +419,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.markdown != nil {
 			m.markdown.Reset()
 		}
-		if index := groupIndex(m.groups, selectedKey); index >= 0 {
+		visibleGroups := m.visibleGroups()
+		if index := groupIndex(visibleGroups, selectedKey); index >= 0 {
 			m.cursor = index
-		} else if m.cursor >= len(m.messages) {
-			m.cursor = max(0, len(m.messages)-1)
+		} else if m.cursor >= len(visibleGroups) {
+			m.cursor = max(0, len(visibleGroups)-1)
 		}
 		return m.withContextCommand()
 	case repairMsg:
@@ -467,6 +484,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case answeredMsg:
 		m.err = msg.err
 		if msg.sent {
+			delete(m.drafts, m.activeDraftKey)
+			m.activeDraftKey = ""
 			m.answering = false
 			m.answerID = ""
 			m.answerGroupKey = ""
@@ -535,7 +554,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "tab":
+			wasReply := m.answering && m.paneFocus == focusReply
 			m.cyclePaneFocus(1)
+			if wasReply {
+				m.stowActiveDraft()
+				return m.withContextCommand()
+			}
 			if m.answering && m.paneFocus == focusReply {
 				m.editor.Focus()
 				return m, textarea.Blink
@@ -543,7 +567,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor.Blur()
 			return m, nil
 		case "shift+tab":
+			wasReply := m.answering && m.paneFocus == focusReply
 			m.cyclePaneFocus(-1)
+			if wasReply {
+				m.stowActiveDraft()
+				return m.withContextCommand()
+			}
 			if m.answering && m.paneFocus == focusReply {
 				m.editor.Focus()
 				return m, textarea.Blink
@@ -592,6 +621,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.answering {
 			switch msg.String() {
 			case "ctrl+c", "esc":
+				delete(m.drafts, m.activeDraftKey)
+				m.activeDraftKey = ""
 				m.answering = false
 				m.answerID = ""
 				m.answerGroupKey = ""
@@ -686,11 +717,15 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showTechnical = !m.showTechnical
 			return m, nil
 		case "enter", "a":
-			if group, ok := m.groupAtCursor(); ok && canReplyGroup(group) {
+			if group, ok := m.groupAtCursor(); ok && group.draft != nil {
+				m.resumeDraft(*group.draft)
+				return m, textarea.Blink
+			} else if ok && canReplyGroup(group) {
 				m.answering = true
 				m.answerQ = replyTarget(group)
 				m.answerID = m.answerQ.ID
 				m.answerGroupKey = group.key
+				m.activeDraftKey = group.key
 				m.composeTo = ""
 				m.composeName = ""
 				m.composeContext = model.RepositoryContext{}
@@ -794,6 +829,7 @@ func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.answerQ = model.Message{}
 		m.composeTo, m.composeName = choice.mailboxID, choice.name
 		m.composeContext, m.composeNamed = choice.context, choice.named
+		m.activeDraftKey = "draft:" + uuid.NewString()
 		m.paneFocus = focusReply
 		m.resizeEditor()
 		m.editor.Focus()
@@ -826,6 +862,57 @@ func (m *app) cyclePaneFocus(direction int) {
 		next += count
 	}
 	m.paneFocus = paneFocus(next)
+}
+
+func (m *app) stowActiveDraft() {
+	if !m.answering {
+		return
+	}
+	key := m.activeDraftKey
+	if key == "" {
+		key = m.answerGroupKey
+	}
+	if key == "" {
+		key = "draft:" + uuid.NewString()
+	}
+	if m.drafts == nil {
+		m.drafts = make(map[string]messageDraft)
+	}
+	m.drafts[key] = messageDraft{
+		key: key, body: m.editor.Value(), answerID: m.answerID, answerGroupKey: m.answerGroupKey,
+		answerQ: m.answerQ, composeTo: m.composeTo, composeName: m.composeName,
+		composeContext: m.composeContext, composeNamed: m.composeNamed, updatedAt: time.Now(),
+	}
+	m.answering = false
+	m.activeDraftKey = ""
+	m.answerID = ""
+	m.answerGroupKey = ""
+	m.answerQ = model.Message{}
+	m.composeTo = ""
+	m.composeName = ""
+	m.composeContext = model.RepositoryContext{}
+	m.composeNamed = false
+	m.editor.Blur()
+	m.editor.Reset()
+	if index := groupIndex(m.visibleGroups(), key); index >= 0 {
+		m.cursor = index
+	}
+}
+
+func (m *app) resumeDraft(draft messageDraft) {
+	m.answering = true
+	m.activeDraftKey = draft.key
+	m.answerID = draft.answerID
+	m.answerGroupKey = draft.answerGroupKey
+	m.answerQ = draft.answerQ
+	m.composeTo = draft.composeTo
+	m.composeName = draft.composeName
+	m.composeContext = draft.composeContext
+	m.composeNamed = draft.composeNamed
+	m.paneFocus = focusReply
+	m.resizeEditor()
+	m.editor.SetValue(draft.body)
+	m.editor.Focus()
 }
 
 func (m app) paneFocused(pane paneFocus) bool { return m.paneFocus == pane }
@@ -910,10 +997,45 @@ func detailValue(details, prefix string) string {
 }
 
 func (m app) visibleGroups() []messageGroup {
+	var base []messageGroup
 	if len(m.groups) > 0 || len(m.messages) == 0 {
-		return m.groups
+		base = m.groups
+	} else {
+		base = groupMessages(m.messages)
 	}
-	return groupMessages(m.messages)
+	groups := make([]messageGroup, len(base))
+	copy(groups, base)
+	seenDrafts := make(map[string]bool)
+	for i := range groups {
+		if draft, ok := m.drafts[groups[i].key]; ok {
+			copyDraft := draft
+			groups[i].draft = &copyDraft
+			seenDrafts[draft.key] = true
+		}
+	}
+	for key, draft := range m.drafts {
+		if seenDrafts[key] {
+			continue
+		}
+		copyDraft := draft
+		group := messageGroup{key: key, draft: &copyDraft}
+		if draft.answerQ.ID != "" {
+			group.messages = []model.Message{draft.answerQ}
+		}
+		groups = append(groups, group)
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		return groupActivity(groups[i]).After(groupActivity(groups[j]))
+	})
+	return groups
+}
+
+func groupActivity(group messageGroup) time.Time {
+	latest := group.latest().CreatedAt
+	if group.draft != nil && group.draft.updatedAt.After(latest) {
+		return group.draft.updatedAt
+	}
+	return latest
 }
 
 func (m app) groupAtCursor() (messageGroup, bool) {
@@ -932,7 +1054,7 @@ func (m app) withContextCommand() (tea.Model, tea.Cmd) {
 		} else {
 			q = m.answerQ
 		}
-	} else if group, found := m.groupAtCursor(); found {
+	} else if group, found := m.groupAtCursor(); found && len(group.messages) > 0 {
 		q = group.latest()
 	}
 	if q.ID == "" || m.repo == nil {
@@ -1203,7 +1325,11 @@ func (m app) View() tea.View {
 		messagePane = m.renderGroupPanel(detailGroup, layout.messageWidth)
 	}
 	messagePane = fitRenderedPane(messagePane, layout.messageWidth, layout.messageHeight, m.messageScroll, messageFocused)
-	replyPane := renderMessagePanel("Press Enter to reply to the selected turn.", layout.replyWidth, "[reply]", "", replyFocused)
+	replyHint := "Press Enter to reply to the selected turn."
+	if hasDetail && detailGroup.draft != nil {
+		replyHint = "Draft saved. Press Enter to continue editing."
+	}
+	replyPane := renderMessagePanel(replyHint, layout.replyWidth, "[reply]", "", replyFocused)
 	if m.pickingRecipient {
 		replyPane = m.renderRecipientPicker(layout.replyWidth, layout.replyHeight)
 	} else if m.answering {
@@ -1305,13 +1431,21 @@ func (m app) renderInboxPane(width, height int) string {
 	} else if listRows > 0 {
 		start, end := listWindow(len(groups), m.cursor, listRows)
 		for i := start; i < end; i++ {
-			message := groups[i].latest()
+			group := groups[i]
+			message := group.latest()
+			if group.draft != nil && len(group.messages) == 0 {
+				message = model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: group.draft.composeTo, RecipientLabel: group.draft.composeName, Body: group.draft.body}
+			}
 			direction := short(displayMailboxLabel(message.SenderLabel, message.Context), 18)
 			if message.SenderMailboxID == model.HumanMailboxID {
 				direction = "sent → " + short(displayMailboxLabel(message.RecipientLabel, message.Context), 16)
 			}
-			kind := groupPresentationKind(groups[i])
+			kind := groupPresentationKind(group)
 			badge := presentationLabel(kind)
+			if group.draft != nil {
+				direction = "draft → " + short(draftRecipient(*group.draft), 15)
+				badge = "DRAFT"
+			}
 			if badge != "" {
 				badge += " "
 			}
@@ -1354,6 +1488,15 @@ func groupPresentationKind(group messageGroup) string {
 }
 
 func (m app) renderGroupPanel(group messageGroup, width int) string {
+	if len(group.messages) == 0 && group.draft != nil {
+		body := titleStyle.Render("New message to "+draftRecipient(*group.draft)) + "\n\n"
+		if group.draft.body == "" {
+			body += dim.Render("(empty draft)")
+		} else {
+			body += group.draft.body
+		}
+		return renderMessagePanel(body, width, "[draft]", "press enter to continue", m.paneFocused(focusMessage))
+	}
 	latest := group.latest()
 	kind := groupPresentationKind(group)
 	sender := displayMailboxLabel(latest.SenderLabel, latest.Context)
@@ -1385,6 +1528,16 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 			}
 		}
 	}
+	if group.draft != nil {
+		body.WriteString("\n\n")
+		body.WriteString(titleStyle.Render("Draft reply"))
+		body.WriteByte('\n')
+		if group.draft.body == "" {
+			body.WriteString(dim.Render("(empty draft)"))
+		} else {
+			body.WriteString(group.draft.body)
+		}
+	}
 	if m.showTechnical {
 		if context := m.technicalContext(latest); context != "" {
 			body.WriteString("\n\n")
@@ -1396,6 +1549,13 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 		bottomLabel = "technical details hidden · press i to show"
 	}
 	return renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage))
+}
+
+func draftRecipient(draft messageDraft) string {
+	if draft.composeName != "" {
+		return draft.composeName
+	}
+	return displayMailboxLabel(draft.answerQ.SenderLabel, draft.answerQ.Context)
 }
 
 func groupHasTechnicalIdentifiers(group messageGroup) bool {

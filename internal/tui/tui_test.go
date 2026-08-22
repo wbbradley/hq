@@ -572,6 +572,72 @@ func TestTabAndShiftTabCyclePaneFocus(t *testing.T) {
 	}
 }
 
+func TestLeavingReplyStowsDraftAndRestoresInboxNavigation(t *testing.T) {
+	question := message("question", testAgentID, model.HumanMailboxID, "Question")
+	other := message("other", testAgentID, model.HumanMailboxID, "Other message")
+	question.CreatedAt = time.Unix(20, 0)
+	other.CreatedAt = time.Unix(10, 0)
+	editor := textarea.New()
+	editor.SetValue("unfinished reply")
+	editor.Focus()
+	m := app{
+		messages: []model.Message{question, other}, answering: true, answerID: question.ID,
+		answerGroupKey: messageGroupKey(question), answerQ: question, activeDraftKey: messageGroupKey(question),
+		editor: editor, paneFocus: focusReply, width: 80, height: 24,
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(app)
+	if m.answering || m.paneFocus != focusInbox || len(m.drafts) != 1 {
+		t.Fatalf("reply was not stowed: %#v", m)
+	}
+	if view := m.View().Content; !strings.Contains(view, "DRAFT") || !strings.Contains(view, "unfinished reply") {
+		t.Fatalf("reply draft was not shown on its thread: %q", view)
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	m = updated.(app)
+	if view := m.View().Content; !strings.Contains(view, "Other message") {
+		t.Fatalf("message pane did not follow inbox navigation: %q", view)
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	m = updated.(app)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if !m.answering || m.paneFocus != focusReply || m.editor.Value() != "unfinished reply" {
+		t.Fatalf("reply draft did not resume: %#v", m)
+	}
+}
+
+func TestLeavingNewMessageCreatesOutboundDraftRow(t *testing.T) {
+	editor := textarea.New()
+	editor.SetValue("unfinished new message")
+	editor.Focus()
+	m := app{
+		answering: true, activeDraftKey: "draft:new", composeTo: "fred-id", composeName: "fred",
+		editor: editor, paneFocus: focusReply, width: 80, height: 24,
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(app)
+	view := m.View().Content
+	if m.answering || m.paneFocus != focusInbox || !strings.Contains(view, "draft → fred") || !strings.Contains(view, "DRAFT") || !strings.Contains(view, "unfinished new message") {
+		t.Fatalf("new-message draft row = %q, state = %#v", view, m)
+	}
+	updated, _ = m.Update(loadedMsg{inbox: []model.Message{message("incoming", testAgentID, model.HumanMailboxID, "Incoming")}})
+	m = updated.(app)
+	if group, ok := m.groupAtCursor(); !ok || group.draft == nil || group.draft.body != "unfinished new message" {
+		t.Fatalf("reload lost draft selection: %#v", m)
+	}
+
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if !m.answering || m.composeTo != "fred-id" || m.editor.Value() != "unfinished new message" {
+		t.Fatalf("new-message draft did not resume: %#v", m)
+	}
+}
+
 func TestPageKeysApplyToFocusedPane(t *testing.T) {
 	messages := make([]model.Message, 0, 10)
 	for i := range 10 {
