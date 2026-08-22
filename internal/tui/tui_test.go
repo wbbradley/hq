@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,7 +101,7 @@ func TestDeliveryLabels(t *testing.T) {
 
 func TestStatusViewIsSeparateAndToggleable(t *testing.T) {
 	received := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
-	m := app{network: store.NetworkStatus{Queued: 2, RelayAccepted: 3, Rejected: 1, Relays: []store.RelayHealth{{URL: "wss://relay.test", LastEvent: &received}}}}
+	m := app{width: 100, height: 40, network: store.NetworkStatus{Queued: 2, RelayAccepted: 3, Rejected: 1, Relays: []store.RelayHealth{{URL: "wss://relay.test", LastEvent: &received}}}}
 	if strings.Contains(m.View().Content, "Relay status") {
 		t.Fatal("status crowded the default view")
 	}
@@ -144,14 +145,14 @@ func TestMessageDetailWrapsToTerminalWidth(t *testing.T) {
 	}
 }
 
-func TestShortMessageDetailKeepsNaturalWidth(t *testing.T) {
+func TestShortMessageDetailFillsAllocatedWidth(t *testing.T) {
 	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d68", testAgentID, model.HumanMailboxID, "Short")
 	m := app{messages: []model.Message{item}, width: 100}
 
 	for _, line := range strings.Split(m.View().Content, "\n") {
 		if strings.Contains(line, "╭") {
-			if width := lipgloss.Width(line); width >= m.width {
-				t.Fatalf("short detail panel width = %d; want natural width below %d", width, m.width)
+			if width := lipgloss.Width(line); width != m.width {
+				t.Fatalf("short detail panel width = %d; want allocated width %d", width, m.width)
 			}
 			return
 		}
@@ -239,7 +240,7 @@ func TestMessagePresentationKindsAndFriendlyLabels(t *testing.T) {
 		item.Details = "Kind: " + test.kind
 		messages = append(messages, item)
 	}
-	view := (app{messages: messages}).View().Content
+	view := (app{messages: messages, width: 100, height: 40}).View().Content
 	if !strings.Contains(view, "codex · repo") || strings.Contains(view, "codex:0198c7ec") {
 		t.Fatalf("friendly mailbox label missing: %q", view)
 	}
@@ -265,7 +266,7 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 	item.RecipientInstallationID = "recipient-installation-opaque"
 	item.ReplyTo = &replyTo
 	item.Details = "Kind: update\nCodex thread: codex-thread-opaque\nCodex turn: turn-opaque\nHQ message: hq-opaque\n\nChoose one:\n- accept\n- decline"
-	m := app{messages: []model.Message{item}}
+	m := app{messages: []model.Message{item}, width: 100, height: 80}
 
 	view := m.View().Content
 	for _, hidden := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "hq-opaque", "Kind: update"} {
@@ -373,8 +374,13 @@ func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
 }
 
 func TestListHeightAndHorizontalReplyLayout(t *testing.T) {
-	if start, end := listWindow(100, 50, 20); end-start > 10 {
-		t.Fatalf("20-row TUI displayed %d inbox rows; want at most 10 after header", end-start)
+	layout := responsivePaneLayout(120, 20, true)
+	if layout.inboxHeight != 5 || layout.messageWidth != 60 || layout.replyWidth != 60 || !layout.horizontal {
+		t.Fatalf("wide responsive layout = %#v", layout)
+	}
+	narrow := responsivePaneLayout(119, 20, true)
+	if narrow.horizontal || narrow.messageWidth != 119 || narrow.replyWidth != 119 || narrow.messageHeight+narrow.replyHeight != 14 {
+		t.Fatalf("narrow responsive layout = %#v", narrow)
 	}
 	item := message("message", testAgentID, model.HumanMailboxID, "Body")
 	item.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
@@ -399,6 +405,111 @@ func TestListHeightAndHorizontalReplyLayout(t *testing.T) {
 	}
 }
 
+func TestResponsiveViewFitsTerminalAndSwitchesAt120Columns(t *testing.T) {
+	item := message("message", testAgentID, model.HumanMailboxID, "Body")
+	item.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	for _, width := range []int{119, 120} {
+		editor := textarea.New()
+		editor.Focus()
+		m := app{
+			messages: []model.Message{item}, answering: true, answerID: item.ID,
+			answerGroupKey: messageGroupKey(item), answerQ: item, editor: editor, width: width, height: 24,
+		}
+		m.resizeEditor()
+		view := m.View().Content
+		if got := lipgloss.Height(view); got != m.height {
+			t.Fatalf("%d-column view height = %d; want %d", width, got, m.height)
+		}
+		for lineNumber, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Fatalf("%d-column view line %d width = %d: %q", width, lineNumber+1, got, line)
+			}
+		}
+		layout := responsivePaneLayout(width, m.height, true)
+		lines := strings.Split(view, "\n")
+		if lipgloss.Width(lines[0]) != width || !strings.Contains(lines[0], "[HQ · Inbox") || !strings.Contains(lines[layout.inboxHeight], "[an update from") {
+			t.Fatalf("%d-column fixture boundaries: %q", width, view)
+		}
+		if width == 120 && strings.Count(lines[layout.inboxHeight], "╭") != 2 {
+			t.Fatalf("wide panes are not side by side: %q", lines[layout.inboxHeight])
+		}
+		if width == 119 && !strings.Contains(lines[layout.inboxHeight+layout.messageHeight], "[reply]") {
+			t.Fatalf("narrow reply pane is not vertically stacked: %q", view)
+		}
+	}
+}
+
+func TestMessagePanePageScrollingStaysInsideFixture(t *testing.T) {
+	var body strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&body, "line-%02d\n", i)
+	}
+	item := message("message", testAgentID, model.HumanMailboxID, strings.TrimSpace(body.String()))
+	m := app{messages: []model.Message{item}, width: 80, height: 24, paneFocus: focusMessage}
+	bottomView := m.View().Content
+	bottomLines := strings.Split(bottomView, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:]
+	if bottom := strings.Join(bottomLines, "\n"); !strings.Contains(bottom, "line-20") || strings.Contains(bottom, "line-01") {
+		t.Fatalf("message pane did not begin at latest content: %q", bottom)
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = updated.(app)
+	upperView := m.View().Content
+	upperLines := strings.Split(upperView, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:]
+	if upper := strings.Join(upperLines, "\n"); !strings.Contains(upper, "line-08") || strings.Contains(upper, "line-20") {
+		t.Fatalf("page-up did not scroll within message fixture: %q", upper)
+	}
+	if lipgloss.Height(upperView) != m.height {
+		t.Fatalf("scrolled view height = %d; want %d", lipgloss.Height(upperView), m.height)
+	}
+}
+
+func TestTabAndShiftTabCyclePaneFocus(t *testing.T) {
+	m := app{editor: textarea.New(), width: 120, height: 24}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(app)
+	if m.paneFocus != focusMessage || !strings.Contains(m.View().Content, "message · focused") {
+		t.Fatalf("first tab focus = %v", m.paneFocus)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(app)
+	if m.paneFocus != focusReply || !strings.Contains(m.View().Content, "reply · focused") {
+		t.Fatalf("second tab focus = %v", m.paneFocus)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	m = updated.(app)
+	if m.paneFocus != focusMessage {
+		t.Fatalf("shift-tab focus = %v", m.paneFocus)
+	}
+}
+
+func TestPageKeysApplyToFocusedPane(t *testing.T) {
+	messages := make([]model.Message, 0, 10)
+	for i := range 10 {
+		item := message(fmt.Sprintf("message-%02d", i), testAgentID, model.HumanMailboxID, fmt.Sprintf("Body %02d", i))
+		item.CreatedAt = time.Unix(int64(100-i), 0)
+		messages = append(messages, item)
+	}
+	m := app{messages: messages, width: 80, height: 24, paneFocus: focusInbox}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
+	m = updated.(app)
+	if m.cursor == 0 || m.messageScroll != 0 {
+		t.Fatalf("inbox page-down changed cursor=%d scroll=%d", m.cursor, m.messageScroll)
+	}
+	m.paneFocus = focusMessage
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = updated.(app)
+	if m.messageScroll == 0 {
+		t.Fatal("message page-up did not change message scroll")
+	}
+	previousScroll := m.messageScroll
+	m.paneFocus = focusReply
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	m = updated.(app)
+	if m.messageScroll != previousScroll {
+		t.Fatalf("reply page-up changed message scroll from %d to %d", previousScroll, m.messageScroll)
+	}
+}
+
 func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", agent.ID, model.HumanMailboxID, "Question")
@@ -409,7 +520,7 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	}
 	editor := textarea.New()
 	editor.SetValue("Answer")
-	m := app{ctx: ctx, store: s, messages: []model.Message{inbound}, answering: true, answerID: inbound.ID, answerQ: inbound, editor: editor}
+	m := app{ctx: ctx, store: s, messages: []model.Message{inbound}, answering: true, answerID: inbound.ID, answerQ: inbound, editor: editor, paneFocus: focusReply}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("enter did not submit")
@@ -531,7 +642,7 @@ func TestShiftEnterAndCtrlJInsertNewlines(t *testing.T) {
 	editor.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"))
 	editor.SetValue("first")
 	editor.Focus()
-	m := app{answering: true, answerID: "id", editor: editor}
+	m := app{answering: true, answerID: "id", editor: editor, paneFocus: focusReply}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
 	m = updated.(app)
 	updated, _ = m.Update(tea.KeyPressMsg{Code: 'j', Mod: tea.ModCtrl})
@@ -545,7 +656,7 @@ func TestPasteInsertsTextIntoActiveDraft(t *testing.T) {
 	editor := textarea.New()
 	editor.SetValue("Before ")
 	editor.Focus()
-	m := app{answering: true, answerID: "id", editor: editor}
+	m := app{answering: true, answerID: "id", editor: editor, paneFocus: focusReply}
 
 	updated, _ := m.Update(tea.PasteMsg{Content: "voice-to-text"})
 	m = updated.(app)

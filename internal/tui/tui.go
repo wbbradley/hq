@@ -68,11 +68,32 @@ type app struct {
 	nextUndoID     uint64
 	undoing        bool
 	undoNotice     string
+	messageScroll  int
+	paneFocus      paneFocus
 }
+
+type paneFocus int
+
+const (
+	focusInbox paneFocus = iota
+	focusMessage
+	focusReply
+)
 
 type messageGroup struct {
 	key      string
 	messages []model.Message
+}
+
+type paneLayout struct {
+	width         int
+	height        int
+	inboxHeight   int
+	messageWidth  int
+	messageHeight int
+	replyWidth    int
+	replyHeight   int
+	horizontal    bool
 }
 
 func (g messageGroup) latest() model.Message {
@@ -309,8 +330,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		_, replyWidth, _ := horizontalPaneWidths(msg.Width)
-		m.editor.SetWidth(max(20, replyWidth-4))
+		layout := responsivePaneLayout(msg.Width, msg.Height, m.answering)
+		m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
+		m.editor.SetHeight(max(1, layout.replyHeight-4))
 	case loadedMsg:
 		selectedKey := m.selectedGroupKey()
 		m.inbox, m.sent, m.archived, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.network, msg.err
@@ -384,6 +406,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.answerGroupKey = ""
 			m.answerQ = model.Message{}
 			m.composeTo = ""
+			m.paneFocus = focusInbox
 			m.editor.Reset()
 			return m, tea.Batch(m.load, m.syncNow())
 		}
@@ -414,7 +437,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.load, m.syncNow())
 		}
 	case tea.PasteMsg:
-		if m.answering {
+		if m.answering && m.paneFocus == focusReply {
 			var cmd tea.Cmd
 			m.editor, cmd = m.editor.Update(msg)
 			return m, cmd
@@ -426,6 +449,62 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		switch msg.String() {
+		case "tab":
+			m.cyclePaneFocus(1)
+			if m.answering && m.paneFocus == focusReply {
+				m.editor.Focus()
+				return m, textarea.Blink
+			}
+			m.editor.Blur()
+			return m, nil
+		case "shift+tab":
+			m.cyclePaneFocus(-1)
+			if m.answering && m.paneFocus == focusReply {
+				m.editor.Focus()
+				return m, textarea.Blink
+			}
+			m.editor.Blur()
+			return m, nil
+		}
+		switch msg.String() {
+		case "pgup":
+			layout := responsivePaneLayout(m.width, m.height, m.answering)
+			switch m.paneFocus {
+			case focusInbox:
+				m.cursor = max(0, m.cursor-max(1, layout.inboxHeight-3))
+				m.messageScroll = 0
+				return m.withContextCommand()
+			case focusMessage:
+				m.messageScroll += max(1, layout.messageHeight-3)
+				return m, nil
+			case focusReply:
+				if m.answering {
+					var cmd tea.Cmd
+					m.editor, cmd = m.editor.Update(msg)
+					return m, cmd
+				}
+			}
+			return m, nil
+		case "pgdown":
+			layout := responsivePaneLayout(m.width, m.height, m.answering)
+			switch m.paneFocus {
+			case focusInbox:
+				m.cursor = min(max(0, len(m.messages)-1), m.cursor+max(1, layout.inboxHeight-3))
+				m.messageScroll = 0
+				return m.withContextCommand()
+			case focusMessage:
+				m.messageScroll = max(0, m.messageScroll-max(1, layout.messageHeight-3))
+				return m, nil
+			case focusReply:
+				if m.answering {
+					var cmd tea.Cmd
+					m.editor, cmd = m.editor.Update(msg)
+					return m, cmd
+				}
+			}
+			return m, nil
+		}
 		if m.answering {
 			switch msg.String() {
 			case "ctrl+c", "esc":
@@ -434,13 +513,38 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.answerGroupKey = ""
 				m.answerQ = model.Message{}
 				m.composeTo = ""
+				m.paneFocus = focusInbox
 				m.editor.Blur()
 				m.editor.Reset()
 				return m, nil
+			case "j", "down":
+				if m.paneFocus == focusMessage {
+					m.messageScroll = max(0, m.messageScroll-1)
+					return m, nil
+				}
+				if m.paneFocus == focusInbox && m.cursor+1 < len(m.messages) {
+					m.cursor++
+					return m, nil
+				}
+			case "k", "up":
+				if m.paneFocus == focusMessage {
+					m.messageScroll++
+					return m, nil
+				}
+				if m.paneFocus == focusInbox && m.cursor > 0 {
+					m.cursor--
+					return m, nil
+				}
 			case "enter":
+				if m.paneFocus != focusReply {
+					return m, nil
+				}
 				if strings.TrimSpace(m.editor.Value()) != "" {
 					return m, m.answer
 				}
+				return m, nil
+			}
+			if m.paneFocus != focusReply {
 				return m, nil
 			}
 			var cmd tea.Cmd
@@ -451,23 +555,41 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "j", "down":
+			if m.paneFocus == focusMessage {
+				m.messageScroll = max(0, m.messageScroll-1)
+				return m, nil
+			}
+			if m.paneFocus != focusInbox {
+				return m, nil
+			}
 			if m.cursor+1 < len(m.messages) {
 				m.cursor++
+				m.messageScroll = 0
 				return m.withContextCommand()
 			}
 		case "k", "up":
+			if m.paneFocus == focusMessage {
+				m.messageScroll++
+				return m, nil
+			}
+			if m.paneFocus != focusInbox {
+				return m, nil
+			}
 			if m.cursor > 0 {
 				m.cursor--
+				m.messageScroll = 0
 				return m.withContextCommand()
 			}
 		case "s":
 			m.showSent = !m.showSent
 			m.cursor = 0
+			m.messageScroll = 0
 			m.setMessages()
 			return m.withContextCommand()
 		case "x":
 			m.showArchived = !m.showArchived
 			m.cursor = 0
+			m.messageScroll = 0
 			m.setMessages()
 			return m.withContextCommand()
 		case "v":
@@ -483,6 +605,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.answerID = m.answerQ.ID
 				m.answerGroupKey = group.key
 				m.composeTo = ""
+				m.paneFocus = focusReply
+				m.resizeEditor()
 				m.editor.Focus()
 				return m, textarea.Blink
 			}
@@ -510,6 +634,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.answerID = ""
 					m.answerGroupKey = group.key
 					m.composeTo = target
+					m.paneFocus = focusReply
+					m.resizeEditor()
 					m.editor.Focus()
 					return m, textarea.Blink
 				}
@@ -519,6 +645,33 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *app) resizeEditor() {
+	layout := responsivePaneLayout(m.width, m.height, true)
+	m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
+	m.editor.SetHeight(max(1, layout.replyHeight-4))
+}
+
+func (m *app) cyclePaneFocus(direction int) {
+	count := int(focusReply) + 1
+	next := (int(m.paneFocus) + direction) % count
+	if next < 0 {
+		next += count
+	}
+	m.paneFocus = paneFocus(next)
+}
+
+func (m app) paneFocused(pane paneFocus) bool { return m.paneFocus == pane }
+
+func focusPanelLabel(label string, focused bool) string {
+	if !focused || label == "" {
+		return label
+	}
+	if strings.HasSuffix(label, "]") {
+		return strings.TrimSuffix(label, "]") + " · focused]"
+	}
+	return label + " · focused"
 }
 
 func (m *app) setMessages() {
@@ -905,54 +1058,132 @@ func (m app) technicalContext(message model.Message) string {
 }
 
 func (m app) View() tea.View {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("HQ · Mailbox"))
-	b.WriteString("  ")
-	b.WriteString(selected.Render("Inbox"))
-	b.WriteString("  ")
+	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	inboxPane := m.renderInboxPane(layout.width, layout.inboxHeight)
+	var detailGroup messageGroup
+	hasDetail := false
+	if m.answering {
+		detailGroup, hasDetail = m.groupByKey(m.selectedGroupKey())
+		if !hasDetail && m.answerQ.ID != "" {
+			detailGroup, hasDetail = messageGroup{key: messageGroupKey(m.answerQ), messages: []model.Message{m.answerQ}}, true
+		}
+	} else {
+		detailGroup, hasDetail = m.groupAtCursor()
+	}
+	messagePane := renderMessagePanel("No message selected.", layout.messageWidth, focusPanelLabel("[message]", m.paneFocused(focusMessage)), "")
+	if hasDetail {
+		messagePane = m.renderGroupPanel(detailGroup, layout.messageWidth)
+	}
+	messagePane = fitRenderedPane(messagePane, layout.messageWidth, layout.messageHeight, m.messageScroll)
+	replyPane := renderMessagePanel("Press Enter to reply to the selected turn.", layout.replyWidth, focusPanelLabel("[reply]", m.paneFocused(focusReply)), "")
+	if m.answering {
+		replyPane = m.renderReplyPane(layout.replyWidth)
+	}
+	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0)
+	bottom := ""
+	if layout.horizontal {
+		bottom = lipgloss.JoinHorizontal(lipgloss.Top, messagePane, replyPane)
+	} else {
+		bottom = lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
+	}
+	help := "tab/shift+tab focus · j/k navigate · pgup/pgdown message · enter reply · d archive · u undo · i details · q quit"
+	if m.answering {
+		help = "tab/shift+tab focus · pgup/pgdown message · enter submit · shift+enter/ctrl+j newline · esc cancel"
+	}
+	if m.undoNotice != "" {
+		help = m.undoNotice + " · " + help
+	}
+	help = dim.Render(truncateDisplay(help, layout.width))
+	content := lipgloss.JoinVertical(lipgloss.Left, inboxPane, bottom, help)
+	view := tea.NewView(content)
+	view.AltScreen = true
+	return view
+}
+
+func listWindow(total, cursor, limit int) (int, int) {
+	if total == 0 {
+		return 0, 0
+	}
+	limit = min(total, max(1, limit))
+	start := max(0, cursor-limit/2)
+	if start+limit > total {
+		start = total - limit
+	}
+	return start, start + limit
+}
+
+func responsivePaneLayout(width, height int, _ bool) paneLayout {
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+	result := paneLayout{width: width, height: height}
+	usableHeight := max(2, height-1) // Reserve one terminal row for responsive help.
+	result.inboxHeight = max(2, (height+3)/4)
+	result.inboxHeight = min(result.inboxHeight, usableHeight-1)
+	remaining := max(1, usableHeight-result.inboxHeight)
+	result.messageWidth, result.messageHeight = width, remaining
+	if width >= 120 {
+		result.horizontal = true
+		result.messageWidth = width / 2
+		result.replyWidth = width - result.messageWidth
+		result.replyHeight = remaining
+		return result
+	}
+	result.replyWidth = width
+	result.messageHeight = max(1, (remaining+1)/2)
+	result.replyHeight = max(1, remaining-result.messageHeight)
+	return result
+}
+
+func (m app) renderInboxPane(width, height int) string {
+	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
+	innerHeight := max(0, height-2)
+	var lines []string
+	navigation := "Inbox"
 	if m.showSent {
-		b.WriteString(selected.Render("Sent:on"))
+		navigation += "  Sent:on"
 	} else {
-		b.WriteString(dim.Render("Sent:off"))
+		navigation += "  Sent:off"
 	}
-	b.WriteString("  ")
 	if m.showArchived {
-		b.WriteString(selected.Render("Archived:on"))
+		navigation += "  Archived:on"
 	} else {
-		b.WriteString(dim.Render("Archived:off"))
+		navigation += "  Archived:off"
 	}
-	b.WriteString("\n\n")
-	if m.connection.Diagnostic != "" {
-		style := dim
-		if m.connection.Blocking {
-			style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+	lines = append(lines, titleStyle.Render(truncateDisplay(navigation, innerWidth)))
+	appendDiagnostic := func(value string, style lipgloss.Style) {
+		if value != "" && len(lines) < innerHeight {
+			lines = append(lines, style.Render(truncateDisplay(singleLine(value), innerWidth)))
 		}
-		b.WriteString(style.Render(m.connection.Diagnostic))
-		b.WriteString("\n\n")
-		if m.connection.Blocking {
-			b.WriteString(dim.Render("Restart or upgrade the indicated HQ component, then reopen the TUI. · q quit"))
-			view := tea.NewView(b.String())
-			view.AltScreen = true
-			return view
-		}
+	}
+	connectionStyle := dim
+	if m.connection.Blocking {
+		connectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+	}
+	appendDiagnostic(m.connection.Diagnostic, connectionStyle)
+	if m.connection.Blocking {
+		appendDiagnostic("Restart or upgrade the indicated HQ component, then reopen the TUI. · q quit", dim)
 	}
 	if m.err != nil {
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.err.Error()))
-		b.WriteString("\n\n")
+		appendDiagnostic(m.err.Error(), lipgloss.NewStyle().Foreground(lipgloss.Color("196")))
 	}
 	if m.syncErr != nil {
-		b.WriteString(dim.Render("relay sync pending: " + m.syncErr.Error()))
-		b.WriteString("\n\n")
+		appendDiagnostic("relay sync pending: "+m.syncErr.Error(), dim)
 	}
 	if m.showStatus {
-		b.WriteString(panel.Render(formatNetworkStatus(m.network)))
-		b.WriteString("\n\n")
+		for _, line := range strings.Split(formatNetworkStatus(m.network), "\n") {
+			appendDiagnostic(line, dim)
+		}
 	}
 	groups := m.visibleGroups()
-	if len(groups) == 0 {
-		b.WriteString(dim.Render("No messages in this view. Press r to refresh."))
-	} else {
-		start, end := listWindow(len(groups), m.cursor, m.height)
+	listRows := max(0, innerHeight-len(lines))
+	if len(groups) == 0 && listRows > 0 {
+		lines = append(lines, dim.Render(truncateDisplay("No messages in this view. Press r to refresh.", innerWidth)))
+	} else if listRows > 0 {
+		start, end := listWindow(len(groups), m.cursor, listRows)
 		for i := start; i < end; i++ {
 			message := groups[i].latest()
 			direction := short(displayMailboxLabel(message.SenderLabel, message.Context), 18)
@@ -968,87 +1199,23 @@ func (m app) View() tea.View {
 			if message.ArchivedAt != nil {
 				state += " [archived]"
 			}
-			line := fmt.Sprintf("%-18s %s%s%s", direction, badge, singleLine(message.Body), state)
+			line := truncateDisplay(fmt.Sprintf("%-18s %s%s%s", direction, badge, singleLine(message.Body), state), innerWidth-2)
 			if i == m.cursor {
-				b.WriteString(selected.Render("› " + line))
+				lines = append(lines, selected.Render("› "+line))
 			} else {
 				switch kind {
 				case "final-answer":
-					b.WriteString("  " + finalStyle.Render(line))
+					lines = append(lines, "  "+finalStyle.Render(line))
 				case "update", "status", "notice":
-					b.WriteString("  " + dim.Render(line))
+					lines = append(lines, "  "+dim.Render(line))
 				default:
-					b.WriteString("  " + line)
+					lines = append(lines, "  "+line)
 				}
 			}
-			b.WriteByte('\n')
 		}
 	}
-	var detailGroup messageGroup
-	hasDetail := false
-	if m.answering {
-		detailGroup, hasDetail = m.groupByKey(m.selectedGroupKey())
-		if !hasDetail && m.answerQ.ID != "" {
-			detailGroup, hasDetail = messageGroup{key: messageGroupKey(m.answerQ), messages: []model.Message{m.answerQ}}, true
-		}
-	} else {
-		detailGroup, hasDetail = m.groupAtCursor()
-	}
-	if hasDetail {
-		b.WriteString("\n")
-		messageWidth, replyWidth, horizontal := horizontalPaneWidths(m.width)
-		if !m.answering || !horizontal {
-			messageWidth = m.width
-		}
-		messagePane := m.renderGroupPanel(detailGroup, messageWidth)
-		if m.answering {
-			replyPane := m.renderReplyPane(replyWidth)
-			if horizontal {
-				b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, messagePane, "  ", replyPane))
-			} else {
-				b.WriteString(messagePane)
-				b.WriteString("\n\n")
-				b.WriteString(replyPane)
-			}
-		} else {
-			b.WriteString(messagePane)
-		}
-	}
-	if m.undoNotice != "" {
-		b.WriteString("\n\n")
-		b.WriteString(dim.Render(m.undoNotice))
-	}
-	if !m.answering {
-		b.WriteString("\n\n")
-		b.WriteString(dim.Render("j/k move · enter reply · d archive · u undo · n new · s sent · x archived · v status · i details · r refresh · q quit · live · repair 5m"))
-	}
-	view := tea.NewView(b.String())
-	view.AltScreen = true
-	return view
-}
-
-func listWindow(total, cursor, terminalHeight int) (int, int) {
-	if total == 0 {
-		return 0, 0
-	}
-	limit := total
-	if terminalHeight > 0 {
-		limit = min(total, max(1, terminalHeight*3/5-2))
-	}
-	start := max(0, cursor-limit/2)
-	if start+limit > total {
-		start = total - limit
-	}
-	return start, start + limit
-}
-
-func horizontalPaneWidths(terminalWidth int) (messageWidth, replyWidth int, horizontal bool) {
-	const gap = 2
-	if terminalWidth < 66 {
-		return terminalWidth, max(24, terminalWidth), false
-	}
-	replyWidth = min(72, max(28, terminalWidth*2/5))
-	return terminalWidth - gap - replyWidth, replyWidth, true
+	rendered := renderMessagePanel(strings.Join(lines, "\n"), width, focusPanelLabel("[HQ · Inbox]", m.paneFocused(focusInbox)), "")
+	return fitRenderedPane(rendered, width, height, 0)
 }
 
 func groupPresentationKind(group messageGroup) string {
@@ -1070,6 +1237,10 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 	kind := groupPresentationKind(group)
 	sender := displayMailboxLabel(latest.SenderLabel, latest.Context)
 	topLabel := presentationPanelLabel(kind, sender)
+	topLabel = focusPanelLabel(topLabel, m.paneFocused(focusMessage))
+	if topLabel == "" && m.paneFocused(focusMessage) {
+		topLabel = "[message · focused]"
+	}
 	var body strings.Builder
 	if topLabel == "" {
 		body.WriteString(dim.Render("From: " + sender))
@@ -1135,12 +1306,12 @@ func (m app) renderReplyPane(width int) string {
 	body.WriteByte('\n')
 	editor := m.editor
 	if width > 0 {
-		editor.SetWidth(max(20, width-panel.GetHorizontalFrameSize()))
+		editor.SetWidth(max(1, width-panel.GetHorizontalFrameSize()))
 	}
 	body.WriteString(editor.View())
 	body.WriteByte('\n')
 	body.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
-	return renderMessagePanel(body.String(), width, "[reply]", "")
+	return renderMessagePanel(body.String(), width, focusPanelLabel("[reply]", m.paneFocused(focusReply)), "")
 }
 
 func short(s string, n int) string {
@@ -1154,21 +1325,21 @@ func singleLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 func renderMessagePanel(content string, terminalWidth int, topLabel, bottomLabel string) string {
 	rendered := panel.Render(content)
+	if terminalWidth > panel.GetHorizontalFrameSize() {
+		rendered = panel.Width(terminalWidth).Render(content)
+	}
 	width := lipgloss.Width(rendered)
 	minimumWidth := max(lipgloss.Width(topLabel), lipgloss.Width(bottomLabel)) + 6
 	if (topLabel != "" || bottomLabel != "") && width < minimumWidth && (terminalWidth <= 0 || minimumWidth <= terminalWidth) {
 		width = minimumWidth
 		rendered = panel.Width(width).Render(content)
 	}
-	if terminalWidth > panel.GetHorizontalFrameSize() && width > terminalWidth {
-		rendered = panel.Width(terminalWidth).Render(content)
-	}
 	if topLabel == "" && bottomLabel == "" {
 		return rendered
 	}
 	lines := strings.Split(rendered, "\n")
 	bottomWidth := lipgloss.Width(lines[len(lines)-1])
-	if bottomWidth < 4 {
+	if bottomWidth < 6 {
 		return rendered
 	}
 	if topLabel != "" {
@@ -1182,6 +1353,42 @@ func renderMessagePanel(content string, terminalWidth int, topLabel, bottomLabel
 		lines[len(lines)-1] = panelEdge.Render("╰"+strings.Repeat("─", left)) + panelEdge.Render(" "+label+" ") + panelEdge.Render("─╯")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func fitRenderedPane(rendered string, width, height, scrollBack int) string {
+	if height <= 0 {
+		return ""
+	}
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	if height == 1 {
+		return lines[0]
+	}
+	top, bottom := lines[0], lines[len(lines)-1]
+	inner := lines[1 : len(lines)-1]
+	innerHeight := max(0, height-2)
+	start := 0
+	if len(inner) > innerHeight {
+		maxStart := len(inner) - innerHeight
+		start = maxStart - min(maxStart, max(0, scrollBack))
+		inner = inner[start : start+innerHeight]
+	}
+	blankRendered := panel.Width(max(width, panel.GetHorizontalFrameSize()+1)).Render("")
+	blankLines := strings.Split(blankRendered, "\n")
+	blank := ""
+	if len(blankLines) >= 3 {
+		blank = blankLines[1]
+	}
+	for len(inner) < innerHeight {
+		inner = append(inner, blank)
+	}
+	result := make([]string, 0, height)
+	result = append(result, top)
+	result = append(result, inner...)
+	result = append(result, bottom)
+	return strings.Join(result, "\n")
 }
 
 func truncateDisplay(value string, width int) string {
