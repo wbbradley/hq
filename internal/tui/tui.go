@@ -23,12 +23,14 @@ import (
 const repairInterval = 5 * time.Minute
 
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	finalStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
-	selected   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
-	dim        = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	panelEdge  = lipgloss.NewStyle().Foreground(lipgloss.Color("62"))
-	panel      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
+	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	finalStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	selected     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
+	dim          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	panelEdge    = lipgloss.NewStyle().Foreground(lipgloss.Color("62"))
+	dimPanelEdge = lipgloss.NewStyle().Foreground(lipgloss.Color("60"))
+	panel        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
+	dimPanel     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("60")).Padding(0, 1)
 )
 
 type app struct {
@@ -664,16 +666,6 @@ func (m *app) cyclePaneFocus(direction int) {
 
 func (m app) paneFocused(pane paneFocus) bool { return m.paneFocus == pane }
 
-func focusPanelLabel(label string, focused bool) string {
-	if !focused || label == "" {
-		return label
-	}
-	if strings.HasSuffix(label, "]") {
-		return strings.TrimSuffix(label, "]") + " · focused]"
-	}
-	return label + " · focused"
-}
-
 func (m *app) setMessages() {
 	seen := make(map[string]bool)
 	var allMessages []model.Message
@@ -1070,16 +1062,18 @@ func (m app) View() tea.View {
 	} else {
 		detailGroup, hasDetail = m.groupAtCursor()
 	}
-	messagePane := renderMessagePanel("No message selected.", layout.messageWidth, focusPanelLabel("[message]", m.paneFocused(focusMessage)), "")
+	messageFocused := m.paneFocused(focusMessage)
+	replyFocused := m.paneFocused(focusReply)
+	messagePane := renderMessagePanel("No message selected.", layout.messageWidth, "[message]", "", messageFocused)
 	if hasDetail {
 		messagePane = m.renderGroupPanel(detailGroup, layout.messageWidth)
 	}
-	messagePane = fitRenderedPane(messagePane, layout.messageWidth, layout.messageHeight, m.messageScroll)
-	replyPane := renderMessagePanel("Press Enter to reply to the selected turn.", layout.replyWidth, focusPanelLabel("[reply]", m.paneFocused(focusReply)), "")
+	messagePane = fitRenderedPane(messagePane, layout.messageWidth, layout.messageHeight, m.messageScroll, messageFocused)
+	replyPane := renderMessagePanel("Press Enter to reply to the selected turn.", layout.replyWidth, "[reply]", "", replyFocused)
 	if m.answering {
 		replyPane = m.renderReplyPane(layout.replyWidth)
 	}
-	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0)
+	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0, replyFocused)
 	bottom := ""
 	if layout.horizontal {
 		bottom = lipgloss.JoinHorizontal(lipgloss.Top, messagePane, replyPane)
@@ -1214,8 +1208,9 @@ func (m app) renderInboxPane(width, height int) string {
 			}
 		}
 	}
-	rendered := renderMessagePanel(strings.Join(lines, "\n"), width, focusPanelLabel("[HQ · Inbox]", m.paneFocused(focusInbox)), "")
-	return fitRenderedPane(rendered, width, height, 0)
+	focused := m.paneFocused(focusInbox)
+	rendered := renderMessagePanel(strings.Join(lines, "\n"), width, "[HQ · Inbox]", "", focused)
+	return fitRenderedPane(rendered, width, height, 0, focused)
 }
 
 func groupPresentationKind(group messageGroup) string {
@@ -1237,10 +1232,6 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 	kind := groupPresentationKind(group)
 	sender := displayMailboxLabel(latest.SenderLabel, latest.Context)
 	topLabel := presentationPanelLabel(kind, sender)
-	topLabel = focusPanelLabel(topLabel, m.paneFocused(focusMessage))
-	if topLabel == "" && m.paneFocused(focusMessage) {
-		topLabel = "[message · focused]"
-	}
 	var body strings.Builder
 	if topLabel == "" {
 		body.WriteString(dim.Render("From: " + sender))
@@ -1284,7 +1275,7 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 	if !m.showTechnical && (metadataHidden || groupHasTechnicalIdentifiers(group) || m.technicalContext(latest) != "") {
 		bottomLabel = "technical details hidden · press i to show"
 	}
-	return renderMessagePanel(body.String(), width, topLabel, bottomLabel)
+	return renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage))
 }
 
 func groupHasTechnicalIdentifiers(group messageGroup) bool {
@@ -1311,7 +1302,7 @@ func (m app) renderReplyPane(width int) string {
 	body.WriteString(editor.View())
 	body.WriteByte('\n')
 	body.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
-	return renderMessagePanel(body.String(), width, focusPanelLabel("[reply]", m.paneFocused(focusReply)), "")
+	return renderMessagePanel(body.String(), width, "[reply]", "", m.paneFocused(focusReply))
 }
 
 func short(s string, n int) string {
@@ -1323,16 +1314,20 @@ func short(s string, n int) string {
 
 func singleLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-func renderMessagePanel(content string, terminalWidth int, topLabel, bottomLabel string) string {
-	rendered := panel.Render(content)
-	if terminalWidth > panel.GetHorizontalFrameSize() {
-		rendered = panel.Width(terminalWidth).Render(content)
+func renderMessagePanel(content string, terminalWidth int, topLabel, bottomLabel string, focused bool) string {
+	paneStyle, edgeStyle := dimPanel, dimPanelEdge
+	if focused {
+		paneStyle, edgeStyle = panel, panelEdge
+	}
+	rendered := paneStyle.Render(content)
+	if terminalWidth > paneStyle.GetHorizontalFrameSize() {
+		rendered = paneStyle.Width(terminalWidth).Render(content)
 	}
 	width := lipgloss.Width(rendered)
 	minimumWidth := max(lipgloss.Width(topLabel), lipgloss.Width(bottomLabel)) + 6
 	if (topLabel != "" || bottomLabel != "") && width < minimumWidth && (terminalWidth <= 0 || minimumWidth <= terminalWidth) {
 		width = minimumWidth
-		rendered = panel.Width(width).Render(content)
+		rendered = paneStyle.Width(width).Render(content)
 	}
 	if topLabel == "" && bottomLabel == "" {
 		return rendered
@@ -1345,17 +1340,17 @@ func renderMessagePanel(content string, terminalWidth int, topLabel, bottomLabel
 	if topLabel != "" {
 		label := truncateDisplay(topLabel, bottomWidth-6)
 		right := bottomWidth - lipgloss.Width(label) - 5
-		lines[0] = panelEdge.Render("╭─" + " " + label + " " + strings.Repeat("─", right) + "╮")
+		lines[0] = edgeStyle.Render("╭─" + " " + label + " " + strings.Repeat("─", right) + "╮")
 	}
 	if bottomLabel != "" {
 		label := truncateDisplay(bottomLabel, bottomWidth-6)
 		left := bottomWidth - lipgloss.Width(label) - 5
-		lines[len(lines)-1] = panelEdge.Render("╰"+strings.Repeat("─", left)) + panelEdge.Render(" "+label+" ") + panelEdge.Render("─╯")
+		lines[len(lines)-1] = edgeStyle.Render("╰"+strings.Repeat("─", left)) + edgeStyle.Render(" "+label+" ") + edgeStyle.Render("─╯")
 	}
 	return strings.Join(lines, "\n")
 }
 
-func fitRenderedPane(rendered string, width, height, scrollBack int) string {
+func fitRenderedPane(rendered string, width, height, scrollBack int, focused bool) string {
 	if height <= 0 {
 		return ""
 	}
@@ -1375,7 +1370,11 @@ func fitRenderedPane(rendered string, width, height, scrollBack int) string {
 		start = maxStart - min(maxStart, max(0, scrollBack))
 		inner = inner[start : start+innerHeight]
 	}
-	blankRendered := panel.Width(max(width, panel.GetHorizontalFrameSize()+1)).Render("")
+	paneStyle := dimPanel
+	if focused {
+		paneStyle = panel
+	}
+	blankRendered := paneStyle.Width(max(width, paneStyle.GetHorizontalFrameSize()+1)).Render("")
 	blankLines := strings.Split(blankRendered, "\n")
 	blank := ""
 	if len(blankLines) >= 3 {

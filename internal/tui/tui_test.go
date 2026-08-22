@@ -464,15 +464,25 @@ func TestMessagePanePageScrollingStaysInsideFixture(t *testing.T) {
 }
 
 func TestTabAndShiftTabCyclePaneFocus(t *testing.T) {
-	m := app{editor: textarea.New(), width: 120, height: 24}
+	m := app{editor: textarea.New(), width: 80, height: 24}
+	borderUses := func(view, label, color string) bool {
+		for _, line := range strings.Split(view, "\n") {
+			if strings.Contains(line, label) {
+				return strings.Contains(line, "\x1b[38;5;"+color+"m")
+			}
+		}
+		return false
+	}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = updated.(app)
-	if m.paneFocus != focusMessage || !strings.Contains(m.View().Content, "message · focused") {
+	view := m.View().Content
+	if m.paneFocus != focusMessage || !borderUses(view, "[message]", "62") || !borderUses(view, "[HQ · Inbox]", "60") || strings.Contains(view, "focused") {
 		t.Fatalf("first tab focus = %v", m.paneFocus)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = updated.(app)
-	if m.paneFocus != focusReply || !strings.Contains(m.View().Content, "reply · focused") {
+	view = m.View().Content
+	if m.paneFocus != focusReply || !borderUses(view, "[reply]", "62") || !borderUses(view, "[message]", "60") || strings.Contains(view, "focused") {
 		t.Fatalf("second tab focus = %v", m.paneFocus)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
