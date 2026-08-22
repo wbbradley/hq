@@ -22,11 +22,12 @@ var (
 )
 
 type Claim struct {
-	MessageID          string   `json:"message_id,omitempty"`
-	ReplyTo            string   `json:"reply_to,omitempty"`
-	ExcludeReplyTo     []string `json:"exclude_reply_to,omitempty"`
-	RecipientMailboxID string   `json:"recipient_mailbox_id,omitempty"`
-	UnthreadedOnly     bool     `json:"unthreaded_only,omitempty"`
+	MessageID           string   `json:"message_id,omitempty"`
+	ReplyTo             string   `json:"reply_to,omitempty"`
+	ExcludeReplyTo      []string `json:"exclude_reply_to,omitempty"`
+	RecipientMailboxID  string   `json:"recipient_mailbox_id,omitempty"`
+	CorrelationThreadID string   `json:"correlation_thread_id,omitempty"`
+	UnthreadedOnly      bool     `json:"unthreaded_only,omitempty"`
 }
 
 type NamedAgent struct {
@@ -39,6 +40,21 @@ type NamedAgent struct {
 	Active           bool                    `json:"active"`
 	LeaseExpiresAt   *time.Time              `json:"lease_expires_at,omitempty"`
 	LastActiveAt     *time.Time              `json:"last_active_at,omitempty"`
+}
+
+// AgentSession is the durable, installation-private projection of one harness
+// session bound to a named agent. Runtime state is deliberately not part of
+// this record; AgentActive describes the owning agent at query time.
+type AgentSession struct {
+	AgentName      string                  `json:"agent_name"`
+	MailboxID      string                  `json:"mailbox_id"`
+	Harness        string                  `json:"harness"`
+	SessionID      string                  `json:"session_id"`
+	Context        model.RepositoryContext `json:"context"`
+	CreatedAt      time.Time               `json:"created_at"`
+	LastSelectedAt time.Time               `json:"last_selected_at"`
+	Current        bool                    `json:"current"`
+	AgentActive    bool                    `json:"agent_active"`
 }
 
 type AgentOwnershipConflict struct {
@@ -139,6 +155,7 @@ type Operations interface {
 	CreateNamedAgent(context.Context, string, string) (NamedAgent, error)
 	GetNamedAgent(context.Context, string) (NamedAgent, error)
 	ListNamedAgents(context.Context) ([]NamedAgent, error)
+	ListNamedAgentSessions(context.Context, string) ([]AgentSession, error)
 	RetireNamedAgent(context.Context, string) error
 	SelectNamedAgentSession(context.Context, string, model.SessionIdentity, model.RepositoryContext) (NamedAgent, error)
 	AcquireNamedAgent(context.Context, string, string, time.Duration) (NamedAgent, error)

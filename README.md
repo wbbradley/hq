@@ -67,7 +67,7 @@ hq poll
 
 `poll` exits with code 3 and writes nothing when the mailbox has no ready messages.
 
-The mailbox follows a resumed harness session across process restarts and directory changes. `--session ID` and `HQ_SESSION` select a `custom` mailbox for advanced use; an explicit flag wins. `hq mailboxes` lists mailbox candidates seen in the current directory, Git common directory, worktree, branch, or compact remote identity. The command does not claim or merge a mailbox.
+The mailbox follows a resumed harness session across process restarts and directory changes. `--session ID` and `HQ_SESSION` select a `custom` mailbox for advanced use; an explicit flag wins. `hq mailboxes` lists mailbox candidates seen in the current directory, Git common directory, worktree, branch, or compact remote identity. Each row includes `agent=NAME` when the mailbox has a durable agent name, `agent=NAME (retired)` when that agent is retired, or `agent=-` when it is unnamed. JSON output includes `agent_name` for named mailboxes and `agent_retired` when applicable. The command does not claim or merge a mailbox.
 
 Durable installation-local agent names can be created or can adopt an existing unnamed local agent mailbox. Names are lowercase slugs and remain permanently reserved after retirement. Presence is a local advisory lease rather than a relay heartbeat:
 
@@ -80,35 +80,21 @@ hq agent retire fred --yes
 
 ## Codex app-server bridge
 
-`hq codex` runs a Codex app-server thread as an HQ agent mailbox. It requires an installed and authenticated Codex CLI **v0.148.0** on `PATH` and an initialized HQ identity:
+`hq codex` is a local control client for a daemon-owned, durable named agent. It requires an installed and authenticated Codex CLI **v0.148.0** on the caller's `PATH` and an initialized HQ identity:
 
 ```mermaid
 flowchart LR
-    Human[Human using HQ] <--> Node[(HQ local node)]
-
-    subgraph Bridge["hq codex bridge process"]
-        Lifecycle[Lifecycle and thread state]
-        Dispatcher[HQ input dispatcher]
-        Replies[Pending reply registry]
-        Requests[Question and approval router]
-        Output[Canonical output relay]
-        Transport[JSON-RPC transport]
-
-        Lifecycle --> Transport
-        Dispatcher -->|turn/start or turn/steer| Transport
-        Dispatcher -->|structured replies| Replies
-        Replies -->|validated answer| Requests
-        Transport -->|server requests| Requests
-        Transport -->|final output and turn status| Output
+    CLI[hq codex client] -->|local RPC: environment, cwd, desired session| Node
+    TUI[HQ TUI] -->|same local RPC| Node
+    subgraph Local["installation-local control plane"]
+        Node[(HQ daemon)] --> Supervisor[Named-agent supervisor]
+        Supervisor -->|stdio child| AppServer[Codex app-server]
+        Supervisor -.-> Ledger[(shared delivery ledger)]
     end
-
-    Node -->|subscribed tasks and replies| Dispatcher
-    Requests -->|questions and approval choices| Node
-    Output -->|agent messages and status| Node
-    Transport <--> AppServer[Codex app-server]
-
-    Dispatcher -.->|delivery checkpoints| Ledger[(Codex bridge ledger)]
-    Output -.->|output checkpoints| Ledger
+    subgraph Data["Nostr data plane"]
+        Mailbox[Durable agent mailbox] <--> Relay[Encrypted relay traffic]
+    end
+    Supervisor <--> Mailbox
 ```
 
 ```sh
@@ -116,30 +102,28 @@ codex --version
 hq identity init
 ```
 
-Start a new thread in the current directory, optionally with an initial prompt:
+Launch or resume a named agent in the current directory, optionally with an initial prompt:
 
 ```sh
-hq codex
-hq codex --cwd . "Inspect the failing tests and propose a fix"
 hq codex --agent fred
+hq codex --agent fred --cwd . "Inspect the failing tests and propose a fix"
 hq codex --agent fred --new-thread
+hq codex --agent fred --session 019c0000-0000-7000-8000-000000000001
 ```
 
-`--cwd` defaults to the current directory; a relative path is resolved from that directory. Without an initial prompt, the bridge reports readiness and waits for HQ input. A new thread receives a narrow instruction to use structured human input whenever it needs an answer.
+`--agent NAME` is required; anonymous bridges and the old top-level `--resume` form are unsupported and no anonymous bridge state is migrated. `--cwd` defaults to the invoking client's current directory, and relative values are resolved there before the request is sent. The daemon validates the absolute path on its own machine, starts or resumes the exact requested thread, and changes the durable selection only after Codex acknowledges success. A missing rollout is an actionable failure and never silently creates a replacement.
 
-`hq codex --yolo` starts `codex --yolo app-server --stdio`, disabling Codex approvals and sandboxing for that bridge process. Use it only when the surrounding environment provides the required isolation.
+The client transmits its complete environment snapshot as a sensitive, transient local-RPC input so the child sees the caller's credentials, `PATH`, and Codex configuration. The environment is used only to construct the child process: it is never stored in SQLite, signed events, mutation receipts, the ledger, Nostr, logs, diagnostics, status, or RPC results. `--yolo` starts `codex --yolo app-server --stdio`; use it only when the surrounding environment provides the required isolation.
 
-Resume the exact same Codex conversation without replacing its existing instructions:
+The CLI waits for a definitive running or failed acknowledgement, prints the agent, selected thread, directory, and status, and exits. The bridge and app-server remain children of the daemon; they survive CLI or TUI exit and stop cleanly when the daemon stops or restarts. Workers are not automatically restarted after a node restart, so the agent is offline while retaining its selection.
 
-```sh
-hq codex --cwd /path/to/repo --resume 019c0000-0000-7000-8000-000000000001
-```
+A newly created agent has no selected session until its first successful `thread/start`. New threads receive developer instructions naming the durable agent and requiring structured human input; exact resumes do not replace the thread's instructions. Starting another thread preserves historical bindings and their exact repository/directory context, creation time, and most-recent selection time. One thread can never be reassigned to another agent.
 
-`--agent NAME` uses a durable installation-local mailbox. The first run creates the agent and a Codex thread; later runs automatically resume its selected thread and drain root messages queued while it was offline. `--new-thread` explicitly starts and selects a replacement while retaining the mailbox and historical bindings. A failed automatic resume leaves the selection unchanged and requires `--new-thread`; `--agent` cannot be combined with legacy `--resume`.
+Press `g` in the TUI to search non-retired agents, inspect active/offline state and current and historical sessions, resume an exact thread, start a new thread with a directory input, or stop a local worker. Switching a live worker requires confirmation and all operations run asynchronously without discarding inbox position, focus, or drafts.
 
-Named bridges hold a local 30-second ownership lease renewed every 10 seconds. A competing live bridge is rejected, clean shutdown releases the lease, and a crashed owner becomes replaceable after expiry. This ownership is local to one HQ installation and is not a distributed relay heartbeat.
+Named bridges hold a local 30-second ownership lease renewed every 10 seconds as the final exclusion boundary. A conflicting independently owned lease is reported rather than killed. Repeated local launch request IDs are idempotent, different named agents may run concurrently, and one daemon-shared ledger serializes their delivery checkpoints.
 
-The ready inbox message includes the named agent when present, Codex thread ID, and opaque HQ mailbox ID. In another terminal, open `hq` and send a root message to that mailbox. Replies remain bound to the turn they answer and are not treated as ordinary input for a replacement thread. The bridge starts a turn while idle and steers the active turn when Codex permits it.
+The CLI/TUI acknowledgement includes the agent, Codex thread, directory, and runtime phase without creating a mailbox status event or Nostr outbox row. Open `hq` and send a root message to the durable agent. Replies remain bound to the thread they answer and are not treated as ordinary input for a replacement thread. The bridge starts a turn while idle and steers the active turn when Codex permits it.
 
 Structured questions and approvals appear as separate HQ inbox rows with Codex thread, turn, item, request, and HQ message IDs. Reply with exactly one choice shown in the details. Choices such as `acceptForSession`, `grantSession`, or a policy-amendment choice persist more authority than a one-time approval and are labeled `PERSISTS`. Permission denial and cancellation always return an empty turn-scoped profile. MCP form accepts require `accept {"field":"value"}` with a validated primitive JSON object; URL requests use `accept`, `decline`, or `cancel`.
 
@@ -151,15 +135,15 @@ Only final `item/completed` agent-message content is relayed. Streaming deltas, 
 
 The bridge stores delivery and emitted-output checkpoints beside the resolved HQ database as `<database>.codexbridge.json` with owner-only permissions. Accepted HQ messages carry their HQ ID as Codex `clientUserMessageId`; an uncertain send is reconciled against Codex thread history before retry. Canonical output uses deterministic HQ IDs and reconciles the HQ store before marking its ledger checkpoint, so replay after a normal restart does not duplicate it.
 
-This is an exactly-once recovery boundary for one bridge process and its restarts, not a distributed lock. Named agents add installation-local process exclusion; legacy anonymous `--resume` sessions do not. HQ claims expire after 30 seconds and Codex steering errors are not a stable typed API in v0.148.0.
+This is an exactly-once recovery boundary for daemon-owned workers, not a distributed lock. HQ claims expire after 30 seconds and Codex steering errors are not a stable typed API in v0.148.0.
 
-On cancellation, EOF, child failure, or a fatal output error, the bridge stops accepting input, releases uncommitted claims, cancels pending structured waits, drains accepted canonical output, emits one terminal HQ status when the store remains available, then closes or kills the child. App-server stderr is written separately as `hq codex: app-server: ...`; it is never parsed as protocol traffic.
+On cancellation, EOF, child failure, or a fatal output error, the bridge stops accepting input, releases uncommitted claims, cancels pending structured waits, drains accepted canonical output, emits one terminal HQ status when the store remains available, then closes or kills the child.
 
 Troubleshooting:
 
 - Run `hq help codex` to confirm syntax and `codex --version` to confirm v0.148.0.
 - An unsupported server request stops the bridge with compatibility guidance instead of guessing a permissive response.
-- If the ready message never appears, inspect prefixed app-server stderr and the terminal error. Verify Codex authentication, the working directory, and HQ identity.
+- If readiness fails, verify Codex authentication, the caller environment, the working directory, and HQ identity; sensitive child environment and raw child stderr are deliberately absent from diagnostics.
 - If an immediate relay sync request is undesirable, use global `--no-sync`; local HQ and Codex delivery still operate, but a network-enabled node may still publish durable outbox work.
 - Do not delete the sidecar ledger while a bridge is running.
 
@@ -280,14 +264,14 @@ hq sync
 hq daemon run|status|stop|restart
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
-hq codex [--cwd PATH] [--agent NAME [--new-thread] | --resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
+hq codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]
 hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
 ```
 
 Set `HQ_DB` or pass global `--db PATH` before the command to use another database. Mutating commands ask the node to commit their signed event and may wait up to three seconds for an immediate relay synchronization request. `--no-sync` skips only that client request; it is not a node-wide offline switch. Relay errors go to stderr and never undo the local event.
 
-The local node is required and normally auto-starts on the first client connection. `hq daemon run` runs it in the foreground; systemd or launchd may keep it warm for uninterrupted relay subscriptions. `hq daemon status` reads the protected lifecycle RPC, `stop` requests a clean stop, and `restart` replaces the instance while connected clients reconnect and resubscribe. `hq sync` asks the owning node to wake its network engine. Build drift is allowed when wire ranges remain compatible and is shown with restart guidance; incompatible ranges identify the stale side.
+The local node is required and normally auto-starts on the first client connection. `hq daemon run` runs it in the foreground; systemd or launchd may keep it warm for uninterrupted relay subscriptions. `hq daemon status` reads the protected lifecycle RPC, `stop` requests a clean stop, and `restart` replaces the in-process runtime while connected clients reconnect and resubscribe. Because `restart` does not reload the daemon executable, after installing a new HQ build use `hq daemon stop`, wait for it to exit, and let the next normal command auto-start the new binary. `hq sync` asks the owning node to wake its network engine. Build drift is allowed when wire ranges remain compatible and is shown with restart guidance; incompatible ranges identify the stale side.
 
 ## Message and delivery rules
 
@@ -299,7 +283,7 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 The TUI subscribes before its initial snapshot and reloads immediately after local or remote commits. A five-minute repair refresh remains; active text, focus, and selection survive every reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, last receive time, account members, pending account fanout, relay-accepted sends, invalid or revoked-device traffic, and event queue counts.
 
-SQLite schema 10 includes durable named-agent projections and local ownership leases in addition to mutation receipts and monotonic change revisions. Schema 7 migrates through versions 8, 9, and 10; unsupported older layouts may still reset during pre-1.0 development.
+SQLite schema 11 includes durable named-agent session-history projections and local ownership leases in addition to mutation receipts and monotonic change revisions. Schema 7 migrates through versions 8, 9, 10, and 11; unsupported older layouts may still reset during pre-1.0 development.
 
 See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for signed causal state, and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
 

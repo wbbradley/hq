@@ -16,7 +16,6 @@ import (
 	charmterm "github.com/charmbracelet/x/term"
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/agenthelp"
-	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/hqclient"
 	"github.com/wbbradley/hq/internal/identity"
@@ -50,8 +49,8 @@ Human commands:
   cancel  Archive one inbox message
 
 Other commands:
-  codex [--cwd PATH] [--agent NAME [--new-thread] | --resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
-             Bridge a Codex app-server thread through HQ
+  codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]
+             Ask the local daemon to run a durable Codex agent
   agent      Create, list, or retire durable named agents
   mailboxes  Find agent mailboxes seen in this repository
   identity   Create, inspect, back up, import, or reset the installation identity
@@ -73,10 +72,10 @@ Local client transport currently requires Unix; Windows named-pipe support is no
 already-durable outbox work through its configured network engine.
 `
 
-const codexUsage = `hq codex bridges one Codex app-server thread through an HQ mailbox.
+const codexUsage = `hq codex asks the local HQ daemon to run a durable named Codex agent.
 
 Usage:
-  hq [--db PATH] [--no-sync] codex [--cwd PATH] [--agent NAME [--new-thread] | --resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
+  hq [--db PATH] [--no-sync] codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]
 
 Requirements:
   Install and authenticate Codex CLI v0.148.0, and run hq identity init once.
@@ -84,25 +83,25 @@ Requirements:
 Options:
   --cwd PATH          Thread working directory. Defaults to the current directory;
                       relative paths are resolved from the current directory.
-  --resume THREAD_ID  Resume this exact Codex thread instead of starting a new one.
-  --agent NAME        Attach to a durable installation-local named agent. Creates it
-                      when absent and automatically resumes its selected Codex thread.
+  --agent NAME        Required durable installation-local agent name. Creates it when
+                      absent and resumes its selected Codex thread when one exists.
   --new-thread        Start and select a replacement thread for --agent while retaining
                       its mailbox, queued root messages, and historical thread bindings.
+  --session THREAD_ID Resume this exact thread from the named agent's history.
   --yolo              Pass Codex's --yolo mode to app-server; disables approvals and sandboxing.
                       Use only inside an externally secured environment.
 
-Remaining arguments are joined as the optional initial prompt. Without a prompt, the
-bridge waits for HQ input. A new thread receives the structured-human-input instruction;
-a resumed thread keeps its existing instructions. The Codex thread ID is bound to one
-HQ mailbox, and restart/deduplication state is stored beside the HQ database in
-<database>.codexbridge.json.
+Remaining arguments are joined as the optional initial prompt. The client sends its current
+directory and complete environment transiently to the local daemon, waits for a ready or failed
+acknowledgement, then exits. The daemon owns the bridge and Codex child until stopped or the node
+shuts down. New threads receive the durable agent name and structured-human-input instruction;
+resumed threads keep their existing instructions.
 
-Questions, approvals, final output, and lifecycle status appear in the human HQ inbox.
+Questions, approvals, and final output appear in the human HQ inbox; local runtime status stays
+in the CLI/TUI control plane.
 Approval replies must exactly match the choices shown by HQ. Secret-marked requests are
-rejected because HQ persists messages. Run only one bridge process for a thread. With
---no-sync, the bridge does not request immediate relay synchronization; node-owned networking
-may still publish durable outbox work.
+rejected because HQ persists messages. The daemon enforces one worker per named agent and
+one owner per thread. --no-sync does not disable node-owned networking.
 `
 
 var ErrNoMessages = errors.New("no messages ready")
@@ -115,6 +114,7 @@ type App struct {
 	ErrOut           io.Writer
 	Getwd            func() (string, error)
 	Getenv           func(string) string
+	Environ          func() []string
 	Hostname         func() (string, error)
 	IsTTY            func() bool
 	Open             func(context.Context, string) (domain.Store, error)
@@ -129,12 +129,12 @@ type App struct {
 	DaemonStatus     func(string) (string, error)
 	StopDaemon       func(string) error
 	RestartDaemon    func(string) error
-	RunCodexBridge   func(context.Context, codexbridge.Options) error
+	LaunchCodexAgent func(context.Context, domain.Store, domain.CodexLaunchRequest) (domain.CodexRuntime, error)
 }
 
 func New() *App {
 	return &App{
-		In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr, Getwd: os.Getwd, Getenv: os.Getenv,
+		In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr, Getwd: os.Getwd, Getenv: os.Getenv, Environ: os.Environ,
 		Hostname: os.Hostname,
 		IsTTY: func() bool {
 			return charmterm.IsTerminal(os.Stdin.Fd()) && charmterm.IsTerminal(os.Stdout.Fd())
@@ -149,7 +149,13 @@ func New() *App {
 		DaemonStatus:     syncer.DaemonStatus,
 		StopDaemon:       syncer.StopDaemon,
 		RestartDaemon:    syncer.RestartDaemon,
-		RunCodexBridge:   codexbridge.Run,
+		LaunchCodexAgent: func(ctx context.Context, store domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+			controller, ok := store.(domain.CodexRuntimeController)
+			if !ok {
+				return domain.CodexRuntime{}, errors.New("Codex runtime control is unavailable")
+			}
+			return controller.LaunchCodexAgent(ctx, request)
+		},
 		ReadPassword: func(prompt string) ([]byte, error) {
 			if _, err := io.WriteString(os.Stderr, prompt); err != nil {
 				return nil, err
@@ -316,21 +322,22 @@ func hasHelpFlag(args []string) bool {
 	return false
 }
 
-func (a *App) codex(ctx context.Context, s domain.Store, args []string, databasePath string, noSync bool) error {
+func (a *App) codex(ctx context.Context, s domain.Store, args []string, _ string, _ bool) error {
 	f := flags("codex")
 	workingDirectory := f.String("cwd", "", "Codex thread working directory")
-	resumeThreadID := f.String("resume", "", "existing Codex thread ID")
 	agentName := f.String("agent", "", "durable named agent")
 	newThread := f.Bool("new-thread", false, "start and select a replacement named-agent thread")
+	sessionID := f.String("session", "", "resume an exact thread from the named agent's history")
 	yolo := f.Bool("yolo", false, "disable Codex approvals and sandboxing")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*agentName) != "" && strings.TrimSpace(*resumeThreadID) != "" {
-		return errors.New("codex cannot combine --agent and --resume")
+	name := strings.TrimSpace(*agentName)
+	if name == "" {
+		return errors.New("codex requires --agent NAME")
 	}
-	if *newThread && strings.TrimSpace(*agentName) == "" {
-		return errors.New("codex --new-thread requires --agent NAME")
+	if *newThread && strings.TrimSpace(*sessionID) != "" {
+		return errors.New("codex cannot combine --new-thread and --session")
 	}
 	baseDirectory, err := a.workDirectory()
 	if err != nil {
@@ -343,25 +350,44 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, database
 		directory = filepath.Join(baseDirectory, directory)
 	}
 	directory = filepath.Clean(directory)
-	if a.RunCodexBridge == nil {
-		return errors.New("Codex bridge runner is unavailable")
+	if a.LaunchCodexAgent == nil {
+		return errors.New("Codex runtime client is unavailable")
 	}
-	options := codexbridge.Options{
-		Directory: directory, ResumeThreadID: strings.TrimSpace(*resumeThreadID), AgentName: strings.TrimSpace(*agentName), NewThread: *newThread,
-		InitialPrompt: strings.Join(f.Args(), " "), Repository: a.repositoryContext(ctx, directory),
-		Store: s, Stderr: a.ErrOut, Updates: clientUpdates(s), Yolo: *yolo,
+	action := domain.CodexSessionCurrent
+	if *newThread {
+		action = domain.CodexSessionNew
+	} else if strings.TrimSpace(*sessionID) != "" {
+		action = domain.CodexSessionResume
 	}
-	resolvedDatabasePath, err := identity.ResolveDatabasePath(databasePath)
+	environment := os.Environ()
+	if a.Environ != nil {
+		environment = a.Environ()
+	}
+	request := domain.CodexLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: name, Action: action, SessionID: strings.TrimSpace(*sessionID),
+		Directory: directory, Repository: a.repositoryContext(ctx, directory), Environment: append([]string(nil), environment...),
+		InitialPrompt: strings.Join(f.Args(), " "), Yolo: *yolo,
+	}
+	result, err := a.LaunchCodexAgent(ctx, s, request)
+	for index := range request.Environment {
+		request.Environment[index] = ""
+	}
 	if err != nil {
 		return err
 	}
-	options.LedgerPath = resolvedDatabasePath + ".codexbridge.json"
-	if !noSync {
-		options.Sync = func(syncContext context.Context) error {
-			return a.trySync(syncContext, s, false, "Codex bridge status saved")
-		}
+	if _, err = fmt.Fprintf(a.Out, "agent=%s thread=%s directory=%s status=%s\n", result.AgentName, result.ThreadID, result.Directory, result.Phase); err != nil {
+		return err
 	}
-	return a.RunCodexBridge(ctx, options)
+	if result.Phase != domain.CodexRuntimeRunning {
+		if result.Error == "" {
+			result.Error = "Codex runtime did not become ready"
+		}
+		if result.Phase == domain.CodexRuntimeConflict {
+			return fmt.Errorf("%w: %s", domain.ErrAgentOwned, result.Error)
+		}
+		return errors.New(result.Error)
+	}
+	return nil
 }
 
 func (a *App) daemon(ctx context.Context, databasePath string, args []string) error {
@@ -1418,14 +1444,39 @@ func (a *App) mailboxes(ctx context.Context, s domain.Store, args []string) erro
 	if err != nil {
 		return err
 	}
+	agents, err := s.ListNamedAgents(ctx)
+	if err != nil {
+		return err
+	}
+	agentsByMailbox := make(map[string]domain.NamedAgent, len(agents))
+	for _, agent := range agents {
+		agentsByMailbox[agent.MailboxID] = agent
+	}
+	output := make([]mailboxCandidateOutput, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		agent := agentsByMailbox[mailbox.ID]
+		output = append(output, mailboxCandidateOutput{Mailbox: mailbox, AgentName: agent.Name, AgentRetired: agent.Retired})
+	}
 	if *jsonOutput {
-		return writeJSON(a.Out, mailboxes)
+		return writeJSON(a.Out, output)
 	}
 	var b bytes.Buffer
-	for _, mailbox := range mailboxes {
-		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", mailbox.ID, mailbox.Label, mailbox.LastSeen.Format(time.RFC3339), mailbox.Context.Directory)
+	for _, candidate := range output {
+		agentName := candidate.AgentName
+		if agentName == "" {
+			agentName = "-"
+		} else if candidate.AgentRetired {
+			agentName += " (retired)"
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\tagent=%s\n", candidate.ID, candidate.Label, candidate.LastSeen.Format(time.RFC3339), candidate.Context.Directory, agentName)
 	}
 	return writeOnce(a.Out, b.Bytes())
+}
+
+type mailboxCandidateOutput struct {
+	model.Mailbox
+	AgentName    string `json:"agent_name,omitempty"`
+	AgentRetired bool   `json:"agent_retired,omitempty"`
 }
 
 func (a *App) cancel(ctx context.Context, s domain.Store, args []string) error {

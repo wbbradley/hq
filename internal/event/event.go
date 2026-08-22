@@ -148,10 +148,11 @@ type AgentNamePayload struct {
 }
 
 type AgentSessionPayload struct {
-	Name              string `json:"name"`
-	MailboxID         string `json:"mailbox_id"`
-	Harness           string `json:"harness"`
-	ExternalSessionID string `json:"external_session_id"`
+	Name              string            `json:"name"`
+	MailboxID         string            `json:"mailbox_id"`
+	Harness           string            `json:"harness"`
+	ExternalSessionID string            `json:"external_session_id"`
+	Context           RepositoryContext `json:"context"`
 }
 
 type TargetPayload struct {

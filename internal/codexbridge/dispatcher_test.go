@@ -452,7 +452,7 @@ func TestDispatcherPrioritizesRegisteredReplyOverGeneralInput(t *testing.T) {
 	stopDispatcherTest(t, cancel, done)
 }
 
-func TestDispatcherDoesNotTreatUnregisteredReplyAsNormalInput(t *testing.T) {
+func TestDispatcherTreatsCurrentThreadReplyAsNormalInput(t *testing.T) {
 	fixture := newDispatcherFixture(t)
 	human, err := fixture.store.HumanMailbox(context.Background())
 	if err != nil {
@@ -463,7 +463,34 @@ func TestDispatcherDoesNotTreatUnregisteredReplyAsNormalInput(t *testing.T) {
 	if err := fixture.store.Create(context.Background(), question); err != nil {
 		t.Fatal(err)
 	}
-	reply := model.Message{ID: "019c0000-0000-7000-8000-000000000116", Context: question.Context, SenderMailboxID: human.ID, RecipientMailboxID: fixture.agent.ID, Body: "follow up", CreatedAt: time.Now().UTC()}
+	reply := model.Message{ID: "019c0000-0000-7000-8000-000000000116", Context: question.Context, SenderMailboxID: human.ID, RecipientMailboxID: fixture.agent.ID, Body: "follow up", Details: "Codex thread: " + fixture.thread, CreatedAt: time.Now().UTC()}
+	if err := fixture.store.Reply(context.Background(), questionID, reply); err != nil {
+		t.Fatal(err)
+	}
+	protocol := newDispatcherProtocol(t, fixture.state)
+	cancel, done := runDispatcher(t, fixture.dispatcher(protocol))
+	request := protocol.next(t, "turn/start")
+	var params TurnStartParams
+	if json.Unmarshal(request.Params, &params) != nil || params.ClientUserMessageID != reply.ID || params.Input[0].Text != reply.Body {
+		t.Fatalf("params = %s", request.Params)
+	}
+	protocol.result(t, request, `{"turn":{"id":"turn-reply","status":"inProgress"}}`)
+	waitForCompleted(t, fixture.store, reply.ID)
+	stopDispatcherTest(t, cancel, done)
+}
+
+func TestDispatcherDoesNotDeliverReplyFromAnotherThread(t *testing.T) {
+	fixture := newDispatcherFixture(t)
+	human, err := fixture.store.HumanMailbox(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	questionID := "019c0000-0000-7000-8000-000000000119"
+	question := model.Message{ID: questionID, Context: model.RepositoryContext{Directory: "/work/repo"}, SenderMailboxID: fixture.agent.ID, RecipientMailboxID: human.ID, Body: "Old thread output", CreatedAt: time.Now().UTC()}
+	if err := fixture.store.Create(context.Background(), question); err != nil {
+		t.Fatal(err)
+	}
+	reply := model.Message{ID: "019c0000-0000-7000-8000-000000000120", Context: question.Context, SenderMailboxID: human.ID, RecipientMailboxID: fixture.agent.ID, Body: "stale follow up", Details: "Codex thread: replaced-thread", CreatedAt: time.Now().UTC()}
 	if err := fixture.store.Reply(context.Background(), questionID, reply); err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +498,7 @@ func TestDispatcherDoesNotTreatUnregisteredReplyAsNormalInput(t *testing.T) {
 	cancel, done := runDispatcher(t, fixture.dispatcher(protocol))
 	select {
 	case request := <-protocol.requests:
-		t.Fatalf("unregistered reply became %s", request.Method)
+		t.Fatalf("old-thread reply became %s", request.Method)
 	case <-time.After(150 * time.Millisecond):
 	}
 	stopDispatcherTest(t, cancel, done)

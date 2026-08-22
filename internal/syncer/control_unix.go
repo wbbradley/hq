@@ -70,6 +70,7 @@ func startControl(ctx context.Context, paths RuntimePaths, wake chan<- struct{},
 		Metadata:       metadata,
 		Modes:          modes,
 		RequestTimeout: 2 * time.Second,
+		MethodTimeouts: map[string]time.Duration{"codex/launch": 2 * time.Minute, "codex/stop": 15 * time.Second},
 	})
 	if err != nil {
 		listener.Close()

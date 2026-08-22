@@ -23,6 +23,7 @@ type Service struct {
 	}
 	Synchronize   func(context.Context) error
 	Subscriptions *SubscriptionHub
+	Runtime       domain.CodexRuntimeController
 }
 
 func (s Service) Handle(ctx context.Context, session *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
@@ -134,6 +135,12 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 		return s.Store.GetNamedAgent(ctx, request.Name)
 	case ListNamedAgentsMethod:
 		return s.Store.ListNamedAgents(ctx)
+	case ListAgentSessionsMethod:
+		var request NamedAgentRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.ListNamedAgentSessions(ctx, request.Name)
 	case RetireNamedAgentMethod:
 		var request NamedAgentRequest
 		if err := decodeRequest(raw, &request); err != nil {
@@ -161,6 +168,27 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return nil, s.Store.ReleaseNamedAgent(ctx, request.Name, request.OwnerToken)
+	case LaunchCodexAgentMethod:
+		if s.Runtime == nil {
+			return nil, errors.New("Codex runtime control is unavailable")
+		}
+		var request domain.CodexLaunchRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Runtime.LaunchCodexAgent(ctx, request)
+	case StopCodexAgentMethod, CodexRuntimeMethod:
+		if s.Runtime == nil {
+			return nil, errors.New("Codex runtime control is unavailable")
+		}
+		var request CodexAgentRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		if method == StopCodexAgentMethod {
+			return s.Runtime.StopCodexAgent(ctx, request.Name)
+		}
+		return s.Runtime.CodexAgentRuntime(ctx, request.Name)
 	case CreateMethod:
 		var request MessageRequest
 		if err := decodeRequest(raw, &request); err != nil {

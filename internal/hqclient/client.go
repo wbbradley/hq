@@ -184,6 +184,33 @@ func (c *Client) ListNamedAgents(ctx context.Context) ([]domain.NamedAgent, erro
 	return result, err
 }
 
+func (c *Client) ListNamedAgentSessions(ctx context.Context, name string) ([]domain.AgentSession, error) {
+	var result []domain.AgentSession
+	err := c.call(ctx, domainrpc.ListAgentSessionsMethod, domainrpc.NamedAgentRequest{Name: name}, &result)
+	return result, err
+}
+
+func (c *Client) LaunchCodexAgent(ctx context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	var result domain.CodexRuntime
+	if request.RequestID == "" {
+		request.RequestID = uuid.NewString()
+	}
+	err := c.call(ctx, domainrpc.LaunchCodexAgentMethod, request, &result)
+	return result, err
+}
+
+func (c *Client) StopCodexAgent(ctx context.Context, name string) (domain.CodexRuntime, error) {
+	var result domain.CodexRuntime
+	err := c.call(ctx, domainrpc.StopCodexAgentMethod, domainrpc.CodexAgentRequest{Name: name}, &result)
+	return result, err
+}
+
+func (c *Client) CodexAgentRuntime(ctx context.Context, name string) (domain.CodexRuntime, error) {
+	var result domain.CodexRuntime
+	err := c.call(ctx, domainrpc.CodexRuntimeMethod, domainrpc.CodexAgentRequest{Name: name}, &result)
+	return result, err
+}
+
 func (c *Client) RetireNamedAgent(ctx context.Context, name string) error {
 	return c.mutatingCall(ctx, domainrpc.RetireNamedAgentMethod, func(id string) any { return domainrpc.NamedAgentRequest{MutationID: id, Name: name} }, nil)
 }
@@ -341,4 +368,5 @@ func (c *Client) Synchronize(ctx context.Context) error {
 }
 
 var _ domain.Store = (*Client)(nil)
+var _ domain.CodexRuntimeController = (*Client)(nil)
 var _ io.Closer = (*Client)(nil)

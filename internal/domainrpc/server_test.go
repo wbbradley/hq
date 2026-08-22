@@ -18,6 +18,21 @@ type recordingOperations struct {
 	err    error
 }
 
+type recordingRuntime struct{ called string }
+
+func (r *recordingRuntime) LaunchCodexAgent(_ context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	r.called = LaunchCodexAgentMethod
+	return domain.CodexRuntime{AgentName: request.AgentName, Phase: domain.CodexRuntimeRunning}, nil
+}
+func (r *recordingRuntime) StopCodexAgent(_ context.Context, name string) (domain.CodexRuntime, error) {
+	r.called = StopCodexAgentMethod
+	return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
+}
+func (r *recordingRuntime) CodexAgentRuntime(_ context.Context, name string) (domain.CodexRuntime, error) {
+	r.called = CodexRuntimeMethod
+	return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
+}
+
 func (s *recordingOperations) MutationResult(_ context.Context, mutation domain.Mutation) (json.RawMessage, bool, error) {
 	if s.called == mutation.Method {
 		return json.RawMessage(`null`), true, nil
@@ -44,6 +59,9 @@ func (s *recordingOperations) GetNamedAgent(context.Context, string) (domain.Nam
 }
 func (s *recordingOperations) ListNamedAgents(context.Context) ([]domain.NamedAgent, error) {
 	return nil, s.record(ListNamedAgentsMethod)
+}
+func (s *recordingOperations) ListNamedAgentSessions(context.Context, string) ([]domain.AgentSession, error) {
+	return nil, s.record(ListAgentSessionsMethod)
 }
 func (s *recordingOperations) RetireNamedAgent(context.Context, string) error {
 	return s.record(RetireNamedAgentMethod)
@@ -135,6 +153,7 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{CreateNamedAgentMethod, NamedAgentRequest{MutationID: mutationID}},
 		{GetNamedAgentMethod, NamedAgentRequest{}},
 		{ListNamedAgentsMethod, nil},
+		{ListAgentSessionsMethod, NamedAgentRequest{}},
 		{RetireNamedAgentMethod, NamedAgentRequest{MutationID: mutationID}},
 		{SelectAgentSessionMethod, AgentSessionRequest{MutationID: mutationID}},
 		{AcquireAgentMethod, AgentOwnershipRequest{MutationID: mutationID}},
@@ -181,6 +200,26 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 	service := Service{Store: operations, Synchronize: func(context.Context) error { operations.called = SynchronizeMethod; return nil }}
 	if _, rpcErr := service.Handle(context.Background(), nil, SynchronizeMethod, nil); rpcErr != nil || operations.called != SynchronizeMethod {
 		t.Fatalf("sync called=%q error=%v", operations.called, rpcErr)
+	}
+}
+
+func TestServiceDispatchesLocalCodexRuntimeWithoutMutationReceipts(t *testing.T) {
+	operations := &recordingOperations{}
+	runtime := &recordingRuntime{}
+	service := Service{Store: operations, Runtime: runtime}
+	for _, test := range []struct {
+		method string
+		value  any
+	}{
+		{LaunchCodexAgentMethod, domain.CodexLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"}},
+		{StopCodexAgentMethod, CodexAgentRequest{Name: "fred"}},
+		{CodexRuntimeMethod, CodexAgentRequest{Name: "fred"}},
+	} {
+		raw, _ := json.Marshal(test.value)
+		result, rpcErr := service.Handle(context.Background(), nil, test.method, raw)
+		if rpcErr != nil || result == nil || runtime.called != test.method || operations.called != "" {
+			t.Fatalf("%s result=%#v rpc=%v runtime=%q store=%q", test.method, result, rpcErr, runtime.called, operations.called)
+		}
 	}
 }
 

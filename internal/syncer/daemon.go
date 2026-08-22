@@ -48,24 +48,25 @@ func (d Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer lock.Release()
-	if d.RuntimeFactory != nil {
-		runtime, err := d.RuntimeFactory(ctx)
-		if err != nil {
-			return err
-		}
-		if runtime.Engine == nil {
-			if runtime.Closer != nil {
-				_ = runtime.Closer.Close()
-			}
-			return errors.New("daemon runtime factory returned no engine")
-		}
-		d.Engine, d.Domain = runtime.Engine, runtime.Domain
-		if runtime.Closer != nil {
-			defer runtime.Closer.Close()
-		}
-	}
 	for {
+		var closer io.Closer
+		if d.RuntimeFactory != nil {
+			runtime, err := d.RuntimeFactory(ctx)
+			if err != nil {
+				return err
+			}
+			if runtime.Engine == nil {
+				if runtime.Closer != nil {
+					_ = runtime.Closer.Close()
+				}
+				return errors.New("daemon runtime factory returned no engine")
+			}
+			d.Engine, d.Domain, closer = runtime.Engine, runtime.Domain, runtime.Closer
+		}
 		restart, err := d.runRuntime(ctx, paths)
+		if closer != nil {
+			err = errors.Join(err, closer.Close())
+		}
 		if err != nil || !restart {
 			return err
 		}

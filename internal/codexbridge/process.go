@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -21,17 +22,31 @@ type ProcessStarter interface {
 }
 
 type ExecStarter struct {
-	Path string
-	Yolo bool
+	Path           string
+	Yolo           bool
+	Environment    []string
+	UseEnvironment bool
 }
 
-func (s ExecStarter) Start(directory string) (Process, error) {
+func (s *ExecStarter) Start(directory string) (Process, error) {
+	defer func() {
+		for index := range s.Environment {
+			s.Environment[index] = ""
+		}
+		s.Environment = nil
+	}()
 	path := strings.TrimSpace(s.Path)
 	if path == "" {
 		path = "codex"
 	}
 	command := exec.Command(path, s.arguments()...)
 	command.Dir = directory
+	if s.UseEnvironment {
+		command.Env = make([]string, len(s.Environment))
+		copy(command.Env, s.Environment)
+	} else {
+		command.Env = os.Environ()
+	}
 	input, err := command.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("open Codex app-server stdin: %w", err)
@@ -47,6 +62,9 @@ func (s ExecStarter) Start(directory string) (Process, error) {
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("start Codex app-server: %w", err)
 	}
+	// The child has received its environment. Do not retain it in the process
+	// wrapper, where diagnostics or later inspection could expose credentials.
+	command.Env = nil
 	return &execProcess{command: command, input: input, output: output, errors: errorsPipe}, nil
 }
 

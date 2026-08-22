@@ -117,7 +117,7 @@ func (d *Dispatcher) claim(ctx context.Context) (claimedDelivery, error) {
 	if err != nil {
 		return claimedDelivery{}, err
 	}
-	claim := domain.Claim{RecipientMailboxID: d.MailboxID, UnthreadedOnly: true}
+	claim := domain.Claim{RecipientMailboxID: d.MailboxID, CorrelationThreadID: d.ThreadID}
 	if d.Replies != nil {
 		claim.ExcludeReplyTo = d.Replies.OutstandingIDs()
 	}

@@ -165,7 +165,7 @@ func TestCodexBridgeFullSession(t *testing.T) {
 	server.nextCall(t, "initialize")
 	server.nextCall(t, "initialized")
 	server.nextCall(t, "thread/start")
-	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex bridge ready")
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex ready in /work/repo")
 
 	firstInputID := "019c0000-0000-7000-8000-000000000121"
 	fixture.addHumanMessage(t, firstInputID, "Implement the feature", time.Now().UTC())
@@ -226,7 +226,7 @@ func TestCodexBridgeFullSession(t *testing.T) {
 	restartServer.nextCall(t, "initialize")
 	restartServer.nextCall(t, "initialized")
 	restartServer.nextCall(t, "thread/resume")
-	waitForMessageCount(t, fixture.store, model.HumanMailboxID, "Codex bridge ready", 2)
+	waitForMessageCount(t, fixture.store, model.HumanMailboxID, "Codex ready in /work/repo", 2)
 	restartServer.sendRaw(canonical)
 
 	restartInputID := "019c0000-0000-7000-8000-000000000124"

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/wbbradley/hq/internal/agenthelp"
-	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/hqclient"
@@ -40,8 +39,9 @@ func testApp(t *testing.T, input string) (*App, *bytes.Buffer) {
 	out := new(bytes.Buffer)
 	return &App{
 		In: strings.NewReader(input), Out: out, ErrOut: new(bytes.Buffer),
-		Getwd:  func() (string, error) { return "/work/repo", nil },
-		Getenv: func(string) string { return "" },
+		Getwd:   func() (string, error) { return "/work/repo", nil },
+		Getenv:  func(string) string { return "" },
+		Environ: func() []string { return []string{"PATH=/caller/bin", "TOKEN=secret"} },
 		Open: func(_ context.Context, path string) (domain.Store, error) {
 			initializeTestIdentity(t, path)
 			database, err := store.Open(path)
@@ -70,39 +70,39 @@ func initializeTestIdentity(t *testing.T, database string) {
 	}
 }
 
-func TestCodexCommandBuildsBridgeOptions(t *testing.T) {
+func TestCodexCommandBuildsDaemonLaunchRequest(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	var received codexbridge.Options
-	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error {
-		received = options
-		return nil
+	var received domain.CodexLaunchRequest
+	a.LaunchCodexAgent = func(_ context.Context, _ domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+		received = request
+		received.Environment = append([]string(nil), request.Environment...)
+		return domain.CodexRuntime{AgentName: request.AgentName, ThreadID: request.SessionID, Directory: request.Directory, Phase: domain.CodexRuntimeRunning}, nil
 	}
-	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "codex", "--cwd", "child", "--resume", "thread-42", "--yolo", "continue", "working"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "codex", "--agent", "fred", "--cwd", "child", "--session", "thread-42", "--yolo", "continue", "working"}); err != nil {
 		t.Fatal(err)
 	}
-	if received.Directory != "/work/repo/child" || received.ResumeThreadID != "thread-42" || received.InitialPrompt != "continue working" {
-		t.Fatalf("options = %#v", received)
+	if received.AgentName != "fred" || received.Directory != "/work/repo/child" || received.SessionID != "thread-42" || received.Action != domain.CodexSessionResume || received.InitialPrompt != "continue working" {
+		t.Fatalf("request = %#v", received)
 	}
-	if received.Repository.Directory != "/work/repo/child" || received.Store == nil || received.Stderr != a.ErrOut || received.Sync != nil || received.LedgerPath != database+".codexbridge.json" || !received.Yolo {
-		t.Fatalf("dependencies = %#v", received)
+	if received.Repository.Directory != "/work/repo/child" || strings.Join(received.Environment, "|") != "PATH=/caller/bin|TOKEN=secret" || !received.Yolo || received.RequestID == "" {
+		t.Fatalf("launch context = %#v", received)
 	}
 }
 
-func TestCodexCommandDefaultsToCurrentDirectoryAndEnablesSync(t *testing.T) {
+func TestCodexCommandDefaultsToCallerDirectory(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	a.Synchronize = func(context.Context, domain.Store) error { return nil }
-	var received codexbridge.Options
-	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error {
-		received = options
-		return options.Sync(context.Background())
+	var received domain.CodexLaunchRequest
+	a.LaunchCodexAgent = func(_ context.Context, _ domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+		received = request
+		return domain.CodexRuntime{AgentName: request.AgentName, ThreadID: "new-thread", Directory: request.Directory, Phase: domain.CodexRuntimeRunning}, nil
 	}
-	if err := a.Run(context.Background(), []string{"--db", database, "codex"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", database, "codex", "--agent", "fred"}); err != nil {
 		t.Fatal(err)
 	}
-	if received.Directory != "/work/repo" || received.InitialPrompt != "" || received.Sync == nil || received.Yolo {
-		t.Fatalf("options = %#v", received)
+	if received.Directory != "/work/repo" || received.InitialPrompt != "" || received.Action != domain.CodexSessionCurrent || received.Yolo {
+		t.Fatalf("request = %#v", received)
 	}
 }
 
@@ -122,7 +122,7 @@ func TestCodexHelpDoesNotOpenStore(t *testing.T) {
 	if outputs[0] != outputs[1] || outputs[0] != codexUsage {
 		t.Fatalf("help outputs differ:\n%s\n---\n%s", outputs[0], outputs[1])
 	}
-	for _, required := range []string{"Codex CLI v0.148.0", "--resume THREAD_ID", "--agent NAME", "--new-thread", "--yolo", "disables approvals and sandboxing", "<database>.codexbridge.json", "Secret-marked", "one bridge process"} {
+	for _, required := range []string{"Codex CLI v0.148.0", "--session THREAD_ID", "--agent NAME", "--new-thread", "--yolo", "disables approvals and sandboxing", "complete environment", "daemon owns"} {
 		if !strings.Contains(outputs[0], required) {
 			t.Fatalf("Codex help is missing %q", required)
 		}
@@ -135,7 +135,7 @@ func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 	if err := a.Run(context.Background(), []string{"help"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "codex [--cwd PATH] [--agent NAME [--new-thread] | --resume THREAD_ID] [--yolo] [INITIAL PROMPT...]") {
+	if !strings.Contains(out.String(), "codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]") {
 		t.Fatalf("global help = %q", out.String())
 	}
 	a, _ = testApp(t, "")
@@ -152,20 +152,26 @@ func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 func TestCodexNamedAgentOptionsAndConflicts(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	var received codexbridge.Options
-	a.RunCodexBridge = func(_ context.Context, options codexbridge.Options) error { received = options; return nil }
+	var received domain.CodexLaunchRequest
+	a.LaunchCodexAgent = func(_ context.Context, _ domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+		received = request
+		return domain.CodexRuntime{AgentName: request.AgentName, ThreadID: "new", Directory: request.Directory, Phase: domain.CodexRuntimeRunning}, nil
+	}
 	if err := a.Run(context.Background(), []string{"--db", database, "codex", "--agent", "fred", "--new-thread", "continue"}); err != nil {
 		t.Fatal(err)
 	}
-	if received.AgentName != "fred" || !received.NewThread || received.InitialPrompt != "continue" {
-		t.Fatalf("options = %#v", received)
+	if received.AgentName != "fred" || received.Action != domain.CodexSessionNew || received.InitialPrompt != "continue" {
+		t.Fatalf("request = %#v", received)
 	}
 	for _, args := range [][]string{
-		{"--db", database, "codex", "--agent", "fred", "--resume", "thread"},
-		{"--db", database, "codex", "--new-thread"},
+		{"--db", database, "codex", "--agent", "fred", "--new-thread", "--session", "thread"},
+		{"--db", database, "codex"},
 	} {
 		a, _ := testApp(t, "")
-		a.RunCodexBridge = func(context.Context, codexbridge.Options) error { t.Fatal("invalid options ran bridge"); return nil }
+		a.LaunchCodexAgent = func(context.Context, domain.Store, domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+			t.Fatal("invalid options launched Codex")
+			return domain.CodexRuntime{}, nil
+		}
 		if err := a.Run(context.Background(), args); err == nil {
 			t.Fatalf("args %#v succeeded", args)
 		}
@@ -556,12 +562,54 @@ func TestMailboxesFindsCandidatesWithoutClaiming(t *testing.T) {
 	if err := a.Run(ctx, []string{"--db", db, "send", "old"}); err != nil {
 		t.Fatal(err)
 	}
+	s := openTestStore(t, db)
+	mailboxes, err := s.FindMailboxes(ctx, model.RepositoryContext{Directory: "/work/repo"})
+	if err != nil || len(mailboxes) != 1 {
+		t.Fatalf("mailboxes before naming = %#v, %v", mailboxes, err)
+	}
+	if _, err := s.CreateNamedAgent(ctx, "fred", mailboxes[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
 	a, out := testApp(t, "")
 	if err := a.Run(ctx, []string{"--db", db, "mailboxes"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "codex:") {
+	if !strings.Contains(out.String(), "codex:") || !strings.Contains(out.String(), "\tagent=fred\n") {
 		t.Fatalf("mailboxes = %q", out.String())
+	}
+	a, out = testApp(t, "")
+	if err := a.Run(ctx, []string{"--db", db, "mailboxes", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var candidates []mailboxCandidateOutput
+	if err := json.Unmarshal(out.Bytes(), &candidates); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ID != mailboxes[0].ID || candidates[0].AgentName != "fred" {
+		t.Fatalf("JSON mailboxes = %#v", candidates)
+	}
+	s = openTestStore(t, db)
+	if err := s.RetireNamedAgent(ctx, "fred"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	a, out = testApp(t, "")
+	if err := a.Run(ctx, []string{"--db", db, "mailboxes"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "\tagent=fred (retired)\n") {
+		t.Fatalf("retired text mailbox = %q", out.String())
+	}
+	a, out = testApp(t, "")
+	if err := a.Run(ctx, []string{"--db", db, "mailboxes", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &candidates); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].AgentName != "fred" || !candidates[0].AgentRetired {
+		t.Fatalf("retired JSON mailboxes = %#v", candidates)
 	}
 }
 

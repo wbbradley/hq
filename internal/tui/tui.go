@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -34,54 +35,80 @@ var (
 )
 
 type app struct {
-	ctx              context.Context
-	store            domain.Store
-	repo             repoctx.Provider
-	messages         []model.Message
-	groups           []messageGroup
-	inbox            []model.Message
-	sent             []model.Message
-	archived         []model.Message
-	showSent         bool
-	showArchived     bool
-	showStatus       bool
-	showTechnical    bool
-	cursor           int
-	width            int
-	height           int
-	answering        bool
-	answerID         string
-	answerGroupKey   string
-	answerQ          model.Message
-	drafts           map[string]messageDraft
-	activeDraftKey   string
-	composeTo        string
-	composeName      string
-	composeContext   model.RepositoryContext
-	composeNamed     bool
-	agents           []domain.NamedAgent
-	pickingRecipient bool
-	pickerQuery      string
-	pickerCursor     int
-	editor           textarea.Model
-	err              error
-	contextID        string
-	branch           string
-	remotes          string
-	pull             string
-	sync             func(context.Context) error
-	syncErr          error
-	network          domain.NetworkStatus
-	changes          <-chan domain.Invalidation
-	states           <-chan domain.ConnectionUpdate
-	connection       domain.ConnectionUpdate
-	undoStack        []undoAction
-	nextUndoID       uint64
-	undoing          bool
-	undoNotice       string
-	messageScroll    int
-	paneFocus        paneFocus
-	markdown         *messageMarkdownRenderer
+	ctx               context.Context
+	store             domain.Store
+	repo              repoctx.Provider
+	messages          []model.Message
+	groups            []messageGroup
+	inbox             []model.Message
+	sent              []model.Message
+	archived          []model.Message
+	showSent          bool
+	showArchived      bool
+	showStatus        bool
+	showTechnical     bool
+	cursor            int
+	width             int
+	height            int
+	answering         bool
+	answerID          string
+	answerGroupKey    string
+	answerQ           model.Message
+	drafts            map[string]messageDraft
+	activeDraftKey    string
+	composeTo         string
+	composeName       string
+	composeContext    model.RepositoryContext
+	composeNamed      bool
+	agents            []domain.NamedAgent
+	pickingRecipient  bool
+	pickerQuery       string
+	pickerCursor      int
+	editor            textarea.Model
+	err               error
+	contextID         string
+	branch            string
+	remotes           string
+	pull              string
+	sync              func(context.Context) error
+	syncErr           error
+	network           domain.NetworkStatus
+	changes           <-chan domain.Invalidation
+	states            <-chan domain.ConnectionUpdate
+	connection        domain.ConnectionUpdate
+	undoStack         []undoAction
+	nextUndoID        uint64
+	undoing           bool
+	undoNotice        string
+	messageScroll     int
+	paneFocus         paneFocus
+	markdown          *messageMarkdownRenderer
+	launchDirectory   string
+	launchEnvironment []string
+	managingAgents    bool
+	agentManager      agentManager
+}
+
+type agentManagerStage int
+
+const (
+	chooseRuntimeAgent agentManagerStage = iota
+	chooseRuntimeSession
+	enterRuntimeDirectory
+	confirmRuntimeSwitch
+)
+
+type agentManager struct {
+	stage     agentManagerStage
+	query     string
+	cursor    int
+	agent     domain.NamedAgent
+	sessions  []domain.AgentSession
+	runtime   domain.CodexRuntime
+	directory string
+	pending   domain.CodexLaunchRequest
+	busy      bool
+	status    string
 }
 
 type paneFocus int
@@ -172,6 +199,18 @@ type invalidatedMsg struct{}
 
 type connectionMsg struct{ state domain.ConnectionUpdate }
 
+type agentSessionsMsg struct {
+	agent    domain.NamedAgent
+	sessions []domain.AgentSession
+	runtime  domain.CodexRuntime
+	err      error
+}
+
+type codexRuntimeMsg struct {
+	runtime domain.CodexRuntime
+	err     error
+}
+
 type syncMsg struct{ err error }
 
 type branchMsg struct {
@@ -219,7 +258,11 @@ func RunWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Wri
 	)
 	editor.SetWidth(72)
 	editor.SetHeight(6)
-	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync, states: updates.States, connection: updates.Initial, markdown: newMessageMarkdownRenderer(nil)}
+	launchDirectory, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("read TUI launch directory: %w", err)
+	}
+	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync, states: updates.States, connection: updates.Initial, markdown: newMessageMarkdownRenderer(nil), launchDirectory: launchDirectory, launchEnvironment: os.Environ()}
 	if subscription != nil {
 		m.changes = subscription.Changes()
 	}
@@ -433,6 +476,24 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connectionMsg:
 		m.connection = msg.state
 		return m, m.waitConnection()
+	case agentSessionsMsg:
+		m.agentManager.busy = false
+		m.agentManager.agent, m.agentManager.sessions, m.agentManager.runtime = msg.agent, msg.sessions, msg.runtime
+		if msg.err != nil {
+			m.agentManager.status = msg.err.Error()
+			return m, nil
+		}
+		m.agentManager.stage, m.agentManager.cursor, m.agentManager.status = chooseRuntimeSession, 0, ""
+		return m, nil
+	case codexRuntimeMsg:
+		m.agentManager.busy = false
+		m.agentManager.runtime = msg.runtime
+		if msg.err != nil {
+			m.agentManager.status = msg.err.Error()
+		} else {
+			m.agentManager.status = fmt.Sprintf("%s · %s · %s", msg.runtime.Phase, shortThreadID(msg.runtime.ThreadID), msg.runtime.Directory)
+		}
+		return m, m.load
 	case syncMsg:
 		m.syncErr = msg.err
 		if msg.err == nil {
@@ -551,6 +612,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pickingRecipient {
 			return m.updateRecipientPicker(msg)
+		}
+		if m.managingAgents {
+			return m.updateAgentManager(msg)
 		}
 		switch msg.String() {
 		case "tab":
@@ -756,6 +820,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.paneFocus = focusReply
 			m.editor.Blur()
 			return m, nil
+		case "g":
+			m.managingAgents = true
+			m.agentManager = agentManager{stage: chooseRuntimeAgent}
+			m.editor.Blur()
+			return m, nil
 		case "r":
 			return m, m.load
 		}
@@ -781,6 +850,239 @@ func (m app) recipients() []recipientChoice {
 		return choices[left].name < choices[right].name
 	})
 	return choices
+}
+
+func (m app) runtimeAgents() []domain.NamedAgent {
+	query := strings.ToLower(strings.TrimSpace(m.agentManager.query))
+	filtered := make([]domain.NamedAgent, 0, len(m.agents))
+	for _, agent := range m.agents {
+		if agent.Retired || (query != "" && !strings.Contains(strings.ToLower(agent.Name), query)) {
+			continue
+		}
+		filtered = append(filtered, agent)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].Active != filtered[j].Active {
+			return filtered[i].Active
+		}
+		return filtered[i].Name < filtered[j].Name
+	})
+	return filtered
+}
+
+func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.agentManager.busy {
+		if key.String() == "esc" {
+			m.managingAgents = false
+		}
+		return m, nil
+	}
+	switch key.String() {
+	case "ctrl+c", "esc":
+		for index := range m.agentManager.pending.Environment {
+			m.agentManager.pending.Environment[index] = ""
+		}
+		if m.agentManager.stage == chooseRuntimeAgent {
+			m.managingAgents = false
+		} else {
+			m.agentManager = agentManager{stage: chooseRuntimeAgent}
+		}
+		return m, nil
+	}
+	switch m.agentManager.stage {
+	case chooseRuntimeAgent:
+		agents := m.runtimeAgents()
+		switch key.String() {
+		case "j", "down":
+			m.agentManager.cursor = min(max(0, len(agents)-1), m.agentManager.cursor+1)
+		case "k", "up":
+			m.agentManager.cursor = max(0, m.agentManager.cursor-1)
+		case "enter":
+			if len(agents) > 0 {
+				agent := agents[min(m.agentManager.cursor, len(agents)-1)]
+				m.agentManager.busy = true
+				return m, m.loadAgentSessions(agent)
+			}
+		case "backspace":
+			runes := []rune(m.agentManager.query)
+			if len(runes) > 0 {
+				m.agentManager.query, m.agentManager.cursor = string(runes[:len(runes)-1]), 0
+			}
+		default:
+			if key.Text != "" && !strings.ContainsAny(key.Text, "\r\n\t") {
+				m.agentManager.query += key.Text
+				m.agentManager.cursor = 0
+			}
+		}
+	case chooseRuntimeSession:
+		rowCount := len(m.agentManager.sessions) + 1
+		switch key.String() {
+		case "j", "down":
+			m.agentManager.cursor = min(rowCount-1, m.agentManager.cursor+1)
+		case "k", "up":
+			m.agentManager.cursor = max(0, m.agentManager.cursor-1)
+		case "n":
+			m.beginNewRuntimeDirectory()
+		case "s":
+			m.agentManager.busy = true
+			return m, m.stopManagedAgent()
+		case "enter":
+			if m.agentManager.cursor == 0 {
+				m.beginNewRuntimeDirectory()
+				return m, nil
+			}
+			session := m.agentManager.sessions[m.agentManager.cursor-1]
+			directory := session.Context.Directory
+			if directory == "" {
+				directory = m.defaultRuntimeDirectory()
+			}
+			var err error
+			directory, err = m.validRuntimeDirectory(directory)
+			if err != nil {
+				m.agentManager.status = err.Error()
+				return m, nil
+			}
+			request := m.runtimeRequest(domain.CodexSessionResume, session.SessionID, directory)
+			return m.confirmOrLaunch(request)
+		}
+	case enterRuntimeDirectory:
+		switch key.String() {
+		case "enter":
+			directory, err := m.validRuntimeDirectory(m.agentManager.directory)
+			if err != nil {
+				m.agentManager.status = err.Error()
+				return m, nil
+			}
+			request := m.runtimeRequest(domain.CodexSessionNew, "", directory)
+			return m.confirmOrLaunch(request)
+		case "backspace":
+			runes := []rune(m.agentManager.directory)
+			if len(runes) > 0 {
+				m.agentManager.directory = string(runes[:len(runes)-1])
+			}
+		default:
+			if key.Text != "" && !strings.ContainsAny(key.Text, "\r\n\t") {
+				m.agentManager.directory += key.Text
+			}
+		}
+	case confirmRuntimeSwitch:
+		switch strings.ToLower(key.String()) {
+		case "y", "enter":
+			request := m.agentManager.pending
+			request.ConfirmSwitch = true
+			m.agentManager.busy = true
+			m.agentManager.status = "switching Codex runtime…"
+			return m, m.launchManagedAgent(request)
+		case "n":
+			for index := range m.agentManager.pending.Environment {
+				m.agentManager.pending.Environment[index] = ""
+			}
+			m.agentManager.stage = chooseRuntimeSession
+			m.agentManager.pending = domain.CodexLaunchRequest{}
+		}
+	}
+	return m, nil
+}
+
+func (m *app) beginNewRuntimeDirectory() {
+	m.agentManager.stage = enterRuntimeDirectory
+	m.agentManager.directory = m.defaultRuntimeDirectory()
+	m.agentManager.status = ""
+}
+
+func (m app) defaultRuntimeDirectory() string {
+	if m.agentManager.agent.Context.Directory != "" {
+		return m.agentManager.agent.Context.Directory
+	}
+	return m.launchDirectory
+}
+
+func (m app) validRuntimeDirectory(raw string) (string, error) {
+	directory := strings.TrimSpace(raw)
+	if !filepath.IsAbs(directory) {
+		directory = filepath.Join(m.launchDirectory, directory)
+	}
+	directory = filepath.Clean(directory)
+	info, err := os.Stat(directory)
+	if err != nil {
+		return "", errors.New("directory does not exist")
+	}
+	if !info.IsDir() {
+		return "", errors.New("path is not a directory")
+	}
+	return directory, nil
+}
+
+func (m app) runtimeRequest(action domain.CodexSessionAction, sessionID, directory string) domain.CodexLaunchRequest {
+	repository := model.RepositoryContext{Directory: directory}
+	if snapshotter, ok := m.repo.(interface {
+		Snapshot(context.Context, string) model.RepositoryContext
+	}); ok {
+		repository = snapshotter.Snapshot(m.ctx, directory)
+	}
+	return domain.CodexLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: m.agentManager.agent.Name, Action: action, SessionID: sessionID,
+		Directory: directory, Repository: repository, Environment: append([]string(nil), m.launchEnvironment...),
+	}
+}
+
+func (m app) confirmOrLaunch(request domain.CodexLaunchRequest) (tea.Model, tea.Cmd) {
+	if m.agentManager.runtime.Phase == domain.CodexRuntimeRunning && (request.Action == domain.CodexSessionNew || request.SessionID != m.agentManager.runtime.ThreadID) {
+		m.agentManager.stage = confirmRuntimeSwitch
+		m.agentManager.pending = request
+		m.agentManager.status = "replace the running Codex worker? y/n"
+		return m, nil
+	}
+	m.agentManager.busy = true
+	m.agentManager.status = "starting Codex runtime…"
+	return m, m.launchManagedAgent(request)
+}
+
+func (m app) loadAgentSessions(agent domain.NamedAgent) tea.Cmd {
+	return func() tea.Msg {
+		sessions, err := m.store.ListNamedAgentSessions(m.ctx, agent.Name)
+		controller, ok := m.store.(domain.CodexRuntimeController)
+		if err == nil && !ok {
+			err = errors.New("Codex runtime control is unavailable")
+		}
+		var runtime domain.CodexRuntime
+		if err == nil {
+			runtime, err = controller.CodexAgentRuntime(m.ctx, agent.Name)
+		}
+		return agentSessionsMsg{agent: agent, sessions: sessions, runtime: runtime, err: err}
+	}
+}
+
+func (m app) launchManagedAgent(request domain.CodexLaunchRequest) tea.Cmd {
+	return func() tea.Msg {
+		controller, ok := m.store.(domain.CodexRuntimeController)
+		if !ok {
+			return codexRuntimeMsg{err: errors.New("Codex runtime control is unavailable")}
+		}
+		runtime, err := controller.LaunchCodexAgent(m.ctx, request)
+		for index := range request.Environment {
+			request.Environment[index] = ""
+		}
+		return codexRuntimeMsg{runtime: runtime, err: err}
+	}
+}
+
+func (m app) stopManagedAgent() tea.Cmd {
+	return func() tea.Msg {
+		controller, ok := m.store.(domain.CodexRuntimeController)
+		if !ok {
+			return codexRuntimeMsg{err: errors.New("Codex runtime control is unavailable")}
+		}
+		runtime, err := controller.StopCodexAgent(m.ctx, m.agentManager.agent.Name)
+		return codexRuntimeMsg{runtime: runtime, err: err}
+	}
+}
+
+func shortThreadID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:8] + "…" + id[len(id)-4:]
 }
 
 func (m app) filteredRecipients() []recipientChoice {
@@ -1305,7 +1607,82 @@ func (m app) technicalContext(message model.Message) string {
 	return strings.Join(lines, "\n")
 }
 
+func (m app) renderAgentManager() string {
+	width := max(40, m.width)
+	var body strings.Builder
+	body.WriteString(titleStyle.Render("Codex agents"))
+	body.WriteString("\n\n")
+	switch m.agentManager.stage {
+	case chooseRuntimeAgent:
+		body.WriteString("Search: " + m.agentManager.query + "\n\n")
+		agents := m.runtimeAgents()
+		if len(agents) == 0 {
+			body.WriteString(dim.Render("No non-retired named agents."))
+		}
+		for index, agent := range agents {
+			state := "offline"
+			if agent.Active {
+				state = "active"
+			}
+			thread := shortThreadID(agent.CurrentSessionID)
+			if thread == "" {
+				thread = "no session"
+			}
+			line := fmt.Sprintf("%s · %s · %s · %s", agent.Name, state, thread, agent.Context.Directory)
+			if index == m.agentManager.cursor {
+				line = selected.Render(line)
+			}
+			body.WriteString(line + "\n")
+		}
+	case chooseRuntimeSession:
+		runtime := m.agentManager.runtime
+		body.WriteString(fmt.Sprintf("%s · %s · %s\n\n", m.agentManager.agent.Name, runtime.Phase, runtime.Directory))
+		newLine := "+ new Codex thread"
+		if m.agentManager.cursor == 0 {
+			newLine = selected.Render(newLine)
+		}
+		body.WriteString(newLine + "\n")
+		for index, session := range m.agentManager.sessions {
+			marker := " "
+			if session.Current {
+				marker = "*"
+			}
+			line := fmt.Sprintf("%s %s · %s · %s", marker, shortThreadID(session.SessionID), session.Context.Directory, session.LastSelectedAt.Local().Format("2006-01-02 15:04"))
+			if index+1 == m.agentManager.cursor {
+				line = selected.Render(line)
+			}
+			body.WriteString(line + "\n")
+		}
+	case enterRuntimeDirectory:
+		body.WriteString("New Codex thread for " + m.agentManager.agent.Name + "\n\n")
+		body.WriteString("Directory: " + m.agentManager.directory + "\n")
+	case confirmRuntimeSwitch:
+		body.WriteString("Agent " + m.agentManager.agent.Name + " is running.\n")
+		body.WriteString("Stop it and switch to the requested session? y/n\n")
+	}
+	if m.agentManager.busy {
+		body.WriteString("\n" + dim.Render("Working…"))
+	}
+	if m.agentManager.status != "" {
+		body.WriteString("\n" + m.agentManager.status)
+	}
+	help := "type to search · j/k move · enter select · esc back"
+	if m.agentManager.stage == chooseRuntimeSession {
+		help = "j/k move · enter resume/new · n new · s stop · esc back"
+	} else if m.agentManager.stage == enterRuntimeDirectory {
+		help = "type directory · enter launch · esc back"
+	} else if m.agentManager.stage == confirmRuntimeSwitch {
+		help = "y confirm · n cancel · esc back"
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, panel.Width(max(1, width-panel.GetHorizontalFrameSize())).Render(body.String()), dim.Render(help))
+}
+
 func (m app) View() tea.View {
+	if m.managingAgents {
+		view := tea.NewView(m.renderAgentManager())
+		view.AltScreen = true
+		return view
+	}
 	layout := responsivePaneLayout(m.width, m.height, m.answering)
 	inboxPane := m.renderInboxPane(layout.width, layout.inboxHeight)
 	var detailGroup messageGroup
@@ -1337,7 +1714,7 @@ func (m app) View() tea.View {
 	}
 	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0, replyFocused)
 	bottom := lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
-	help := "tab/shift+tab focus · j/k navigate · pgup/pgdown message · enter reply · n new · d archive · u undo · i details · q quit"
+	help := "tab/shift+tab focus · j/k navigate · pgup/pgdown message · enter reply · n new · g agents · d archive · u undo · i details · q quit"
 	if m.pickingRecipient {
 		help = "type to filter recipients · j/k or arrows move · enter select · esc cancel"
 	} else if m.answering {

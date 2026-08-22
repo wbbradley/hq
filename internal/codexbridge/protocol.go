@@ -1,10 +1,17 @@
 package codexbridge
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 const TestedCodexVersion = "0.148.0"
 
 const RequireStructuredHumanInput = "When progress requires an answer from the human, use the structured request_user_input tool."
+
+func NamedAgentDeveloperInstructions(name string) string {
+	return fmt.Sprintf("You are operating through HQ as the durable agent named %q.\nThis name identifies your HQ mailbox across Codex thread replacements.\nDo not infer personality, permissions, authority, or repository scope from the name.\n\n%s", name, RequireStructuredHumanInput)
+}
 
 type rpcEnvelope struct {
 	JSONRPC string          `json:"jsonrpc,omitempty"`

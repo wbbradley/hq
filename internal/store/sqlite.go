@@ -21,7 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 10
+const schemaVersion = 11
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -80,6 +80,22 @@ CREATE TABLE agent_ownership (
     owner_token TEXT NOT NULL,
     lease_expires_at INTEGER NOT NULL,
     FOREIGN KEY(name) REFERENCES named_agents(name) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE agent_sessions (
+    agent_name TEXT NOT NULL,
+    mailbox_id TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    external_session_id TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    git_common_dir TEXT NOT NULL DEFAULT '',
+    remote_identity TEXT NOT NULL DEFAULT '',
+    worktree TEXT NOT NULL DEFAULT '',
+    branch TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    last_selected_at INTEGER NOT NULL,
+    PRIMARY KEY(harness, external_session_id),
+    FOREIGN KEY(agent_name) REFERENCES named_agents(name) ON DELETE CASCADE,
+    FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE
 ) STRICT;
 CREATE TABLE mailbox_contexts (
     mailbox_id TEXT NOT NULL,
@@ -259,7 +275,7 @@ CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, creat
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 10;
+PRAGMA user_version = 11;
 `
 
 const (
@@ -363,6 +379,13 @@ PRAGMA foreign_keys = ON;`
 			return fmt.Errorf("migrate schema to version 10: %w", err)
 		}
 		version = 10
+	}
+	if version == 10 {
+		migration := `CREATE TABLE IF NOT EXISTS agent_sessions (agent_name TEXT NOT NULL, mailbox_id TEXT NOT NULL, harness TEXT NOT NULL, external_session_id TEXT NOT NULL, directory TEXT NOT NULL, git_common_dir TEXT NOT NULL DEFAULT '', remote_identity TEXT NOT NULL DEFAULT '', worktree TEXT NOT NULL DEFAULT '', branch TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, last_selected_at INTEGER NOT NULL, PRIMARY KEY(harness, external_session_id), FOREIGN KEY(agent_name) REFERENCES named_agents(name) ON DELETE CASCADE, FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE) STRICT; UPDATE projection_checkpoint SET event_count=-1 WHERE id=1; PRAGMA user_version = 11;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 11: %w", err)
+		}
+		version = 11
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -771,7 +794,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 			return err
 		}
 	}
-	for _, table := range []string{"causal_edges", "threads", "messages", "mailbox_contexts", "harness_bindings", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_shares", "human_account_default", "human_account_devices", "human_accounts"} {
+	for _, table := range []string{"causal_edges", "threads", "messages", "mailbox_contexts", "harness_bindings", "agent_sessions", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_shares", "human_account_default", "human_account_devices", "human_accounts"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 			return fmt.Errorf("clear %s projection: %w", table, err)
 		}
@@ -823,6 +846,11 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if lease, exists := ownership[agent.Name]; exists && !agent.Retired {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_ownership(name,owner_token,lease_expires_at) VALUES (?,?,?)`, agent.Name, lease.token, lease.expiry); err != nil {
 				return fmt.Errorf("restore agent ownership: %w", err)
+			}
+		}
+		for _, session := range agent.Sessions {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(agent_name,mailbox_id,harness,external_session_id,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, agent.Name, agent.MailboxID, session.Harness, session.ExternalSessionID, session.Context.Directory, session.Context.GitCommonDir, session.Context.RemoteIdentity, session.Context.Worktree, session.Context.Branch, time.Unix(session.CreatedAt, 0).UTC().UnixMilli(), time.Unix(session.LastSelectedAt, 0).UTC().UnixMilli()); err != nil {
+				return fmt.Errorf("project named agent session: %w", err)
 			}
 		}
 	}
@@ -1241,8 +1269,8 @@ func (s *SQLite) messageRecord(ctx context.Context, id string) (messageWithEvent
 	return messageWithEvent{message: m, eventID: eventID}, nil
 }
 
-const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 OR o.state='rejected' THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.audience_account_id, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, COALESCE(NULLIF(msg.actor_label,''),CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN sb.harness||':'||substr(sm.id,-8) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END), COALESCE(hd.label,''), CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN rb.harness||':'||substr(rm.id,-8) ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
-const joins = ` messages msg LEFT JOIN mailboxes sm ON sm.id=msg.sender_mailbox_id AND sm.installation_id=msg.sender_installation_id LEFT JOIN harness_bindings sb ON sb.mailbox_id=sm.id LEFT JOIN mailboxes rm ON rm.id=msg.recipient_mailbox_id AND rm.installation_id=msg.recipient_installation_id LEFT JOIN harness_bindings rb ON rb.mailbox_id=rm.id LEFT JOIN human_account_devices hd ON hd.account_id=msg.audience_account_id AND hd.installation_id=msg.sender_installation_id LEFT JOIN delivery_facts d ON d.message_id=msg.id LEFT JOIN (SELECT event_id,CASE WHEN SUM(CASE WHEN state='queued' THEN 1 ELSE 0 END)>0 THEN 'queued' WHEN SUM(CASE WHEN state='relay-accepted' THEN 1 ELSE 0 END)>0 THEN 'relay-accepted' WHEN SUM(CASE WHEN state='rejected' THEN 1 ELSE 0 END)>0 THEN 'rejected' ELSE '' END AS state FROM outbox GROUP BY event_id) o ON o.event_id=msg.event_id `
+const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 OR o.state='rejected' THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.audience_account_id, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, COALESCE(NULLIF(msg.actor_label,''),CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN COALESCE(sn.name,NULLIF(sn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=sm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||':'||substr(sm.id,-8) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END), COALESCE(hd.label,''), CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN COALESCE(rn.name,NULLIF(rn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=rm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||CASE WHEN rn.name IS NULL THEN ':'||substr(rm.id,-8) ELSE '' END ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
+const joins = ` messages msg LEFT JOIN mailboxes sm ON sm.id=msg.sender_mailbox_id AND sm.installation_id=msg.sender_installation_id LEFT JOIN named_agents sn ON sn.mailbox_id=sm.id LEFT JOIN mailboxes rm ON rm.id=msg.recipient_mailbox_id AND rm.installation_id=msg.recipient_installation_id LEFT JOIN named_agents rn ON rn.mailbox_id=rm.id LEFT JOIN human_account_devices hd ON hd.account_id=msg.audience_account_id AND hd.installation_id=msg.sender_installation_id LEFT JOIN delivery_facts d ON d.message_id=msg.id LEFT JOIN (SELECT event_id,CASE WHEN SUM(CASE WHEN state='queued' THEN 1 ELSE 0 END)>0 THEN 'queued' WHEN SUM(CASE WHEN state='relay-accepted' THEN 1 ELSE 0 END)>0 THEN 'relay-accepted' WHEN SUM(CASE WHEN state='rejected' THEN 1 ELSE 0 END)>0 THEN 'rejected' ELSE '' END AS state FROM outbox GROUP BY event_id) o ON o.event_id=msg.event_id `
 
 type scanner interface{ Scan(...any) error }
 
@@ -1484,6 +1512,10 @@ func (s *SQLite) Claim(ctx context.Context, claim Claim, token string) (model.Me
 	}
 	if claim.RecipientMailboxID != "" {
 		where, args = append(where, "m.recipient_mailbox_id = ?"), append(args, claim.RecipientMailboxID)
+	}
+	if claim.CorrelationThreadID != "" {
+		where = append(where, `(m.reply_to IS NULL OR instr(char(10)||m.details||char(10), char(10)||'Codex thread: '||?||char(10)) > 0)`)
+		args = append(args, claim.CorrelationThreadID)
 	}
 	if claim.UnthreadedOnly {
 		where = append(where, "m.reply_to IS NULL")

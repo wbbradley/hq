@@ -135,16 +135,43 @@ func (s *SQLite) ListNamedAgents(ctx context.Context) ([]domain.NamedAgent, erro
 	return agents, nil
 }
 
+func (s *SQLite) ListNamedAgentSessions(ctx context.Context, name string) ([]domain.AgentSession, error) {
+	agent, err := s.GetNamedAgent(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT mailbox_id,harness,external_session_id,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at FROM agent_sessions WHERE agent_name=? ORDER BY last_selected_at DESC,harness,external_session_id`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []domain.AgentSession
+	for rows.Next() {
+		var session domain.AgentSession
+		var created, selected int64
+		if err := rows.Scan(&session.MailboxID, &session.Harness, &session.SessionID, &session.Context.Directory, &session.Context.GitCommonDir, &session.Context.RemoteIdentity, &session.Context.Worktree, &session.Context.Branch, &created, &selected); err != nil {
+			return nil, err
+		}
+		session.AgentName = name
+		session.CreatedAt = time.UnixMilli(created).UTC()
+		session.LastSelectedAt = time.UnixMilli(selected).UTC()
+		session.Current = agent.Harness == session.Harness && agent.CurrentSessionID == session.SessionID
+		session.AgentActive = agent.Active
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
 func getNamedAgentWith(ctx context.Context, queryer rowQueryer, name string, now time.Time) (domain.NamedAgent, error) {
 	var agent domain.NamedAgent
 	var retired int
 	var lease, active sql.NullInt64
 	err := queryer.QueryRowContext(ctx, `SELECT a.name,a.mailbox_id,a.retired,a.current_harness,a.current_session_id,a.last_active_at,o.lease_expires_at,
-COALESCE((SELECT c.directory FROM mailbox_contexts c WHERE c.mailbox_id=a.mailbox_id ORDER BY c.first_seen_at DESC LIMIT 1),''),
-COALESCE((SELECT c.git_common_dir FROM mailbox_contexts c WHERE c.mailbox_id=a.mailbox_id ORDER BY c.first_seen_at DESC LIMIT 1),''),
-COALESCE((SELECT c.remote_identity FROM mailbox_contexts c WHERE c.mailbox_id=a.mailbox_id ORDER BY c.first_seen_at DESC LIMIT 1),''),
-COALESCE((SELECT c.worktree FROM mailbox_contexts c WHERE c.mailbox_id=a.mailbox_id ORDER BY c.first_seen_at DESC LIMIT 1),''),
-COALESCE((SELECT c.branch FROM mailbox_contexts c WHERE c.mailbox_id=a.mailbox_id ORDER BY c.first_seen_at DESC LIMIT 1),'')
+COALESCE((SELECT s.directory FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
+COALESCE((SELECT s.git_common_dir FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
+COALESCE((SELECT s.remote_identity FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
+COALESCE((SELECT s.worktree FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
+COALESCE((SELECT s.branch FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),'')
 FROM named_agents a LEFT JOIN agent_ownership o ON o.name=a.name WHERE a.name=?`, name).Scan(
 		&agent.Name, &agent.MailboxID, &retired, &agent.Harness, &agent.CurrentSessionID, &active, &lease,
 		&agent.Context.Directory, &agent.Context.GitCommonDir, &agent.Context.RemoteIdentity, &agent.Context.Worktree, &agent.Context.Branch)
@@ -183,6 +210,9 @@ func (s *SQLite) SelectNamedAgentSession(ctx context.Context, name string, sessi
 	if strings.TrimSpace(session.Harness) == "" || strings.TrimSpace(session.ExternalSessionID) == "" {
 		return domain.NamedAgent{}, errors.New("harness and external session ID are required")
 	}
+	if strings.TrimSpace(repository.Directory) == "" {
+		return domain.NamedAgent{}, errors.New("agent session working directory is required")
+	}
 	resolveMu.Lock()
 	defer resolveMu.Unlock()
 	agent, err := s.GetNamedAgent(ctx, name)
@@ -205,7 +235,7 @@ func (s *SQLite) SelectNamedAgentSession(ctx context.Context, name string, sessi
 		binding, _ := event.MarshalPayload(event.MailboxBindingPayload{MailboxID: agent.MailboxID, Harness: session.Harness, ExternalSessionID: session.ExternalSessionID})
 		contents = append(contents, event.Content{Type: event.TypeMailboxBind, Scope: event.ScopeInstallationPrivate, Payload: binding})
 	}
-	selection, _ := event.MarshalPayload(event.AgentSessionPayload{Name: name, MailboxID: agent.MailboxID, Harness: session.Harness, ExternalSessionID: session.ExternalSessionID})
+	selection, _ := event.MarshalPayload(event.AgentSessionPayload{Name: name, MailboxID: agent.MailboxID, Harness: session.Harness, ExternalSessionID: session.ExternalSessionID, Context: eventContext(repository)})
 	selectionContent := event.Content{Type: event.TypeAgentSessionSelect, Scope: event.ScopeInstallationPrivate, Payload: selection}
 	if parent, err := s.currentAgentSelectionEvent(ctx, name, agent.Harness, agent.CurrentSessionID); err != nil {
 		return domain.NamedAgent{}, err

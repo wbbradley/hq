@@ -27,6 +27,32 @@ type testDomainStore struct{ *store.SQLite }
 
 func (*testDomainStore) Synchronize(context.Context) error { return nil }
 
+type runtimeTestStore struct {
+	*testDomainStore
+	runtime  domain.CodexRuntime
+	launches []domain.CodexLaunchRequest
+}
+
+func (s *runtimeTestStore) LaunchCodexAgent(_ context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	copyRequest := request
+	copyRequest.Environment = append([]string(nil), request.Environment...)
+	s.launches = append(s.launches, copyRequest)
+	s.runtime = domain.CodexRuntime{AgentName: request.AgentName, ThreadID: request.SessionID, Directory: request.Directory, Phase: domain.CodexRuntimeRunning}
+	if s.runtime.ThreadID == "" {
+		s.runtime.ThreadID = "thread-new"
+	}
+	return s.runtime, nil
+}
+
+func (s *runtimeTestStore) StopCodexAgent(_ context.Context, name string) (domain.CodexRuntime, error) {
+	s.runtime = domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}
+	return s.runtime, nil
+}
+
+func (s *runtimeTestStore) CodexAgentRuntime(context.Context, string) (domain.CodexRuntime, error) {
+	return s.runtime, nil
+}
+
 func TestRefreshPreservesActiveDraft(t *testing.T) {
 	m1 := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", testAgentID, model.HumanMailboxID, "First")
 	m2 := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d62", testAgentID, model.HumanMailboxID, "Second")
@@ -716,7 +742,7 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sent) != 2 || sent[1].ReplyTo != nil || sent[1].Body != "More detail" {
+	if len(sent) != 2 || sent[1].ReplyTo != nil || sent[1].Body != "More detail" || sent[1].RecipientLabel != "fred" {
 		t.Fatalf("sent = %#v", sent)
 	}
 }
@@ -760,6 +786,81 @@ func TestRecipientPickerIsIndependentSearchableAndOrdered(t *testing.T) {
 	m = updated.(app)
 	if m.pickingRecipient || m.cursor != 4 || m.messageScroll != 3 || !m.showSent {
 		t.Fatalf("escape changed inbox state = %#v", m)
+	}
+}
+
+func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxState(t *testing.T) {
+	base, ctx, mailbox := openStore(t)
+	directoryOne, directoryTwo := t.TempDir(), t.TempDir()
+	named, err := base.CreateNamedAgent(ctx, "fred", mailbox.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selection := range []struct{ id, directory string }{{"thread-one", directoryOne}, {"thread-two", directoryTwo}} {
+		if _, err := base.SelectNamedAgentSession(ctx, "fred", model.SessionIdentity{Harness: "codex", ExternalSessionID: selection.id}, model.RepositoryContext{Directory: selection.directory}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	named, _ = base.GetNamedAgent(ctx, "fred")
+	runtimeStore := &runtimeTestStore{testDomainStore: base, runtime: domain.CodexRuntime{AgentName: "fred", Phase: domain.CodexRuntimeOffline}}
+	editor := textarea.New()
+	editor.SetValue("preserved draft")
+	m := app{
+		ctx: ctx, store: runtimeStore, agents: []domain.NamedAgent{named}, editor: editor,
+		cursor: 3, messageScroll: 2, launchDirectory: directoryOne, launchEnvironment: []string{"PATH=/tui/bin", "TOKEN=transient"},
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
+	m = updated.(app)
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if cmd == nil {
+		t.Fatal("agent selection did not load sessions asynchronously")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(app)
+	if m.agentManager.stage != chooseRuntimeSession || len(m.agentManager.sessions) != 2 {
+		t.Fatalf("session chooser = %#v", m.agentManager)
+	}
+	for index, session := range m.agentManager.sessions {
+		if session.SessionID == "thread-one" {
+			m.agentManager.cursor = index + 1
+		}
+	}
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if cmd == nil {
+		t.Fatal("offline historical resume did not launch")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(app)
+	if len(runtimeStore.launches) != 1 || runtimeStore.launches[0].SessionID != "thread-one" || runtimeStore.launches[0].Directory != directoryOne || strings.Join(runtimeStore.launches[0].Environment, "|") != "PATH=/tui/bin|TOKEN=transient" {
+		t.Fatalf("resume request = %#v", runtimeStore.launches)
+	}
+	if m.cursor != 3 || m.messageScroll != 2 || m.editor.Value() != "preserved draft" {
+		t.Fatalf("agent manager changed inbox state: %#v", m)
+	}
+
+	m.agentManager.stage, m.agentManager.cursor = chooseRuntimeSession, 0
+	m.agentManager.runtime = domain.CodexRuntime{AgentName: "fred", ThreadID: "thread-one", Directory: directoryOne, Phase: domain.CodexRuntimeRunning}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.agentManager.stage != enterRuntimeDirectory {
+		t.Fatalf("new thread stage = %v", m.agentManager.stage)
+	}
+	m.agentManager.directory = directoryTwo
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if cmd != nil || m.agentManager.stage != confirmRuntimeSwitch {
+		t.Fatalf("live switch was not confirmed first: stage=%v cmd=%v", m.agentManager.stage, cmd)
+	}
+	updated, cmd = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if cmd == nil {
+		t.Fatal("confirmed live switch did not launch asynchronously")
+	}
+	m = updated.(app)
+	_ = cmd()
+	if len(runtimeStore.launches) != 2 || !runtimeStore.launches[1].ConfirmSwitch || runtimeStore.launches[1].Action != domain.CodexSessionNew || runtimeStore.launches[1].Directory != directoryTwo {
+		t.Fatalf("new-thread request = %#v", runtimeStore.launches)
 	}
 }
 

@@ -90,7 +90,7 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `mailbox.context` | Installation-private; mailbox ID and repository context | Records one signed context snapshot for abandoned-session search. |
 | `agent.name.claim` | Installation-private; `name`, `mailbox_id` | Permanently claims a local lowercase agent name for one agent mailbox. |
 | `agent.retire` | Installation-private; `name`, `mailbox_id` | Retires a name and mailbox without permitting later reuse. |
-| `agent.session.select` | Installation-private; name, mailbox, harness, and external session ID | Selects the named agent's current harness session while retaining older bindings. |
+| `agent.session.select` | Installation-private; name, mailbox, harness, external session ID, and exact repository context | Selects the named agent's current harness session while retaining rebuildable per-session directory history and selection times. |
 | `question` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts a question thread. An account question projects into every active device's human mailbox. |
 | `answer` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Adds one answer to a question thread. An account answer directly names the source agent and also replicates account state. |
 | `message` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts an async message thread. |
@@ -170,5 +170,6 @@ These node facts are not canonical events and remain unsigned:
 - Projection checkpoints.
 - Delivery leases, sync locks, and retry timers.
 - UI focus, drafts, and cache data.
+- Codex worker processes, caller environments, paths under validation, request receipts, runtime phases, presence, and ownership leases.
 
 Direct database edits can bypass the protocol, but supported HQ code must apply durable state only through valid signed events.

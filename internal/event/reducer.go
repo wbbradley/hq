@@ -45,6 +45,15 @@ type NamedAgentProjection struct {
 	ExternalSessionID string
 	SelectedAt        int64
 	SelectionEventID  string
+	Sessions          map[string]AgentSessionProjection
+}
+
+type AgentSessionProjection struct {
+	Harness           string
+	ExternalSessionID string
+	Context           RepositoryContext
+	CreatedAt         int64
+	LastSelectedAt    int64
 }
 
 type PeerProjection struct {
@@ -863,6 +872,18 @@ func (s *State) classifyNamedAgents() {
 			var payload AgentSessionPayload
 			_ = decodePayload(record.Event.Content.Payload, &payload)
 			name, mailboxID = payload.Name, payload.MailboxID
+			matchedBinding := false
+			for _, binding := range s.Mailboxes[mailboxID].Bindings {
+				if binding.Harness == payload.Harness && binding.ExternalSessionID == payload.ExternalSessionID {
+					matchedBinding = true
+					break
+				}
+			}
+			if !matchedBinding {
+				record.Status, record.Reason = StatusUnresolved, "agent session selection has no matching mailbox binding"
+				s.Records[id] = record
+				continue
+			}
 		}
 		if names[name] != mailboxID {
 			record.Status, record.Reason = StatusUnresolved, "agent fact has no matching name claim"
@@ -878,7 +899,7 @@ func (s *State) projectNamedAgents() {
 		if record.Status == StatusProjected && record.Event.Content.Type == TypeAgentNameClaim {
 			var payload AgentNamePayload
 			_ = decodePayload(record.Event.Content.Payload, &payload)
-			s.NamedAgents[payload.Name] = NamedAgentProjection{Name: payload.Name, MailboxID: payload.MailboxID}
+			s.NamedAgents[payload.Name] = NamedAgentProjection{Name: payload.Name, MailboxID: payload.MailboxID, Sessions: make(map[string]AgentSessionProjection)}
 		}
 	}
 	for _, id := range ids {
@@ -898,6 +919,15 @@ func (s *State) projectNamedAgents() {
 			_ = decodePayload(record.Event.Content.Payload, &payload)
 			agent := s.NamedAgents[payload.Name]
 			created := record.Event.Nostr.CreatedAt
+			key := payload.Harness + "\x00" + payload.ExternalSessionID
+			session := agent.Sessions[key]
+			if session.ExternalSessionID == "" {
+				session = AgentSessionProjection{Harness: payload.Harness, ExternalSessionID: payload.ExternalSessionID, Context: payload.Context, CreatedAt: created}
+			}
+			if created >= session.LastSelectedAt {
+				session.Context, session.LastSelectedAt = payload.Context, created
+			}
+			agent.Sessions[key] = session
 			if agent.SelectionEventID == "" || s.ancestor(agent.SelectionEventID, id) || (created > agent.SelectedAt && !s.ancestor(id, agent.SelectionEventID)) || (created == agent.SelectedAt && !s.ancestor(id, agent.SelectionEventID) && id > agent.SelectionEventID) {
 				agent.Harness, agent.ExternalSessionID = payload.Harness, payload.ExternalSessionID
 				agent.SelectedAt, agent.SelectionEventID = created, id

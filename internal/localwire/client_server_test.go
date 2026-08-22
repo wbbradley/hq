@@ -252,6 +252,27 @@ func TestServerAppliesRequestDeadline(t *testing.T) {
 	}
 }
 
+func TestServerAppliesMethodSpecificRequestDeadline(t *testing.T) {
+	handler := func(ctx context.Context, _ *Session, _ string, _ json.RawMessage) (any, *RPCError) {
+		select {
+		case <-time.After(40 * time.Millisecond):
+			return "ready", nil
+		case <-ctx.Done():
+			return nil, &RPCError{Code: CodeInternal, Message: ctx.Err().Error()}
+		}
+	}
+	client, stop := testServer(t, ServerOptions{
+		Modes:          map[HandshakeMode]ModeConfig{DomainMode: {Supported: VersionRange{Min: 1, Max: 3}, Handler: handler}},
+		RequestTimeout: 10 * time.Millisecond,
+		MethodTimeouts: map[string]time.Duration{"codex/launch": time.Second},
+	})
+	defer stop()
+	var result string
+	if err := client.Call(context.Background(), "codex/launch", nil, &result); err != nil || result != "ready" {
+		t.Fatalf("long-running method = %q, %v", result, err)
+	}
+}
+
 func echoHandler(_ context.Context, _ *Session, _ string, raw json.RawMessage) (any, *RPCError) {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {

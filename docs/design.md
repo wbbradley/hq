@@ -2,11 +2,12 @@
 
 HQ is a local-node application with signed, event-backed state. One node process owns an
 installation's root key, SQLite database, reducer, projections, delivery leases, relay engine, and
-subscription revisions. CLI, TUI, and Codex bridge processes are domain clients; they never open
-SQLite or sign events themselves.
+subscription revisions. CLI and TUI processes are domain clients; they never open SQLite, sign
+events, or own Codex workers themselves. The node supervises every HQ-managed Codex bridge and
+its app-server child in process.
 
 [events.md](events.md) defines canonical event schema 1 and causal reduction.
-[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 10 stores the exact signed
+[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 11 stores the exact signed
 event bytes as the source of truth and rebuildable projections derived from them.
 
 ## Identity, state, and runtime paths
@@ -25,8 +26,8 @@ restricted to the current user.
 
 `identity reset --yes` stops being safe once a node is using that identity: stop the node first. It
 deletes the key, database, and SQLite side files. HQ remains pre-1.0 and unsupported schema versions
-may be reset rather than migrated; schema 7 migrates through durable mutation receipts (8) and
-change revisions (9).
+may be reset rather than migrated; schema 7 migrates through durable mutation receipts (8), change
+revisions (9), named-agent projections (10), and per-session history (11).
 
 ## The local node
 
@@ -39,8 +40,8 @@ The protected local socket multiplexes two versioned modes:
 
 - Lifecycle RPC reports status and handles wake, stop, and restart. Restart closes existing
   sessions, creates a new instance ID, and refreshes runtime metadata.
-- Domain RPC carries mailbox, message, peer, human-account, relay, lease, synchronization, and
-  change-subscription requests and responses.
+- Domain RPC carries mailbox, message, peer, human-account, relay, lease, synchronization,
+  change-subscription, session-history, and local Codex-runtime requests and responses.
 
 Each handshake negotiates an explicit supported version range and exchanges build metadata. Equal
 wire ranges with different builds are allowed and surfaced as an actionable restart notice. A
@@ -107,6 +108,26 @@ agent lease persists across node restarts, expires naturally after crashes, and 
 as a relay heartbeat. Claims use a 30-second lease because
 stdout or a Codex app-server call cannot share the SQLite transaction. The Codex sidecar ledger and
 deterministic app-server IDs reconcile the remaining crash window.
+
+## Codex control plane and data plane
+
+`hq codex` and the TUI capture their process environment and launch directory, ensure the node is
+running, and issue the same local runtime RPC. The node-owned supervisor validates directories,
+hosts one worker per durable agent, starts only `codex app-server --stdio`, waits for an exact
+`thread/start` or `thread/resume` acknowledgement, then commits the selected session. Stable request
+IDs make a lost local response safe to retry, while the named-agent lease rejects any independent
+legacy owner. One shared thread-keyed ledger supports concurrent agents without sidecar races.
+
+The caller environment exists only long enough to construct the child environment. It is excluded
+from canonical events, projections, mutation receipts, Nostr, the ledger, logs, diagnostics, status,
+and RPC results. Process ownership, paths, presence, and runtime phases are also installation-local
+and never enter Nostr. Durable names, thread bindings, selections, and per-session repository context
+are signed installation-private facts. Mailbox questions, answers, messages, and relay delivery are
+the Nostr data plane.
+
+Node stop or restart cancels every worker and leaves its durable selection intact and offline;
+workers are not automatically restarted. A future remote controller must address the owning node's
+control plane, where paths are interpreted and validated.
 
 The node configures strict tables, foreign keys, WAL mode, `synchronous=FULL`, a five-second busy
 timeout, one database connection, and mode `0600`. WAL is an SQLite durability mechanism inside the

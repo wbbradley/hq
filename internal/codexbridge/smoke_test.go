@@ -25,7 +25,7 @@ func TestInstalledCodexV01480Smoke(t *testing.T) {
 		t.Fatalf("installed Codex version = %q, want %q", version, wantVersion)
 	}
 
-	process, err := (ExecStarter{}).Start(t.TempDir())
+	process, err := (&ExecStarter{}).Start(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

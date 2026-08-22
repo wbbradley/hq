@@ -31,6 +31,7 @@ type ServerOptions struct {
 	MaximumFrameBytes         int
 	MaximumConcurrentRequests int
 	RequestTimeout            time.Duration
+	MethodTimeouts            map[string]time.Duration
 	HandshakeTimeout          time.Duration
 	WriteTimeout              time.Duration
 }
@@ -181,7 +182,11 @@ func (s *Server) ServeConn(ctx context.Context, connection io.ReadWriteCloser) e
 		go func(request Envelope) {
 			defer handlers.Done()
 			defer func() { <-concurrency }()
-			requestCtx, requestCancel := context.WithTimeout(sessionCtx, s.options.RequestTimeout)
+			timeout := s.options.RequestTimeout
+			if methodTimeout := s.options.MethodTimeouts[request.Method]; methodTimeout > 0 {
+				timeout = methodTimeout
+			}
+			requestCtx, requestCancel := context.WithTimeout(sessionCtx, timeout)
 			defer requestCancel()
 			result, rpcErr := config.Handler(requestCtx, session, request.Method, request.Params)
 			if rpcErr != nil {

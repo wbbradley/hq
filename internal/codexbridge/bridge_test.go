@@ -288,7 +288,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	if store.identity != (model.SessionIdentity{Harness: "codex", ExternalSessionID: "thread-new"}) || store.repo.Directory != "/work/repo" {
 		t.Fatalf("binding = %#v, %#v", store.identity, store.repo)
 	}
-	if store.messages[0].Body != "Codex bridge ready" || !strings.Contains(store.messages[0].Details, "Kind: status") || !strings.Contains(store.messages[0].Details, "thread-new") {
+	if store.messages[0].Body != "Codex ready in /work/repo" || !strings.Contains(store.messages[0].Details, "Kind: status") || !strings.Contains(store.messages[0].Details, "thread-new") {
 		t.Fatalf("ready message = %#v", store.messages[0])
 	}
 	cancel()
@@ -338,7 +338,7 @@ func TestRunReportsInitialTurnFailureWithSingleTerminalStatus(t *testing.T) {
 	store.mu.Lock()
 	messages := append([]model.Message(nil), store.messages...)
 	store.mu.Unlock()
-	if len(messages) != 2 || messages[0].Body != "Codex bridge ready" || messages[1].Body != "Codex bridge stopped" || !strings.Contains(messages[1].Details, "model unavailable") {
+	if len(messages) != 2 || messages[0].Body != "Codex ready in /work/repo" || messages[1].Body != "Codex bridge stopped" || !strings.Contains(messages[1].Details, "model unavailable") {
 		t.Fatalf("messages = %#v", messages)
 	}
 }
@@ -394,6 +394,20 @@ func TestRunNamedAgentStartsSelectsRenewsAndReleases(t *testing.T) {
 	if start.Method != "thread/start" {
 		t.Fatalf("thread request = %s", start.Method)
 	}
+	var startParams ThreadStartParams
+	if err := json.Unmarshal(start.Params, &startParams); err != nil {
+		t.Fatal(err)
+	}
+	wantInstructions := NamedAgentDeveloperInstructions("fred")
+	if startParams.DeveloperInstructions != wantInstructions || !strings.Contains(startParams.DeveloperInstructions, `durable agent named "fred"`) || !strings.Contains(startParams.DeveloperInstructions, RequireStructuredHumanInput) {
+		t.Fatalf("developer instructions = %q", startParams.DeveloperInstructions)
+	}
+	store.mu.Lock()
+	readyBody := store.messages[0].Body
+	store.mu.Unlock()
+	if readyBody != "fred ready in /work/named" {
+		t.Fatalf("ready body = %q", readyBody)
+	}
 	time.Sleep(15 * time.Millisecond)
 	store.mu.Lock()
 	selected, renewals := store.namedAgent, store.renewals
@@ -444,6 +458,9 @@ func TestRunNamedAgentAutomaticallyResumesOrExplicitlyRotates(t *testing.T) {
 			if test.method == "thread/resume" && !strings.Contains(string(threadRequest.Params), "thread-existing") {
 				t.Fatalf("resume params = %s", threadRequest.Params)
 			}
+			if test.method == "thread/resume" && strings.Contains(string(threadRequest.Params), "developerInstructions") {
+				t.Fatalf("resume replaced developer instructions: %s", threadRequest.Params)
+			}
 			cancel()
 			if err := <-done; err != nil {
 				t.Fatal(err)
@@ -455,6 +472,60 @@ func TestRunNamedAgentAutomaticallyResumesOrExplicitlyRotates(t *testing.T) {
 				t.Fatalf("selected = %q", selected)
 			}
 		})
+	}
+}
+
+func TestRunNamedAgentMissingRolloutDoesNotReplaceOrSelect(t *testing.T) {
+	process := newFakeProcess()
+	requests := make(chan recordedRequest, 8)
+	go func() {
+		defer process.finish(nil)
+		scanner := bufio.NewScanner(process.serverInput)
+		for scanner.Scan() {
+			var request recordedRequest
+			if json.Unmarshal(scanner.Bytes(), &request) != nil {
+				return
+			}
+			requests <- request
+			switch request.Method {
+			case "initialize":
+				_, _ = io.WriteString(process.serverOutput, `{"id":`+jsonNumber(request.ID)+`,"result":{}}`+"\n")
+			case "initialized":
+			case "thread/resume":
+				_, _ = io.WriteString(process.serverOutput, `{"id":`+jsonNumber(request.ID)+`,"error":{"code":-32602,"message":"no rollout found for thread id thread-empty"}}`+"\n")
+			case "thread/start":
+				_, _ = io.WriteString(process.serverOutput, `{"id":`+jsonNumber(request.ID)+`,"result":{"thread":{"id":"thread-replacement"}}}`+"\n")
+			}
+		}
+	}()
+	store := newFakeMailboxStore()
+	store.namedAgent = domain.NamedAgent{Name: "fred", MailboxID: "named-mailbox", Harness: "codex", CurrentSessionID: "thread-empty"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{Directory: "/work", AgentName: "fred", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+	}()
+	for _, method := range []string{"initialize", "initialized", "thread/resume"} {
+		if request := <-requests; request.Method != method {
+			t.Fatalf("request = %q, want %q", request.Method, method)
+		}
+	}
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "no rollout found") {
+		t.Fatalf("error = %v", err)
+	}
+	cancel()
+	select {
+	case request := <-requests:
+		if request.Method == "thread/start" {
+			t.Fatalf("missing rollout silently created a replacement: %#v", request)
+		}
+	default:
+	}
+	store.mu.Lock()
+	selected := store.namedAgent.CurrentSessionID
+	store.mu.Unlock()
+	if selected != "thread-empty" {
+		t.Fatalf("selected = %q", selected)
 	}
 }
 
@@ -641,7 +712,7 @@ func TestBridgeDispatchesHQMessageEndToEnd(t *testing.T) {
 	if initialize.Method != "initialize" || initialized.Method != "initialized" || startThread.Method != "thread/start" {
 		t.Fatalf("handshake = %s, %s, %s", initialize.Method, initialized.Method, startThread.Method)
 	}
-	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex bridge ready")
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex ready in /work/repo")
 	messageID := "019c0000-0000-7000-8000-000000000117"
 	fixture.addHumanMessage(t, messageID, "from HQ", time.Now().UTC())
 	turn := <-requests
@@ -680,7 +751,7 @@ func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
 	<-requests
 	<-requests
 	<-requests
-	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex bridge ready")
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex ready in /work/repo")
 
 	notifications := []string{
 		`{"method":"item/agentMessage/delta","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","itemId":"agent-output","delta":"partial"}}`,
@@ -717,7 +788,7 @@ func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
 	if counts["Authoritative answer"] != 1 || counts["Codex turn failed"] != 1 || counts["Codex bridge stopped"] != 1 || counts["partial"] != 0 {
 		t.Fatalf("body counts = %#v, all=%#v", counts, bodies)
 	}
-	if len(bodies) != 4 || bodies[0] != "Codex bridge ready" || bodies[1] != "Authoritative answer" || bodies[2] != "Codex turn failed" || bodies[3] != "Codex bridge stopped" {
+	if len(bodies) != 4 || bodies[0] != "Codex ready in /work/repo" || bodies[1] != "Authoritative answer" || bodies[2] != "Codex turn failed" || bodies[3] != "Codex bridge stopped" {
 		t.Fatalf("message order = %#v", bodies)
 	}
 }
@@ -767,7 +838,7 @@ func TestBridgeRoutesServerApprovalThroughTemporaryHQStore(t *testing.T) {
 			Ledger: NewMemoryLedger(), Replies: fixture.replies, RepairInterval: 2 * time.Millisecond,
 		})
 	}()
-	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex bridge ready")
+	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "Codex ready in /work/repo")
 	close(sendApproval)
 
 	question := waitForStoreMessage(t, fixture.store, model.HumanMailboxID, "Codex requests approval for file changes")

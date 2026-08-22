@@ -53,6 +53,14 @@ type Options struct {
 	Updates            domain.ClientUpdates
 	AgentLeaseDuration time.Duration
 	AgentRenewInterval time.Duration
+	OnReady            func(BridgeReady)
+	SuppressStatus     bool
+}
+
+type BridgeReady struct {
+	AgentName string
+	ThreadID  string
+	Directory string
 }
 
 func Run(ctx context.Context, options Options) error {
@@ -62,8 +70,8 @@ func Run(ctx context.Context, options Options) error {
 	if options.Store == nil {
 		return errors.New("Codex bridge mailbox store is required")
 	}
-	if options.AgentName != "" && options.ResumeThreadID != "" {
-		return errors.New("named Codex agents cannot use an explicit resume thread")
+	if options.NewThread && options.ResumeThreadID != "" {
+		return errors.New("starting a new thread cannot also resume a thread")
 	}
 	if options.NewThread && options.AgentName == "" {
 		return errors.New("starting a replacement thread requires a named Codex agent")
@@ -84,7 +92,7 @@ func Run(ctx context.Context, options Options) error {
 		if err != nil {
 			return fmt.Errorf("resolve named agent %s: %w", options.AgentName, err)
 		}
-		if !options.NewThread && namedAgent.CurrentSessionID != "" {
+		if resumeThreadID == "" && !options.NewThread && namedAgent.CurrentSessionID != "" {
 			if namedAgent.Harness != "codex" {
 				return fmt.Errorf("named agent %s currently selects %s session %s; use --new-thread to attach Codex", options.AgentName, namedAgent.Harness, namedAgent.CurrentSessionID)
 			}
@@ -130,7 +138,7 @@ func Run(ctx context.Context, options Options) error {
 	}
 	starter := options.Starter
 	if starter == nil {
-		starter = ExecStarter{Yolo: options.Yolo}
+		starter = &ExecStarter{Yolo: options.Yolo}
 	}
 	process, err := starter.Start(options.Directory)
 	if err != nil {
@@ -184,7 +192,11 @@ func Run(ctx context.Context, options Options) error {
 
 	var threadResponse ThreadResponse
 	if resumeThreadID == "" {
-		params := ThreadStartParams{CWD: options.Directory, DeveloperInstructions: RequireStructuredHumanInput}
+		instructions := RequireStructuredHumanInput
+		if options.AgentName != "" {
+			instructions = NamedAgentDeveloperInstructions(options.AgentName)
+		}
+		params := ThreadStartParams{CWD: options.Directory, DeveloperInstructions: instructions}
 		if err := client.Call(ctx, "thread/start", params, &threadResponse); err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -199,8 +211,9 @@ func Run(ctx context.Context, options Options) error {
 			}
 			if options.AgentName != "" {
 				return fmt.Errorf("resume Codex thread %s for named agent %s: %w; use --new-thread to rotate explicitly", resumeThreadID, options.AgentName, err)
+			} else {
+				return fmt.Errorf("resume Codex thread %s: %w", resumeThreadID, err)
 			}
-			return fmt.Errorf("resume Codex thread %s: %w", resumeThreadID, err)
 		}
 	}
 	threadID := strings.TrimSpace(threadResponse.Thread.ID)
@@ -227,13 +240,17 @@ func Run(ctx context.Context, options Options) error {
 	}
 	requestRouter.Bind(threadID, mailbox, options.Repository, options.Sync, options.Updates.Subscribe, options.RepairInterval)
 	outputRelay.Bind(threadID, mailbox, options.Repository)
-	if err := sendStatus(ctx, options, mailbox, threadID, "Codex bridge ready", "The Codex app-server thread is connected and waiting for HQ input."); err != nil {
-		return err
+	if !options.SuppressStatus {
+		if err := sendStatus(ctx, options, mailbox, threadID, bridgeReadyBody(options), "The Codex app-server thread is connected and waiting for HQ input."); err != nil {
+			return err
+		}
 	}
 	finishBeforeDispatcher := func(bridgeErr error, status string) error {
 		stopRequests()
 		outputRelay.StopAndWait()
-		_ = sendStatusAt(context.Background(), options, mailbox, threadID, "Codex bridge stopped", status, outputRelay.nextCreatedAt())
+		if !options.SuppressStatus {
+			_ = sendStatusAt(context.Background(), options, mailbox, threadID, "Codex bridge stopped", status, outputRelay.nextCreatedAt())
+		}
 		return bridgeErr
 	}
 
@@ -255,6 +272,9 @@ func Run(ctx context.Context, options Options) error {
 			return finishBeforeDispatcher(wrapped, wrapped.Error())
 		}
 		threadState.SetActive(turnResponse.Turn.ID)
+	}
+	if options.OnReady != nil {
+		options.OnReady(BridgeReady{AgentName: options.AgentName, ThreadID: threadID, Directory: options.Directory})
 	}
 
 	dispatcherContext, cancelDispatcher := context.WithCancel(ctx)
@@ -283,7 +303,9 @@ func Run(ctx context.Context, options Options) error {
 	}
 	finish := func(bridgeErr error, status string) error {
 		stopRuntime()
-		_ = sendStatusAt(context.Background(), options, mailbox, threadID, "Codex bridge stopped", status, outputRelay.nextCreatedAt())
+		if !options.SuppressStatus {
+			_ = sendStatusAt(context.Background(), options, mailbox, threadID, "Codex bridge stopped", status, outputRelay.nextCreatedAt())
+		}
 		return bridgeErr
 	}
 
@@ -398,6 +420,14 @@ func processExitError(err error) error {
 		return errors.New("Codex app-server exited")
 	}
 	return fmt.Errorf("Codex app-server failed: %w", err)
+}
+
+func bridgeReadyBody(options Options) string {
+	name := strings.TrimSpace(options.AgentName)
+	if name == "" {
+		name = "Codex"
+	}
+	return fmt.Sprintf("%s ready in %s", name, options.Directory)
 }
 
 func sendStatus(ctx context.Context, options Options, mailbox model.Mailbox, threadID, body, status string) error {

@@ -27,6 +27,14 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 			return model.Mailbox{}, nil
 		case domainrpc.FindMailboxesMethod:
 			return []model.Mailbox{}, nil
+		case domainrpc.CreateNamedAgentMethod, domainrpc.GetNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod:
+			return domain.NamedAgent{}, nil
+		case domainrpc.ListNamedAgentsMethod:
+			return []domain.NamedAgent{}, nil
+		case domainrpc.ListAgentSessionsMethod:
+			return []domain.AgentSession{}, nil
+		case domainrpc.LaunchCodexAgentMethod, domainrpc.StopCodexAgentMethod, domainrpc.CodexRuntimeMethod:
+			return domain.CodexRuntime{}, nil
 		case domainrpc.GetMethod, domainrpc.ClaimMethod:
 			return model.Message{}, nil
 		case domainrpc.ListMethod:
@@ -55,6 +63,18 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_, _ = client.HumanMailbox(ctx)
 	_, _ = client.ResolveMailbox(ctx, model.SessionIdentity{}, model.RepositoryContext{})
 	_, _ = client.FindMailboxes(ctx, model.RepositoryContext{})
+	_, _ = client.CreateNamedAgent(ctx, "fred", "")
+	_, _ = client.GetNamedAgent(ctx, "fred")
+	_, _ = client.ListNamedAgents(ctx)
+	_, _ = client.ListNamedAgentSessions(ctx, "fred")
+	_ = client.RetireNamedAgent(ctx, "fred")
+	_, _ = client.SelectNamedAgentSession(ctx, "fred", model.SessionIdentity{}, model.RepositoryContext{})
+	_, _ = client.AcquireNamedAgent(ctx, "fred", "owner", time.Minute)
+	_, _ = client.RenewNamedAgent(ctx, "fred", "owner", time.Minute)
+	_ = client.ReleaseNamedAgent(ctx, "fred", "owner")
+	_, _ = client.LaunchCodexAgent(ctx, domain.CodexLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"})
+	_, _ = client.StopCodexAgent(ctx, "fred")
+	_, _ = client.CodexAgentRuntime(ctx, "fred")
 	_ = client.Create(ctx, model.Message{})
 	_ = client.Reply(ctx, "original", model.Message{})
 	_, _ = client.Get(ctx, "message")
@@ -81,6 +101,9 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_, _ = client.Subscribe(ctx, domain.TopicMessages)
 	want := []string{
 		domainrpc.HumanMailboxMethod, domainrpc.ResolveMailboxMethod, domainrpc.FindMailboxesMethod,
+		domainrpc.CreateNamedAgentMethod, domainrpc.GetNamedAgentMethod, domainrpc.ListNamedAgentsMethod, domainrpc.ListAgentSessionsMethod,
+		domainrpc.RetireNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod, domainrpc.ReleaseAgentMethod,
+		domainrpc.LaunchCodexAgentMethod, domainrpc.StopCodexAgentMethod, domainrpc.CodexRuntimeMethod,
 		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod,
 		domainrpc.ArchiveMethod, domainrpc.RestoreMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
 		domainrpc.TrustPeerMethod, domainrpc.DistrustPeerMethod, domainrpc.ListPeersMethod,

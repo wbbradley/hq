@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,11 +43,14 @@ func TestNamedAgentCreateAdoptRetireAndPermanentReservation(t *testing.T) {
 func TestNamedAgentRetainsHistoricalSessionsAndSelectedSession(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
 	agent, err := s.CreateNamedAgent(ctx, "fred", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, sessionID := range []string{"thread-one", "thread-two"} {
+		now = now.Add(time.Minute)
 		selected, err := s.SelectNamedAgentSession(ctx, "fred", model.SessionIdentity{Harness: "codex", ExternalSessionID: sessionID}, model.RepositoryContext{Directory: "/repo/" + sessionID})
 		if err != nil {
 			t.Fatal(err)
@@ -54,6 +58,20 @@ func TestNamedAgentRetainsHistoricalSessionsAndSelectedSession(t *testing.T) {
 		if selected.CurrentSessionID != sessionID {
 			t.Fatalf("selected session = %q", selected.CurrentSessionID)
 		}
+	}
+	if _, err := s.AcquireNamedAgent(ctx, "fred", "history-test", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := s.ListNamedAgentSessions(ctx, "fred")
+	if err != nil || len(sessions) != 2 {
+		t.Fatalf("sessions = %#v, %v", sessions, err)
+	}
+	byID := map[string]domain.AgentSession{}
+	for _, session := range sessions {
+		byID[session.SessionID] = session
+	}
+	if byID["thread-one"].Context.Directory != "/repo/thread-one" || byID["thread-one"].Current || !byID["thread-two"].Current || !byID["thread-two"].AgentActive || !byID["thread-two"].LastSelectedAt.After(byID["thread-one"].LastSelectedAt) {
+		t.Fatalf("session history = %#v", sessions)
 	}
 	var bindings int
 	if err := s.db.QueryRow(`SELECT count(*) FROM harness_bindings WHERE mailbox_id=?`, agent.MailboxID).Scan(&bindings); err != nil || bindings != 2 {
@@ -65,6 +83,10 @@ func TestNamedAgentRetainsHistoricalSessionsAndSelectedSession(t *testing.T) {
 	rebuilt, err := s.GetNamedAgent(ctx, "fred")
 	if err != nil || rebuilt.CurrentSessionID != "thread-two" {
 		t.Fatalf("rebuilt = %#v, %v", rebuilt, err)
+	}
+	rebuiltSessions, err := s.ListNamedAgentSessions(ctx, "fred")
+	if err != nil || len(rebuiltSessions) != 2 || rebuiltSessions[0].Context.Directory != "/repo/thread-two" || !rebuiltSessions[0].Current {
+		t.Fatalf("rebuilt sessions = %#v, %v", rebuiltSessions, err)
 	}
 }
 
@@ -104,6 +126,27 @@ func TestNamedAgentOwnershipConflictExpiryRenewalAndRebuild(t *testing.T) {
 	offline, err := s.GetNamedAgent(ctx, "fred")
 	if err != nil || offline.Active {
 		t.Fatalf("release = %#v, %v", offline, err)
+	}
+}
+
+func TestNamedAgentSessionCannotBeReassignedAndFailedSelectionIsNonDestructive(t *testing.T) {
+	ctx := context.Background()
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	for _, name := range []string{"fred", "jane"} {
+		if _, err := s.CreateNamedAgent(ctx, name, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity := model.SessionIdentity{Harness: "codex", ExternalSessionID: "thread-owned"}
+	if _, err := s.SelectNamedAgentSession(ctx, "fred", identity, model.RepositoryContext{Directory: "/repo/fred"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SelectNamedAgentSession(ctx, "jane", identity, model.RepositoryContext{Directory: "/repo/jane"}); err == nil || !strings.Contains(err.Error(), "another mailbox") {
+		t.Fatalf("reassignment error = %v", err)
+	}
+	jane, err := s.GetNamedAgent(ctx, "jane")
+	if err != nil || jane.CurrentSessionID != "" {
+		t.Fatalf("failed selection changed Jane = %#v, %v", jane, err)
 	}
 }
 
