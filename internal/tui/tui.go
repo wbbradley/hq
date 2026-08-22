@@ -72,6 +72,7 @@ type app struct {
 	undoNotice     string
 	messageScroll  int
 	paneFocus      paneFocus
+	markdown       *messageMarkdownRenderer
 }
 
 type paneFocus int
@@ -183,7 +184,7 @@ func RunWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Wri
 	)
 	editor.SetWidth(72)
 	editor.SetHeight(6)
-	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync, states: updates.States, connection: updates.Initial}
+	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync, states: updates.States, connection: updates.Initial, markdown: newMessageMarkdownRenderer(nil)}
 	if subscription != nil {
 		m.changes = subscription.Changes()
 	}
@@ -331,14 +332,21 @@ func (m app) restoreAction(action undoAction) tea.Cmd {
 func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		oldLayout := responsivePaneLayout(m.width, m.height, m.answering)
 		m.width, m.height = msg.Width, msg.Height
 		layout := responsivePaneLayout(msg.Width, msg.Height, m.answering)
+		if oldLayout.messageWidth != layout.messageWidth && m.markdown != nil {
+			m.markdown.Reset()
+		}
 		m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
 		m.editor.SetHeight(max(1, layout.replyHeight-4))
 	case loadedMsg:
 		selectedKey := m.selectedGroupKey()
 		m.inbox, m.sent, m.archived, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.network, msg.err
 		m.setMessages()
+		if m.markdown != nil {
+			m.markdown.Reset()
+		}
 		if index := groupIndex(m.groups, selectedKey); index >= 0 {
 			m.cursor = index
 		} else if m.cursor >= len(m.messages) {
@@ -1238,20 +1246,14 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 		body.WriteString("\n\n")
 	}
 	metadataHidden := false
+	markdownWidth := max(1, width-panel.GetHorizontalFrameSize())
 	for i, message := range group.messages {
 		if i > 0 {
 			body.WriteString("\n\n")
 		}
 		body.WriteString(dim.Render("── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM") + " ──"))
 		body.WriteByte('\n')
-		switch presentationKind(message) {
-		case "final-answer":
-			body.WriteString(finalStyle.Render(message.Body))
-		case "update", "status", "notice":
-			body.WriteString(message.Body)
-		default:
-			body.WriteString(titleStyle.Render(message.Body))
-		}
+		body.WriteString(m.markdown.Render(message, markdownWidth))
 		visibleDetails, hidden := presentationDetails(message.Details, m.showTechnical)
 		metadataHidden = metadataHidden || hidden
 		if visibleDetails != "" {

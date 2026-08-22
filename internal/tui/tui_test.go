@@ -13,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
@@ -304,10 +305,11 @@ func TestMessagePanelCombinesKindAndSenderInBorder(t *testing.T) {
 	bodyLine := -1
 	titleOnBorder := false
 	for i, line := range lines {
+		plainLine := ansi.Strip(line)
 		switch {
 		case strings.Contains(line, "╭") && strings.Contains(line, "[an update from codex · repo]"):
 			titleOnBorder = true
-		case strings.Contains(line, "Working on it") && strings.Contains(line, "│"):
+		case strings.Contains(plainLine, "Working on it") && strings.Contains(plainLine, "│"):
 			bodyLine = i
 		}
 	}
@@ -327,6 +329,84 @@ func TestMessagePanelCombinesKindAndSenderInBorder(t *testing.T) {
 	view = (app{messages: []model.Message{item}}).View().Content
 	if !strings.Contains(view, "[a final answer from codex · repo]") || strings.Contains(view, "From: codex · repo") {
 		t.Fatalf("final-answer border title: %q", view)
+	}
+}
+
+func TestMessagePanelRendersOnlyBodiesAsMarkdown(t *testing.T) {
+	item := message("message-id", testAgentID, model.HumanMailboxID, "Body with **bold text**")
+	item.Details = "Kind: update\nVisible **detail markers**"
+	m := app{messages: []model.Message{item}, width: 80, height: 30, markdown: newMessageMarkdownRenderer(renderMessageMarkdown)}
+
+	view := m.View().Content
+	if strings.Count(view, "**bold text**") != 1 || !strings.Contains(view, "\x1b[1m") {
+		t.Fatalf("message body was not rendered as Markdown: %q", view)
+	}
+	if !strings.Contains(view, "Visible **detail markers**") {
+		t.Fatalf("message details were incorrectly rendered as Markdown: %q", view)
+	}
+}
+
+func TestMarkdownTableFitsResponsiveMessagePane(t *testing.T) {
+	item := message("message-id", testAgentID, model.HumanMailboxID, "| Name | Description |\n| --- | --- |\n| alpha | a long value that wraps inside the available cell width |")
+	item.Details = "Kind: update"
+	for _, width := range []int{119, 120} {
+		m := app{messages: []model.Message{item}, width: width, height: 40, markdown: newMessageMarkdownRenderer(renderMessageMarkdown)}
+		view := m.View().Content
+		if !strings.Contains(view, "alpha") || !strings.Contains(view, "Description") {
+			t.Fatalf("%d-column table was not rendered: %q", width, view)
+		}
+		for lineNumber, line := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(line); got > width {
+				t.Fatalf("%d-column view line %d width = %d: %q", width, lineNumber+1, got, line)
+			}
+		}
+	}
+}
+
+func TestCoalescedMessagePartsRenderMarkdownIndependently(t *testing.T) {
+	created := time.Date(2026, 8, 22, 12, 0, 0, 0, time.Local)
+	first := message("first", testAgentID, model.HumanMailboxID, "First **bold part**")
+	first.CreatedAt = created
+	first.Details = "Kind: update\nCodex thread: thread\nCodex turn: turn"
+	second := message("second", testAgentID, model.HumanMailboxID, "Second *italic part*")
+	second.CreatedAt = created.Add(time.Second)
+	second.Details = "Kind: final-answer\nCodex thread: thread\nCodex turn: turn"
+	group := groupMessages([]model.Message{second, first})[0]
+	m := app{markdown: newMessageMarkdownRenderer(renderMessageMarkdown)}
+
+	panel := m.renderGroupPanel(group, 80)
+	if strings.Contains(panel, "**bold part**") || strings.Contains(panel, "*italic part*") {
+		t.Fatalf("coalesced bodies retained Markdown markers: %q", panel)
+	}
+	for _, part := range []model.Message{first, second} {
+		if timestamp := part.CreatedAt.Local().Format("Jan 2, 3:04:05 PM"); !strings.Contains(panel, timestamp) {
+			t.Fatalf("coalesced panel omitted timestamp %q: %q", timestamp, panel)
+		}
+	}
+	if !strings.Contains(panel, "\x1b[1m") || !strings.Contains(panel, ";3m") {
+		t.Fatalf("coalesced bodies omitted independent emphasis: %q", panel)
+	}
+}
+
+func TestMessageMarkdownCacheResetsWhenPaneWidthChanges(t *testing.T) {
+	calls := 0
+	renderer := newMessageMarkdownRenderer(func(body, kind string, width int) (string, error) {
+		calls++
+		return body, nil
+	})
+	item := message("message", testAgentID, model.HumanMailboxID, "Body")
+	m := app{messages: []model.Message{item}, width: 100, height: 30, markdown: renderer, editor: textarea.New()}
+
+	m.View()
+	m.View()
+	if calls != 1 {
+		t.Fatalf("unchanged views rendered %d times; want 1", calls)
+	}
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(app)
+	m.View()
+	if calls != 2 {
+		t.Fatalf("resized pane rendered %d times; want 2", calls)
 	}
 }
 
