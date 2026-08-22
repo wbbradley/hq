@@ -96,7 +96,6 @@ type paneLayout struct {
 	messageHeight int
 	replyWidth    int
 	replyHeight   int
-	horizontal    bool
 }
 
 func (g messageGroup) latest() model.Message {
@@ -114,7 +113,10 @@ type loadedMsg struct {
 	err      error
 }
 
-type answeredMsg struct{ err error }
+type answeredMsg struct {
+	err  error
+	sent bool
+}
 
 type undoAction struct {
 	id         uint64
@@ -279,8 +281,28 @@ func (m app) answer() tea.Msg {
 		message.ReplyTo = &replyTo
 		message.Details = turnCorrelationDetails(m.answerQ)
 		err = m.store.Reply(m.ctx, m.answerID, message)
+		if err == nil {
+			err = m.archiveAnsweredGroup()
+			return answeredMsg{err: err, sent: true}
+		}
 	}
-	return answeredMsg{err: err}
+	return answeredMsg{err: err, sent: err == nil}
+}
+
+func (m app) archiveAnsweredGroup() error {
+	group, ok := m.groupByKey(m.answerGroupKey)
+	if !ok {
+		return nil
+	}
+	for _, message := range group.messages {
+		if message.ID == m.answerID || !canArchive(message) {
+			continue
+		}
+		if err := m.store.Archive(m.ctx, message.ID); err != nil && !errors.Is(err, domain.ErrAlreadyHandled) {
+			return fmt.Errorf("reply sent, but archive turn message %s: %w", message.ID, err)
+		}
+	}
+	return nil
 }
 
 func turnCorrelationDetails(message model.Message) string {
@@ -410,7 +432,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case answeredMsg:
 		m.err = msg.err
-		if msg.err == nil {
+		if msg.sent {
 			m.answering = false
 			m.answerID = ""
 			m.answerGroupKey = ""
@@ -1082,12 +1104,7 @@ func (m app) View() tea.View {
 		replyPane = m.renderReplyPane(layout.replyWidth)
 	}
 	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0, replyFocused)
-	bottom := ""
-	if layout.horizontal {
-		bottom = lipgloss.JoinHorizontal(lipgloss.Top, messagePane, replyPane)
-	} else {
-		bottom = lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
-	}
+	bottom := lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
 	help := "tab/shift+tab focus · j/k navigate · pgup/pgdown message · enter reply · d archive · u undo · i details · q quit"
 	if m.answering {
 		help = "tab/shift+tab focus · pgup/pgdown message · enter submit · shift+enter/ctrl+j newline · esc cancel"
@@ -1126,17 +1143,10 @@ func responsivePaneLayout(width, height int, _ bool) paneLayout {
 	result.inboxHeight = max(2, (height+3)/4)
 	result.inboxHeight = min(result.inboxHeight, usableHeight-1)
 	remaining := max(1, usableHeight-result.inboxHeight)
-	result.messageWidth, result.messageHeight = width, remaining
-	if width >= 120 {
-		result.horizontal = true
-		result.messageWidth = width / 2
-		result.replyWidth = width - result.messageWidth
-		result.replyHeight = remaining
-		return result
-	}
-	result.replyWidth = width
-	result.messageHeight = max(1, (remaining+1)/2)
-	result.replyHeight = max(1, remaining-result.messageHeight)
+	result.messageWidth, result.replyWidth = width, width
+	result.replyHeight = max(6, (height+9)/10)
+	result.replyHeight = min(result.replyHeight, max(1, remaining-1))
+	result.messageHeight = max(1, remaining-result.replyHeight)
 	return result
 }
 

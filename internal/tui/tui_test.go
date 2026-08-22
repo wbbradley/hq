@@ -453,14 +453,19 @@ func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
 	}
 }
 
-func TestListHeightAndHorizontalReplyLayout(t *testing.T) {
+func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 	layout := responsivePaneLayout(120, 20, true)
-	if layout.inboxHeight != 5 || layout.messageWidth != 60 || layout.replyWidth != 60 || !layout.horizontal {
-		t.Fatalf("wide responsive layout = %#v", layout)
+	if layout.inboxHeight != 5 || layout.messageWidth != 120 || layout.replyWidth != 120 || layout.messageHeight != 8 || layout.replyHeight != 6 {
+		t.Fatalf("vertical layout = %#v", layout)
 	}
-	narrow := responsivePaneLayout(119, 20, true)
-	if narrow.horizontal || narrow.messageWidth != 119 || narrow.replyWidth != 119 || narrow.messageHeight+narrow.replyHeight != 14 {
-		t.Fatalf("narrow responsive layout = %#v", narrow)
+	for _, test := range []struct {
+		height      int
+		replyHeight int
+	}{{20, 6}, {60, 6}, {80, 8}, {100, 10}} {
+		got := responsivePaneLayout(160, test.height, true)
+		if got.replyHeight != test.replyHeight {
+			t.Fatalf("%d-row reply height = %d; want %d", test.height, got.replyHeight, test.replyHeight)
+		}
 	}
 	item := message("message", testAgentID, model.HumanMailboxID, "Body")
 	item.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
@@ -471,24 +476,22 @@ func TestListHeightAndHorizontalReplyLayout(t *testing.T) {
 		answerGroupKey: messageGroupKey(item), answerQ: item, editor: editor, width: 120, height: 30,
 	}
 	view := m.View().Content
-	foundSideBySide := false
-	for _, line := range strings.Split(view, "\n") {
-		if strings.Count(line, "╭") == 2 && strings.Contains(line, "[reply]") {
-			foundSideBySide = true
-			if lipgloss.Width(line) > m.width {
-				t.Fatalf("side-by-side panes width = %d; want at most %d", lipgloss.Width(line), m.width)
-			}
-		}
+	lines := strings.Split(view, "\n")
+	viewLayout := responsivePaneLayout(m.width, m.height, true)
+	if !strings.Contains(lines[viewLayout.inboxHeight+viewLayout.messageHeight], "[reply]") {
+		t.Fatalf("reply pane was not rendered below message pane: %q", view)
 	}
-	if !foundSideBySide {
-		t.Fatalf("reply pane was not rendered to the right of message pane: %q", view)
+	for _, line := range lines {
+		if strings.Count(line, "╭") > 1 {
+			t.Fatalf("panes rendered side by side: %q", line)
+		}
 	}
 }
 
-func TestResponsiveViewFitsTerminalAndSwitchesAt120Columns(t *testing.T) {
+func TestResponsiveViewFitsTerminalWithVerticalPanes(t *testing.T) {
 	item := message("message", testAgentID, model.HumanMailboxID, "Body")
 	item.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
-	for _, width := range []int{119, 120} {
+	for _, width := range []int{80, 119, 120, 200} {
 		editor := textarea.New()
 		editor.Focus()
 		m := app{
@@ -510,11 +513,8 @@ func TestResponsiveViewFitsTerminalAndSwitchesAt120Columns(t *testing.T) {
 		if lipgloss.Width(lines[0]) != width || !strings.Contains(lines[0], "[HQ · Inbox") || !strings.Contains(lines[layout.inboxHeight], "[an update from") {
 			t.Fatalf("%d-column fixture boundaries: %q", width, view)
 		}
-		if width == 120 && strings.Count(lines[layout.inboxHeight], "╭") != 2 {
-			t.Fatalf("wide panes are not side by side: %q", lines[layout.inboxHeight])
-		}
-		if width == 119 && !strings.Contains(lines[layout.inboxHeight+layout.messageHeight], "[reply]") {
-			t.Fatalf("narrow reply pane is not vertically stacked: %q", view)
+		if strings.Count(lines[layout.inboxHeight], "╭") != 1 || !strings.Contains(lines[layout.inboxHeight+layout.messageHeight], "[reply]") {
+			t.Fatalf("%d-column panes are not vertically stacked: %q", width, view)
 		}
 	}
 }
@@ -644,6 +644,57 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	}
 	if len(sent) != 2 || sent[1].ReplyTo != nil || sent[1].Body != "More detail" {
 		t.Fatalf("sent = %#v", sent)
+	}
+}
+
+func TestReplyArchivesEveryVisibleMessageInTurn(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d72", agent.ID, model.HumanMailboxID, "First update")
+	first.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	final := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d73", agent.ID, model.HumanMailboxID, "Final answer")
+	final.CreatedAt = first.CreatedAt.Add(time.Second)
+	final.Details = "Kind: final-answer\nCodex thread: thread-1\nCodex turn: turn-1"
+	for _, item := range []model.Message{first, final} {
+		if err := s.Create(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := app{ctx: ctx, store: s, inbox: []model.Message{final, first}, editor: textarea.New()}
+	m.setMessages()
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.answerID != final.ID {
+		t.Fatalf("reply target = %q; want final answer %q", m.answerID, final.ID)
+	}
+	m.editor.SetValue("Thanks")
+	result := m.answer().(answeredMsg)
+	if result.err != nil || !result.sent {
+		t.Fatalf("answer result = %#v", result)
+	}
+
+	for _, item := range []model.Message{first, final} {
+		archived, err := s.Get(ctx, item.ID)
+		if err != nil || archived.ArchivedAt == nil {
+			t.Fatalf("turn message %s was not archived: %#v, %v", item.ID, archived, err)
+		}
+	}
+	replies, err := s.List(ctx, model.Filter{ReplyTo: final.ID})
+	if err != nil || len(replies) != 1 || replies[0].Body != "Thanks" {
+		t.Fatalf("replies = %#v, %v", replies, err)
+	}
+}
+
+func TestSentReplyClosesDraftWhenTurnArchiveReportsError(t *testing.T) {
+	editor := textarea.New()
+	editor.SetValue("already sent")
+	m := app{answering: true, answerID: "message", answerGroupKey: "turn", editor: editor, paneFocus: focusReply}
+	archiveErr := errors.New("archive failed")
+
+	updated, _ := m.Update(answeredMsg{err: archiveErr, sent: true})
+	m = updated.(app)
+	if m.answering || m.answerID != "" || m.editor.Value() != "" || !errors.Is(m.err, archiveErr) {
+		t.Fatalf("sent reply retained a duplicate-able draft: %#v", m)
 	}
 }
 
