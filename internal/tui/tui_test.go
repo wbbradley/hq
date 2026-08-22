@@ -461,7 +461,7 @@ func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 	for _, test := range []struct {
 		height      int
 		replyHeight int
-	}{{20, 6}, {60, 6}, {80, 8}, {100, 10}} {
+	}{{20, 6}, {60, 9}, {80, 12}, {100, 15}} {
 		got := responsivePaneLayout(160, test.height, true)
 		if got.replyHeight != test.replyHeight {
 			t.Fatalf("%d-row reply height = %d; want %d", test.height, got.replyHeight, test.replyHeight)
@@ -778,6 +778,24 @@ func TestRecipientPickerFitsSmallTerminal(t *testing.T) {
 	lines := strings.Split(view, "\n")
 	if len(lines) > 12 || !strings.Contains(view, "recipient") || !strings.Contains(view, "choose a local") {
 		t.Fatalf("small picker = %q", view)
+	}
+}
+
+func TestRecipientPickerShowsThreeChoicesAtMinimumHeight(t *testing.T) {
+	m := app{
+		agents: []domain.NamedAgent{
+			{Name: "alice", MailboxID: "alice-id", Active: true},
+			{Name: "bob", MailboxID: "bob-id"},
+		},
+		pickingRecipient: true,
+		paneFocus:        focusReply,
+		editor:           textarea.New(),
+	}
+	view := m.renderRecipientPicker(80, 6)
+	for _, name := range []string{"alice", "self", "bob"} {
+		if !strings.Contains(view, name) {
+			t.Fatalf("minimum-height picker omitted %q: %q", name, view)
+		}
 	}
 }
 

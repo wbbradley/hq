@@ -1252,7 +1252,7 @@ func responsivePaneLayout(width, height int, _ bool) paneLayout {
 	result.inboxHeight = min(result.inboxHeight, usableHeight-1)
 	remaining := max(1, usableHeight-result.inboxHeight)
 	result.messageWidth, result.replyWidth = width, width
-	result.replyHeight = max(6, (height+9)/10)
+	result.replyHeight = max(6, (3*height+19)/20)
 	result.replyHeight = min(result.replyHeight, max(1, remaining-1))
 	result.messageHeight = max(1, remaining-result.replyHeight)
 	return result
@@ -1428,15 +1428,13 @@ func (m app) renderReplyPane(width int) string {
 func (m app) renderRecipientPicker(width, height int) string {
 	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
 	var body strings.Builder
-	body.WriteString(titleStyle.Render("New message — choose a local recipient"))
-	body.WriteByte('\n')
 	query := m.pickerQuery
 	if query == "" {
 		query = "type to filter"
 	}
 	body.WriteString(dim.Render("Search: " + query))
 	choices := m.filteredRecipients()
-	rows := max(1, height-5)
+	rows := max(1, height-3)
 	start, end := listWindow(len(choices), m.pickerCursor, rows)
 	for index := start; index < end; index++ {
 		choice := choices[index]
@@ -1460,7 +1458,7 @@ func (m app) renderRecipientPicker(width, height int) string {
 		body.WriteByte('\n')
 		body.WriteString(dim.Render("No matching recipients."))
 	}
-	return renderMessagePanel(body.String(), width, "[recipient]", "", m.paneFocused(focusReply))
+	return renderMessagePanel(body.String(), width, "[recipient · choose a local recipient]", "", m.paneFocused(focusReply))
 }
 
 func short(s string, n int) string {
