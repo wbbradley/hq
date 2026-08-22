@@ -556,13 +556,13 @@ func TestTabAndShiftTabCyclePaneFocus(t *testing.T) {
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = updated.(app)
 	view := m.View().Content
-	if m.paneFocus != focusMessage || !borderUses(view, "[message]", "62") || !borderUses(view, "[HQ · Inbox]", "60") || strings.Contains(view, "focused") {
+	if m.paneFocus != focusMessage || !borderUses(view, "[message]", "63") || !borderUses(view, "[HQ · Inbox]", "59") || strings.Contains(view, "focused") {
 		t.Fatalf("first tab focus = %v", m.paneFocus)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = updated.(app)
 	view = m.View().Content
-	if m.paneFocus != focusReply || !borderUses(view, "[reply]", "62") || !borderUses(view, "[message]", "60") || strings.Contains(view, "focused") {
+	if m.paneFocus != focusReply || !borderUses(view, "[reply]", "63") || !borderUses(view, "[message]", "59") || strings.Contains(view, "focused") {
 		t.Fatalf("second tab focus = %v", m.paneFocus)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})

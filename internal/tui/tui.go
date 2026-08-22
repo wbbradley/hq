@@ -27,10 +27,10 @@ var (
 	finalStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	selected     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
 	dim          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	panelEdge    = lipgloss.NewStyle().Foreground(lipgloss.Color("62"))
-	dimPanelEdge = lipgloss.NewStyle().Foreground(lipgloss.Color("60"))
-	panel        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
-	dimPanel     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("60")).Padding(0, 1)
+	panelEdge    = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
+	dimPanelEdge = lipgloss.NewStyle().Foreground(lipgloss.Color("59"))
+	panel        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(0, 1)
+	dimPanel     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("59")).Padding(0, 1)
 )
 
 type app struct {
