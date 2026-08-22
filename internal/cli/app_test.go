@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wbbradley/hq/internal/agenthelp"
+	hqconfig "github.com/wbbradley/hq/internal/config"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/hqclient"
@@ -103,6 +104,54 @@ func TestCodexCommandDefaultsToCallerDirectory(t *testing.T) {
 	}
 	if received.Directory != "/work/repo" || received.InitialPrompt != "" || received.Action != domain.CodexSessionCurrent || received.Yolo {
 		t.Fatalf("request = %#v", received)
+	}
+}
+
+func TestCodexCommandUsesConfiguredYoloDefaultAndAllowsOverride(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, _ := testApp(t, "")
+	a.LoadConfig = func() (hqconfig.Settings, error) {
+		return hqconfig.Settings{Codex: hqconfig.CodexSettings{Yolo: true}}, nil
+	}
+	var launches []domain.CodexLaunchRequest
+	a.LaunchCodexAgent = func(_ context.Context, _ domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+		launches = append(launches, request)
+		return domain.CodexRuntime{AgentName: request.AgentName, ThreadID: "thread", Directory: request.Directory, Phase: domain.CodexRuntimeRunning}, nil
+	}
+	for _, args := range [][]string{
+		{"--db", database, "codex", "--agent", "fred"},
+		{"--db", database, "codex", "--agent", "fred", "--yolo=false"},
+	} {
+		if err := a.Run(context.Background(), args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(launches) != 2 || !launches[0].Yolo || launches[1].Yolo {
+		t.Fatalf("launches = %#v", launches)
+	}
+}
+
+func TestConfigCommandGetsAndSetsCodexYolo(t *testing.T) {
+	a, out := testApp(t, "")
+	settings := hqconfig.Settings{}
+	a.LoadConfig = func() (hqconfig.Settings, error) { return settings, nil }
+	a.SaveConfig = func(updated hqconfig.Settings) error { settings = updated; return nil }
+	a.Open = func(context.Context, string) (domain.Store, error) {
+		t.Fatal("config command opened the database")
+		return nil, nil
+	}
+	if err := a.Run(context.Background(), []string{"config", "set", "codex.yolo", "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if !settings.Codex.Yolo || out.String() != "codex.yolo=true\n" {
+		t.Fatalf("settings/output = %#v %q", settings, out.String())
+	}
+	out.Reset()
+	if err := a.Run(context.Background(), []string{"config", "get", "codex.yolo"}); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "true\n" {
+		t.Fatalf("get output = %q", out.String())
 	}
 }
 

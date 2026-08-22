@@ -821,6 +821,11 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 	if m.agentManager.stage != chooseRuntimeSession || len(m.agentManager.sessions) != 2 {
 		t.Fatalf("session chooser = %#v", m.agentManager)
 	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	m = updated.(app)
+	if !m.agentManager.yolo || !strings.Contains(m.renderAgentManager(), "YOLO mode: ON") {
+		t.Fatalf("YOLO switch = %#v", m.agentManager)
+	}
 	for index, session := range m.agentManager.sessions {
 		if session.SessionID == "thread-one" {
 			m.agentManager.cursor = index + 1
@@ -833,7 +838,7 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 	}
 	updated, _ = m.Update(cmd())
 	m = updated.(app)
-	if len(runtimeStore.launches) != 1 || runtimeStore.launches[0].SessionID != "thread-one" || runtimeStore.launches[0].Directory != directoryOne || strings.Join(runtimeStore.launches[0].Environment, "|") != "PATH=/tui/bin|TOKEN=transient" {
+	if len(runtimeStore.launches) != 1 || runtimeStore.launches[0].SessionID != "thread-one" || runtimeStore.launches[0].Directory != directoryOne || strings.Join(runtimeStore.launches[0].Environment, "|") != "PATH=/tui/bin|TOKEN=transient" || !runtimeStore.launches[0].Yolo {
 		t.Fatalf("resume request = %#v", runtimeStore.launches)
 	}
 	if m.cursor != 3 || m.messageScroll != 2 || m.editor.Value() != "preserved draft" {
@@ -859,8 +864,17 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 	}
 	m = updated.(app)
 	_ = cmd()
-	if len(runtimeStore.launches) != 2 || !runtimeStore.launches[1].ConfirmSwitch || runtimeStore.launches[1].Action != domain.CodexSessionNew || runtimeStore.launches[1].Directory != directoryTwo {
+	if len(runtimeStore.launches) != 2 || !runtimeStore.launches[1].ConfirmSwitch || runtimeStore.launches[1].Action != domain.CodexSessionNew || runtimeStore.launches[1].Directory != directoryTwo || !runtimeStore.launches[1].Yolo {
 		t.Fatalf("new-thread request = %#v", runtimeStore.launches)
+	}
+}
+
+func TestAgentManagerUsesConfiguredYoloDefault(t *testing.T) {
+	m := app{editor: textarea.New(), defaultYolo: true}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
+	m = updated.(app)
+	if !m.managingAgents || !m.agentManager.yolo {
+		t.Fatalf("agent manager did not use configured YOLO default: %#v", m.agentManager)
 	}
 }
 

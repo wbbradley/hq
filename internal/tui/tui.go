@@ -16,6 +16,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/google/uuid"
+	hqconfig "github.com/wbbradley/hq/internal/config"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/repoctx"
@@ -86,6 +87,7 @@ type app struct {
 	markdown          *messageMarkdownRenderer
 	launchDirectory   string
 	launchEnvironment []string
+	defaultYolo       bool
 	managingAgents    bool
 	agentManager      agentManager
 }
@@ -111,6 +113,7 @@ type agentManager struct {
 	threadName    string
 	renameSession domain.AgentSession
 	pending       domain.CodexLaunchRequest
+	yolo          bool
 	busy          bool
 	status        string
 }
@@ -251,6 +254,14 @@ func RunWithSync(ctx context.Context, s domain.Store, in io.Reader, out io.Write
 }
 
 func RunWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Writer, updates domain.ClientUpdates, sync func(context.Context) error) error {
+	settings, err := hqconfig.Load()
+	if err != nil {
+		return err
+	}
+	return runWithClient(ctx, s, in, out, updates, sync, settings.Codex.Yolo)
+}
+
+func runWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Writer, updates domain.ClientUpdates, sync func(context.Context) error, defaultYolo bool) error {
 	var subscription domain.ChangeSubscription
 	var err error
 	if updates.Subscribe != nil {
@@ -272,7 +283,7 @@ func RunWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Wri
 	if err != nil {
 		return fmt.Errorf("read TUI launch directory: %w", err)
 	}
-	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync, states: updates.States, connection: updates.Initial, markdown: newMessageMarkdownRenderer(nil), launchDirectory: launchDirectory, launchEnvironment: os.Environ()}
+	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync, states: updates.States, connection: updates.Initial, markdown: newMessageMarkdownRenderer(nil), launchDirectory: launchDirectory, launchEnvironment: os.Environ(), defaultYolo: defaultYolo}
 	if subscription != nil {
 		m.changes = subscription.Changes()
 	}
@@ -859,7 +870,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "g":
 			m.managingAgents = true
-			m.agentManager = agentManager{stage: chooseRuntimeAgent}
+			m.agentManager = agentManager{stage: chooseRuntimeAgent, yolo: m.defaultYolo}
 			m.editor.Blur()
 			return m, nil
 		case "r":
@@ -927,7 +938,7 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.agentManager.renameSession = domain.AgentSession{}
 			m.agentManager.status = ""
 		} else {
-			m.agentManager = agentManager{stage: chooseRuntimeAgent}
+			m.agentManager = agentManager{stage: chooseRuntimeAgent, yolo: m.defaultYolo}
 		}
 		return m, nil
 	}
@@ -968,6 +979,9 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "s":
 			m.agentManager.busy = true
 			return m, m.stopManagedAgent()
+		case "y":
+			m.agentManager.yolo = !m.agentManager.yolo
+			m.agentManager.status = ""
 		case "r":
 			if m.agentManager.cursor > 0 && m.agentManager.cursor <= len(m.agentManager.sessions) {
 				m.agentManager.renameSession = m.agentManager.sessions[m.agentManager.cursor-1]
@@ -1088,6 +1102,7 @@ func (m app) runtimeRequest(action domain.CodexSessionAction, sessionID, directo
 	return domain.CodexLaunchRequest{
 		RequestID: uuid.NewString(), AgentName: m.agentManager.agent.Name, Action: action, SessionID: sessionID,
 		Directory: directory, Repository: repository, Environment: append([]string(nil), m.launchEnvironment...),
+		Yolo: m.agentManager.yolo,
 	}
 }
 
@@ -1739,6 +1754,11 @@ func (m app) renderAgentManager() string {
 	case chooseRuntimeSession:
 		runtime := m.agentManager.runtime
 		body.WriteString(fmt.Sprintf("%s · %s · %s\n\n", m.agentManager.agent.Name, runtime.Phase, runtime.Directory))
+		yolo := "off"
+		if m.agentManager.yolo {
+			yolo = "ON"
+		}
+		body.WriteString("YOLO mode: " + yolo + " (y to toggle)\n\n")
 		newLine := "+ new Codex thread"
 		if m.agentManager.cursor == 0 {
 			newLine = selected.Render(newLine)
@@ -1758,8 +1778,14 @@ func (m app) renderAgentManager() string {
 	case enterRuntimeDirectory:
 		body.WriteString("New Codex thread for " + m.agentManager.agent.Name + "\n\n")
 		body.WriteString("Directory: " + m.agentManager.directory + "\n")
+		if m.agentManager.yolo {
+			body.WriteString("YOLO mode: ON\n")
+		}
 	case confirmRuntimeSwitch:
 		body.WriteString("Agent " + m.agentManager.agent.Name + " is running.\n")
+		if m.agentManager.pending.Yolo {
+			body.WriteString("Requested YOLO mode: ON\n")
+		}
 		body.WriteString("Stop it and switch to the requested session? y/n\n")
 	case enterThreadName:
 		body.WriteString("Rename " + threadLabel(m.agentManager.renameSession.ThreadName, m.agentManager.renameSession.SessionID) + "\n\n")
@@ -1774,7 +1800,7 @@ func (m app) renderAgentManager() string {
 	}
 	help := "type to search · j/k move · enter select · esc back"
 	if m.agentManager.stage == chooseRuntimeSession {
-		help = "j/k move · enter resume/new · r rename · n new · s stop · esc back"
+		help = "j/k move · enter resume/new · y YOLO · r rename · n new · s stop · esc back"
 	} else if m.agentManager.stage == enterRuntimeDirectory {
 		help = "type directory · enter launch · esc back"
 	} else if m.agentManager.stage == confirmRuntimeSwitch {

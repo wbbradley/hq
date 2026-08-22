@@ -10,12 +10,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	charmterm "github.com/charmbracelet/x/term"
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/agenthelp"
+	hqconfig "github.com/wbbradley/hq/internal/config"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/hqclient"
 	"github.com/wbbradley/hq/internal/identity"
@@ -61,6 +63,7 @@ Other commands:
   status     Show relay and event processing status
   sync       Run one full foreground relay sync pass
   daemon     Run or control the local HQ node (run|status|stop|restart)
+  config     Show or set local HQ preferences
   help       Print command help
   version    Print the version
 
@@ -89,6 +92,7 @@ Options:
                       its mailbox, queued root messages, and historical thread bindings.
   --session THREAD_ID Resume this exact thread from the named agent's history.
   --yolo              Pass Codex's --yolo mode to app-server; disables approvals and sandboxing.
+                      Defaults to config codex.yolo; use --yolo=false to override it.
                       Use only inside an externally secured environment.
 
 Remaining arguments are joined as the optional initial prompt. The client sends its current
@@ -130,6 +134,8 @@ type App struct {
 	StopDaemon       func(string) error
 	RestartDaemon    func(string) error
 	LaunchCodexAgent func(context.Context, domain.Store, domain.CodexLaunchRequest) (domain.CodexRuntime, error)
+	LoadConfig       func() (hqconfig.Settings, error)
+	SaveConfig       func(hqconfig.Settings) error
 }
 
 func New() *App {
@@ -156,6 +162,8 @@ func New() *App {
 			}
 			return controller.LaunchCodexAgent(ctx, request)
 		},
+		LoadConfig: hqconfig.Load,
+		SaveConfig: hqconfig.Save,
 		ReadPassword: func(prompt string) ([]byte, error) {
 			if _, err := io.WriteString(os.Stderr, prompt); err != nil {
 				return nil, err
@@ -219,6 +227,9 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	}
 	if command == "daemon" {
 		return a.daemon(ctx, dbPath, args)
+	}
+	if command == "config" {
+		return a.config(args)
 	}
 	s, err := a.Open(ctx, dbPath)
 	if err != nil {
@@ -328,7 +339,11 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, _ string
 	agentName := f.String("agent", "", "durable named agent")
 	newThread := f.Bool("new-thread", false, "start and select a replacement named-agent thread")
 	sessionID := f.String("session", "", "resume an exact thread from the named agent's history")
-	yolo := f.Bool("yolo", false, "disable Codex approvals and sandboxing")
+	settings, err := a.loadConfig()
+	if err != nil {
+		return err
+	}
+	yolo := f.Bool("yolo", settings.Codex.Yolo, "disable Codex approvals and sandboxing")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -397,6 +412,44 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, _ string
 		return errors.New(result.Error)
 	}
 	return nil
+}
+
+func (a *App) loadConfig() (hqconfig.Settings, error) {
+	if a.LoadConfig == nil {
+		return hqconfig.Settings{}, nil
+	}
+	return a.LoadConfig()
+}
+
+func (a *App) config(args []string) error {
+	settings, err := a.loadConfig()
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 || (len(args) == 1 && args[0] == "get") {
+		_, err = fmt.Fprintf(a.Out, "codex.yolo=%t\n", settings.Codex.Yolo)
+		return err
+	}
+	if len(args) == 2 && args[0] == "get" && args[1] == "codex.yolo" {
+		_, err = fmt.Fprintf(a.Out, "%t\n", settings.Codex.Yolo)
+		return err
+	}
+	if len(args) != 3 || args[0] != "set" || args[1] != "codex.yolo" {
+		return errors.New("config usage: hq config [get [codex.yolo] | set codex.yolo true|false]")
+	}
+	value, err := strconv.ParseBool(args[2])
+	if err != nil {
+		return errors.New("codex.yolo must be true or false")
+	}
+	settings.Codex.Yolo = value
+	if a.SaveConfig == nil {
+		return errors.New("HQ config storage is unavailable")
+	}
+	if err := a.SaveConfig(settings); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(a.Out, "codex.yolo=%t\n", value)
+	return err
 }
 
 func (a *App) daemon(ctx context.Context, databasePath string, args []string) error {
