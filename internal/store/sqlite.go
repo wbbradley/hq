@@ -21,7 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 9
+const schemaVersion = 10
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -61,10 +61,25 @@ CREATE TABLE mailbox_activity (
 CREATE TABLE harness_bindings (
     harness TEXT NOT NULL,
     external_session_id TEXT NOT NULL,
-    mailbox_id TEXT NOT NULL UNIQUE,
+    mailbox_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     PRIMARY KEY(harness, external_session_id),
     FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE named_agents (
+    name TEXT PRIMARY KEY,
+    mailbox_id TEXT NOT NULL UNIQUE,
+    retired INTEGER NOT NULL CHECK(retired IN (0,1)),
+    current_harness TEXT NOT NULL DEFAULT '',
+    current_session_id TEXT NOT NULL DEFAULT '',
+    last_active_at INTEGER,
+    FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE agent_ownership (
+    name TEXT PRIMARY KEY,
+    owner_token TEXT NOT NULL,
+    lease_expires_at INTEGER NOT NULL,
+    FOREIGN KEY(name) REFERENCES named_agents(name) ON DELETE CASCADE
 ) STRICT;
 CREATE TABLE mailbox_contexts (
     mailbox_id TEXT NOT NULL,
@@ -244,7 +259,7 @@ CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, creat
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 9;
+PRAGMA user_version = 10;
 `
 
 const (
@@ -258,6 +273,7 @@ type SQLite struct {
 	signer      identity.Material
 	database    string
 	afterChange func(domain.Invalidation)
+	now         func() time.Time
 }
 
 type canonicalIngest struct {
@@ -266,6 +282,7 @@ type canonicalIngest struct {
 
 var canonicalChangeTopics = []domain.ChangeTopic{
 	domain.TopicMessages, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman,
+	domain.TopicAgents,
 }
 
 func (s *SQLite) SetChangeObserver(observer func(domain.Invalidation)) {
@@ -298,7 +315,7 @@ func Open(path string) (*SQLite, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &SQLite{db: db, signer: signer, database: resolved}
+	s := &SQLite{db: db, signer: signer, database: resolved, now: time.Now}
 	if err := s.configure(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -331,6 +348,21 @@ func (s *SQLite) configure(ctx context.Context) error {
 			return fmt.Errorf("migrate schema to version 9: %w", err)
 		}
 		version = 9
+	}
+	if version == 9 {
+		migration := `PRAGMA foreign_keys = OFF;
+CREATE TABLE harness_bindings_v10 (harness TEXT NOT NULL, external_session_id TEXT NOT NULL, mailbox_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(harness, external_session_id), FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE) STRICT;
+INSERT INTO harness_bindings_v10 SELECT harness,external_session_id,mailbox_id,created_at FROM harness_bindings;
+DROP TABLE harness_bindings;
+ALTER TABLE harness_bindings_v10 RENAME TO harness_bindings;
+CREATE TABLE IF NOT EXISTS named_agents (name TEXT PRIMARY KEY, mailbox_id TEXT NOT NULL UNIQUE, retired INTEGER NOT NULL CHECK(retired IN (0,1)), current_harness TEXT NOT NULL DEFAULT '', current_session_id TEXT NOT NULL DEFAULT '', last_active_at INTEGER, FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE) STRICT;
+CREATE TABLE IF NOT EXISTS agent_ownership (name TEXT PRIMARY KEY, owner_token TEXT NOT NULL, lease_expires_at INTEGER NOT NULL, FOREIGN KEY(name) REFERENCES named_agents(name) ON DELETE CASCADE) STRICT;
+PRAGMA user_version = 10;
+PRAGMA foreign_keys = ON;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 10: %w", err)
+		}
+		version = 10
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -695,6 +727,12 @@ func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEv
 
 func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) error {
 	activity := make(map[string]int64)
+	agentActivity := make(map[string]int64)
+	type ownershipLease struct {
+		token  string
+		expiry int64
+	}
+	ownership := make(map[string]ownershipLease)
 	activityRows, err := tx.QueryContext(ctx, `SELECT mailbox_id,last_seen_at FROM mailbox_activity`)
 	if err == nil {
 		for activityRows.Next() {
@@ -706,12 +744,34 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		}
 		activityRows.Close()
 	}
+	agentRows, agentErr := tx.QueryContext(ctx, `SELECT name,last_active_at FROM named_agents WHERE last_active_at IS NOT NULL`)
+	if agentErr == nil {
+		for agentRows.Next() {
+			var name string
+			var seen int64
+			if agentRows.Scan(&name, &seen) == nil {
+				agentActivity[name] = seen
+			}
+		}
+		agentRows.Close()
+	}
+	ownershipRows, ownershipErr := tx.QueryContext(ctx, `SELECT name,owner_token,lease_expires_at FROM agent_ownership`)
+	if ownershipErr == nil {
+		for ownershipRows.Next() {
+			var name string
+			var lease ownershipLease
+			if ownershipRows.Scan(&name, &lease.token, &lease.expiry) == nil {
+				ownership[name] = lease
+			}
+		}
+		ownershipRows.Close()
+	}
 	for id, record := range state.Records {
 		if _, err := tx.ExecContext(ctx, `UPDATE canonical_events SET reduction_status = ?, reduction_reason = ? WHERE event_id = ?`, record.Status, record.Reason, id); err != nil {
 			return err
 		}
 	}
-	for _, table := range []string{"causal_edges", "threads", "messages", "mailbox_contexts", "harness_bindings", "mailbox_activity", "mailboxes", "peers", "mailbox_shares", "human_account_default", "human_account_devices", "human_accounts"} {
+	for _, table := range []string{"causal_edges", "threads", "messages", "mailbox_contexts", "harness_bindings", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_shares", "human_account_default", "human_account_devices", "human_accounts"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 			return fmt.Errorf("clear %s projection: %w", table, err)
 		}
@@ -741,14 +801,28 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_activity(mailbox_id, last_seen_at) VALUES (?, ?)`, mailbox.ID, seen); err != nil {
 			return err
 		}
-		if mailbox.Harness != "" {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO harness_bindings(harness, external_session_id, mailbox_id, created_at) VALUES (?, ?, ?, ?)`, mailbox.Harness, mailbox.ExternalSessionID, mailbox.ID, created); err != nil {
+		for _, binding := range mailbox.Bindings {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO harness_bindings(harness, external_session_id, mailbox_id, created_at) VALUES (?, ?, ?, ?)`, binding.Harness, binding.ExternalSessionID, mailbox.ID, created); err != nil {
 				return fmt.Errorf("project harness binding: %w", err)
 			}
 		}
 		for _, context := range mailbox.Contexts {
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO mailbox_contexts(mailbox_id, directory, git_common_dir, remote_identity, worktree, branch, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, mailbox.ID, context.Directory, context.GitCommonDir, context.RemoteIdentity, context.Worktree, context.Branch, created); err != nil {
 				return err
+			}
+		}
+	}
+	for _, agent := range state.NamedAgents {
+		var lastActive any
+		if seen := agentActivity[agent.Name]; seen != 0 {
+			lastActive = seen
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO named_agents(name,mailbox_id,retired,current_harness,current_session_id,last_active_at) VALUES (?,?,?,?,?,?)`, agent.Name, agent.MailboxID, boolInt(agent.Retired), agent.Harness, agent.ExternalSessionID, lastActive); err != nil {
+			return fmt.Errorf("project named agent: %w", err)
+		}
+		if lease, exists := ownership[agent.Name]; exists && !agent.Retired {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_ownership(name,owner_token,lease_expires_at) VALUES (?,?,?)`, agent.Name, lease.token, lease.expiry); err != nil {
+				return fmt.Errorf("restore agent ownership: %w", err)
 			}
 		}
 	}
@@ -1007,9 +1081,9 @@ type rowQueryer interface {
 
 func getMailboxWith(ctx context.Context, queryer rowQueryer, id string) (model.Mailbox, error) {
 	var m model.Mailbox
-	var harness sql.NullString
+	var harness, agentName sql.NullString
 	var created, seen int64
-	err := queryer.QueryRowContext(ctx, `SELECT m.id, m.kind, b.harness, m.created_at, COALESCE(a.last_seen_at, m.created_at) FROM mailboxes m LEFT JOIN harness_bindings b ON b.mailbox_id = m.id LEFT JOIN mailbox_activity a ON a.mailbox_id = m.id WHERE m.id = ?`, id).Scan(&m.ID, &m.Kind, &harness, &created, &seen)
+	err := queryer.QueryRowContext(ctx, `SELECT m.id,m.kind,COALESCE(n.current_harness,(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=m.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1)),m.created_at,COALESCE(a.last_seen_at,m.created_at),n.name FROM mailboxes m LEFT JOIN named_agents n ON n.mailbox_id=m.id LEFT JOIN mailbox_activity a ON a.mailbox_id=m.id WHERE m.id=?`, id).Scan(&m.ID, &m.Kind, &harness, &created, &seen, &agentName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -1017,7 +1091,11 @@ func getMailboxWith(ctx context.Context, queryer rowQueryer, id string) (model.M
 		return m, err
 	}
 	m.Harness = harness.String
-	m.Label = mailboxLabel(m.Kind, m.Harness, m.ID)
+	if agentName.String != "" {
+		m.Label = agentName.String
+	} else {
+		m.Label = mailboxLabel(m.Kind, m.Harness, m.ID)
+	}
 	m.CreatedAt, m.LastSeen = time.UnixMilli(created).UTC(), time.UnixMilli(seen).UTC()
 	return m, nil
 }
@@ -1403,6 +1481,9 @@ func (s *SQLite) Claim(ctx context.Context, claim Claim, token string) (model.Me
 	}
 	if claim.RecipientMailboxID != "" {
 		where, args = append(where, "m.recipient_mailbox_id = ?"), append(args, claim.RecipientMailboxID)
+	}
+	if claim.UnthreadedOnly {
+		where = append(where, "m.reply_to IS NULL")
 	}
 	where = append(where, "d.completed_at IS NULL", "(d.delivery_token IS NULL OR d.delivery_lease_until < ?)")
 	args = append(args, now.UnixMilli())

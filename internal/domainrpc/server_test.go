@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/localwire"
@@ -34,6 +35,30 @@ func (s *recordingOperations) ResolveMailbox(context.Context, model.SessionIdent
 }
 func (s *recordingOperations) FindMailboxes(context.Context, model.RepositoryContext) ([]model.Mailbox, error) {
 	return nil, s.record(FindMailboxesMethod)
+}
+func (s *recordingOperations) CreateNamedAgent(context.Context, string, string) (domain.NamedAgent, error) {
+	return domain.NamedAgent{}, s.record(CreateNamedAgentMethod)
+}
+func (s *recordingOperations) GetNamedAgent(context.Context, string) (domain.NamedAgent, error) {
+	return domain.NamedAgent{}, s.record(GetNamedAgentMethod)
+}
+func (s *recordingOperations) ListNamedAgents(context.Context) ([]domain.NamedAgent, error) {
+	return nil, s.record(ListNamedAgentsMethod)
+}
+func (s *recordingOperations) RetireNamedAgent(context.Context, string) error {
+	return s.record(RetireNamedAgentMethod)
+}
+func (s *recordingOperations) SelectNamedAgentSession(context.Context, string, model.SessionIdentity, model.RepositoryContext) (domain.NamedAgent, error) {
+	return domain.NamedAgent{}, s.record(SelectAgentSessionMethod)
+}
+func (s *recordingOperations) AcquireNamedAgent(context.Context, string, string, time.Duration) (domain.NamedAgent, error) {
+	return domain.NamedAgent{}, s.record(AcquireAgentMethod)
+}
+func (s *recordingOperations) RenewNamedAgent(context.Context, string, string, time.Duration) (domain.NamedAgent, error) {
+	return domain.NamedAgent{}, s.record(RenewAgentMethod)
+}
+func (s *recordingOperations) ReleaseNamedAgent(context.Context, string, string) error {
+	return s.record(ReleaseAgentMethod)
 }
 func (s *recordingOperations) Create(context.Context, model.Message) error {
 	return s.record(CreateMethod)
@@ -107,6 +132,14 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{HumanMailboxMethod, nil},
 		{ResolveMailboxMethod, ResolveMailboxRequest{MutationID: mutationID}},
 		{FindMailboxesMethod, RepositoryRequest{}},
+		{CreateNamedAgentMethod, NamedAgentRequest{MutationID: mutationID}},
+		{GetNamedAgentMethod, NamedAgentRequest{}},
+		{ListNamedAgentsMethod, nil},
+		{RetireNamedAgentMethod, NamedAgentRequest{MutationID: mutationID}},
+		{SelectAgentSessionMethod, AgentSessionRequest{MutationID: mutationID}},
+		{AcquireAgentMethod, AgentOwnershipRequest{MutationID: mutationID}},
+		{RenewAgentMethod, AgentOwnershipRequest{MutationID: mutationID}},
+		{ReleaseAgentMethod, AgentOwnershipRequest{MutationID: mutationID}},
 		{CreateMethod, MessageRequest{MutationID: mutationID}},
 		{ReplyMethod, ReplyRequest{MutationID: mutationID}},
 		{GetMethod, IDRequest{}},

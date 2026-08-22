@@ -21,7 +21,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "9"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "10"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -31,7 +31,7 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 			t.Errorf("%s = %q, want %q", query, got, want)
 		}
 	}
-	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "mailbox_contexts", "messages", "threads", "peers", "mailbox_shares", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts", "change_revision"} {
+	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "named_agents", "agent_ownership", "mailbox_contexts", "messages", "threads", "peers", "mailbox_shares", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts", "change_revision"} {
 		var strict int
 		if err := s.db.QueryRow(`SELECT strict FROM pragma_table_list WHERE name = ?`, table).Scan(&strict); err != nil {
 			t.Fatal(err)
@@ -336,7 +336,7 @@ func TestVersionTwoDataIsDestroyed(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 9 {
+	if version != 10 {
 		t.Fatalf("user_version = %d", version)
 	}
 }
@@ -377,6 +377,37 @@ func TestVersionSevenMigratesWithoutLosingCanonicalState(t *testing.T) {
 	var version int
 	if err := reopened.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
 		t.Fatalf("migrated version = %d, %v", version, err)
+	}
+}
+
+func TestVersionNineMigrationPreservesStateAndAllowsNamedMailboxHistory(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	agent := resolveAgent(t, s, "codex", "one", "/repo")
+	var canonical int
+	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&canonical); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`PRAGMA foreign_keys=OFF; DROP TABLE agent_ownership; DROP TABLE named_agents;
+ALTER TABLE harness_bindings RENAME TO harness_bindings_v10;
+CREATE TABLE harness_bindings (harness TEXT NOT NULL, external_session_id TEXT NOT NULL, mailbox_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, PRIMARY KEY(harness,external_session_id), FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE) STRICT;
+INSERT INTO harness_bindings SELECT * FROM harness_bindings_v10; DROP TABLE harness_bindings_v10; PRAGMA user_version=9; PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	var after int
+	if err := reopened.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&after); err != nil || after != canonical {
+		t.Fatalf("canonical events = %d, want %d: %v", after, canonical, err)
+	}
+	if _, err := reopened.db.Exec(`INSERT INTO harness_bindings(harness,external_session_id,mailbox_id,created_at) VALUES ('codex','two',?,?)`, agent.ID, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("second historical binding: %v", err)
 	}
 }
 

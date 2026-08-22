@@ -11,6 +11,7 @@ const (
 	TopicPeers     ChangeTopic = "peers"
 	TopicHuman     ChangeTopic = "human"
 	TopicRelays    ChangeTopic = "relays"
+	TopicAgents    ChangeTopic = "agents"
 )
 
 type Invalidation struct {

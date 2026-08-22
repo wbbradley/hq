@@ -648,6 +648,31 @@ func TestPeerAndMailboxCommands(t *testing.T) {
 	}
 }
 
+func TestNamedAgentCommands(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	a, out := testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "agent", "create", "fred"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "fred\t") {
+		t.Fatalf("create = %q", out.String())
+	}
+	a, out = testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "agent", "list", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"name":"fred"`) || !strings.Contains(out.String(), `"active":false`) {
+		t.Fatalf("list = %q", out.String())
+	}
+	a, _ = testApp(t, "")
+	if err := a.Run(context.Background(), []string{"--db", database, "agent", "retire", "fred"}); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("unconfirmed retire = %v", err)
+	}
+	if err := a.Run(context.Background(), []string{"--db", database, "agent", "retire", "--yes", "fred"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRelayCommands(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")

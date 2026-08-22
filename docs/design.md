@@ -6,7 +6,7 @@ subscription revisions. CLI, TUI, and Codex bridge processes are domain clients;
 SQLite or sign events themselves.
 
 [events.md](events.md) defines canonical event schema 1 and causal reduction.
-[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 9 stores the exact signed
+[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 10 stores the exact signed
 event bytes as the source of truth and rebuildable projections derived from them.
 
 ## Identity, state, and runtime paths
@@ -77,7 +77,7 @@ supported state model.
 
 `change_revision` contains one monotonic revision allocated in the same transaction as each
 relevant change. Invalidations contain only the revision, broad topics (`messages`, `mailboxes`,
-`network`, `peers`, `human`, and `relays`), and an optional full-snapshot flag. They never contain
+`network`, `peers`, `human`, `relays`, and `agents`), and an optional full-snapshot flag. They never contain
 message bodies, database rows, signing material, or mutation results.
 
 A subscription is registered before its acknowledged revision is read. Activation occurs only
@@ -93,8 +93,8 @@ fallback. TUI drafts, focus, and selection survive reloads.
 
 `canonical_events` retains exact signed bytes, identity fields, event type, scope, and reduction
 status. `causal_edges` indexes parents and `projection_checkpoint` records rebuild progress.
-`mailboxes`, bindings, contexts, messages, threads, peers, shares, human accounts, and devices are
-rebuildable projections.
+`mailboxes`, historical bindings, named agents, selected sessions, contexts, messages, threads,
+peers, shares, human accounts, and devices are rebuildable projections.
 
 `outbox` contains one row per canonical event and recipient installation, including exact canonical
 bytes, recipient key and relay hints, and the exact signed gift wrap before first publish.
@@ -102,7 +102,9 @@ bytes, recipient key and relay hints, and the exact signed gift wrap before firs
 unsigned transport facts. Mutation receipts and change revisions provide local RPC recovery and
 subscriptions.
 
-Delivery claims and mailbox activity are unsigned node facts. Claims use a 30-second lease because
+Delivery claims, mailbox activity, and named-agent ownership are unsigned local node facts. A named
+agent lease persists across node restarts, expires naturally after crashes, and is never published
+as a relay heartbeat. Claims use a 30-second lease because
 stdout or a Codex app-server call cannot share the SQLite transaction. The Codex sidecar ledger and
 deterministic app-server IDs reconcile the remaining crash window.
 

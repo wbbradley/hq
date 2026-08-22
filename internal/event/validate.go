@@ -184,6 +184,37 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if strings.TrimSpace(payload.Context.Directory) == "" {
 			return StatusInvalid, errors.New("mailbox context needs a directory")
 		}
+	case TypeAgentNameClaim, TypeAgentRetire:
+		if err := validateControl(content); err != nil {
+			return StatusInvalid, err
+		}
+		var payload AgentNamePayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validAgentName(payload.Name); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validUUID("mailbox ID", payload.MailboxID); err != nil {
+			return StatusInvalid, err
+		}
+	case TypeAgentSessionSelect:
+		if err := validateControl(content); err != nil {
+			return StatusInvalid, err
+		}
+		var payload AgentSessionPayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validAgentName(payload.Name); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validUUID("mailbox ID", payload.MailboxID); err != nil {
+			return StatusInvalid, err
+		}
+		if strings.TrimSpace(payload.Harness) == "" || strings.TrimSpace(payload.ExternalSessionID) == "" {
+			return StatusInvalid, errors.New("agent session selection needs a harness and external session ID")
+		}
 	case TypePeerTrust, TypePeerDistrust:
 		if err := validateControl(content); err != nil {
 			return StatusInvalid, err
@@ -284,7 +315,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 
 func knownType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeQuestion, TypeAnswer, TypeMessage,
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeQuestion, TypeAnswer, TypeMessage,
 		TypeThreadCancel, TypeMessageArchive, TypeMessageRestore, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
 		TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountCreate, TypeHumanAccountSelect,
 		TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke:
@@ -292,6 +323,25 @@ func knownType(kind Type) bool {
 	default:
 		return false
 	}
+}
+
+func validAgentName(name string) error {
+	if name == "self" || name == "human" {
+		return fmt.Errorf("agent name %q is reserved", name)
+	}
+	if len(name) < 1 || len(name) > 63 || name[0] < 'a' || name[0] > 'z' {
+		return errors.New("agent name must be a 1-63 character lowercase slug")
+	}
+	for i := 1; i < len(name); i++ {
+		character := name[i]
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return errors.New("agent name must be a 1-63 character lowercase slug")
+		}
+	}
+	if name[len(name)-1] == '-' {
+		return errors.New("agent name must be a 1-63 character lowercase slug")
+	}
+	return nil
 }
 
 func validateHumanAccountPayload(payload HumanAccountPayload) error {

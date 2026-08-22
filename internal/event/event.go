@@ -35,6 +35,9 @@ const (
 	TypeMailboxCreate      Type = "mailbox.create"
 	TypeMailboxBind        Type = "mailbox.bind"
 	TypeMailboxContext     Type = "mailbox.context"
+	TypeAgentNameClaim     Type = "agent.name.claim"
+	TypeAgentRetire        Type = "agent.retire"
+	TypeAgentSessionSelect Type = "agent.session.select"
 	TypeQuestion           Type = "question"
 	TypeAnswer             Type = "answer"
 	TypeMessage            Type = "message"
@@ -137,6 +140,18 @@ type MailboxBindingPayload struct {
 type MailboxContextPayload struct {
 	MailboxID string            `json:"mailbox_id"`
 	Context   RepositoryContext `json:"context"`
+}
+
+type AgentNamePayload struct {
+	Name      string `json:"name"`
+	MailboxID string `json:"mailbox_id"`
+}
+
+type AgentSessionPayload struct {
+	Name              string `json:"name"`
+	MailboxID         string `json:"mailbox_id"`
+	Harness           string `json:"harness"`
+	ExternalSessionID string `json:"external_session_id"`
 }
 
 type TargetPayload struct {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/buildinfo"
@@ -161,6 +162,60 @@ func (c *Client) FindMailboxes(ctx context.Context, repository model.RepositoryC
 	var result []model.Mailbox
 	err := c.call(ctx, domainrpc.FindMailboxesMethod, domainrpc.RepositoryRequest{Repository: repository}, &result)
 	return result, err
+}
+
+func (c *Client) CreateNamedAgent(ctx context.Context, name, mailboxID string) (domain.NamedAgent, error) {
+	var result domain.NamedAgent
+	err := c.mutatingCall(ctx, domainrpc.CreateNamedAgentMethod, func(id string) any {
+		return domainrpc.NamedAgentRequest{MutationID: id, Name: name, MailboxID: mailboxID}
+	}, &result)
+	return result, err
+}
+
+func (c *Client) GetNamedAgent(ctx context.Context, name string) (domain.NamedAgent, error) {
+	var result domain.NamedAgent
+	err := c.call(ctx, domainrpc.GetNamedAgentMethod, domainrpc.NamedAgentRequest{Name: name}, &result)
+	return result, err
+}
+
+func (c *Client) ListNamedAgents(ctx context.Context) ([]domain.NamedAgent, error) {
+	var result []domain.NamedAgent
+	err := c.call(ctx, domainrpc.ListNamedAgentsMethod, nil, &result)
+	return result, err
+}
+
+func (c *Client) RetireNamedAgent(ctx context.Context, name string) error {
+	return c.mutatingCall(ctx, domainrpc.RetireNamedAgentMethod, func(id string) any { return domainrpc.NamedAgentRequest{MutationID: id, Name: name} }, nil)
+}
+
+func (c *Client) SelectNamedAgentSession(ctx context.Context, name string, session model.SessionIdentity, repository model.RepositoryContext) (domain.NamedAgent, error) {
+	var result domain.NamedAgent
+	err := c.mutatingCall(ctx, domainrpc.SelectAgentSessionMethod, func(id string) any {
+		return domainrpc.AgentSessionRequest{MutationID: id, Name: name, Harness: session.Harness, SessionID: session.ExternalSessionID, Repository: repository}
+	}, &result)
+	return result, err
+}
+
+func (c *Client) AcquireNamedAgent(ctx context.Context, name, token string, duration time.Duration) (domain.NamedAgent, error) {
+	return c.agentOwnership(ctx, domainrpc.AcquireAgentMethod, name, token, duration)
+}
+
+func (c *Client) RenewNamedAgent(ctx context.Context, name, token string, duration time.Duration) (domain.NamedAgent, error) {
+	return c.agentOwnership(ctx, domainrpc.RenewAgentMethod, name, token, duration)
+}
+
+func (c *Client) agentOwnership(ctx context.Context, method, name, token string, duration time.Duration) (domain.NamedAgent, error) {
+	var result domain.NamedAgent
+	err := c.mutatingCall(ctx, method, func(id string) any {
+		return domainrpc.AgentOwnershipRequest{MutationID: id, Name: name, OwnerToken: token, Duration: duration}
+	}, &result)
+	return result, err
+}
+
+func (c *Client) ReleaseNamedAgent(ctx context.Context, name, token string) error {
+	return c.mutatingCall(ctx, domainrpc.ReleaseAgentMethod, func(id string) any {
+		return domainrpc.AgentOwnershipRequest{MutationID: id, Name: name, OwnerToken: token}
+	}, nil)
 }
 
 func (c *Client) Create(ctx context.Context, message model.Message) error {

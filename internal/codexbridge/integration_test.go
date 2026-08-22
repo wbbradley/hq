@@ -206,7 +206,7 @@ func TestCodexBridgeFullSession(t *testing.T) {
 		SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: fixture.agent.ID,
 		Body: "Please add one more test", CreatedAt: time.Now().UTC(),
 	}
-	if err := fixture.store.Reply(context.Background(), output.ID, followUp); err != nil {
+	if err := fixture.store.Create(context.Background(), followUp); err != nil {
 		t.Fatal(err)
 	}
 	followUpTurn := server.nextCall(t, "turn/start")

@@ -86,8 +86,11 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | --- | --- | --- |
 | `installation.create` | Installation-private; optional `label` | Records installation creation. |
 | `mailbox.create` | Installation-private; `mailbox_id`, `kind`, optional `label` | Creates a human or agent mailbox projection. |
-| `mailbox.bind` | Installation-private; `mailbox_id`, `harness`, `external_session_id` | Binds a harness session to a mailbox. |
+| `mailbox.bind` | Installation-private; `mailbox_id`, `harness`, `external_session_id` | Permanently records a harness session binding; named mailboxes may retain several. |
 | `mailbox.context` | Installation-private; mailbox ID and repository context | Records one signed context snapshot for abandoned-session search. |
+| `agent.name.claim` | Installation-private; `name`, `mailbox_id` | Permanently claims a local lowercase agent name for one agent mailbox. |
+| `agent.retire` | Installation-private; `name`, `mailbox_id` | Retires a name and mailbox without permitting later reuse. |
+| `agent.session.select` | Installation-private; name, mailbox, harness, and external session ID | Selects the named agent's current harness session while retaining older bindings. |
 | `question` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts a question thread. An account question projects into every active device's human mailbox. |
 | `answer` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Adds one answer to a question thread. An account answer directly names the source agent and also replicates account state. |
 | `message` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts an async message thread. |

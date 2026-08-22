@@ -452,7 +452,7 @@ func TestDispatcherPrioritizesRegisteredReplyOverGeneralInput(t *testing.T) {
 	stopDispatcherTest(t, cancel, done)
 }
 
-func TestDispatcherTreatsUnregisteredReplyAsNormalInput(t *testing.T) {
+func TestDispatcherDoesNotTreatUnregisteredReplyAsNormalInput(t *testing.T) {
 	fixture := newDispatcherFixture(t)
 	human, err := fixture.store.HumanMailbox(context.Background())
 	if err != nil {
@@ -469,14 +469,11 @@ func TestDispatcherTreatsUnregisteredReplyAsNormalInput(t *testing.T) {
 	}
 	protocol := newDispatcherProtocol(t, fixture.state)
 	cancel, done := runDispatcher(t, fixture.dispatcher(protocol))
-	request := protocol.next(t, "turn/start")
-	var params TurnStartParams
-	_ = json.Unmarshal(request.Params, &params)
-	if params.ClientUserMessageID != reply.ID || params.Input[0].Text != "follow up" {
-		t.Fatalf("params = %s", request.Params)
+	select {
+	case request := <-protocol.requests:
+		t.Fatalf("unregistered reply became %s", request.Method)
+	case <-time.After(150 * time.Millisecond):
 	}
-	protocol.result(t, request, `{"turn":{"id":"turn-follow-up","status":"inProgress"}}`)
-	waitForCompleted(t, fixture.store, reply.ID)
 	stopDispatcherTest(t, cancel, done)
 }
 

@@ -3,6 +3,7 @@ package domainrpc
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/localwire"
@@ -10,34 +11,42 @@ import (
 )
 
 const (
-	HumanMailboxMethod      = "mailbox/human"
-	ResolveMailboxMethod    = "mailbox/resolve"
-	FindMailboxesMethod     = "mailbox/list"
-	CreateMethod            = "message/create"
-	ReplyMethod             = "message/reply"
-	GetMethod               = "message/get"
-	ListMethod              = "message/list"
-	ArchiveMethod           = "message/archive"
-	RestoreMethod           = "message/restore"
-	ClaimMethod             = "delivery/claim"
-	CompleteMethod          = "delivery/complete"
-	ReleaseMethod           = "delivery/release"
-	TrustPeerMethod         = "peer/trust"
-	DistrustPeerMethod      = "peer/distrust"
-	ListPeersMethod         = "peer/list"
-	HumanAccountMethod      = "human/account"
-	HumanDevicesMethod      = "human/devices"
-	CreateHumanInviteMethod = "human/invite/create"
-	JoinHumanInviteMethod   = "human/invite/join"
-	RevokeHumanDeviceMethod = "human/device/revoke"
-	SetMailboxShareMethod   = "mailbox/share/set"
-	AddRelayMethod          = "relay/add"
-	RemoveRelayMethod       = "relay/remove"
-	ListRelaysMethod        = "relay/list"
-	NetworkStatusMethod     = "status/network"
-	SynchronizeMethod       = "sync/request"
-	SubscribeChangesMethod  = "changes/subscribe"
-	InvalidatedMethod       = "changes/invalidated"
+	HumanMailboxMethod       = "mailbox/human"
+	ResolveMailboxMethod     = "mailbox/resolve"
+	FindMailboxesMethod      = "mailbox/list"
+	CreateNamedAgentMethod   = "agent/create"
+	GetNamedAgentMethod      = "agent/get"
+	ListNamedAgentsMethod    = "agent/list"
+	RetireNamedAgentMethod   = "agent/retire"
+	SelectAgentSessionMethod = "agent/session/select"
+	AcquireAgentMethod       = "agent/ownership/acquire"
+	RenewAgentMethod         = "agent/ownership/renew"
+	ReleaseAgentMethod       = "agent/ownership/release"
+	CreateMethod             = "message/create"
+	ReplyMethod              = "message/reply"
+	GetMethod                = "message/get"
+	ListMethod               = "message/list"
+	ArchiveMethod            = "message/archive"
+	RestoreMethod            = "message/restore"
+	ClaimMethod              = "delivery/claim"
+	CompleteMethod           = "delivery/complete"
+	ReleaseMethod            = "delivery/release"
+	TrustPeerMethod          = "peer/trust"
+	DistrustPeerMethod       = "peer/distrust"
+	ListPeersMethod          = "peer/list"
+	HumanAccountMethod       = "human/account"
+	HumanDevicesMethod       = "human/devices"
+	CreateHumanInviteMethod  = "human/invite/create"
+	JoinHumanInviteMethod    = "human/invite/join"
+	RevokeHumanDeviceMethod  = "human/device/revoke"
+	SetMailboxShareMethod    = "mailbox/share/set"
+	AddRelayMethod           = "relay/add"
+	RemoveRelayMethod        = "relay/remove"
+	ListRelaysMethod         = "relay/list"
+	NetworkStatusMethod      = "status/network"
+	SynchronizeMethod        = "sync/request"
+	SubscribeChangesMethod   = "changes/subscribe"
+	InvalidatedMethod        = "changes/invalidated"
 )
 
 const (
@@ -45,6 +54,11 @@ const (
 	CodeAlreadyHandled = "already_handled"
 	CodeNotReady       = "not_ready"
 	CodeClaimed        = "claimed"
+	CodeAgentNotFound  = "agent_not_found"
+	CodeAgentRetired   = "agent_retired"
+	CodeAgentNameTaken = "agent_name_taken"
+	CodeMailboxNamed   = "mailbox_named"
+	CodeAgentOwned     = "agent_owned"
 	CodeDomain         = "domain_error"
 )
 
@@ -57,6 +71,27 @@ type ResolveMailboxRequest struct {
 
 type RepositoryRequest struct {
 	Repository model.RepositoryContext `json:"repository"`
+}
+
+type NamedAgentRequest struct {
+	MutationID string `json:"mutation_id,omitempty"`
+	Name       string `json:"name"`
+	MailboxID  string `json:"mailbox_id,omitempty"`
+}
+
+type AgentSessionRequest struct {
+	MutationID string                  `json:"mutation_id"`
+	Name       string                  `json:"name"`
+	Harness    string                  `json:"harness"`
+	SessionID  string                  `json:"session_id"`
+	Repository model.RepositoryContext `json:"repository"`
+}
+
+type AgentOwnershipRequest struct {
+	MutationID string        `json:"mutation_id"`
+	Name       string        `json:"name"`
+	OwnerToken string        `json:"owner_token"`
+	Duration   time.Duration `json:"duration"`
 }
 
 type MessageRequest struct {
@@ -155,6 +190,16 @@ func EncodeError(err error) *localwire.RPCError {
 		code = CodeNotReady
 	case errors.Is(err, domain.ErrClaimed):
 		code = CodeClaimed
+	case errors.Is(err, domain.ErrAgentNotFound):
+		code = CodeAgentNotFound
+	case errors.Is(err, domain.ErrAgentRetired):
+		code = CodeAgentRetired
+	case errors.Is(err, domain.ErrAgentNameTaken):
+		code = CodeAgentNameTaken
+	case errors.Is(err, domain.ErrMailboxNamed):
+		code = CodeMailboxNamed
+	case errors.Is(err, domain.ErrAgentOwned):
+		code = CodeAgentOwned
 	}
 	return &localwire.RPCError{Code: code, Message: err.Error()}
 }
@@ -174,6 +219,16 @@ func DecodeError(err error) error {
 		sentinel = domain.ErrNotReady
 	case CodeClaimed:
 		sentinel = domain.ErrClaimed
+	case CodeAgentNotFound:
+		sentinel = domain.ErrAgentNotFound
+	case CodeAgentRetired:
+		sentinel = domain.ErrAgentRetired
+	case CodeAgentNameTaken:
+		sentinel = domain.ErrAgentNameTaken
+	case CodeMailboxNamed:
+		sentinel = domain.ErrMailboxNamed
+	case CodeAgentOwned:
+		sentinel = domain.ErrAgentOwned
 	default:
 		return err
 	}

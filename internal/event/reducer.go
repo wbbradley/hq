@@ -34,6 +34,17 @@ type MailboxProjection struct {
 	Harness           string
 	ExternalSessionID string
 	Contexts          []RepositoryContext
+	Bindings          []MailboxBindingPayload
+}
+
+type NamedAgentProjection struct {
+	Name              string
+	MailboxID         string
+	Retired           bool
+	Harness           string
+	ExternalSessionID string
+	SelectedAt        int64
+	SelectionEventID  string
 }
 
 type PeerProjection struct {
@@ -115,6 +126,7 @@ type State struct {
 	Records          map[string]Record
 	Invalid          []Record
 	Mailboxes        map[string]MailboxProjection
+	NamedAgents      map[string]NamedAgentProjection
 	Peers            map[string]PeerProjection
 	Shares           map[string]MailboxShareProjection
 	Accounts         map[string]HumanAccountProjection
@@ -128,14 +140,15 @@ type State struct {
 // in any order and may pass the same event more than once.
 func Reduce(rawEvents [][]byte, policy Policy) State {
 	state := State{
-		Policy:    policy,
-		Records:   make(map[string]Record),
-		Mailboxes: make(map[string]MailboxProjection),
-		Peers:     make(map[string]PeerProjection),
-		Shares:    make(map[string]MailboxShareProjection),
-		Accounts:  make(map[string]HumanAccountProjection),
-		Messages:  make(map[string]MessageProjection),
-		Threads:   make(map[string]ThreadProjection),
+		Policy:      policy,
+		Records:     make(map[string]Record),
+		Mailboxes:   make(map[string]MailboxProjection),
+		NamedAgents: make(map[string]NamedAgentProjection),
+		Peers:       make(map[string]PeerProjection),
+		Shares:      make(map[string]MailboxShareProjection),
+		Accounts:    make(map[string]HumanAccountProjection),
+		Messages:    make(map[string]MessageProjection),
+		Threads:     make(map[string]ThreadProjection),
 	}
 	for _, raw := range rawEvents {
 		schemas := policy.SchemaVersions
@@ -167,6 +180,8 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 	state.reduceShares()
 	state.classifyDomainEvents()
 	state.projectMailboxes()
+	state.classifyNamedAgents()
+	state.projectNamedAgents()
 	state.projectMessages()
 	state.applyMessageState()
 	state.projectThreads()
@@ -792,6 +807,7 @@ func (s *State) projectMailboxes() {
 			_ = decodePayload(record.Event.Content.Payload, &payload)
 			mailbox := s.Mailboxes[payload.MailboxID]
 			mailbox.ID, mailbox.Harness, mailbox.ExternalSessionID = payload.MailboxID, payload.Harness, payload.ExternalSessionID
+			mailbox.Bindings = append(mailbox.Bindings, payload)
 			s.Mailboxes[payload.MailboxID] = mailbox
 		}
 	}
@@ -804,6 +820,89 @@ func (s *State) projectMailboxes() {
 			mailbox.ID = payload.MailboxID
 			mailbox.Contexts = append(mailbox.Contexts, payload.Context)
 			s.Mailboxes[payload.MailboxID] = mailbox
+		}
+	}
+}
+
+func (s *State) classifyNamedAgents() {
+	names, mailboxes := make(map[string]string), make(map[string]string)
+	for _, id := range sortedRecordIDs(s.Records) {
+		record := s.Records[id]
+		if record.Status != StatusProjected || record.Event.Content.Type != TypeAgentNameClaim {
+			continue
+		}
+		var payload AgentNamePayload
+		_ = decodePayload(record.Event.Content.Payload, &payload)
+		mailbox, exists := s.Mailboxes[payload.MailboxID]
+		reason := ""
+		if !exists || mailbox.Kind != "agent" {
+			reason = "agent name claim needs an existing agent mailbox"
+		} else if existing, ok := names[payload.Name]; ok && existing != payload.MailboxID {
+			reason = "agent name has conflicting mailbox claims"
+		} else if existing, ok := mailboxes[payload.MailboxID]; ok && existing != payload.Name {
+			reason = "agent mailbox has conflicting name claims"
+		}
+		if reason != "" {
+			record.Status, record.Reason = StatusUnresolved, reason
+			s.Records[id] = record
+			continue
+		}
+		names[payload.Name], mailboxes[payload.MailboxID] = payload.MailboxID, payload.Name
+	}
+	for _, id := range sortedRecordIDs(s.Records) {
+		record := s.Records[id]
+		if record.Status != StatusProjected || (record.Event.Content.Type != TypeAgentRetire && record.Event.Content.Type != TypeAgentSessionSelect) {
+			continue
+		}
+		var name, mailboxID string
+		if record.Event.Content.Type == TypeAgentRetire {
+			var payload AgentNamePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			name, mailboxID = payload.Name, payload.MailboxID
+		} else {
+			var payload AgentSessionPayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			name, mailboxID = payload.Name, payload.MailboxID
+		}
+		if names[name] != mailboxID {
+			record.Status, record.Reason = StatusUnresolved, "agent fact has no matching name claim"
+			s.Records[id] = record
+		}
+	}
+}
+
+func (s *State) projectNamedAgents() {
+	ids := sortedRecordIDs(s.Records)
+	for _, id := range ids {
+		record := s.Records[id]
+		if record.Status == StatusProjected && record.Event.Content.Type == TypeAgentNameClaim {
+			var payload AgentNamePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			s.NamedAgents[payload.Name] = NamedAgentProjection{Name: payload.Name, MailboxID: payload.MailboxID}
+		}
+	}
+	for _, id := range ids {
+		record := s.Records[id]
+		if record.Status == StatusProjected && record.Event.Content.Type == TypeAgentRetire {
+			var payload AgentNamePayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			agent := s.NamedAgents[payload.Name]
+			agent.Retired = true
+			s.NamedAgents[payload.Name] = agent
+		}
+	}
+	for _, id := range ids {
+		record := s.Records[id]
+		if record.Status == StatusProjected && record.Event.Content.Type == TypeAgentSessionSelect {
+			var payload AgentSessionPayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			agent := s.NamedAgents[payload.Name]
+			created := record.Event.Nostr.CreatedAt
+			if agent.SelectionEventID == "" || s.ancestor(agent.SelectionEventID, id) || (created > agent.SelectedAt && !s.ancestor(id, agent.SelectionEventID)) || (created == agent.SelectedAt && !s.ancestor(id, agent.SelectionEventID) && id > agent.SelectionEventID) {
+				agent.Harness, agent.ExternalSessionID = payload.Harness, payload.ExternalSessionID
+				agent.SelectedAt, agent.SelectionEventID = created, id
+			}
+			s.NamedAgents[payload.Name] = agent
 		}
 	}
 }
@@ -1061,7 +1160,7 @@ func (s State) Wait(questionID string, mailbox MailboxAddress) (MessageProjectio
 
 func isControlType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountSelect:
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountSelect:
 		return true
 	default:
 		return false

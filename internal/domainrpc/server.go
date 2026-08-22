@@ -71,6 +71,8 @@ func encodeMutationError(err error) *localwire.RPCError {
 
 var mutationMethods = map[string]bool{
 	ResolveMailboxMethod: true, CreateMethod: true, ReplyMethod: true, ArchiveMethod: true, RestoreMethod: true,
+	CreateNamedAgentMethod: true, RetireNamedAgentMethod: true, SelectAgentSessionMethod: true,
+	AcquireAgentMethod: true, RenewAgentMethod: true, ReleaseAgentMethod: true,
 	ClaimMethod: true, CompleteMethod: true, ReleaseMethod: true, TrustPeerMethod: true,
 	DistrustPeerMethod: true, CreateHumanInviteMethod: true, JoinHumanInviteMethod: true,
 	RevokeHumanDeviceMethod: true, SetMailboxShareMethod: true, AddRelayMethod: true,
@@ -118,6 +120,47 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return s.Store.FindMailboxes(ctx, request.Repository)
+	case CreateNamedAgentMethod:
+		var request NamedAgentRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.CreateNamedAgent(ctx, request.Name, request.MailboxID)
+	case GetNamedAgentMethod:
+		var request NamedAgentRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.GetNamedAgent(ctx, request.Name)
+	case ListNamedAgentsMethod:
+		return s.Store.ListNamedAgents(ctx)
+	case RetireNamedAgentMethod:
+		var request NamedAgentRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return nil, s.Store.RetireNamedAgent(ctx, request.Name)
+	case SelectAgentSessionMethod:
+		var request AgentSessionRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.SelectNamedAgentSession(ctx, request.Name, model.SessionIdentity{Harness: request.Harness, ExternalSessionID: request.SessionID}, request.Repository)
+	case AcquireAgentMethod, RenewAgentMethod:
+		var request AgentOwnershipRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		if method == AcquireAgentMethod {
+			return s.Store.AcquireNamedAgent(ctx, request.Name, request.OwnerToken, request.Duration)
+		}
+		return s.Store.RenewNamedAgent(ctx, request.Name, request.OwnerToken, request.Duration)
+	case ReleaseAgentMethod:
+		var request AgentOwnershipRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return nil, s.Store.ReleaseNamedAgent(ctx, request.Name, request.OwnerToken)
 	case CreateMethod:
 		var request MessageRequest
 		if err := decodeRequest(raw, &request); err != nil {

@@ -5,7 +5,7 @@ source of application state. Local CLI, TUI, and Codex clients use versioned dom
 signs and stores canonical events, then its continuous network engine moves exact encrypted wrappers
 through retained relays.
 
-This release uses canonical schema 1 and SQLite schema 9. The implementation pins
+This release uses canonical schema 1 and SQLite schema 10. The implementation pins
 `fiatjaf.com/nostr` at revision `5fe6a7499d07` behind `internal/nostrwire`; HQ owns the canonical
 schema, wrapper validation, durable outbox, relay interface, and retry rules.
 

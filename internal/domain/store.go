@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/wbbradley/hq/internal/model"
@@ -13,6 +14,11 @@ var (
 	ErrAlreadyHandled = errors.New("message has already been handled")
 	ErrNotReady       = errors.New("no message is ready")
 	ErrClaimed        = errors.New("message is being delivered by another process")
+	ErrAgentNotFound  = errors.New("named agent not found")
+	ErrAgentRetired   = errors.New("named agent is retired")
+	ErrAgentNameTaken = errors.New("agent name is permanently reserved")
+	ErrMailboxNamed   = errors.New("mailbox already belongs to a named agent")
+	ErrAgentOwned     = errors.New("named agent is owned by another process")
 )
 
 type Claim struct {
@@ -20,7 +26,30 @@ type Claim struct {
 	ReplyTo            string   `json:"reply_to,omitempty"`
 	ExcludeReplyTo     []string `json:"exclude_reply_to,omitempty"`
 	RecipientMailboxID string   `json:"recipient_mailbox_id,omitempty"`
+	UnthreadedOnly     bool     `json:"unthreaded_only,omitempty"`
 }
+
+type NamedAgent struct {
+	Name             string                  `json:"name"`
+	MailboxID        string                  `json:"mailbox_id"`
+	Retired          bool                    `json:"retired"`
+	Harness          string                  `json:"harness,omitempty"`
+	CurrentSessionID string                  `json:"current_session_id,omitempty"`
+	Context          model.RepositoryContext `json:"context,omitempty"`
+	Active           bool                    `json:"active"`
+	LeaseExpiresAt   *time.Time              `json:"lease_expires_at,omitempty"`
+	LastActiveAt     *time.Time              `json:"last_active_at,omitempty"`
+}
+
+type AgentOwnershipConflict struct {
+	Name      string
+	ExpiresAt time.Time
+}
+
+func (e *AgentOwnershipConflict) Error() string {
+	return fmt.Sprintf("%s: %s until %s", ErrAgentOwned, e.Name, e.ExpiresAt.Format(time.RFC3339))
+}
+func (e *AgentOwnershipConflict) Unwrap() error { return ErrAgentOwned }
 
 type Peer struct {
 	InstallationID string   `json:"installation_id"`
@@ -107,6 +136,14 @@ type Operations interface {
 	HumanMailbox(context.Context) (model.Mailbox, error)
 	ResolveMailbox(context.Context, model.SessionIdentity, model.RepositoryContext) (model.Mailbox, error)
 	FindMailboxes(context.Context, model.RepositoryContext) ([]model.Mailbox, error)
+	CreateNamedAgent(context.Context, string, string) (NamedAgent, error)
+	GetNamedAgent(context.Context, string) (NamedAgent, error)
+	ListNamedAgents(context.Context) ([]NamedAgent, error)
+	RetireNamedAgent(context.Context, string) error
+	SelectNamedAgentSession(context.Context, string, model.SessionIdentity, model.RepositoryContext) (NamedAgent, error)
+	AcquireNamedAgent(context.Context, string, string, time.Duration) (NamedAgent, error)
+	RenewNamedAgent(context.Context, string, string, time.Duration) (NamedAgent, error)
+	ReleaseNamedAgent(context.Context, string, string) error
 	Create(context.Context, model.Message) error
 	Reply(context.Context, string, model.Message) error
 	Get(context.Context, string) (model.Message, error)

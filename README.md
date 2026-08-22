@@ -69,6 +69,15 @@ hq poll
 
 The mailbox follows a resumed harness session across process restarts and directory changes. `--session ID` and `HQ_SESSION` select a `custom` mailbox for advanced use; an explicit flag wins. `hq mailboxes` lists mailbox candidates seen in the current directory, Git common directory, worktree, branch, or compact remote identity. The command does not claim or merge a mailbox.
 
+Durable installation-local agent names can be created or can adopt an existing unnamed local agent mailbox. Names are lowercase slugs and remain permanently reserved after retirement. Presence is a local advisory lease rather than a relay heartbeat:
+
+```sh
+hq agent create fred
+hq agent create jane --mailbox MAILBOX_ID
+hq agent list --json
+hq agent retire fred --yes
+```
+
 ## Codex app-server bridge
 
 `hq codex` runs a Codex app-server thread as an HQ agent mailbox. It requires an installed and authenticated Codex CLI **v0.148.0** on `PATH` and an initialized HQ identity:
@@ -237,6 +246,9 @@ hq poll [--session ID] [--dir PATH] [--json]
 hq get MESSAGE_ID
 hq list [--sender MAILBOX] [--recipient MAILBOX] [--dir PATH] [--archived|--all] [--limit N] [--json]
 hq mailboxes [--dir PATH] [--json]
+hq agent create NAME [--mailbox MAILBOX_ID]
+hq agent list [--json]
+hq agent retire NAME --yes
 hq identity init
 hq identity show [--json]
 hq identity export BACKUP_PATH
@@ -279,7 +291,7 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 The TUI subscribes before its initial snapshot and reloads immediately after local or remote commits. A five-minute repair refresh remains; active text, focus, and selection survive every reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, last receive time, account members, pending account fanout, relay-accepted sends, invalid or revoked-device traffic, and event queue counts.
 
-SQLite schema 9 includes durable mutation receipts and monotonic change revisions. Schema 7 migrates through versions 8 and 9; unsupported older layouts may still reset during pre-1.0 development.
+SQLite schema 10 includes durable named-agent projections and local ownership leases in addition to mutation receipts and monotonic change revisions. Schema 7 migrates through versions 8, 9, and 10; unsupported older layouts may still reset during pre-1.0 development.
 
 See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for signed causal state, and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
 

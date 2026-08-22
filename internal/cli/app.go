@@ -52,6 +52,7 @@ Human commands:
 Other commands:
   codex [--cwd PATH] [--resume THREAD_ID] [--yolo] [INITIAL PROMPT...]
              Bridge a Codex app-server thread through HQ
+  agent      Create, list, or retire durable named agents
   mailboxes  Find agent mailboxes seen in this repository
   identity   Create, inspect, back up, import, or reset the installation identity
   human      Show, pair, list, or revoke human account devices
@@ -237,6 +238,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.list(ctx, s, args)
 	case "mailboxes":
 		return a.mailboxes(ctx, s, args)
+	case "agent":
+		commandErr = a.agent(ctx, s, args)
 	case "answer":
 		commandErr = a.answer(ctx, s, args)
 	case "cancel":
@@ -748,6 +751,90 @@ func (a *App) mailbox(ctx context.Context, s domain.Store, args []string) error 
 	return s.SetMailboxShare(ctx, args[1], args[2], args[0] == "share")
 }
 
+func (a *App) agent(ctx context.Context, s domain.Store, args []string) error {
+	if len(args) == 0 {
+		return errors.New("agent needs create, list, or retire")
+	}
+	switch args[0] {
+	case "create":
+		f := flags("agent create")
+		mailboxID := f.String("mailbox", "", "adopt an existing local unnamed agent mailbox")
+		arguments := flagsAfterName(args[1:])
+		if err := f.Parse(arguments); err != nil {
+			return err
+		}
+		if len(f.Args()) != 1 {
+			return errors.New("agent create needs NAME")
+		}
+		agent, err := s.CreateNamedAgent(ctx, f.Args()[0], *mailboxID)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(a.Out, "%s\t%s\n", agent.Name, agent.MailboxID)
+		return err
+	case "list":
+		f := flags("agent list")
+		jsonOutput := f.Bool("json", false, "write JSON")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 0 {
+			return errors.New("agent list takes flags only")
+		}
+		agents, err := s.ListNamedAgents(ctx)
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeJSON(a.Out, agents)
+		}
+		for _, agent := range agents {
+			presence := "offline"
+			if agent.Active {
+				presence = "active"
+			}
+			if agent.Retired {
+				presence = "retired"
+			}
+			session := "-"
+			if agent.CurrentSessionID != "" {
+				session = agent.Harness + ":" + agent.CurrentSessionID
+			}
+			lastActive := "-"
+			if agent.LastActiveAt != nil {
+				lastActive = agent.LastActiveAt.Format(time.RFC3339)
+			}
+			if _, err := fmt.Fprintf(a.Out, "%s\t%s\t%s\t%s\t%s\t%s\n", agent.Name, presence, agent.MailboxID, session, lastActive, agent.Context.Directory); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "retire":
+		f := flags("agent retire")
+		yes := f.Bool("yes", false, "confirm permanent retirement")
+		if err := f.Parse(flagsAfterName(args[1:])); err != nil {
+			return err
+		}
+		if len(f.Args()) != 1 {
+			return errors.New("agent retire needs NAME")
+		}
+		if !*yes {
+			return errors.New("agent retirement is permanent; pass --yes to confirm")
+		}
+		return s.RetireNamedAgent(ctx, f.Args()[0])
+	default:
+		return fmt.Errorf("unknown agent command %q", args[0])
+	}
+}
+
+func flagsAfterName(arguments []string) []string {
+	if len(arguments) > 1 && !strings.HasPrefix(arguments[0], "-") {
+		result := append([]string(nil), arguments[1:]...)
+		return append(result, arguments[0])
+	}
+	return arguments
+}
+
 func (a *App) relay(ctx context.Context, s domain.Store, args []string) error {
 	if len(args) == 0 {
 		return errors.New("relay needs add, list, or remove")
@@ -1156,7 +1243,7 @@ func (a *App) poll(ctx context.Context, s domain.Store, args []string) error {
 	var claims []claim
 	for _, candidate := range messages {
 		token := uuid.NewString()
-		m, err := s.Claim(ctx, domain.Claim{MessageID: candidate.ID}, token)
+		m, err := s.Claim(ctx, domain.Claim{MessageID: candidate.ID, UnthreadedOnly: true}, token)
 		if err == nil {
 			claims = append(claims, claim{m: m, token: token})
 		}
