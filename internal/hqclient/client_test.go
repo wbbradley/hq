@@ -22,6 +22,8 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	var methods []string
 	messageEnvironmentCalls := 0
 	var listFilter model.Filter
+	var conversationFilter model.ConversationFilter
+	var historyFilter model.ConversationHistoryFilter
 	handler := func(_ context.Context, _ *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
 		lock.Lock()
 		methods = append(methods, method)
@@ -62,6 +64,20 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 			}
 			listFilter = request.Filter
 			return []model.Message{}, nil
+		case domainrpc.ListConversationsMethod:
+			var request domainrpc.ConversationFilterRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+			}
+			conversationFilter = request.Filter
+			return model.ConversationPage{Conversations: []model.ConversationSummary{{Key: model.ConversationKey{CounterpartyMailboxID: "agent", CodexThreadID: "thread"}}}, NextCursor: "summary-next"}, nil
+		case domainrpc.ConversationHistoryMethod:
+			var request domainrpc.ConversationHistoryRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+			}
+			historyFilter = request.Filter
+			return model.MessagePage{Messages: []model.Message{{ID: "history-message"}}, NextCursor: "history-next"}, nil
 		case domainrpc.ListPeersMethod:
 			return []domain.Peer{}, nil
 		case domainrpc.HumanAccountMethod:
@@ -104,6 +120,10 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_, _ = client.Get(ctx, "message")
 	wantListFilter := model.Filter{CounterpartyMailboxID: "counterparty", ThreadID: "hq-thread", CodexThreadID: "codex-thread", CodexTurnID: "codex-turn"}
 	_, _ = client.List(ctx, wantListFilter)
+	wantConversationFilter := model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Cursor: "summary-cursor", Limit: 17}
+	conversationResult, _ := client.ListConversations(ctx, wantConversationFilter)
+	wantHistoryFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", CodexThreadID: "thread"}, Cursor: "history-cursor", Limit: 23}
+	historyResult, _ := client.ListConversationHistory(ctx, wantHistoryFilter)
 	_ = client.Archive(ctx, "message")
 	_ = client.Restore(ctx, "message")
 	_, _ = client.Claim(ctx, domain.Claim{}, "token")
@@ -129,7 +149,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		domainrpc.CreateNamedAgentMethod, domainrpc.GetNamedAgentMethod, domainrpc.ListNamedAgentsMethod, domainrpc.ListAgentSessionsMethod, domainrpc.RenameAgentSessionMethod,
 		domainrpc.RetireNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod, domainrpc.ReleaseAgentMethod,
 		domainrpc.LaunchCodexAgentMethod, domainrpc.StopCodexAgentMethod, domainrpc.CodexRuntimeMethod,
-		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod,
+		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod, domainrpc.ListConversationsMethod, domainrpc.ConversationHistoryMethod,
 		domainrpc.ArchiveMethod, domainrpc.RestoreMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
 		domainrpc.TrustPeerMethod, domainrpc.DistrustPeerMethod, domainrpc.ListPeersMethod,
 		domainrpc.HumanAccountMethod, domainrpc.HumanDevicesMethod, domainrpc.CreateHumanInviteMethod,
@@ -152,6 +172,12 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	}
 	if listFilter != wantListFilter {
 		t.Fatalf("list filter = %#v; want %#v", listFilter, wantListFilter)
+	}
+	if conversationFilter != wantConversationFilter || historyFilter != wantHistoryFilter {
+		t.Fatalf("conversation filters = %#v / %#v; want %#v / %#v", conversationFilter, historyFilter, wantConversationFilter, wantHistoryFilter)
+	}
+	if len(conversationResult.Conversations) != 1 || conversationResult.NextCursor != "summary-next" || len(historyResult.Messages) != 1 || historyResult.NextCursor != "history-next" {
+		t.Fatalf("conversation results = %#v / %#v", conversationResult, historyResult)
 	}
 }
 

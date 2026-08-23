@@ -288,6 +288,18 @@ func (c *Client) List(ctx context.Context, filter model.Filter) ([]model.Message
 	return result, err
 }
 
+func (c *Client) ListConversations(ctx context.Context, filter model.ConversationFilter) (model.ConversationPage, error) {
+	var result model.ConversationPage
+	err := c.call(ctx, domainrpc.ListConversationsMethod, domainrpc.ConversationFilterRequest{Filter: filter}, &result)
+	return result, err
+}
+
+func (c *Client) ListConversationHistory(ctx context.Context, filter model.ConversationHistoryFilter) (model.MessagePage, error) {
+	var result model.MessagePage
+	err := c.call(ctx, domainrpc.ConversationHistoryMethod, domainrpc.ConversationHistoryRequest{Filter: filter}, &result)
+	return result, err
+}
+
 func (c *Client) Archive(ctx context.Context, id string) error {
 	return c.mutatingCall(ctx, domainrpc.ArchiveMethod, func(mutationID string) any { return domainrpc.MutationIDRequest{MutationID: mutationID, ID: id} }, nil)
 }

@@ -14,10 +14,12 @@ import (
 )
 
 type recordingOperations struct {
-	called     string
-	calls      int
-	err        error
-	listFilter model.Filter
+	called             string
+	calls              int
+	err                error
+	listFilter         model.Filter
+	conversationFilter model.ConversationFilter
+	historyFilter      model.ConversationHistoryFilter
 }
 
 type recordingRuntime struct {
@@ -105,6 +107,14 @@ func (s *recordingOperations) List(_ context.Context, filter model.Filter) ([]mo
 	s.listFilter = filter
 	return nil, s.record(ListMethod)
 }
+func (s *recordingOperations) ListConversations(_ context.Context, filter model.ConversationFilter) (model.ConversationPage, error) {
+	s.conversationFilter = filter
+	return model.ConversationPage{}, s.record(ListConversationsMethod)
+}
+func (s *recordingOperations) ListConversationHistory(_ context.Context, filter model.ConversationHistoryFilter) (model.MessagePage, error) {
+	s.historyFilter = filter
+	return model.MessagePage{}, s.record(ConversationHistoryMethod)
+}
 func (s *recordingOperations) Archive(context.Context, string) error { return s.record(ArchiveMethod) }
 func (s *recordingOperations) Restore(context.Context, string) error { return s.record(RestoreMethod) }
 func (s *recordingOperations) Claim(context.Context, domain.Claim, string) (model.Message, error) {
@@ -179,6 +189,8 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{ReplyMethod, ReplyRequest{MutationID: mutationID}},
 		{GetMethod, IDRequest{}},
 		{ListMethod, FilterRequest{}},
+		{ListConversationsMethod, ConversationFilterRequest{}},
+		{ConversationHistoryMethod, ConversationHistoryRequest{}},
 		{ArchiveMethod, MutationIDRequest{MutationID: mutationID}},
 		{RestoreMethod, MutationIDRequest{MutationID: mutationID}},
 		{ClaimMethod, ClaimRequest{MutationID: mutationID}},
@@ -261,6 +273,21 @@ func TestServicePassesStructuredConversationFilter(t *testing.T) {
 	}
 	if operations.listFilter != want {
 		t.Fatalf("list filter = %#v; want %#v", operations.listFilter, want)
+	}
+}
+
+func TestServicePassesConversationPageRequests(t *testing.T) {
+	operations := &recordingOperations{}
+	service := Service{Store: operations}
+	conversationFilter := model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Cursor: "summary-cursor", Limit: 17}
+	raw, _ := json.Marshal(ConversationFilterRequest{Filter: conversationFilter})
+	if _, rpcErr := service.Handle(context.Background(), nil, ListConversationsMethod, raw); rpcErr != nil || operations.conversationFilter != conversationFilter {
+		t.Fatalf("conversation filter = %#v, error=%v", operations.conversationFilter, rpcErr)
+	}
+	historyFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", CodexThreadID: "thread"}, Cursor: "history-cursor", Limit: 23}
+	raw, _ = json.Marshal(ConversationHistoryRequest{Filter: historyFilter})
+	if _, rpcErr := service.Handle(context.Background(), nil, ConversationHistoryMethod, raw); rpcErr != nil || operations.historyFilter != historyFilter {
+		t.Fatalf("history filter = %#v, error=%v", operations.historyFilter, rpcErr)
 	}
 }
 

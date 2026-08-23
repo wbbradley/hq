@@ -41,6 +41,9 @@ type app struct {
 	repo              repoctx.Provider
 	messages          []model.Message
 	groups            []messageGroup
+	conversations     []model.ConversationSummary
+	conversationMode  bool
+	histories         map[string][]model.Message
 	inbox             []model.Message
 	sent              []model.Message
 	archived          []model.Message
@@ -127,9 +130,10 @@ const (
 )
 
 type messageGroup struct {
-	key      string
-	messages []model.Message
-	draft    *messageDraft
+	key             string
+	conversationKey model.ConversationKey
+	messages        []model.Message
+	draft           *messageDraft
 }
 
 type messageDraft struct {
@@ -172,12 +176,20 @@ func (g messageGroup) latest() model.Message {
 }
 
 type loadedMsg struct {
-	inbox    []model.Message
-	sent     []model.Message
-	archived []model.Message
-	network  domain.NetworkStatus
-	agents   []domain.NamedAgent
-	sessions map[string]domain.AgentSession
+	inbox         []model.Message
+	sent          []model.Message
+	archived      []model.Message
+	conversations []model.ConversationSummary
+	histories     map[string][]model.Message
+	network       domain.NetworkStatus
+	agents        []domain.NamedAgent
+	sessions      map[string]domain.AgentSession
+	err           error
+}
+
+type historyLoadedMsg struct {
+	key      string
+	messages []model.Message
 	err      error
 }
 
@@ -339,19 +351,24 @@ func (m app) syncNow() tea.Cmd {
 }
 
 func (m app) load() tea.Msg {
-	open := false
-	inbox, err := m.store.List(m.ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Archived: &open, Limit: 1000, NewestFirst: true})
+	conversations, err := m.loadAllConversations()
 	if err != nil {
 		return loadedMsg{err: err}
 	}
-	sent, err := m.store.List(m.ctx, model.Filter{SenderMailboxID: model.HumanMailboxID, Limit: 1000, NewestFirst: true})
-	if err != nil {
-		return loadedMsg{err: err}
+	histories := make(map[string][]model.Message)
+	selectedKey := m.selectedGroupKey()
+	selectedConversation, found := conversationSummaryByString(conversations, selectedKey)
+	if !found && len(conversations) > 0 {
+		selectedConversation = conversations[0]
+		selectedKey = conversationKeyString(selectedConversation.Key)
+		found = true
 	}
-	closed := true
-	archived, err := m.store.List(m.ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Archived: &closed, Limit: 1000, NewestFirst: true})
-	if err != nil {
-		return loadedMsg{err: err}
+	if found {
+		history, historyErr := m.loadAllConversationHistory(selectedConversation.Key)
+		if historyErr != nil {
+			return loadedMsg{err: historyErr}
+		}
+		histories[selectedKey] = history
 	}
 	agents, err := m.store.ListNamedAgents(m.ctx)
 	if err != nil {
@@ -368,7 +385,50 @@ func (m app) load() tea.Msg {
 		}
 	}
 	network, err := m.store.NetworkStatus(m.ctx)
-	return loadedMsg{inbox: inbox, sent: sent, archived: archived, agents: agents, sessions: sessions, network: network, err: err}
+	return loadedMsg{conversations: conversations, histories: histories, agents: agents, sessions: sessions, network: network, err: err}
+}
+
+func (m app) loadAllConversations() ([]model.ConversationSummary, error) {
+	filter := model.ConversationFilter{IncludeSent: m.showSent, IncludeArchived: m.showArchived, Limit: 200}
+	var conversations []model.ConversationSummary
+	for {
+		page, err := m.store.ListConversations(m.ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		conversations = append(conversations, page.Conversations...)
+		if page.NextCursor == "" {
+			return conversations, nil
+		}
+		filter.Cursor = page.NextCursor
+	}
+}
+
+func (m app) loadAllConversationHistory(key model.ConversationKey) ([]model.Message, error) {
+	filter := model.ConversationHistoryFilter{Key: key, Limit: 200}
+	var messages []model.Message
+	for {
+		page, err := m.store.ListConversationHistory(m.ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, page.Messages...)
+		if page.NextCursor == "" {
+			return messages, nil
+		}
+		filter.Cursor = page.NextCursor
+	}
+}
+
+func (m app) loadConversationHistory(key model.ConversationKey) tea.Cmd {
+	stableKey := conversationKeyString(key)
+	if _, loaded := m.histories[stableKey]; loaded || !key.Valid() {
+		return nil
+	}
+	return func() tea.Msg {
+		messages, err := m.loadAllConversationHistory(key)
+		return historyLoadedMsg{key: stableKey, messages: messages, err: err}
+	}
 }
 
 func (m app) answer() tea.Msg {
@@ -391,6 +451,9 @@ func (m app) answer() tea.Msg {
 					cause = domain.ErrAgentRetired
 				}
 				return answeredMsg{err: fmt.Errorf("recipient %s is no longer available; choose a recipient again: %w", m.composeName, cause)}
+			}
+			if agent.Harness == "codex" && agent.CurrentSessionID != "" {
+				message.Details = "Codex thread: " + agent.CurrentSessionID
 			}
 		}
 		message.RecipientMailboxID = m.composeTo
@@ -415,8 +478,9 @@ func (m app) archiveAnsweredGroup() error {
 	if !ok {
 		return nil
 	}
+	targetUnit := actionUnitKey(m.answerQ)
 	for _, message := range group.messages {
-		if message.ID == m.answerID || !canArchive(message) {
+		if message.ID == m.answerID || !canArchive(message) || actionUnitKey(message) != targetUnit {
 			continue
 		}
 		if err := m.store.Archive(m.ctx, message.ID); err != nil && !errors.Is(err, domain.ErrAlreadyHandled) {
@@ -442,8 +506,10 @@ func turnCorrelationDetails(message model.Message) string {
 func (m app) archiveGroup(group messageGroup) tea.Cmd {
 	return func() tea.Msg {
 		var archived []string
+		target := archiveTarget(group)
+		targetUnit := actionUnitKey(target)
 		for _, message := range group.messages {
-			if canArchive(message) {
+			if canArchive(message) && actionUnitKey(message) == targetUnit {
 				if err := m.store.Archive(m.ctx, message.ID); err != nil {
 					return archivedMsg{messageIDs: archived, err: err}
 				}
@@ -485,7 +551,14 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetHeight(max(1, layout.replyHeight-4))
 	case loadedMsg:
 		selectedKey := m.selectedGroupKey()
-		m.inbox, m.sent, m.archived, m.agents, m.threadSessions, m.network, m.err = msg.inbox, msg.sent, msg.archived, msg.agents, msg.sessions, msg.network, msg.err
+		if msg.conversations != nil || (msg.err == nil && m.store != nil) {
+			m.conversationMode = true
+			m.conversations = msg.conversations
+			m.histories = msg.histories
+		} else {
+			m.inbox, m.sent, m.archived = msg.inbox, msg.sent, msg.archived
+		}
+		m.agents, m.threadSessions, m.network, m.err = msg.agents, msg.sessions, msg.network, msg.err
 		if choices := m.filteredRecipients(); m.pickerCursor >= len(choices) {
 			m.pickerCursor = max(0, len(choices)-1)
 		}
@@ -498,6 +571,24 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = index
 		} else if m.cursor >= len(visibleGroups) {
 			m.cursor = max(0, len(visibleGroups)-1)
+		}
+		return m.withContextCommand()
+	case historyLoadedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		if m.histories == nil {
+			m.histories = make(map[string][]model.Message)
+		}
+		m.histories[msg.key] = msg.messages
+		selectedKey := m.selectedGroupKey()
+		m.setMessages()
+		if index := groupIndex(m.visibleGroups(), selectedKey); index >= 0 {
+			m.cursor = index
+		}
+		if m.markdown != nil {
+			m.markdown.Reset()
 		}
 		return m.withContextCommand()
 	case repairMsg:
@@ -713,7 +804,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			layout := responsivePaneLayout(m.width, m.height, m.answering)
 			switch m.paneFocus {
 			case focusInbox:
-				m.cursor = min(max(0, len(m.messages)-1), m.cursor+max(1, layout.inboxHeight-3))
+				m.cursor = min(max(0, len(m.visibleGroups())-1), m.cursor+max(1, layout.inboxHeight-3))
 				m.messageScroll = 0
 				return m.withContextCommand()
 			case focusMessage:
@@ -750,7 +841,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messageScroll = max(0, m.messageScroll-1)
 					return m, nil
 				}
-				if m.paneFocus == focusInbox && m.cursor+1 < len(m.messages) {
+				if m.paneFocus == focusInbox && m.cursor+1 < len(m.visibleGroups()) {
 					m.cursor++
 					return m, nil
 				}
@@ -790,7 +881,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.paneFocus != focusInbox {
 				return m, nil
 			}
-			if m.cursor+1 < len(m.messages) {
+			if m.cursor+1 < len(m.visibleGroups()) {
 				m.cursor++
 				m.messageScroll = 0
 				return m.withContextCommand()
@@ -812,12 +903,18 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showSent = !m.showSent
 			m.cursor = 0
 			m.messageScroll = 0
+			if m.conversationMode {
+				return m, m.load
+			}
 			m.setMessages()
 			return m.withContextCommand()
 		case "x":
 			m.showArchived = !m.showArchived
 			m.cursor = 0
 			m.messageScroll = 0
+			if m.conversationMode {
+				return m, m.load
+			}
 			m.setMessages()
 			return m.withContextCommand()
 		case "v":
@@ -1347,6 +1444,29 @@ func (m *app) resumeDraft(draft messageDraft) {
 func (m app) paneFocused(pane paneFocus) bool { return m.paneFocus == pane }
 
 func (m *app) setMessages() {
+	if m.conversationMode {
+		m.groups = make([]messageGroup, 0, len(m.conversations))
+		m.messages = make([]model.Message, 0, len(m.conversations))
+		for _, summary := range m.conversations {
+			key := conversationKeyString(summary.Key)
+			messages := []model.Message{summary.Latest}
+			if summary.OldestOpen != nil && summary.OldestOpen.ID != summary.Latest.ID {
+				messages = append(messages, *summary.OldestOpen)
+				sort.Slice(messages, func(i, j int) bool {
+					if messages[i].CreatedAt.Equal(messages[j].CreatedAt) {
+						return messages[i].ID < messages[j].ID
+					}
+					return messages[i].CreatedAt.Before(messages[j].CreatedAt)
+				})
+			}
+			if history, loaded := m.histories[key]; loaded {
+				messages = append([]model.Message(nil), history...)
+			}
+			m.groups = append(m.groups, messageGroup{key: key, conversationKey: summary.Key, messages: messages})
+			m.messages = append(m.messages, summary.Latest)
+		}
+		return
+	}
 	seen := make(map[string]bool)
 	var allMessages []model.Message
 	add := func(batch []model.Message) {
@@ -1408,12 +1528,42 @@ func groupMessages(messages []model.Message) []messageGroup {
 }
 
 func messageGroupKey(message model.Message) string {
-	turn := detailValue(message.Details, "Codex turn:")
-	if turn == "" || turn == "(none)" {
-		return "message:" + message.ID
+	return conversationKeyString(conversationKeyForMessage(message))
+}
+
+func conversationKeyForMessage(message model.Message) model.ConversationKey {
+	counterparty := message.SenderMailboxID
+	if counterparty == model.HumanMailboxID {
+		counterparty = message.RecipientMailboxID
 	}
-	thread := detailValue(message.Details, "Codex thread:")
-	return "turn:" + message.SenderMailboxID + ":" + thread + ":" + turn
+	correlation := model.MessageCorrelation{CodexThreadID: message.CodexThreadID, CodexTurnID: message.CodexTurnID}
+	if correlation.CodexThreadID == "" {
+		correlation = model.ParseMessageCorrelation(message.Details)
+	}
+	key := model.ConversationKey{CounterpartyMailboxID: counterparty, CodexThreadID: correlation.CodexThreadID}
+	if key.CodexThreadID == "" {
+		key.ThreadID = message.ThreadID
+		if key.ThreadID == "" {
+			key.ThreadID = message.ID
+		}
+	}
+	return key
+}
+
+func conversationKeyString(key model.ConversationKey) string {
+	if key.CodexThreadID != "" {
+		return "conversation:" + key.CounterpartyMailboxID + ":codex:" + key.CodexThreadID
+	}
+	return "conversation:" + key.CounterpartyMailboxID + ":thread:" + key.ThreadID
+}
+
+func conversationSummaryByString(summaries []model.ConversationSummary, stableKey string) (model.ConversationSummary, bool) {
+	for _, summary := range summaries {
+		if conversationKeyString(summary.Key) == stableKey {
+			return summary, true
+		}
+	}
+	return model.ConversationSummary{}, false
 }
 
 func detailValue(details, prefix string) string {
@@ -1449,7 +1599,12 @@ func (m app) visibleGroups() []messageGroup {
 		copyDraft := draft
 		group := messageGroup{key: key, draft: &copyDraft}
 		if draft.answerQ.ID != "" {
-			group.messages = []model.Message{draft.answerQ}
+			group.conversationKey = conversationKeyForMessage(draft.answerQ)
+			if history, loaded := m.histories[key]; loaded {
+				group.messages = append([]model.Message(nil), history...)
+			} else {
+				group.messages = []model.Message{draft.answerQ}
+			}
 		}
 		groups = append(groups, group)
 	}
@@ -1477,27 +1632,30 @@ func (m app) groupAtCursor() (messageGroup, bool) {
 
 func (m app) withContextCommand() (tea.Model, tea.Cmd) {
 	var q model.Message
+	var historyCmd tea.Cmd
 	if m.answering {
 		if group, found := m.groupByKey(m.selectedGroupKey()); found {
 			q = group.latest()
+			historyCmd = m.loadConversationHistory(group.conversationKey)
 		} else {
 			q = m.answerQ
 		}
 	} else if group, found := m.groupAtCursor(); found && len(group.messages) > 0 {
 		q = group.latest()
+		historyCmd = m.loadConversationHistory(group.conversationKey)
 	}
 	if q.ID == "" || m.repo == nil {
 		m.contextID, m.branch, m.remotes, m.pull = "", "", "", ""
-		return m, nil
+		return m, historyCmd
 	}
 	if q.ID == m.contextID {
-		return m, nil
+		return m, historyCmd
 	}
 	m.contextID = q.ID
 	m.branch = "git loading…"
 	m.remotes = ""
 	m.pull = ""
-	return m, m.loadBranch(q)
+	return m, tea.Batch(m.loadBranch(q), historyCmd)
 }
 
 func (m app) loadRemotes(q model.Message, branch string) tea.Cmd {
@@ -1568,18 +1726,47 @@ func canArchive(message model.Message) bool {
 }
 
 func replyTarget(group messageGroup) model.Message {
+	oldest := archiveTarget(group)
+	if oldest.ID == "" {
+		return model.Message{}
+	}
+	unit := actionUnitKey(oldest)
 	for i := len(group.messages) - 1; i >= 0; i-- {
 		message := group.messages[i]
-		if canReply(message) && detailValue(message.Details, "Codex request:") != "" {
+		if canReply(message) && actionUnitKey(message) == unit && detailValue(message.Details, "Codex request:") != "" {
 			return message
 		}
 	}
 	for i := len(group.messages) - 1; i >= 0; i-- {
-		if canReply(group.messages[i]) {
-			return group.messages[i]
+		message := group.messages[i]
+		if canReply(message) && actionUnitKey(message) == unit {
+			return message
 		}
 	}
 	return model.Message{}
+}
+
+func archiveTarget(group messageGroup) model.Message {
+	for _, message := range group.messages {
+		if canArchive(message) {
+			return message
+		}
+	}
+	return model.Message{}
+}
+
+func actionUnitKey(message model.Message) string {
+	turn := message.CodexTurnID
+	if turn == "" {
+		turn = model.ParseMessageCorrelation(message.Details).CodexTurnID
+	}
+	if turn != "" {
+		return "turn:" + turn
+	}
+	if message.ThreadID != "" {
+		return "thread:" + message.ThreadID
+	}
+	return "message:" + message.ID
 }
 
 func canReplyGroup(group messageGroup) bool { return replyTarget(group).ID != "" }
@@ -2049,7 +2236,11 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 		if i > 0 {
 			body.WriteString("\n\n")
 		}
-		body.WriteString(dim.Render("── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM") + " ──"))
+		header := "── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM")
+		if direction := messageDirection(message); direction != "" {
+			header += " · " + direction
+		}
+		body.WriteString(dim.Render(header + " ──"))
 		body.WriteByte('\n')
 		body.WriteString(m.markdown.Render(message, markdownWidth))
 		visibleDetails, hidden := m.presentationDetails(message.Details, m.showTechnical)
@@ -2086,6 +2277,21 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 		bottomLabel = "technical details hidden · press i to show"
 	}
 	return renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage))
+}
+
+func messageDirection(message model.Message) string {
+	if message.SenderMailboxID == model.HumanMailboxID {
+		recipient := message.RecipientLabel
+		if recipient == "" {
+			recipient = message.RecipientMailboxID
+		}
+		return "You → " + displayMailboxLabel(recipient, message.Context)
+	}
+	sender := message.SenderLabel
+	if sender == "" {
+		sender = message.SenderMailboxID
+	}
+	return displayMailboxLabel(sender, message.Context) + " → You"
 }
 
 func draftRecipient(draft messageDraft) string {

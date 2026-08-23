@@ -11,47 +11,49 @@ import (
 )
 
 const (
-	HumanMailboxMethod       = "mailbox/human"
-	ResolveMailboxMethod     = "mailbox/resolve"
-	FindMailboxesMethod      = "mailbox/list"
-	CreateNamedAgentMethod   = "agent/create"
-	GetNamedAgentMethod      = "agent/get"
-	ListNamedAgentsMethod    = "agent/list"
-	ListAgentSessionsMethod  = "agent/session/list"
-	RenameAgentSessionMethod = "agent/session/rename"
-	RetireNamedAgentMethod   = "agent/retire"
-	SelectAgentSessionMethod = "agent/session/select"
-	AcquireAgentMethod       = "agent/ownership/acquire"
-	RenewAgentMethod         = "agent/ownership/renew"
-	ReleaseAgentMethod       = "agent/ownership/release"
-	LaunchCodexAgentMethod   = "codex/launch"
-	StopCodexAgentMethod     = "codex/stop"
-	CodexRuntimeMethod       = "codex/status"
-	CreateMethod             = "message/create"
-	ReplyMethod              = "message/reply"
-	GetMethod                = "message/get"
-	ListMethod               = "message/list"
-	ArchiveMethod            = "message/archive"
-	RestoreMethod            = "message/restore"
-	ClaimMethod              = "delivery/claim"
-	CompleteMethod           = "delivery/complete"
-	ReleaseMethod            = "delivery/release"
-	TrustPeerMethod          = "peer/trust"
-	DistrustPeerMethod       = "peer/distrust"
-	ListPeersMethod          = "peer/list"
-	HumanAccountMethod       = "human/account"
-	HumanDevicesMethod       = "human/devices"
-	CreateHumanInviteMethod  = "human/invite/create"
-	JoinHumanInviteMethod    = "human/invite/join"
-	RevokeHumanDeviceMethod  = "human/device/revoke"
-	SetMailboxShareMethod    = "mailbox/share/set"
-	AddRelayMethod           = "relay/add"
-	RemoveRelayMethod        = "relay/remove"
-	ListRelaysMethod         = "relay/list"
-	NetworkStatusMethod      = "status/network"
-	SynchronizeMethod        = "sync/request"
-	SubscribeChangesMethod   = "changes/subscribe"
-	InvalidatedMethod        = "changes/invalidated"
+	HumanMailboxMethod        = "mailbox/human"
+	ResolveMailboxMethod      = "mailbox/resolve"
+	FindMailboxesMethod       = "mailbox/list"
+	CreateNamedAgentMethod    = "agent/create"
+	GetNamedAgentMethod       = "agent/get"
+	ListNamedAgentsMethod     = "agent/list"
+	ListAgentSessionsMethod   = "agent/session/list"
+	RenameAgentSessionMethod  = "agent/session/rename"
+	RetireNamedAgentMethod    = "agent/retire"
+	SelectAgentSessionMethod  = "agent/session/select"
+	AcquireAgentMethod        = "agent/ownership/acquire"
+	RenewAgentMethod          = "agent/ownership/renew"
+	ReleaseAgentMethod        = "agent/ownership/release"
+	LaunchCodexAgentMethod    = "codex/launch"
+	StopCodexAgentMethod      = "codex/stop"
+	CodexRuntimeMethod        = "codex/status"
+	CreateMethod              = "message/create"
+	ReplyMethod               = "message/reply"
+	GetMethod                 = "message/get"
+	ListMethod                = "message/list"
+	ListConversationsMethod   = "conversation/list"
+	ConversationHistoryMethod = "conversation/history"
+	ArchiveMethod             = "message/archive"
+	RestoreMethod             = "message/restore"
+	ClaimMethod               = "delivery/claim"
+	CompleteMethod            = "delivery/complete"
+	ReleaseMethod             = "delivery/release"
+	TrustPeerMethod           = "peer/trust"
+	DistrustPeerMethod        = "peer/distrust"
+	ListPeersMethod           = "peer/list"
+	HumanAccountMethod        = "human/account"
+	HumanDevicesMethod        = "human/devices"
+	CreateHumanInviteMethod   = "human/invite/create"
+	JoinHumanInviteMethod     = "human/invite/join"
+	RevokeHumanDeviceMethod   = "human/device/revoke"
+	SetMailboxShareMethod     = "mailbox/share/set"
+	AddRelayMethod            = "relay/add"
+	RemoveRelayMethod         = "relay/remove"
+	ListRelaysMethod          = "relay/list"
+	NetworkStatusMethod       = "status/network"
+	SynchronizeMethod         = "sync/request"
+	SubscribeChangesMethod    = "changes/subscribe"
+	InvalidatedMethod         = "changes/invalidated"
 )
 
 const (
@@ -135,6 +137,14 @@ type MutationIDRequest struct {
 
 type FilterRequest struct {
 	Filter model.Filter `json:"filter"`
+}
+
+type ConversationFilterRequest struct {
+	Filter model.ConversationFilter `json:"filter"`
+}
+
+type ConversationHistoryRequest struct {
+	Filter model.ConversationHistoryFilter `json:"filter"`
 }
 
 type ClaimRequest struct {

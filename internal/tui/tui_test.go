@@ -33,6 +33,38 @@ type runtimeTestStore struct {
 	launches []domain.CodexLaunchRequest
 }
 
+type pagedHistoryStore struct {
+	domain.Store
+	calls int
+}
+
+func (s *pagedHistoryStore) ListConversationHistory(_ context.Context, filter model.ConversationHistoryFilter) (model.MessagePage, error) {
+	s.calls++
+	if filter.Cursor == "" {
+		messages := make([]model.Message, 200)
+		for index := range messages {
+			messages[index] = message(fmt.Sprintf("message-%03d", index), testAgentID, model.HumanMailboxID, fmt.Sprintf("body-%03d", index))
+		}
+		return model.MessagePage{Messages: messages, NextCursor: "next-page"}, nil
+	}
+	return model.MessagePage{Messages: []model.Message{message("message-200", testAgentID, model.HumanMailboxID, "body-200")}}, nil
+}
+
+type outboundCaptureStore struct {
+	domain.Store
+	agent   domain.NamedAgent
+	created model.Message
+}
+
+func (s *outboundCaptureStore) GetNamedAgent(context.Context, string) (domain.NamedAgent, error) {
+	return s.agent, nil
+}
+
+func (s *outboundCaptureStore) Create(_ context.Context, created model.Message) error {
+	s.created = created
+	return nil
+}
+
 func (s *runtimeTestStore) LaunchCodexAgent(_ context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
 	copyRequest := request
 	copyRequest.Environment = append([]string(nil), request.Environment...)
@@ -209,6 +241,65 @@ func TestSentAndArchivedAreIndependent(t *testing.T) {
 	m = updated.(app)
 	if len(m.messages) != 4 || !m.showSent || !m.showArchived {
 		t.Fatalf("combined mode = %#v", m)
+	}
+}
+
+func TestConversationLoadShowsCompleteBidirectionalHistory(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	created := time.Now().UTC().Add(-time.Minute)
+	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df1", agent.ID, model.HumanMailboxID, "first inbound")
+	first.CreatedAt = created
+	first.Details = "Codex thread: history-thread\nCodex turn: turn-one"
+	human := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df2", model.HumanMailboxID, agent.ID, "human response")
+	human.CreatedAt = created.Add(time.Second)
+	human.Details = "Codex thread: history-thread\nCodex turn: turn-one"
+	second := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df3", agent.ID, model.HumanMailboxID, "second inbound")
+	second.CreatedAt = created.Add(2 * time.Second)
+	second.Details = "Codex thread: history-thread\nCodex turn: turn-two"
+	for _, item := range []model.Message{first, human, second} {
+		if err := s.Create(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Archive(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	m := app{ctx: ctx, store: s, editor: textarea.New(), markdown: newMessageMarkdownRenderer(nil), width: 100, height: 32}
+	loaded := m.load().(loadedMsg)
+	updated, _ := m.Update(loaded)
+	m = updated.(app)
+	groups := m.visibleGroups()
+	if len(groups) != 1 || len(groups[0].messages) != 3 {
+		t.Fatalf("conversation groups = %#v", groups)
+	}
+	for index, body := range []string{"first inbound", "human response", "second inbound"} {
+		if groups[0].messages[index].Body != body {
+			t.Fatalf("history[%d] = %q; want %q", index, groups[0].messages[index].Body, body)
+		}
+	}
+	if view := m.View().Content; !strings.Contains(view, "You →") || !strings.Contains(view, "first inbound") {
+		t.Fatalf("bidirectional history view = %q", view)
+	}
+}
+
+func TestConversationHistoryLoaderExhaustsPages(t *testing.T) {
+	store := &pagedHistoryStore{}
+	m := app{ctx: context.Background(), store: store}
+	key := model.ConversationKey{CounterpartyMailboxID: testAgentID, CodexThreadID: "thread"}
+	messages, err := m.loadAllConversationHistory(key)
+	if err != nil || len(messages) != 201 || store.calls != 2 || messages[200].Body != "body-200" {
+		t.Fatalf("paged history = %d messages / %d calls / %v", len(messages), store.calls, err)
+	}
+}
+
+func TestNewNamedAgentMessageRecordsCurrentCodexThread(t *testing.T) {
+	store := &outboundCaptureStore{agent: domain.NamedAgent{Name: "fred", MailboxID: testAgentID, Harness: "codex", CurrentSessionID: "current-codex-thread"}}
+	editor := textarea.New()
+	editor.SetValue("hello")
+	m := app{ctx: context.Background(), store: store, editor: editor, answering: true, composeTo: testAgentID, composeName: "fred", composeNamed: true}
+	result := m.answer().(answeredMsg)
+	if result.err != nil || store.created.Details != "Codex thread: current-codex-thread" {
+		t.Fatalf("created message = %#v, result=%#v", store.created, result)
 	}
 }
 
@@ -1172,6 +1263,38 @@ func TestReplyArchivesEveryVisibleMessageInTurn(t *testing.T) {
 	replies, err := s.List(ctx, model.Filter{ReplyTo: final.ID})
 	if err != nil || len(replies) != 1 || replies[0].Body != "Thanks" {
 		t.Fatalf("replies = %#v, %v", replies, err)
+	}
+}
+
+func TestArchiveTargetsOnlyOldestOpenActionUnit(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	firstUpdate := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e01", agent.ID, model.HumanMailboxID, "first update")
+	firstUpdate.Details = "Codex thread: thread-1\nCodex turn: turn-1"
+	firstFinal := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e02", agent.ID, model.HumanMailboxID, "first final")
+	firstFinal.CreatedAt = firstUpdate.CreatedAt.Add(time.Second)
+	firstFinal.Details = "Codex thread: thread-1\nCodex turn: turn-1"
+	secondTurn := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e03", agent.ID, model.HumanMailboxID, "second turn")
+	secondTurn.CreatedAt = firstUpdate.CreatedAt.Add(2 * time.Second)
+	secondTurn.Details = "Codex thread: thread-1\nCodex turn: turn-2"
+	for _, item := range []model.Message{firstUpdate, firstFinal, secondTurn} {
+		if err := s.Create(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	group := groupMessages([]model.Message{secondTurn, firstFinal, firstUpdate})[0]
+	result := (app{ctx: ctx, store: s}).archiveGroup(group)().(archivedMsg)
+	if result.err != nil || len(result.messageIDs) != 2 {
+		t.Fatalf("archive result = %#v", result)
+	}
+	for _, item := range []model.Message{firstUpdate, firstFinal} {
+		got, err := s.Get(ctx, item.ID)
+		if err != nil || got.ArchivedAt == nil {
+			t.Fatalf("oldest unit message = %#v, %v", got, err)
+		}
+	}
+	remaining, err := s.Get(ctx, secondTurn.ID)
+	if err != nil || remaining.ArchivedAt != nil {
+		t.Fatalf("newer unit was archived: %#v, %v", remaining, err)
 	}
 }
 

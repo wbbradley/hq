@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -353,6 +354,135 @@ func TestMessageConversationCorrelationFilters(t *testing.T) {
 	canonical, err := s.List(ctx, model.Filter{ThreadID: root.ThreadID})
 	if err != nil || len(canonical) != 1 || canonical[0].ID != uncorrelated.ID {
 		t.Fatalf("canonical thread filter = %#v, %v", canonical, err)
+	}
+}
+
+func TestConversationSummariesFilterUnionAndPagination(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "conversation-summary", "/repo")
+	other := resolveAgent(t, s, "codex", "conversation-summary-other", "/repo")
+	created := time.Now().UTC().Add(-time.Minute)
+	open := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc1", agent.ID, model.HumanMailboxID, "open")
+	open.CreatedAt = created
+	open.Details = "Codex thread: open-thread\nCodex turn: turn-one"
+	openReply := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc4", model.HumanMailboxID, agent.ID, "open conversation reply")
+	openReply.CreatedAt = created.Add(time.Second)
+	openReply.Details = "Codex thread: open-thread\nCodex turn: turn-one"
+	sent := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc2", model.HumanMailboxID, agent.ID, "sent only")
+	sent.CreatedAt = created
+	sent.Details = "Codex thread: sent-thread"
+	archived := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc3", other.ID, model.HumanMailboxID, "archived only")
+	archived.CreatedAt = created
+	archived.Details = "Codex thread: archived-thread"
+	for _, item := range []model.Message{open, openReply, sent, archived} {
+		if err := s.Create(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Archive(ctx, archived.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	defaultPage, err := s.ListConversations(ctx, model.ConversationFilter{})
+	if err != nil || len(defaultPage.Conversations) != 1 || defaultPage.Conversations[0].Key.CodexThreadID != "open-thread" || defaultPage.Conversations[0].OpenCount != 1 {
+		t.Fatalf("default conversations = %#v, %v", defaultPage, err)
+	}
+	first, err := s.ListConversations(ctx, model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Limit: 1})
+	if err != nil || len(first.Conversations) != 1 || first.NextCursor == "" {
+		t.Fatalf("first conversation page = %#v, %v", first, err)
+	}
+	second, err := s.ListConversations(ctx, model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Limit: 1, Cursor: first.NextCursor})
+	if err != nil || len(second.Conversations) != 1 || second.NextCursor == "" || second.Conversations[0].Key == first.Conversations[0].Key {
+		t.Fatalf("second conversation page = %#v, %v", second, err)
+	}
+	third, err := s.ListConversations(ctx, model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Limit: 1, Cursor: second.NextCursor})
+	if err != nil || len(third.Conversations) != 1 || third.NextCursor != "" {
+		t.Fatalf("third conversation page = %#v, %v", third, err)
+	}
+	seen := map[string]bool{
+		first.Conversations[0].Key.CodexThreadID:  true,
+		second.Conversations[0].Key.CodexThreadID: true,
+		third.Conversations[0].Key.CodexThreadID:  true,
+	}
+	for _, thread := range []string{"open-thread", "sent-thread", "archived-thread"} {
+		if !seen[thread] {
+			t.Fatalf("paginated union omitted %q: %#v", thread, seen)
+		}
+	}
+	if _, err := s.ListConversations(ctx, model.ConversationFilter{Cursor: "malformed"}); err == nil {
+		t.Fatal("malformed conversation cursor was accepted")
+	}
+}
+
+func TestConversationHistoryIsCompleteChronologicalAndIsolated(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "conversation-history", "/repo")
+	other := resolveAgent(t, s, "codex", "conversation-history-other", "/repo")
+	created := time.Now().UTC().Add(-time.Minute)
+	items := []model.Message{
+		message("0198c7ec-73b0-7cc3-a5f7-e31c77140dd1", agent.ID, model.HumanMailboxID, "first inbound"),
+		message("0198c7ec-73b0-7cc3-a5f7-e31c77140dd2", model.HumanMailboxID, agent.ID, "human reply"),
+		message("0198c7ec-73b0-7cc3-a5f7-e31c77140dd3", agent.ID, model.HumanMailboxID, "second inbound"),
+		message("0198c7ec-73b0-7cc3-a5f7-e31c77140dd4", other.ID, model.HumanMailboxID, "other agent"),
+	}
+	for index := range items {
+		items[index].CreatedAt = created.Add(time.Duration(index) * time.Second)
+		items[index].Details = "Codex thread: shared-thread\nCodex turn: turn-" + fmt.Sprint(index)
+		if err := s.Create(ctx, items[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Archive(ctx, items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	key := model.ConversationKey{CounterpartyMailboxID: agent.ID, CodexThreadID: "shared-thread"}
+	first, err := s.ListConversationHistory(ctx, model.ConversationHistoryFilter{Key: key, Limit: 2})
+	if err != nil || len(first.Messages) != 2 || first.NextCursor == "" {
+		t.Fatalf("first history page = %#v, %v", first, err)
+	}
+	second, err := s.ListConversationHistory(ctx, model.ConversationHistoryFilter{Key: key, Limit: 2, Cursor: first.NextCursor})
+	if err != nil || len(second.Messages) != 1 || second.NextCursor != "" {
+		t.Fatalf("second history page = %#v, %v", second, err)
+	}
+	got := append(first.Messages, second.Messages...)
+	for index, body := range []string{"first inbound", "human reply", "second inbound"} {
+		if got[index].Body != body {
+			t.Fatalf("history[%d] = %q; want %q", index, got[index].Body, body)
+		}
+	}
+	if got[0].ArchivedAt == nil || got[1].SenderMailboxID != model.HumanMailboxID {
+		t.Fatalf("history lost archive/direction state: %#v", got)
+	}
+	if _, err := s.ListConversationHistory(ctx, model.ConversationHistoryFilter{Key: key, Cursor: "malformed"}); err == nil {
+		t.Fatal("malformed history cursor was accepted")
+	}
+}
+
+func TestConversationHistoryCanonicalFallback(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "conversation-fallback", "/repo")
+	question := message("0198c7ec-73b0-7cc3-a5f7-e31c77140de1", agent.ID, model.HumanMailboxID, "question")
+	if err := s.Create(ctx, question); err != nil {
+		t.Fatal(err)
+	}
+	reply := message("0198c7ec-73b0-7cc3-a5f7-e31c77140de2", model.HumanMailboxID, agent.ID, "answer")
+	if err := s.Reply(ctx, question.ID, reply); err != nil {
+		t.Fatal(err)
+	}
+	root, err := s.Get(ctx, question.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListConversations(ctx, model.ConversationFilter{IncludeSent: true, IncludeArchived: true})
+	if err != nil || len(page.Conversations) != 1 || page.Conversations[0].Key.ThreadID != root.ThreadID {
+		t.Fatalf("fallback summary = %#v, %v", page, err)
+	}
+	history, err := s.ListConversationHistory(ctx, model.ConversationHistoryFilter{Key: page.Conversations[0].Key})
+	if err != nil || len(history.Messages) != 2 || history.Messages[0].ID != question.ID || history.Messages[1].ID != reply.ID {
+		t.Fatalf("fallback history = %#v, %v", history, err)
 	}
 }
 

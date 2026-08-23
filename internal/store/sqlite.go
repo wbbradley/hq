@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1426,6 +1427,202 @@ func (s *SQLite) List(ctx context.Context, f model.Filter) ([]model.Message, err
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
+}
+
+type conversationCursor struct {
+	Activity int64  `json:"activity"`
+	SortKey  string `json:"sort_key"`
+}
+
+type historyCursor struct {
+	CreatedAt int64  `json:"created_at"`
+	ID        string `json:"id"`
+}
+
+func encodePageCursor(value any) (string, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func decodePageCursor(raw string, value any) error {
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return fmt.Errorf("decode cursor: %w", err)
+	}
+	if err := json.Unmarshal(decoded, value); err != nil {
+		return fmt.Errorf("decode cursor: %w", err)
+	}
+	return nil
+}
+
+func pageLimit(limit int) int {
+	if limit <= 0 {
+		return 50
+	}
+	return min(limit, 200)
+}
+
+func (s *SQLite) ListConversations(ctx context.Context, filter model.ConversationFilter) (model.ConversationPage, error) {
+	limit := pageLimit(filter.Limit)
+	queryArgs := []any{
+		model.HumanMailboxID, model.HumanMailboxID, model.HumanMailboxID,
+		model.HumanMailboxID, model.HumanMailboxID, model.HumanMailboxID,
+		model.HumanMailboxID, boolInt(filter.IncludeSent), model.HumanMailboxID,
+		boolInt(filter.IncludeArchived), model.HumanMailboxID, model.HumanMailboxID,
+	}
+	cursorClause := ""
+	if filter.Cursor != "" {
+		var cursor conversationCursor
+		if err := decodePageCursor(filter.Cursor, &cursor); err != nil || cursor.Activity <= 0 || cursor.SortKey == "" {
+			if err == nil {
+				err = errors.New("cursor is incomplete")
+			}
+			return model.ConversationPage{}, fmt.Errorf("list conversations: %w", err)
+		}
+		cursorClause = `WHERE (last_activity < ? OR (last_activity = ? AND sort_key > ?))`
+		queryArgs = append(queryArgs, cursor.Activity, cursor.Activity, cursor.SortKey)
+	}
+	queryArgs = append(queryArgs, limit+1)
+	query := `WITH identified AS (
+ SELECT id,created_at,sender_mailbox_id,recipient_mailbox_id,archived_at,
+  CASE WHEN sender_mailbox_id=? THEN recipient_mailbox_id ELSE sender_mailbox_id END AS counterparty,
+  CASE WHEN codex_thread_id<>'' THEN 'codex' ELSE 'thread' END AS conversation_kind,
+  CASE WHEN codex_thread_id<>'' THEN codex_thread_id ELSE thread_event_id END AS conversation_id
+ FROM messages
+ WHERE (sender_mailbox_id=? OR recipient_mailbox_id=?) AND sender_mailbox_id<>recipient_mailbox_id
+), eligible AS (
+ SELECT counterparty,conversation_kind,conversation_id,
+  counterparty||char(31)||conversation_kind||char(31)||conversation_id AS sort_key,
+  MAX(created_at) AS last_activity,
+  SUM(CASE WHEN recipient_mailbox_id=? AND archived_at IS NULL THEN 1 ELSE 0 END) AS open_count,
+  MAX(CASE WHEN sender_mailbox_id=? THEN 1 ELSE 0 END) AS has_sent,
+  MAX(CASE WHEN recipient_mailbox_id=? AND archived_at IS NOT NULL THEN 1 ELSE 0 END) AS has_archived
+ FROM identified
+ GROUP BY counterparty,conversation_kind,conversation_id
+ HAVING SUM(CASE WHEN recipient_mailbox_id=? AND archived_at IS NULL THEN 1 ELSE 0 END)>0
+   OR (?=1 AND MAX(CASE WHEN sender_mailbox_id=? THEN 1 ELSE 0 END)>0)
+   OR (?=1 AND MAX(CASE WHEN recipient_mailbox_id=? AND archived_at IS NOT NULL THEN 1 ELSE 0 END)>0)
+)
+SELECT counterparty,conversation_kind,conversation_id,sort_key,last_activity,open_count,has_sent,has_archived,
+ (SELECT i.id FROM identified i WHERE i.counterparty=e.counterparty AND i.conversation_kind=e.conversation_kind AND i.conversation_id=e.conversation_id ORDER BY i.created_at DESC,i.id DESC LIMIT 1),
+ (SELECT i.id FROM identified i WHERE i.counterparty=e.counterparty AND i.conversation_kind=e.conversation_kind AND i.conversation_id=e.conversation_id AND i.recipient_mailbox_id=? AND i.archived_at IS NULL ORDER BY i.created_at,i.id LIMIT 1)
+FROM eligible e ` + cursorClause + ` ORDER BY last_activity DESC,sort_key LIMIT ?`
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return model.ConversationPage{}, fmt.Errorf("list conversations: %w", err)
+	}
+	defer rows.Close()
+	type summaryRow struct {
+		summary model.ConversationSummary
+		sortKey string
+		latest  string
+		open    sql.NullString
+		at      int64
+	}
+	var summaries []summaryRow
+	for rows.Next() {
+		var item summaryRow
+		var kind, identifier string
+		var hasSent, hasArchived int
+		if err := rows.Scan(&item.summary.Key.CounterpartyMailboxID, &kind, &identifier, &item.sortKey, &item.at, &item.summary.OpenCount, &hasSent, &hasArchived, &item.latest, &item.open); err != nil {
+			return model.ConversationPage{}, fmt.Errorf("list conversations: %w", err)
+		}
+		if kind == "codex" {
+			item.summary.Key.CodexThreadID = identifier
+		} else {
+			item.summary.Key.ThreadID = identifier
+		}
+		item.summary.HasSent = hasSent != 0
+		item.summary.HasArchived = hasArchived != 0
+		item.summary.LastActivity = time.UnixMilli(item.at).UTC()
+		summaries = append(summaries, item)
+	}
+	if err := rows.Err(); err != nil {
+		return model.ConversationPage{}, fmt.Errorf("list conversations: %w", err)
+	}
+	page := model.ConversationPage{}
+	if len(summaries) > limit {
+		last := summaries[limit-1]
+		page.NextCursor, err = encodePageCursor(conversationCursor{Activity: last.at, SortKey: last.sortKey})
+		if err != nil {
+			return model.ConversationPage{}, fmt.Errorf("list conversations: %w", err)
+		}
+		summaries = summaries[:limit]
+	}
+	page.Conversations = make([]model.ConversationSummary, 0, len(summaries))
+	for _, item := range summaries {
+		item.summary.Latest, err = s.Get(ctx, item.latest)
+		if err != nil {
+			return model.ConversationPage{}, fmt.Errorf("list conversations: latest message: %w", err)
+		}
+		if item.open.Valid {
+			openMessage, getErr := s.Get(ctx, item.open.String)
+			if getErr != nil {
+				return model.ConversationPage{}, fmt.Errorf("list conversations: oldest open message: %w", getErr)
+			}
+			item.summary.OldestOpen = &openMessage
+		}
+		page.Conversations = append(page.Conversations, item.summary)
+	}
+	return page, nil
+}
+
+func (s *SQLite) ListConversationHistory(ctx context.Context, filter model.ConversationHistoryFilter) (model.MessagePage, error) {
+	if !filter.Key.Valid() {
+		return model.MessagePage{}, errors.New("list conversation history: invalid conversation key")
+	}
+	limit := pageLimit(filter.Limit)
+	where := []string{`((msg.sender_mailbox_id=? AND msg.recipient_mailbox_id=?) OR (msg.sender_mailbox_id=? AND msg.recipient_mailbox_id=?))`}
+	args := []any{filter.Key.CounterpartyMailboxID, model.HumanMailboxID, model.HumanMailboxID, filter.Key.CounterpartyMailboxID}
+	if filter.Key.CodexThreadID != "" {
+		where = append(where, `msg.codex_thread_id=?`)
+		args = append(args, filter.Key.CodexThreadID)
+	} else {
+		where = append(where, `msg.codex_thread_id=''`, `msg.thread_event_id=?`)
+		args = append(args, filter.Key.ThreadID)
+	}
+	if filter.Cursor != "" {
+		var cursor historyCursor
+		if err := decodePageCursor(filter.Cursor, &cursor); err != nil || cursor.CreatedAt <= 0 || cursor.ID == "" {
+			if err == nil {
+				err = errors.New("cursor is incomplete")
+			}
+			return model.MessagePage{}, fmt.Errorf("list conversation history: %w", err)
+		}
+		where = append(where, `(msg.created_at>? OR (msg.created_at=? AND msg.id>?))`)
+		args = append(args, cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
+	}
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+` FROM `+joins+` WHERE `+strings.Join(where, " AND ")+` ORDER BY msg.created_at,msg.id LIMIT ?`, args...)
+	if err != nil {
+		return model.MessagePage{}, fmt.Errorf("list conversation history: %w", err)
+	}
+	defer rows.Close()
+	var messages []model.Message
+	for rows.Next() {
+		message, scanErr := scanMessage(rows)
+		if scanErr != nil {
+			return model.MessagePage{}, scanErr
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return model.MessagePage{}, err
+	}
+	page := model.MessagePage{}
+	if len(messages) > limit {
+		last := messages[limit-1]
+		page.NextCursor, err = encodePageCursor(historyCursor{CreatedAt: last.CreatedAt.UnixMilli(), ID: last.ID})
+		if err != nil {
+			return model.MessagePage{}, fmt.Errorf("list conversation history: %w", err)
+		}
+		messages = messages[:limit]
+	}
+	page.Messages = messages
+	return page, nil
 }
 
 func (s *SQLite) Archive(ctx context.Context, id string) error {

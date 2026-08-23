@@ -230,6 +230,18 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return s.Store.List(ctx, request.Filter)
+	case ListConversationsMethod:
+		var request ConversationFilterRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.ListConversations(ctx, request.Filter)
+	case ConversationHistoryMethod:
+		var request ConversationHistoryRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.ListConversationHistory(ctx, request.Filter)
 	case ArchiveMethod:
 		var request MutationIDRequest
 		if err := decodeRequest(raw, &request); err != nil {

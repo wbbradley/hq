@@ -168,6 +168,8 @@ type Operations interface {
 	Reply(context.Context, string, model.Message) error
 	Get(context.Context, string) (model.Message, error)
 	List(context.Context, model.Filter) ([]model.Message, error)
+	ListConversations(context.Context, model.ConversationFilter) (model.ConversationPage, error)
+	ListConversationHistory(context.Context, model.ConversationHistoryFilter) (model.MessagePage, error)
 	Archive(context.Context, string) error
 	Restore(context.Context, string) error
 	Claim(context.Context, Claim, string) (model.Message, error)
