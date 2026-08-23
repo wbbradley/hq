@@ -783,7 +783,11 @@ func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T
 	}
 	m.setMessages()
 	m.reconcileMessageViewport(false)
+	m.scrollMessagePane(3)
 	initial := m.messageScroll
+	if !m.messageScrollManual {
+		t.Fatal("fixture did not establish a manual scroll anchor")
+	}
 
 	latest := message("latest-open", testAgentID, model.HumanMailboxID, "Latest update")
 	latest.CreatedAt = created.Add(time.Second)
@@ -793,13 +797,51 @@ func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T
 		histories:     map[string][]model.Message{stableKey: {previous, latest}},
 	})
 	m = updated.(app)
-	if m.messageLiveAnchorID != latest.ID || m.messageScroll <= initial {
-		t.Fatalf("live anchor = %q at %d; want %q after %d", m.messageLiveAnchorID, m.messageScroll, latest.ID, initial)
+	if m.messageLiveAnchorID != latest.ID || m.messageScroll <= initial || m.messageScrollManual {
+		t.Fatalf("live anchor = %q at %d (manual=%t); want %q after %d", m.messageLiveAnchorID, m.messageScroll, m.messageScrollManual, latest.ID, initial)
 	}
 	layout := responsivePaneLayout(m.width, m.height, false)
 	messageView := strings.Join(strings.Split(m.View().Content, "\n")[layout.inboxHeight:], "\n")
 	if !strings.Contains(messageView, "Latest update") || strings.Count(messageView, "previous update") >= 18 {
 		t.Fatalf("message pane did not advance to latest update: %q", messageView)
+	}
+}
+
+func TestMessagePaneRestoresUnreadBoundaryAfterRestartAndMultipleReplies(t *testing.T) {
+	created := time.Date(2026, 8, 23, 17, 4, 5, 0, time.Local)
+	makeTurnMessage := func(id, body string, offset time.Duration, sender, recipient string) model.Message {
+		item := message(id, sender, recipient, body)
+		item.CreatedAt = created.Add(offset)
+		item.Details = "Codex thread: restart-thread"
+		return item
+	}
+	first := makeTurnMessage("first-agent", strings.Repeat("first response\n", 10), 0, testAgentID, model.HumanMailboxID)
+	firstReply := makeTurnMessage("first-human", "First human reply", time.Second, model.HumanMailboxID, testAgentID)
+	second := makeTurnMessage("second-agent", strings.Repeat("second response\n", 10), 2*time.Second, testAgentID, model.HumanMailboxID)
+	secondReply := makeTurnMessage("second-human", "Second human reply", 3*time.Second, model.HumanMailboxID, testAgentID)
+	latest := makeTurnMessage("latest-agent", "Latest response after restart", 4*time.Second, testAgentID, model.HumanMailboxID)
+
+	m := app{messages: []model.Message{first, firstReply, second, secondReply, latest}, width: 80, height: 24}
+	m.groups = groupMessages(m.messages)
+	group, found := m.detailGroup()
+	if !found {
+		t.Fatal("message group not found")
+	}
+	layout := responsivePaneLayout(m.width, m.height, false)
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	want := messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	for _, span := range rendered.spans {
+		if span.messageID == latest.ID {
+			want = min(want, span.start)
+			break
+		}
+	}
+	if got := automaticMessageStart(group, rendered, layout.messageHeight, ""); got != want {
+		t.Fatalf("restart start = %d; want latest post-reply boundary %d", got, want)
+	}
+	messageView := strings.Join(strings.Split(m.View().Content, "\n")[layout.inboxHeight:], "\n")
+	if !strings.Contains(messageView, "Latest response after restart") || strings.Contains(messageView, "first response") {
+		t.Fatalf("restarted pane returned to already-read content: %q", messageView)
 	}
 }
 

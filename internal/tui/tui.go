@@ -596,11 +596,14 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.cursor >= len(visibleGroups) {
 			m.cursor = max(0, len(visibleGroups)-1)
 		}
-		if !m.messageScrollManual && len(knownSelectedMessages) > 0 {
+		if len(knownSelectedMessages) > 0 {
 			if group, found := m.groupByKey(selectedKey); found {
 				for _, message := range group.messages {
 					if !knownSelectedMessages[message.ID] && canArchive(message) {
 						m.messageLiveAnchorID = message.ID
+						m.messageScrollManual = false
+						m.messageAnchorID = ""
+						m.messageAnchorOffset = 0
 					}
 				}
 			}
@@ -1781,7 +1784,19 @@ func messagePaneMaxStart(rendered string, height int) int {
 
 func automaticMessageStart(group messageGroup, rendered renderedMessageGroup, height int, liveAnchorID string) int {
 	maximum := messagePaneMaxStart(rendered.panel, height)
-	target := archiveTarget(group)
+	target := model.Message{}
+	lastHumanMessage := -1
+	for index, message := range group.messages {
+		if message.SenderMailboxID == model.HumanMailboxID {
+			lastHumanMessage = index
+		}
+	}
+	for index, message := range group.messages {
+		if index > lastHumanMessage && canArchive(message) {
+			target = message
+			break
+		}
+	}
 	for _, message := range group.messages {
 		if message.ID == liveAnchorID && canArchive(message) {
 			target = message
