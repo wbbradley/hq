@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,11 @@ type recordingOperations struct {
 	err    error
 }
 
-type recordingRuntime struct{ called string }
+type recordingRuntime struct {
+	called           string
+	wakeMessages     []model.Message
+	wakeEnvironments [][]string
+}
 
 func (r *recordingRuntime) LaunchCodexAgent(_ context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
 	r.called = LaunchCodexAgentMethod
@@ -31,6 +36,10 @@ func (r *recordingRuntime) StopCodexAgent(_ context.Context, name string) (domai
 func (r *recordingRuntime) CodexAgentRuntime(_ context.Context, name string) (domain.CodexRuntime, error) {
 	r.called = CodexRuntimeMethod
 	return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
+}
+func (r *recordingRuntime) WakeCodexAgent(message model.Message, environment []string) {
+	r.wakeMessages = append(r.wakeMessages, message)
+	r.wakeEnvironments = append(r.wakeEnvironments, append([]string(nil), environment...))
 }
 
 func (s *recordingOperations) MutationResult(_ context.Context, mutation domain.Mutation) (json.RawMessage, bool, error) {
@@ -204,6 +213,30 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 	service := Service{Store: operations, Synchronize: func(context.Context) error { operations.called = SynchronizeMethod; return nil }}
 	if _, rpcErr := service.Handle(context.Background(), nil, SynchronizeMethod, nil); rpcErr != nil || operations.called != SynchronizeMethod {
 		t.Fatalf("sync called=%q error=%v", operations.called, rpcErr)
+	}
+}
+
+func TestCommittedHumanMessagesAttemptNamedAgentWakeWithTransientEnvironment(t *testing.T) {
+	mutationID := "0198c7ec-73b0-7cc3-a5f7-e31c77140d60"
+	message := model.Message{ID: "message-1", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: "named-mailbox", Body: "continue"}
+	runtime := &recordingRuntime{}
+	operations := &recordingOperations{}
+	service := Service{Store: operations, Runtime: runtime}
+	request := MessageRequest{MutationID: mutationID, Message: message, Environment: []string{"PATH=/sender/bin", "TOKEN=transient"}}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, rpcErr := service.Handle(context.Background(), nil, CreateMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	// A replay that finds the durable mutation receipt must repair the wake
+	// attempt too, covering a daemon exit between commit and wake dispatch.
+	if _, rpcErr := service.Handle(context.Background(), nil, CreateMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if len(runtime.wakeMessages) != 2 || runtime.wakeMessages[0].ID != message.ID || strings.Join(runtime.wakeEnvironments[0], "|") != "PATH=/sender/bin|TOKEN=transient" {
+		t.Fatalf("wake messages=%#v environments=%#v", runtime.wakeMessages, runtime.wakeEnvironments)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,12 +17,26 @@ import (
 )
 
 func TestClientCallsEveryDomainMethod(t *testing.T) {
+	t.Setenv("HQ_CLIENT_WAKE_ENV", "expected")
 	var lock sync.Mutex
 	var methods []string
-	handler := func(_ context.Context, _ *localwire.Session, method string, _ json.RawMessage) (any, *localwire.RPCError) {
+	messageEnvironmentCalls := 0
+	handler := func(_ context.Context, _ *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
 		lock.Lock()
 		methods = append(methods, method)
 		lock.Unlock()
+		if method == domainrpc.CreateMethod || method == domainrpc.ReplyMethod {
+			var request struct {
+				Environment []string `json:"environment"`
+			}
+			if json.Unmarshal(raw, &request) == nil {
+				for _, entry := range request.Environment {
+					if entry == "HQ_CLIENT_WAKE_ENV=expected" {
+						messageEnvironmentCalls++
+					}
+				}
+			}
+		}
 		switch method {
 		case domainrpc.HumanMailboxMethod, domainrpc.ResolveMailboxMethod:
 			return model.Mailbox{}, nil
@@ -119,6 +134,9 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	defer lock.Unlock()
 	if len(methods) != len(want) {
 		t.Fatalf("methods = %#v", methods)
+	}
+	if messageEnvironmentCalls != 2 {
+		t.Fatalf("message environment calls = %d; methods=%s", messageEnvironmentCalls, strings.Join(methods, ","))
 	}
 	for index := range want {
 		if methods[index] != want[index] {

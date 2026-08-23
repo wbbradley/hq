@@ -112,14 +112,16 @@ type AgentOwnershipRequest struct {
 }
 
 type MessageRequest struct {
-	MutationID string        `json:"mutation_id"`
-	Message    model.Message `json:"message"`
+	MutationID  string        `json:"mutation_id"`
+	Message     model.Message `json:"message"`
+	Environment []string      `json:"environment,omitempty"`
 }
 
 type ReplyRequest struct {
-	MutationID string        `json:"mutation_id"`
-	OriginalID string        `json:"original_id"`
-	Reply      model.Message `json:"reply"`
+	MutationID  string        `json:"mutation_id"`
+	OriginalID  string        `json:"original_id"`
+	Reply       model.Message `json:"reply"`
+	Environment []string      `json:"environment,omitempty"`
 }
 
 type IDRequest struct {

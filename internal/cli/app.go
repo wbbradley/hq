@@ -96,10 +96,11 @@ Options:
                       Use only inside an externally secured environment.
 
 Remaining arguments are joined as the optional initial prompt. The client sends its current
-directory and complete environment transiently to the local daemon, waits for a ready or failed
-acknowledgement, then exits. The daemon owns the bridge and Codex child until stopped or the node
-shuts down. New threads receive the durable agent name and structured-human-input instruction;
-resumed threads keep their existing instructions.
+directory and complete environment to the local daemon, waits for a ready or failed acknowledgement,
+then exits. The daemon retains the last successful launch only in memory so a later message can wake
+an offline agent. The daemon owns the bridge and Codex child until stopped or the node shuts down.
+New threads receive the durable agent name and structured-human-input instruction; resumed threads
+keep their existing instructions.
 
 Questions, approvals, and final output appear in the human HQ inbox; local runtime status stays
 in the CLI/TUI control plane.

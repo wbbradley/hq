@@ -125,8 +125,10 @@ hosts one worker per durable agent, starts only `codex app-server --stdio`, wait
 IDs make a lost local response safe to retry, while the named-agent lease rejects any independent
 legacy owner. One shared thread-keyed ledger supports concurrent agents without sidecar races.
 
-The caller environment exists only long enough to construct the child environment. HQ does not add
-its names or values to canonical events, projections, mutation receipts, Nostr, the ledger,
+The caller environment is sensitive local control-plane state. After a successful launch, the
+supervisor retains one last-known-good launch template per named agent in daemon memory for automatic
+offline wakeups. It wipes replaced templates and all templates on shutdown. HQ does not add
+environment names or values to canonical events, projections, mutation receipts, Nostr, the ledger,
 HQ-authored log attributes, diagnostics, status, or RPC results. The protected diagnostic log does
 capture app-server stderr verbatim, so child-emitted text is inside the local logging trust boundary.
 Process ownership, paths, presence, and runtime phases are also installation-local
@@ -137,9 +139,16 @@ stopping, or switching a worker. Presentation code resolves names through the ag
 abstraction instead of copying mutable labels into immutable messages or runtime records. Mailbox
 questions, answers, messages, and relay delivery are the Nostr data plane.
 
+A committed local human message or answer addressed to an offline named Codex mailbox asks the
+supervisor to resume the selected thread asynchronously. Concurrent messages coalesce into one wake.
+Within one daemon lifetime the exact last-known-good environment, cwd, repository context, and yolo
+setting are reused; after restart, the selected session context is combined with the sender's current
+environment. Initial prompts are never replayed. Mutation-receipt replays repeat the idempotent wake
+attempt so a crash between message commit and dispatch does not permanently strand queued input.
+
 Node stop or restart cancels every worker and leaves its durable selection intact and offline;
-workers are not automatically restarted. A future remote controller must address the owning node's
-control plane, where paths are interpreted and validated.
+workers restart on demand when a local human message arrives. A future remote controller must address
+the owning node's control plane, where paths are interpreted and validated.
 
 The node configures strict tables, foreign keys, WAL mode, `synchronous=FULL`, a five-second busy
 timeout, one database connection, and mode `0600`. WAL is an SQLite durability mechanism inside the

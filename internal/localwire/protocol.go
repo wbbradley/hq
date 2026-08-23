@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	CurrentDomainVersion    = 5
+	CurrentDomainVersion    = 6
 	CurrentLifecycleVersion = 1
 )
 

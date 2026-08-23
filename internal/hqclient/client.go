@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -254,13 +255,25 @@ func (c *Client) ReleaseNamedAgent(ctx context.Context, name, token string) erro
 }
 
 func (c *Client) Create(ctx context.Context, message model.Message) error {
-	return c.mutatingCall(ctx, domainrpc.CreateMethod, func(id string) any { return domainrpc.MessageRequest{MutationID: id, Message: message} }, nil)
+	environment := os.Environ()
+	defer clearEnvironment(environment)
+	return c.mutatingCall(ctx, domainrpc.CreateMethod, func(id string) any {
+		return domainrpc.MessageRequest{MutationID: id, Message: message, Environment: environment}
+	}, nil)
 }
 
 func (c *Client) Reply(ctx context.Context, originalID string, reply model.Message) error {
+	environment := os.Environ()
+	defer clearEnvironment(environment)
 	return c.mutatingCall(ctx, domainrpc.ReplyMethod, func(id string) any {
-		return domainrpc.ReplyRequest{MutationID: id, OriginalID: originalID, Reply: reply}
+		return domainrpc.ReplyRequest{MutationID: id, OriginalID: originalID, Reply: reply, Environment: environment}
 	}, nil)
+}
+
+func clearEnvironment(environment []string) {
+	for index := range environment {
+		environment[index] = ""
+	}
 }
 
 func (c *Client) Get(ctx context.Context, id string) (model.Message, error) {

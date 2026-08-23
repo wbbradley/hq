@@ -26,8 +26,9 @@ const (
 	CodexRuntimeConflict CodexRuntimePhase = "ownership-conflict"
 )
 
-// CodexLaunchRequest is local control-plane input. Environment is sensitive
-// and transient: implementations must never persist, log, or return it.
+// CodexLaunchRequest is local control-plane input. Environment is sensitive:
+// implementations may retain it only in daemon memory for automatic relaunch,
+// and must never write it to durable storage, log it, or return it.
 type CodexLaunchRequest struct {
 	RequestID     string                  `json:"request_id"`
 	AgentName     string                  `json:"agent_name"`
@@ -54,4 +55,11 @@ type CodexRuntimeController interface {
 	LaunchCodexAgent(context.Context, CodexLaunchRequest) (CodexRuntime, error)
 	StopCodexAgent(context.Context, string) (CodexRuntime, error)
 	CodexAgentRuntime(context.Context, string) (CodexRuntime, error)
+}
+
+// CodexRuntimeAutoStarter is implemented by a daemon-owned runtime that can
+// wake the named agent addressed by a newly committed local human message.
+// Implementations must copy Environment before returning if they retain it.
+type CodexRuntimeAutoStarter interface {
+	WakeCodexAgent(model.Message, []string)
 }

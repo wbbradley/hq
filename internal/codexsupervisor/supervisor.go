@@ -18,6 +18,7 @@ import (
 	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/logging"
+	"github.com/wbbradley/hq/internal/model"
 )
 
 type StarterFactory func(environment []string) codexbridge.ProcessStarter
@@ -32,8 +33,11 @@ type Supervisor struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	mu       sync.Mutex
+	wakeWG   sync.WaitGroup
 	workers  map[string]*worker
 	receipts map[string]receipt
+	lastGood map[string]domain.CodexLaunchRequest
+	waking   map[string]bool
 	subs     map[uint64]*localSubscription
 	nextSub  uint64
 }
@@ -45,6 +49,7 @@ type worker struct {
 	ready     chan struct{}
 	done      chan struct{}
 	runtime   domain.CodexRuntime
+	launch    domain.CodexLaunchRequest
 }
 
 type receipt struct {
@@ -57,13 +62,22 @@ func New(ctx context.Context, store domain.Operations, ledger codexbridge.Delive
 	if ledger == nil {
 		ledger = codexbridge.NewMemoryLedger()
 	}
-	return &Supervisor{Store: store, Ledger: ledger, Logger: slog.New(slog.DiscardHandler), ctx: lifetime, cancel: cancel, workers: make(map[string]*worker), receipts: make(map[string]receipt), subs: make(map[uint64]*localSubscription)}
+	return &Supervisor{
+		Store: store, Ledger: ledger, Logger: slog.New(slog.DiscardHandler), ctx: lifetime, cancel: cancel,
+		workers: make(map[string]*worker), receipts: make(map[string]receipt), lastGood: make(map[string]domain.CodexLaunchRequest), waking: make(map[string]bool), subs: make(map[uint64]*localSubscription),
+	}
 }
 
 func (s *Supervisor) Close() error {
 	logger := s.logger().With("component", "codex_supervisor")
 	logger.Info("Codex supervisor stopping")
 	s.cancel()
+	// Wake registration is gated by mu and checks the canceled lifetime. Cross
+	// that gate before waiting so no goroutine can call Add concurrently with a
+	// zero-count Wait.
+	s.mu.Lock()
+	s.mu.Unlock()
+	s.wakeWG.Wait()
 	s.mu.Lock()
 	workers := make([]*worker, 0, len(s.workers))
 	for _, current := range s.workers {
@@ -74,6 +88,12 @@ func (s *Supervisor) Close() error {
 	for _, current := range workers {
 		<-current.done
 	}
+	s.mu.Lock()
+	for name, request := range s.lastGood {
+		clearLaunchEnvironment(&request)
+		delete(s.lastGood, name)
+	}
+	s.mu.Unlock()
 	logger.Info("Codex supervisor stopped", "workers", len(workers))
 	return nil
 }
@@ -89,6 +109,10 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 	logger = s.logger().With("component", "codex_supervisor", "agent", request.AgentName, "request_id", request.RequestID, "directory", request.Directory)
 
 	s.mu.Lock()
+	if s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return domain.CodexRuntime{}, errors.New("Codex supervisor is stopped")
+	}
 	if previous, ok := s.receipts[request.RequestID]; ok {
 		s.mu.Unlock()
 		if previous.digest != digest {
@@ -149,6 +173,7 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 	current := &worker{
 		requestID: request.RequestID, digest: digest, cancel: cancel, ready: make(chan struct{}), done: make(chan struct{}),
 		runtime: domain.CodexRuntime{AgentName: request.AgentName, ThreadID: resumeID, Directory: request.Directory, Phase: domain.CodexRuntimeStarting, StartedAt: &started},
+		launch:  cloneLaunchRequest(request),
 	}
 	s.workers[request.AgentName] = current
 	logger.Info("Codex worker registered", "resume_thread_id", resumeID, "new_thread", newThread)
@@ -296,6 +321,16 @@ func (s *Supervisor) markReady(current *worker, ready codexbridge.BridgeReady) {
 	current.runtime.Phase = domain.CodexRuntimeRunning
 	current.runtime.ThreadID = ready.ThreadID
 	current.runtime.Directory = ready.Directory
+	relaunch := cloneLaunchRequest(current.launch)
+	relaunch.RequestID = ""
+	relaunch.Action = domain.CodexSessionResume
+	relaunch.SessionID = ready.ThreadID
+	relaunch.Directory = ready.Directory
+	relaunch.Repository.Directory = ready.Directory
+	relaunch.InitialPrompt = ""
+	relaunch.ConfirmSwitch = false
+	s.replaceLastGoodLocked(current.runtime.AgentName, relaunch)
+	clearLaunchEnvironment(&current.launch)
 	s.logger().Info("Codex worker ready", "component", "codex_supervisor", "agent", current.runtime.AgentName, "thread_id", ready.ThreadID, "directory", ready.Directory)
 	close(current.ready)
 }
@@ -324,6 +359,7 @@ func (s *Supervisor) runWorker(ctx context.Context, current *worker, options cod
 	if s.workers[current.runtime.AgentName] == current {
 		delete(s.workers, current.runtime.AgentName)
 	}
+	clearLaunchEnvironment(&current.launch)
 	close(current.done)
 	s.mu.Unlock()
 	if err != nil {
@@ -331,6 +367,93 @@ func (s *Supervisor) runWorker(ctx context.Context, current *worker, options cod
 	} else {
 		logger.Info("Codex worker exited", "phase", current.runtime.Phase, "thread_id", current.runtime.ThreadID, "reason", "context canceled")
 	}
+}
+
+// WakeCodexAgent asynchronously resumes the offline named Codex agent addressed
+// by a newly committed local human message. The exact last successful launch
+// configuration wins while this daemon remains alive. After a daemon restart,
+// the durable selected thread and cwd are combined with the sending client's
+// environment.
+func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string) {
+	if message.SenderMailboxID != model.HumanMailboxID || strings.TrimSpace(message.RecipientMailboxID) == "" {
+		return
+	}
+	agents, err := s.Store.ListNamedAgents(s.ctx)
+	if err != nil {
+		s.logger().Error("resolve named agent for message wake", "component", "codex_supervisor", "recipient_mailbox_id", message.RecipientMailboxID, "error", err)
+		return
+	}
+	var agent domain.NamedAgent
+	for _, candidate := range agents {
+		if candidate.MailboxID == message.RecipientMailboxID {
+			agent = candidate
+			break
+		}
+	}
+	if agent.Name == "" || agent.Retired || agent.Active || agent.Harness != "codex" || agent.CurrentSessionID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	if s.ctx.Err() != nil || s.workers[agent.Name] != nil || s.waking[agent.Name] {
+		s.mu.Unlock()
+		return
+	}
+	request, found := s.lastGood[agent.Name]
+	if found && request.SessionID == agent.CurrentSessionID {
+		request = cloneLaunchRequest(request)
+	} else {
+		request = domain.CodexLaunchRequest{
+			Directory: agent.Context.Directory, Repository: agent.Context,
+			Environment: append([]string(nil), environment...),
+		}
+		if len(request.Environment) == 0 {
+			request.Environment = os.Environ()
+		}
+	}
+	request.RequestID = uuid.NewString()
+	request.AgentName = agent.Name
+	request.Action = domain.CodexSessionResume
+	request.SessionID = agent.CurrentSessionID
+	request.InitialPrompt = ""
+	request.ConfirmSwitch = false
+	s.waking[agent.Name] = true
+	s.wakeWG.Add(1)
+	s.mu.Unlock()
+
+	go func() {
+		defer s.wakeWG.Done()
+		runtime, launchErr := s.LaunchCodexAgent(s.ctx, request)
+		clearLaunchEnvironment(&request)
+		s.mu.Lock()
+		delete(s.waking, agent.Name)
+		s.mu.Unlock()
+		logger := s.logger().With("component", "codex_supervisor", "agent", agent.Name, "thread_id", agent.CurrentSessionID)
+		if launchErr != nil || runtime.Phase != domain.CodexRuntimeRunning {
+			logger.Warn("automatic Codex agent wake failed", "phase", runtime.Phase, "error", launchErr)
+			return
+		}
+		logger.Info("automatic Codex agent wake succeeded", "directory", runtime.Directory)
+	}()
+}
+
+func (s *Supervisor) replaceLastGoodLocked(name string, request domain.CodexLaunchRequest) {
+	if previous, ok := s.lastGood[name]; ok {
+		clearLaunchEnvironment(&previous)
+	}
+	s.lastGood[name] = request
+}
+
+func cloneLaunchRequest(request domain.CodexLaunchRequest) domain.CodexLaunchRequest {
+	request.Environment = append([]string(nil), request.Environment...)
+	return request
+}
+
+func clearLaunchEnvironment(request *domain.CodexLaunchRequest) {
+	for index := range request.Environment {
+		request.Environment[index] = ""
+	}
+	request.Environment = nil
 }
 
 func (s *Supervisor) logger() *slog.Logger {
@@ -411,3 +534,4 @@ func sameDesiredRuntime(runtime domain.CodexRuntime, request domain.CodexLaunchR
 }
 
 var _ domain.CodexRuntimeController = (*Supervisor)(nil)
+var _ domain.CodexRuntimeAutoStarter = (*Supervisor)(nil)

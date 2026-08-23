@@ -19,6 +19,7 @@ import (
 	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/identity"
+	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
 )
 
@@ -185,6 +186,127 @@ func TestSupervisorLaunchIsDetachedIdempotentConcurrentAndEnvironmentPrivate(t *
 		if readErr == nil && bytes.Contains(raw, []byte(secret)) {
 			t.Fatalf("environment secret persisted in %s", path)
 		}
+	}
+}
+
+func TestMessageWakesOfflineAgentWithLastKnownGoodLaunch(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	starter := &scriptedStarter{}
+	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	supervisor.Starter = starter.factory
+	defer supervisor.Close()
+	directory := t.TempDir()
+	originalEnvironment := []string{"PATH=/original/bin", "TOKEN=original-secret"}
+	launched, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew,
+		Directory: directory, Repository: model.RepositoryContext{Directory: directory, Branch: "main"},
+		Environment: originalEnvironment, InitialPrompt: "begin once", Yolo: true,
+	})
+	if err != nil || launched.Phase != domain.CodexRuntimeRunning {
+		t.Fatalf("initial launch = %#v, %v", launched, err)
+	}
+	supervisor.mu.Lock()
+	lastGood := cloneLaunchRequest(supervisor.lastGood["fred"])
+	supervisor.mu.Unlock()
+	defer clearLaunchEnvironment(&lastGood)
+	if lastGood.SessionID != launched.ThreadID || lastGood.InitialPrompt != "" || !lastGood.Yolo || strings.Join(lastGood.Environment, "|") != strings.Join(originalEnvironment, "|") {
+		t.Fatalf("last known good launch = %#v", lastGood)
+	}
+	if _, err := supervisor.StopCodexAgent(context.Background(), "fred"); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := database.GetNamedAgent(context.Background(), "fred")
+	if err != nil || agent.Active {
+		t.Fatalf("offline agent = %#v, %v", agent, err)
+	}
+	message := model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID, Body: "wake up"}
+	supervisor.WakeCodexAgent(message, []string{"PATH=/new/sender", "TOKEN=new-secret"})
+	supervisor.WakeCodexAgent(message, []string{"PATH=/duplicate"})
+	woken := waitForRunningRuntime(t, supervisor, "fred")
+	if woken.ThreadID != launched.ThreadID || woken.Directory != directory {
+		t.Fatalf("woken runtime = %#v", woken)
+	}
+	starter.mu.Lock()
+	starts := starter.starts
+	environments := append([][]string(nil), starter.environments...)
+	starter.mu.Unlock()
+	if starts != 2 || len(environments) != 2 || strings.Join(environments[1], "|") != strings.Join(originalEnvironment, "|") {
+		t.Fatalf("starts=%d environments=%#v", starts, environments)
+	}
+}
+
+func TestMessageWakeAfterDaemonRestartUsesPersistedThreadAndSenderEnvironment(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	directory := t.TempDir()
+	firstStarter := &scriptedStarter{}
+	first := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	first.Starter = firstStarter.factory
+	launched, err := first.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew,
+		Directory: directory, Repository: model.RepositoryContext{Directory: directory}, Environment: []string{"TOKEN=old-daemon-secret"}, Yolo: true,
+	})
+	if err != nil || launched.Phase != domain.CodexRuntimeRunning {
+		t.Fatalf("initial launch = %#v, %v", launched, err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondStarter := &scriptedStarter{}
+	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	second.Starter = secondStarter.factory
+	defer second.Close()
+	agent, err := database.GetNamedAgent(context.Background(), "fred")
+	if err != nil || agent.Active || agent.CurrentSessionID != launched.ThreadID {
+		t.Fatalf("persisted agent = %#v, %v", agent, err)
+	}
+	senderEnvironment := []string{"PATH=/sender/bin", "TOKEN=sender-secret"}
+	second.WakeCodexAgent(model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID}, senderEnvironment)
+	woken := waitForRunningRuntime(t, second, "fred")
+	if woken.ThreadID != launched.ThreadID || woken.Directory != directory {
+		t.Fatalf("woken runtime = %#v", woken)
+	}
+	secondStarter.mu.Lock()
+	environments := append([][]string(nil), secondStarter.environments...)
+	secondStarter.mu.Unlock()
+	if len(environments) != 1 || strings.Join(environments[0], "|") != strings.Join(senderEnvironment, "|") {
+		t.Fatalf("restart environments = %#v", environments)
+	}
+}
+
+func waitForRunningRuntime(t *testing.T, supervisor *Supervisor, name string) domain.CodexRuntime {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		runtime, err := supervisor.CodexAgentRuntime(context.Background(), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.Phase == domain.CodexRuntimeRunning {
+			return runtime
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("agent %s did not wake; last runtime %#v", name, runtime)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

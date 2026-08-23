@@ -38,6 +38,7 @@ func (s Service) Handle(ctx context.Context, session *localwire.Session, method 
 		if result, found, lookupErr := s.Store.MutationResult(ctx, mutation); lookupErr != nil {
 			return nil, encodeMutationError(lookupErr)
 		} else if found {
+			s.wakeForReplayedMessageMutation(method, raw)
 			return result, nil
 		}
 		ctx = domain.WithMutation(ctx, mutation)
@@ -200,13 +201,23 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		return nil, s.Store.Create(ctx, request.Message)
+		defer clearEnvironment(request.Environment)
+		if err := s.Store.Create(ctx, request.Message); err != nil {
+			return nil, err
+		}
+		s.wakeCodexAgent(request.Message, request.Environment)
+		return nil, nil
 	case ReplyMethod:
 		var request ReplyRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		return nil, s.Store.Reply(ctx, request.OriginalID, request.Reply)
+		defer clearEnvironment(request.Environment)
+		if err := s.Store.Reply(ctx, request.OriginalID, request.Reply); err != nil {
+			return nil, err
+		}
+		s.wakeCodexAgent(request.Reply, request.Environment)
+		return nil, nil
 	case GetMethod:
 		var request IDRequest
 		if err := decodeRequest(raw, &request); err != nil {
@@ -329,6 +340,35 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 		}, nil
 	default:
 		return nil, &methodNotFoundError{method: method}
+	}
+}
+
+func (s Service) wakeCodexAgent(message model.Message, environment []string) {
+	if runtime, ok := s.Runtime.(domain.CodexRuntimeAutoStarter); ok {
+		runtime.WakeCodexAgent(message, environment)
+	}
+}
+
+func (s Service) wakeForReplayedMessageMutation(method string, raw json.RawMessage) {
+	switch method {
+	case CreateMethod:
+		var request MessageRequest
+		if json.Unmarshal(raw, &request) == nil {
+			s.wakeCodexAgent(request.Message, request.Environment)
+			clearEnvironment(request.Environment)
+		}
+	case ReplyMethod:
+		var request ReplyRequest
+		if json.Unmarshal(raw, &request) == nil {
+			s.wakeCodexAgent(request.Reply, request.Environment)
+			clearEnvironment(request.Environment)
+		}
+	}
+}
+
+func clearEnvironment(environment []string) {
+	for index := range environment {
+		environment[index] = ""
 	}
 }
 
