@@ -180,8 +180,8 @@ func TestMessageDetailWrapsToTerminalWidth(t *testing.T) {
 	)
 	item.Details = "RLE support shares patterns with other tools.\nCell-age trails add richer terminal art and keep the tail-marker visible."
 	m := app{messages: []model.Message{item}, width: 40}
-
-	view := m.View().Content
+	group := groupMessages(m.messages)[0]
+	view := m.renderGroupPanel(group, m.width)
 	inDetailPanel := false
 	foundDetailPanel := false
 	for lineNumber, line := range strings.Split(view, "\n") {
@@ -282,6 +282,24 @@ func TestConversationLoadShowsCompleteBidirectionalHistory(t *testing.T) {
 	}
 }
 
+func TestConversationReloadPreservesStableSelection(t *testing.T) {
+	firstMessage := message("selection-first", testAgentID, model.HumanMailboxID, "first")
+	firstMessage.Details = "Codex thread: first-thread"
+	secondMessage := message("selection-second", testAgentID, model.HumanMailboxID, "second")
+	secondMessage.Details = "Codex thread: second-thread"
+	first := model.ConversationSummary{Key: conversationKeyForMessage(firstMessage), Latest: firstMessage}
+	second := model.ConversationSummary{Key: conversationKeyForMessage(secondMessage), Latest: secondMessage}
+	m := app{conversations: []model.ConversationSummary{first, second}, conversationMode: true, cursor: 1}
+	m.setMessages()
+	selectedKey := m.selectedGroupKey()
+	updated, _ := m.Update(loadedMsg{conversations: []model.ConversationSummary{second, first}, histories: map[string][]model.Message{selectedKey: {secondMessage}}})
+	m = updated.(app)
+	group, ok := m.groupAtCursor()
+	if !ok || group.key != selectedKey {
+		t.Fatalf("selection moved after reorder: cursor=%d group=%#v want=%q", m.cursor, group, selectedKey)
+	}
+}
+
 func TestConversationHistoryLoaderExhaustsPages(t *testing.T) {
 	store := &pagedHistoryStore{}
 	m := app{ctx: context.Background(), store: store}
@@ -322,7 +340,7 @@ func TestRepositoryContextShowsRemotesBeforePullState(t *testing.T) {
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
 	m = updated.(app)
-	view = m.View().Content
+	view = m.renderGroupPanel(groupMessages(m.messages)[0], m.width)
 	for _, shown := range []string{"source desktop", "git feature", "origin: wbbradley/hq", "[gh unavailable]", item.Context.Directory, "sender installation ID: " + item.SenderInstallationID} {
 		if !strings.Contains(view, shown) {
 			t.Fatalf("expanded context omitted %q: %q", shown, view)
@@ -643,20 +661,170 @@ func TestMessagePanePageScrollingStaysInsideFixture(t *testing.T) {
 	}
 	item := message("message", testAgentID, model.HumanMailboxID, strings.TrimSpace(body.String()))
 	m := app{messages: []model.Message{item}, width: 80, height: 24, paneFocus: focusMessage}
-	bottomView := m.View().Content
-	bottomLines := strings.Split(bottomView, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:]
-	if bottom := strings.Join(bottomLines, "\n"); !strings.Contains(bottom, "line-20") || strings.Contains(bottom, "line-01") {
-		t.Fatalf("message pane did not begin at latest content: %q", bottom)
+	topView := m.View().Content
+	topLines := strings.Split(topView, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:]
+	if top := strings.Join(topLines, "\n"); !strings.Contains(top, "line-01") || strings.Contains(top, "line-20") {
+		t.Fatalf("message pane did not anchor at oldest open content: %q", top)
 	}
-	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = updated.(app)
-	upperView := m.View().Content
-	upperLines := strings.Split(upperView, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:]
-	if upper := strings.Join(upperLines, "\n"); !strings.Contains(upper, "line-08") || strings.Contains(upper, "line-20") {
-		t.Fatalf("page-up did not scroll within message fixture: %q", upper)
+	lowerView := m.View().Content
+	lowerLines := strings.Split(lowerView, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:]
+	if lower := strings.Join(lowerLines, "\n"); !strings.Contains(lower, "line-08") || strings.Contains(lower, "line-01") {
+		t.Fatalf("page-down did not scroll within message fixture: %q", lower)
 	}
-	if lipgloss.Height(upperView) != m.height {
-		t.Fatalf("scrolled view height = %d; want %d", lipgloss.Height(upperView), m.height)
+	if lipgloss.Height(lowerView) != m.height {
+		t.Fatalf("scrolled view height = %d; want %d", lipgloss.Height(lowerView), m.height)
+	}
+}
+
+func TestMessagePaneOppositeDirectionMovesImmediatelyAfterTopBoundary(t *testing.T) {
+	var body strings.Builder
+	for index := 1; index <= 30; index++ {
+		fmt.Fprintf(&body, "line-%02d\n", index)
+	}
+	item := message("scroll-boundary", testAgentID, model.HumanMailboxID, strings.TrimSpace(body.String()))
+	m := app{messages: []model.Message{item}, width: 80, height: 24, paneFocus: focusMessage}
+	for range 8 {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+		m = updated.(app)
+	}
+	if m.messageScroll != 0 {
+		t.Fatalf("top-boundary keys accumulated scroll state: %#v", m)
+	}
+	before := m.View().Content
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m = updated.(app)
+	after := m.View().Content
+	if m.messageScroll != 1 || !m.messageScrollManual || before == after {
+		t.Fatalf("first j after top boundary did not move: scroll=%d manual=%t", m.messageScroll, m.messageScrollManual)
+	}
+}
+
+func TestMessagePaneAnchorsOldestOpenActionAfterArchivedHistory(t *testing.T) {
+	archived := message("archived-history", testAgentID, model.HumanMailboxID, strings.Repeat("archived ancestor\n", 20))
+	archived.Details = "Codex thread: anchor-thread\nCodex turn: old-turn"
+	archivedAt := time.Now().UTC()
+	archived.ArchivedAt = &archivedAt
+	open := message("open-history", testAgentID, model.HumanMailboxID, "oldest open action")
+	open.CreatedAt = archived.CreatedAt.Add(time.Second)
+	open.Details = "Codex thread: anchor-thread\nCodex turn: open-turn"
+	m := app{messages: []model.Message{archived, open}, width: 80, height: 24}
+	view := m.View().Content
+	messageView := strings.Join(strings.Split(view, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:], "\n")
+	if !strings.Contains(messageView, "oldest open action") || strings.Contains(messageView, "archived ancestor") {
+		t.Fatalf("message pane did not anchor open action: %q", messageView)
+	}
+}
+
+func TestMessagePaneUsesNewestContentWhenConversationHasNoOpenWork(t *testing.T) {
+	first := message("archived-first", testAgentID, model.HumanMailboxID, strings.Repeat("old history\n", 20))
+	second := message("archived-latest", testAgentID, model.HumanMailboxID, "newest archived content")
+	second.CreatedAt = first.CreatedAt.Add(time.Second)
+	archivedAt := time.Now().UTC()
+	first.ArchivedAt, second.ArchivedAt = &archivedAt, &archivedAt
+	m := app{messages: []model.Message{first, second}, width: 80, height: 24}
+	view := m.View().Content
+	messageView := strings.Join(strings.Split(view, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:], "\n")
+	if !strings.Contains(messageView, "newest archived content") || strings.Contains(messageView, "old history") {
+		t.Fatalf("archived-only conversation did not open at newest content: %q", messageView)
+	}
+}
+
+func TestManualMessageAnchorSurvivesEarlierLiveHistory(t *testing.T) {
+	current := message("current-message", testAgentID, model.HumanMailboxID, strings.Repeat("current line\n", 24))
+	current.Details = "Codex thread: live-anchor\nCodex turn: current-turn"
+	conversationKey := conversationKeyForMessage(current)
+	stableKey := conversationKeyString(conversationKey)
+	m := app{
+		conversations: []model.ConversationSummary{{Key: conversationKey, Latest: current}}, conversationMode: true,
+		histories: map[string][]model.Message{stableKey: {current}}, width: 80, height: 24, paneFocus: focusMessage,
+	}
+	m.setMessages()
+	m.reconcileMessageViewport(false)
+	m.scrollMessagePane(5)
+	anchorID, anchorOffset := m.messageAnchorID, m.messageAnchorOffset
+	earlier := message("earlier-message", testAgentID, model.HumanMailboxID, strings.Repeat("earlier line\n", 12))
+	earlier.CreatedAt = current.CreatedAt.Add(-time.Minute)
+	earlier.Details = "Codex thread: live-anchor\nCodex turn: earlier-turn"
+	updated, _ := m.Update(historyLoadedMsg{key: stableKey, messages: []model.Message{earlier, current}})
+	m = updated.(app)
+	if !m.messageScrollManual || m.messageAnchorID != anchorID || m.messageAnchorOffset != anchorOffset || m.messageScroll <= 5 {
+		t.Fatalf("manual anchor was not preserved across earlier history: scroll=%d anchor=%q+%d", m.messageScroll, m.messageAnchorID, m.messageAnchorOffset)
+	}
+}
+
+func TestManualMessageAnchorSurvivesResizeReflow(t *testing.T) {
+	item := message("resize-anchor", testAgentID, model.HumanMailboxID, strings.Repeat("several words that wrap differently ", 40))
+	m := app{messages: []model.Message{item}, groups: groupMessages([]model.Message{item}), markdown: newMessageMarkdownRenderer(nil), editor: textarea.New(), width: 48, height: 24, paneFocus: focusMessage}
+	m.reconcileMessageViewport(false)
+	m.scrollMessagePane(6)
+	anchorID, anchorOffset := m.messageAnchorID, m.messageAnchorOffset
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 28})
+	m = updated.(app)
+	group, _ := m.detailGroup()
+	rendered := m.renderGroupPanelLayout(group, responsivePaneLayout(m.width, m.height, m.answering).messageWidth)
+	if !m.messageScrollManual || m.messageAnchorID != anchorID || m.messageAnchorOffset != anchorOffset || m.messageScroll > messagePaneLastStart(rendered.panel) {
+		t.Fatalf("manual resize anchor = scroll %d, %q+%d; want %q+%d", m.messageScroll, m.messageAnchorID, m.messageAnchorOffset, anchorID, anchorOffset)
+	}
+}
+
+func TestAutomaticMessageAnchorAdvancesAndRestoresWithOpenState(t *testing.T) {
+	first := message("first-open", testAgentID, model.HumanMailboxID, strings.Repeat("first action\n", 12))
+	first.Details = "Codex thread: state-anchor\nCodex turn: first-turn"
+	second := message("second-open", testAgentID, model.HumanMailboxID, "second action")
+	second.CreatedAt = first.CreatedAt.Add(time.Second)
+	second.Details = "Codex thread: state-anchor\nCodex turn: second-turn"
+	m := app{messages: []model.Message{first, second}, width: 80, height: 24}
+	m.groups = groupMessages(m.messages)
+	m.reconcileMessageViewport(false)
+	initial := m.messageScroll
+	archivedAt := time.Now().UTC()
+	m.messages[0].ArchivedAt = &archivedAt
+	m.groups = groupMessages(m.messages)
+	m.reconcileMessageViewport(true)
+	advanced := m.messageScroll
+	if advanced <= initial || m.messageScrollManual {
+		t.Fatalf("automatic anchor did not advance: initial=%d advanced=%d", initial, advanced)
+	}
+	m.messages[0].ArchivedAt = nil
+	m.groups = groupMessages(m.messages)
+	m.reconcileMessageViewport(true)
+	if m.messageScroll != initial {
+		t.Fatalf("automatic anchor did not restore: got=%d want=%d", m.messageScroll, initial)
+	}
+}
+
+func TestRenderedMessageSpansTrackWrappedMessages(t *testing.T) {
+	first := message("wrapped-first", testAgentID, model.HumanMailboxID, strings.Repeat("wrapped words ", 20))
+	first.Details = "Codex thread: span-thread\nCodex turn: first-turn"
+	second := message("wrapped-second", testAgentID, model.HumanMailboxID, "second")
+	second.CreatedAt = first.CreatedAt.Add(time.Second)
+	second.Details = "Codex thread: span-thread\nCodex turn: second-turn"
+	m := app{markdown: newMessageMarkdownRenderer(nil)}
+	group := groupMessages([]model.Message{first, second})[0]
+	narrow := m.renderGroupPanelLayout(group, 40)
+	wide := m.renderGroupPanelLayout(group, 100)
+	if len(narrow.spans) != 2 || narrow.spans[0].messageID != first.ID || narrow.spans[1].messageID != second.ID || narrow.spans[0].end > narrow.spans[1].start {
+		t.Fatalf("message spans = %#v", narrow.spans)
+	}
+	if narrow.spans[0].end <= wide.spans[0].end {
+		t.Fatalf("wrapping did not expand first span: narrow=%#v wide=%#v", narrow.spans[0], wide.spans[0])
+	}
+}
+
+func TestMessageScrollingRemainsBoundedInSmallTerminal(t *testing.T) {
+	item := message("small-scroll", testAgentID, model.HumanMailboxID, strings.Repeat("small terminal line\n", 20))
+	m := app{messages: []model.Message{item}, editor: textarea.New(), width: 38, height: 8, paneFocus: focusMessage}
+	for range 50 {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+		m = updated.(app)
+	}
+	group, _ := m.detailGroup()
+	layout := responsivePaneLayout(m.width, m.height, false)
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	if m.messageScroll < 0 || m.messageScroll > messagePaneLastStart(rendered.panel) || lipgloss.Height(m.View().Content) != m.height {
+		t.Fatalf("small-terminal scroll=%d maximum=%d height=%d", m.messageScroll, messagePaneLastStart(rendered.panel), lipgloss.Height(m.View().Content))
 	}
 }
 
@@ -853,7 +1021,7 @@ func TestEmptyingExistingDraftDeletesItWhenLeavingComposer(t *testing.T) {
 func TestPageKeysApplyToFocusedPane(t *testing.T) {
 	messages := make([]model.Message, 0, 10)
 	for i := range 10 {
-		item := message(fmt.Sprintf("message-%02d", i), testAgentID, model.HumanMailboxID, fmt.Sprintf("Body %02d", i))
+		item := message(fmt.Sprintf("message-%02d", i), testAgentID, model.HumanMailboxID, strings.Repeat(fmt.Sprintf("Body %02d\n", i), 30))
 		item.CreatedAt = time.Unix(int64(100-i), 0)
 		messages = append(messages, item)
 	}
@@ -864,10 +1032,10 @@ func TestPageKeysApplyToFocusedPane(t *testing.T) {
 		t.Fatalf("inbox page-down changed cursor=%d scroll=%d", m.cursor, m.messageScroll)
 	}
 	m.paneFocus = focusMessage
-	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = updated.(app)
 	if m.messageScroll == 0 {
-		t.Fatal("message page-up did not change message scroll")
+		t.Fatal("message page-down did not change message scroll")
 	}
 	previousScroll := m.messageScroll
 	m.paneFocus = focusReply

@@ -36,63 +36,67 @@ var (
 )
 
 type app struct {
-	ctx               context.Context
-	store             domain.Store
-	repo              repoctx.Provider
-	messages          []model.Message
-	groups            []messageGroup
-	conversations     []model.ConversationSummary
-	conversationMode  bool
-	histories         map[string][]model.Message
-	inbox             []model.Message
-	sent              []model.Message
-	archived          []model.Message
-	showSent          bool
-	showArchived      bool
-	showStatus        bool
-	showTechnical     bool
-	cursor            int
-	width             int
-	height            int
-	answering         bool
-	answerID          string
-	answerGroupKey    string
-	answerQ           model.Message
-	drafts            map[string]messageDraft
-	activeDraftKey    string
-	composeTo         string
-	composeName       string
-	composeContext    model.RepositoryContext
-	composeNamed      bool
-	agents            []domain.NamedAgent
-	threadSessions    map[string]domain.AgentSession
-	pickingRecipient  bool
-	pickerQuery       string
-	pickerCursor      int
-	editor            textarea.Model
-	err               error
-	contextID         string
-	branch            string
-	remotes           string
-	pull              string
-	sync              func(context.Context) error
-	syncErr           error
-	network           domain.NetworkStatus
-	changes           <-chan domain.Invalidation
-	states            <-chan domain.ConnectionUpdate
-	connection        domain.ConnectionUpdate
-	undoStack         []undoAction
-	nextUndoID        uint64
-	undoing           bool
-	undoNotice        string
-	messageScroll     int
-	paneFocus         paneFocus
-	markdown          *messageMarkdownRenderer
-	launchDirectory   string
-	launchEnvironment []string
-	defaultYolo       bool
-	managingAgents    bool
-	agentManager      agentManager
+	ctx                 context.Context
+	store               domain.Store
+	repo                repoctx.Provider
+	messages            []model.Message
+	groups              []messageGroup
+	conversations       []model.ConversationSummary
+	conversationMode    bool
+	histories           map[string][]model.Message
+	inbox               []model.Message
+	sent                []model.Message
+	archived            []model.Message
+	showSent            bool
+	showArchived        bool
+	showStatus          bool
+	showTechnical       bool
+	cursor              int
+	width               int
+	height              int
+	answering           bool
+	answerID            string
+	answerGroupKey      string
+	answerQ             model.Message
+	drafts              map[string]messageDraft
+	activeDraftKey      string
+	composeTo           string
+	composeName         string
+	composeContext      model.RepositoryContext
+	composeNamed        bool
+	agents              []domain.NamedAgent
+	threadSessions      map[string]domain.AgentSession
+	pickingRecipient    bool
+	pickerQuery         string
+	pickerCursor        int
+	editor              textarea.Model
+	err                 error
+	contextID           string
+	branch              string
+	remotes             string
+	pull                string
+	sync                func(context.Context) error
+	syncErr             error
+	network             domain.NetworkStatus
+	changes             <-chan domain.Invalidation
+	states              <-chan domain.ConnectionUpdate
+	connection          domain.ConnectionUpdate
+	undoStack           []undoAction
+	nextUndoID          uint64
+	undoing             bool
+	undoNotice          string
+	messageScroll       int
+	messageScrollManual bool
+	messageViewportKey  string
+	messageAnchorID     string
+	messageAnchorOffset int
+	paneFocus           paneFocus
+	markdown            *messageMarkdownRenderer
+	launchDirectory     string
+	launchEnvironment   []string
+	defaultYolo         bool
+	managingAgents      bool
+	agentManager        agentManager
 }
 
 type agentManagerStage int
@@ -166,6 +170,18 @@ type paneLayout struct {
 	messageHeight int
 	replyWidth    int
 	replyHeight   int
+}
+
+type messageLineSpan struct {
+	messageID  string
+	actionUnit string
+	start      int
+	end        int
+}
+
+type renderedMessageGroup struct {
+	panel string
+	spans []messageLineSpan
 }
 
 func (g messageGroup) latest() model.Message {
@@ -549,6 +565,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
 		m.editor.SetHeight(max(1, layout.replyHeight-4))
+		m.reconcileMessageViewport(true)
 	case loadedMsg:
 		selectedKey := m.selectedGroupKey()
 		if msg.conversations != nil || (msg.err == nil && m.store != nil) {
@@ -572,6 +589,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.cursor >= len(visibleGroups) {
 			m.cursor = max(0, len(visibleGroups)-1)
 		}
+		m.reconcileMessageViewport(true)
 		return m.withContextCommand()
 	case historyLoadedMsg:
 		if msg.err != nil {
@@ -590,6 +608,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.markdown != nil {
 			m.markdown.Reset()
 		}
+		m.reconcileMessageViewport(true)
 		return m.withContextCommand()
 	case repairMsg:
 		return m, tea.Batch(m.load, m.syncNow(), scheduleRepair())
@@ -696,6 +715,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.composeNamed = false
 			m.paneFocus = focusInbox
 			m.editor.Reset()
+			m.reconcileMessageViewport(true)
 			return m, tea.Batch(m.load, m.syncNow())
 		}
 		if errors.Is(msg.err, domain.ErrAgentRetired) || errors.Is(msg.err, domain.ErrAgentNotFound) {
@@ -787,10 +807,10 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.paneFocus {
 			case focusInbox:
 				m.cursor = max(0, m.cursor-max(1, layout.inboxHeight-3))
-				m.messageScroll = 0
+				m.resetMessageViewport()
 				return m.withContextCommand()
 			case focusMessage:
-				m.messageScroll += max(1, layout.messageHeight-3)
+				m.scrollMessagePane(-max(1, layout.messageHeight-3))
 				return m, nil
 			case focusReply:
 				if m.answering {
@@ -805,10 +825,10 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.paneFocus {
 			case focusInbox:
 				m.cursor = min(max(0, len(m.visibleGroups())-1), m.cursor+max(1, layout.inboxHeight-3))
-				m.messageScroll = 0
+				m.resetMessageViewport()
 				return m.withContextCommand()
 			case focusMessage:
-				m.messageScroll = max(0, m.messageScroll-max(1, layout.messageHeight-3))
+				m.scrollMessagePane(max(1, layout.messageHeight-3))
 				return m, nil
 			case focusReply:
 				if m.answering {
@@ -835,10 +855,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.paneFocus = focusInbox
 				m.editor.Blur()
 				m.editor.Reset()
+				m.reconcileMessageViewport(true)
 				return m, nil
 			case "j", "down":
 				if m.paneFocus == focusMessage {
-					m.messageScroll = max(0, m.messageScroll-1)
+					m.scrollMessagePane(1)
 					return m, nil
 				}
 				if m.paneFocus == focusInbox && m.cursor+1 < len(m.visibleGroups()) {
@@ -847,7 +868,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "k", "up":
 				if m.paneFocus == focusMessage {
-					m.messageScroll++
+					m.scrollMessagePane(-1)
 					return m, nil
 				}
 				if m.paneFocus == focusInbox && m.cursor > 0 {
@@ -875,7 +896,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "j", "down":
 			if m.paneFocus == focusMessage {
-				m.messageScroll = max(0, m.messageScroll-1)
+				m.scrollMessagePane(1)
 				return m, nil
 			}
 			if m.paneFocus != focusInbox {
@@ -883,12 +904,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.cursor+1 < len(m.visibleGroups()) {
 				m.cursor++
-				m.messageScroll = 0
+				m.resetMessageViewport()
 				return m.withContextCommand()
 			}
 		case "k", "up":
 			if m.paneFocus == focusMessage {
-				m.messageScroll++
+				m.scrollMessagePane(-1)
 				return m, nil
 			}
 			if m.paneFocus != focusInbox {
@@ -896,13 +917,13 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.cursor > 0 {
 				m.cursor--
-				m.messageScroll = 0
+				m.resetMessageViewport()
 				return m.withContextCommand()
 			}
 		case "s":
 			m.showSent = !m.showSent
 			m.cursor = 0
-			m.messageScroll = 0
+			m.resetMessageViewport()
 			if m.conversationMode {
 				return m, m.load
 			}
@@ -911,7 +932,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "x":
 			m.showArchived = !m.showArchived
 			m.cursor = 0
-			m.messageScroll = 0
+			m.resetMessageViewport()
 			if m.conversationMode {
 				return m, m.load
 			}
@@ -922,6 +943,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "i":
 			m.showTechnical = !m.showTechnical
+			m.reconcileMessageViewport(true)
 			return m, nil
 		case "enter", "a":
 			if group, ok := m.groupAtCursor(); ok && (group.draft != nil || canReplyGroup(group)) {
@@ -1318,6 +1340,7 @@ func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.paneFocus = focusReply
 		m.resizeEditor()
 		m.editor.Focus()
+		m.reconcileMessageViewport(true)
 		return m, textarea.Blink
 	case "backspace":
 		runes := []rune(m.pickerQuery)
@@ -1359,6 +1382,7 @@ func (m app) beginComposeForSelection() (tea.Model, tea.Cmd) {
 			m.paneFocus = focusReply
 			m.resizeEditor()
 			m.editor.Focus()
+			m.reconcileMessageViewport(true)
 			return m, textarea.Blink
 		}
 	}
@@ -1423,6 +1447,7 @@ func (m *app) stowActiveDraft() {
 	} else if m.cursor >= len(groups) {
 		m.cursor = max(0, len(groups)-1)
 	}
+	m.reconcileMessageViewport(true)
 }
 
 func (m *app) resumeDraft(draft messageDraft) {
@@ -1439,6 +1464,7 @@ func (m *app) resumeDraft(draft messageDraft) {
 	m.resizeEditor()
 	m.editor.SetValue(draft.body)
 	m.editor.Focus()
+	m.reconcileMessageViewport(true)
 }
 
 func (m app) paneFocused(pane paneFocus) bool { return m.paneFocus == pane }
@@ -1715,6 +1741,123 @@ func (m app) groupByKey(key string) (messageGroup, bool) {
 		return groups[index], true
 	}
 	return messageGroup{}, false
+}
+
+func (m app) detailGroup() (messageGroup, bool) {
+	if m.answering {
+		if group, found := m.groupByKey(m.selectedGroupKey()); found {
+			return group, true
+		}
+		if m.answerQ.ID != "" {
+			return messageGroup{key: messageGroupKey(m.answerQ), conversationKey: conversationKeyForMessage(m.answerQ), messages: []model.Message{m.answerQ}}, true
+		}
+		return messageGroup{}, false
+	}
+	return m.groupAtCursor()
+}
+
+func messagePaneMaxStart(rendered string, height int) int {
+	lines := strings.Split(rendered, "\n")
+	innerLines := max(0, len(lines)-2)
+	innerHeight := max(0, height-2)
+	return max(0, innerLines-innerHeight)
+}
+
+func messagePaneLastStart(rendered string) int {
+	return max(0, len(strings.Split(rendered, "\n"))-3)
+}
+
+func automaticMessageStart(group messageGroup, rendered renderedMessageGroup, height int) int {
+	maximum := messagePaneMaxStart(rendered.panel, height)
+	target := archiveTarget(group)
+	if target.ID == "" {
+		return maximum
+	}
+	unit := actionUnitKey(target)
+	for _, span := range rendered.spans {
+		if span.actionUnit == unit {
+			return max(0, span.start)
+		}
+	}
+	return maximum
+}
+
+func (m app) resolvedMessageStart(group messageGroup, rendered renderedMessageGroup, height int) int {
+	maximum := messagePaneLastStart(rendered.panel)
+	if !m.messageScrollManual || m.messageViewportKey != group.key {
+		return automaticMessageStart(group, rendered, height)
+	}
+	if m.messageAnchorID != "" {
+		for _, span := range rendered.spans {
+			if span.messageID == m.messageAnchorID {
+				return min(maximum, max(0, span.start+m.messageAnchorOffset))
+			}
+		}
+	}
+	return min(maximum, max(0, m.messageScroll))
+}
+
+func captureMessageAnchor(rendered renderedMessageGroup, start int) (string, int) {
+	var chosen *messageLineSpan
+	for index := range rendered.spans {
+		span := &rendered.spans[index]
+		if span.start > start {
+			break
+		}
+		chosen = span
+	}
+	if chosen == nil {
+		return "", start
+	}
+	return chosen.messageID, max(0, start-chosen.start)
+}
+
+func (m *app) reconcileMessageViewport(preserveManual bool) {
+	group, found := m.detailGroup()
+	if !found {
+		if !preserveManual {
+			m.resetMessageViewport()
+		}
+		return
+	}
+	if !preserveManual || m.messageViewportKey != group.key {
+		m.messageScrollManual = false
+		m.messageAnchorID = ""
+		m.messageAnchorOffset = 0
+	}
+	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	m.messageScroll = m.resolvedMessageStart(group, rendered, layout.messageHeight)
+	m.messageViewportKey = group.key
+	if m.messageScrollManual {
+		m.messageAnchorID, m.messageAnchorOffset = captureMessageAnchor(rendered, m.messageScroll)
+	}
+}
+
+func (m *app) resetMessageViewport() {
+	m.messageScroll = 0
+	m.messageScrollManual = false
+	m.messageViewportKey = ""
+	m.messageAnchorID = ""
+	m.messageAnchorOffset = 0
+}
+
+func (m *app) scrollMessagePane(delta int) {
+	group, found := m.detailGroup()
+	if !found {
+		return
+	}
+	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	current := m.resolvedMessageStart(group, rendered, layout.messageHeight)
+	next := min(messagePaneLastStart(rendered.panel), max(0, current+delta))
+	m.messageScroll = next
+	m.messageViewportKey = group.key
+	if next == current {
+		return
+	}
+	m.messageScrollManual = true
+	m.messageAnchorID, m.messageAnchorOffset = captureMessageAnchor(rendered, next)
 }
 
 func canReply(message model.Message) bool {
@@ -2030,23 +2173,16 @@ func (m app) View() tea.View {
 	}
 	layout := responsivePaneLayout(m.width, m.height, m.answering)
 	inboxPane := m.renderInboxPane(layout.width, layout.inboxHeight)
-	var detailGroup messageGroup
-	hasDetail := false
-	if m.answering {
-		detailGroup, hasDetail = m.groupByKey(m.selectedGroupKey())
-		if !hasDetail && m.answerQ.ID != "" {
-			detailGroup, hasDetail = messageGroup{key: messageGroupKey(m.answerQ), messages: []model.Message{m.answerQ}}, true
-		}
-	} else {
-		detailGroup, hasDetail = m.groupAtCursor()
-	}
+	detailGroup, hasDetail := m.detailGroup()
 	messageFocused := m.paneFocused(focusMessage)
 	replyFocused := m.paneFocused(focusReply)
 	messagePane := renderMessagePanel("No message selected.", layout.messageWidth, "[message]", "", messageFocused)
 	if hasDetail {
-		messagePane = m.renderGroupPanel(detailGroup, layout.messageWidth)
+		rendered := m.renderGroupPanelLayout(detailGroup, layout.messageWidth)
+		messagePane = fitRenderedPaneFromTop(rendered.panel, layout.messageWidth, layout.messageHeight, m.resolvedMessageStart(detailGroup, rendered, layout.messageHeight), messageFocused)
+	} else {
+		messagePane = fitRenderedPaneFromTop(messagePane, layout.messageWidth, layout.messageHeight, 0, messageFocused)
 	}
-	messagePane = fitRenderedPane(messagePane, layout.messageWidth, layout.messageHeight, m.messageScroll, messageFocused)
 	replyHint := "Press Tab or n to choose a recipient for a new message."
 	if hasDetail && detailGroup.draft != nil {
 		replyHint = "Press Tab or Enter to continue this draft, or n for a new message."
@@ -2212,6 +2348,10 @@ func groupPresentationKind(group messageGroup) string {
 }
 
 func (m app) renderGroupPanel(group messageGroup, width int) string {
+	return m.renderGroupPanelLayout(group, width).panel
+}
+
+func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessageGroup {
 	if len(group.messages) == 0 && group.draft != nil {
 		body := titleStyle.Render("New message to "+draftRecipient(*group.draft)) + "\n\n"
 		if group.draft.body == "" {
@@ -2219,7 +2359,7 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 		} else {
 			body += group.draft.body
 		}
-		return renderMessagePanel(body, width, "[draft]", "press enter to continue", m.paneFocused(focusMessage))
+		return renderedMessageGroup{panel: renderMessagePanel(body, width, "[draft]", "press enter to continue", m.paneFocused(focusMessage))}
 	}
 	latest := group.latest()
 	kind := groupPresentationKind(group)
@@ -2231,11 +2371,13 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 		body.WriteString("\n\n")
 	}
 	metadataHidden := false
+	var spans []messageLineSpan
 	markdownWidth := max(1, width-panel.GetHorizontalFrameSize())
 	for i, message := range group.messages {
 		if i > 0 {
 			body.WriteString("\n\n")
 		}
+		spanStart := nextRenderedLineIndex(body.String())
 		header := "── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM")
 		if direction := messageDirection(message); direction != "" {
 			header += " · " + direction
@@ -2255,9 +2397,11 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 				body.WriteString(dim.Render(identifiers))
 			}
 		}
+		spans = append(spans, messageLineSpan{messageID: message.ID, actionUnit: actionUnitKey(message), start: spanStart, end: renderedLineCount(body.String())})
 	}
 	if group.draft != nil {
 		body.WriteString("\n\n")
+		draftStart := nextRenderedLineIndex(body.String())
 		body.WriteString(titleStyle.Render("Draft reply"))
 		body.WriteByte('\n')
 		if group.draft.body == "" {
@@ -2265,6 +2409,7 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 		} else {
 			body.WriteString(group.draft.body)
 		}
+		spans = append(spans, messageLineSpan{messageID: "draft:" + group.key, actionUnit: "draft:" + group.key, start: draftStart, end: renderedLineCount(body.String())})
 	}
 	if m.showTechnical {
 		if context := m.technicalContext(latest); context != "" {
@@ -2276,7 +2421,18 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 	if !m.showTechnical && (metadataHidden || groupHasTechnicalIdentifiers(group) || m.technicalContext(latest) != "") {
 		bottomLabel = "technical details hidden · press i to show"
 	}
-	return renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage))
+	return renderedMessageGroup{panel: renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage)), spans: spans}
+}
+
+func renderedLineCount(value string) int {
+	if value == "" {
+		return 0
+	}
+	return strings.Count(value, "\n") + 1
+}
+
+func nextRenderedLineIndex(value string) int {
+	return max(0, renderedLineCount(value)-1)
 }
 
 func messageDirection(message model.Message) string {
@@ -2462,6 +2618,46 @@ func fitRenderedPane(rendered string, width, height, scrollBack int, focused boo
 		maxStart := len(inner) - innerHeight
 		start = maxStart - min(maxStart, max(0, scrollBack))
 		inner = inner[start : start+innerHeight]
+	}
+	paneStyle := dimPanel
+	if focused {
+		paneStyle = panel
+	}
+	blankRendered := paneStyle.Width(max(width, paneStyle.GetHorizontalFrameSize()+1)).Render("")
+	blankLines := strings.Split(blankRendered, "\n")
+	blank := ""
+	if len(blankLines) >= 3 {
+		blank = blankLines[1]
+	}
+	for len(inner) < innerHeight {
+		inner = append(inner, blank)
+	}
+	result := make([]string, 0, height)
+	result = append(result, top)
+	result = append(result, inner...)
+	result = append(result, bottom)
+	return strings.Join(result, "\n")
+}
+
+func fitRenderedPaneFromTop(rendered string, width, height, start int, focused bool) string {
+	if height <= 0 {
+		return ""
+	}
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	if height == 1 {
+		return lines[0]
+	}
+	top, bottom := lines[0], lines[len(lines)-1]
+	inner := lines[1 : len(lines)-1]
+	innerHeight := max(0, height-2)
+	maximum := max(0, len(inner)-1)
+	start = min(maximum, max(0, start))
+	if len(inner) > innerHeight {
+		end := min(len(inner), start+innerHeight)
+		inner = inner[start:end]
 	}
 	paneStyle := dimPanel
 	if focused {
