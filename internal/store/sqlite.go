@@ -21,7 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -127,6 +127,8 @@ CREATE TABLE messages (
     actor_label TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL,
     details TEXT NOT NULL DEFAULT '',
+	codex_thread_id TEXT NOT NULL DEFAULT '',
+	codex_turn_id TEXT NOT NULL DEFAULT '',
     reply_to TEXT,
     created_at INTEGER NOT NULL,
     archived_at INTEGER,
@@ -275,8 +277,10 @@ INSERT INTO change_revision(id,revision) VALUES (1,0);
 CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, created_at, id);
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
+CREATE INDEX messages_codex_conversation ON messages(codex_thread_id, created_at, id);
+CREATE INDEX messages_codex_turn ON messages(codex_thread_id, codex_turn_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 12;
+PRAGMA user_version = 13;
 `
 
 const (
@@ -402,6 +406,27 @@ PRAGMA foreign_keys = ON;`
 			return fmt.Errorf("migrate schema to version 12: %w", err)
 		}
 		version = 12
+	}
+	if version == 12 {
+		for _, column := range []string{"codex_thread_id", "codex_turn_id"} {
+			var count int
+			if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name=?`, column).Scan(&count); err != nil {
+				return fmt.Errorf("inspect schema version 12: %w", err)
+			}
+			if count == 0 {
+				if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`); err != nil {
+					return fmt.Errorf("add message correlation column %s: %w", column, err)
+				}
+			}
+		}
+		migration := `CREATE INDEX IF NOT EXISTS messages_codex_conversation ON messages(codex_thread_id, created_at, id);
+CREATE INDEX IF NOT EXISTS messages_codex_turn ON messages(codex_thread_id, codex_turn_id, created_at, id);
+UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
+PRAGMA user_version = 13;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 13: %w", err)
+		}
+		version = 13
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -896,8 +921,9 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if message.Archived {
 			archived = message.ArchivedAt.UnixMilli()
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, eventID, message.ThreadID, message.Type, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
+		correlation := model.ParseMessageCorrelation(message.Details)
+		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, codex_thread_id, codex_turn_id, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, eventID, message.ThreadID, message.Type, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, correlation.CodexThreadID, correlation.CodexTurnID, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
 		if err != nil {
 			return fmt.Errorf("project message: %w", err)
 		}
@@ -1285,7 +1311,7 @@ func (s *SQLite) messageRecord(ctx context.Context, id string) (messageWithEvent
 	return messageWithEvent{message: m, eventID: eventID}, nil
 }
 
-const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 OR o.state='rejected' THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.audience_account_id, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, COALESCE(NULLIF(msg.actor_label,''),CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN COALESCE(sn.name,NULLIF(sn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=sm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||':'||substr(sm.id,-8) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END), COALESCE(hd.label,''), CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN COALESCE(rn.name,NULLIF(rn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=rm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||CASE WHEN rn.name IS NULL THEN ':'||substr(rm.id,-8) ELSE '' END ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
+const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.codex_thread_id, msg.codex_turn_id, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 OR o.state='rejected' THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.audience_account_id, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, COALESCE(NULLIF(msg.actor_label,''),CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN COALESCE(sn.name,NULLIF(sn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=sm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||':'||substr(sm.id,-8) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END), COALESCE(hd.label,''), CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN COALESCE(rn.name,NULLIF(rn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=rm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||CASE WHEN rn.name IS NULL THEN ':'||substr(rm.id,-8) ELSE '' END ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
 const joins = ` messages msg LEFT JOIN mailboxes sm ON sm.id=msg.sender_mailbox_id AND sm.installation_id=msg.sender_installation_id LEFT JOIN named_agents sn ON sn.mailbox_id=sm.id LEFT JOIN mailboxes rm ON rm.id=msg.recipient_mailbox_id AND rm.installation_id=msg.recipient_installation_id LEFT JOIN named_agents rn ON rn.mailbox_id=rm.id LEFT JOIN human_account_devices hd ON hd.account_id=msg.audience_account_id AND hd.installation_id=msg.sender_installation_id LEFT JOIN delivery_facts d ON d.message_id=msg.id LEFT JOIN (SELECT event_id,CASE WHEN SUM(CASE WHEN state='queued' THEN 1 ELSE 0 END)>0 THEN 'queued' WHEN SUM(CASE WHEN state='relay-accepted' THEN 1 ELSE 0 END)>0 THEN 'relay-accepted' WHEN SUM(CASE WHEN state='rejected' THEN 1 ELSE 0 END)>0 THEN 'rejected' ELSE '' END AS state FROM outbox GROUP BY event_id) o ON o.event_id=msg.event_id `
 
 type scanner interface{ Scan(...any) error }
@@ -1295,7 +1321,7 @@ func scanMessage(row scanner) (model.Message, error) {
 	var reply sql.NullString
 	var created int64
 	var archived, completed sql.NullInt64
-	err := row.Scan(&m.ID, &m.EventID, &m.ThreadID, &m.Incomplete, &m.PeerReceived, &m.Rejected, &m.DeliveryState, &m.AudienceAccountID, &m.Context.Directory, &m.Context.GitCommonDir, &m.Context.RemoteIdentity, &m.Context.Worktree, &m.Context.Branch, &m.SenderInstallationID, &m.RecipientInstallationID, &m.SenderMailboxID, &m.RecipientMailboxID, &m.SenderLabel, &m.SourceDeviceLabel, &m.RecipientLabel, &m.Body, &m.Details, &reply, &created, &archived, &completed)
+	err := row.Scan(&m.ID, &m.EventID, &m.ThreadID, &m.CodexThreadID, &m.CodexTurnID, &m.Incomplete, &m.PeerReceived, &m.Rejected, &m.DeliveryState, &m.AudienceAccountID, &m.Context.Directory, &m.Context.GitCommonDir, &m.Context.RemoteIdentity, &m.Context.Worktree, &m.Context.Branch, &m.SenderInstallationID, &m.RecipientInstallationID, &m.SenderMailboxID, &m.RecipientMailboxID, &m.SenderLabel, &m.SourceDeviceLabel, &m.RecipientLabel, &m.Body, &m.Details, &reply, &created, &archived, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -1341,6 +1367,19 @@ func (s *SQLite) List(ctx context.Context, f model.Filter) ([]model.Message, err
 	}
 	if f.RecipientMailboxID != "" {
 		add("msg.recipient_mailbox_id = ?", f.RecipientMailboxID)
+	}
+	if f.CounterpartyMailboxID != "" {
+		where = append(where, "((msg.sender_mailbox_id = ? AND msg.recipient_mailbox_id = ?) OR (msg.sender_mailbox_id = ? AND msg.recipient_mailbox_id = ?))")
+		args = append(args, f.CounterpartyMailboxID, model.HumanMailboxID, model.HumanMailboxID, f.CounterpartyMailboxID)
+	}
+	if f.ThreadID != "" {
+		add("msg.thread_event_id = ?", f.ThreadID)
+	}
+	if f.CodexThreadID != "" {
+		add("msg.codex_thread_id = ?", f.CodexThreadID)
+	}
+	if f.CodexTurnID != "" {
+		add("msg.codex_turn_id = ?", f.CodexTurnID)
 	}
 	if f.ReplyTo != "" {
 		add("msg.reply_to = ?", f.ReplyTo)

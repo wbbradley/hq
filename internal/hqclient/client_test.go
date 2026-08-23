@@ -21,6 +21,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	var lock sync.Mutex
 	var methods []string
 	messageEnvironmentCalls := 0
+	var listFilter model.Filter
 	handler := func(_ context.Context, _ *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
 		lock.Lock()
 		methods = append(methods, method)
@@ -55,6 +56,11 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		case domainrpc.GetMethod, domainrpc.ClaimMethod:
 			return model.Message{}, nil
 		case domainrpc.ListMethod:
+			var request domainrpc.FilterRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+			}
+			listFilter = request.Filter
 			return []model.Message{}, nil
 		case domainrpc.ListPeersMethod:
 			return []domain.Peer{}, nil
@@ -96,7 +102,8 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_ = client.Create(ctx, model.Message{})
 	_ = client.Reply(ctx, "original", model.Message{})
 	_, _ = client.Get(ctx, "message")
-	_, _ = client.List(ctx, model.Filter{})
+	wantListFilter := model.Filter{CounterpartyMailboxID: "counterparty", ThreadID: "hq-thread", CodexThreadID: "codex-thread", CodexTurnID: "codex-turn"}
+	_, _ = client.List(ctx, wantListFilter)
 	_ = client.Archive(ctx, "message")
 	_ = client.Restore(ctx, "message")
 	_, _ = client.Claim(ctx, domain.Claim{}, "token")
@@ -142,6 +149,9 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		if methods[index] != want[index] {
 			t.Fatalf("method %d = %q, want %q", index, methods[index], want[index])
 		}
+	}
+	if listFilter != wantListFilter {
+		t.Fatalf("list filter = %#v; want %#v", listFilter, wantListFilter)
 	}
 }
 

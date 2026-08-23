@@ -38,6 +38,8 @@ type Message struct {
 	ID                      string            `json:"id"`
 	EventID                 string            `json:"event_id"`
 	ThreadID                string            `json:"thread_id"`
+	CodexThreadID           string            `json:"codex_thread_id,omitempty"`
+	CodexTurnID             string            `json:"codex_turn_id,omitempty"`
 	Incomplete              bool              `json:"incomplete_causal_history,omitempty"`
 	PeerReceived            bool              `json:"peer_received,omitempty"`
 	Rejected                bool              `json:"rejected,omitempty"`
@@ -60,12 +62,16 @@ type Message struct {
 }
 
 type Filter struct {
-	Directory          string `json:"directory,omitempty"`
-	SenderMailboxID    string `json:"sender_mailbox_id,omitempty"`
-	RecipientMailboxID string `json:"recipient_mailbox_id,omitempty"`
-	ReplyTo            string `json:"reply_to,omitempty"`
-	Archived           *bool  `json:"archived,omitempty"`
-	Completed          *bool  `json:"completed,omitempty"`
-	Limit              int    `json:"limit,omitempty"`
-	NewestFirst        bool   `json:"newest_first,omitempty"`
+	Directory             string `json:"directory,omitempty"`
+	SenderMailboxID       string `json:"sender_mailbox_id,omitempty"`
+	RecipientMailboxID    string `json:"recipient_mailbox_id,omitempty"`
+	CounterpartyMailboxID string `json:"counterparty_mailbox_id,omitempty"`
+	ThreadID              string `json:"thread_id,omitempty"`
+	CodexThreadID         string `json:"codex_thread_id,omitempty"`
+	CodexTurnID           string `json:"codex_turn_id,omitempty"`
+	ReplyTo               string `json:"reply_to,omitempty"`
+	Archived              *bool  `json:"archived,omitempty"`
+	Completed             *bool  `json:"completed,omitempty"`
+	Limit                 int    `json:"limit,omitempty"`
+	NewestFirst           bool   `json:"newest_first,omitempty"`
 }

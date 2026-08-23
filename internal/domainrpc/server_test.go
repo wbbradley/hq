@@ -14,9 +14,10 @@ import (
 )
 
 type recordingOperations struct {
-	called string
-	calls  int
-	err    error
+	called     string
+	calls      int
+	err        error
+	listFilter model.Filter
 }
 
 type recordingRuntime struct {
@@ -99,7 +100,9 @@ func (s *recordingOperations) Reply(context.Context, string, model.Message) erro
 func (s *recordingOperations) Get(context.Context, string) (model.Message, error) {
 	return model.Message{}, s.record(GetMethod)
 }
-func (s *recordingOperations) List(context.Context, model.Filter) ([]model.Message, error) {
+
+func (s *recordingOperations) List(_ context.Context, filter model.Filter) ([]model.Message, error) {
+	s.listFilter = filter
 	return nil, s.record(ListMethod)
 }
 func (s *recordingOperations) Archive(context.Context, string) error { return s.record(ArchiveMethod) }
@@ -237,6 +240,27 @@ func TestCommittedHumanMessagesAttemptNamedAgentWakeWithTransientEnvironment(t *
 	}
 	if len(runtime.wakeMessages) != 2 || runtime.wakeMessages[0].ID != message.ID || strings.Join(runtime.wakeEnvironments[0], "|") != "PATH=/sender/bin|TOKEN=transient" {
 		t.Fatalf("wake messages=%#v environments=%#v", runtime.wakeMessages, runtime.wakeEnvironments)
+	}
+}
+
+func TestServicePassesStructuredConversationFilter(t *testing.T) {
+	operations := &recordingOperations{}
+	service := Service{Store: operations}
+	want := model.Filter{
+		CounterpartyMailboxID: "counterparty",
+		ThreadID:              "hq-thread",
+		CodexThreadID:         "codex-thread",
+		CodexTurnID:           "codex-turn",
+	}
+	raw, err := json.Marshal(FilterRequest{Filter: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, rpcErr := service.Handle(context.Background(), nil, ListMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if operations.listFilter != want {
+		t.Fatalf("list filter = %#v; want %#v", operations.listFilter, want)
 	}
 }
 

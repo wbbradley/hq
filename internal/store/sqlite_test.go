@@ -21,7 +21,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "12"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "13"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -308,6 +308,87 @@ func TestMailboxFilters(t *testing.T) {
 	}
 	if err := s.Archive(ctx, inbound.ID); err != nil {
 		t.Fatalf("rearchive restored message: %v", err)
+	}
+}
+
+func TestMessageConversationCorrelationFilters(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	firstAgent := resolveAgent(t, s, "codex", "correlation-one", "/repo")
+	secondAgent := resolveAgent(t, s, "codex", "correlation-two", "/repo")
+	firstInbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da1", firstAgent.ID, model.HumanMailboxID, "first inbound")
+	firstInbound.Details = "Codex thread: shared-thread\nCodex turn: first-turn"
+	firstOutbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da2", model.HumanMailboxID, firstAgent.ID, "first outbound")
+	firstOutbound.Details = "Codex thread: shared-thread\nCodex turn: second-turn"
+	secondInbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da3", secondAgent.ID, model.HumanMailboxID, "second inbound")
+	secondInbound.Details = "Codex thread: shared-thread\nCodex turn: first-turn"
+	uncorrelated := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da4", firstAgent.ID, model.HumanMailboxID, "uncorrelated")
+	for _, item := range []model.Message{firstInbound, firstOutbound, secondInbound, uncorrelated} {
+		if err := s.Create(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.List(ctx, model.Filter{CodexThreadID: "shared-thread", CounterpartyMailboxID: firstAgent.ID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Body != "first inbound" || got[1].Body != "first outbound" {
+		t.Fatalf("first conversation = %#v", got)
+	}
+	for _, item := range got {
+		if item.CodexThreadID != "shared-thread" || item.CodexTurnID == "" {
+			t.Fatalf("projected correlation = %#v", item)
+		}
+	}
+
+	turn, err := s.List(ctx, model.Filter{CodexThreadID: "shared-thread", CodexTurnID: "first-turn", CounterpartyMailboxID: secondAgent.ID})
+	if err != nil || len(turn) != 1 || turn[0].ID != secondInbound.ID {
+		t.Fatalf("turn filter = %#v, %v", turn, err)
+	}
+	root, err := s.Get(ctx, uncorrelated.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := s.List(ctx, model.Filter{ThreadID: root.ThreadID})
+	if err != nil || len(canonical) != 1 || canonical[0].ID != uncorrelated.ID {
+		t.Fatalf("canonical thread filter = %#v, %v", canonical, err)
+	}
+}
+
+func TestVersionTwelveMigrationBackfillsMessageCorrelation(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "correlation-migration", "/repo")
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db1", agent.ID, model.HumanMailboxID, "preserve correlation")
+	item.Details = "Codex thread: migrated-thread\nCodex turn: migrated-turn"
+	if err := s.Create(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP INDEX messages_codex_conversation; DROP INDEX messages_codex_turn; ALTER TABLE messages DROP COLUMN codex_thread_id; ALTER TABLE messages DROP COLUMN codex_turn_id; PRAGMA user_version = 12`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.Get(ctx, item.ID)
+	if err != nil || got.CodexThreadID != "migrated-thread" || got.CodexTurnID != "migrated-turn" || got.Body != item.Body {
+		t.Fatalf("migrated message = %#v, %v", got, err)
 	}
 }
 
