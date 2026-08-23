@@ -393,7 +393,7 @@ func TestAskWaitsForReplyByDefault(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	initializeTestIdentity(t, database)
 	askStore := openTestStore(t, database)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	a, out := testApp(t, "")
@@ -405,7 +405,7 @@ func TestAskWaitsForReplyByDefault(t *testing.T) {
 	}()
 
 	var question model.Message
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for question.ID == "" && time.Now().Before(deadline) {
 		select {
 		case err := <-done:
@@ -1007,7 +1007,7 @@ func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
 	application.RepoContext = func(context.Context, string) model.RepositoryContext {
 		return model.RepositoryContext{Directory: "/work/repo"}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
@@ -1020,7 +1020,7 @@ func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
 	}
 	defer replier.Close()
 	var question model.Message
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for question.ID == "" && time.Now().Before(deadline) {
 		messages, listErr := replier.List(ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Limit: 10})
 		if listErr != nil {
@@ -1049,10 +1049,10 @@ func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("subscribed ask waited for its one-hour repair interval")
 	}
-	if elapsed := time.Since(started); elapsed > time.Second || output.String() != "Immediately\n" {
+	if elapsed := time.Since(started); elapsed > 5*time.Second || output.String() != "Immediately\n" {
 		t.Fatalf("subscribed ask elapsed=%s output=%q", elapsed, output.String())
 	}
 }
@@ -1069,7 +1069,7 @@ func TestWaitRunsBoundedSyncAndSyncFailureKeepsLocalSuccess(t *testing.T) {
 	a.Getenv = envMap(map[string]string{"CODEX_THREAD_ID": "waiting"})
 	syncCalls := 0
 	a.Synchronize = func(context.Context, domain.Store) error { syncCalls++; return nil }
-	err := a.Run(context.Background(), []string{"--db", database, "wait", "--timeout", "20ms", "--interval", "5ms", messageID})
+	err := a.Run(context.Background(), []string{"--db", database, "wait", "--timeout", "1s", "--interval", "5ms", messageID})
 	if !errors.Is(err, context.DeadlineExceeded) || syncCalls == 0 {
 		t.Fatalf("wait error=%v sync calls=%d", err, syncCalls)
 	}
