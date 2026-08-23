@@ -81,7 +81,7 @@ Usage:
   hq [--db PATH] [--no-sync] codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]
 
 Requirements:
-  Install and authenticate Codex CLI v0.148.0, and run hq identity init once.
+  Install and authenticate Codex CLI v0.149.0, and run hq identity init once.
 
 Options:
   --cwd PATH          Thread working directory. Defaults to the current directory;
@@ -91,7 +91,7 @@ Options:
   --new-thread        Start and select a replacement thread for --agent while retaining
                       its mailbox, queued root messages, and historical thread bindings.
   --session THREAD_ID Resume this exact thread from the named agent's history.
-  --yolo              Pass Codex's --yolo mode to app-server; disables approvals and sandboxing.
+  --yolo              Set the app-server thread to never approve and danger-full-access.
                       Defaults to config codex.yolo; use --yolo=false to override it.
                       Use only inside an externally secured environment.
 

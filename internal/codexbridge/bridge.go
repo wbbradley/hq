@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -54,6 +55,7 @@ type Options struct {
 	AgentRenewInterval time.Duration
 	OnReady            func(BridgeReady)
 	SuppressStatus     bool
+	Logger             *slog.Logger
 }
 
 type BridgeReady struct {
@@ -63,6 +65,12 @@ type BridgeReady struct {
 }
 
 func Run(ctx context.Context, options Options) error {
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	logger = logger.With("agent", options.AgentName, "directory", options.Directory)
+	logger.Info("Codex bridge starting", "resume_thread_id", options.ResumeThreadID, "new_thread", options.NewThread, "yolo", options.Yolo, "has_initial_prompt", strings.TrimSpace(options.InitialPrompt) != "")
 	if strings.TrimSpace(options.Directory) == "" {
 		return errors.New("Codex bridge working directory is required")
 	}
@@ -82,6 +90,7 @@ func Run(ctx context.Context, options Options) error {
 	}
 	namedAgent, err := namedStore.CreateNamedAgent(ctx, options.AgentName, "")
 	if err != nil {
+		logger.Error("resolve named agent", "error", err)
 		return fmt.Errorf("resolve named agent %s: %w", options.AgentName, err)
 	}
 	if resumeThreadID == "" && !options.NewThread && namedAgent.CurrentSessionID != "" {
@@ -92,8 +101,10 @@ func Run(ctx context.Context, options Options) error {
 	}
 	stopOwnership, ownershipErrors, leaseErr := holdNamedAgent(ctx, namedStore, options, options.AgentName)
 	if leaseErr != nil {
+		logger.Error("acquire named agent ownership", "error", leaseErr)
 		return fmt.Errorf("acquire named agent %s: %w", options.AgentName, leaseErr)
 	}
+	logger.Info("named agent ownership acquired")
 	defer stopOwnership()
 	var subscription domain.ChangeSubscription
 	if options.Updates.Subscribe != nil {
@@ -128,12 +139,14 @@ func Run(ctx context.Context, options Options) error {
 	}
 	starter := options.Starter
 	if starter == nil {
-		starter = &ExecStarter{Yolo: options.Yolo}
+		starter = &ExecStarter{}
 	}
 	process, err := starter.Start(options.Directory)
 	if err != nil {
+		logger.Error("start Codex app-server", "error", err)
 		return err
 	}
+	logger.Info("Codex app-server transport pipes connected")
 	processDone := make(chan struct{})
 	var processErr error
 	go func() {
@@ -150,10 +163,13 @@ func Run(ctx context.Context, options Options) error {
 	client := NewClient(transportContext, process.Output(), process.Input(), requestRouter, notifications)
 	var mailbox model.Mailbox
 	shutdown := func() {
+		logger.Debug("closing Codex app-server stdin")
 		_ = process.Input().Close()
 		select {
 		case <-processDone:
+			logger.Debug("Codex app-server stopped after stdin close")
 		case <-time.After(gracefulProcessStop):
+			logger.Warn("Codex app-server did not stop gracefully", "timeout", gracefulProcessStop)
 			_ = process.Kill()
 			<-processDone
 		}
@@ -174,15 +190,20 @@ func Run(ctx context.Context, options Options) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		logger.Error("initialize Codex app-server", "error", err)
 		return fmt.Errorf("initialize Codex app-server: %w", err)
 	}
 	if err := client.Notify("initialized", struct{}{}); err != nil {
+		logger.Error("acknowledge Codex app-server initialization", "error", err)
 		return fmt.Errorf("acknowledge Codex app-server initialization: %w", err)
 	}
+	logger.Info("Codex app-server initialized")
 
 	var threadResponse ThreadResponse
 	if resumeThreadID == "" {
+		logger.Info("starting Codex thread")
 		params := ThreadStartParams{CWD: options.Directory, DeveloperInstructions: NamedAgentDeveloperInstructions(options.AgentName)}
+		applyYoloThreadSettings(options.Yolo, &params.ApprovalPolicy, &params.Sandbox)
 		if err := client.Call(ctx, "thread/start", params, &threadResponse); err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -190,7 +211,9 @@ func Run(ctx context.Context, options Options) error {
 			return fmt.Errorf("start Codex thread: %w", err)
 		}
 	} else {
+		logger.Info("resuming Codex thread", "thread_id", resumeThreadID)
 		params := ThreadResumeParams{ThreadID: resumeThreadID, CWD: options.Directory}
+		applyYoloThreadSettings(options.Yolo, &params.ApprovalPolicy, &params.Sandbox)
 		if err := client.Call(ctx, "thread/resume", params, &threadResponse); err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -206,9 +229,12 @@ func Run(ctx context.Context, options Options) error {
 		return fmt.Errorf("Codex app-server resumed thread %s instead of requested thread %s", threadID, resumeThreadID)
 	}
 	threadState.BindThread(threadID)
+	logger = logger.With("thread_id", threadID)
+	logger.Info("Codex thread connected", "resumed", resumeThreadID != "")
 	threadState.UpdateThread(threadResponse.Thread)
 	selected, selectErr := namedStore.SelectNamedAgentSession(ctx, options.AgentName, model.SessionIdentity{Harness: "codex", ExternalSessionID: threadID}, options.Repository)
 	if selectErr != nil {
+		logger.Error("select Codex thread for named agent", "error", selectErr)
 		return fmt.Errorf("select Codex thread for named agent %s: %w", options.AgentName, selectErr)
 	}
 	namedAgent = selected
@@ -251,6 +277,7 @@ func Run(ctx context.Context, options Options) error {
 	if options.OnReady != nil {
 		options.OnReady(BridgeReady{AgentName: options.AgentName, ThreadID: threadID, Directory: options.Directory})
 	}
+	logger.Info("Codex bridge ready")
 
 	dispatcherContext, cancelDispatcher := context.WithCancel(ctx)
 	dispatcherDone := make(chan struct{})
@@ -286,8 +313,10 @@ func Run(ctx context.Context, options Options) error {
 
 	select {
 	case ownershipErr := <-ownershipErrors:
+		logger.Error("Codex bridge stopping", "reason", "ownership lost", "error", ownershipErr)
 		return finish(fmt.Errorf("named agent ownership lost: %w", ownershipErr), ownershipErr.Error())
 	case <-ctx.Done():
+		logger.Info("Codex bridge stopping", "reason", "context canceled")
 		return finish(nil, "Bridge cancelled; the app-server process is being terminated.")
 	case <-client.Done():
 		transportErr := client.Err()
@@ -296,6 +325,7 @@ func Run(ctx context.Context, options Options) error {
 			transportErr = processExitError(processErr)
 		case <-time.After(100 * time.Millisecond):
 		}
+		logger.Error("Codex bridge stopping", "reason", "app-server transport closed", "error", transportErr)
 		return finish(transportErr, transportErr.Error())
 	case <-processDone:
 		select {
@@ -303,22 +333,37 @@ func Run(ctx context.Context, options Options) error {
 		case <-time.After(time.Second):
 		}
 		exitErr := processExitError(processErr)
+		logger.Error("Codex bridge stopping", "reason", "app-server process exited", "error", exitErr)
 		return finish(exitErr, exitErr.Error())
 	case <-dispatcherDone:
 		if dispatcherErr == nil {
 			dispatcherErr = errors.New("Codex HQ input dispatcher stopped unexpectedly")
 		}
+		logger.Error("Codex bridge stopping", "reason", "input dispatcher stopped", "error", dispatcherErr)
 		return finish(dispatcherErr, dispatcherErr.Error())
 	case <-outputRelay.Done():
 		outputErr := outputRelay.Err()
 		if outputErr == nil {
 			outputErr = errors.New("Codex output relay stopped unexpectedly")
 		}
+		logger.Error("Codex bridge stopping", "reason", "output relay stopped", "error", outputErr)
 		return finish(outputErr, outputErr.Error())
 	}
 }
 
+func applyYoloThreadSettings(yolo bool, approvalPolicy, sandbox *string) {
+	if !yolo {
+		return
+	}
+	*approvalPolicy = approvalPolicyNever
+	*sandbox = sandboxModeDangerFullAccess
+}
+
 func holdNamedAgent(ctx context.Context, store NamedAgentStore, options Options, name string) (func(), <-chan error, error) {
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	duration := options.AgentLeaseDuration
 	if duration <= 0 {
 		duration = defaultAgentLeaseDuration
@@ -343,13 +388,16 @@ func holdNamedAgent(ctx context.Context, store NamedAgentStore, options Options,
 			case <-leaseContext.Done():
 				return
 			case <-ticker.C:
-				if _, err := store.RenewNamedAgent(leaseContext, name, token, duration); err != nil {
+				agent, err := store.RenewNamedAgent(leaseContext, name, token, duration)
+				if err != nil {
+					logger.Error("renew named agent ownership", "agent", name, "error", err)
 					select {
 					case errorsChannel <- err:
 					default:
 					}
 					return
 				}
+				logger.Debug("named agent ownership renewed", "agent", name, "lease_expires_at", agent.LeaseExpiresAt)
 			}
 		}
 	}()

@@ -255,7 +255,7 @@ func TestRunRequiresNamedAgent(t *testing.T) {
 	}
 }
 
-func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
+func TestRunStartsYoloThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	process := newFakeProcess()
 	requests := make(chan recordedRequest, 5)
 	runHandshakeServer(t, process, "thread-new", requests)
@@ -264,7 +264,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(ctx, Options{
-			Directory: "/work/repo", AgentName: "test-agent", InitialPrompt: "inspect the queue", Starter: fakeStarter{process}, Store: store,
+			Directory: "/work/repo", AgentName: "test-agent", InitialPrompt: "inspect the queue", Yolo: true, Starter: fakeStarter{process}, Store: store,
 			Repository: model.RepositoryContext{Directory: "/work/repo", Branch: "main"}, Stderr: io.Discard, Ledger: NewMemoryLedger(),
 		})
 	}()
@@ -285,7 +285,7 @@ func TestRunStartsThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 		t.Fatalf("initialize params = %s", initialize.Params)
 	}
 	var startParams ThreadStartParams
-	if start.Method != "thread/start" || json.Unmarshal(start.Params, &startParams) != nil || startParams.CWD != "/work/repo" || startParams.DeveloperInstructions != NamedAgentDeveloperInstructions("test-agent") {
+	if start.Method != "thread/start" || json.Unmarshal(start.Params, &startParams) != nil || startParams.CWD != "/work/repo" || startParams.DeveloperInstructions != NamedAgentDeveloperInstructions("test-agent") || startParams.ApprovalPolicy != approvalPolicyNever || startParams.Sandbox != sandboxModeDangerFullAccess {
 		t.Fatalf("thread start = %s %s", start.Method, start.Params)
 	}
 	var turnParams TurnStartParams
@@ -358,7 +358,7 @@ func TestRunResumesExplicitThreadWithoutDeveloperInstruction(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, Options{Directory: "/work/other", AgentName: "test-agent", ResumeThreadID: "thread-existing", Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/other"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
+		done <- Run(ctx, Options{Directory: "/work/other", AgentName: "test-agent", ResumeThreadID: "thread-existing", Yolo: true, Starter: fakeStarter{process}, Store: store, Repository: model.RepositoryContext{Directory: "/work/other"}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
 	}()
 	waitForMessages(t, store, 1)
 	<-requests
@@ -368,7 +368,7 @@ func TestRunResumesExplicitThreadWithoutDeveloperInstruction(t *testing.T) {
 		t.Fatalf("second request = %s", initialized.Method)
 	}
 	var params map[string]any
-	if resume.Method != "thread/resume" || json.Unmarshal(resume.Params, &params) != nil || params["threadId"] != "thread-existing" || params["cwd"] != "/work/other" {
+	if resume.Method != "thread/resume" || json.Unmarshal(resume.Params, &params) != nil || params["threadId"] != "thread-existing" || params["cwd"] != "/work/other" || params["approvalPolicy"] != approvalPolicyNever || params["sandbox"] != sandboxModeDangerFullAccess {
 		t.Fatalf("resume = %s %s", resume.Method, resume.Params)
 	}
 	if _, exists := params["developerInstructions"]; exists {

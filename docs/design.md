@@ -24,6 +24,11 @@ canonical database path. Short paths use a sibling socket; long Unix paths use a
 under `$XDG_RUNTIME_DIR/hq` or the platform runtime fallback. Socket and metadata permissions are
 restricted to the current user.
 
+The node owns a single append-only structured diagnostic sink at `~/logs/hq.log`. It uses the Go
+standard library's `log/slog` text handler at debug level; HQ creates `~/logs` with mode `0700` when
+absent and always protects the log with mode `0600`. Daemon, supervisor, bridge, and subprocess records share this sink and carry stable
+correlation attributes rather than embedding context in prose.
+
 `identity reset --yes` stops being safe once a node is using that identity: stop the node first. It
 deletes the key, database, and SQLite side files. HQ remains pre-1.0 and unsupported schema versions
 may be reset rather than migrated; schema 7 migrates through durable mutation receipts (8), change
@@ -105,7 +110,9 @@ subscriptions.
 
 Delivery claims, mailbox activity, and named-agent ownership are unsigned local node facts. A named
 agent lease persists across node restarts, expires naturally after crashes, and is never published
-as a relay heartbeat. Claims use a 30-second lease because
+as a relay heartbeat. A suspended process may revive its expired lease only while its exact owner
+token remains stored; any intervening acquisition replaces the token and defeats the stale renewal.
+Claims use a 30-second lease because
 stdout or a Codex app-server call cannot share the SQLite transaction. The Codex sidecar ledger and
 deterministic app-server IDs reconcile the remaining crash window.
 
@@ -118,9 +125,11 @@ hosts one worker per durable agent, starts only `codex app-server --stdio`, wait
 IDs make a lost local response safe to retry, while the named-agent lease rejects any independent
 legacy owner. One shared thread-keyed ledger supports concurrent agents without sidecar races.
 
-The caller environment exists only long enough to construct the child environment. It is excluded
-from canonical events, projections, mutation receipts, Nostr, the ledger, logs, diagnostics, status,
-and RPC results. Process ownership, paths, presence, and runtime phases are also installation-local
+The caller environment exists only long enough to construct the child environment. HQ does not add
+its names or values to canonical events, projections, mutation receipts, Nostr, the ledger,
+HQ-authored log attributes, diagnostics, status, or RPC results. The protected diagnostic log does
+capture app-server stderr verbatim, so child-emitted text is inside the local logging trust boundary.
+Process ownership, paths, presence, and runtime phases are also installation-local
 and never enter Nostr. Durable agent names, thread bindings, selections, mutable thread names, and
 per-session repository context are signed installation-private facts. A thread-name change is
 separate from selection and runtime state: it updates the session projection without starting,

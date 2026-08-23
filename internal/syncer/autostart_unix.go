@@ -38,11 +38,17 @@ func startDetachedCommand(specification detachedCommand) error {
 	if err := os.MkdirAll(specification.Directory, 0o700); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Dir(specification.LogPath), 0o700); err != nil {
+		return err
+	}
 	logFile, err := os.OpenFile(specification.LogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer logFile.Close()
+	if err := logFile.Chmod(0o600); err != nil {
+		return err
+	}
 	nullInput, err := os.Open(os.DevNull)
 	if err != nil {
 		return err

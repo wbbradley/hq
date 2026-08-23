@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +29,24 @@ type scriptedStarter struct {
 	fail         error
 }
 
-func (s *scriptedStarter) factory(environment []string, _ bool) codexbridge.ProcessStarter {
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(value []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(value)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func (s *scriptedStarter) factory(environment []string) codexbridge.ProcessStarter {
 	s.mu.Lock()
 	s.environments = append(s.environments, append([]string(nil), environment...))
 	s.mu.Unlock()
@@ -185,6 +203,8 @@ func TestSupervisorFailureDoesNotSelectAndDoesNotEchoEnvironment(t *testing.T) {
 	starter := &scriptedStarter{fail: errors.New("failed with " + secret)}
 	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
 	supervisor.Starter = starter.factory
+	var diagnostics lockedBuffer
+	supervisor.Logger = slog.New(slog.NewTextHandler(&diagnostics, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	defer supervisor.Close()
 	result, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{
 		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: t.TempDir(), Environment: []string{"TOKEN=" + secret},
@@ -195,6 +215,19 @@ func TestSupervisorFailureDoesNotSelectAndDoesNotEchoEnvironment(t *testing.T) {
 	agent, getErr := database.GetNamedAgent(context.Background(), "fred")
 	if getErr != nil || agent.CurrentSessionID != "" {
 		t.Fatalf("failed launch selected a session: %#v, %v", agent, getErr)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(diagnostics.String(), `msg="Codex worker exited"`) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	log := diagnostics.String()
+	for _, expected := range []string{`msg="Codex agent launch requested"`, `msg="Codex worker registered"`, `msg="Codex worker exited"`} {
+		if !strings.Contains(log, expected) {
+			t.Fatalf("supervisor log omitted %q: %s", expected, log)
+		}
+	}
+	if strings.Contains(log, "TOKEN="+secret) {
+		t.Fatalf("supervisor log exposed the environment entry: %s", log)
 	}
 }
 

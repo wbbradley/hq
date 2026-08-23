@@ -171,7 +171,7 @@ func TestCodexHelpDoesNotOpenStore(t *testing.T) {
 	if outputs[0] != outputs[1] || outputs[0] != codexUsage {
 		t.Fatalf("help outputs differ:\n%s\n---\n%s", outputs[0], outputs[1])
 	}
-	for _, required := range []string{"Codex CLI v0.148.0", "--session THREAD_ID", "--agent NAME", "--new-thread", "--yolo", "disables approvals and sandboxing", "complete environment", "daemon owns"} {
+	for _, required := range []string{"Codex CLI v0.149.0", "--session THREAD_ID", "--agent NAME", "--new-thread", "--yolo", "never approve and danger-full-access", "complete environment", "daemon owns"} {
 		if !strings.Contains(outputs[0], required) {
 			t.Fatalf("Codex help is missing %q", required)
 		}
@@ -967,6 +967,7 @@ func TestOrdinaryCommandPrintsConnectionDiagnostic(t *testing.T) {
 
 func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
+	t.Setenv("HOME", filepath.Join(filepath.Dir(database), "home"))
 	initializeTestIdentity(t, database)
 	nodeContext, stopNode := context.WithCancel(context.Background())
 	nodeDone := make(chan error, 1)

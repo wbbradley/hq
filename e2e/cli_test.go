@@ -97,6 +97,14 @@ func TestIsolatedCLIRequestReply(t *testing.T) {
 	}
 	run(false, "--db", database, "daemon", "stop")
 	waitForDaemonExit(t, binary, environment, database)
+	logPath := filepath.Join(root, "home", "logs", "hq.log")
+	rawLog, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if log := string(rawLog); !strings.Contains(log, `msg="daemon starting"`) || !strings.Contains(log, `msg="daemon control plane ready"`) || !strings.Contains(log, `msg="daemon stopped"`) {
+		t.Fatalf("daemon lifecycle log = %q", log)
+	}
 }
 
 func repositoryRoot(t *testing.T) string {

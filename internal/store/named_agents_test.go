@@ -121,11 +121,25 @@ func TestNamedAgentOwnershipConflictExpiryRenewalAndRebuild(t *testing.T) {
 		t.Fatalf("lease after rebuild = %#v, %v", afterRebuild, err)
 	}
 	now = now.Add(31 * time.Second)
+	revived, err := s.RenewNamedAgent(ctx, "fred", "owner-one", 30*time.Second)
+	if err != nil || !revived.Active {
+		t.Fatalf("same owner could not revive expired lease after sleep = %#v, %v", revived, err)
+	}
+	if _, err := s.AcquireNamedAgent(ctx, "fred", "owner-two", 30*time.Second); !errors.Is(err, domain.ErrAgentOwned) {
+		t.Fatalf("competing acquire after revival = %v", err)
+	}
+	now = now.Add(31 * time.Second)
 	if _, err := s.AcquireNamedAgent(ctx, "fred", "owner-two", 30*time.Second); err != nil {
 		t.Fatalf("expired takeover = %v", err)
 	}
+	if _, err := s.RenewNamedAgent(ctx, "fred", "owner-one", 30*time.Second); !errors.Is(err, domain.ErrAgentOwned) {
+		t.Fatalf("displaced owner renewed over replacement token = %v", err)
+	}
 	if err := s.ReleaseNamedAgent(ctx, "fred", "owner-two"); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := s.RenewNamedAgent(ctx, "fred", "owner-two", 30*time.Second); !errors.Is(err, domain.ErrAgentOwned) {
+		t.Fatalf("released owner renewed missing lease = %v", err)
 	}
 	offline, err := s.GetNamedAgent(ctx, "fred")
 	if err != nil || offline.Active {

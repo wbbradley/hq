@@ -28,6 +28,7 @@ import (
 func TestLiveNodeDomainRoundTripAndRuntimeOwnership(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
 	databasePath := filepath.Join(root, "installation", "hq.db")
@@ -208,6 +209,7 @@ func TestLiveNodeDomainRoundTripAndRuntimeOwnership(t *testing.T) {
 func TestCLIAndTUIAndCodexClientsShareOneNodeStore(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
 	databasePath := filepath.Join(root, "installation", "hq.db")
@@ -315,6 +317,7 @@ func TestCLIAndTUIAndCodexClientsShareOneNodeStore(t *testing.T) {
 func TestMutationRetryReplaysReceiptAcrossNodeRestart(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
 	databasePath := filepath.Join(root, "installation", "hq.db")

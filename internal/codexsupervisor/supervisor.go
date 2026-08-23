@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,15 +17,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/logging"
 )
 
-type StarterFactory func(environment []string, yolo bool) codexbridge.ProcessStarter
+type StarterFactory func(environment []string) codexbridge.ProcessStarter
 
 type Supervisor struct {
 	Store   domain.Operations
 	Ledger  codexbridge.DeliveryLedger
 	Starter StarterFactory
 	Sync    func(context.Context) error
+	Logger  *slog.Logger
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -55,10 +57,12 @@ func New(ctx context.Context, store domain.Operations, ledger codexbridge.Delive
 	if ledger == nil {
 		ledger = codexbridge.NewMemoryLedger()
 	}
-	return &Supervisor{Store: store, Ledger: ledger, ctx: lifetime, cancel: cancel, workers: make(map[string]*worker), receipts: make(map[string]receipt), subs: make(map[uint64]*localSubscription)}
+	return &Supervisor{Store: store, Ledger: ledger, Logger: slog.New(slog.DiscardHandler), ctx: lifetime, cancel: cancel, workers: make(map[string]*worker), receipts: make(map[string]receipt), subs: make(map[uint64]*localSubscription)}
 }
 
 func (s *Supervisor) Close() error {
+	logger := s.logger().With("component", "codex_supervisor")
+	logger.Info("Codex supervisor stopping")
 	s.cancel()
 	s.mu.Lock()
 	workers := make([]*worker, 0, len(s.workers))
@@ -70,27 +74,35 @@ func (s *Supervisor) Close() error {
 	for _, current := range workers {
 		<-current.done
 	}
+	logger.Info("Codex supervisor stopped", "workers", len(workers))
 	return nil
 }
 
 func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	logger := s.logger().With("component", "codex_supervisor", "agent", request.AgentName, "request_id", request.RequestID)
+	logger.Info("Codex agent launch requested", "action", request.Action, "session_id", request.SessionID, "directory", request.Directory, "yolo", request.Yolo, "environment_variables", len(request.Environment), "has_initial_prompt", strings.TrimSpace(request.InitialPrompt) != "")
 	digest, err := validateLaunch(&request)
 	if err != nil {
+		logger.Warn("Codex agent launch rejected", "error", err)
 		return domain.CodexRuntime{}, err
 	}
+	logger = s.logger().With("component", "codex_supervisor", "agent", request.AgentName, "request_id", request.RequestID, "directory", request.Directory)
 
 	s.mu.Lock()
 	if previous, ok := s.receipts[request.RequestID]; ok {
 		s.mu.Unlock()
 		if previous.digest != digest {
+			logger.Warn("Codex launch request ID reused with different options")
 			return domain.CodexRuntime{}, errors.New("Codex launch request ID was reused for different options")
 		}
+		logger.Debug("returning prior Codex launch receipt", "phase", previous.runtime.Phase, "thread_id", previous.runtime.ThreadID)
 		return previous.runtime, nil
 	}
 	if current := s.workers[request.AgentName]; current != nil {
 		if current.requestID == request.RequestID {
 			if current.digest != digest {
 				s.mu.Unlock()
+				logger.Warn("active Codex launch request ID reused with different options")
 				return domain.CodexRuntime{}, errors.New("Codex launch request ID was reused for different options")
 			}
 			s.mu.Unlock()
@@ -100,12 +112,15 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 			result := current.runtime
 			s.receipts[request.RequestID] = receipt{digest: digest, runtime: result}
 			s.mu.Unlock()
+			logger.Info("Codex agent already running in requested session", "thread_id", result.ThreadID)
 			return result, nil
 		}
 		if !request.ConfirmSwitch {
 			s.mu.Unlock()
+			logger.Warn("Codex session switch requires confirmation", "current_thread_id", current.runtime.ThreadID)
 			return domain.CodexRuntime{}, errors.New("named agent is already running; confirm the session switch")
 		}
+		logger.Info("stopping Codex worker for confirmed session switch", "current_thread_id", current.runtime.ThreadID)
 		current.runtime.Phase = domain.CodexRuntimeStopping
 		current.cancel()
 		s.mu.Unlock()
@@ -120,11 +135,13 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 	agent, err := s.Store.CreateNamedAgent(ctx, request.AgentName, "")
 	if err != nil {
 		s.mu.Unlock()
+		logger.Error("resolve named agent for Codex launch", "error", err)
 		return domain.CodexRuntime{}, err
 	}
 	resumeID, newThread, err := s.resolveAction(ctx, agent, request)
 	if err != nil {
 		s.mu.Unlock()
+		logger.Warn("resolve requested Codex session", "error", err)
 		return domain.CodexRuntime{}, err
 	}
 	workerContext, cancel := context.WithCancel(s.ctx)
@@ -134,15 +151,16 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 		runtime: domain.CodexRuntime{AgentName: request.AgentName, ThreadID: resumeID, Directory: request.Directory, Phase: domain.CodexRuntimeStarting, StartedAt: &started},
 	}
 	s.workers[request.AgentName] = current
+	logger.Info("Codex worker registered", "resume_thread_id", resumeID, "new_thread", newThread)
 	environment := append([]string(nil), request.Environment...)
 	request.Environment = nil
 	starterFactory := s.Starter
 	if starterFactory == nil {
-		starterFactory = func(environment []string, yolo bool) codexbridge.ProcessStarter {
-			return &codexbridge.ExecStarter{Environment: environment, UseEnvironment: true, Yolo: yolo}
+		starterFactory = func(environment []string) codexbridge.ProcessStarter {
+			return &codexbridge.ExecStarter{Environment: environment, UseEnvironment: true, Logger: logger.With("component", "codex_process")}
 		}
 	}
-	starter := starterFactory(append([]string(nil), environment...), request.Yolo)
+	starter := starterFactory(append([]string(nil), environment...))
 	for index := range environment {
 		environment[index] = ""
 	}
@@ -150,7 +168,8 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 	options := codexbridge.Options{
 		Directory: request.Directory, ResumeThreadID: resumeID, AgentName: request.AgentName, NewThread: newThread,
 		InitialPrompt: request.InitialPrompt, Yolo: request.Yolo, Repository: request.Repository,
-		Store: s.Store, Starter: starter, Stderr: io.Discard, Sync: s.Sync, Ledger: s.Ledger,
+		Store: s.Store, Starter: starter, Stderr: logging.NewLineWriter(logger.With("component", "codex_process"), slog.LevelWarn, "Codex app-server stderr"), Sync: s.Sync, Ledger: s.Ledger,
+		Logger:         logger.With("component", "codex_bridge"),
 		Updates:        domain.ClientUpdates{Subscribe: s.Subscribe},
 		SuppressStatus: true,
 		OnReady:        func(ready codexbridge.BridgeReady) { s.markReady(current, ready) },
@@ -277,10 +296,13 @@ func (s *Supervisor) markReady(current *worker, ready codexbridge.BridgeReady) {
 	current.runtime.Phase = domain.CodexRuntimeRunning
 	current.runtime.ThreadID = ready.ThreadID
 	current.runtime.Directory = ready.Directory
+	s.logger().Info("Codex worker ready", "component", "codex_supervisor", "agent", current.runtime.AgentName, "thread_id", ready.ThreadID, "directory", ready.Directory)
 	close(current.ready)
 }
 
 func (s *Supervisor) runWorker(ctx context.Context, current *worker, options codexbridge.Options) {
+	logger := s.logger().With("component", "codex_supervisor", "agent", current.runtime.AgentName, "request_id", current.requestID)
+	logger.Info("Codex worker starting", "directory", current.runtime.Directory, "requested_thread_id", current.runtime.ThreadID)
 	err := codexbridge.Run(ctx, options)
 	s.mu.Lock()
 	if current.runtime.Phase == domain.CodexRuntimeStarting {
@@ -304,6 +326,18 @@ func (s *Supervisor) runWorker(ctx context.Context, current *worker, options cod
 	}
 	close(current.done)
 	s.mu.Unlock()
+	if err != nil {
+		logger.Error("Codex worker exited", "phase", current.runtime.Phase, "thread_id", current.runtime.ThreadID, "error", err)
+	} else {
+		logger.Info("Codex worker exited", "phase", current.runtime.Phase, "thread_id", current.runtime.ThreadID, "reason", "context canceled")
+	}
+}
+
+func (s *Supervisor) logger() *slog.Logger {
+	if s.Logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return s.Logger
 }
 
 func safeWorkerFailure(err error) string {

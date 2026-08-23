@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/wbbradley/hq/internal/codexbridge"
@@ -10,6 +11,7 @@ import (
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/domainrpc"
 	"github.com/wbbradley/hq/internal/localwire"
+	"github.com/wbbradley/hq/internal/logging"
 	"github.com/wbbradley/hq/internal/store"
 	"github.com/wbbradley/hq/internal/syncer"
 )
@@ -29,22 +31,33 @@ func (r Runner) Run(ctx context.Context, databasePath string) error {
 	if err != nil {
 		return err
 	}
+	logger, logCloser, err := logging.Open(paths.Log)
+	if err != nil {
+		return fmt.Errorf("open HQ daemon log: %w", err)
+	}
+	defer logCloser.Close()
+	logger = logger.With("service", "hq")
+	logger.Info("HQ node initializing", "database", paths.Database, "log_path", paths.Log)
 	opener := r.Open
 	if opener == nil {
 		opener = store.Open
 	}
 	factory := func(context.Context) (syncer.Runtime, error) {
+		logger.Debug("opening HQ database", "database", paths.Database)
 		database, err := opener(paths.Database)
 		if err != nil {
+			logger.Error("open HQ database", "database", paths.Database, "error", err)
 			return syncer.Runtime{}, err
 		}
 		engine := &syncer.Engine{State: database, Codec: database.WireCodec(nil, nil)}
 		ledger, err := codexbridge.OpenFileLedger(paths.Database + ".codexbridge.json")
 		if err != nil {
 			database.Close()
+			logger.Error("open Codex delivery ledger", "error", err)
 			return syncer.Runtime{}, err
 		}
 		supervisor := codexsupervisor.New(ctx, database, ledger)
+		supervisor.Logger = logger
 		subscriptions := domainrpc.NewSubscriptionHub()
 		database.SetChangeObserver(func(change domain.Invalidation) {
 			subscriptions.Publish(change)
@@ -63,6 +76,7 @@ func (r Runner) Run(ctx context.Context, databasePath string) error {
 		RuntimeFactory: factory,
 		Coordinator:    syncer.FileCoordinator{DatabasePath: paths.Database},
 		DatabasePath:   paths.Database,
+		Logger:         logger,
 	}).Run(ctx)
 }
 

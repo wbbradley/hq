@@ -12,6 +12,7 @@ func TestRuntimePathsResolveDefaultsAndExplicitDatabases(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
 	defaults, err := ResolveRuntimePaths("")
 	if err != nil {
 		t.Fatal(err)
@@ -25,6 +26,9 @@ func TestRuntimePathsResolveDefaultsAndExplicitDatabases(t *testing.T) {
 	}
 	if defaults.ConfigDirectory != filepath.Join(root, "config", "hq") {
 		t.Fatalf("default config = %q", defaults.ConfigDirectory)
+	}
+	if defaults.Log != filepath.Join(root, "home", "logs", "hq.log") {
+		t.Fatalf("default log = %q", defaults.Log)
 	}
 
 	explicitDatabase := filepath.Join(root, "isolated", "other.db")

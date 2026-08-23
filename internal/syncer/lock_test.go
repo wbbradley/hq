@@ -1,8 +1,10 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -69,7 +71,11 @@ func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := &countingEngine{}
-	daemon := Daemon{Engine: engine, Coordinator: FileCoordinator{DatabasePath: database}, DatabasePath: database, PollInterval: time.Hour}
+	var diagnostics bytes.Buffer
+	daemon := Daemon{
+		Engine: engine, Coordinator: FileCoordinator{DatabasePath: database}, DatabasePath: database, PollInterval: time.Hour,
+		Logger: slog.New(slog.NewTextHandler(&diagnostics, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
 	done := make(chan error, 1)
 	go func() { done <- daemon.Run(context.Background()) }()
 	deadline := time.Now().Add(2 * time.Second)
@@ -160,6 +166,11 @@ func TestDaemonWakeStatusStopAndStaleSocket(t *testing.T) {
 		t.Fatalf("daemon did not release lock: %v", err)
 	}
 	_ = lock.Release()
+	for _, message := range []string{"daemon starting", "daemon ownership acquired", "daemon control plane ready", "sync engine starting", "daemon restart requested", "restarting daemon runtime", "daemon stopped"} {
+		if !strings.Contains(diagnostics.String(), `msg="`+message+`"`) {
+			t.Fatalf("daemon log omitted %q: %s", message, diagnostics.String())
+		}
+	}
 }
 
 func TestSocketPathFallsBackWhenDatabasePathIsTooLong(t *testing.T) {

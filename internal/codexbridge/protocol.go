@@ -5,7 +5,13 @@ import (
 	"fmt"
 )
 
-const TestedCodexVersion = "0.148.0"
+const TestedCodexVersion = "0.149.0"
+
+const (
+	approvalPolicyNever         = "never"
+	sandboxModeDangerFullAccess = "danger-full-access"
+	sandboxTypeDangerFullAccess = "dangerFullAccess"
+)
 
 const RequireStructuredHumanInput = "When progress requires an answer from the human, use the structured request_user_input tool."
 
@@ -48,11 +54,16 @@ type InitializeParams struct {
 type ThreadStartParams struct {
 	CWD                   string `json:"cwd"`
 	DeveloperInstructions string `json:"developerInstructions"`
+	ApprovalPolicy        string `json:"approvalPolicy,omitempty"`
+	Sandbox               string `json:"sandbox,omitempty"`
+	Ephemeral             bool   `json:"ephemeral,omitempty"`
 }
 
 type ThreadResumeParams struct {
-	ThreadID string `json:"threadId"`
-	CWD      string `json:"cwd,omitempty"`
+	ThreadID       string `json:"threadId"`
+	CWD            string `json:"cwd,omitempty"`
+	ApprovalPolicy string `json:"approvalPolicy,omitempty"`
+	Sandbox        string `json:"sandbox,omitempty"`
 }
 
 type Thread struct {
@@ -62,7 +73,13 @@ type Thread struct {
 }
 
 type ThreadResponse struct {
-	Thread Thread `json:"thread"`
+	Thread         Thread        `json:"thread"`
+	ApprovalPolicy string        `json:"approvalPolicy,omitempty"`
+	Sandbox        SandboxPolicy `json:"sandbox,omitempty"`
+}
+
+type SandboxPolicy struct {
+	Type string `json:"type"`
 }
 
 type TextInput struct {

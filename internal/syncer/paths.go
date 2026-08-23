@@ -43,6 +43,10 @@ func ResolveRuntimePaths(databasePath string) (RuntimePaths, error) {
 	if err != nil {
 		return RuntimePaths{}, err
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return RuntimePaths{}, fmt.Errorf("resolve HQ log directory: %w", err)
+	}
 	digest := storageDigest(database)
 	configDirectory := configRoot
 	if database != defaultDatabase {
@@ -66,7 +70,7 @@ func ResolveRuntimePaths(databasePath string) (RuntimePaths, error) {
 		Database: database, IdentityKey: key,
 		OwnershipLock: database + ".sync.lock", Socket: socket,
 		PID: database + ".node.pid", InstanceMetadata: database + ".node.json",
-		Log: database + ".node.log", ConfigDirectory: configDirectory,
+		Log: filepath.Join(home, "logs", "hq.log"), ConfigDirectory: configDirectory,
 		RuntimeDirectory: runtimeDirectory, protectDatabaseDirectory: database == defaultDatabase,
 	}, nil
 }

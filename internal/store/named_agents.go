@@ -433,8 +433,11 @@ func (s *SQLite) changeAgentOwnership(ctx context.Context, name, ownerToken stri
 		if live && token != ownerToken {
 			return nil, &domain.AgentOwnershipConflict{Name: name, ExpiresAt: time.UnixMilli(expiry).UTC()}
 		}
-		if operation == "renew" && (!live || token != ownerToken) {
-			return nil, fmt.Errorf("%w: no live lease for %s", domain.ErrAgentOwned, name)
+		// A suspended machine can wake after the wall-clock lease expiry even
+		// though this exact owner still holds the persisted token. Revive that
+		// lease; a real takeover replaces the token and remains a conflict.
+		if operation == "renew" && (errors.Is(leaseErr, sql.ErrNoRows) || token != ownerToken) {
+			return nil, fmt.Errorf("%w: lease is missing or owned by another process for %s", domain.ErrAgentOwned, name)
 		}
 		newExpiry := now.Add(duration).UnixMilli()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_ownership(name,owner_token,lease_expires_at) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET owner_token=excluded.owner_token,lease_expires_at=excluded.lease_expires_at`, name, ownerToken, newExpiry); err != nil {

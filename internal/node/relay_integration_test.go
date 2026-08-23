@@ -28,6 +28,7 @@ import (
 func TestDomainClientResubscribesAcrossLiveNodeRestartAndBuildDrift(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
 	databasePath := filepath.Join(root, "restart", "hq.db")
@@ -88,6 +89,7 @@ func TestDomainClientResubscribesAcrossLiveNodeRestartAndBuildDrift(t *testing.T
 func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
 	relay := newRetainedRelay(t)

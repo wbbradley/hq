@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestInstalledCodexV01480Smoke(t *testing.T) {
+func TestInstalledCodexV01490Smoke(t *testing.T) {
 	if os.Getenv("HQ_CODEX_SMOKE") != "1" {
 		t.Skip("set HQ_CODEX_SMOKE=1 to test the installed Codex app-server")
 	}
@@ -25,7 +25,8 @@ func TestInstalledCodexV01480Smoke(t *testing.T) {
 		t.Fatalf("installed Codex version = %q, want %q", version, wantVersion)
 	}
 
-	process, err := (&ExecStarter{}).Start(t.TempDir())
+	directory := t.TempDir()
+	process, err := (&ExecStarter{}).Start(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +50,21 @@ func TestInstalledCodexV01480Smoke(t *testing.T) {
 		_ = process.Kill()
 		<-waitDone
 		t.Fatalf("acknowledge installed Codex app-server: %v", err)
+	}
+	var threadResponse ThreadResponse
+	if err := client.Call(protocolContext, "thread/start", ThreadStartParams{
+		CWD: directory, ApprovalPolicy: approvalPolicyNever, Sandbox: sandboxModeDangerFullAccess, Ephemeral: true,
+	}, &threadResponse); err != nil {
+		cancelProtocol()
+		_ = process.Kill()
+		<-waitDone
+		t.Fatalf("start ephemeral yolo thread: %v", err)
+	}
+	if threadResponse.Thread.ID == "" || threadResponse.ApprovalPolicy != approvalPolicyNever || threadResponse.Sandbox.Type != sandboxTypeDangerFullAccess {
+		cancelProtocol()
+		_ = process.Kill()
+		<-waitDone
+		t.Fatalf("yolo thread settings = %#v", threadResponse)
 	}
 	cancelProtocol()
 	_ = process.Input().Close()

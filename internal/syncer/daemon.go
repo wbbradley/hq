@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +24,7 @@ type Daemon struct {
 	Coordinator    SyncCoordinator
 	DatabasePath   string
 	PollInterval   time.Duration
+	Logger         *slog.Logger
 }
 
 type Runtime struct {
@@ -43,41 +46,69 @@ func (d Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	logger := d.logger().With("component", "daemon", "database", paths.Database)
+	logger.Info("daemon starting", "pid", os.Getpid(), "build", buildinfo.Version, "log_path", paths.Log)
+	defer logger.Info("daemon stopped")
+	logger.Debug("acquiring daemon ownership lock", "lock_path", paths.OwnershipLock)
 	lock, err := d.Coordinator.TryAcquire()
 	if err != nil {
+		logger.Error("daemon ownership lock failed", "error", err)
 		return err
 	}
-	defer lock.Release()
+	logger.Info("daemon ownership acquired", "lock_path", paths.OwnershipLock)
+	defer func() {
+		if err := lock.Release(); err != nil {
+			logger.Error("daemon ownership release failed", "error", err)
+		} else {
+			logger.Debug("daemon ownership released")
+		}
+	}()
 	for {
 		var closer io.Closer
 		if d.RuntimeFactory != nil {
+			logger.Debug("constructing daemon runtime")
 			runtime, err := d.RuntimeFactory(ctx)
 			if err != nil {
+				logger.Error("construct daemon runtime", "error", err)
 				return err
 			}
 			if runtime.Engine == nil {
 				if runtime.Closer != nil {
 					_ = runtime.Closer.Close()
 				}
+				logger.Error("daemon runtime factory returned no engine")
 				return errors.New("daemon runtime factory returned no engine")
 			}
 			d.Engine, d.Domain, closer = runtime.Engine, runtime.Domain, runtime.Closer
+			logger.Info("daemon runtime constructed", "domain_rpc", d.Domain != nil)
 		}
 		restart, err := d.runRuntime(ctx, paths)
 		if closer != nil {
-			err = errors.Join(err, closer.Close())
+			closeErr := closer.Close()
+			if closeErr != nil {
+				logger.Error("close daemon runtime", "error", closeErr)
+			}
+			err = errors.Join(err, closeErr)
 		}
 		if err != nil || !restart {
+			if err != nil {
+				logger.Error("daemon runtime stopped with error", "error", err)
+			} else {
+				logger.Info("daemon runtime stopped", "reason", "shutdown")
+			}
 			return err
 		}
+		logger.Info("restarting daemon runtime")
 	}
 }
 
 func (d Daemon) runRuntime(ctx context.Context, paths RuntimePaths) (bool, error) {
+	logger := d.logger().With("component", "daemon", "database", paths.Database)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var restarting atomic.Bool
 	restart := func() {
+		logger.Info("daemon restart requested")
 		restarting.Store(true)
 		cancel()
 	}
@@ -89,31 +120,51 @@ func (d Daemon) runRuntime(ctx context.Context, paths RuntimePaths) (bool, error
 		return state.Load().(string)
 	}, metadata, d.Domain)
 	if err != nil && !errors.Is(err, ErrControlUnavailable) {
+		logger.Error("start daemon control plane", "socket", paths.Socket, "error", err)
 		return false, err
 	}
+	if errors.Is(err, ErrControlUnavailable) {
+		logger.Warn("daemon control plane unavailable")
+	} else {
+		logger.Info("daemon control plane ready", "socket", paths.Socket, "instance_id", metadata.InstanceID)
+	}
 	if control != nil {
-		defer control.Close()
+		defer func() {
+			if err := control.Close(); err != nil {
+				logger.Error("close daemon control plane", "error", err)
+			}
+		}()
 	}
 	if engine, ok := d.Engine.(WakeSyncEngine); ok {
 		state.Store("running; live relay subscriptions starting")
+		logger.Info("sync engine starting", "mode", "live")
 		err := engine.RunWithWake(runCtx, wake)
 		if restarting.Load() {
+			logger.Info("sync engine stopped for restart")
 			return true, nil
 		}
 		if runCtx.Err() != nil {
+			logger.Info("sync engine stopped", "reason", "context canceled")
 			return false, nil
+		}
+		if err != nil {
+			logger.Error("sync engine stopped unexpectedly", "error", err)
 		}
 		return false, err
 	}
+	logger.Info("sync engine starting", "mode", "poll", "interval", d.PollInterval)
 	for {
 		err := d.Engine.RunOnce(runCtx)
 		if runCtx.Err() != nil {
+			logger.Info("sync engine stopped", "restart", restarting.Load())
 			return restarting.Load(), nil
 		}
 		if err != nil {
 			state.Store("running; last sync error: " + err.Error())
+			logger.Warn("sync iteration failed", "error", err)
 		} else {
 			state.Store("running; last sync succeeded at " + time.Now().UTC().Format(time.RFC3339))
+			logger.Debug("sync iteration succeeded")
 		}
 		timer := time.NewTimer(d.PollInterval)
 		select {
@@ -125,6 +176,13 @@ func (d Daemon) runRuntime(ctx context.Context, paths RuntimePaths) (bool, error
 		case <-timer.C:
 		}
 	}
+}
+
+func (d Daemon) logger() *slog.Logger {
+	if d.Logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return d.Logger
 }
 
 func Wake(databasePath string) error {

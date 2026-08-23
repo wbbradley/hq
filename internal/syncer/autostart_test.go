@@ -178,6 +178,7 @@ func TestDetachedCommandContinuesAfterLauncherReturns(t *testing.T) {
 
 func TestEnsureNodeWaitsForDetachedNodeProcess(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(root, "runtime"))
