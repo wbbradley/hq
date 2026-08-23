@@ -127,6 +127,31 @@ func (p *scriptedProcess) Kill() error {
 	return nil
 }
 
+func TestSupervisorLaunchCanPublishAgentCreationInvalidation(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	supervisor.Starter = (&scriptedStarter{}).factory
+	database.SetChangeObserver(supervisor.Publish)
+	defer supervisor.Close()
+
+	result, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: t.TempDir(),
+	})
+	if err != nil || result.Phase != domain.CodexRuntimeRunning {
+		t.Fatalf("launch with synchronous change publication = %#v, %v", result, err)
+	}
+}
+
 func TestSupervisorLaunchIsDetachedIdempotentConcurrentAndEnvironmentPrivate(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "hq.db")
 	keyPath, _ := identity.KeyPath(databasePath)

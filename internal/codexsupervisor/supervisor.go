@@ -31,9 +31,12 @@ type Supervisor struct {
 	Sync               func(context.Context) error
 	Logger             *slog.Logger
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
+	ctx    context.Context
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	// subsMu stays independent because store changes may publish synchronously
+	// while a supervisor operation holds mu.
+	subsMu   sync.Mutex
 	wakeWG   sync.WaitGroup
 	workers  map[string]*worker
 	receipts map[string]receipt
@@ -216,15 +219,15 @@ type localSubscription struct {
 func (s *localSubscription) Changes() <-chan domain.Invalidation { return s.changes }
 func (s *localSubscription) Close() {
 	s.once.Do(func() {
-		s.supervisor.mu.Lock()
+		s.supervisor.subsMu.Lock()
 		delete(s.supervisor.subs, s.id)
-		s.supervisor.mu.Unlock()
+		s.supervisor.subsMu.Unlock()
 	})
 }
 
 func (s *Supervisor) Subscribe(_ context.Context, topics ...domain.ChangeTopic) (domain.ChangeSubscription, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
 	s.nextSub++
 	subscription := &localSubscription{supervisor: s, id: s.nextSub, topics: make(map[domain.ChangeTopic]bool), changes: make(chan domain.Invalidation, 1)}
 	for _, topic := range topics {
@@ -235,8 +238,8 @@ func (s *Supervisor) Subscribe(_ context.Context, topics ...domain.ChangeTopic) 
 }
 
 func (s *Supervisor) Publish(change domain.Invalidation) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
 	for _, subscription := range s.subs {
 		matched := change.FullSnapshot || len(subscription.topics) == 0
 		for _, topic := range change.Topics {
