@@ -504,7 +504,7 @@ func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 	view := m.View().Content
 	lines := strings.Split(view, "\n")
 	viewLayout := responsivePaneLayout(m.width, m.height, true)
-	if !strings.Contains(lines[viewLayout.inboxHeight+viewLayout.messageHeight], "[reply]") {
+	if !strings.Contains(lines[viewLayout.inboxHeight+viewLayout.messageHeight], "[Replying to ") {
 		t.Fatalf("reply pane was not rendered below message pane: %q", view)
 	}
 	for _, line := range lines {
@@ -539,7 +539,7 @@ func TestResponsiveViewFitsTerminalWithVerticalPanes(t *testing.T) {
 		if lipgloss.Width(lines[0]) != width || !strings.Contains(lines[0], "[HQ · Inbox") || !strings.Contains(lines[layout.inboxHeight], "[an update from") {
 			t.Fatalf("%d-column fixture boundaries: %q", width, view)
 		}
-		if strings.Count(lines[layout.inboxHeight], "╭") != 1 || !strings.Contains(lines[layout.inboxHeight+layout.messageHeight], "[reply]") {
+		if strings.Count(lines[layout.inboxHeight], "╭") != 1 || !strings.Contains(lines[layout.inboxHeight+layout.messageHeight], "[Replying to ") {
 			t.Fatalf("%d-column panes are not vertically stacked: %q", width, view)
 		}
 	}
@@ -589,7 +589,7 @@ func TestTabAndShiftTabCyclePaneFocus(t *testing.T) {
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = updated.(app)
 	view = m.View().Content
-	if m.paneFocus != focusReply || !m.answering || m.answerID != selected.ID || !borderUses(view, "[reply]", "63") || strings.Contains(view, "focused") {
+	if m.paneFocus != focusReply || !m.answering || m.answerID != selected.ID || !borderUses(view, "[Replying to ", "63") || strings.Contains(view, "focused") {
 		t.Fatalf("second tab state: focus=%v answering=%v answerID=%q", m.paneFocus, m.answering, m.answerID)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
@@ -609,6 +609,47 @@ func TestTabIntoReplyWithoutSelectionOpensRecipientPicker(t *testing.T) {
 	}
 	if view := m.View().Content; !strings.Contains(view, "[recipient · choose a local recipient]") {
 		t.Fatalf("recipient picker was not rendered: %q", view)
+	}
+}
+
+func TestReplyHintsDescribeContextualComposeKeys(t *testing.T) {
+	withoutSelection := (app{editor: textarea.New(), width: 100, height: 24}).View().Content
+	if !strings.Contains(withoutSelection, "Press Tab or n to choose a recipient for a new message.") || strings.Contains(withoutSelection, "Enter to reply") {
+		t.Fatalf("new-message hint is not contextual: %q", withoutSelection)
+	}
+
+	selected := message("selected", testAgentID, model.HumanMailboxID, "Selected message")
+	withSelection := (app{messages: []model.Message{selected}, editor: textarea.New(), width: 100, height: 24}).View().Content
+	if !strings.Contains(withSelection, "Press Tab or Enter to reply to the selected turn, or n for a new message.") {
+		t.Fatalf("reply hint is not contextual: %q", withSelection)
+	}
+}
+
+func TestComposePanePutsActionAndStyledAgentNameInBorder(t *testing.T) {
+	newMessage := app{
+		answering: true, composeTo: "alice-id", composeName: "alice", editor: textarea.New(),
+		paneFocus: focusReply,
+	}
+	view := newMessage.renderReplyPane(80)
+	if !strings.Contains(ansi.Strip(view), "[New message to alice]") || !strings.Contains(view, titleStyle.Render("alice")) {
+		t.Fatalf("new-message border title = %q", view)
+	}
+	if strings.Count(ansi.Strip(view), "New message to alice") != 1 {
+		t.Fatalf("new-message title was duplicated in the pane body: %q", view)
+	}
+
+	reply := app{
+		answering: true,
+		answerQ:   message("selected", "alice-id", model.HumanMailboxID, "Selected message"),
+		agents:    []domain.NamedAgent{{Name: "alice", MailboxID: "alice-id"}},
+		editor:    textarea.New(), paneFocus: focusReply,
+	}
+	view = reply.renderReplyPane(80)
+	if !strings.Contains(ansi.Strip(view), "[Replying to alice]") || !strings.Contains(view, titleStyle.Render("alice")) {
+		t.Fatalf("reply border title = %q", view)
+	}
+	if strings.Count(ansi.Strip(view), "Replying to alice") != 1 || strings.Contains(view, "Reply to this turn") {
+		t.Fatalf("reply title was duplicated in the pane body: %q", view)
 	}
 }
 
@@ -675,6 +716,46 @@ func TestLeavingNewMessageCreatesOutboundDraftRow(t *testing.T) {
 	m = updated.(app)
 	if !m.answering || m.composeTo != "fred-id" || m.editor.Value() != "unfinished new message" {
 		t.Fatalf("new-message draft did not resume: %#v", m)
+	}
+}
+
+func TestLeavingEmptyComposerDoesNotCreateDraft(t *testing.T) {
+	question := message("question", testAgentID, model.HumanMailboxID, "Question")
+	for name, m := range map[string]app{
+		"reply": {
+			messages: []model.Message{question}, answering: true, answerID: question.ID,
+			answerGroupKey: messageGroupKey(question), answerQ: question, activeDraftKey: messageGroupKey(question),
+			editor: textarea.New(), paneFocus: focusReply,
+		},
+		"new message": {
+			answering: true, activeDraftKey: "draft:new", composeTo: "alice-id", composeName: "alice",
+			editor: textarea.New(), paneFocus: focusReply,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m.editor.SetValue(" \n\t")
+			updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+			m = updated.(app)
+			if m.answering || m.paneFocus != focusInbox || len(m.drafts) != 0 {
+				t.Fatalf("empty composer was retained as a draft: %#v", m)
+			}
+		})
+	}
+}
+
+func TestEmptyingExistingDraftDeletesItWhenLeavingComposer(t *testing.T) {
+	draft := messageDraft{key: "draft:new", body: "saved", composeTo: "alice-id", composeName: "alice"}
+	m := app{
+		drafts: map[string]messageDraft{draft.key: draft}, editor: textarea.New(),
+		paneFocus: focusInbox, width: 80, height: 24,
+	}
+	m.resumeDraft(draft)
+	m.editor.SetValue("")
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(app)
+	if m.answering || len(m.drafts) != 0 || len(m.visibleGroups()) != 0 || m.cursor != 0 {
+		t.Fatalf("emptied saved draft was not deleted: %#v", m)
 	}
 }
 

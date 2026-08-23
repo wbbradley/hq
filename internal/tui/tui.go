@@ -1291,16 +1291,23 @@ func (m *app) stowActiveDraft() {
 	if key == "" {
 		key = m.answerGroupKey
 	}
-	if key == "" {
-		key = "draft:" + uuid.NewString()
-	}
-	if m.drafts == nil {
-		m.drafts = make(map[string]messageDraft)
-	}
-	m.drafts[key] = messageDraft{
-		key: key, body: m.editor.Value(), answerID: m.answerID, answerGroupKey: m.answerGroupKey,
-		answerQ: m.answerQ, composeTo: m.composeTo, composeName: m.composeName,
-		composeContext: m.composeContext, composeNamed: m.composeNamed, updatedAt: time.Now(),
+	body := m.editor.Value()
+	if strings.TrimSpace(body) == "" {
+		if key != "" {
+			delete(m.drafts, key)
+		}
+	} else {
+		if key == "" {
+			key = "draft:" + uuid.NewString()
+		}
+		if m.drafts == nil {
+			m.drafts = make(map[string]messageDraft)
+		}
+		m.drafts[key] = messageDraft{
+			key: key, body: body, answerID: m.answerID, answerGroupKey: m.answerGroupKey,
+			answerQ: m.answerQ, composeTo: m.composeTo, composeName: m.composeName,
+			composeContext: m.composeContext, composeNamed: m.composeNamed, updatedAt: time.Now(),
+		}
 	}
 	m.answering = false
 	m.activeDraftKey = ""
@@ -1313,8 +1320,11 @@ func (m *app) stowActiveDraft() {
 	m.composeNamed = false
 	m.editor.Blur()
 	m.editor.Reset()
-	if index := groupIndex(m.visibleGroups(), key); index >= 0 {
+	groups := m.visibleGroups()
+	if index := groupIndex(groups, key); index >= 0 {
 		m.cursor = index
+	} else if m.cursor >= len(groups) {
+		m.cursor = max(0, len(groups)-1)
 	}
 }
 
@@ -1850,11 +1860,11 @@ func (m app) View() tea.View {
 		messagePane = m.renderGroupPanel(detailGroup, layout.messageWidth)
 	}
 	messagePane = fitRenderedPane(messagePane, layout.messageWidth, layout.messageHeight, m.messageScroll, messageFocused)
-	replyHint := "Tab here to choose a recipient for a new message."
+	replyHint := "Press Tab or n to choose a recipient for a new message."
 	if hasDetail && detailGroup.draft != nil {
-		replyHint = "Draft saved. Press Enter to continue editing."
+		replyHint = "Press Tab or Enter to continue this draft, or n for a new message."
 	} else if hasDetail && canReplyGroup(detailGroup) {
-		replyHint = "Tab here or press Enter to reply to the selected turn."
+		replyHint = "Press Tab or Enter to reply to the selected turn, or n for a new message."
 	}
 	replyPane := renderMessagePanel(replyHint, layout.replyWidth, "[reply]", "", replyFocused)
 	if m.pickingRecipient {
@@ -2096,12 +2106,6 @@ func groupHasTechnicalIdentifiers(group messageGroup) bool {
 
 func (m app) renderReplyPane(width int) string {
 	var body strings.Builder
-	if m.composeTo != "" {
-		body.WriteString(titleStyle.Render("New message to " + m.composeName))
-	} else {
-		body.WriteString(titleStyle.Render("Reply to this turn"))
-	}
-	body.WriteByte('\n')
 	editor := m.editor
 	if width > 0 {
 		editor.SetWidth(max(1, width-panel.GetHorizontalFrameSize()))
@@ -2109,7 +2113,23 @@ func (m app) renderReplyPane(width int) string {
 	body.WriteString(editor.View())
 	body.WriteByte('\n')
 	body.WriteString(dim.Render("enter submit · shift+enter/ctrl+j newline · esc cancel"))
-	return renderMessagePanel(body.String(), width, "[reply]", "", m.paneFocused(focusReply))
+	prefix := "Replying to"
+	if m.composeTo != "" {
+		prefix = "New message to"
+	}
+	return renderComposePanel(body.String(), width, prefix, m.composeRecipientName(), m.paneFocused(focusReply))
+}
+
+func (m app) composeRecipientName() string {
+	if m.composeTo != "" && m.composeName != "" {
+		return m.composeName
+	}
+	for _, agent := range m.agents {
+		if agent.MailboxID == m.answerQ.SenderMailboxID {
+			return agent.Name
+		}
+	}
+	return displayMailboxLabel(m.answerQ.SenderLabel, m.answerQ.Context)
 }
 
 func (m app) renderRecipientPicker(width, height int) string {
@@ -2190,6 +2210,30 @@ func renderMessagePanel(content string, terminalWidth int, topLabel, bottomLabel
 		left := bottomWidth - lipgloss.Width(label) - 5
 		lines[len(lines)-1] = edgeStyle.Render("╰"+strings.Repeat("─", left)) + edgeStyle.Render(" "+label+" ") + edgeStyle.Render("─╯")
 	}
+	return strings.Join(lines, "\n")
+}
+
+func renderComposePanel(content string, terminalWidth int, prefix, name string, focused bool) string {
+	plainPrefix, suffix := "["+prefix+" ", "]"
+	plainLabel := plainPrefix + name + suffix
+	rendered := renderMessagePanel(content, terminalWidth, plainLabel, "", focused)
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		return rendered
+	}
+	borderWidth := lipgloss.Width(lines[0])
+	availableNameWidth := borderWidth - 6 - lipgloss.Width(plainPrefix) - lipgloss.Width(suffix)
+	if availableNameWidth < 1 {
+		return rendered
+	}
+	displayName := truncateDisplay(name, availableNameWidth)
+	labelWidth := lipgloss.Width(plainPrefix) + lipgloss.Width(displayName) + lipgloss.Width(suffix)
+	right := max(0, borderWidth-labelWidth-5)
+	edgeStyle := dimPanelEdge
+	if focused {
+		edgeStyle = panelEdge
+	}
+	lines[0] = edgeStyle.Render("╭─ "+plainPrefix) + titleStyle.Render(displayName) + edgeStyle.Render(suffix+" "+strings.Repeat("─", right)+"╮")
 	return strings.Join(lines, "\n")
 }
 
