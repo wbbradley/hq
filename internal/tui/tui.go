@@ -88,6 +88,7 @@ type app struct {
 	messageScroll       int
 	messageScrollManual bool
 	messageViewportKey  string
+	messageLiveAnchorID string
 	messageAnchorID     string
 	messageAnchorOffset int
 	paneFocus           paneFocus
@@ -568,6 +569,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconcileMessageViewport(true)
 	case loadedMsg:
 		selectedKey := m.selectedGroupKey()
+		knownSelectedMessages := make(map[string]bool)
+		if group, found := m.groupByKey(selectedKey); found {
+			for _, message := range group.messages {
+				knownSelectedMessages[message.ID] = true
+			}
+		}
 		if msg.conversations != nil || (msg.err == nil && m.store != nil) {
 			m.conversationMode = true
 			m.conversations = msg.conversations
@@ -588,6 +595,15 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = index
 		} else if m.cursor >= len(visibleGroups) {
 			m.cursor = max(0, len(visibleGroups)-1)
+		}
+		if !m.messageScrollManual && len(knownSelectedMessages) > 0 {
+			if group, found := m.groupByKey(selectedKey); found {
+				for _, message := range group.messages {
+					if !knownSelectedMessages[message.ID] && canArchive(message) {
+						m.messageLiveAnchorID = message.ID
+					}
+				}
+			}
 		}
 		m.reconcileMessageViewport(true)
 		return m.withContextCommand()
@@ -1763,9 +1779,15 @@ func messagePaneMaxStart(rendered string, height int) int {
 	return max(0, innerLines-innerHeight)
 }
 
-func automaticMessageStart(group messageGroup, rendered renderedMessageGroup, height int) int {
+func automaticMessageStart(group messageGroup, rendered renderedMessageGroup, height int, liveAnchorID string) int {
 	maximum := messagePaneMaxStart(rendered.panel, height)
 	target := archiveTarget(group)
+	for _, message := range group.messages {
+		if message.ID == liveAnchorID && canArchive(message) {
+			target = message
+			break
+		}
+	}
 	if target.ID == "" {
 		return maximum
 	}
@@ -1780,7 +1802,7 @@ func automaticMessageStart(group messageGroup, rendered renderedMessageGroup, he
 func (m app) resolvedMessageStart(group messageGroup, rendered renderedMessageGroup, height int) int {
 	maximum := messagePaneMaxStart(rendered.panel, height)
 	if !m.messageScrollManual || m.messageViewportKey != group.key {
-		return automaticMessageStart(group, rendered, height)
+		return automaticMessageStart(group, rendered, height, m.messageLiveAnchorID)
 	}
 	if m.messageAnchorID != "" {
 		for _, span := range rendered.spans {
@@ -1817,6 +1839,7 @@ func (m *app) reconcileMessageViewport(preserveManual bool) {
 	}
 	if !preserveManual || m.messageViewportKey != group.key {
 		m.messageScrollManual = false
+		m.messageLiveAnchorID = ""
 		m.messageAnchorID = ""
 		m.messageAnchorOffset = 0
 	}
@@ -1833,6 +1856,7 @@ func (m *app) resetMessageViewport() {
 	m.messageScroll = 0
 	m.messageScrollManual = false
 	m.messageViewportKey = ""
+	m.messageLiveAnchorID = ""
 	m.messageAnchorID = ""
 	m.messageAnchorOffset = 0
 }
@@ -2308,7 +2332,7 @@ func (m app) renderInboxPane(width, height int) string {
 			if message.ArchivedAt != nil {
 				state += " [archived]"
 			}
-			line := truncateDisplay(fmt.Sprintf("%-18s %s%s%s", direction, badge, singleLine(message.Body), state), innerWidth-2)
+			line := truncateDisplay(fmt.Sprintf("%s %s%s%s", direction, badge, singleLine(message.Body), state), innerWidth-2)
 			if i == m.cursor {
 				lines = append(lines, selected.Render("› "+line))
 			} else {

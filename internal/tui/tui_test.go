@@ -392,6 +392,16 @@ func TestMessagePresentationKindsAndFriendlyLabels(t *testing.T) {
 	}
 }
 
+func TestInboxRowsUseOnlyNeededSpaceAfterAgentName(t *testing.T) {
+	item := message("compact-row", testAgentID, model.HumanMailboxID, "Working on it")
+	item.Context.Directory = "/work/repo"
+	item.Details = "Kind: update"
+	view := ansi.Strip((app{messages: []model.Message{item}, width: 100, height: 24}).View().Content)
+	if !strings.Contains(view, "codex · repo [update] Working on it") {
+		t.Fatalf("inbox row retained a fixed-width agent column: %q", view)
+	}
+}
+
 func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 	replyTo := "reply-id-opaque"
 	item := message("message-id-opaque", testAgentID, model.HumanMailboxID, "Approval needed")
@@ -748,12 +758,48 @@ func TestMessagePaneAnchorsNewReplyAfterArchivedMessagesInSameTurn(t *testing.T)
 			break
 		}
 	}
-	if got := automaticMessageStart(group, rendered, layout.messageHeight); got != want || got == 0 {
+	if got := automaticMessageStart(group, rendered, layout.messageHeight, ""); got != want || got == 0 {
 		t.Fatalf("automatic start = %d; want unread reply start %d", got, want)
 	}
 	messageView := strings.Join(strings.Split(m.View().Content, "\n")[layout.inboxHeight:], "\n")
 	if !strings.Contains(messageView, "New reply") || strings.Count(messageView, "already read") >= 18 {
 		t.Fatalf("message pane did not prioritize the new reply: %q", messageView)
+	}
+}
+
+func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T) {
+	created := time.Date(2026, 8, 23, 16, 4, 5, 0, time.Local)
+	previous := message("previous-open", testAgentID, model.HumanMailboxID, strings.Repeat("previous update\n", 18))
+	previous.CreatedAt = created
+	previous.Details = "Codex thread: live-thread\nCodex turn: shared-turn"
+	key := conversationKeyForMessage(previous)
+	stableKey := conversationKeyString(key)
+	m := app{
+		conversations:    []model.ConversationSummary{{Key: key, Latest: previous, OldestOpen: &previous}},
+		conversationMode: true,
+		histories:        map[string][]model.Message{stableKey: {previous}},
+		width:            80,
+		height:           24,
+	}
+	m.setMessages()
+	m.reconcileMessageViewport(false)
+	initial := m.messageScroll
+
+	latest := message("latest-open", testAgentID, model.HumanMailboxID, "Latest update")
+	latest.CreatedAt = created.Add(time.Second)
+	latest.Details = "Codex thread: live-thread\nCodex turn: shared-turn"
+	updated, _ := m.Update(loadedMsg{
+		conversations: []model.ConversationSummary{{Key: key, Latest: latest, OldestOpen: &previous}},
+		histories:     map[string][]model.Message{stableKey: {previous, latest}},
+	})
+	m = updated.(app)
+	if m.messageLiveAnchorID != latest.ID || m.messageScroll <= initial {
+		t.Fatalf("live anchor = %q at %d; want %q after %d", m.messageLiveAnchorID, m.messageScroll, latest.ID, initial)
+	}
+	layout := responsivePaneLayout(m.width, m.height, false)
+	messageView := strings.Join(strings.Split(m.View().Content, "\n")[layout.inboxHeight:], "\n")
+	if !strings.Contains(messageView, "Latest update") || strings.Count(messageView, "previous update") >= 18 {
+		t.Fatalf("message pane did not advance to latest update: %q", messageView)
 	}
 }
 
