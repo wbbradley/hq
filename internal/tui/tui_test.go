@@ -701,7 +701,7 @@ func TestMessagePaneOppositeDirectionMovesImmediatelyAfterTopBoundary(t *testing
 	}
 }
 
-func TestMessagePaneAnchorsOldestOpenActionAfterArchivedHistory(t *testing.T) {
+func TestMessagePaneKeepsOldestOpenActionVisibleAfterArchivedHistory(t *testing.T) {
 	archived := message("archived-history", testAgentID, model.HumanMailboxID, strings.Repeat("archived ancestor\n", 20))
 	archived.Details = "Codex thread: anchor-thread\nCodex turn: old-turn"
 	archivedAt := time.Now().UTC()
@@ -712,8 +712,8 @@ func TestMessagePaneAnchorsOldestOpenActionAfterArchivedHistory(t *testing.T) {
 	m := app{messages: []model.Message{archived, open}, width: 80, height: 24}
 	view := m.View().Content
 	messageView := strings.Join(strings.Split(view, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:], "\n")
-	if !strings.Contains(messageView, "oldest open action") || strings.Contains(messageView, "archived ancestor") {
-		t.Fatalf("message pane did not anchor open action: %q", messageView)
+	if !strings.Contains(messageView, "oldest open action") {
+		t.Fatalf("message pane did not keep open action visible: %q", messageView)
 	}
 }
 
@@ -764,8 +764,17 @@ func TestManualMessageAnchorSurvivesResizeReflow(t *testing.T) {
 	m = updated.(app)
 	group, _ := m.detailGroup()
 	rendered := m.renderGroupPanelLayout(group, responsivePaneLayout(m.width, m.height, m.answering).messageWidth)
-	if !m.messageScrollManual || m.messageAnchorID != anchorID || m.messageAnchorOffset != anchorOffset || m.messageScroll > messagePaneLastStart(rendered.panel) {
-		t.Fatalf("manual resize anchor = scroll %d, %q+%d; want %q+%d", m.messageScroll, m.messageAnchorID, m.messageAnchorOffset, anchorID, anchorOffset)
+	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	maximum := messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	expectedScroll := maximum
+	for _, span := range rendered.spans {
+		if span.messageID == anchorID {
+			expectedScroll = min(maximum, span.start+anchorOffset)
+			break
+		}
+	}
+	if !m.messageScrollManual || m.messageAnchorID != anchorID || m.messageScroll != expectedScroll || m.messageScroll > maximum {
+		t.Fatalf("manual resize anchor = scroll %d, %q+%d; want scroll %d for %q", m.messageScroll, m.messageAnchorID, m.messageAnchorOffset, expectedScroll, anchorID)
 	}
 }
 
@@ -823,8 +832,45 @@ func TestMessageScrollingRemainsBoundedInSmallTerminal(t *testing.T) {
 	group, _ := m.detailGroup()
 	layout := responsivePaneLayout(m.width, m.height, false)
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
-	if m.messageScroll < 0 || m.messageScroll > messagePaneLastStart(rendered.panel) || lipgloss.Height(m.View().Content) != m.height {
-		t.Fatalf("small-terminal scroll=%d maximum=%d height=%d", m.messageScroll, messagePaneLastStart(rendered.panel), lipgloss.Height(m.View().Content))
+	maximum := messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	if m.messageScroll < 0 || m.messageScroll > maximum || lipgloss.Height(m.View().Content) != m.height {
+		t.Fatalf("small-terminal scroll=%d maximum=%d height=%d", m.messageScroll, maximum, lipgloss.Height(m.View().Content))
+	}
+}
+
+func TestMessagePaneStopsAtLastFullViewport(t *testing.T) {
+	var body strings.Builder
+	for index := 1; index <= 30; index++ {
+		fmt.Fprintf(&body, "line-%02d\n", index)
+	}
+	item := message("bottom-boundary", testAgentID, model.HumanMailboxID, strings.TrimSpace(body.String()))
+	m := app{messages: []model.Message{item}, width: 80, height: 24, paneFocus: focusMessage}
+	for range 100 {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+		m = updated.(app)
+	}
+	group, _ := m.detailGroup()
+	layout := responsivePaneLayout(m.width, m.height, false)
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	maximum := messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	if m.messageScroll != maximum {
+		t.Fatalf("bottom scroll=%d; want last full viewport start %d", m.messageScroll, maximum)
+	}
+	before := m.View().Content
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m = updated.(app)
+	if m.messageScroll != maximum || m.View().Content != before {
+		t.Fatalf("scroll advanced past bottom: scroll=%d maximum=%d", m.messageScroll, maximum)
+	}
+}
+
+func TestFitRenderedPaneFromTopClampsToLastFullViewport(t *testing.T) {
+	content := strings.Join([]string{"line-01", "line-02", "line-03", "line-04", "line-05", "line-06"}, "\n")
+	rendered := renderMessagePanel(content, 40, "[message]", "", false)
+	fitted := fitRenderedPaneFromTop(rendered, 40, 6, 100, false)
+	lines := strings.Split(ansi.Strip(fitted), "\n")
+	if len(lines) != 6 || !strings.Contains(lines[len(lines)-2], "line-06") || strings.Contains(fitted, "line-01") || strings.Contains(fitted, "line-02") {
+		t.Fatalf("last full viewport was not preserved: %q", fitted)
 	}
 }
 

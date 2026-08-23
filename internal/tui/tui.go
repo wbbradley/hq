@@ -1763,10 +1763,6 @@ func messagePaneMaxStart(rendered string, height int) int {
 	return max(0, innerLines-innerHeight)
 }
 
-func messagePaneLastStart(rendered string) int {
-	return max(0, len(strings.Split(rendered, "\n"))-3)
-}
-
 func automaticMessageStart(group messageGroup, rendered renderedMessageGroup, height int) int {
 	maximum := messagePaneMaxStart(rendered.panel, height)
 	target := archiveTarget(group)
@@ -1776,14 +1772,14 @@ func automaticMessageStart(group messageGroup, rendered renderedMessageGroup, he
 	unit := actionUnitKey(target)
 	for _, span := range rendered.spans {
 		if span.actionUnit == unit {
-			return max(0, span.start)
+			return min(maximum, max(0, span.start))
 		}
 	}
 	return maximum
 }
 
 func (m app) resolvedMessageStart(group messageGroup, rendered renderedMessageGroup, height int) int {
-	maximum := messagePaneLastStart(rendered.panel)
+	maximum := messagePaneMaxStart(rendered.panel, height)
 	if !m.messageScrollManual || m.messageViewportKey != group.key {
 		return automaticMessageStart(group, rendered, height)
 	}
@@ -1850,7 +1846,7 @@ func (m *app) scrollMessagePane(delta int) {
 	layout := responsivePaneLayout(m.width, m.height, m.answering)
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	current := m.resolvedMessageStart(group, rendered, layout.messageHeight)
-	next := min(messagePaneLastStart(rendered.panel), max(0, current+delta))
+	next := min(messagePaneMaxStart(rendered.panel, layout.messageHeight), max(0, current+delta))
 	m.messageScroll = next
 	m.messageViewportKey = group.key
 	if next == current {
@@ -2653,7 +2649,7 @@ func fitRenderedPaneFromTop(rendered string, width, height, start int, focused b
 	top, bottom := lines[0], lines[len(lines)-1]
 	inner := lines[1 : len(lines)-1]
 	innerHeight := max(0, height-2)
-	maximum := max(0, len(inner)-1)
+	maximum := max(0, len(inner)-innerHeight)
 	start = min(maximum, max(0, start))
 	if len(inner) > innerHeight {
 		end := min(len(inner), start+innerHeight)
