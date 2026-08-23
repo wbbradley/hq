@@ -717,6 +717,46 @@ func TestMessagePaneKeepsOldestOpenActionVisibleAfterArchivedHistory(t *testing.
 	}
 }
 
+func TestMessagePaneAnchorsNewReplyAfterArchivedMessagesInSameTurn(t *testing.T) {
+	created := time.Date(2026, 8, 23, 15, 4, 5, 0, time.Local)
+	read := message("read-reply", testAgentID, model.HumanMailboxID, strings.Repeat("already read\n", 18))
+	read.CreatedAt = created
+	read.Details = "Codex thread: anchor-thread\nCodex turn: shared-turn"
+	archivedAt := created.Add(time.Second)
+	read.ArchivedAt = &archivedAt
+
+	human := message("human-response", model.HumanMailboxID, testAgentID, "My response")
+	human.CreatedAt = created.Add(2 * time.Second)
+	human.Details = "Codex thread: anchor-thread\nCodex turn: shared-turn"
+
+	unread := message("unread-reply", testAgentID, model.HumanMailboxID, "New reply")
+	unread.CreatedAt = created.Add(3 * time.Second)
+	unread.Details = "Codex thread: anchor-thread\nCodex turn: shared-turn"
+
+	m := app{messages: []model.Message{read, human, unread}, width: 80, height: 24}
+	m.groups = groupMessages(m.messages)
+	group, found := m.detailGroup()
+	if !found {
+		t.Fatal("message group not found")
+	}
+	layout := responsivePaneLayout(m.width, m.height, false)
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	want := messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	for _, span := range rendered.spans {
+		if span.messageID == unread.ID {
+			want = min(want, span.start)
+			break
+		}
+	}
+	if got := automaticMessageStart(group, rendered, layout.messageHeight); got != want || got == 0 {
+		t.Fatalf("automatic start = %d; want unread reply start %d", got, want)
+	}
+	messageView := strings.Join(strings.Split(m.View().Content, "\n")[layout.inboxHeight:], "\n")
+	if !strings.Contains(messageView, "New reply") || strings.Count(messageView, "already read") >= 18 {
+		t.Fatalf("message pane did not prioritize the new reply: %q", messageView)
+	}
+}
+
 func TestMessagePaneUsesNewestContentWhenConversationHasNoOpenWork(t *testing.T) {
 	first := message("archived-first", testAgentID, model.HumanMailboxID, strings.Repeat("old history\n", 20))
 	second := message("archived-latest", testAgentID, model.HumanMailboxID, "newest archived content")

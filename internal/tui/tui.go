@@ -1769,9 +1769,8 @@ func automaticMessageStart(group messageGroup, rendered renderedMessageGroup, he
 	if target.ID == "" {
 		return maximum
 	}
-	unit := actionUnitKey(target)
 	for _, span := range rendered.spans {
-		if span.actionUnit == unit {
+		if span.messageID == target.ID {
 			return min(maximum, max(0, span.start))
 		}
 	}
