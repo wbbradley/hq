@@ -794,6 +794,16 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.managingAgents {
 			return m.updateAgentManager(msg)
 		}
+		pageKey := msg.String()
+		pageMsg := msg
+		switch pageKey {
+		case "ctrl+u":
+			pageKey = "pgup"
+			pageMsg = tea.KeyPressMsg{Code: tea.KeyPgUp}
+		case "ctrl+d":
+			pageKey = "pgdown"
+			pageMsg = tea.KeyPressMsg{Code: tea.KeyPgDown}
+		}
 		switch msg.String() {
 		case "tab":
 			wasReply := m.answering && m.paneFocus == focusReply
@@ -820,7 +830,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor.Blur()
 			return m, nil
 		}
-		switch msg.String() {
+		switch pageKey {
 		case "pgup":
 			layout := responsivePaneLayout(m.width, m.height, m.answering)
 			switch m.paneFocus {
@@ -834,7 +844,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case focusReply:
 				if m.answering {
 					var cmd tea.Cmd
-					m.editor, cmd = m.editor.Update(msg)
+					m.editor, cmd = m.editor.Update(pageMsg)
 					return m, cmd
 				}
 			}
@@ -852,7 +862,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case focusReply:
 				if m.answering {
 					var cmd tea.Cmd
-					m.editor, cmd = m.editor.Update(msg)
+					m.editor, cmd = m.editor.Update(pageMsg)
 					return m, cmd
 				}
 			}
@@ -2231,11 +2241,11 @@ func (m app) View() tea.View {
 	}
 	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0, replyFocused)
 	bottom := lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
-	help := "tab/shift+tab focus/compose · j/k navigate · pgup/pgdown message · enter reply · n new · g agents · d archive · u undo · i details · q quit"
+	help := "tab/shift+tab focus/compose · j/k navigate · pgup/pgdown or ^u/^d page · enter reply · n new · g agents · d archive · u undo · i details · q quit"
 	if m.pickingRecipient {
 		help = "type to filter recipients · j/k or arrows move · enter select · esc cancel"
 	} else if m.answering {
-		help = "tab/shift+tab focus · pgup/pgdown message · enter submit · shift+enter/ctrl+j newline · esc cancel"
+		help = "tab/shift+tab focus · pgup/pgdown or ^u/^d page · enter submit · shift+enter/ctrl+j newline · esc cancel"
 	}
 	if m.undoNotice != "" {
 		help = m.undoNotice + " · " + help
@@ -2268,11 +2278,11 @@ func responsivePaneLayout(width, height int, _ bool) paneLayout {
 	}
 	result := paneLayout{width: width, height: height}
 	usableHeight := max(2, height-1) // Reserve one terminal row for responsive help.
-	result.inboxHeight = max(2, (height+3)/4)
+	result.inboxHeight = max(2, (height+3)/4-1)
 	result.inboxHeight = min(result.inboxHeight, usableHeight-1)
 	remaining := max(1, usableHeight-result.inboxHeight)
 	result.messageWidth, result.replyWidth = width, width
-	result.replyHeight = max(6, (3*height+19)/20)
+	result.replyHeight = max(6, (3*height+19)/20) + 1
 	result.replyHeight = min(result.replyHeight, max(1, remaining-1))
 	result.messageHeight = max(1, remaining-result.replyHeight)
 	return result
@@ -2320,10 +2330,13 @@ func (m app) renderInboxPane(width, height int) string {
 	}
 	groups := m.visibleGroups()
 	listRows := max(0, innerHeight-len(lines))
+	listOffset := len(lines)
+	listStart, listVisible := 0, 0
 	if len(groups) == 0 && listRows > 0 {
 		lines = append(lines, dim.Render(truncateDisplay("No messages in this view. Press r to refresh.", innerWidth)))
 	} else if listRows > 0 {
 		start, end := listWindow(len(groups), m.cursor, listRows)
+		listStart, listVisible = start, end-start
 		for i := start; i < end; i++ {
 			group := groups[i]
 			message := group.latest()
@@ -2364,7 +2377,8 @@ func (m app) renderInboxPane(width, height int) string {
 	}
 	focused := m.paneFocused(focusInbox)
 	rendered := renderMessagePanel(strings.Join(lines, "\n"), width, "[HQ · Inbox]", "", focused)
-	return fitRenderedPane(rendered, width, height, 0, focused)
+	rendered = fitRenderedPane(rendered, width, height, 0, focused)
+	return renderPaneScrollbar(rendered, listStart, listVisible, len(groups), listOffset, listRows, focused)
 }
 
 func groupPresentationKind(group messageGroup) string {
@@ -2687,7 +2701,8 @@ func fitRenderedPaneFromTop(rendered string, width, height, start int, focused b
 	top, bottom := lines[0], lines[len(lines)-1]
 	inner := lines[1 : len(lines)-1]
 	innerHeight := max(0, height-2)
-	maximum := max(0, len(inner)-innerHeight)
+	totalInner := len(inner)
+	maximum := max(0, totalInner-innerHeight)
 	start = min(maximum, max(0, start))
 	if len(inner) > innerHeight {
 		end := min(len(inner), start+innerHeight)
@@ -2710,7 +2725,41 @@ func fitRenderedPaneFromTop(rendered string, width, height, start int, focused b
 	result = append(result, top)
 	result = append(result, inner...)
 	result = append(result, bottom)
-	return strings.Join(result, "\n")
+	return renderPaneScrollbar(strings.Join(result, "\n"), start, min(totalInner, innerHeight), totalInner, 0, innerHeight, focused)
+}
+
+func renderPaneScrollbar(rendered string, start, visible, total, trackOffset, trackHeight int, focused bool) string {
+	if total <= visible || visible <= 0 || trackHeight <= 0 {
+		return rendered
+	}
+	lines := strings.Split(rendered, "\n")
+	available := max(0, len(lines)-2-trackOffset)
+	trackHeight = min(trackHeight, available)
+	if trackHeight <= 0 {
+		return rendered
+	}
+	thumbHeight := max(1, visible*trackHeight/total)
+	thumbHeight = min(trackHeight, thumbHeight)
+	maximumStart := max(1, total-visible)
+	thumbRange := trackHeight - thumbHeight
+	thumbStart := min(thumbRange, max(0, start)*thumbRange/maximumStart)
+	trackStyle, thumbStyle := dimPanelEdge, panelEdge
+	if !focused {
+		thumbStyle = dimPanelEdge.Copy().Foreground(lipgloss.Color("103"))
+	}
+	for offset := range trackHeight {
+		lineIndex := 1 + trackOffset + offset
+		border := strings.LastIndex(lines[lineIndex], "│")
+		if border < 0 {
+			continue
+		}
+		glyph := trackStyle.Render("░")
+		if offset >= thumbStart && offset < thumbStart+thumbHeight {
+			glyph = thumbStyle.Render("█")
+		}
+		lines[lineIndex] = lines[lineIndex][:border] + glyph + lines[lineIndex][border+len("│"):]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func truncateDisplay(value string, width int) string {

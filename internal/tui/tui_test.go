@@ -600,13 +600,13 @@ func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
 
 func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 	layout := responsivePaneLayout(120, 20, true)
-	if layout.inboxHeight != 5 || layout.messageWidth != 120 || layout.replyWidth != 120 || layout.messageHeight != 8 || layout.replyHeight != 6 {
+	if layout.inboxHeight != 4 || layout.messageWidth != 120 || layout.replyWidth != 120 || layout.messageHeight != 8 || layout.replyHeight != 7 {
 		t.Fatalf("vertical layout = %#v", layout)
 	}
 	for _, test := range []struct {
 		height      int
 		replyHeight int
-	}{{20, 6}, {60, 9}, {80, 12}, {100, 15}} {
+	}{{20, 7}, {60, 10}, {80, 13}, {100, 16}} {
 		got := responsivePaneLayout(160, test.height, true)
 		if got.replyHeight != test.replyHeight {
 			t.Fatalf("%d-row reply height = %d; want %d", test.height, got.replyHeight, test.replyHeight)
@@ -630,6 +630,36 @@ func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 		if strings.Count(line, "╭") > 1 {
 			t.Fatalf("panes rendered side by side: %q", line)
 		}
+	}
+}
+
+func TestInboxAndMessagePanesShowScrollbarsOnlyWhenScrollable(t *testing.T) {
+	messages := make([]model.Message, 0, 12)
+	for index := range 12 {
+		item := message(fmt.Sprintf("scroll-row-%02d", index), testAgentID, model.HumanMailboxID, fmt.Sprintf("message %02d", index))
+		item.ThreadID = item.ID
+		item.CreatedAt = item.CreatedAt.Add(time.Duration(index) * time.Second)
+		messages = append(messages, item)
+	}
+	m := app{messages: messages, width: 80, height: 40, paneFocus: focusInbox}
+	inbox := m.renderInboxPane(m.width, responsivePaneLayout(m.width, m.height, false).inboxHeight)
+	if !strings.Contains(inbox, "█") || !strings.Contains(inbox, "░") {
+		t.Fatalf("scrollable inbox omitted scrollbar: %q", inbox)
+	}
+
+	long := message("long-scroll-message", testAgentID, model.HumanMailboxID, strings.Repeat("message line\n", 30))
+	m = app{messages: []model.Message{long}, width: 80, height: 24, paneFocus: focusMessage}
+	view := m.View().Content
+	layout := responsivePaneLayout(m.width, m.height, false)
+	messagePane := strings.Join(strings.Split(view, "\n")[layout.inboxHeight:layout.inboxHeight+layout.messageHeight], "\n")
+	if !strings.Contains(messagePane, "█") || !strings.Contains(messagePane, "░") {
+		t.Fatalf("scrollable message pane omitted scrollbar: %q", messagePane)
+	}
+
+	short := message("short-message", testAgentID, model.HumanMailboxID, "short")
+	m = app{messages: []model.Message{short}, width: 80, height: 24}
+	if strings.Contains(m.View().Content, "█") || strings.Contains(m.View().Content, "░") {
+		t.Fatalf("non-scrollable panes showed a scrollbar: %q", m.View().Content)
 	}
 }
 
@@ -1217,6 +1247,60 @@ func TestPageKeysApplyToFocusedPane(t *testing.T) {
 	m = updated.(app)
 	if m.messageScroll != previousScroll {
 		t.Fatalf("reply page-up changed message scroll from %d to %d", previousScroll, m.messageScroll)
+	}
+}
+
+func TestControlDUPageTheFocusedPane(t *testing.T) {
+	messages := make([]model.Message, 0, 10)
+	for index := range 10 {
+		item := message(fmt.Sprintf("control-page-%02d", index), testAgentID, model.HumanMailboxID, strings.Repeat(fmt.Sprintf("Body %02d\n", index), 30))
+		item.CreatedAt = time.Unix(int64(100-index), 0)
+		messages = append(messages, item)
+	}
+	controlDown := tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}
+	controlUp := tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl}
+	m := app{messages: messages, width: 80, height: 24, paneFocus: focusInbox}
+
+	updated, _ := m.Update(controlDown)
+	m = updated.(app)
+	if m.cursor == 0 {
+		t.Fatal("ctrl+d did not page the inbox down")
+	}
+	updated, _ = m.Update(controlUp)
+	m = updated.(app)
+	if m.cursor != 0 {
+		t.Fatalf("ctrl+u did not page the inbox up: cursor=%d", m.cursor)
+	}
+
+	m.paneFocus = focusMessage
+	m.reconcileMessageViewport(false)
+	messageStart := m.messageScroll
+	updated, _ = m.Update(controlDown)
+	m = updated.(app)
+	if m.messageScroll <= messageStart {
+		t.Fatal("ctrl+d did not page the message pane down")
+	}
+	updated, _ = m.Update(controlUp)
+	m = updated.(app)
+	if m.messageScroll != messageStart {
+		t.Fatalf("ctrl+u did not page the message pane up: scroll=%d want=%d", m.messageScroll, messageStart)
+	}
+
+	editor := textarea.New()
+	editor.SetHeight(4)
+	editor.SetValue(strings.Repeat("reply line\n", 20))
+	editor.MoveToBegin()
+	editor.Focus()
+	m = app{answering: true, editor: editor, paneFocus: focusReply, width: 80, height: 24}
+	updated, _ = m.Update(controlDown)
+	m = updated.(app)
+	if m.editor.Line() == 0 {
+		t.Fatal("ctrl+d did not page the reply pane down")
+	}
+	updated, _ = m.Update(controlUp)
+	m = updated.(app)
+	if m.editor.Line() != 0 {
+		t.Fatalf("ctrl+u did not page the reply pane up: line=%d", m.editor.Line())
 	}
 }
 
