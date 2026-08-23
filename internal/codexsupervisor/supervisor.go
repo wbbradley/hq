@@ -24,11 +24,12 @@ import (
 type StarterFactory func(environment []string) codexbridge.ProcessStarter
 
 type Supervisor struct {
-	Store   domain.Operations
-	Ledger  codexbridge.DeliveryLedger
-	Starter StarterFactory
-	Sync    func(context.Context) error
-	Logger  *slog.Logger
+	Store              domain.Operations
+	Ledger             codexbridge.DeliveryLedger
+	Starter            StarterFactory
+	LoadLaunchDefaults func() (domain.CodexLaunchDefaults, error)
+	Sync               func(context.Context) error
+	Logger             *slog.Logger
 
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -403,6 +404,7 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 	if found && request.SessionID == agent.CurrentSessionID {
 		request = cloneLaunchRequest(request)
 	} else {
+		found = false
 		request = domain.CodexLaunchRequest{
 			Directory: agent.Context.Directory, Repository: agent.Context,
 			Environment: append([]string(nil), environment...),
@@ -420,6 +422,19 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 	s.waking[agent.Name] = true
 	s.wakeWG.Add(1)
 	s.mu.Unlock()
+	if !found {
+		defaults, defaultsErr := s.launchDefaults()
+		if defaultsErr != nil {
+			clearLaunchEnvironment(&request)
+			s.mu.Lock()
+			delete(s.waking, agent.Name)
+			s.mu.Unlock()
+			s.wakeWG.Done()
+			s.logger().Warn("automatic Codex agent wake could not load launch defaults", "component", "codex_supervisor", "agent", agent.Name, "error", defaultsErr)
+			return
+		}
+		applyLaunchDefaults(&request, defaults)
+	}
 
 	go func() {
 		defer s.wakeWG.Done()
@@ -435,6 +450,17 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 		}
 		logger.Info("automatic Codex agent wake succeeded", "directory", runtime.Directory)
 	}()
+}
+
+func (s *Supervisor) launchDefaults() (domain.CodexLaunchDefaults, error) {
+	if s.LoadLaunchDefaults == nil {
+		return domain.CodexLaunchDefaults{}, nil
+	}
+	return s.LoadLaunchDefaults()
+}
+
+func applyLaunchDefaults(request *domain.CodexLaunchRequest, defaults domain.CodexLaunchDefaults) {
+	request.Yolo = defaults.Yolo
 }
 
 func (s *Supervisor) replaceLastGoodLocked(name string, request domain.CodexLaunchRequest) {

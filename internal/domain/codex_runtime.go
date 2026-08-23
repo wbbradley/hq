@@ -26,6 +26,13 @@ const (
 	CodexRuntimeConflict CodexRuntimePhase = "ownership-conflict"
 )
 
+// CodexLaunchDefaults contains local preferences used when the daemon must
+// construct a launch request itself. Explicit client launch requests already
+// contain their resolved values.
+type CodexLaunchDefaults struct {
+	Yolo bool
+}
+
 // CodexLaunchRequest is local control-plane input. Environment is sensitive:
 // implementations may retain it only in daemon memory for automatic relaunch,
 // and must never write it to durable storage, log it, or return it.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/codexsupervisor"
+	hqconfig "github.com/wbbradley/hq/internal/config"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/domainrpc"
 	"github.com/wbbradley/hq/internal/localwire"
@@ -58,6 +59,10 @@ func (r Runner) Run(ctx context.Context, databasePath string) error {
 		}
 		supervisor := codexsupervisor.New(ctx, database, ledger)
 		supervisor.Logger = logger
+		supervisor.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) {
+			settings, err := hqconfig.Load()
+			return domain.CodexLaunchDefaults{Yolo: settings.Codex.Yolo}, err
+		}
 		subscriptions := domainrpc.NewSubscriptionHub()
 		database.SetChangeObserver(func(change domain.Invalidation) {
 			subscriptions.Publish(change)

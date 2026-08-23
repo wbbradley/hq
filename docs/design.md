@@ -143,8 +143,9 @@ A committed local human message or answer addressed to an offline named Codex ma
 supervisor to resume the selected thread asynchronously. Concurrent messages coalesce into one wake.
 Within one daemon lifetime the exact last-known-good environment, cwd, repository context, and yolo
 setting are reused; after restart, the selected session context is combined with the sender's current
-environment. Initial prompts are never replayed. Mutation-receipt replays repeat the idempotent wake
-attempt so a crash between message commit and dispatch does not permanently strand queued input.
+environment and launch defaults loaded by the daemon when it constructs the request. Initial prompts
+are never replayed. Mutation-receipt replays repeat the idempotent wake attempt so a crash between
+message commit and dispatch does not permanently strand queued input.
 
 Node stop or restart cancels every worker and leaves its durable selection intact and offline;
 workers restart on demand when a local human message arrives. A future remote controller must address

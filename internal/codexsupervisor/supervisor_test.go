@@ -203,6 +203,11 @@ func TestMessageWakesOfflineAgentWithLastKnownGoodLaunch(t *testing.T) {
 	starter := &scriptedStarter{}
 	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
 	supervisor.Starter = starter.factory
+	defaultLoads := 0
+	supervisor.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) {
+		defaultLoads++
+		return domain.CodexLaunchDefaults{}, nil
+	}
 	defer supervisor.Close()
 	directory := t.TempDir()
 	originalEnvironment := []string{"PATH=/original/bin", "TOKEN=original-secret"}
@@ -242,6 +247,9 @@ func TestMessageWakesOfflineAgentWithLastKnownGoodLaunch(t *testing.T) {
 	if starts != 2 || len(environments) != 2 || strings.Join(environments[1], "|") != strings.Join(originalEnvironment, "|") {
 		t.Fatalf("starts=%d environments=%#v", starts, environments)
 	}
+	if defaultLoads != 0 {
+		t.Fatalf("last-known-good wake loaded defaults %d times", defaultLoads)
+	}
 }
 
 func TestMessageWakeAfterDaemonRestartUsesPersistedThreadAndSenderEnvironment(t *testing.T) {
@@ -273,6 +281,11 @@ func TestMessageWakeAfterDaemonRestartUsesPersistedThreadAndSenderEnvironment(t 
 	secondStarter := &scriptedStarter{}
 	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
 	second.Starter = secondStarter.factory
+	defaultLoads := 0
+	second.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) {
+		defaultLoads++
+		return domain.CodexLaunchDefaults{Yolo: true}, nil
+	}
 	defer second.Close()
 	agent, err := database.GetNamedAgent(context.Background(), "fred")
 	if err != nil || agent.Active || agent.CurrentSessionID != launched.ThreadID {
@@ -289,6 +302,13 @@ func TestMessageWakeAfterDaemonRestartUsesPersistedThreadAndSenderEnvironment(t 
 	secondStarter.mu.Unlock()
 	if len(environments) != 1 || strings.Join(environments[0], "|") != strings.Join(senderEnvironment, "|") {
 		t.Fatalf("restart environments = %#v", environments)
+	}
+	second.mu.Lock()
+	lastGood := cloneLaunchRequest(second.lastGood["fred"])
+	second.mu.Unlock()
+	defer clearLaunchEnvironment(&lastGood)
+	if defaultLoads != 1 || !lastGood.Yolo {
+		t.Fatalf("restart launch defaults: loads=%d request=%#v", defaultLoads, lastGood)
 	}
 }
 
