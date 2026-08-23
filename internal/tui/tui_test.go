@@ -570,7 +570,8 @@ func TestMessagePanePageScrollingStaysInsideFixture(t *testing.T) {
 }
 
 func TestTabAndShiftTabCyclePaneFocus(t *testing.T) {
-	m := app{editor: textarea.New(), width: 80, height: 24}
+	selected := message("selected", testAgentID, model.HumanMailboxID, "Selected message")
+	m := app{messages: []model.Message{selected}, editor: textarea.New(), width: 80, height: 24}
 	borderUses := func(view, label, color string) bool {
 		for _, line := range strings.Split(view, "\n") {
 			if strings.Contains(line, label) {
@@ -582,19 +583,32 @@ func TestTabAndShiftTabCyclePaneFocus(t *testing.T) {
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = updated.(app)
 	view := m.View().Content
-	if m.paneFocus != focusMessage || !borderUses(view, "[message]", "63") || !borderUses(view, "[HQ · Inbox]", "59") || strings.Contains(view, "focused") {
+	if m.paneFocus != focusMessage || !borderUses(view, "[HQ · Inbox]", "59") || strings.Contains(view, "focused") {
 		t.Fatalf("first tab focus = %v", m.paneFocus)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = updated.(app)
 	view = m.View().Content
-	if m.paneFocus != focusReply || !borderUses(view, "[reply]", "63") || !borderUses(view, "[message]", "59") || strings.Contains(view, "focused") {
-		t.Fatalf("second tab focus = %v", m.paneFocus)
+	if m.paneFocus != focusReply || !m.answering || m.answerID != selected.ID || !borderUses(view, "[reply]", "63") || strings.Contains(view, "focused") {
+		t.Fatalf("second tab state: focus=%v answering=%v answerID=%q", m.paneFocus, m.answering, m.answerID)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
 	m = updated.(app)
 	if m.paneFocus != focusMessage {
 		t.Fatalf("shift-tab focus = %v", m.paneFocus)
+	}
+}
+
+func TestTabIntoReplyWithoutSelectionOpensRecipientPicker(t *testing.T) {
+	m := app{editor: textarea.New(), paneFocus: focusMessage, width: 80, height: 24}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(app)
+	if m.paneFocus != focusReply || !m.pickingRecipient || m.answering {
+		t.Fatalf("tab into reply without selection = %#v", m)
+	}
+	if view := m.View().Content; !strings.Contains(view, "[recipient · choose a local recipient]") {
+		t.Fatalf("recipient picker was not rendered: %q", view)
 	}
 }
 

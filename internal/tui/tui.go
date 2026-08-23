@@ -672,9 +672,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stowActiveDraft()
 				return m.withContextCommand()
 			}
-			if m.answering && m.paneFocus == focusReply {
-				m.editor.Focus()
-				return m, textarea.Blink
+			if m.paneFocus == focusReply {
+				return m.beginComposeForSelection()
 			}
 			m.editor.Blur()
 			return m, nil
@@ -685,9 +684,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stowActiveDraft()
 				return m.withContextCommand()
 			}
-			if m.answering && m.paneFocus == focusReply {
-				m.editor.Focus()
-				return m, textarea.Blink
+			if m.paneFocus == focusReply {
+				return m.beginComposeForSelection()
 			}
 			m.editor.Blur()
 			return m, nil
@@ -829,23 +827,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showTechnical = !m.showTechnical
 			return m, nil
 		case "enter", "a":
-			if group, ok := m.groupAtCursor(); ok && group.draft != nil {
-				m.resumeDraft(*group.draft)
-				return m, textarea.Blink
-			} else if ok && canReplyGroup(group) {
-				m.answering = true
-				m.answerQ = replyTarget(group)
-				m.answerID = m.answerQ.ID
-				m.answerGroupKey = group.key
-				m.activeDraftKey = group.key
-				m.composeTo = ""
-				m.composeName = ""
-				m.composeContext = model.RepositoryContext{}
-				m.composeNamed = false
-				m.paneFocus = focusReply
-				m.resizeEditor()
-				m.editor.Focus()
-				return m, textarea.Blink
+			if group, ok := m.groupAtCursor(); ok && (group.draft != nil || canReplyGroup(group)) {
+				return m.beginComposeForSelection()
 			}
 		case "d":
 			if group, ok := m.groupAtCursor(); ok && canArchiveGroup(group) {
@@ -1258,6 +1241,37 @@ func (m *app) resizeEditor() {
 	layout := responsivePaneLayout(m.width, m.height, true)
 	m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
 	m.editor.SetHeight(max(1, layout.replyHeight-4))
+}
+
+func (m app) beginComposeForSelection() (tea.Model, tea.Cmd) {
+	if group, ok := m.groupAtCursor(); ok {
+		if group.draft != nil {
+			m.resumeDraft(*group.draft)
+			return m, textarea.Blink
+		}
+		if canReplyGroup(group) {
+			m.answering = true
+			m.answerQ = replyTarget(group)
+			m.answerID = m.answerQ.ID
+			m.answerGroupKey = group.key
+			m.activeDraftKey = group.key
+			m.composeTo = ""
+			m.composeName = ""
+			m.composeContext = model.RepositoryContext{}
+			m.composeNamed = false
+			m.paneFocus = focusReply
+			m.resizeEditor()
+			m.editor.Focus()
+			return m, textarea.Blink
+		}
+	}
+
+	m.pickingRecipient = true
+	m.pickerQuery = ""
+	m.pickerCursor = 0
+	m.paneFocus = focusReply
+	m.editor.Blur()
+	return m, nil
 }
 
 func (m *app) cyclePaneFocus(direction int) {
@@ -1836,9 +1850,11 @@ func (m app) View() tea.View {
 		messagePane = m.renderGroupPanel(detailGroup, layout.messageWidth)
 	}
 	messagePane = fitRenderedPane(messagePane, layout.messageWidth, layout.messageHeight, m.messageScroll, messageFocused)
-	replyHint := "Press Enter to reply to the selected turn."
+	replyHint := "Tab here to choose a recipient for a new message."
 	if hasDetail && detailGroup.draft != nil {
 		replyHint = "Draft saved. Press Enter to continue editing."
+	} else if hasDetail && canReplyGroup(detailGroup) {
+		replyHint = "Tab here or press Enter to reply to the selected turn."
 	}
 	replyPane := renderMessagePanel(replyHint, layout.replyWidth, "[reply]", "", replyFocused)
 	if m.pickingRecipient {
@@ -1848,7 +1864,7 @@ func (m app) View() tea.View {
 	}
 	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0, replyFocused)
 	bottom := lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
-	help := "tab/shift+tab focus · j/k navigate · pgup/pgdown message · enter reply · n new · g agents · d archive · u undo · i details · q quit"
+	help := "tab/shift+tab focus/compose · j/k navigate · pgup/pgdown message · enter reply · n new · g agents · d archive · u undo · i details · q quit"
 	if m.pickingRecipient {
 		help = "type to filter recipients · j/k or arrows move · enter select · esc cancel"
 	} else if m.answering {
