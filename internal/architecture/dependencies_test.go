@@ -81,6 +81,26 @@ func TestOnlyNodeRuntimeOpensConcreteStore(t *testing.T) {
 	}
 }
 
+func TestHarnessPortHasNoCodexDependency(t *testing.T) {
+	repository := repositoryRoot(t)
+	files, err := productionGoFiles(filepath.Join(repository, "internal", "harness"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range files {
+		file := parseFile(t, path)
+		for _, spec := range file.Imports {
+			importPath, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(strings.ToLower(importPath), "codex") {
+				t.Errorf("%s imports Codex dependency %q", relativePath(repository, path), importPath)
+			}
+		}
+	}
+}
+
 func productionGoFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
