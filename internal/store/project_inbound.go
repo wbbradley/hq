@@ -14,23 +14,15 @@ import (
 	"github.com/wbbradley/hq/internal/projectstate"
 )
 
-// acceptInboundProjectMessagesTx gives causally usable account traffic the
-// same home-issued sequence it would receive through local Create.
-func (s *SQLite) acceptInboundProjectMessagesTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	return s.acceptProjectMessagesTx(ctx, tx, `m.sender_installation_id<>p.home_installation_id`)
-}
-
-// repairLocalProjectReplies accepts replies written by versions that routed a
-// local reply to a project mailbox through the generic answer path. It runs
-// outside canonical ingestion so normal Create/CreateProjectMessage cannot
-// race their own transactional acceptance.
-func (s *SQLite) repairLocalProjectReplies(ctx context.Context) error {
+// reconcileProjectInputs commits the project-input invariant for projected
+// messages that may predate or have bypassed the current ingress transaction.
+func (s *SQLite) reconcileProjectInputs(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	accepted, err := s.acceptProjectMessagesTx(ctx, tx, `m.sender_installation_id=p.home_installation_id AND m.event_type='answer' AND m.reply_to IS NOT NULL`)
+	accepted, err := s.reconcileProjectInputsTx(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -48,9 +40,11 @@ func (s *SQLite) repairLocalProjectReplies(ctx context.Context) error {
 	return nil
 }
 
-func (s *SQLite) acceptProjectMessagesTx(ctx context.Context, tx *sql.Tx, sourceCondition string) ([]string, error) {
-	query := `SELECT p.id,m.id,m.event_id FROM messages m JOIN projects p ON p.mailbox_id=m.recipient_mailbox_id LEFT JOIN project_message_acceptances a ON a.message_id=m.id WHERE a.message_id IS NULL AND m.sender_mailbox_id=? AND m.purpose IN (?,?) AND ` + sourceCondition + ` ORDER BY m.created_at,m.event_id`
-	rows, err := tx.QueryContext(ctx, query, model.HumanMailboxID, model.MessagePurposeProjectInput, model.MessagePurposeConversation)
+// reconcileProjectInputsTx is the single commit boundary for accepting human
+// conversation into authoritative project history. It is intentionally
+// source-agnostic: local create/reply, remote append, and replay converge here.
+func (s *SQLite) reconcileProjectInputsTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT p.id,m.id,m.event_id FROM messages m JOIN projects p ON p.mailbox_id=m.recipient_mailbox_id LEFT JOIN project_message_acceptances a ON a.message_id=m.id WHERE a.message_id IS NULL AND m.sender_mailbox_id=? AND m.purpose IN (?,?) ORDER BY p.id,m.created_at,m.event_id`, model.HumanMailboxID, model.MessagePurposeProjectInput, model.MessagePurposeConversation)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +76,7 @@ func (s *SQLite) acceptProjectMessagesTx(ctx context.Context, tx *sql.Tx, source
 		if err != nil {
 			return nil, err
 		}
-		if _, err := s.ingestCanonicalTx(ctx, tx, []event.SignedEvent{acceptance}, true); err != nil {
+		if _, err := s.ingestCanonicalProjectionTx(ctx, tx, []event.SignedEvent{acceptance}, true); err != nil {
 			return nil, err
 		}
 		if err := s.appendProjectPendingNoticeTx(ctx, tx, message.projectID, message.messageID, acceptance.ID(), now); err != nil {
@@ -118,6 +112,6 @@ func (s *SQLite) appendProjectPendingNoticeTx(ctx context.Context, tx *sql.Tx, p
 	if err != nil {
 		return err
 	}
-	_, err = s.ingestCanonicalTx(ctx, tx, signed, true)
+	_, err = s.ingestCanonicalProjectionTx(ctx, tx, signed, true)
 	return err
 }

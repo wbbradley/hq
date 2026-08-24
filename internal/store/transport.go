@@ -402,7 +402,11 @@ func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL strin
 			return ReceiveResult{}, ingestErr
 		}
 		if len(canonicalCommit.EventIDs) > 0 {
-			canonicalChange, err = recordChangeTx(ctx, tx, canonicalChangeTopics)
+			topics := canonicalChangeTopics
+			if len(canonicalCommit.ProjectInputAcceptanceIDs) != 0 {
+				topics = append(append([]domain.ChangeTopic(nil), canonicalChangeTopics...), domain.TopicProjects)
+			}
+			canonicalChange, err = recordChangeTx(ctx, tx, topics)
 			if err != nil {
 				return ReceiveResult{}, err
 			}

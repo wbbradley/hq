@@ -19,7 +19,6 @@ import (
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
-	"github.com/wbbradley/hq/internal/projectstate"
 	_ "modernc.org/sqlite"
 )
 
@@ -550,7 +549,8 @@ func (s *SQLite) SetProjectCommandHandler(handler func(context.Context, domain.P
 }
 
 type canonicalIngest struct {
-	EventIDs []string
+	EventIDs                  []string
+	ProjectInputAcceptanceIDs []string
 }
 
 var canonicalChangeTopics = []domain.ChangeTopic{
@@ -593,9 +593,9 @@ func Open(path string) (*SQLite, error) {
 		db.Close()
 		return nil, err
 	}
-	if err := s.repairLocalProjectReplies(context.Background()); err != nil {
+	if err := s.reconcileProjectInputs(context.Background()); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("repair local project replies: %w", err)
+		return nil, fmt.Errorf("reconcile project inputs: %w", err)
 	}
 	if err := os.Chmod(resolved, 0o600); err != nil {
 		db.Close()
@@ -1068,7 +1068,11 @@ func (s *SQLite) appendContentsResult(ctx context.Context, contents []event.Cont
 	}
 	var change domain.Invalidation
 	if len(commit.EventIDs) > 0 {
-		change, err = recordChangeTx(ctx, tx, canonicalChangeTopics)
+		topics := canonicalChangeTopics
+		if len(commit.ProjectInputAcceptanceIDs) != 0 {
+			topics = append(append([]domain.ChangeTopic(nil), canonicalChangeTopics...), domain.TopicProjects)
+		}
+		change, err = recordChangeTx(ctx, tx, topics)
 		if err != nil {
 			return nil, err
 		}
@@ -1112,6 +1116,20 @@ func (s *SQLite) appendSignedTxMode(ctx context.Context, tx *sql.Tx, additions [
 }
 
 func (s *SQLite) ingestCanonicalTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent, requireProjected bool) (canonicalIngest, error) {
+	commit, err := s.ingestCanonicalProjectionTx(ctx, tx, additions, requireProjected)
+	if err != nil {
+		return commit, err
+	}
+	accepted, err := s.reconcileProjectInputsTx(ctx, tx)
+	commit.EventIDs = append(commit.EventIDs, accepted...)
+	commit.ProjectInputAcceptanceIDs = append(commit.ProjectInputAcceptanceIDs, accepted...)
+	return commit, err
+}
+
+// ingestCanonicalProjectionTx projects canonical facts without invoking the
+// project-input invariant. Only the invariant itself uses this lower boundary
+// while appending acceptance events and their idempotent pending notices.
+func (s *SQLite) ingestCanonicalProjectionTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent, requireProjected bool) (canonicalIngest, error) {
 	var commit canonicalIngest
 	rows, err := tx.QueryContext(ctx, `SELECT event_id,raw FROM canonical_events ORDER BY event_id`)
 	if err != nil {
@@ -1171,11 +1189,6 @@ func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEv
 	if err != nil {
 		return err
 	}
-	acceptedProjectEvents, err := s.acceptInboundProjectMessagesTx(ctx, tx)
-	if err != nil {
-		return err
-	}
-	commit.EventIDs = append(commit.EventIDs, acceptedProjectEvents...)
 	var change domain.Invalidation
 	if len(commit.EventIDs) > 0 {
 		topics := append(append([]domain.ChangeTopic(nil), canonicalChangeTopics...), domain.TopicProjects)
@@ -1711,61 +1724,7 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 		payload, _ = event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Purpose: m.Purpose, Context: contextPointer(m.Context), ActorLabel: actorLabel})
 		content.Payload = payload
 	}
-	if projectID != "" && m.Purpose == model.MessagePurposeProjectInput {
-		return s.createProjectMessage(ctx, projectID, m, content)
-	}
 	return s.appendContents(ctx, []event.Content{content}, []time.Time{m.CreatedAt}, nil)
-}
-
-func (s *SQLite) createProjectMessage(ctx context.Context, projectID string, message model.Message, content event.Content, companions ...event.Content) error {
-	contents := append([]event.Content{content}, companions...)
-	createdAt := make([]time.Time, len(contents))
-	for index := range createdAt {
-		createdAt[index] = message.CreatedAt
-	}
-	messageEvents, err := s.signContents(ctx, contents, createdAt)
-	if err != nil {
-		return err
-	}
-	acceptedAt := s.now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var head string
-	if err := tx.QueryRowContext(ctx, `SELECT head_event_id FROM projects WHERE id=? AND mailbox_id=?`, projectID, message.RecipientMailboxID).Scan(&head); errors.Is(err, sql.ErrNoRows) {
-		return domain.ErrProjectNotFound
-	} else if err != nil {
-		return err
-	}
-	var sequence int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0)+1 FROM project_message_acceptances WHERE project_id=?`, projectID).Scan(&sequence); err != nil {
-		return err
-	}
-	acceptance, _, err := s.signProjectEventTx(ctx, tx, projectID, head, projectstate.MessageAccepted{MessageID: message.ID, MessageEventID: messageEvents[0].ID(), Sequence: sequence}, acceptedAt)
-	if err != nil {
-		return err
-	}
-	events := append(messageEvents, acceptance)
-	if _, err := s.ingestCanonicalTx(ctx, tx, events, true); err != nil {
-		return err
-	}
-	if err := s.appendProjectPendingNoticeTx(ctx, tx, projectID, message.ID, acceptance.ID(), acceptedAt); err != nil {
-		return err
-	}
-	if err := recordMutationTx(ctx, tx, nil); err != nil {
-		return err
-	}
-	change, err := recordChangeTx(ctx, tx, append(canonicalChangeTopics, domain.TopicProjects))
-	if err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	s.notifyChange(change)
-	return nil
 }
 
 func contextPointer(repo model.RepositoryContext) *event.RepositoryContext {
@@ -1829,7 +1788,7 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 				payload, _ = event.MarshalPayload(event.TextPayload{MessageID: reply.ID, Body: reply.Body, Details: reply.Details, Purpose: reply.Purpose, Context: contextPointer(reply.Context), ActorLabel: actorLabel})
 				answer.Payload = payload
 			}
-			return s.createProjectMessage(ctx, projectID, reply, answer, archive)
+			return s.appendContents(ctx, []event.Content{answer, archive}, []time.Time{reply.CreatedAt, reply.CreatedAt}, nil)
 		}
 	}
 	return s.appendContents(ctx, []event.Content{answer, archive}, []time.Time{reply.CreatedAt, reply.CreatedAt}, nil)
@@ -2468,6 +2427,9 @@ func (s *SQLite) rebuildOnce(ctx context.Context) error {
 	}
 	rows.Close()
 	if err := s.rebuildTx(ctx, tx, event.Reduce(raw, s.policy())); err != nil {
+		return err
+	}
+	if _, err := s.reconcileProjectInputsTx(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()

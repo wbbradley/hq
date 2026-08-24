@@ -1065,7 +1065,7 @@ func TestStructuredReplyToProjectQuestionIsNotAcceptedAsConversation(t *testing.
 	}
 }
 
-func TestOpenRepairsPreviouslyStrandedLocalProjectReply(t *testing.T) {
+func TestGenericCanonicalAppendAcceptsLocalProjectReplyAndRestartIsIdempotent(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	s := openStore(t, database)
 	ctx := context.Background()
@@ -1092,8 +1092,8 @@ func TestOpenRepairsPreviouslyStrandedLocalProjectReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	var before int
-	if err := s.db.QueryRow(`SELECT count(*) FROM project_message_acceptances WHERE message_id=?`, replyID).Scan(&before); err != nil || before != 0 {
-		t.Fatalf("reply was not stranded before reopen: count=%d err=%v", before, err)
+	if err := s.db.QueryRow(`SELECT count(*) FROM project_message_acceptances WHERE message_id=?`, replyID).Scan(&before); err != nil || before != 1 {
+		t.Fatalf("generic append acceptance count=%d err=%v", before, err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -1105,6 +1105,52 @@ func TestOpenRepairsPreviouslyStrandedLocalProjectReply(t *testing.T) {
 	t.Cleanup(func() { reopened.Close() })
 	var sequence int64
 	if err := reopened.db.QueryRow(`SELECT sequence FROM project_message_acceptances WHERE project_id=? AND message_id=?`, project.ID, replyID).Scan(&sequence); err != nil || sequence != 1 {
-		t.Fatalf("repaired reply sequence = %d, %v", sequence, err)
+		t.Fatalf("reply sequence after restart = %d, %v", sequence, err)
+	}
+}
+
+func TestRebuildReconcilesProjectInputMissingFromLegacyHistory(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "legacy input"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, parents, deviceLabel, err := s.localAccountAction(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID := "019c0000-0000-7000-8000-000000000373"
+	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: messageID, Body: "legacy unaccepted input", Purpose: model.MessagePurposeProjectInput, ActorLabel: deviceLabel})
+	content := event.Content{Type: event.TypeMessage, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(project.MailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	signed, err := s.signContents(ctx, []event.Content{content}, []time.Time{time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ingestCanonicalProjectionTx(ctx, tx, signed, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM project_message_acceptances WHERE message_id=?`, messageID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("legacy acceptance before rebuild=%d err=%v", count, err)
+	}
+	if err := s.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM project_message_acceptances WHERE message_id=?`, messageID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("legacy acceptance after rebuild=%d err=%v", count, err)
+	}
+	if err := s.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM project_message_acceptances WHERE message_id=?`, messageID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("legacy acceptance after repeated rebuild=%d err=%v", count, err)
 	}
 }
