@@ -601,12 +601,25 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setMessages()
 		visibleGroups := m.visibleGroups()
+		automaticallySelected := selectedKey == "" && len(visibleGroups) > 0
 		if index := groupIndex(visibleGroups, selectedKey); index >= 0 {
 			m.cursor = index
 		} else if m.cursor >= len(visibleGroups) {
 			m.cursor = max(0, len(visibleGroups)-1)
 		}
-		if len(knownSelectedMessages) > 0 {
+		if automaticallySelected {
+			group := visibleGroups[m.cursor]
+			m.messageViewportKey = group.key
+			m.messageLiveAnchorID = ""
+			m.messageScrollManual = false
+			m.messageAnchorID = ""
+			m.messageAnchorOffset = 0
+			for _, message := range group.messages {
+				if canArchive(message) {
+					m.messageLiveAnchorID = message.ID
+				}
+			}
+		} else if len(knownSelectedMessages) > 0 {
 			if group, found := m.groupByKey(selectedKey); found {
 				for _, message := range group.messages {
 					if !knownSelectedMessages[message.ID] && canArchive(message) {

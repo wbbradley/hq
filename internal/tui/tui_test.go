@@ -876,6 +876,50 @@ func TestMessagePaneAnchorsNewReplyAfterArchivedMessagesInSameTurn(t *testing.T)
 	}
 }
 
+func TestMessagePaneClearsStaleAnchorWhenOnlyConversationReappears(t *testing.T) {
+	created := time.Date(2026, 8, 23, 18, 4, 5, 0, time.Local)
+	previous := message("previous-reply", testAgentID, model.HumanMailboxID, strings.Repeat("previous reply\n", 20))
+	previous.CreatedAt = created
+	previous.Details = "Codex thread: reappearing-thread\nCodex turn: previous-turn"
+	archivedAt := created.Add(time.Second)
+	previous.ArchivedAt = &archivedAt
+	human := message("human-reply", model.HumanMailboxID, testAgentID, "My reply")
+	human.CreatedAt = created.Add(2 * time.Second)
+	human.Details = "Codex thread: reappearing-thread\nCodex turn: previous-turn"
+	latest := message("latest-reply", testAgentID, model.HumanMailboxID, strings.Repeat("latest reply\n", 12))
+	latest.CreatedAt = created.Add(3 * time.Second)
+	latest.Details = "Codex thread: reappearing-thread\nCodex turn: latest-turn"
+	key := conversationKeyForMessage(latest)
+	stableKey := conversationKeyString(key)
+
+	m := app{
+		conversationMode: true, histories: map[string][]model.Message{}, width: 80, height: 24,
+		messageViewportKey: stableKey, messageScrollManual: true, messageAnchorID: previous.ID,
+	}
+	m.setMessages()
+	updated, _ := m.Update(loadedMsg{
+		conversations: []model.ConversationSummary{{Key: key, Latest: latest, OldestOpen: &latest}},
+		histories:     map[string][]model.Message{stableKey: {previous, human, latest}},
+	})
+	m = updated.(app)
+	group, found := m.detailGroup()
+	if !found {
+		t.Fatal("automatically selected conversation not found")
+	}
+	layout := responsivePaneLayout(m.width, m.height, false)
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	want := messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	for _, span := range rendered.spans {
+		if span.messageID == latest.ID {
+			want = min(want, span.start)
+			break
+		}
+	}
+	if m.messageScrollManual || m.messageLiveAnchorID != latest.ID || m.messageScroll != want {
+		t.Fatalf("reappearing conversation retained stale anchor: scroll=%d want=%d manual=%t live=%q", m.messageScroll, want, m.messageScrollManual, m.messageLiveAnchorID)
+	}
+}
+
 func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T) {
 	created := time.Date(2026, 8, 23, 16, 4, 5, 0, time.Local)
 	previous := message("previous-open", testAgentID, model.HumanMailboxID, strings.Repeat("previous update\n", 18))
