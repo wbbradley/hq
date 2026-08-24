@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -81,21 +82,42 @@ func TestOnlyNodeRuntimeOpensConcreteStore(t *testing.T) {
 	}
 }
 
-func TestHarnessPortHasNoCodexDependency(t *testing.T) {
+func TestHarnessNeutralPackagesHaveNoCodexDependency(t *testing.T) {
 	repository := repositoryRoot(t)
-	files, err := productionGoFiles(filepath.Join(repository, "internal", "harness"))
+	for _, directory := range []string{"harness", "harnessbridge"} {
+		files, err := productionGoFiles(filepath.Join(repository, "internal", directory))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range files {
+			file := parseFile(t, path)
+			for _, spec := range file.Imports {
+				importPath, err := strconv.Unquote(spec.Path.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(strings.ToLower(importPath), "codex") {
+					t.Errorf("%s imports Codex dependency %q", relativePath(repository, path), importPath)
+				}
+			}
+		}
+	}
+}
+
+func TestHarnessBridgeContainsNoVendorProtocolNames(t *testing.T) {
+	repository := repositoryRoot(t)
+	files, err := productionGoFiles(filepath.Join(repository, "internal", "harnessbridge"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range files {
-		file := parseFile(t, path)
-		for _, spec := range file.Imports {
-			importPath, err := strconv.Unquote(spec.Path.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(strings.ToLower(importPath), "codex") {
-				t.Errorf("%s imports Codex dependency %q", relativePath(repository, path), importPath)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"thread/start", "thread/resume", "thread/read", "turn/start", "turn/steer", "clientUserMessageId", "ServerRequest", "RPCError"} {
+			if strings.Contains(string(raw), forbidden) {
+				t.Errorf("%s contains vendor protocol name %q", relativePath(repository, path), forbidden)
 			}
 		}
 	}

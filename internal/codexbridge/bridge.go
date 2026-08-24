@@ -86,7 +86,7 @@ type BridgeReady struct {
 	Directory string
 }
 
-func Run(ctx context.Context, options Options) error {
+func runLegacy(ctx context.Context, options Options) error {
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
