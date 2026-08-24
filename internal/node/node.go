@@ -106,6 +106,7 @@ func (r Runner) Run(ctx context.Context, databasePath string) error {
 			subscriptions.Publish(change)
 			supervisor.Publish(change)
 		})
+		supervisor.StartWorkReconciliation()
 		service := domainrpc.Service{
 			Store: database, Subscriptions: subscriptions, Runtime: supervisor,
 			Synchronize: func(context.Context) error {

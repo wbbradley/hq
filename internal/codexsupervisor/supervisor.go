@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ type Supervisor struct {
 	Store              domain.Operations
 	Projects           domain.ProjectOperations
 	Workflows          domain.ProjectWorkflowOperations
+	PendingWork        domain.CodexPendingWorkOperations
 	Ledger             codexbridge.DeliveryLedger
 	Starter            StarterFactory
 	LoadLaunchDefaults func() (domain.CodexLaunchDefaults, error)
@@ -40,15 +42,19 @@ type Supervisor struct {
 	mu     sync.Mutex
 	// subsMu stays independent because store changes may publish synchronously
 	// while a supervisor operation holds mu.
-	subsMu      sync.Mutex
-	wakeWG      sync.WaitGroup
-	workers     map[string]*worker
-	receipts    map[string]receipt
-	lastGood    map[string]domain.CodexLaunchRequest
-	provisionMu sync.Mutex
-	waking      map[string]bool
-	subs        map[uint64]*localSubscription
-	nextSub     uint64
+	subsMu            sync.Mutex
+	wakeWG            sync.WaitGroup
+	reconcileWG       sync.WaitGroup
+	reconcileOnce     sync.Once
+	reconcileTrigger  chan struct{}
+	ReconcileInterval time.Duration
+	workers           map[string]*worker
+	receipts          map[string]receipt
+	lastGood          map[string]domain.CodexLaunchRequest
+	provisionMu       sync.Mutex
+	waking            map[string]bool
+	subs              map[uint64]*localSubscription
+	nextSub           uint64
 }
 
 type GitRunner func(context.Context, string, ...string) ([]byte, error)
@@ -76,7 +82,7 @@ func New(ctx context.Context, store domain.Operations, ledger codexbridge.Delive
 	}
 	supervisor := &Supervisor{
 		Store: store, Ledger: ledger, Logger: slog.New(slog.DiscardHandler), ctx: lifetime, cancel: cancel,
-		workers: make(map[string]*worker), receipts: make(map[string]receipt), lastGood: make(map[string]domain.CodexLaunchRequest), waking: make(map[string]bool), subs: make(map[uint64]*localSubscription),
+		workers: make(map[string]*worker), receipts: make(map[string]receipt), lastGood: make(map[string]domain.CodexLaunchRequest), waking: make(map[string]bool), subs: make(map[uint64]*localSubscription), reconcileTrigger: make(chan struct{}, 1),
 	}
 	if projects, ok := store.(domain.ProjectOperations); ok {
 		supervisor.Projects = projects
@@ -85,6 +91,9 @@ func New(ctx context.Context, store domain.Operations, ledger codexbridge.Delive
 		supervisor.Workflows = workflows
 		supervisor.recoverIncompleteProjectActivations()
 	}
+	if pending, ok := store.(domain.CodexPendingWorkOperations); ok {
+		supervisor.PendingWork = pending
+	}
 	return supervisor
 }
 
@@ -92,6 +101,7 @@ func (s *Supervisor) Close() error {
 	logger := s.logger().With("component", "codex_supervisor")
 	logger.Info("Codex supervisor stopping")
 	s.cancel()
+	s.reconcileWG.Wait()
 	// Wake registration is gated by mu and checks the canceled lifetime. Cross
 	// that gate before waiting so no goroutine can call Add concurrently with a
 	// zero-count Wait.
@@ -318,6 +328,9 @@ func (s *Supervisor) Subscribe(_ context.Context, topics ...domain.ChangeTopic) 
 }
 
 func (s *Supervisor) Publish(change domain.Invalidation) {
+	if change.FullSnapshot || slices.Contains(change.Topics, domain.TopicMessages) || slices.Contains(change.Topics, domain.TopicProjects) || slices.Contains(change.Topics, domain.TopicAgents) {
+		s.triggerWorkReconciliation()
+	}
 	s.subsMu.Lock()
 	defer s.subsMu.Unlock()
 	for _, subscription := range s.subs {
@@ -331,6 +344,60 @@ func (s *Supervisor) Publish(change domain.Invalidation) {
 			default:
 			}
 		}
+	}
+}
+
+// StartWorkReconciliation begins the durable pending-work loop. Call it only
+// after the store observer is installed; the initial trigger then closes the
+// startup scan/observer race.
+func (s *Supervisor) StartWorkReconciliation() {
+	s.reconcileOnce.Do(func() {
+		if s.PendingWork == nil {
+			return
+		}
+		s.reconcileWG.Add(1)
+		go s.runWorkReconciliation()
+		s.triggerWorkReconciliation()
+	})
+}
+
+func (s *Supervisor) triggerWorkReconciliation() {
+	select {
+	case s.reconcileTrigger <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Supervisor) runWorkReconciliation() {
+	defer s.reconcileWG.Done()
+	interval := s.ReconcileInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-s.reconcileTrigger:
+		case <-timer.C:
+		}
+		s.reconcilePendingWork()
+		timer.Reset(interval)
+	}
+}
+
+func (s *Supervisor) reconcilePendingWork() {
+	work, err := s.PendingWork.ListCodexPendingWork(s.ctx)
+	if err != nil {
+		if s.ctx.Err() == nil {
+			s.logger().Warn("scan durable Codex pending work", "component", "codex_supervisor", "error", err)
+		}
+		return
+	}
+	for _, item := range work {
+		s.WakeCodexAgent(model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: item.MailboxID}, nil)
 	}
 }
 

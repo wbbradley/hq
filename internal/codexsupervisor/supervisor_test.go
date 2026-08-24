@@ -259,16 +259,16 @@ func TestProjectMessageWakesDurableRunnableAssignmentAfterRestart(t *testing.T) 
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
+	message := model.Message{ID: "019c0000-0000-7000-8000-000000000401", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: activated.Project.MailboxID, Body: "resume project", CreatedAt: time.Now().UTC()}
+	if err := database.Create(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
 	secondStarter := &scriptedStarter{}
 	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
 	second.Starter = secondStarter.factory
 	second.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) { return domain.CodexLaunchDefaults{}, nil }
 	defer second.Close()
-	message := model.Message{ID: "019c0000-0000-7000-8000-000000000401", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: activated.Project.MailboxID, Body: "resume project", CreatedAt: time.Now().UTC()}
-	if err := database.Create(context.Background(), message); err != nil {
-		t.Fatal(err)
-	}
-	second.WakeCodexAgent(message, []string{"PATH=/sender/bin"})
+	second.StartWorkReconciliation()
 	runtime := waitForRunningRuntime(t, second, "fred")
 	if runtime.ThreadID != activated.Runtime.ThreadID {
 		t.Fatalf("woke thread %q, want %q", runtime.ThreadID, activated.Runtime.ThreadID)
@@ -283,6 +283,69 @@ func TestProjectMessageWakesDurableRunnableAssignmentAfterRestart(t *testing.T) 
 			t.Fatalf("project message was not dispatched after wake: %#v, %v", got, err)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestSupervisorReconcilesDirectWorkFromStoreInvalidationOnce(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	directory := t.TempDir()
+	first := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	first.Starter = (&scriptedStarter{}).factory
+	launched, err := first.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: "direct", Action: domain.CodexSessionNew, Directory: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondStarter := &scriptedStarter{}
+	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	second.Starter = secondStarter.factory
+	second.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) { return domain.CodexLaunchDefaults{}, nil }
+	database.SetChangeObserver(second.Publish)
+	second.StartWorkReconciliation()
+	defer second.Close()
+	agent, err := database.GetNamedAgent(context.Background(), "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{ID: "019c0000-0000-7000-8000-000000000402", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID, Body: "durable direct work", CreatedAt: time.Now().UTC()}
+	if err := database.Create(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		second.Publish(domain.Invalidation{Topics: []domain.ChangeTopic{domain.TopicMessages}})
+	}
+	runtime := waitForRunningRuntime(t, second, "direct")
+	if runtime.ThreadID != launched.ThreadID || runtime.Directory != directory {
+		t.Fatalf("reconciled runtime = %#v", runtime)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got, getErr := database.Get(context.Background(), message.ID)
+		if getErr == nil && got.CompletedAt != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("direct work was not delivered: %#v, %v", got, getErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	secondStarter.mu.Lock()
+	starts := secondStarter.starts
+	secondStarter.mu.Unlock()
+	if starts != 1 {
+		t.Fatalf("duplicate reconciliation launched %d workers", starts)
 	}
 }
 

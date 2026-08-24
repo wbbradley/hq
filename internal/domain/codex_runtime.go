@@ -34,6 +34,31 @@ type CodexLaunchDefaults struct {
 	Yolo bool
 }
 
+type CodexPendingWorkKind string
+
+const (
+	CodexPendingDirect  CodexPendingWorkKind = "direct-agent"
+	CodexPendingProject CodexPendingWorkKind = "project-assignment"
+)
+
+// CodexPendingWork is the durable launch identity for an inbox that currently
+// has incomplete delivery. Environment and runtime presence are deliberately
+// absent: they are transient daemon concerns.
+type CodexPendingWork struct {
+	Kind            CodexPendingWorkKind    `json:"kind"`
+	AgentName       string                  `json:"agent_name"`
+	MailboxID       string                  `json:"mailbox_id"`
+	SessionID       string                  `json:"session_id"`
+	Repository      model.RepositoryContext `json:"repository"`
+	ProjectID       string                  `json:"project_id,omitempty"`
+	AssignmentID    string                  `json:"assignment_id,omitempty"`
+	ProjectThreadID string                  `json:"project_thread_id,omitempty"`
+}
+
+type CodexPendingWorkOperations interface {
+	ListCodexPendingWork(context.Context) ([]CodexPendingWork, error)
+}
+
 // CodexLaunchRequest is local control-plane input. Environment is sensitive:
 // implementations may retain it only in daemon memory for automatic relaunch,
 // and must never write it to durable storage, log it, or return it.
