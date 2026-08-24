@@ -173,6 +173,8 @@ type fakeProcess struct {
 	serverErrors *io.PipeWriter
 	wait         chan error
 	finishOnce   sync.Once
+	killOnce     sync.Once
+	killed       chan struct{}
 }
 
 func newFakeProcess() *fakeProcess {
@@ -181,7 +183,8 @@ func newFakeProcess() *fakeProcess {
 	clientErrors, serverErrors := io.Pipe()
 	return &fakeProcess{
 		clientInput: clientInput, clientOutput: clientOutput, clientErrors: clientErrors,
-		serverInput: serverInput, serverOutput: serverOutput, serverErrors: serverErrors, wait: make(chan error, 1),
+		serverInput: serverInput, serverOutput: serverOutput, serverErrors: serverErrors,
+		wait: make(chan error, 1), killed: make(chan struct{}),
 	}
 }
 
@@ -190,6 +193,7 @@ func (p *fakeProcess) Output() io.ReadCloser { return p.clientOutput }
 func (p *fakeProcess) Errors() io.ReadCloser { return p.clientErrors }
 func (p *fakeProcess) Wait() error           { return <-p.wait }
 func (p *fakeProcess) Kill() error {
+	p.killOnce.Do(func() { close(p.killed) })
 	p.finish(errors.New("killed"))
 	return nil
 }
@@ -307,9 +311,68 @@ func TestRunStartsYoloThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("bridge did not stop after cancellation")
 	}
+	select {
+	case <-process.killed:
+		t.Fatal("graceful stdin-close shutdown killed the process")
+	default:
+	}
 	waitForMessages(t, store, 2)
 	if store.messages[1].Body != "Codex bridge stopped" || !strings.Contains(store.messages[1].Details, "Kind: status") || !strings.Contains(store.messages[1].Details, "cancelled") {
 		t.Fatalf("terminal message = %#v", store.messages[1])
+	}
+}
+
+func TestRunForcesProcessShutdownAfterGracePeriod(t *testing.T) {
+	process := newFakeProcess()
+	requests := make(chan recordedRequest, 4)
+	go func() {
+		scanner := bufio.NewScanner(process.serverInput)
+		for scanner.Scan() {
+			var request recordedRequest
+			if json.Unmarshal(scanner.Bytes(), &request) != nil {
+				return
+			}
+			requests <- request
+			switch request.Method {
+			case "initialize":
+				_, _ = io.WriteString(process.serverOutput, `{"id":1,"result":{}}`+"\n")
+			case "initialized":
+			case "thread/start":
+				_, _ = io.WriteString(process.serverOutput, `{"id":2,"result":{"thread":{"id":"thread-stubborn"}}}`+"\n")
+			}
+		}
+		// Deliberately leave stdout and the process wait channel open after
+		// stdin closes. The bridge must escalate to Kill.
+	}()
+	store := newFakeMailboxStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() {
+		done <- Run(ctx, Options{
+			Directory: "/work/repo", AgentName: "test-agent", Starter: fakeStarter{process}, Store: store,
+			Stderr: io.Discard, Ledger: NewMemoryLedger(), SuppressStatus: true,
+			OnReady: func(BridgeReady) { close(ready) },
+		})
+	}()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("bridge did not become ready")
+	}
+	cancel()
+	select {
+	case <-process.killed:
+	case <-time.After(gracefulProcessStop + time.Second):
+		t.Fatal("bridge did not kill process after graceful shutdown timeout")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bridge did not finish after forced process shutdown")
 	}
 }
 

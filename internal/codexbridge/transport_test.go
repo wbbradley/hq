@@ -75,6 +75,62 @@ func TestClientRejectsMalformedAndOversizedFrames(t *testing.T) {
 	}
 }
 
+func TestUnknownNotificationDoesNotStopTransport(t *testing.T) {
+	serverInput, clientOutput := io.Pipe()
+	clientInput, serverOutput := io.Pipe()
+	client := NewClient(context.Background(), clientInput, clientOutput, nil, nil)
+	go func() {
+		defer serverOutput.Close()
+		reader := bufio.NewReader(serverInput)
+		_, _ = reader.ReadBytes('\n')
+		_, _ = serverOutput.Write([]byte(`{"method":"future/additiveNotification","params":{"value":true}}` + "\n"))
+		_, _ = serverOutput.Write([]byte(`{"id":1,"result":{"thread":{"id":"thread-after-notification"}}}` + "\n"))
+	}()
+	var response ThreadResponse
+	if err := client.Call(context.Background(), "thread/start", ThreadStartParams{}, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Thread.ID != "thread-after-notification" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestCanceledCallDoesNotStopTransport(t *testing.T) {
+	serverInput, clientOutput := io.Pipe()
+	clientInput, serverOutput := io.Pipe()
+	client := NewClient(context.Background(), clientInput, clientOutput, nil, nil)
+	firstReceived := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	go func() {
+		defer serverOutput.Close()
+		reader := bufio.NewReader(serverInput)
+		_, _ = reader.ReadBytes('\n')
+		close(firstReceived)
+		<-releaseFirst
+		_, _ = serverOutput.Write([]byte(`{"id":1,"result":{"thread":{"id":"late-thread"}}}` + "\n"))
+		_, _ = reader.ReadBytes('\n')
+		_, _ = serverOutput.Write([]byte(`{"id":2,"result":{"thread":{"id":"live-thread"}}}` + "\n"))
+	}()
+	callContext, cancel := context.WithCancel(context.Background())
+	callDone := make(chan error, 1)
+	go func() {
+		callDone <- client.Call(callContext, "thread/read", ThreadReadParams{ThreadID: "thread-1"}, nil)
+	}()
+	<-firstReceived
+	cancel()
+	if err := <-callDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled call error = %v", err)
+	}
+	close(releaseFirst)
+	var response ThreadResponse
+	if err := client.Call(context.Background(), "thread/read", ThreadReadParams{ThreadID: "thread-1"}, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Thread.ID != "live-thread" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 type blockingRequestHandler struct {
 	started chan struct{}
 	release chan struct{}
