@@ -34,6 +34,16 @@ type NamedAgentStore interface {
 	ReleaseNamedAgent(context.Context, string, string) error
 }
 
+type Store interface {
+	MailboxStore
+	NamedAgentStore
+}
+
+type ProjectStore interface {
+	domain.ProjectDeliveryOperations
+	domain.ProjectOutputOperations
+}
+
 type Options struct {
 	Directory          string
 	ResumeThreadID     string
@@ -44,7 +54,8 @@ type Options struct {
 	InitialPrompt      string
 	Yolo               bool
 	Repository         model.RepositoryContext
-	Store              MailboxStore
+	Store              Store
+	ProjectStore       ProjectStore
 	Starter            ProcessStarter
 	Stderr             io.Writer
 	Sync               func(context.Context) error
@@ -97,10 +108,10 @@ func Run(ctx context.Context, options Options) error {
 		return errors.New("project Codex bridge requires a ready binding callback")
 	}
 	resumeThreadID := options.ResumeThreadID
-	namedStore, ok := options.Store.(NamedAgentStore)
-	if !ok {
-		return errors.New("Codex bridge store does not support named agents")
+	if options.ProjectID != "" && options.ProjectStore == nil {
+		return errors.New("project Codex bridge store is required")
 	}
+	namedStore := options.Store
 	namedAgent, err := namedStore.CreateNamedAgent(ctx, options.AgentName, "")
 	if err != nil {
 		logger.Error("resolve named agent", "error", err)
@@ -171,7 +182,7 @@ func Run(ctx context.Context, options Options) error {
 	transportContext, cancelTransport := context.WithCancel(context.Background())
 	threadState := NewThreadState("")
 	requestRouter := NewRequestRouter(options.Store, replies)
-	outputRelay := NewOutputRelay(options.Store, ledger, options.Sync)
+	outputRelay := NewOutputRelay(options.Store, options.ProjectStore, ledger, options.Sync)
 	notifications := NewNotificationHub(threadState, outputRelay)
 	client := NewClient(transportContext, process.Output(), process.Input(), requestRouter, notifications)
 	var mailbox model.Mailbox
@@ -317,7 +328,7 @@ func Run(ctx context.Context, options Options) error {
 	dispatcher := &Dispatcher{
 		Client: client, Store: options.Store, Ledger: ledger, Replies: replies, State: threadState,
 		ThreadID: threadID, MailboxID: mailbox.ID, RepairInterval: options.RepairInterval, Sync: options.Sync,
-		ProjectID: projectBinding.ProjectID, AssignmentID: projectBinding.AssignmentID, ProjectThreadID: projectBinding.ProjectThreadID,
+		ProjectStore: options.ProjectStore, ProjectID: projectBinding.ProjectID, AssignmentID: projectBinding.AssignmentID, ProjectThreadID: projectBinding.ProjectThreadID,
 	}
 	if subscription != nil {
 		dispatcher.Invalidations = subscription.Changes()

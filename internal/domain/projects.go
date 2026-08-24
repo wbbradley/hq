@@ -302,6 +302,20 @@ type ProjectWorkflowOperations interface {
 	AdvanceAgentRetirement(context.Context, string, string, string) error
 }
 
+// ProjectRuntimeStore is the daemon composition-root contract for supervised
+// project execution. RPC clients intentionally implement Store instead: the
+// delivery, workflow, command, and recovery capabilities here are local
+// daemon internals.
+type ProjectRuntimeStore interface {
+	Operations
+	ProjectOperations
+	ProjectDeliveryOperations
+	ProjectOutputOperations
+	ProjectCommandOperations
+	ProjectWorkflowOperations
+	CodexPendingWorkOperations
+}
+
 type AgentRetirementOperation struct {
 	ID        string    `json:"id"`
 	AgentName string    `json:"agent_name"`

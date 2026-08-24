@@ -189,7 +189,7 @@ func (f dispatcherFixture) addHumanMessage(t *testing.T, id, body string, create
 
 func (f dispatcherFixture) dispatcher(protocol *dispatcherProtocol) *Dispatcher {
 	return &Dispatcher{
-		Client: protocol.client, Store: f.store, Ledger: f.ledger, Replies: f.replies, State: f.state,
+		Client: protocol.client, Store: f.store, ProjectStore: f.store, Ledger: f.ledger, Replies: f.replies, State: f.state,
 		ThreadID: f.thread, MailboxID: f.agent.ID, RepairInterval: 2 * time.Millisecond,
 	}
 }

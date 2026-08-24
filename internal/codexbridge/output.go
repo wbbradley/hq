@@ -29,6 +29,7 @@ type canonicalOutput struct {
 
 type OutputRelay struct {
 	store         OutputStore
+	projectStore  domain.ProjectOutputOperations
 	ledger        DeliveryLedger
 	sync          func(context.Context) error
 	queue         chan canonicalOutput
@@ -52,9 +53,9 @@ type OutputRelay struct {
 	err   error
 }
 
-func NewOutputRelay(store OutputStore, ledger DeliveryLedger, syncMailbox func(context.Context) error) *OutputRelay {
+func NewOutputRelay(store OutputStore, projectStore domain.ProjectOutputOperations, ledger DeliveryLedger, syncMailbox func(context.Context) error) *OutputRelay {
 	relay := &OutputRelay{
-		store: store, ledger: ledger, sync: syncMailbox, queue: make(chan canonicalOutput, canonicalOutputQueueSize),
+		store: store, projectStore: projectStore, ledger: ledger, sync: syncMailbox, queue: make(chan canonicalOutput, canonicalOutputQueueSize),
 		done: make(chan struct{}), accept: true, now: time.Now,
 	}
 	go relay.run()
@@ -163,11 +164,10 @@ func (r *OutputRelay) publish(output canonicalOutput) error {
 	case errors.Is(err, domain.ErrNotFound):
 		var createErr error
 		if project != nil {
-			projectStore, ok := r.store.(domain.ProjectOutputOperations)
-			if !ok {
-				return errors.New("Codex output store does not support project provenance")
+			if r.projectStore == nil {
+				return errors.New("project Codex output store is required")
 			}
-			createErr = projectStore.CreateProjectOutput(context.Background(), *project, message)
+			createErr = r.projectStore.CreateProjectOutput(context.Background(), *project, message)
 		} else {
 			createErr = r.store.Create(context.Background(), message)
 		}

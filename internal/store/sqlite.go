@@ -2611,3 +2611,5 @@ func (s *SQLite) PendingOutbox(ctx context.Context, limit int) ([]OutboundJob, e
 	}
 	return jobs, rows.Err()
 }
+
+var _ domain.ProjectRuntimeStore = (*SQLite)(nil)

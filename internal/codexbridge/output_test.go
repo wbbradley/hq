@@ -18,7 +18,7 @@ func outputNotification(method, params string) Notification {
 }
 
 func boundOutputRelay(fixture dispatcherFixture, ledger DeliveryLedger, syncMailbox func(context.Context) error) *OutputRelay {
-	relay := NewOutputRelay(fixture.store, ledger, syncMailbox)
+	relay := NewOutputRelay(fixture.store, fixture.store, ledger, syncMailbox)
 	relay.Bind(fixture.thread, fixture.agent, model.RepositoryContext{Directory: "/work/repo"})
 	return relay
 }
@@ -174,7 +174,7 @@ func (s failingOutputStore) Get(context.Context, string) (model.Message, error) 
 }
 
 func TestOutputRelaySurfacesStoreFailure(t *testing.T) {
-	relay := NewOutputRelay(failingOutputStore{err: errors.New("disk full")}, NewMemoryLedger(), nil)
+	relay := NewOutputRelay(failingOutputStore{err: errors.New("disk full")}, nil, NewMemoryLedger(), nil)
 	relay.Bind("thread-1", model.Mailbox{ID: "agent-1"}, model.RepositoryContext{Directory: "/work"})
 	relay.HandleNotification(context.Background(), outputNotification("item/completed", `{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"agent-1","text":"result"}}`))
 	<-relay.Done()

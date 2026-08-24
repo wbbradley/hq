@@ -548,4 +548,6 @@ func (c *Client) Synchronize(ctx context.Context) error {
 
 var _ domain.Store = (*Client)(nil)
 var _ domain.CodexRuntimeController = (*Client)(nil)
+var _ domain.ProjectCodexRuntimeController = (*Client)(nil)
+var _ domain.ProjectWorktreeProvisioner = (*Client)(nil)
 var _ io.Closer = (*Client)(nil)
