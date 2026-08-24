@@ -151,7 +151,6 @@ func New() *App {
 		RunTUIWithSync:   tui.RunWithSync,
 		RunTUIWithClient: tui.RunWithClient,
 		RepoContext:      repoctx.GitHub{}.Snapshot,
-		Sessions:         session.Resolver{Getenv: os.Getenv},
 		Synchronize:      func(ctx context.Context, s domain.Store) error { return s.Synchronize(ctx) },
 		RunDaemon:        node.Run,
 		DaemonStatus:     syncer.DaemonStatus,

@@ -48,7 +48,6 @@ func (d Daemon) Run(ctx context.Context) error {
 	}
 	logger := d.logger().With("component", "daemon", "database", paths.Database)
 	logger.Info("daemon starting", "pid", os.Getpid(), "build", buildinfo.Version, "log_path", paths.Log)
-	defer logger.Info("daemon stopped")
 	logger.Debug("acquiring daemon ownership lock", "lock_path", paths.OwnershipLock)
 	lock, err := d.Coordinator.TryAcquire()
 	if err != nil {
@@ -63,6 +62,7 @@ func (d Daemon) Run(ctx context.Context) error {
 			logger.Debug("daemon ownership released")
 		}
 	}()
+	defer logger.Info("daemon stopped")
 	for {
 		var closer io.Closer
 		if d.RuntimeFactory != nil {
@@ -217,13 +217,21 @@ func StopDaemon(databasePath string) error {
 	defer cancel()
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
+	coordinator := FileCoordinator{DatabasePath: databasePath}
 	for {
 		metadata, readErr := ReadInstanceMetadata(paths)
-		if errors.Is(readErr, os.ErrNotExist) || (readErr == nil && metadata.InstanceID != handshake.Server.InstanceID) {
+		if readErr == nil && metadata.InstanceID != handshake.Server.InstanceID {
 			return nil
 		}
-		if readErr != nil {
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 			return fmt.Errorf("read stopping daemon metadata: %w", readErr)
+		}
+		lock, lockErr := coordinator.TryAcquire()
+		if lockErr == nil {
+			return lock.Release()
+		}
+		if !errors.Is(lockErr, ErrNodeOwned) {
+			return fmt.Errorf("wait for stopping daemon ownership release: %w", lockErr)
 		}
 		select {
 		case <-ctx.Done():
