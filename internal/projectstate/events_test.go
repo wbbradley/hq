@@ -132,4 +132,12 @@ func TestReducerCoversEverySupportedOperation(t *testing.T) {
 			t.Fatalf("reducer did not cover %q", operation)
 		}
 	}
+	if len(snapshot.Resources) != 3 || len(snapshot.Claims) != 3 {
+		t.Fatalf("historical resources=%d claims=%d", len(snapshot.Resources), len(snapshot.Claims))
+	}
+	for _, claim := range snapshot.Claims {
+		if claim.ReleasedEventID == "" {
+			t.Fatalf("claim was not released: %#v", claim)
+		}
+	}
 }

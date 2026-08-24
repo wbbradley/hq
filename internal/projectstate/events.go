@@ -178,13 +178,22 @@ func (AssignmentConfiguring) Operation() Operation { return OperationAssignmentC
 func (AssignmentConfiguring) projectEventData()    {}
 
 type AssignmentRunnable struct {
-	AssignmentID string `json:"assignment_id"`
-	Agent        string `json:"agent"`
-	ThreadID     string `json:"thread_id"`
+	AssignmentID string  `json:"assignment_id"`
+	Agent        string  `json:"agent"`
+	ThreadID     string  `json:"thread_id"`
+	Thread       *Thread `json:"thread,omitempty"`
 }
 
 func (AssignmentRunnable) Operation() Operation { return OperationAssignmentRunnable }
 func (AssignmentRunnable) projectEventData()    {}
+
+type Thread struct {
+	ID               string    `json:"id"`
+	Harness          string    `json:"harness"`
+	ExternalThreadID string    `json:"external_thread_id"`
+	LaunchDirectory  string    `json:"launch_directory"`
+	CreatedAt        time.Time `json:"created_at"`
+}
 
 type AssignmentBlocked struct {
 	AssignmentID string `json:"assignment_id"`

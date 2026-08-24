@@ -23,7 +23,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 25
+const schemaVersion = 26
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -518,8 +518,8 @@ CREATE UNIQUE INDEX agent_retirement_incomplete ON agent_retirement_operations(a
 CREATE TRIGGER project_identity_immutable BEFORE UPDATE OF home_installation_id,mailbox_id,predecessor_project_id ON projects BEGIN SELECT RAISE(ABORT,'project identity is immutable'); END;
 CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF kind,home_installation_id,canonical_locator ON resources BEGIN SELECT RAISE(ABORT,'resource identity is immutable'); END;
 CREATE TRIGGER project_thread_scope_immutable BEFORE UPDATE OF project_id,agent_name,harness,external_thread_id ON project_threads BEGIN SELECT RAISE(ABORT,'project thread scope is immutable'); END;
-CREATE TRIGGER active_claim_requires_open BEFORE INSERT ON resource_claim_epochs WHEN NEW.released_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id)<>'open' BEGIN SELECT RAISE(ABORT,'active resource claim requires open project'); END;
-CREATE TRIGGER active_assignment_requires_open BEFORE INSERT ON project_assignment_epochs WHEN NEW.ended_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id)<>'open' BEGIN SELECT RAISE(ABORT,'active assignment requires open project'); END;
+CREATE TRIGGER active_claim_requires_open BEFORE INSERT ON resource_claim_epochs WHEN NEW.released_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id) NOT IN ('open','closing') BEGIN SELECT RAISE(ABORT,'active resource claim requires open or closing project'); END;
+CREATE TRIGGER active_assignment_requires_open BEFORE INSERT ON project_assignment_epochs WHEN NEW.ended_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id) NOT IN ('open','closing') BEGIN SELECT RAISE(ABORT,'active assignment requires open or closing project'); END;
 CREATE TRIGGER closed_project_requires_release BEFORE UPDATE OF lifecycle ON projects WHEN NEW.lifecycle='closed' AND (EXISTS(SELECT 1 FROM resource_claim_epochs WHERE project_id=NEW.id AND released_event_id IS NULL) OR EXISTS(SELECT 1 FROM project_assignment_epochs WHERE project_id=NEW.id AND ended_event_id IS NULL)) BEGIN SELECT RAISE(ABORT,'closed project cannot retain claims or assignment'); END;
 CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, created_at, id);
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
@@ -527,7 +527,7 @@ CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_
 CREATE INDEX messages_codex_conversation ON messages(codex_thread_id, created_at, id);
 CREATE INDEX messages_codex_turn ON messages(codex_thread_id, codex_turn_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 25;
+PRAGMA user_version = 26;
 `
 
 const (
@@ -813,6 +813,18 @@ PRAGMA user_version = 25;`
 			return fmt.Errorf("migrate schema to version 25: %w", err)
 		}
 		version = 25
+	}
+	if version == 25 {
+		migration := `DROP TRIGGER IF EXISTS active_claim_requires_open;
+DROP TRIGGER IF EXISTS active_assignment_requires_open;
+CREATE TRIGGER active_claim_requires_open BEFORE INSERT ON resource_claim_epochs WHEN NEW.released_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id) NOT IN ('open','closing') BEGIN SELECT RAISE(ABORT,'active resource claim requires open or closing project'); END;
+CREATE TRIGGER active_assignment_requires_open BEFORE INSERT ON project_assignment_epochs WHEN NEW.ended_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id) NOT IN ('open','closing') BEGIN SELECT RAISE(ABORT,'active assignment requires open or closing project'); END;
+UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
+PRAGMA user_version = 26;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 26: %w", err)
+		}
+		version = 26
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -1428,6 +1440,9 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 			return err
 		}
 	}
+	if err := s.rebuildAuthoritativeProjectsTx(ctx, tx, state); err != nil {
+		return err
+	}
 	if err := s.rebuildProjectReplicasTx(ctx, tx, state); err != nil {
 		return err
 	}
@@ -1728,21 +1743,12 @@ func (s *SQLite) createProjectMessage(ctx context.Context, projectID string, mes
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0)+1 FROM project_message_acceptances WHERE project_id=?`, projectID).Scan(&sequence); err != nil {
 		return err
 	}
-	acceptance, acceptanceBody, err := s.signProjectEventTx(ctx, tx, projectID, head, projectstate.MessageAccepted{MessageID: message.ID, MessageEventID: messageEvents[0].ID(), Sequence: sequence}, acceptedAt)
+	acceptance, _, err := s.signProjectEventTx(ctx, tx, projectID, head, projectstate.MessageAccepted{MessageID: message.ID, MessageEventID: messageEvents[0].ID(), Sequence: sequence}, acceptedAt)
 	if err != nil {
 		return err
 	}
 	events := append(messageEvents, acceptance)
 	if _, err := s.ingestCanonicalTx(ctx, tx, events, true); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, acceptance.ID(), projectID, head, projectstate.OperationMessageAccepted, acceptanceBody, acceptedAt.UnixMilli()); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO project_message_acceptances(project_id,sequence,message_id,message_event_id,acceptance_event_id,accepted_at) VALUES (?,?,?,?,?,?)`, projectID, sequence, message.ID, messageEvents[0].ID(), acceptance.ID(), acceptedAt.UnixMilli()); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=? AND head_event_id=?`, acceptance.ID(), acceptedAt.UnixMilli(), projectID, head); err != nil {
 		return err
 	}
 	if err := s.appendProjectPendingNoticeTx(ctx, tx, projectID, message.ID, acceptance.ID(), acceptedAt); err != nil {

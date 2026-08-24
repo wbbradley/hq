@@ -791,7 +791,7 @@ func TestProjectDispatchIsOrderedAndBoundToRunnableAssignment(t *testing.T) {
 	if _, err := s.CreateNamedAgent(ctx, "alice", ""); err != nil {
 		t.Fatal(err)
 	}
-	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "dispatch", Open: true})
+	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "dispatch", Open: true, Paths: []domain.ProjectPathInput{{DisplayPath: t.TempDir()}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -853,6 +853,26 @@ func TestProjectDispatchIsOrderedAndBoundToRunnableAssignment(t *testing.T) {
 	}
 	if assignmentID != project.Assignment.ID || agent != "alice" || external != "codex-thread" {
 		t.Fatalf("dispatch provenance = %s %s %s", assignmentID, agent, external)
+	}
+	head := project.HeadEventID
+	if err := s.db.QueryRow(`SELECT head_event_id FROM projects WHERE id=?`, project.ID).Scan(&head); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := s.GetProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.HeadEventID != head || rebuilt.Assignment == nil || rebuilt.Assignment.ID != project.Assignment.ID || len(rebuilt.Resources) != 1 {
+		t.Fatalf("rebuilt project = %#v", rebuilt)
+	}
+	for table, want := range map[string]int{"project_threads": 1, "project_assignment_epochs": 1, "project_message_acceptances": 2, "project_dispatch_records": 1, "resource_claim_epochs": 1} {
+		var got int
+		if err := s.db.QueryRow(`SELECT count(*) FROM `+table+` WHERE project_id=?`, project.ID).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s after clean rebuild = %d, want %d: %v", table, got, want, err)
+		}
 	}
 }
 

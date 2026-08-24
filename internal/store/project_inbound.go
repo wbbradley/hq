@@ -78,20 +78,11 @@ func (s *SQLite) acceptProjectMessagesTx(ctx context.Context, tx *sql.Tx, source
 			return nil, err
 		}
 		now := s.now().UTC()
-		acceptance, body, err := s.signProjectEventTx(ctx, tx, message.projectID, head, projectstate.MessageAccepted{MessageID: message.messageID, MessageEventID: message.eventID, Sequence: sequence}, now)
+		acceptance, _, err := s.signProjectEventTx(ctx, tx, message.projectID, head, projectstate.MessageAccepted{MessageID: message.messageID, MessageEventID: message.eventID, Sequence: sequence}, now)
 		if err != nil {
 			return nil, err
 		}
 		if _, err := s.ingestCanonicalTx(ctx, tx, []event.SignedEvent{acceptance}, true); err != nil {
-			return nil, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, acceptance.ID(), message.projectID, head, projectstate.OperationMessageAccepted, body, now.UnixMilli()); err != nil {
-			return nil, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO project_message_acceptances(project_id,sequence,message_id,message_event_id,acceptance_event_id,accepted_at) VALUES (?,?,?,?,?,?)`, message.projectID, sequence, message.messageID, message.eventID, acceptance.ID(), now.UnixMilli()); err != nil {
-			return nil, err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=? AND head_event_id=?`, acceptance.ID(), now.UnixMilli(), message.projectID, head); err != nil {
 			return nil, err
 		}
 		if err := s.appendProjectPendingNoticeTx(ctx, tx, message.projectID, message.messageID, acceptance.ID(), now); err != nil {

@@ -218,23 +218,14 @@ func (s *SQLite) RecordProjectDispatch(ctx context.Context, messageID, token str
 	if err := tx.QueryRowContext(ctx, `SELECT head_event_id FROM projects WHERE id=?`, projectID).Scan(&head); err != nil {
 		return err
 	}
-	dispatch, body, err := s.signProjectEventTx(ctx, tx, projectID, head, projectstate.MessageDispatched{MessageID: messageID, Sequence: sequence, AssignmentID: assignmentID, Agent: agentName, ProjectThreadID: projectThreadID, ExternalThreadID: externalThreadID}, now)
+	dispatch, _, err := s.signProjectEventTx(ctx, tx, projectID, head, projectstate.MessageDispatched{MessageID: messageID, Sequence: sequence, AssignmentID: assignmentID, Agent: agentName, ProjectThreadID: projectThreadID, ExternalThreadID: externalThreadID}, now)
 	if err != nil {
 		return err
 	}
 	if _, err := s.ingestCanonicalTx(ctx, tx, []event.SignedEvent{dispatch}, true); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, dispatch.ID(), projectID, head, projectstate.OperationMessageDispatched, body, now.UnixMilli()); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO project_dispatch_records(message_id,project_id,sequence,assignment_id,agent_name,project_thread_id,external_thread_id,dispatch_event_id,dispatched_at) VALUES (?,?,?,?,?,?,?,?,?)`, messageID, projectID, sequence, assignmentID, agentName, projectThreadID, externalThreadID, dispatch.ID(), now.UnixMilli()); err != nil {
-		return err
-	}
 	if _, err := tx.ExecContext(ctx, `UPDATE project_dispatch_attempts SET state='accepted',owner_token=NULL,lease_until=NULL,updated_at=? WHERE message_id=?`, now.UnixMilli(), messageID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=? AND head_event_id=?`, dispatch.ID(), now.UnixMilli(), projectID, head); err != nil {
 		return err
 	}
 	change, err := recordChangeTx(ctx, tx, []domain.ChangeTopic{domain.TopicMessages, domain.TopicProjects})

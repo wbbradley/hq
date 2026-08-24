@@ -35,8 +35,45 @@ type Dispatch struct {
 	DispatchedAt     time.Time
 }
 
+type ResourceProjection struct {
+	Resource       domain.ProjectResource
+	AddedEventID   string
+	RemovedEventID string
+	CreatedAt      time.Time
+	RemovedAt      time.Time
+}
+
+type ClaimProjection struct {
+	ResourceID      string
+	AcquiredEventID string
+	ReleasedEventID string
+	AcquiredAt      time.Time
+	ReleasedAt      time.Time
+}
+
+type AssignmentProjection struct {
+	Assignment     domain.ProjectAssignment
+	StartedEventID string
+	EndedEventID   string
+	Forced         bool
+}
+
+type ThreadProjection struct {
+	ID               string
+	ProjectID        string
+	Agent            string
+	Harness          string
+	ExternalThreadID string
+	LaunchDirectory  string
+	CreatedAt        time.Time
+}
+
 type Snapshot struct {
 	Project     domain.Project
+	Resources   []ResourceProjection
+	Claims      []ClaimProjection
+	Assignments []AssignmentProjection
+	Threads     []ThreadProjection
 	Acceptances []Acceptance
 	Dispatches  []Dispatch
 }
@@ -69,7 +106,12 @@ func Apply(current Snapshot, item Event) (Snapshot, error) {
 		next.Project = domain.Project{ID: item.ProjectID, HomeInstallation: item.HomeInstallation, MailboxID: data.MailboxID, PredecessorProjectID: data.Request.PredecessorProjectID, Name: data.Request.Name, Brief: data.Request.Brief, Lifecycle: lifecycle, HeadEventID: item.ID, CreatedAt: item.CreatedAt, UpdatedAt: item.CreatedAt}
 		for _, resource := range data.Resources {
 			checked := resource.LastCheckedAt
-			next.Project.Resources = append(next.Project.Resources, domain.ProjectResource{ID: resource.ID, Kind: resource.Kind, HomeInstallation: item.HomeInstallation, DisplayLocator: resource.DisplayLocator, CanonicalLocator: resource.CanonicalLocator, Health: resource.Health, HealthDetails: cloneMap(resource.HealthDetails), LastCheckedAt: &checked})
+			projectResource := domain.ProjectResource{ID: resource.ID, Kind: resource.Kind, HomeInstallation: item.HomeInstallation, DisplayLocator: resource.DisplayLocator, CanonicalLocator: resource.CanonicalLocator, Health: resource.Health, HealthDetails: cloneMap(resource.HealthDetails), LastCheckedAt: &checked}
+			next.Project.Resources = append(next.Project.Resources, projectResource)
+			next.Resources = append(next.Resources, ResourceProjection{Resource: projectResource, AddedEventID: item.ID, CreatedAt: item.CreatedAt})
+			if data.Request.Open {
+				next.Claims = append(next.Claims, ClaimProjection{ResourceID: resource.ID, AcquiredEventID: item.ID, AcquiredAt: item.CreatedAt})
+			}
 		}
 		if len(next.Project.Resources) > 0 {
 			if data.Request.PrimaryPath < 0 || data.Request.PrimaryPath >= len(next.Project.Resources) {
@@ -102,6 +144,9 @@ func applyData(next *Snapshot, item Event) error {
 			return fmt.Errorf("open requires an unarchived closed project")
 		}
 		next.Project.Lifecycle = domain.ProjectOpen
+		for _, resource := range next.Project.Resources {
+			next.Claims = append(next.Claims, ClaimProjection{ResourceID: resource.ID, AcquiredEventID: item.ID, AcquiredAt: item.CreatedAt})
+		}
 	case *Closing:
 		if next.Project.Lifecycle != domain.ProjectOpen {
 			return fmt.Errorf("closing requires an open project")
@@ -113,8 +158,13 @@ func applyData(next *Snapshot, item Event) error {
 		}
 		if next.Project.Assignment != nil {
 			next.Project.SuggestedAgentName = next.Project.Assignment.AgentName
+			ended := item.CreatedAt
+			next.Project.Assignment.State, next.Project.Assignment.EndedAt = domain.AssignmentEnded, &ended
+			next.Assignments[len(next.Assignments)-1].Assignment = *next.Project.Assignment
+			next.Assignments[len(next.Assignments)-1].EndedEventID, next.Assignments[len(next.Assignments)-1].Forced = item.ID, data.Forced
 		}
 		next.Project.Lifecycle, next.Project.Assignment = domain.ProjectClosed, nil
+		releaseClaims(next, item)
 	case *Archived:
 		if next.Project.Lifecycle != domain.ProjectClosed || next.Project.Archived {
 			return fmt.Errorf("archive requires an unarchived closed project")
@@ -136,6 +186,10 @@ func applyData(next *Snapshot, item Event) error {
 		}
 		checked := data.LastCheckedAt
 		next.Project.Resources = append(next.Project.Resources, domain.ProjectResource{ID: data.ResourceID, Kind: data.Kind, HomeInstallation: next.Project.HomeInstallation, DisplayLocator: data.DisplayLocator, CanonicalLocator: data.CanonicalLocator, Health: data.Health, HealthDetails: cloneMap(data.HealthDetails), LastCheckedAt: &checked})
+		next.Resources = append(next.Resources, ResourceProjection{Resource: next.Project.Resources[len(next.Project.Resources)-1], AddedEventID: item.ID, CreatedAt: item.CreatedAt})
+		if next.Project.Lifecycle == domain.ProjectOpen {
+			next.Claims = append(next.Claims, ClaimProjection{ResourceID: data.ResourceID, AcquiredEventID: item.ID, AcquiredAt: item.CreatedAt})
+		}
 		if data.Primary {
 			next.Project.PrimaryResourceID = data.ResourceID
 		}
@@ -145,6 +199,9 @@ func applyData(next *Snapshot, item Event) error {
 			return fmt.Errorf("removed project resource %q does not exist", data.ResourceID)
 		}
 		next.Project.Resources = append(next.Project.Resources[:index], next.Project.Resources[index+1:]...)
+		projectionIndex := findCurrentResourceProjection(next.Resources, data.ResourceID)
+		next.Resources[projectionIndex].RemovedEventID, next.Resources[projectionIndex].RemovedAt = item.ID, item.CreatedAt
+		releaseResourceClaims(next, data.ResourceID, item)
 		if next.Project.PrimaryResourceID == data.ResourceID {
 			next.Project.PrimaryResourceID = ""
 			if len(next.Project.Resources) > 0 {
@@ -158,6 +215,13 @@ func applyData(next *Snapshot, item Event) error {
 		}
 		checked := data.LastCheckedAt
 		next.Project.Resources[index] = domain.ProjectResource{ID: data.NewResourceID, Kind: "path", HomeInstallation: next.Project.HomeInstallation, DisplayLocator: data.DisplayLocator, CanonicalLocator: data.CanonicalLocator, Health: data.Health, HealthDetails: cloneMap(data.HealthDetails), LastCheckedAt: &checked}
+		projectionIndex := findCurrentResourceProjection(next.Resources, data.OldResourceID)
+		next.Resources[projectionIndex].RemovedEventID, next.Resources[projectionIndex].RemovedAt = item.ID, item.CreatedAt
+		releaseResourceClaims(next, data.OldResourceID, item)
+		next.Resources = append(next.Resources, ResourceProjection{Resource: next.Project.Resources[index], AddedEventID: item.ID, CreatedAt: item.CreatedAt})
+		if next.Project.Lifecycle == domain.ProjectOpen {
+			next.Claims = append(next.Claims, ClaimProjection{ResourceID: data.NewResourceID, AcquiredEventID: item.ID, AcquiredAt: item.CreatedAt})
+		}
 		if next.Project.PrimaryResourceID == data.OldResourceID {
 			next.Project.PrimaryResourceID = data.NewResourceID
 		}
@@ -173,26 +237,53 @@ func applyData(next *Snapshot, item Event) error {
 		}
 		checked := data.LastCheckedAt
 		next.Project.Resources[index].Health, next.Project.Resources[index].HealthDetails, next.Project.Resources[index].LastCheckedAt = data.Health, cloneMap(data.HealthDetails), &checked
+		projectionIndex := findCurrentResourceProjection(next.Resources, data.ResourceID)
+		next.Resources[projectionIndex].Resource = next.Project.Resources[index]
 	case *AssignmentConfiguring:
 		if next.Project.Lifecycle != domain.ProjectOpen || next.Project.Assignment != nil || data.AssignmentID == "" || data.Agent == "" {
 			return fmt.Errorf("project assignment configuration is invalid")
 		}
 		next.Project.Assignment = &domain.ProjectAssignment{ID: data.AssignmentID, AgentName: data.Agent, State: domain.AssignmentConfiguring, StartedAt: item.CreatedAt}
+		next.Assignments = append(next.Assignments, AssignmentProjection{Assignment: *next.Project.Assignment, StartedEventID: item.ID})
 		next.Project.SuggestedAgentName = ""
 	case *AssignmentRunnable:
 		if next.Project.Assignment == nil || next.Project.Assignment.ID != data.AssignmentID || next.Project.Assignment.AgentName != data.Agent || next.Project.Assignment.State != domain.AssignmentConfiguring || data.ThreadID == "" {
 			return fmt.Errorf("runnable project assignment does not match configuring assignment")
 		}
 		next.Project.Assignment.State, next.Project.Assignment.SelectedThreadID = domain.AssignmentRunnable, data.ThreadID
+		next.Assignments[len(next.Assignments)-1].Assignment = *next.Project.Assignment
+		if data.Thread != nil {
+			if data.Thread.ID != data.ThreadID || data.Thread.Harness == "" || data.Thread.ExternalThreadID == "" || data.Thread.LaunchDirectory == "" {
+				return fmt.Errorf("runnable project assignment thread data is invalid")
+			}
+			found := false
+			for _, thread := range next.Threads {
+				if thread.ID == data.Thread.ID {
+					found = thread.ProjectID == next.Project.ID && thread.Agent == data.Agent
+				}
+			}
+			if !found {
+				createdAt := data.Thread.CreatedAt
+				if createdAt.IsZero() {
+					createdAt = item.CreatedAt
+				}
+				next.Threads = append(next.Threads, ThreadProjection{ID: data.Thread.ID, ProjectID: next.Project.ID, Agent: data.Agent, Harness: data.Thread.Harness, ExternalThreadID: data.Thread.ExternalThreadID, LaunchDirectory: data.Thread.LaunchDirectory, CreatedAt: createdAt})
+			}
+		}
 	case *AssignmentBlocked:
 		if next.Project.Assignment == nil || next.Project.Assignment.ID != data.AssignmentID || next.Project.Assignment.AgentName != data.Agent || next.Project.Assignment.State == domain.AssignmentBlocked {
 			return fmt.Errorf("blocked project assignment does not match active assignment")
 		}
 		next.Project.Assignment.State = domain.AssignmentBlocked
+		next.Assignments[len(next.Assignments)-1].Assignment = *next.Project.Assignment
 	case *AssignmentEnded:
 		if next.Project.Assignment == nil || next.Project.Assignment.ID != data.AssignmentID || next.Project.Assignment.AgentName != data.Agent {
 			return fmt.Errorf("ended project assignment does not match active assignment")
 		}
+		ended := item.CreatedAt
+		next.Project.Assignment.State, next.Project.Assignment.EndedAt = domain.AssignmentEnded, &ended
+		next.Assignments[len(next.Assignments)-1].Assignment = *next.Project.Assignment
+		next.Assignments[len(next.Assignments)-1].EndedEventID, next.Assignments[len(next.Assignments)-1].Forced = item.ID, data.Forced
 		next.Project.SuggestedAgentName, next.Project.Assignment = next.Project.Assignment.AgentName, nil
 	case *MessageAccepted:
 		if data.MessageID == "" || data.MessageEventID == "" || data.Sequence != int64(len(next.Acceptances)+1) {
@@ -232,6 +323,13 @@ func applyData(next *Snapshot, item Event) error {
 func cloneSnapshot(current Snapshot) Snapshot {
 	next := current
 	next.Project.Resources = append([]domain.ProjectResource(nil), current.Project.Resources...)
+	next.Resources = append([]ResourceProjection(nil), current.Resources...)
+	for index := range next.Resources {
+		next.Resources[index].Resource.HealthDetails = cloneMap(next.Resources[index].Resource.HealthDetails)
+	}
+	next.Claims = append([]ClaimProjection(nil), current.Claims...)
+	next.Assignments = append([]AssignmentProjection(nil), current.Assignments...)
+	next.Threads = append([]ThreadProjection(nil), current.Threads...)
 	for index := range next.Project.Resources {
 		next.Project.Resources[index].HealthDetails = cloneMap(next.Project.Resources[index].HealthDetails)
 		if current.Project.Resources[index].LastCheckedAt != nil {
@@ -246,6 +344,31 @@ func cloneSnapshot(current Snapshot) Snapshot {
 	next.Acceptances = append([]Acceptance(nil), current.Acceptances...)
 	next.Dispatches = append([]Dispatch(nil), current.Dispatches...)
 	return next
+}
+
+func findCurrentResourceProjection(resources []ResourceProjection, id string) int {
+	for index := range resources {
+		if resources[index].Resource.ID == id && resources[index].RemovedEventID == "" {
+			return index
+		}
+	}
+	return -1
+}
+
+func releaseClaims(next *Snapshot, item Event) {
+	for index := range next.Claims {
+		if next.Claims[index].ReleasedEventID == "" {
+			next.Claims[index].ReleasedEventID, next.Claims[index].ReleasedAt = item.ID, item.CreatedAt
+		}
+	}
+}
+
+func releaseResourceClaims(next *Snapshot, resourceID string, item Event) {
+	for index := range next.Claims {
+		if next.Claims[index].ResourceID == resourceID && next.Claims[index].ReleasedEventID == "" {
+			next.Claims[index].ReleasedEventID, next.Claims[index].ReleasedAt = item.ID, item.CreatedAt
+		}
+	}
 }
 
 func cloneMap(values map[string]string) map[string]string {

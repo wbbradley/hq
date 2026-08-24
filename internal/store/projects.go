@@ -84,7 +84,7 @@ func pathOverlap(a, b string) string {
 }
 
 func (s *SQLite) appendProjectEventTx(ctx context.Context, tx *sql.Tx, projectID, previous string, data projectstate.Data, now int64) (string, error) {
-	signed, raw, err := s.signProjectEventTx(ctx, tx, projectID, previous, data, time.UnixMilli(now).UTC())
+	signed, _, err := s.signProjectEventTx(ctx, tx, projectID, previous, data, time.UnixMilli(now).UTC())
 	if err != nil {
 		return "", err
 	}
@@ -92,8 +92,7 @@ func (s *SQLite) appendProjectEventTx(ctx context.Context, tx *sql.Tx, projectID
 		return "", err
 	}
 	id := signed.ID()
-	_, err = tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, id, projectID, previous, data.Operation(), raw, now)
-	return id, err
+	return id, nil
 }
 
 func (s *SQLite) signProjectEvent(ctx context.Context, projectID, previous string, data projectstate.Data, createdAt time.Time, accountID string, membershipParents []string) (event.SignedEvent, []byte, error) {
@@ -222,7 +221,6 @@ func (s *SQLite) CreateProject(ctx context.Context, request domain.CreateProject
 	}
 	request.HomeInstallation = s.signer.InstallationID
 	createData := projectstate.Created{Request: request, MailboxID: mailboxID, ResourceIDs: resourceIDs, Resources: resourceDescriptors}
-	createBody, _ := marshalProjectAuditPayload(ctx, createData)
 	account, membership, _, err := s.localAccountAction(ctx, "")
 	if err != nil {
 		return domain.Project{}, err
@@ -238,46 +236,13 @@ func (s *SQLite) CreateProject(ctx context.Context, request domain.CreateProject
 	mailboxEvents = append(mailboxEvents, projectEvent)
 
 	value, err := s.commitMutation(ctx, []domain.ChangeTopic{domain.TopicProjects, domain.TopicMailboxes}, func(tx *sql.Tx) (any, error) {
-		now := operationTime.UnixMilli()
 		if request.Open {
 			if err := checkPathConflictsTx(ctx, tx, request.ID, paths); err != nil {
 				return nil, err
 			}
 		}
-		eventID := mailboxEvents[1].ID()
-		lifecycle := domain.ProjectClosed
-		if request.Open {
-			lifecycle = domain.ProjectOpen
-		}
-		primaryID := ""
-		if len(resourceIDs) > 0 {
-			primaryID = resourceIDs[request.PrimaryPath]
-		}
 		if _, err := s.ingestCanonicalTx(ctx, tx, mailboxEvents, true); err != nil {
 			return nil, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id,home_installation_id,mailbox_id,predecessor_project_id,name,brief,lifecycle,archived,primary_resource_id,head_event_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, request.ID, s.signer.InstallationID, mailboxID, nullString(request.PredecessorProjectID), request.Name, request.Brief, lifecycle, false, nullString(primaryID), eventID, now, now); err != nil {
-			return nil, err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, eventID, request.ID, "", projectstate.OperationCreated, createBody, now); err != nil {
-			return nil, err
-		}
-		for i, path := range paths {
-			details, _ := json.Marshal(path.details)
-			if _, err := tx.ExecContext(ctx, `INSERT INTO resources(id,kind,home_installation_id,display_locator,canonical_locator,created_at) VALUES (?,'path',?,?,?,?)`, resourceIDs[i], s.signer.InstallationID, path.display, path.canonical, now); err != nil {
-				return nil, err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO project_resources(project_id,resource_id,added_event_id) VALUES (?,?,?)`, request.ID, resourceIDs[i], eventID); err != nil {
-				return nil, err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO resource_health(resource_id,state,details_json,last_checked_at) VALUES (?,?,?,?)`, resourceIDs[i], path.health, string(details), now); err != nil {
-				return nil, err
-			}
-			if request.Open {
-				if _, err := tx.ExecContext(ctx, `INSERT INTO resource_claim_epochs(id,project_id,resource_id,acquired_event_id,acquired_at) VALUES (?,?,?,?,?)`, uuid.NewString(), request.ID, resourceIDs[i], eventID, now); err != nil {
-					return nil, err
-				}
-			}
 		}
 		return getProjectTx(ctx, tx, request.ID)
 	})
@@ -521,7 +486,6 @@ func (s *SQLite) OpenProject(ctx context.Context, id, expected string) (domain.P
 		if err != nil {
 			return "", err
 		}
-		var resourceIDs []string
 		var paths []canonicalPath
 		for rows.Next() {
 			var rid string
@@ -530,7 +494,6 @@ func (s *SQLite) OpenProject(ctx context.Context, id, expected string) (domain.P
 				rows.Close()
 				return "", err
 			}
-			resourceIDs = append(resourceIDs, rid)
 			paths = append(paths, path)
 		}
 		if err := rows.Close(); err != nil {
@@ -542,14 +505,6 @@ func (s *SQLite) OpenProject(ctx context.Context, id, expected string) (domain.P
 		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.Opened{}, now)
 		if err != nil {
 			return "", err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE projects SET lifecycle='open',head_event_id=?,updated_at=? WHERE id=?`, eventID, now, id); err != nil {
-			return "", err
-		}
-		for _, rid := range resourceIDs {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO resource_claim_epochs(id,project_id,resource_id,acquired_event_id,acquired_at) VALUES (?,?,?,?,?)`, uuid.NewString(), id, rid, eventID, now); err != nil {
-				return "", err
-			}
 		}
 		return eventID, nil
 	})
@@ -598,8 +553,7 @@ func (s *SQLite) BeginCloseProject(ctx context.Context, id, expected string) (do
 		if err != nil {
 			return "", err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET lifecycle='closing',head_event_id=?,updated_at=? WHERE id=?`, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -615,14 +569,7 @@ func (s *SQLite) FinalizeCloseProject(ctx context.Context, id, expected string, 
 		if err != nil {
 			return "", err
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE resource_claim_epochs SET released_event_id=?,released_at=? WHERE project_id=? AND released_event_id IS NULL`, eventID, now, id); err != nil {
-			return "", err
-		}
-		if _, err = tx.ExecContext(ctx, `UPDATE project_assignment_epochs SET state='ended',ended_event_id=?,ended_at=?,forced=? WHERE project_id=? AND ended_event_id IS NULL`, eventID, now, forced, id); err != nil {
-			return "", err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET lifecycle='closed',head_event_id=?,updated_at=? WHERE id=?`, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -645,8 +592,7 @@ func (s *SQLite) SetProjectArchived(ctx context.Context, id, expected string, ar
 		if err != nil {
 			return "", err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET archived=?,head_event_id=?,updated_at=? WHERE id=?`, archived, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -661,12 +607,6 @@ func (s *SQLite) UpdateProjectMetadata(ctx context.Context, id, expected, name, 
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, _ domain.ProjectLifecycle, _ bool, head string, now int64) (string, error) {
 		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.MetadataUpdated{Name: name, Brief: brief}, now)
 		if err != nil {
-			return "", err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE projects SET name=?,brief=?,head_event_id=?,updated_at=? WHERE id=?`, name, brief, eventID, now, id); err != nil {
-			return "", err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET label=? WHERE id=(SELECT mailbox_id FROM projects WHERE id=?)`, name, id); err != nil {
 			return "", err
 		}
 		return eventID, nil
@@ -701,27 +641,7 @@ func (s *SQLite) AddProjectPath(ctx context.Context, id, expected string, input 
 		if err != nil {
 			return "", err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO resources(id,kind,home_installation_id,display_locator,canonical_locator,created_at) SELECT ?,'path',home_installation_id,?,?,? FROM projects WHERE id=?`, resourceID, path.display, path.canonical, now, id); err != nil {
-			return "", err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO project_resources(project_id,resource_id,added_event_id) VALUES (?,?,?)`, id, resourceID, eventID); err != nil {
-			return "", err
-		}
-		details, _ := json.Marshal(path.details)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO resource_health(resource_id,state,details_json,last_checked_at) VALUES (?,?,?,?)`, resourceID, path.health, string(details), now); err != nil {
-			return "", err
-		}
-		if lifecycle == domain.ProjectOpen {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO resource_claim_epochs(id,project_id,resource_id,acquired_event_id,acquired_at) VALUES (?,?,?,?,?)`, uuid.NewString(), id, resourceID, eventID, now); err != nil {
-				return "", err
-			}
-		}
-		if effectivePrimary {
-			_, err = tx.ExecContext(ctx, `UPDATE projects SET primary_resource_id=?,head_event_id=?,updated_at=? WHERE id=?`, resourceID, eventID, now, id)
-		} else {
-			_, err = tx.ExecContext(ctx, `UPDATE projects SET primary_resource_id=COALESCE(primary_resource_id,?),head_event_id=?,updated_at=? WHERE id=?`, resourceID, eventID, now, id)
-		}
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -772,14 +692,7 @@ func (s *SQLite) RemoveProjectResource(ctx context.Context, id, expected, resour
 		if err != nil {
 			return "", err
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE project_resources SET removed_event_id=? WHERE project_id=? AND resource_id=? AND removed_event_id IS NULL`, eventID, id, resourceID); err != nil {
-			return "", err
-		}
-		if _, err = tx.ExecContext(ctx, `UPDATE resource_claim_epochs SET released_event_id=?,released_at=? WHERE project_id=? AND resource_id=? AND released_event_id IS NULL`, eventID, now, id, resourceID); err != nil {
-			return "", err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET primary_resource_id=CASE WHEN primary_resource_id=? THEN (SELECT resource_id FROM project_resources WHERE project_id=? AND removed_event_id IS NULL ORDER BY rowid LIMIT 1) ELSE primary_resource_id END,head_event_id=?,updated_at=? WHERE id=?`, resourceID, id, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -812,29 +725,7 @@ func (s *SQLite) ReplaceProjectPath(ctx context.Context, id, expected, oldResour
 		if err != nil {
 			return "", err
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO resources(id,kind,home_installation_id,display_locator,canonical_locator,created_at) SELECT ?,'path',home_installation_id,?,?,? FROM projects WHERE id=?`, newResourceID, path.display, path.canonical, now, id); err != nil {
-			return "", err
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO project_resources(project_id,resource_id,added_event_id) VALUES (?,?,?)`, id, newResourceID, eventID); err != nil {
-			return "", err
-		}
-		if _, err = tx.ExecContext(ctx, `UPDATE project_resources SET removed_event_id=? WHERE project_id=? AND resource_id=? AND removed_event_id IS NULL`, eventID, id, oldResourceID); err != nil {
-			return "", err
-		}
-		if _, err = tx.ExecContext(ctx, `UPDATE resource_claim_epochs SET released_event_id=?,released_at=? WHERE project_id=? AND resource_id=? AND released_event_id IS NULL`, eventID, now, id, oldResourceID); err != nil {
-			return "", err
-		}
-		if lifecycle == domain.ProjectOpen {
-			if _, err = tx.ExecContext(ctx, `INSERT INTO resource_claim_epochs(id,project_id,resource_id,acquired_event_id,acquired_at) VALUES (?,?,?,?,?)`, uuid.NewString(), id, newResourceID, eventID, now); err != nil {
-				return "", err
-			}
-		}
-		details, _ := json.Marshal(path.details)
-		if _, err = tx.ExecContext(ctx, `INSERT INTO resource_health(resource_id,state,details_json,last_checked_at) VALUES (?,?,?,?)`, newResourceID, path.health, string(details), now); err != nil {
-			return "", err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET primary_resource_id=CASE WHEN primary_resource_id=? THEN ? ELSE primary_resource_id END,head_event_id=?,updated_at=? WHERE id=?`, oldResourceID, newResourceID, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -854,8 +745,7 @@ func (s *SQLite) SetProjectPrimaryResource(ctx context.Context, id, expected, re
 		if err != nil {
 			return "", err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET primary_resource_id=?,head_event_id=?,updated_at=? WHERE id=?`, resourceID, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -913,9 +803,6 @@ func (s *SQLite) CheckProjectResource(ctx context.Context, projectID, resourceID
 		} else if err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE resource_health SET state=?,details_json=?,last_checked_at=? WHERE resource_id=?`, checked.health, string(raw), now.UnixMilli(), resourceID); err != nil {
-			return nil, err
-		}
 		if priorState != checked.health || priorDetails != string(raw) {
 			messageID, idErr := uuid.NewV7()
 			if idErr != nil {
@@ -944,11 +831,7 @@ func (s *SQLite) CheckProjectResource(ctx context.Context, projectID, resourceID
 			if err := tx.QueryRowContext(ctx, `SELECT head_event_id FROM projects WHERE id=?`, projectID).Scan(&head); err != nil {
 				return nil, err
 			}
-			healthEvent, err := s.appendProjectEventTx(ctx, tx, projectID, head, projectstate.ResourceHealth{ResourceID: resourceID, Health: checked.health, HealthDetails: details, LastCheckedAt: now}, now.UnixMilli())
-			if err != nil {
-				return nil, err
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=?`, healthEvent, now.UnixMilli(), projectID); err != nil {
+			if _, err := s.appendProjectEventTx(ctx, tx, projectID, head, projectstate.ResourceHealth{ResourceID: resourceID, Health: checked.health, HealthDetails: details, LastCheckedAt: now}, now.UnixMilli()); err != nil {
 				return nil, err
 			}
 		}
@@ -1002,11 +885,7 @@ func (s *SQLite) AssignProject(ctx context.Context, id, expected, agent string) 
 		if err != nil {
 			return "", err
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO project_assignment_epochs(id,project_id,agent_name,state,started_event_id,started_at) VALUES (?,?,?,'configuring',?,?)`, assignmentID, id, agent, eventID, now); err != nil {
-			return "", err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=?`, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -1029,9 +908,11 @@ func (s *SQLite) ActivateProjectAssignment(ctx context.Context, id, expected str
 			return "", fmt.Errorf("activate assignment: %w", domain.ErrProjectState)
 		}
 		threadID := request.ThreadID
+		var threadData projectstate.Thread
 		if threadID != "" {
 			var threadProject, threadAgent string
-			if err := tx.QueryRowContext(ctx, `SELECT project_id,agent_name FROM project_threads WHERE id=?`, threadID).Scan(&threadProject, &threadAgent); errors.Is(err, sql.ErrNoRows) {
+			var threadCreated int64
+			if err := tx.QueryRowContext(ctx, `SELECT project_id,agent_name,harness,external_thread_id,launch_directory,created_at FROM project_threads WHERE id=?`, threadID).Scan(&threadProject, &threadAgent, &threadData.Harness, &threadData.ExternalThreadID, &threadData.LaunchDirectory, &threadCreated); errors.Is(err, sql.ErrNoRows) {
 				return "", domain.ErrProjectThreadMismatch
 			} else if err != nil {
 				return "", err
@@ -1039,6 +920,7 @@ func (s *SQLite) ActivateProjectAssignment(ctx context.Context, id, expected str
 			if threadProject != id || threadAgent != agent {
 				return "", domain.ErrProjectThreadMismatch
 			}
+			threadData.ID, threadData.CreatedAt = threadID, time.UnixMilli(threadCreated).UTC()
 		}
 		if threadID == "" {
 			if strings.TrimSpace(request.Harness) == "" || strings.TrimSpace(request.ExternalThread) == "" {
@@ -1049,19 +931,16 @@ func (s *SQLite) ActivateProjectAssignment(ctx context.Context, id, expected str
 				return "", err
 			}
 			threadID = uuid.NewString()
+			threadData = projectstate.Thread{ID: threadID, Harness: request.Harness, ExternalThreadID: request.ExternalThread, LaunchDirectory: filepath.Clean(launch), CreatedAt: time.UnixMilli(now).UTC()}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO project_threads(id,project_id,agent_name,harness,external_thread_id,launch_directory,created_at) VALUES (?,?,?,?,?,?,?)`, threadID, id, agent, request.Harness, request.ExternalThread, filepath.Clean(launch), now); err != nil {
 				return "", err
 			}
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.AssignmentRunnable{AssignmentID: assignmentID, Agent: agent, ThreadID: threadID}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.AssignmentRunnable{AssignmentID: assignmentID, Agent: agent, ThreadID: threadID, Thread: &threadData}, now)
 		if err != nil {
 			return "", err
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE project_assignment_epochs SET state='runnable',selected_thread_id=? WHERE id=?`, threadID, assignmentID); err != nil {
-			return "", err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=?`, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
@@ -1094,11 +973,7 @@ func (s *SQLite) BlockProjectAssignment(ctx context.Context, id, expected, diagn
 		if err != nil {
 			return "", err
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE project_assignment_epochs SET state='blocked' WHERE id=?`, assignmentID); err != nil {
-			return "", err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=?`, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 func (s *SQLite) UnassignProject(ctx context.Context, id, expected string, forced bool, runtimeObservation string) (domain.Project, error) {
@@ -1119,11 +994,7 @@ func (s *SQLite) UnassignProject(ctx context.Context, id, expected string, force
 		if err != nil {
 			return "", err
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE project_assignment_epochs SET state='ended',ended_event_id=?,ended_at=?,forced=? WHERE id=?`, eventID, now, forced, assignmentID); err != nil {
-			return "", err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=?`, eventID, now, id)
-		return eventID, err
+		return eventID, nil
 	})
 }
 
