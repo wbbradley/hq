@@ -16,19 +16,22 @@ import (
 )
 
 type scriptedAppServer struct {
-	process   *fakeProcess
-	threadID  string
-	calls     chan rpcEnvelope
-	responses chan rpcEnvelope
-	done      chan error
-	writeMu   sync.Mutex
-	turns     int
+	process          *fakeProcess
+	threadID         string
+	calls            chan rpcEnvelope
+	responses        chan rpcEnvelope
+	done             chan error
+	writeMu          sync.Mutex
+	stateMu          sync.Mutex
+	turns            int
+	threadReadResult string
 }
 
 func newScriptedAppServer(process *fakeProcess, threadID string) *scriptedAppServer {
 	server := &scriptedAppServer{
 		process: process, threadID: threadID, calls: make(chan rpcEnvelope, 64),
 		responses: make(chan rpcEnvelope, 16), done: make(chan error, 1),
+		threadReadResult: `{"thread":{"id":"` + threadID + `","turns":[]}}`,
 	}
 	go server.run()
 	return server
@@ -66,7 +69,12 @@ func (s *scriptedAppServer) run() {
 			}
 			s.result(envelope.ID, `{"turnId":"`+params.ExpectedTurnID+`"}`)
 		case "thread/read":
-			s.result(envelope.ID, `{"thread":{"id":"`+s.threadID+`","turns":[]}}`)
+			s.stateMu.Lock()
+			result := s.threadReadResult
+			s.stateMu.Unlock()
+			s.result(envelope.ID, result)
+		case "turn/interrupt":
+			s.result(envelope.ID, `{}`)
 		default:
 			s.done <- fmt.Errorf("unexpected client method %q", envelope.Method)
 			s.process.finish(nil)
@@ -75,6 +83,12 @@ func (s *scriptedAppServer) run() {
 	}
 	s.process.finish(nil)
 	s.done <- scanner.Err()
+}
+
+func (s *scriptedAppServer) setThreadReadResult(result string) {
+	s.stateMu.Lock()
+	s.threadReadResult = result
+	s.stateMu.Unlock()
 }
 
 func (s *scriptedAppServer) result(id json.RawMessage, result string) {
@@ -96,6 +110,14 @@ func (s *scriptedAppServer) nextCall(t *testing.T, method string) rpcEnvelope {
 			if call.Method == method {
 				return call
 			}
+			continue
+		default:
+		}
+		select {
+		case call := <-s.calls:
+			if call.Method == method {
+				return call
+			}
 		case err := <-s.done:
 			t.Fatalf("scripted app-server stopped before %s: %v", method, err)
 		case <-deadline:
@@ -108,6 +130,14 @@ func (s *scriptedAppServer) nextResponse(t *testing.T, id string) rpcEnvelope {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
 	for {
+		select {
+		case response := <-s.responses:
+			if string(response.ID) == `"`+id+`"` {
+				return response
+			}
+			continue
+		default:
+		}
 		select {
 		case response := <-s.responses:
 			if string(response.ID) == `"`+id+`"` {

@@ -140,6 +140,11 @@ type TurnSteerResponse struct {
 	TurnID string `json:"turnId"`
 }
 
+type TurnInterruptParams struct {
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+}
+
 type TurnNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     Turn   `json:"turn"`

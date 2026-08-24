@@ -392,6 +392,31 @@ type QuestionRequest struct {
 
 func (QuestionRequest) isRequestPayload() {}
 
+type Question struct {
+	ID         string
+	Header     string
+	Prompt     string
+	Options    []QuestionOption
+	AllowOther bool
+	Secret     bool
+}
+
+type QuestionSetRequest struct {
+	Questions []Question
+}
+
+func (QuestionSetRequest) isRequestPayload() {}
+
+// StructuredQuestionRequest carries a provider-neutral schema such as JSON
+// Schema. Schema is user-input structure, not adapter diagnostic metadata.
+type StructuredQuestionRequest struct {
+	Prompt          string
+	SchemaMediaType string
+	Schema          []byte
+}
+
+func (StructuredQuestionRequest) isRequestPayload() {}
+
 type ApprovalRequest struct {
 	Kind       string
 	Summary    string
@@ -427,3 +452,10 @@ type CancelResponse struct {
 }
 
 func (CancelResponse) isResponsePayload() {}
+
+type StructuredResponse struct {
+	MediaType string
+	Data      []byte
+}
+
+func (StructuredResponse) isResponsePayload() {}

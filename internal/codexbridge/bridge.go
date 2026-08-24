@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/harness"
 	"github.com/wbbradley/hq/internal/model"
 )
 
@@ -165,97 +166,53 @@ func Run(ctx context.Context, options Options) error {
 	if starter == nil {
 		starter = &ExecStarter{}
 	}
-	process, err := starter.Start(options.Directory)
-	if err != nil {
-		logger.Error("start Codex app-server", "error", err)
-		return err
-	}
-	logger.Info("Codex app-server transport pipes connected")
-	processDone := make(chan struct{})
-	var processErr error
-	go func() {
-		processErr = process.Wait()
-		close(processDone)
-	}()
-	go func() { _ = forwardStderr(options.Stderr, process.Errors()) }()
-
-	transportContext, cancelTransport := context.WithCancel(context.Background())
-	threadState := NewThreadState("")
 	requestRouter := NewRequestRouter(options.Store, replies)
 	outputRelay := NewOutputRelay(options.Store, options.ProjectStore, ledger, options.Sync)
-	notifications := NewNotificationHub(threadState, outputRelay)
-	client := NewClient(transportContext, process.Output(), process.Input(), requestRouter, notifications)
-	var mailbox model.Mailbox
-	shutdown := func() {
-		logger.Debug("closing Codex app-server stdin")
-		_ = process.Input().Close()
-		select {
-		case <-processDone:
-			logger.Debug("Codex app-server stopped after stdin close")
-		case <-time.After(gracefulProcessStop):
-			logger.Warn("Codex app-server did not stop gracefully", "timeout", gracefulProcessStop)
-			_ = process.Kill()
-			<-processDone
-		}
-	}
-	defer shutdown()
-	stopRequests := func() {
-		cancelTransport()
-		client.StopRequestsAndWait()
-	}
-	defer stopRequests()
 	defer outputRelay.StopAndWait()
-
-	initialize := InitializeParams{
-		ClientInfo:   ClientInfo{Name: "hq", Title: "HQ Codex bridge", Version: TestedCodexVersion},
-		Capabilities: InitializeCapabilities{ExperimentalAPI: true},
+	factory := newHarnessFactoryWithHandlers(starter, options.Stderr, logger.With("component", "codex_adapter"), requestRouter, outputRelay)
+	mode := harness.SessionNew
+	requestedSession := harness.SessionID("")
+	if resumeThreadID == "" {
+		logger.Info("starting Codex thread")
+	} else {
+		logger.Info("resuming Codex thread", "thread_id", resumeThreadID)
+		mode = harness.SessionResume
+		requestedSession = harness.SessionID(resumeThreadID)
 	}
-	if err := client.Call(ctx, "initialize", initialize, nil); err != nil {
+	launched, launchErr := factory.Launch(ctx, harness.LaunchConfig{
+		InstanceID: harness.InstanceID(options.AgentName), AgentName: options.AgentName, Directory: options.Directory,
+		SessionMode: mode, RequestedSession: requestedSession,
+		Options: CodexOptions{Yolo: options.Yolo, DeveloperInstructions: NamedAgentDeveloperInstructions(options.AgentName)},
+	})
+	if launchErr != nil {
+		outputRelay.StopAndWait()
 		if ctx.Err() != nil {
 			return nil
 		}
-		logger.Error("initialize Codex app-server", "error", err)
-		return fmt.Errorf("initialize Codex app-server: %w", err)
+		return bridgeAdapterLaunchError(launchErr, resumeThreadID, options.AgentName)
 	}
-	if err := client.Notify("initialized", struct{}{}); err != nil {
-		logger.Error("acknowledge Codex app-server initialization", "error", err)
-		return fmt.Errorf("acknowledge Codex app-server initialization: %w", err)
-	}
-	logger.Info("Codex app-server initialized")
-
-	var threadResponse ThreadResponse
-	if resumeThreadID == "" {
-		logger.Info("starting Codex thread")
-		params := ThreadStartParams{CWD: options.Directory, DeveloperInstructions: NamedAgentDeveloperInstructions(options.AgentName)}
-		applyYoloThreadSettings(options.Yolo, &params.ApprovalPolicy, &params.Sandbox)
-		if err := client.Call(ctx, "thread/start", params, &threadResponse); err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("start Codex thread: %w", err)
+	instance := launched.(*codexInstance)
+	client := instance.client
+	threadState := instance.threadState
+	threadID := string(instance.session.identity.ID)
+	eventDrainDone := make(chan struct{})
+	go func() {
+		for range instance.Events() {
 		}
-	} else {
-		logger.Info("resuming Codex thread", "thread_id", resumeThreadID)
-		params := ThreadResumeParams{ThreadID: resumeThreadID, CWD: options.Directory}
-		applyYoloThreadSettings(options.Yolo, &params.ApprovalPolicy, &params.Sandbox)
-		if err := client.Call(ctx, "thread/resume", params, &threadResponse); err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("resume Codex thread %s for named agent %s: %w; use --new-thread to rotate explicitly", resumeThreadID, options.AgentName, err)
-		}
-	}
-	threadID := strings.TrimSpace(threadResponse.Thread.ID)
-	if threadID == "" {
-		return errors.New("Codex app-server returned an empty thread ID")
-	}
-	if resumeThreadID != "" && threadID != resumeThreadID {
-		return fmt.Errorf("Codex app-server resumed thread %s instead of requested thread %s", threadID, resumeThreadID)
-	}
-	threadState.BindThread(threadID)
+		close(eventDrainDone)
+	}()
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), gracefulProcessStop+time.Second)
+		defer cancel()
+		_ = instance.Shutdown(shutdownContext)
+		_ = instance.Wait(shutdownContext)
+		<-eventDrainDone
+	}()
+	stopRequests := instance.stopRequests
+	defer stopRequests()
+	var mailbox model.Mailbox
 	logger = logger.With("thread_id", threadID)
 	logger.Info("Codex thread connected", "resumed", resumeThreadID != "")
-	threadState.UpdateThread(threadResponse.Thread)
 	var projectBinding ProjectBinding
 	if options.ProjectID != "" {
 		projectBinding, err = options.ProjectReady(BridgeReady{AgentName: options.AgentName, ThreadID: threadID, Directory: options.Directory})
@@ -304,18 +261,16 @@ func Run(ctx context.Context, options Options) error {
 			wrapped := fmt.Errorf("create initial Codex message ID: %w", err)
 			return finishBeforeDispatcher(wrapped, wrapped.Error())
 		}
-		params := TurnStartParams{
-			ThreadID: threadID, Input: []TextInput{{Type: "text", Text: prompt}}, ClientUserMessageID: messageID.String(),
-		}
-		var turnResponse TurnResponse
-		if err := client.Call(ctx, "turn/start", params, &turnResponse); err != nil {
+		_, err = instance.session.Submit(ctx, harness.Submission{
+			ID: harness.SubmissionID(messageID.String()), Input: []harness.InputPart{harness.TextInput{Text: prompt}},
+		})
+		if err != nil {
 			if ctx.Err() != nil {
 				return finishBeforeDispatcher(nil, "Bridge cancelled; the app-server process is being terminated.")
 			}
 			wrapped := fmt.Errorf("start initial Codex turn: %w", err)
 			return finishBeforeDispatcher(wrapped, wrapped.Error())
 		}
-		threadState.SetActive(turnResponse.Turn.ID)
 	}
 	if options.OnReady != nil {
 		options.OnReady(BridgeReady{AgentName: options.AgentName, ThreadID: threadID, Directory: options.Directory})
@@ -362,23 +317,13 @@ func Run(ctx context.Context, options Options) error {
 	case <-ctx.Done():
 		logger.Info("Codex bridge stopping", "reason", "context canceled")
 		return finish(nil, "Bridge cancelled; the app-server process is being terminated.")
-	case <-client.Done():
-		transportErr := client.Err()
-		select {
-		case <-processDone:
-			transportErr = processExitError(processErr)
-		case <-time.After(100 * time.Millisecond):
+	case <-instance.done:
+		runtimeErr := instance.Wait(context.Background())
+		if runtimeErr == nil {
+			runtimeErr = errors.New("Codex harness instance stopped unexpectedly")
 		}
-		logger.Error("Codex bridge stopping", "reason", "app-server transport closed", "error", transportErr)
-		return finish(transportErr, transportErr.Error())
-	case <-processDone:
-		select {
-		case <-client.Done():
-		case <-time.After(time.Second):
-		}
-		exitErr := processExitError(processErr)
-		logger.Error("Codex bridge stopping", "reason", "app-server process exited", "error", exitErr)
-		return finish(exitErr, exitErr.Error())
+		logger.Error("Codex bridge stopping", "reason", "harness instance stopped", "error", runtimeErr)
+		return finish(runtimeErr, runtimeErr.Error())
 	case <-dispatcherDone:
 		if dispatcherErr == nil {
 			dispatcherErr = errors.New("Codex HQ input dispatcher stopped unexpectedly")
@@ -487,6 +432,24 @@ func processExitError(err error) error {
 		return errors.New("Codex app-server exited")
 	}
 	return fmt.Errorf("Codex app-server failed: %w", err)
+}
+
+func bridgeAdapterLaunchError(err error, resumeThreadID, agentName string) error {
+	var providerErr *harness.ProviderError
+	if errors.As(err, &providerErr) {
+		switch providerErr.Operation {
+		case "start app-server":
+			return fmt.Errorf("start Codex app-server: %w", err)
+		case "initialize app-server":
+			return fmt.Errorf("initialize Codex app-server: %w", err)
+		case "acknowledge app-server initialization":
+			return fmt.Errorf("acknowledge Codex app-server initialization: %w", err)
+		}
+	}
+	if resumeThreadID != "" {
+		return fmt.Errorf("resume Codex thread %s for named agent %s: %w; use --new-thread to rotate explicitly", resumeThreadID, agentName, err)
+	}
+	return fmt.Errorf("start Codex thread: %w", err)
 }
 
 func bridgeReadyBody(options Options) string {
