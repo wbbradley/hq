@@ -81,6 +81,7 @@ type app struct {
 	changes             <-chan domain.Invalidation
 	states              <-chan domain.ConnectionUpdate
 	connection          domain.ConnectionUpdate
+	loadGeneration      uint64
 	undoStack           []undoAction
 	nextUndoID          uint64
 	undoing             bool
@@ -193,6 +194,7 @@ func (g messageGroup) latest() model.Message {
 }
 
 type loadedMsg struct {
+	generation    uint64
 	inbox         []model.Message
 	sent          []model.Message
 	archived      []model.Message
@@ -405,6 +407,17 @@ func (m app) load() tea.Msg {
 	return loadedMsg{conversations: conversations, histories: histories, agents: agents, sessions: sessions, network: network, err: err}
 }
 
+func (m *app) reload() tea.Cmd {
+	m.loadGeneration++
+	generation := m.loadGeneration
+	snapshot := *m
+	return func() tea.Msg {
+		loaded := snapshot.load().(loadedMsg)
+		loaded.generation = generation
+		return loaded
+	}
+}
+
 func (m app) loadAllConversations() ([]model.ConversationSummary, error) {
 	filter := model.ConversationFilter{IncludeSent: m.showSent, IncludeArchived: m.showArchived, Limit: 200}
 	var conversations []model.ConversationSummary
@@ -568,6 +581,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetHeight(max(1, layout.replyHeight-4))
 		m.reconcileMessageViewport(true)
 	case loadedMsg:
+		if msg.generation < m.loadGeneration {
+			return m, nil
+		}
 		selectedKey := m.selectedGroupKey()
 		knownSelectedMessages := make(map[string]bool)
 		if group, found := m.groupByKey(selectedKey); found {
@@ -630,9 +646,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconcileMessageViewport(true)
 		return m.withContextCommand()
 	case repairMsg:
-		return m, tea.Batch(m.load, m.syncNow(), scheduleRepair())
+		load := m.reload()
+		return m, tea.Batch(load, m.syncNow(), scheduleRepair())
 	case invalidatedMsg:
-		return m, tea.Batch(m.load, m.waitInvalidation())
+		load := m.reload()
+		return m, tea.Batch(load, m.waitInvalidation())
 	case connectionMsg:
 		m.connection = msg.state
 		return m, m.waitConnection()
@@ -653,7 +671,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.agentManager.status = fmt.Sprintf("%s · %s · %s", msg.runtime.Phase, threadLabel(m.managedThreadName(msg.runtime.ThreadID), msg.runtime.ThreadID), msg.runtime.Directory)
 		}
-		return m, m.load
+		return m, m.reload()
 	case renamedAgentSessionMsg:
 		m.agentManager.busy = false
 		if msg.err != nil {
@@ -670,11 +688,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.agentManager.stage = chooseRuntimeSession
 		m.agentManager.status = "thread renamed"
-		return m, m.load
+		return m, m.reload()
 	case syncMsg:
 		m.syncErr = msg.err
 		if msg.err == nil {
-			return m, m.load
+			return m, m.reload()
 		}
 	case branchMsg:
 		if msg.message.ID != m.contextID {
@@ -735,7 +753,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.paneFocus = focusInbox
 			m.editor.Reset()
 			m.reconcileMessageViewport(true)
-			return m, tea.Batch(m.load, m.syncNow())
+			load := m.reload()
+			return m, tea.Batch(load, m.syncNow())
 		}
 		if errors.Is(msg.err, domain.ErrAgentRetired) || errors.Is(msg.err, domain.ErrAgentNotFound) {
 			m.answering = false
@@ -760,7 +779,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.undoNotice = fmt.Sprintf("archived %d message(s) · press u to undo", len(msg.messageIDs))
 		}
 		if msg.err == nil || len(msg.messageIDs) > 0 {
-			return m, tea.Batch(m.load, m.syncNow())
+			load := m.reload()
+			return m, tea.Batch(load, m.syncNow())
 		}
 	case restoredMsg:
 		m.undoing = false
@@ -773,7 +793,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.undoNotice = fmt.Sprintf("restored %d message(s)", len(msg.action.messageIDs))
-			return m, tea.Batch(m.load, m.syncNow())
+			load := m.reload()
+			return m, tea.Batch(load, m.syncNow())
 		}
 	case tea.PasteMsg:
 		if m.answering && m.paneFocus == focusReply {
@@ -954,7 +975,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			m.resetMessageViewport()
 			if m.conversationMode {
-				return m, m.load
+				return m, m.reload()
 			}
 			m.setMessages()
 			return m.withContextCommand()
@@ -963,7 +984,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 			m.resetMessageViewport()
 			if m.conversationMode {
-				return m, m.load
+				return m, m.reload()
 			}
 			m.setMessages()
 			return m.withContextCommand()
@@ -1005,7 +1026,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor.Blur()
 			return m, nil
 		case "r":
-			return m, m.load
+			return m, m.reload()
 		}
 	}
 	return m, nil

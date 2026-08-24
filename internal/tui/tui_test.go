@@ -131,6 +131,29 @@ func TestInvalidationReloadPreservesActiveDraftAndRearms(t *testing.T) {
 	}
 }
 
+func TestStaleReloadCannotReplaceNewerConversationSnapshot(t *testing.T) {
+	previous := message("previous-snapshot", testAgentID, model.HumanMailboxID, "Previous reply")
+	latest := message("latest-snapshot", testAgentID, model.HumanMailboxID, "Latest reply")
+	previous.Details = "Codex thread: reload-thread\nCodex turn: previous-turn"
+	latest.Details = "Codex thread: reload-thread\nCodex turn: latest-turn"
+	latest.CreatedAt = previous.CreatedAt.Add(time.Second)
+	m := app{inbox: []model.Message{previous}, loadGeneration: 2, width: 80, height: 24}
+	m.setMessages()
+	m.reconcileMessageViewport(false)
+
+	updated, _ := m.Update(loadedMsg{generation: 2, inbox: []model.Message{latest, previous}})
+	m = updated.(app)
+	if group, found := m.detailGroup(); !found || group.latest().ID != latest.ID {
+		t.Fatalf("newest snapshot was not applied: %#v", group)
+	}
+
+	updated, _ = m.Update(loadedMsg{generation: 1, inbox: []model.Message{previous}})
+	m = updated.(app)
+	if group, found := m.detailGroup(); !found || group.latest().ID != latest.ID || m.messageLiveAnchorID != latest.ID {
+		t.Fatalf("stale snapshot replaced latest conversation state: group=%#v anchor=%q", group, m.messageLiveAnchorID)
+	}
+}
+
 func TestConnectionDiagnosticsArePersistentAndIncompatibilityBlocks(t *testing.T) {
 	drift := app{connection: domain.ConnectionUpdate{Diagnostic: "restart the local HQ node"}}
 	if view := drift.View().Content; !strings.Contains(view, "restart the local HQ node") || strings.Contains(view, "then reopen the TUI") {
