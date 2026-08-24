@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -571,12 +572,8 @@ func (m app) restoreAction(action undoAction) tea.Cmd {
 func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		oldLayout := responsivePaneLayout(m.width, m.height, m.answering)
 		m.width, m.height = msg.Width, msg.Height
 		layout := responsivePaneLayout(msg.Width, msg.Height, m.answering)
-		if oldLayout.messageWidth != layout.messageWidth && m.markdown != nil {
-			m.markdown.Reset()
-		}
 		m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
 		m.editor.SetHeight(max(1, layout.replyHeight-4))
 		m.reconcileMessageViewport(true)
@@ -603,9 +600,6 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pickerCursor = max(0, len(choices)-1)
 		}
 		m.setMessages()
-		if m.markdown != nil {
-			m.markdown.Reset()
-		}
 		visibleGroups := m.visibleGroups()
 		if index := groupIndex(visibleGroups, selectedKey); index >= 0 {
 			m.cursor = index
@@ -639,9 +633,6 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setMessages()
 		if index := groupIndex(m.visibleGroups(), selectedKey); index >= 0 {
 			m.cursor = index
-		}
-		if m.markdown != nil {
-			m.markdown.Reset()
 		}
 		m.reconcileMessageViewport(true)
 		return m.withContextCommand()
@@ -2421,6 +2412,9 @@ func (m app) renderGroupPanel(group messageGroup, width int) string {
 }
 
 func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessageGroup {
+	if cached, ok := m.cachedRenderedMessageGroup(group, width); ok {
+		return cached
+	}
 	if len(group.messages) == 0 && group.draft != nil {
 		body := titleStyle.Render("New message to "+draftRecipient(*group.draft)) + "\n\n"
 		if group.draft.body == "" {
@@ -2428,80 +2422,116 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 		} else {
 			body += group.draft.body
 		}
-		return renderedMessageGroup{panel: renderMessagePanel(body, width, "[draft]", "press enter to continue", m.paneFocused(focusMessage))}
+		return m.cacheRenderedMessageGroup(group, width, renderedMessageGroup{panel: renderMessagePanel(body, width, "[draft]", "press enter to continue", m.paneFocused(focusMessage))})
 	}
 	latest := group.latest()
 	kind := groupPresentationKind(group)
 	sender := displayMailboxLabel(latest.SenderLabel, latest.Context)
 	topLabel := presentationPanelLabel(kind, sender)
 	var body strings.Builder
+	lineCount := 0
 	if topLabel == "" {
-		body.WriteString(dim.Render("From: " + sender))
-		body.WriteString("\n\n")
+		appendRenderedText(&body, &lineCount, dim.Render("From: "+sender))
+		appendRenderedText(&body, &lineCount, "\n\n")
 	}
 	metadataHidden := false
 	var spans []messageLineSpan
 	markdownWidth := max(1, width-panel.GetHorizontalFrameSize())
 	for i, message := range group.messages {
 		if i > 0 {
-			body.WriteString("\n\n")
+			appendRenderedText(&body, &lineCount, "\n\n")
 		}
-		spanStart := nextRenderedLineIndex(body.String())
+		spanStart := max(0, lineCount-1)
 		header := "── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM")
 		if direction := messageDirection(message); direction != "" {
 			header += " · " + direction
 		}
-		body.WriteString(dim.Render(header + " ──"))
-		body.WriteByte('\n')
-		body.WriteString(m.markdown.Render(message, markdownWidth))
+		appendRenderedText(&body, &lineCount, dim.Render(header+" ──"))
+		appendRenderedText(&body, &lineCount, "\n")
+		appendRenderedText(&body, &lineCount, m.markdown.Render(message, markdownWidth))
 		visibleDetails, hidden := m.presentationDetails(message.Details, m.showTechnical)
 		metadataHidden = metadataHidden || hidden
 		if visibleDetails != "" {
-			body.WriteString("\n\n")
-			body.WriteString(visibleDetails)
+			appendRenderedText(&body, &lineCount, "\n\n")
+			appendRenderedText(&body, &lineCount, visibleDetails)
 		}
 		if m.showTechnical {
 			if identifiers := technicalIdentifiers(message); identifiers != "" {
-				body.WriteString("\n\n")
-				body.WriteString(dim.Render(identifiers))
+				appendRenderedText(&body, &lineCount, "\n\n")
+				appendRenderedText(&body, &lineCount, dim.Render(identifiers))
 			}
 		}
-		spans = append(spans, messageLineSpan{messageID: message.ID, actionUnit: actionUnitKey(message), start: spanStart, end: renderedLineCount(body.String())})
+		spans = append(spans, messageLineSpan{messageID: message.ID, actionUnit: actionUnitKey(message), start: spanStart, end: lineCount})
 	}
 	if group.draft != nil {
-		body.WriteString("\n\n")
-		draftStart := nextRenderedLineIndex(body.String())
-		body.WriteString(titleStyle.Render("Draft reply"))
-		body.WriteByte('\n')
+		appendRenderedText(&body, &lineCount, "\n\n")
+		draftStart := max(0, lineCount-1)
+		appendRenderedText(&body, &lineCount, titleStyle.Render("Draft reply"))
+		appendRenderedText(&body, &lineCount, "\n")
 		if group.draft.body == "" {
-			body.WriteString(dim.Render("(empty draft)"))
+			appendRenderedText(&body, &lineCount, dim.Render("(empty draft)"))
 		} else {
-			body.WriteString(group.draft.body)
+			appendRenderedText(&body, &lineCount, group.draft.body)
 		}
-		spans = append(spans, messageLineSpan{messageID: "draft:" + group.key, actionUnit: "draft:" + group.key, start: draftStart, end: renderedLineCount(body.String())})
+		spans = append(spans, messageLineSpan{messageID: "draft:" + group.key, actionUnit: "draft:" + group.key, start: draftStart, end: lineCount})
 	}
 	if m.showTechnical {
 		if context := m.technicalContext(latest); context != "" {
-			body.WriteString("\n\n")
-			body.WriteString(dim.Render(context))
+			appendRenderedText(&body, &lineCount, "\n\n")
+			appendRenderedText(&body, &lineCount, dim.Render(context))
 		}
 	}
 	bottomLabel := ""
 	if !m.showTechnical && (metadataHidden || groupHasTechnicalIdentifiers(group) || m.technicalContext(latest) != "") {
 		bottomLabel = "technical details hidden · press i to show"
 	}
-	return renderedMessageGroup{panel: renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage)), spans: spans}
+	return m.cacheRenderedMessageGroup(group, width, renderedMessageGroup{panel: renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage)), spans: spans})
 }
 
-func renderedLineCount(value string) int {
+func appendRenderedText(body *strings.Builder, lineCount *int, value string) {
 	if value == "" {
-		return 0
+		return
 	}
-	return strings.Count(value, "\n") + 1
+	body.WriteString(value)
+	if *lineCount == 0 {
+		*lineCount = 1
+	}
+	*lineCount += strings.Count(value, "\n")
 }
 
-func nextRenderedLineIndex(value string) int {
-	return max(0, renderedLineCount(value)-1)
+func (m app) cachedRenderedMessageGroup(group messageGroup, width int) (renderedMessageGroup, bool) {
+	if m.markdown == nil || m.markdown.groupCache == nil {
+		return renderedMessageGroup{}, false
+	}
+	cache := m.markdown.groupCache
+	hasDraft := group.draft != nil
+	var draft messageDraft
+	if hasDraft {
+		draft = *group.draft
+	}
+	if cache.groupKey != group.key || !slices.Equal(cache.messages, group.messages) || cache.hasDraft != hasDraft || cache.draft != draft ||
+		cache.width != width || cache.showTechnical != m.showTechnical || cache.focused != m.paneFocused(focusMessage) ||
+		cache.contextID != m.contextID || cache.branch != m.branch || cache.remotes != m.remotes || cache.pull != m.pull {
+		return renderedMessageGroup{}, false
+	}
+	return cache.rendered, true
+}
+
+func (m app) cacheRenderedMessageGroup(group messageGroup, width int, rendered renderedMessageGroup) renderedMessageGroup {
+	if m.markdown == nil {
+		return rendered
+	}
+	hasDraft := group.draft != nil
+	var draft messageDraft
+	if hasDraft {
+		draft = *group.draft
+	}
+	m.markdown.groupCache = &renderedMessageGroupCache{
+		groupKey: group.key, messages: append([]model.Message(nil), group.messages...), draft: draft, hasDraft: hasDraft,
+		width: width, showTechnical: m.showTechnical, focused: m.paneFocused(focusMessage),
+		contextID: m.contextID, branch: m.branch, remotes: m.remotes, pull: m.pull, rendered: rendered,
+	}
+	return rendered
 }
 
 func messageDirection(message model.Message) string {

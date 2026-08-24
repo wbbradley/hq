@@ -21,8 +21,24 @@ type messageMarkdownCacheKey struct {
 }
 
 type messageMarkdownRenderer struct {
-	render markdownRenderFunc
-	cache  map[messageMarkdownCacheKey]string
+	render     markdownRenderFunc
+	cache      map[messageMarkdownCacheKey]string
+	groupCache *renderedMessageGroupCache
+}
+
+type renderedMessageGroupCache struct {
+	groupKey      string
+	messages      []model.Message
+	draft         messageDraft
+	hasDraft      bool
+	width         int
+	showTechnical bool
+	focused       bool
+	contextID     string
+	branch        string
+	remotes       string
+	pull          string
+	rendered      renderedMessageGroup
 }
 
 func newMessageMarkdownRenderer(render markdownRenderFunc) *messageMarkdownRenderer {
@@ -69,6 +85,7 @@ func (r *messageMarkdownRenderer) Render(message model.Message, width int) strin
 func (r *messageMarkdownRenderer) Reset() {
 	if r != nil {
 		r.cache = make(map[messageMarkdownCacheKey]string)
+		r.groupCache = nil
 	}
 }
 

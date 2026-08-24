@@ -578,6 +578,62 @@ func TestMessageMarkdownCacheResetsWhenPaneWidthChanges(t *testing.T) {
 	}
 }
 
+func TestReplyEditsReuseRenderedConversationPanel(t *testing.T) {
+	item := message("cached-panel", testAgentID, model.HumanMailboxID, "Original body")
+	editor := textarea.New()
+	editor.SetValue("first draft")
+	m := app{
+		messages: []model.Message{item}, groups: groupMessages([]model.Message{item}),
+		answering: true, answerID: item.ID, answerGroupKey: messageGroupKey(item), answerQ: item,
+		editor: editor, paneFocus: focusReply, width: 100, height: 30,
+		markdown: newMessageMarkdownRenderer(func(body, _ string, _ int) (string, error) { return body, nil }),
+	}
+	m.View()
+	firstCache := m.markdown.groupCache
+	if firstCache == nil {
+		t.Fatal("initial view did not cache the rendered conversation")
+	}
+
+	m.editor.SetValue("edited draft")
+	m.View()
+	if m.markdown.groupCache != firstCache {
+		t.Fatal("reply-only edit rebuilt the unchanged conversation panel")
+	}
+
+	m.groups[0].messages[0].Body = "Changed message body"
+	view := m.View().Content
+	if m.markdown.groupCache == firstCache || !strings.Contains(view, "Changed message body") {
+		t.Fatalf("message change reused stale conversation panel: %q", view)
+	}
+}
+
+func BenchmarkReplyEditorViewLongConversation(b *testing.B) {
+	created := time.Date(2026, 8, 23, 12, 0, 0, 0, time.Local)
+	messages := make([]model.Message, 0, 120)
+	for index := range 120 {
+		item := message(fmt.Sprintf("benchmark-message-%03d", index), testAgentID, model.HumanMailboxID, strings.Repeat("A representative message body with enough text to wrap. ", 12))
+		item.CreatedAt = created.Add(time.Duration(index) * time.Second)
+		item.Details = fmt.Sprintf("Codex thread: benchmark-thread\nCodex turn: turn-%03d", index)
+		messages = append(messages, item)
+	}
+	editor := textarea.New()
+	editor.SetValue("A reply in progress")
+	editor.Focus()
+	m := app{
+		messages: messages, groups: groupMessages(messages), answering: true,
+		answerID: messages[len(messages)-1].ID, answerGroupKey: messageGroupKey(messages[0]), answerQ: messages[len(messages)-1],
+		editor: editor, paneFocus: focusReply, width: 120, height: 40,
+		markdown: newMessageMarkdownRenderer(func(body, _ string, _ int) (string, error) { return body, nil }),
+	}
+	m.resizeEditor()
+	m.View()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		m.View()
+	}
+}
+
 func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
 	created := time.Date(2026, 8, 21, 15, 4, 5, 0, time.Local)
 	question := message("question", testAgentID, model.HumanMailboxID, "Which approach?")
