@@ -21,6 +21,7 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/node"
 	"github.com/wbbradley/hq/internal/store"
+	"github.com/wbbradley/hq/internal/syncer"
 )
 
 type testDomainStore struct{ *store.SQLite }
@@ -984,6 +985,13 @@ func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	readiness := syncer.NodeLauncher{
+		Start:        func(syncer.RuntimePaths) error { return nil },
+		ReadyTimeout: 30 * time.Second,
+	}
+	if err := readiness.Ensure(ctx, database); err != nil {
+		t.Fatal(err)
+	}
 	replier, err := hqclient.Open(ctx, database)
 	if err != nil {
 		t.Fatal(err)
