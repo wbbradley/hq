@@ -96,7 +96,6 @@ func TestIsolatedCLIRequestReply(t *testing.T) {
 		t.Fatalf("daemon status = %q", status)
 	}
 	run(false, "--db", database, "daemon", "stop")
-	waitForDaemonExit(t, binary, environment, database)
 	logPath := filepath.Join(root, "home", "logs", "hq.log")
 	rawLog, err := os.ReadFile(logPath)
 	if err != nil {
@@ -161,24 +160,4 @@ func isolatedEnvironment(t *testing.T, root string) []string {
 	}
 	environment = append(environment, "NO_COLOR=1")
 	return environment
-}
-
-func waitForDaemonExit(t *testing.T, binary string, environment []string, database string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for {
-		if err := ctx.Err(); err != nil {
-			t.Fatalf("auto-started node did not stop: %v", err)
-		}
-		command := exec.CommandContext(ctx, binary, "--db", database, "daemon", "status")
-		command.Env = environment
-		err := command.Run()
-		if err != nil {
-			if ctx.Err() != nil {
-				t.Fatalf("auto-started node did not stop: %v", ctx.Err())
-			}
-			return
-		}
-	}
 }

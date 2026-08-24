@@ -21,7 +21,6 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/node"
 	"github.com/wbbradley/hq/internal/store"
-	"github.com/wbbradley/hq/internal/syncer"
 )
 
 type testDomainStore struct{ *store.SQLite }
@@ -983,20 +982,18 @@ func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
 			t.Error("test node did not stop")
 		}
 	}()
-	paths, err := syncer.ResolveRuntimePaths(database)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	replier, err := hqclient.Open(ctx, database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	readyDeadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, statErr := os.Stat(paths.Socket); statErr == nil {
-			break
-		}
-		if time.Now().After(readyDeadline) {
-			t.Fatal("test node did not create its socket")
-		}
-		time.Sleep(10 * time.Millisecond)
+	defer replier.Close()
+	publication, err := replier.Subscribe(ctx, domain.TopicMessages)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer publication.Close()
 	application := New()
 	output := new(bytes.Buffer)
 	application.In = strings.NewReader("")
@@ -1007,37 +1004,33 @@ func TestAskReceivesLiveNodeReplyThroughSubscription(t *testing.T) {
 	application.RepoContext = func(context.Context, string) model.RepositoryContext {
 		return model.RepositoryContext{Directory: "/work/repo"}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		done <- application.Run(ctx, []string{"--no-sync", "--db", database, "ask", "--interval", "1h", "Live reply?"})
 	}()
 
-	replier, err := hqclient.Open(ctx, database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer replier.Close()
 	var question model.Message
-	deadline := time.Now().Add(10 * time.Second)
-	for question.ID == "" && time.Now().Before(deadline) {
-		messages, listErr := replier.List(ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Limit: 10})
-		if listErr != nil {
-			t.Fatal(listErr)
-		}
-		for _, candidate := range messages {
-			if candidate.Body == "Live reply?" {
-				question = candidate
-				break
+	for question.ID == "" {
+		select {
+		case <-publication.Changes():
+			messages, listErr := replier.List(ctx, model.Filter{RecipientMailboxID: model.HumanMailboxID, Limit: 10})
+			if listErr != nil {
+				t.Fatal(listErr)
 			}
+			for _, candidate := range messages {
+				if candidate.Body == "Live reply?" {
+					question = candidate
+					break
+				}
+			}
+		case runErr := <-done:
+			if runErr == nil {
+				t.Fatal("subscribed ask completed before receiving a reply")
+			}
+			t.Fatalf("subscribed ask failed before publishing its question: %v", runErr)
+		case <-ctx.Done():
+			t.Fatalf("subscribed ask did not publish its question: %v", ctx.Err())
 		}
-		if question.ID == "" {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	if question.ID == "" {
-		t.Fatal("subscribed ask did not publish its question")
 	}
 	reply := message("019c0000-0000-7000-8000-000000000301", "/work/repo", model.HumanMailboxID, question.SenderMailboxID, "Immediately")
 	started := time.Now()

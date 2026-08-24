@@ -207,14 +207,9 @@ func TestEnsureNodeWaitsForDetachedNodeProcess(t *testing.T) {
 	if err := StopDaemon(database); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(paths.InstanceMetadata); errors.Is(err, os.ErrNotExist) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if _, err := os.Stat(paths.InstanceMetadata); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("detached node runtime metadata remains after stop: %v", err)
 	}
-	t.Fatal("detached node did not clean up runtime metadata after stop")
 }
 
 func TestAutoStartedNodeProcess(t *testing.T) {

@@ -202,14 +202,35 @@ func DaemonStatus(databasePath string) (string, error) {
 
 func StopDaemon(databasePath string) error {
 	var response lifecycleAcknowledgement
-	_, err := controlCommand(databasePath, stopMethod, &response)
+	handshake, err := controlCommand(databasePath, stopMethod, &response)
 	if err != nil {
 		return err
 	}
 	if response.State != "stopping" {
 		return fmt.Errorf("unexpected daemon response %q", response.State)
 	}
-	return nil
+	paths, err := ResolveRuntimePaths(databasePath)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		metadata, readErr := ReadInstanceMetadata(paths)
+		if errors.Is(readErr, os.ErrNotExist) || (readErr == nil && metadata.InstanceID != handshake.Server.InstanceID) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("read stopping daemon metadata: %w", readErr)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("daemon did not stop within 30s: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func RestartDaemon(databasePath string) error {

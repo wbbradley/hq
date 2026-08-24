@@ -1964,12 +1964,18 @@ func splitProjectPaths(value string) []string {
 
 func (m app) expandClientPath(value string) (string, error) {
 	value = os.ExpandEnv(strings.TrimSpace(value))
-	if value == "~" || strings.HasPrefix(value, "~"+string(filepath.Separator)) {
+	homeRelative := strings.HasPrefix(value, "~/") ||
+		(filepath.Separator != '/' && strings.HasPrefix(value, "~"+string(filepath.Separator)))
+	if value == "~" || homeRelative {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("expand home directory: %w", err)
 		}
-		value = filepath.Join(home, strings.TrimPrefix(value, "~"+string(filepath.Separator)))
+		if value == "~" {
+			value = home
+		} else {
+			value = filepath.Join(home, value[2:])
+		}
 	} else if strings.HasPrefix(value, "~") {
 		return "", errors.New("only the current user's ~ home path is supported")
 	}

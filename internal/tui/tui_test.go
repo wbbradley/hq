@@ -1880,6 +1880,7 @@ func TestProjectPathsExpandAgainstClientEnvironment(t *testing.T) {
 	base := t.TempDir()
 	explicit := filepath.Join(t.TempDir(), "from-env")
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("HQ_PROJECT_PATH", explicit)
 	m := app{launchDirectory: base}
 	paths, err := m.expandProjectPaths("~/home-project, $HQ_PROJECT_PATH, relative-project")
@@ -1904,9 +1905,12 @@ func TestProjectSetupTextStagesShowCursor(t *testing.T) {
 }
 
 func TestNewProjectComposeOffersDaemonWorktreeProvisioning(t *testing.T) {
+	repository := filepath.Join(t.TempDir(), "repo")
+	destination := filepath.Join(t.TempDir(), "worktree")
+	additional := filepath.Join(t.TempDir(), "extra")
 	project := domain.Project{ID: "019c0000-0000-7000-8000-000000000391", HomeInstallation: "019c0000-0000-7000-8000-000000000392", MailboxID: "019c0000-0000-7000-8000-000000000393", Name: "worktree", Lifecycle: domain.ProjectClosed}
 	store := &worktreeCaptureStore{project: project}
-	setup := &projectComposeSetup{stage: enterProjectPaths, name: "worktree", home: project.HomeInstallation, pathsText: "/extra"}
+	setup := &projectComposeSetup{stage: enterProjectPaths, name: "worktree", home: project.HomeInstallation, pathsText: additional}
 	m := app{ctx: context.Background(), store: store, projectSetup: setup, agents: []domain.NamedAgent{{Name: "alice", Idle: true}}, editor: textarea.New()}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = updated.(app)
@@ -1921,11 +1925,11 @@ func TestNewProjectComposeOffersDaemonWorktreeProvisioning(t *testing.T) {
 		updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 		m = updated.(app)
 	}
-	enter("/repo")
+	enter(repository)
 	// HEAD is prefilled.
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(app)
-	enter("/worktree")
+	enter(destination)
 	for _, r := range "feature" {
 		updated, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = updated.(app)
@@ -1942,7 +1946,7 @@ func TestNewProjectComposeOffersDaemonWorktreeProvisioning(t *testing.T) {
 	}
 	updated, _ = m.Update(cmd())
 	m = updated.(app)
-	if store.request.Repository != "/repo" || store.request.Destination != "/worktree" || store.request.Branch != "feature" || len(store.request.AdditionalPaths) != 1 || m.projectSetup.stage != chooseProjectAgent {
+	if store.request.Repository != repository || store.request.Destination != destination || store.request.Branch != "feature" || !slices.Equal(store.request.AdditionalPaths, []domain.ProjectPathInput{{DisplayPath: additional}}) || m.projectSetup.stage != chooseProjectAgent {
 		t.Fatalf("worktree request = %#v setup=%#v", store.request, m.projectSetup)
 	}
 }

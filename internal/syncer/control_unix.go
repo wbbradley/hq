@@ -42,7 +42,7 @@ func startControl(ctx context.Context, paths RuntimePaths, wake chan<- struct{},
 		os.Remove(paths.Socket)
 		return nil, err
 	}
-	handler := func(_ context.Context, _ *localwire.Session, method string, _ json.RawMessage) (any, *localwire.RPCError) {
+	handler := func(_ context.Context, session *localwire.Session, method string, _ json.RawMessage) (any, *localwire.RPCError) {
 		switch method {
 		case wakeMethod:
 			select {
@@ -53,9 +53,11 @@ func startControl(ctx context.Context, paths RuntimePaths, wake chan<- struct{},
 		case statusMethod:
 			return lifecycleStatus{State: status()}, nil
 		case stopMethod:
-			return localwire.DeferredResponse{Value: lifecycleAcknowledgement{State: "stopping"}, After: stop}, nil
+			go runAfterSessionCloses(session, stop)
+			return lifecycleAcknowledgement{State: "stopping"}, nil
 		case restartMethod:
-			return localwire.DeferredResponse{Value: lifecycleAcknowledgement{State: "restarting"}, After: restart}, nil
+			go runAfterSessionCloses(session, restart)
+			return lifecycleAcknowledgement{State: "restarting"}, nil
 		default:
 			return nil, &localwire.RPCError{Code: localwire.CodeMethodNotFound, Message: fmt.Sprintf("unknown lifecycle method %q", method)}
 		}
@@ -109,6 +111,11 @@ func startControl(ctx context.Context, paths RuntimePaths, wake chan<- struct{},
 		}
 	}()
 	return handle, nil
+}
+
+func runAfterSessionCloses(session *localwire.Session, action context.CancelFunc) {
+	<-session.Done()
+	action()
 }
 
 func listenLocalSocket(path string) (net.Listener, error) {
