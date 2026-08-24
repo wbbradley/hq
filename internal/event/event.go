@@ -55,6 +55,9 @@ const (
 	TypeHumanDeviceGrant   Type = "human.device.grant"
 	TypeHumanDeviceAccept  Type = "human.device.accept"
 	TypeHumanDeviceRevoke  Type = "human.device.revoke"
+	TypeProjectEvent       Type = "project.event"
+	TypeProjectCommand     Type = "project.command"
+	TypeProjectResult      Type = "project.command.result"
 )
 
 type Scope string
@@ -204,6 +207,34 @@ type HumanDevicePayload struct {
 	Label                 string   `json:"label"`
 	Relays                []string `json:"relays"`
 	CreatorRelays         []string `json:"creator_relays"`
+}
+
+// ProjectEventPayload is a home-issued project history fact. Body is the
+// operation-specific canonical JSON object; PreviousEventID is repeated in
+// Content.Parents so normal causal validation and replication apply.
+type ProjectEventPayload struct {
+	ProjectID       string          `json:"project_id"`
+	PreviousEventID string          `json:"previous_event_id,omitempty"`
+	Operation       string          `json:"operation"`
+	Body            json.RawMessage `json:"body"`
+}
+
+type ProjectCommandPayload struct {
+	CommandID    string          `json:"command_id"`
+	ProjectID    string          `json:"project_id"`
+	ExpectedHead string          `json:"expected_head_event_id"`
+	Operation    string          `json:"operation"`
+	Body         json.RawMessage `json:"body"`
+}
+
+type ProjectCommandResultPayload struct {
+	CommandID   string          `json:"command_id"`
+	ProjectID   string          `json:"project_id"`
+	Stage       string          `json:"stage"`
+	Committed   bool            `json:"committed"`
+	CurrentHead string          `json:"current_head_event_id"`
+	Diagnostic  string          `json:"diagnostic,omitempty"`
+	Body        json.RawMessage `json:"body,omitempty"`
 }
 
 type SecretKey [32]byte

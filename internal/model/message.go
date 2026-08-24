@@ -7,8 +7,9 @@ const HumanMailboxID = "00000000-0000-7000-8000-000000000000"
 type MailboxKind string
 
 const (
-	MailboxHuman MailboxKind = "human"
-	MailboxAgent MailboxKind = "agent"
+	MailboxHuman   MailboxKind = "human"
+	MailboxAgent   MailboxKind = "agent"
+	MailboxProject MailboxKind = "project"
 )
 
 type SessionIdentity struct {

@@ -18,6 +18,7 @@ import (
 type Service struct {
 	Store interface {
 		domain.Operations
+		domain.ProjectOperations
 		domain.MutationLog
 		domain.ChangeLog
 	}
@@ -78,7 +79,11 @@ var mutationMethods = map[string]bool{
 	ClaimMethod: true, CompleteMethod: true, ReleaseMethod: true, TrustPeerMethod: true,
 	DistrustPeerMethod: true, CreateHumanInviteMethod: true, JoinHumanInviteMethod: true,
 	RevokeHumanDeviceMethod: true, SetMailboxShareMethod: true, AddRelayMethod: true,
-	RemoveRelayMethod: true,
+	RemoveRelayMethod:   true,
+	CreateProjectMethod: true, OpenProjectMethod: true, BeginCloseProjectMethod: true, FinalizeCloseProjectMethod: true,
+	ArchiveProjectMethod: true, UpdateProjectMethod: true, AddProjectPathMethod: true, RemoveProjectResourceMethod: true,
+	ReplaceProjectPathMethod: true, SetProjectPrimaryMethod: true, AssignProjectMethod: true, ActivateProjectMethod: true,
+	AbortProjectAssignmentMethod: true, BlockProjectAssignmentMethod: true, UnassignProjectMethod: true,
 }
 
 func mutationForRequest(method string, raw json.RawMessage) (domain.Mutation, bool, error) {
@@ -184,6 +189,56 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return s.Runtime.LaunchCodexAgent(ctx, request)
+	case ActivateCodexProjectMethod:
+		controller, ok := s.Runtime.(domain.ProjectCodexRuntimeController)
+		if !ok {
+			return nil, errors.New("project Codex runtime control is unavailable")
+		}
+		var request domain.ProjectCodexActivationRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return controller.ActivateCodexProject(ctx, request)
+	case CloseCodexProjectMethod:
+		controller, ok := s.Runtime.(domain.ProjectCodexRuntimeController)
+		if !ok {
+			return nil, errors.New("project Codex runtime control is unavailable")
+		}
+		var request domain.ProjectCodexCloseRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return controller.CloseCodexProject(ctx, request)
+	case HandoffCodexProjectMethod:
+		controller, ok := s.Runtime.(domain.ProjectCodexRuntimeController)
+		if !ok {
+			return nil, errors.New("project Codex runtime control is unavailable")
+		}
+		var request domain.ProjectCodexHandoffRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return controller.HandoffCodexProject(ctx, request)
+	case RetireCodexAgentMethod:
+		controller, ok := s.Runtime.(domain.ProjectCodexRuntimeController)
+		if !ok {
+			return nil, errors.New("Codex retirement control is unavailable")
+		}
+		var request domain.CodexRetireAgentRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return nil, controller.RetireCodexAgent(ctx, request)
+	case ProvisionProjectWorktreeMethod:
+		controller, ok := s.Runtime.(domain.ProjectWorktreeProvisioner)
+		if !ok {
+			return nil, errors.New("project worktree provisioning is unavailable")
+		}
+		var request domain.ProjectWorktreeRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return controller.ProvisionProjectWorktree(ctx, request)
 	case StopCodexAgentMethod, CodexRuntimeMethod:
 		if s.Runtime == nil {
 			return nil, errors.New("Codex runtime control is unavailable")
@@ -324,6 +379,108 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 		return s.Store.ListRelays(ctx)
 	case NetworkStatusMethod:
 		return s.Store.NetworkStatus(ctx)
+	case CreateProjectMethod:
+		var request CreateProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.CreateProject(ctx, request.Project)
+	case GetProjectMethod:
+		var request ProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.GetProject(ctx, request.ProjectID)
+	case ListProjectsMethod:
+		var request ListProjectsRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.ListProjects(ctx, request.IncludeArchived)
+	case ListProjectThreadsMethod:
+		var request ProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.ListProjectThreads(ctx, request.ProjectID)
+	case OpenProjectMethod, BeginCloseProjectMethod:
+		var request ProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		if method == OpenProjectMethod {
+			return s.Store.OpenProject(ctx, request.ProjectID, request.ExpectedHead)
+		}
+		return s.Store.BeginCloseProject(ctx, request.ProjectID, request.ExpectedHead)
+	case FinalizeCloseProjectMethod:
+		var request FinalizeCloseProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.FinalizeCloseProject(ctx, request.ProjectID, request.ExpectedHead, request.Forced, request.RuntimeObservation)
+	case ArchiveProjectMethod:
+		var request ArchiveProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.SetProjectArchived(ctx, request.ProjectID, request.ExpectedHead, request.Archived)
+	case UpdateProjectMethod:
+		var request UpdateProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.UpdateProjectMetadata(ctx, request.ProjectID, request.ExpectedHead, request.Name, request.Brief)
+	case AddProjectPathMethod:
+		var request ProjectPathRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.AddProjectPath(ctx, request.ProjectID, request.ExpectedHead, request.Path, request.Primary)
+	case RemoveProjectResourceMethod, SetProjectPrimaryMethod:
+		var request ProjectResourceRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		if method == RemoveProjectResourceMethod {
+			return s.Store.RemoveProjectResource(ctx, request.ProjectID, request.ExpectedHead, request.ResourceID)
+		}
+		return s.Store.SetProjectPrimaryResource(ctx, request.ProjectID, request.ExpectedHead, request.ResourceID)
+	case ReplaceProjectPathMethod:
+		var request ReplaceProjectPathRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.ReplaceProjectPath(ctx, request.ProjectID, request.ExpectedHead, request.ResourceID, request.Path)
+	case CheckProjectResourceMethod:
+		var request CheckProjectResourceRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.CheckProjectResource(ctx, request.ProjectID, request.ResourceID)
+	case AssignProjectMethod:
+		var request AssignProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.AssignProject(ctx, request.ProjectID, request.ExpectedHead, request.AgentName)
+	case ActivateProjectMethod:
+		var request ActivateProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.ActivateProjectAssignment(ctx, request.ProjectID, request.ExpectedHead, request.Activation)
+	case AbortProjectAssignmentMethod, BlockProjectAssignmentMethod, UnassignProjectMethod:
+		var request EndProjectAssignmentRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		if method == AbortProjectAssignmentMethod {
+			return s.Store.AbortProjectAssignment(ctx, request.ProjectID, request.ExpectedHead, request.RuntimeObservation)
+		}
+		if method == BlockProjectAssignmentMethod {
+			return s.Store.BlockProjectAssignment(ctx, request.ProjectID, request.ExpectedHead, request.RuntimeObservation)
+		}
+		return s.Store.UnassignProject(ctx, request.ProjectID, request.ExpectedHead, request.Forced, request.RuntimeObservation)
 	case SynchronizeMethod:
 		if s.Synchronize == nil {
 			return nil, errors.New("node synchronization is unavailable")

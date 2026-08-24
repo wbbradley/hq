@@ -153,7 +153,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if err := validUUID("mailbox ID", payload.MailboxID); err != nil {
 			return StatusInvalid, err
 		}
-		if payload.Kind != "human" && payload.Kind != "agent" {
+		if payload.Kind != "human" && payload.Kind != "agent" && payload.Kind != "project" {
 			return StatusInvalid, fmt.Errorf("invalid mailbox kind %q", payload.Kind)
 		}
 	case TypeMailboxBind:
@@ -234,6 +234,86 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		}
 		if payload.ThreadName != strings.TrimSpace(payload.ThreadName) || !utf8.ValidString(payload.ThreadName) || len(payload.ThreadName) > 200 || strings.ContainsAny(payload.ThreadName, "\r\n\x00") {
 			return StatusInvalid, errors.New("thread name must be trimmed valid UTF-8 of at most 200 bytes without line breaks")
+		}
+	case TypeProjectEvent:
+		if content.Scope != ScopeInstallationPrivate && content.Scope != ScopeAccountAddressed {
+			return StatusInvalid, errors.New("project event must be installation-private or account-addressed")
+		}
+		if content.Sender != nil || content.Recipient != nil || content.ThreadID != "" {
+			return StatusInvalid, errors.New("project event must omit sender, recipient, and thread_id")
+		}
+		var payload ProjectEventPayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if err := validUUID("project ID", payload.ProjectID); err != nil {
+			return StatusInvalid, err
+		}
+		if strings.TrimSpace(payload.Operation) == "" || len(payload.Operation) > 100 || strings.ContainsAny(payload.Operation, "\r\n\x00") {
+			return StatusInvalid, errors.New("project operation must be non-empty and at most 100 bytes without line breaks")
+		}
+		if payload.PreviousEventID == "" {
+			if content.Scope == ScopeInstallationPrivate && len(content.Parents) != 0 {
+				return StatusInvalid, errors.New("initial project event must not have parents")
+			}
+		} else {
+			if err := validEventID("previous project event ID", payload.PreviousEventID); err != nil {
+				return StatusInvalid, err
+			}
+			if !slices.Contains(content.Parents, payload.PreviousEventID) {
+				return StatusInvalid, errors.New("project event parents must include previous_event_id")
+			}
+		}
+		if len(payload.Body) == 0 || len(payload.Body) > MaxWireBytes/2 || !json.Valid(payload.Body) {
+			return StatusInvalid, errors.New("project event body must be a valid bounded JSON value")
+		}
+	case TypeProjectCommand, TypeProjectResult:
+		if content.Scope != ScopeAccountAddressed || content.Sender == nil || content.Recipient == nil || content.Sender.MailboxID != "00000000-0000-7000-8000-000000000000" || content.Recipient.MailboxID != "00000000-0000-7000-8000-000000000000" || content.Sender.InstallationID != content.InstallationID {
+			return StatusInvalid, errors.New("project control must be account-addressed between human device mailboxes")
+		}
+		if content.Type == TypeProjectCommand {
+			var payload ProjectCommandPayload
+			if err := decodePayload(content.Payload, &payload); err != nil {
+				return StatusInvalid, err
+			}
+			if err := validUUID("project command ID", payload.CommandID); err != nil {
+				return StatusInvalid, err
+			}
+			if err := validUUID("project ID", payload.ProjectID); err != nil {
+				return StatusInvalid, err
+			}
+			if payload.Operation == "project.create" || payload.Operation == "project.provision-worktree" {
+				if payload.ExpectedHead != "" {
+					return StatusInvalid, errors.New("project creation command must not have an expected head")
+				}
+			} else if err := validEventID("expected project head", payload.ExpectedHead); err != nil {
+				return StatusInvalid, err
+			}
+			if strings.TrimSpace(payload.Operation) == "" || len(payload.Operation) > 100 {
+				return StatusInvalid, errors.New("project command operation is invalid")
+			}
+			if len(payload.Body) == 0 || !json.Valid(payload.Body) {
+				return StatusInvalid, errors.New("project command body is invalid")
+			}
+		} else {
+			var payload ProjectCommandResultPayload
+			if err := decodePayload(content.Payload, &payload); err != nil {
+				return StatusInvalid, err
+			}
+			if err := validUUID("project command ID", payload.CommandID); err != nil {
+				return StatusInvalid, err
+			}
+			if err := validUUID("project ID", payload.ProjectID); err != nil {
+				return StatusInvalid, err
+			}
+			if payload.Stage != "received" && payload.Stage != "committed" && payload.Stage != "rejected" {
+				return StatusInvalid, errors.New("project command result stage is invalid")
+			}
+			if payload.CurrentHead == "" && payload.Stage != "committed" {
+				// Receipt or rejection may precede project creation.
+			} else if err := validEventID("current project head", payload.CurrentHead); err != nil {
+				return StatusInvalid, err
+			}
 		}
 	case TypePeerTrust, TypePeerDistrust:
 		if err := validateControl(content); err != nil {
@@ -338,7 +418,7 @@ func knownType(kind Type) bool {
 	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeAgentSessionRename, TypeQuestion, TypeAnswer, TypeMessage,
 		TypeThreadCancel, TypeMessageArchive, TypeMessageRestore, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
 		TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountCreate, TypeHumanAccountSelect,
-		TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke:
+		TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke, TypeProjectEvent, TypeProjectCommand, TypeProjectResult:
 		return true
 	default:
 		return false

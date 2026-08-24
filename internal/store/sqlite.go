@@ -22,7 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 13
+const schemaVersion = 24
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -50,7 +50,7 @@ CREATE TABLE projection_checkpoint (
 CREATE TABLE mailboxes (
     id TEXT PRIMARY KEY,
     installation_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('human', 'agent')),
+    kind TEXT NOT NULL CHECK(kind IN ('human', 'agent', 'project')),
     label TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL
 ) STRICT;
@@ -275,13 +275,257 @@ CREATE TABLE change_revision (
     revision INTEGER NOT NULL
 ) STRICT;
 INSERT INTO change_revision(id,revision) VALUES (1,0);
+CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    home_installation_id TEXT NOT NULL,
+    mailbox_id TEXT NOT NULL UNIQUE,
+    predecessor_project_id TEXT,
+    name TEXT NOT NULL,
+    brief TEXT NOT NULL DEFAULT '',
+    lifecycle TEXT NOT NULL CHECK(lifecycle IN ('preparing','open','closing','closed')),
+    archived INTEGER NOT NULL CHECK(archived IN (0,1)),
+    primary_resource_id TEXT,
+    head_event_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK(archived = 0 OR lifecycle = 'closed'),
+    FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id)
+) STRICT;
+CREATE TABLE project_events (
+    event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64),
+    project_id TEXT NOT NULL,
+    previous_event_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id)
+) STRICT;
+CREATE TABLE resources (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    home_installation_id TEXT NOT NULL,
+    display_locator TEXT NOT NULL,
+    canonical_locator TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(id, kind, home_installation_id, canonical_locator)
+) STRICT;
+CREATE TABLE project_resources (
+    project_id TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    added_event_id TEXT NOT NULL,
+    removed_event_id TEXT,
+    PRIMARY KEY(project_id, resource_id, added_event_id),
+    FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(resource_id) REFERENCES resources(id),
+    FOREIGN KEY(added_event_id) REFERENCES project_events(event_id),
+    FOREIGN KEY(removed_event_id) REFERENCES project_events(event_id)
+) STRICT;
+CREATE UNIQUE INDEX project_resources_current ON project_resources(project_id, resource_id) WHERE removed_event_id IS NULL;
+CREATE TABLE resource_claim_epochs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    acquired_event_id TEXT NOT NULL,
+    released_event_id TEXT,
+    acquired_at INTEGER NOT NULL,
+    released_at INTEGER,
+    FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(resource_id) REFERENCES resources(id),
+    FOREIGN KEY(acquired_event_id) REFERENCES project_events(event_id),
+    FOREIGN KEY(released_event_id) REFERENCES project_events(event_id)
+) STRICT;
+CREATE UNIQUE INDEX resource_claim_active ON resource_claim_epochs(resource_id) WHERE released_event_id IS NULL;
+CREATE TABLE resource_health (
+    resource_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL CHECK(state IN ('healthy','missing','inaccessible','malformed','unknown')),
+    details_json TEXT NOT NULL DEFAULT '{}',
+    last_checked_at INTEGER NOT NULL,
+    FOREIGN KEY(resource_id) REFERENCES resources(id)
+) STRICT;
+CREATE TABLE project_assignment_epochs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('configuring','runnable','blocked','ended')),
+    selected_thread_id TEXT,
+    started_event_id TEXT NOT NULL,
+    ended_event_id TEXT,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0,1)),
+    FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(agent_name) REFERENCES named_agents(name),
+    FOREIGN KEY(started_event_id) REFERENCES project_events(event_id),
+    FOREIGN KEY(ended_event_id) REFERENCES project_events(event_id)
+) STRICT;
+CREATE UNIQUE INDEX project_assignment_current_project ON project_assignment_epochs(project_id) WHERE ended_event_id IS NULL;
+CREATE UNIQUE INDEX project_assignment_current_agent ON project_assignment_epochs(agent_name) WHERE ended_event_id IS NULL;
+CREATE TABLE project_threads (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    external_thread_id TEXT NOT NULL,
+    launch_directory TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(harness, external_thread_id),
+    FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(agent_name) REFERENCES named_agents(name)
+) STRICT;
+CREATE TABLE project_message_acceptances (
+    project_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    message_id TEXT NOT NULL UNIQUE,
+    message_event_id TEXT NOT NULL UNIQUE,
+    acceptance_event_id TEXT NOT NULL UNIQUE,
+    accepted_at INTEGER NOT NULL,
+    PRIMARY KEY(project_id, sequence),
+    FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(message_id) REFERENCES messages(id),
+    FOREIGN KEY(message_event_id) REFERENCES canonical_events(event_id),
+    FOREIGN KEY(acceptance_event_id) REFERENCES project_events(event_id)
+) STRICT;
+CREATE TABLE project_dispatch_records (
+    message_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    assignment_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    project_thread_id TEXT NOT NULL,
+    external_thread_id TEXT NOT NULL,
+    dispatch_event_id TEXT NOT NULL UNIQUE,
+    dispatched_at INTEGER NOT NULL,
+    UNIQUE(project_id, sequence),
+    FOREIGN KEY(project_id,sequence) REFERENCES project_message_acceptances(project_id,sequence),
+    FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id),
+    FOREIGN KEY(project_thread_id) REFERENCES project_threads(id),
+    FOREIGN KEY(dispatch_event_id) REFERENCES project_events(event_id)
+) STRICT;
+CREATE TABLE project_dispatch_attempts (
+    message_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    assignment_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    project_thread_id TEXT NOT NULL,
+    external_thread_id TEXT NOT NULL,
+    owner_token TEXT,
+    lease_until INTEGER,
+    state TEXT NOT NULL CHECK(state IN ('pending','uncertain','accepted')),
+    started_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK((owner_token IS NULL) = (lease_until IS NULL)),
+    FOREIGN KEY(project_id,sequence) REFERENCES project_message_acceptances(project_id,sequence),
+    FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id),
+    FOREIGN KEY(project_thread_id) REFERENCES project_threads(id)
+) STRICT;
+CREATE TABLE project_activation_operations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    prior_lifecycle TEXT NOT NULL CHECK(prior_lifecycle IN ('open','closed')),
+    assignment_id TEXT,
+    state TEXT NOT NULL CHECK(state IN ('preparing','configuring','runnable','failed')),
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(agent_name) REFERENCES named_agents(name),
+    FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id)
+) STRICT;
+CREATE UNIQUE INDEX project_activation_incomplete ON project_activation_operations(project_id) WHERE state IN ('preparing','configuring');
+CREATE TABLE project_output_provenance (
+    message_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    assignment_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    project_thread_id TEXT NOT NULL,
+    external_thread_id TEXT NOT NULL,
+    late INTEGER NOT NULL CHECK(late IN (0,1)),
+    current_assignment_id TEXT NOT NULL DEFAULT '',
+    current_agent_name TEXT NOT NULL DEFAULT '',
+    current_project_thread_id TEXT NOT NULL DEFAULT '',
+    runtime_owner_token TEXT NOT NULL DEFAULT '',
+    observed_runtime_state TEXT NOT NULL DEFAULT '',
+    forced_transition INTEGER NOT NULL CHECK(forced_transition IN (0,1)),
+    recorded_at INTEGER NOT NULL,
+    FOREIGN KEY(message_id) REFERENCES messages(id),
+    FOREIGN KEY(project_id) REFERENCES projects(id),
+    FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id),
+    FOREIGN KEY(project_thread_id) REFERENCES project_threads(id)
+) STRICT;
+CREATE TABLE project_replicas (
+    id TEXT PRIMARY KEY,
+    home_installation_id TEXT NOT NULL,
+    head_event_id TEXT NOT NULL,
+    state_json BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE project_audit_log (
+    id INTEGER PRIMARY KEY,
+    operation TEXT NOT NULL,
+    request_id TEXT NOT NULL DEFAULT '',
+    project_id TEXT NOT NULL DEFAULT '',
+    home_installation_id TEXT NOT NULL,
+    expected_head_event_id TEXT NOT NULL DEFAULT '',
+    current_head_event_id TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE project_runtime_operations (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('close','handoff')),
+    project_id TEXT NOT NULL,
+    expected_head_event_id TEXT NOT NULL,
+    current_head_event_id TEXT NOT NULL,
+    target_agent TEXT NOT NULL DEFAULT '',
+    force INTEGER NOT NULL CHECK(force IN (0,1)),
+    archive INTEGER NOT NULL CHECK(archive IN (0,1)),
+    state TEXT NOT NULL CHECK(state IN ('started','closing','unassigned','activating','completed','blocked','failed')),
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id)
+) STRICT;
+CREATE UNIQUE INDEX project_runtime_operation_incomplete ON project_runtime_operations(project_id) WHERE state IN ('started','closing','unassigned','activating');
+CREATE TABLE project_worktree_operations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL UNIQUE,
+    request_json TEXT NOT NULL,
+    canonical_repository TEXT NOT NULL,
+    canonical_destination TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('reserved','worktree-created','completed','failed')),
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX project_worktree_reservations ON project_worktree_operations(canonical_destination) WHERE state IN ('reserved','worktree-created');
+CREATE TABLE agent_retirement_operations (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT '',
+    force INTEGER NOT NULL CHECK(force IN (0,1)),
+    state TEXT NOT NULL CHECK(state IN ('started','quiesced','unassigned','completed','blocked','failed')),
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(agent_name) REFERENCES named_agents(name)
+) STRICT;
+CREATE UNIQUE INDEX agent_retirement_incomplete ON agent_retirement_operations(agent_name) WHERE state IN ('started','quiesced','unassigned');
+CREATE TRIGGER project_identity_immutable BEFORE UPDATE OF home_installation_id,mailbox_id,predecessor_project_id ON projects BEGIN SELECT RAISE(ABORT,'project identity is immutable'); END;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF kind,home_installation_id,canonical_locator ON resources BEGIN SELECT RAISE(ABORT,'resource identity is immutable'); END;
+CREATE TRIGGER project_thread_scope_immutable BEFORE UPDATE OF project_id,agent_name,harness,external_thread_id ON project_threads BEGIN SELECT RAISE(ABORT,'project thread scope is immutable'); END;
+CREATE TRIGGER active_claim_requires_open BEFORE INSERT ON resource_claim_epochs WHEN NEW.released_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id)<>'open' BEGIN SELECT RAISE(ABORT,'active resource claim requires open project'); END;
+CREATE TRIGGER active_assignment_requires_open BEFORE INSERT ON project_assignment_epochs WHEN NEW.ended_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id)<>'open' BEGIN SELECT RAISE(ABORT,'active assignment requires open project'); END;
+CREATE TRIGGER closed_project_requires_release BEFORE UPDATE OF lifecycle ON projects WHEN NEW.lifecycle='closed' AND (EXISTS(SELECT 1 FROM resource_claim_epochs WHERE project_id=NEW.id AND released_event_id IS NULL) OR EXISTS(SELECT 1 FROM project_assignment_epochs WHERE project_id=NEW.id AND ended_event_id IS NULL)) BEGIN SELECT RAISE(ABORT,'closed project cannot retain claims or assignment'); END;
 CREATE INDEX messages_inbox ON messages(recipient_mailbox_id, archived_at, created_at, id);
 CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DESC);
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX messages_codex_conversation ON messages(codex_thread_id, created_at, id);
 CREATE INDEX messages_codex_turn ON messages(codex_thread_id, codex_turn_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 13;
+PRAGMA user_version = 24;
 `
 
 const (
@@ -291,11 +535,16 @@ const (
 )
 
 type SQLite struct {
-	db          *sql.DB
-	signer      identity.Material
-	database    string
-	afterChange func(domain.Invalidation)
-	now         func() time.Time
+	db                    *sql.DB
+	signer                identity.Material
+	database              string
+	afterChange           func(domain.Invalidation)
+	now                   func() time.Time
+	projectCommandHandler func(context.Context, domain.ProjectCommand) (domain.Project, error)
+}
+
+func (s *SQLite) SetProjectCommandHandler(handler func(context.Context, domain.ProjectCommand) (domain.Project, error)) {
+	s.projectCommandHandler = handler
 }
 
 type canonicalIngest struct {
@@ -428,6 +677,118 @@ PRAGMA user_version = 13;`
 			return fmt.Errorf("migrate schema to version 13: %w", err)
 		}
 		version = 13
+	}
+	if version == 13 {
+		migration := `PRAGMA foreign_keys = OFF;
+DROP TABLE IF EXISTS mailboxes_v14;
+CREATE TABLE mailboxes_v14 (id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('human','agent','project')), label TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL) STRICT;
+INSERT INTO mailboxes_v14 SELECT id,installation_id,kind,label,created_at FROM mailboxes;
+DROP TABLE mailboxes;
+ALTER TABLE mailboxes_v14 RENAME TO mailboxes;
+CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, home_installation_id TEXT NOT NULL, mailbox_id TEXT NOT NULL UNIQUE, predecessor_project_id TEXT, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '', lifecycle TEXT NOT NULL CHECK(lifecycle IN ('preparing','open','closing','closed')), archived INTEGER NOT NULL CHECK(archived IN (0,1)), primary_resource_id TEXT, head_event_id TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, CHECK(archived = 0 OR lifecycle = 'closed'), FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id)) STRICT;
+CREATE TABLE IF NOT EXISTS project_events (event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64), project_id TEXT NOT NULL, previous_event_id TEXT NOT NULL, event_type TEXT NOT NULL, payload BLOB NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id)) STRICT;
+CREATE TABLE IF NOT EXISTS resources (id TEXT PRIMARY KEY, kind TEXT NOT NULL, home_installation_id TEXT NOT NULL, display_locator TEXT NOT NULL, canonical_locator TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(id,kind,home_installation_id,canonical_locator)) STRICT;
+CREATE TABLE IF NOT EXISTS project_resources (project_id TEXT NOT NULL, resource_id TEXT NOT NULL, added_event_id TEXT NOT NULL, removed_event_id TEXT, PRIMARY KEY(project_id,resource_id,added_event_id), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(resource_id) REFERENCES resources(id), FOREIGN KEY(added_event_id) REFERENCES project_events(event_id), FOREIGN KEY(removed_event_id) REFERENCES project_events(event_id)) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS project_resources_current ON project_resources(project_id,resource_id) WHERE removed_event_id IS NULL;
+CREATE TABLE IF NOT EXISTS resource_claim_epochs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, resource_id TEXT NOT NULL, acquired_event_id TEXT NOT NULL, released_event_id TEXT, acquired_at INTEGER NOT NULL, released_at INTEGER, FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(resource_id) REFERENCES resources(id), FOREIGN KEY(acquired_event_id) REFERENCES project_events(event_id), FOREIGN KEY(released_event_id) REFERENCES project_events(event_id)) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS resource_claim_active ON resource_claim_epochs(resource_id) WHERE released_event_id IS NULL;
+CREATE TABLE IF NOT EXISTS resource_health (resource_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('healthy','missing','inaccessible','malformed','unknown')), details_json TEXT NOT NULL DEFAULT '{}', last_checked_at INTEGER NOT NULL, FOREIGN KEY(resource_id) REFERENCES resources(id)) STRICT;
+CREATE TABLE IF NOT EXISTS project_assignment_epochs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_name TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('configuring','runnable','blocked','ended')), selected_thread_id TEXT, started_event_id TEXT NOT NULL, ended_event_id TEXT, started_at INTEGER NOT NULL, ended_at INTEGER, forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0,1)), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(agent_name) REFERENCES named_agents(name), FOREIGN KEY(started_event_id) REFERENCES project_events(event_id), FOREIGN KEY(ended_event_id) REFERENCES project_events(event_id)) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS project_assignment_current_project ON project_assignment_epochs(project_id) WHERE ended_event_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS project_assignment_current_agent ON project_assignment_epochs(agent_name) WHERE ended_event_id IS NULL;
+CREATE TABLE IF NOT EXISTS project_threads (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_name TEXT NOT NULL, harness TEXT NOT NULL, external_thread_id TEXT NOT NULL, launch_directory TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(harness,external_thread_id), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(agent_name) REFERENCES named_agents(name)) STRICT;
+PRAGMA user_version = 14;
+PRAGMA foreign_keys = ON;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 14: %w", err)
+		}
+		version = 14
+	}
+	if version == 14 {
+		migration := `CREATE TRIGGER IF NOT EXISTS project_identity_immutable BEFORE UPDATE OF home_installation_id,mailbox_id,predecessor_project_id ON projects BEGIN SELECT RAISE(ABORT,'project identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS resource_identity_immutable BEFORE UPDATE OF kind,home_installation_id,canonical_locator ON resources BEGIN SELECT RAISE(ABORT,'resource identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS project_thread_scope_immutable BEFORE UPDATE OF project_id,agent_name,harness,external_thread_id ON project_threads BEGIN SELECT RAISE(ABORT,'project thread scope is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS active_claim_requires_open BEFORE INSERT ON resource_claim_epochs WHEN NEW.released_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id)<>'open' BEGIN SELECT RAISE(ABORT,'active resource claim requires open project'); END;
+CREATE TRIGGER IF NOT EXISTS active_assignment_requires_open BEFORE INSERT ON project_assignment_epochs WHEN NEW.ended_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id)<>'open' BEGIN SELECT RAISE(ABORT,'active assignment requires open project'); END;
+CREATE TRIGGER IF NOT EXISTS closed_project_requires_release BEFORE UPDATE OF lifecycle ON projects WHEN NEW.lifecycle='closed' AND (EXISTS(SELECT 1 FROM resource_claim_epochs WHERE project_id=NEW.id AND released_event_id IS NULL) OR EXISTS(SELECT 1 FROM project_assignment_epochs WHERE project_id=NEW.id AND ended_event_id IS NULL)) BEGIN SELECT RAISE(ABORT,'closed project cannot retain claims or assignment'); END;
+PRAGMA user_version = 15;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 15: %w", err)
+		}
+		version = 15
+	}
+	if version == 15 {
+		migration := `CREATE TABLE IF NOT EXISTS project_message_acceptances (project_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0), message_id TEXT NOT NULL UNIQUE, message_event_id TEXT NOT NULL UNIQUE, acceptance_event_id TEXT NOT NULL UNIQUE, accepted_at INTEGER NOT NULL, PRIMARY KEY(project_id,sequence), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(message_id) REFERENCES messages(id), FOREIGN KEY(message_event_id) REFERENCES canonical_events(event_id), FOREIGN KEY(acceptance_event_id) REFERENCES project_events(event_id)) STRICT;
+CREATE TABLE IF NOT EXISTS project_dispatch_records (message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sequence INTEGER NOT NULL, assignment_id TEXT NOT NULL, agent_name TEXT NOT NULL, project_thread_id TEXT NOT NULL, external_thread_id TEXT NOT NULL, dispatch_event_id TEXT NOT NULL UNIQUE, dispatched_at INTEGER NOT NULL, UNIQUE(project_id,sequence), FOREIGN KEY(project_id,sequence) REFERENCES project_message_acceptances(project_id,sequence), FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id), FOREIGN KEY(project_thread_id) REFERENCES project_threads(id), FOREIGN KEY(dispatch_event_id) REFERENCES project_events(event_id)) STRICT;
+PRAGMA user_version = 16;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 16: %w", err)
+		}
+		version = 16
+	}
+	if version == 16 {
+		migration := `CREATE TABLE IF NOT EXISTS project_dispatch_attempts (message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sequence INTEGER NOT NULL, assignment_id TEXT NOT NULL, agent_name TEXT NOT NULL, project_thread_id TEXT NOT NULL, external_thread_id TEXT NOT NULL, owner_token TEXT, lease_until INTEGER, state TEXT NOT NULL CHECK(state IN ('pending','uncertain','accepted')), started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, CHECK((owner_token IS NULL)=(lease_until IS NULL)), FOREIGN KEY(project_id,sequence) REFERENCES project_message_acceptances(project_id,sequence), FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id), FOREIGN KEY(project_thread_id) REFERENCES project_threads(id)) STRICT;
+PRAGMA user_version = 17;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 17: %w", err)
+		}
+		version = 17
+	}
+	if version == 17 {
+		migration := `CREATE TABLE IF NOT EXISTS project_activation_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_name TEXT NOT NULL, prior_lifecycle TEXT NOT NULL CHECK(prior_lifecycle IN ('open','closed')), assignment_id TEXT, state TEXT NOT NULL CHECK(state IN ('preparing','configuring','runnable','failed')), last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(agent_name) REFERENCES named_agents(name), FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id)) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS project_activation_incomplete ON project_activation_operations(project_id) WHERE state IN ('preparing','configuring');
+PRAGMA user_version = 18;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 18: %w", err)
+		}
+		version = 18
+	}
+	if version == 18 {
+		migration := `CREATE TABLE IF NOT EXISTS project_output_provenance (message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, assignment_id TEXT NOT NULL, agent_name TEXT NOT NULL, project_thread_id TEXT NOT NULL, external_thread_id TEXT NOT NULL, late INTEGER NOT NULL CHECK(late IN (0,1)), current_assignment_id TEXT NOT NULL DEFAULT '', current_agent_name TEXT NOT NULL DEFAULT '', current_project_thread_id TEXT NOT NULL DEFAULT '', runtime_owner_token TEXT NOT NULL DEFAULT '', observed_runtime_state TEXT NOT NULL DEFAULT '', forced_transition INTEGER NOT NULL CHECK(forced_transition IN (0,1)), recorded_at INTEGER NOT NULL, FOREIGN KEY(message_id) REFERENCES messages(id), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id), FOREIGN KEY(project_thread_id) REFERENCES project_threads(id)) STRICT;
+PRAGMA user_version = 19;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 19: %w", err)
+		}
+		version = 19
+	}
+	if version == 19 {
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS project_replicas (id TEXT PRIMARY KEY, home_installation_id TEXT NOT NULL, head_event_id TEXT NOT NULL, state_json BLOB NOT NULL, updated_at INTEGER NOT NULL) STRICT; PRAGMA user_version = 20`); err != nil {
+			return fmt.Errorf("migrate schema to version 20: %w", err)
+		}
+		version = 20
+	}
+	if version == 20 {
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS project_audit_log (id INTEGER PRIMARY KEY, operation TEXT NOT NULL, request_id TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL DEFAULT '', home_installation_id TEXT NOT NULL, expected_head_event_id TEXT NOT NULL DEFAULT '', current_head_event_id TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL, details_json TEXT NOT NULL, created_at INTEGER NOT NULL) STRICT; PRAGMA user_version = 21`); err != nil {
+			return fmt.Errorf("migrate schema to version 21: %w", err)
+		}
+		version = 21
+	}
+	if version == 21 {
+		migration := `CREATE TABLE IF NOT EXISTS project_runtime_operations (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('close','handoff')), project_id TEXT NOT NULL, expected_head_event_id TEXT NOT NULL, current_head_event_id TEXT NOT NULL, target_agent TEXT NOT NULL DEFAULT '', force INTEGER NOT NULL CHECK(force IN (0,1)), archive INTEGER NOT NULL CHECK(archive IN (0,1)), state TEXT NOT NULL CHECK(state IN ('started','closing','unassigned','activating','completed','blocked','failed')), last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id)) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS project_runtime_operation_incomplete ON project_runtime_operations(project_id) WHERE state IN ('started','closing','unassigned','activating');
+PRAGMA user_version = 22;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 22: %w", err)
+		}
+		version = 22
+	}
+	if version == 22 {
+		migration := `CREATE TABLE IF NOT EXISTS project_worktree_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE, request_json TEXT NOT NULL, canonical_repository TEXT NOT NULL, canonical_destination TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('reserved','worktree-created','completed','failed')), last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL) STRICT;
+CREATE INDEX IF NOT EXISTS project_worktree_reservations ON project_worktree_operations(canonical_destination) WHERE state IN ('reserved','worktree-created');
+PRAGMA user_version = 23;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 23: %w", err)
+		}
+		version = 23
+	}
+	if version == 23 {
+		migration := `CREATE TABLE IF NOT EXISTS agent_retirement_operations (id TEXT PRIMARY KEY, agent_name TEXT NOT NULL, project_id TEXT NOT NULL DEFAULT '', force INTEGER NOT NULL CHECK(force IN (0,1)), state TEXT NOT NULL CHECK(state IN ('started','quiesced','unassigned','completed','blocked','failed')), last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY(agent_name) REFERENCES named_agents(name)) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_retirement_incomplete ON agent_retirement_operations(agent_name) WHERE state IN ('started','quiesced','unassigned');
+PRAGMA user_version = 24;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 24: %w", err)
+		}
+		version = 24
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -774,9 +1135,15 @@ func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEv
 	if err != nil {
 		return err
 	}
+	acceptedProjectEvents, err := s.acceptInboundProjectMessagesTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	commit.EventIDs = append(commit.EventIDs, acceptedProjectEvents...)
 	var change domain.Invalidation
 	if len(commit.EventIDs) > 0 {
-		change, err = recordChangeTx(ctx, tx, canonicalChangeTopics)
+		topics := append(append([]domain.ChangeTopic(nil), canonicalChangeTopics...), domain.TopicProjects)
+		change, err = recordChangeTx(ctx, tx, topics)
 		if err != nil {
 			return err
 		}
@@ -787,10 +1154,16 @@ func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEv
 	if len(commit.EventIDs) > 0 {
 		s.notifyChange(change)
 	}
-	return nil
+	return s.ProcessProjectCommands(ctx)
 }
 
 func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) error {
+	// Project and assignment tables reference rebuildable projections. Their
+	// canonical rows are recreated before commit, so defer those foreign-key
+	// checks across the projection rebuild transaction.
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		return err
+	}
 	activity := make(map[string]int64)
 	agentActivity := make(map[string]int64)
 	type ownershipLease struct {
@@ -1031,6 +1404,9 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 			return err
 		}
 	}
+	if err := s.rebuildProjectReplicasTx(ctx, tx, state); err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO projection_checkpoint(id, event_count, rebuilt_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET event_count = excluded.event_count, rebuilt_at = excluded.rebuilt_at`, len(state.Records), time.Now().UTC().UnixMilli())
 	return err
 }
@@ -1224,14 +1600,26 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 	typeName := event.TypeMessage
 	scope := event.ScopeInstallationPrivate
 	recipientInstallationID := s.signer.InstallationID
+	var remoteProjectID, remoteProjectHome string
+	_ = s.db.QueryRowContext(ctx, `SELECT id,home_installation_id FROM project_replicas WHERE json_extract(state_json,'$.mailbox_id')=?`, m.RecipientMailboxID).Scan(&remoteProjectID, &remoteProjectHome)
 	if m.RecipientInstallationID != "" {
 		recipientInstallationID = m.RecipientInstallationID
+	} else if remoteProjectHome != "" {
+		recipientInstallationID = remoteProjectHome
 	}
 	var recipient = &event.MailboxAddress{InstallationID: recipientInstallationID, MailboxID: m.RecipientMailboxID}
 	var audience *event.Audience
 	var parents []string
 	remoteRecipient := recipientInstallationID != s.signer.InstallationID
-	if remoteRecipient {
+	if remoteProjectID != "" && m.SenderMailboxID == model.HumanMailboxID {
+		account, membership, deviceLabel, err := s.localAccountAction(ctx, "")
+		if err != nil {
+			return err
+		}
+		actorLabel = deviceLabel
+		payload, _ = event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Context: contextPointer(m.Context), ActorLabel: actorLabel})
+		audience, parents, scope = &event.Audience{HumanAccountID: account.ID}, membership, event.ScopeAccountAddressed
+	} else if remoteRecipient {
 		scope = event.ScopePeerAddressed
 		if m.SenderMailboxID != model.HumanMailboxID {
 			typeName = event.TypeQuestion
@@ -1253,7 +1641,71 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 		audience, parents, scope = &event.Audience{HumanAccountID: account.ID}, membership, event.ScopeAccountAddressed
 	}
 	content := event.Content{Type: typeName, Sender: s.localAddress(m.SenderMailboxID), Recipient: recipient, Audience: audience, Parents: parents, Scope: scope, Payload: payload}
+	var projectID string
+	if recipientInstallationID == s.signer.InstallationID {
+		err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE mailbox_id=?`, m.RecipientMailboxID).Scan(&projectID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if projectID != "" {
+		return s.createProjectMessage(ctx, projectID, m, content)
+	}
 	return s.appendContents(ctx, []event.Content{content}, []time.Time{m.CreatedAt}, nil)
+}
+
+func (s *SQLite) createProjectMessage(ctx context.Context, projectID string, message model.Message, content event.Content) error {
+	messageEvents, err := s.signContents(ctx, []event.Content{content}, []time.Time{message.CreatedAt})
+	if err != nil {
+		return err
+	}
+	acceptedAt := s.now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var head string
+	if err := tx.QueryRowContext(ctx, `SELECT head_event_id FROM projects WHERE id=? AND mailbox_id=?`, projectID, message.RecipientMailboxID).Scan(&head); errors.Is(err, sql.ErrNoRows) {
+		return domain.ErrProjectNotFound
+	} else if err != nil {
+		return err
+	}
+	var sequence int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0)+1 FROM project_message_acceptances WHERE project_id=?`, projectID).Scan(&sequence); err != nil {
+		return err
+	}
+	acceptance, acceptanceBody, err := s.signProjectEventTx(ctx, tx, projectID, head, "project.message.accepted", map[string]any{"message_id": message.ID, "message_event_id": messageEvents[0].ID(), "sequence": sequence}, acceptedAt)
+	if err != nil {
+		return err
+	}
+	if _, err := s.ingestCanonicalTx(ctx, tx, []event.SignedEvent{messageEvents[0], acceptance}, true); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, acceptance.ID(), projectID, head, "project.message.accepted", acceptanceBody, acceptedAt.UnixMilli()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO project_message_acceptances(project_id,sequence,message_id,message_event_id,acceptance_event_id,accepted_at) VALUES (?,?,?,?,?,?)`, projectID, sequence, message.ID, messageEvents[0].ID(), acceptance.ID(), acceptedAt.UnixMilli()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE projects SET head_event_id=?,updated_at=? WHERE id=? AND head_event_id=?`, acceptance.ID(), acceptedAt.UnixMilli(), projectID, head); err != nil {
+		return err
+	}
+	if err := s.appendProjectPendingNoticeTx(ctx, tx, projectID, message.ID, acceptance.ID(), acceptedAt); err != nil {
+		return err
+	}
+	if err := recordMutationTx(ctx, tx, nil); err != nil {
+		return err
+	}
+	change, err := recordChangeTx(ctx, tx, append(canonicalChangeTopics, domain.TopicProjects))
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.notifyChange(change)
+	return nil
 }
 
 func contextPointer(repo model.RepositoryContext) *event.RepositoryContext {
@@ -1773,6 +2225,7 @@ func (s *SQLite) Claim(ctx context.Context, claim Claim, token string) (model.Me
 		where = append(where, "m.reply_to IS NULL")
 	}
 	where = append(where, "d.completed_at IS NULL", "(d.delivery_token IS NULL OR d.delivery_lease_until < ?)")
+	where = append(where, "NOT EXISTS (SELECT 1 FROM projects p WHERE p.mailbox_id=m.recipient_mailbox_id)")
 	args = append(args, now.UnixMilli())
 	query := `UPDATE delivery_facts SET delivery_token=?, delivery_lease_until=? WHERE message_id=(SELECT m.id FROM messages m JOIN delivery_facts d ON d.message_id=m.id WHERE ` + strings.Join(where, " AND ") + ` ORDER BY m.created_at,m.id LIMIT 1) RETURNING message_id`
 	queryArgs := append([]any{token, now.Add(30 * time.Second).UnixMilli()}, args...)

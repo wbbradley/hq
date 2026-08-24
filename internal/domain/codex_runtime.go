@@ -24,6 +24,7 @@ const (
 	CodexRuntimeStopping CodexRuntimePhase = "stopping"
 	CodexRuntimeFailed   CodexRuntimePhase = "failed"
 	CodexRuntimeConflict CodexRuntimePhase = "ownership-conflict"
+	CodexRuntimePending  CodexRuntimePhase = "pending-home-command"
 )
 
 // CodexLaunchDefaults contains local preferences used when the daemon must
@@ -62,6 +63,48 @@ type CodexRuntimeController interface {
 	LaunchCodexAgent(context.Context, CodexLaunchRequest) (CodexRuntime, error)
 	StopCodexAgent(context.Context, string) (CodexRuntime, error)
 	CodexAgentRuntime(context.Context, string) (CodexRuntime, error)
+}
+
+type ProjectCodexActivationRequest struct {
+	ProjectID    string             `json:"project_id"`
+	ExpectedHead string             `json:"expected_head_event_id"`
+	AgentName    string             `json:"agent_name"`
+	Launch       CodexLaunchRequest `json:"launch"`
+}
+
+type ProjectCodexActivation struct {
+	Project Project      `json:"project"`
+	Runtime CodexRuntime `json:"runtime"`
+}
+
+type ProjectCodexCloseRequest struct {
+	RequestID    string `json:"request_id"`
+	ProjectID    string `json:"project_id"`
+	ExpectedHead string `json:"expected_head_event_id"`
+	Force        bool   `json:"force,omitempty"`
+	Archive      bool   `json:"archive,omitempty"`
+}
+
+type ProjectCodexHandoffRequest struct {
+	RequestID    string             `json:"request_id"`
+	ProjectID    string             `json:"project_id"`
+	ExpectedHead string             `json:"expected_head_event_id"`
+	NewAgentName string             `json:"new_agent_name"`
+	Force        bool               `json:"force,omitempty"`
+	Launch       CodexLaunchRequest `json:"launch"`
+}
+
+type CodexRetireAgentRequest struct {
+	RequestID string `json:"request_id"`
+	AgentName string `json:"agent_name"`
+	Force     bool   `json:"force,omitempty"`
+}
+
+type ProjectCodexRuntimeController interface {
+	ActivateCodexProject(context.Context, ProjectCodexActivationRequest) (ProjectCodexActivation, error)
+	CloseCodexProject(context.Context, ProjectCodexCloseRequest) (Project, error)
+	HandoffCodexProject(context.Context, ProjectCodexHandoffRequest) (ProjectCodexActivation, error)
+	RetireCodexAgent(context.Context, CodexRetireAgentRequest) error
 }
 
 // CodexRuntimeAutoStarter is implemented by a daemon-owned runtime that can

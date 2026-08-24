@@ -28,3 +28,18 @@ func MutationFromContext(ctx context.Context) (Mutation, bool) {
 	mutation, ok := ctx.Value(mutationContextKey{}).(Mutation)
 	return mutation, ok
 }
+
+type mutationlessContext struct{ context.Context }
+
+func (c mutationlessContext) Value(key any) any {
+	if _, ok := key.(mutationContextKey); ok {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+// WithoutMutation keeps cancellation and all unrelated values while ensuring
+// nested observational commits do not consume the caller's mutation receipt.
+func WithoutMutation(ctx context.Context) context.Context {
+	return mutationlessContext{Context: ctx}
+}

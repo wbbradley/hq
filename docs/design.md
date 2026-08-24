@@ -7,10 +7,10 @@ events, or own Codex workers themselves. The node supervises every HQ-managed Co
 its app-server child in process.
 
 [events.md](events.md) defines canonical event schema 1 and causal reduction.
-[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 11 stores the exact signed
+[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 24 stores the exact signed
 event bytes as the source of truth and rebuildable projections derived from them.
-[projects.md](projects.md) defines the proposed project, resource-claim, assignment, mailbox, and
-remote-control model. It is a design target and is not yet implemented.
+[projects.md](projects.md) defines the project, resource-claim, assignment, mailbox, and
+remote-control model implemented by the daemon, RPC clients, CLI, and TUI.
 
 ## Identity, state, and runtime paths
 

@@ -23,6 +23,58 @@ type dispatcherProtocol struct {
 	serverOutput *io.PipeWriter
 }
 
+func TestProjectDispatcherUsesAssignmentBoundDelivery(t *testing.T) {
+	fixture := newDispatcherFixture(t)
+	ctx := context.Background()
+	project, err := fixture.store.CreateProject(ctx, domain.CreateProjectRequest{Name: "bridge project", Open: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err = fixture.store.AssignProject(ctx, project.ID, project.HeadEventID, "test-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err = fixture.store.ActivateProjectAssignment(ctx, project.ID, project.HeadEventID, domain.ActivateProjectAssignmentRequest{Harness: "codex", ExternalThread: fixture.thread, LaunchDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageID := "019c0000-0000-7000-8000-000000000190"
+	if err := fixture.store.Create(ctx, model.Message{ID: messageID, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: project.MailboxID, Body: "project input", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	project, err = fixture.store.GetProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocol := newDispatcherProtocol(t, fixture.state)
+	dispatcher := fixture.dispatcher(protocol)
+	dispatcher.MailboxID, dispatcher.ProjectID = project.MailboxID, project.ID
+	dispatcher.AssignmentID, dispatcher.ProjectThreadID = project.Assignment.ID, project.Assignment.SelectedThreadID
+	dispatcher.Replies = nil
+	cancel, done := runDispatcher(t, dispatcher)
+	request := protocol.next(t, "turn/start")
+	var params TurnStartParams
+	if err := json.Unmarshal(request.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.ClientUserMessageID != messageID || params.ThreadID != fixture.thread {
+		t.Fatalf("project dispatch params = %#v", params)
+	}
+	protocol.result(t, request, `{"turn":{"id":"project-turn"}}`)
+	deadline := time.Now().Add(time.Second)
+	for {
+		message, err := fixture.store.Get(ctx, messageID)
+		if err == nil && message.CompletedAt != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("project message was not completed: %#v, %v", message, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stopDispatcherTest(t, cancel, done)
+}
+
 func newDispatcherProtocol(t *testing.T, notifications NotificationHandler) *dispatcherProtocol {
 	t.Helper()
 	serverInput, clientOutput := io.Pipe()

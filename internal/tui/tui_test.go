@@ -56,6 +56,17 @@ type outboundCaptureStore struct {
 	created model.Message
 }
 
+type worktreeCaptureStore struct {
+	domain.Store
+	request domain.ProjectWorktreeRequest
+	project domain.Project
+}
+
+func (s *worktreeCaptureStore) ProvisionProjectWorktree(_ context.Context, request domain.ProjectWorktreeRequest) (domain.Project, error) {
+	s.request = request
+	return s.project, nil
+}
+
 func (s *outboundCaptureStore) GetNamedAgent(context.Context, string) (domain.NamedAgent, error) {
 	return s.agent, nil
 }
@@ -1193,7 +1204,7 @@ func TestTabIntoReplyWithoutSelectionOpensRecipientPicker(t *testing.T) {
 	if m.paneFocus != focusReply || !m.pickingRecipient || m.answering {
 		t.Fatalf("tab into reply without selection = %#v", m)
 	}
-	if view := m.View().Content; !strings.Contains(view, "[recipient · choose a local recipient]") {
+	if view := m.View().Content; !strings.Contains(view, "[project · choose project work or direct recipient]") {
 		t.Fatalf("recipient picker was not rendered: %q", view)
 	}
 }
@@ -1731,6 +1742,141 @@ func TestRetiredRecipientKeepsDraftAndShowsActionableError(t *testing.T) {
 	}
 }
 
+func TestClosedProjectComposeGuidesAgentThreadAndDirectory(t *testing.T) {
+	s, ctx, _ := openStore(t)
+	if _, err := s.CreateNamedAgent(ctx, "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "guided", Paths: []domain.ProjectPathInput{{DisplayPath: directory}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.GetNamedAgent(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := app{ctx: ctx, store: s, projects: []domain.Project{project}, agents: []domain.NamedAgent{agent}, editor: textarea.New(), launchDirectory: directory}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	m = updated.(app)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.projectSetup == nil || m.projectSetup.stage != chooseProjectAgent {
+		t.Fatalf("project setup = %#v", m.projectSetup)
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if cmd == nil {
+		t.Fatal("agent selection did not load project threads")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(app)
+	if m.projectSetup == nil || m.projectSetup.stage != chooseProjectThread {
+		t.Fatalf("thread setup = %#v", m.projectSetup)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.projectSetup.stage != enterProjectDirectory || m.projectSetup.directory != directory {
+		t.Fatalf("directory setup = %#v", m.projectSetup)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if !m.answering || m.composeActivation == nil || m.composeActivation.projectID != project.ID || m.composeActivation.agentName != "alice" || m.composeActivation.action != domain.CodexSessionNew {
+		t.Fatalf("guided compose = %#v", m.composeActivation)
+	}
+}
+
+func TestNewProjectComposeCollectsHomeBriefAndResources(t *testing.T) {
+	s, ctx, _ := openStore(t)
+	if _, err := s.CreateNamedAgent(ctx, "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := s.GetNamedAgent(ctx, "alice")
+	account, _ := s.HumanAccount(ctx)
+	devices, _ := s.HumanDevices(ctx)
+	directory := t.TempDir()
+	m := app{ctx: ctx, store: s, agents: []domain.NamedAgent{agent}, account: account, devices: devices, editor: textarea.New(), launchDirectory: directory}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	m = updated.(app)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.projectSetup == nil || m.projectSetup.stage != enterProjectName {
+		t.Fatalf("new project setup = %#v", m.projectSetup)
+	}
+	for _, r := range "new work" {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = updated.(app)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	for _, r := range "brief" {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = updated.(app)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	for _, r := range directory {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = updated.(app)
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if cmd == nil {
+		t.Fatal("project creation command missing")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(app)
+	if m.projectSetup == nil || m.projectSetup.stage != chooseProjectAgent || m.projectSetup.project.Name != "new work" || m.projectSetup.project.Brief != "brief" || len(m.projectSetup.project.Resources) != 1 {
+		t.Fatalf("created setup = %#v", m.projectSetup)
+	}
+}
+
+func TestNewProjectComposeOffersDaemonWorktreeProvisioning(t *testing.T) {
+	project := domain.Project{ID: "019c0000-0000-7000-8000-000000000391", HomeInstallation: "019c0000-0000-7000-8000-000000000392", MailboxID: "019c0000-0000-7000-8000-000000000393", Name: "worktree", Lifecycle: domain.ProjectClosed}
+	store := &worktreeCaptureStore{project: project}
+	setup := &projectComposeSetup{stage: enterProjectPaths, name: "worktree", home: project.HomeInstallation, pathsText: "/extra"}
+	m := app{ctx: context.Background(), store: store, projectSetup: setup, agents: []domain.NamedAgent{{Name: "alice", Idle: true}}, editor: textarea.New()}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(app)
+	if m.projectSetup.stage != enterWorktreeRepository {
+		t.Fatalf("worktree stage = %v", m.projectSetup.stage)
+	}
+	enter := func(value string) {
+		for _, r := range value {
+			updated, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+			m = updated.(app)
+		}
+		updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+		m = updated.(app)
+	}
+	enter("/repo")
+	// HEAD is prefilled.
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	enter("/worktree")
+	for _, r := range "feature" {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = updated.(app)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.projectSetup.stage != chooseWorktreePrimary {
+		t.Fatalf("primary stage = %v", m.projectSetup.stage)
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if cmd == nil {
+		t.Fatal("worktree provisioning command missing")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(app)
+	if store.request.Repository != "/repo" || store.request.Destination != "/worktree" || store.request.Branch != "feature" || len(store.request.AdditionalPaths) != 1 || m.projectSetup.stage != chooseProjectAgent {
+		t.Fatalf("worktree request = %#v setup=%#v", store.request, m.projectSetup)
+	}
+}
+
 func TestAgentReloadPreservesPickerAndComposerState(t *testing.T) {
 	editor := textarea.New()
 	m := app{pickingRecipient: true, pickerQuery: "r", pickerCursor: 2, cursor: 3, editor: editor}
@@ -1754,7 +1900,7 @@ func TestRecipientPickerFitsSmallTerminal(t *testing.T) {
 	m := app{agents: []domain.NamedAgent{{Name: "fred", MailboxID: "fred-id"}}, pickingRecipient: true, paneFocus: focusReply, editor: textarea.New(), width: 38, height: 12}
 	view := m.View().Content
 	lines := strings.Split(view, "\n")
-	if len(lines) > 12 || !strings.Contains(view, "recipient") || !strings.Contains(view, "choose a local") {
+	if len(lines) > 12 || !strings.Contains(view, "project") || !strings.Contains(view, "choose project") {
 		t.Fatalf("small picker = %q", view)
 	}
 }

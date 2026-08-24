@@ -41,6 +41,8 @@ type NamedAgent struct {
 	Active            bool                    `json:"active"`
 	LeaseExpiresAt    *time.Time              `json:"lease_expires_at,omitempty"`
 	LastActiveAt      *time.Time              `json:"last_active_at,omitempty"`
+	AssignedProjectID string                  `json:"assigned_project_id,omitempty"`
+	Idle              bool                    `json:"idle"`
 }
 
 // AgentSession is the durable, installation-private projection of one harness
@@ -192,6 +194,7 @@ type Operations interface {
 
 type Store interface {
 	Operations
+	ProjectOperations
 	Synchronize(context.Context) error
 	Close() error
 }

@@ -1,7 +1,6 @@
 # Project model
 
-Status: proposed v1 design. This document defines semantics and invariants; it does not imply that
-the project model has been implemented.
+Status: implemented v1 model. This document is normative for project semantics and invariants.
 
 HQ projects coordinate durable conversations, named agents, execution threads, and exclusive
 claims on local work areas. The model is advisory at the operating-system boundary: HQ can prevent
@@ -342,6 +341,10 @@ repository, merge base, worktree destination, branch name, and primary path. Pro
 explicit daemon workflow with a temporary destination reservation. Closing or archiving never
 removes the created worktree or branch.
 
+The CLI exposes the same workflow as `hq project worktree`; both surfaces use one stable operation
+ID. A retry resumes after reservation, Git creation, or project creation rather than creating a
+second worktree or project.
+
 ## Authority, consistency, and transport
 
 ### Home authority
@@ -385,6 +388,10 @@ Every command has observable stages:
 3. received by the project home;
 4. authoritatively committed or rejected; and
 5. runtime side effects converged, failed, or remained unknown.
+
+The current command-result envelope reports `received` and terminal `committed` or `rejected`
+stages. Runtime commands are not reported committed until their runtime saga converges; a rejection
+diagnostic distinguishes a definite failure from an external runtime whose state remains unknown.
 
 Commands may be queued while the home is offline. The UI shows pending state until it receives a
 signed result. Expected-head comparison prevents a delayed command from silently applying to state
@@ -457,4 +464,3 @@ outside the existing protected diagnostic boundary.
 - Project-message cancellation.
 - Project deletion, destructive worktree cleanup, or automatic branch deletion.
 - Rich project-lineage branching or merging semantics.
-

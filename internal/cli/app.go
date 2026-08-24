@@ -54,6 +54,7 @@ Other commands:
   codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]
              Ask the local daemon to run a durable Codex agent
   agent      Create, list, or retire durable named agents
+  project    Create, inspect, message, activate, hand off, close, or archive projects
   mailboxes  Find agent mailboxes seen in this repository
   identity   Create, inspect, back up, import, or reset the installation identity
   human      Show, pair, list, or revoke human account devices
@@ -262,6 +263,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		return a.mailboxes(ctx, s, args)
 	case "agent":
 		commandErr = a.agent(ctx, s, args)
+	case "project":
+		commandErr = a.project(ctx, s, args)
 	case "answer":
 		commandErr = a.answer(ctx, s, args)
 	case "cancel":
@@ -598,7 +601,7 @@ func (a *App) identity(databasePath string, args []string) error {
 	case "show":
 		f := flags("identity show")
 		asJSON := f.Bool("json", false, "write JSON")
-		if err := f.Parse(args[1:]); err != nil {
+		if err := f.Parse(flagsAfterName(args[1:])); err != nil {
 			return err
 		}
 		if len(f.Args()) != 0 {
@@ -656,7 +659,7 @@ func (a *App) identity(databasePath string, args []string) error {
 	case "reset":
 		f := flags("identity reset")
 		yes := f.Bool("yes", false, "confirm destructive reset")
-		if err := f.Parse(args[1:]); err != nil {
+		if err := f.Parse(flagsAfterName(args[1:])); err != nil {
 			return err
 		}
 		if len(f.Args()) != 0 || !*yes {
@@ -916,6 +919,7 @@ func (a *App) agent(ctx context.Context, s domain.Store, args []string) error {
 	case "retire":
 		f := flags("agent retire")
 		yes := f.Bool("yes", false, "confirm permanent retirement")
+		force := f.Bool("force", false, "retire even when runtime quiescence cannot be confirmed")
 		if err := f.Parse(flagsAfterName(args[1:])); err != nil {
 			return err
 		}
@@ -925,10 +929,349 @@ func (a *App) agent(ctx context.Context, s domain.Store, args []string) error {
 		if !*yes {
 			return errors.New("agent retirement is permanent; pass --yes to confirm")
 		}
+		if controller, ok := s.(domain.ProjectCodexRuntimeController); ok {
+			return controller.RetireCodexAgent(ctx, domain.CodexRetireAgentRequest{RequestID: uuid.NewString(), AgentName: f.Args()[0], Force: *force})
+		}
 		return s.RetireNamedAgent(ctx, f.Args()[0])
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
+}
+
+func (a *App) project(ctx context.Context, s domain.Store, args []string) error {
+	if len(args) == 0 {
+		return errors.New("project needs create, worktree, list, show, send, activate, handoff, close, reopen, archive, unarchive, check, or resource")
+	}
+	get := func(id string) (domain.Project, error) { return s.GetProject(ctx, id) }
+	switch args[0] {
+	case "worktree":
+		f := flags("project worktree")
+		repository := f.String("repo", "", "existing Git repository")
+		mergeBase := f.String("base", "HEAD", "commit or ref used as the worktree base")
+		destination := f.String("destination", "", "new worktree destination")
+		branch := f.String("branch", "", "new branch name")
+		home := f.String("home", "", "home HQ installation UUID (defaults to this device)")
+		brief := f.String("brief", "", "human-authored project brief")
+		predecessor := f.String("predecessor", "", "immutable predecessor project UUID")
+		open := f.Bool("open", false, "leave the project open after provisioning")
+		primary := f.Int("primary", 0, "zero-based primary path index (worktree destination is index zero)")
+		asJSON := f.Bool("json", false, "write JSON")
+		var paths stringList
+		f.Var(&paths, "path", "additional desired path resource; may be repeated")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 1 || strings.TrimSpace(*repository) == "" || strings.TrimSpace(*destination) == "" || strings.TrimSpace(*branch) == "" {
+			return errors.New("project worktree needs NAME, --repo, --destination, and --branch")
+		}
+		provisioner, ok := s.(domain.ProjectWorktreeProvisioner)
+		if !ok {
+			return errors.New("project worktree provisioning is unavailable")
+		}
+		request := domain.ProjectWorktreeRequest{RequestID: uuid.NewString(), ProjectID: uuid.NewString(), HomeInstallation: *home, Name: f.Args()[0], Brief: *brief, PredecessorProjectID: *predecessor, Repository: *repository, MergeBase: *mergeBase, Destination: *destination, Branch: *branch, PrimaryPath: *primary, Open: *open}
+		for _, path := range paths {
+			request.AdditionalPaths = append(request.AdditionalPaths, domain.ProjectPathInput{DisplayPath: path})
+		}
+		project, err := provisioner.ProvisionProjectWorktree(ctx, request)
+		if err != nil {
+			return err
+		}
+		return writeProject(a.Out, project, *asJSON)
+	case "create":
+		f := flags("project create")
+		brief := f.String("brief", "", "human-authored project brief")
+		open := f.Bool("open", false, "acquire resource claims immediately")
+		predecessor := f.String("predecessor", "", "immutable predecessor project UUID")
+		home := f.String("home", "", "home HQ installation UUID (defaults to this device)")
+		primary := f.Int("primary", 0, "zero-based primary path index")
+		asJSON := f.Bool("json", false, "write JSON")
+		var paths stringList
+		f.Var(&paths, "path", "desired path resource; may be repeated")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(f.Args()) != 1 {
+			return errors.New("project create needs NAME (put flags before NAME)")
+		}
+		request := domain.CreateProjectRequest{Name: f.Args()[0], HomeInstallation: *home, Brief: *brief, PredecessorProjectID: *predecessor, PrimaryPath: *primary, Open: *open}
+		for _, path := range paths {
+			request.Paths = append(request.Paths, domain.ProjectPathInput{DisplayPath: path})
+		}
+		project, err := s.CreateProject(ctx, request)
+		if err != nil {
+			return err
+		}
+		return writeProject(a.Out, project, *asJSON)
+	case "list":
+		f := flags("project list")
+		all := f.Bool("all", false, "include archived projects")
+		asJSON := f.Bool("json", false, "write JSON")
+		if err := f.Parse(args[1:]); err != nil || len(f.Args()) != 0 {
+			if err != nil {
+				return err
+			}
+			return errors.New("project list takes flags only")
+		}
+		projects, err := s.ListProjects(ctx, *all)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return writeJSON(a.Out, projects)
+		}
+		for _, project := range projects {
+			agent := "-"
+			if project.Assignment != nil && a.ErrOut != nil {
+				agent = project.Assignment.AgentName + ":" + string(project.Assignment.State)
+			}
+			archived := ""
+			if project.Archived {
+				archived = "\tarchived"
+			}
+			if _, err := fmt.Fprintf(a.Out, "%s\t%s\t%s\t%s%s\n", project.ID, project.Name, project.Lifecycle, agent, archived); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "show":
+		f := flags("project show")
+		asJSON := f.Bool("json", false, "write JSON")
+		if err := f.Parse(flagsAfterName(args[1:])); err != nil {
+			return err
+		}
+		if len(f.Args()) != 1 {
+			return errors.New("project show needs PROJECT_ID")
+		}
+		project, err := get(f.Args()[0])
+		if err != nil {
+			return err
+		}
+		return writeProject(a.Out, project, *asJSON)
+	case "send":
+		if len(args) < 3 {
+			return errors.New("project send needs PROJECT_ID and MESSAGE")
+		}
+		project, err := get(args[1])
+		if err != nil {
+			return err
+		}
+		id, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		message := model.Message{ID: id.String(), SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: project.MailboxID, Body: strings.Join(args[2:], " "), CreatedAt: time.Now().UTC()}
+		if err := s.Create(ctx, message); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(a.Out, message.ID)
+		return err
+	case "activate", "handoff":
+		f := flags("project " + args[0])
+		agent := f.String("agent", "", "idle local named agent")
+		cwd := f.String("cwd", "", "new thread launch directory")
+		sessionID := f.String("session", "", "compatible historical Codex thread to resume")
+		newThread := f.Bool("new-thread", false, "start a fresh Codex thread")
+		yolo := f.Bool("yolo", false, "use danger-full-access without approvals")
+		force := f.Bool("force", false, "force takeover when old runtime quiescence is unknown")
+		if err := f.Parse(flagsAfterName(args[1:])); err != nil {
+			return err
+		}
+		if len(f.Args()) != 1 || strings.TrimSpace(*agent) == "" {
+			return fmt.Errorf("project %s needs PROJECT_ID and --agent NAME", args[0])
+		}
+		if *newThread && *sessionID != "" {
+			return errors.New("--new-thread and --session are mutually exclusive")
+		}
+		project, err := get(f.Args()[0])
+		if err != nil {
+			return err
+		}
+		directory, err := a.projectLaunchDirectory(project, *cwd)
+		if err != nil {
+			return err
+		}
+		action := domain.CodexSessionNew
+		if *sessionID != "" {
+			action = domain.CodexSessionResume
+		}
+		environment := os.Environ()
+		if a.Environ != nil {
+			environment = a.Environ()
+		}
+		launch := domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: *agent, Action: action, SessionID: *sessionID, Directory: directory, Repository: a.repositoryContext(ctx, directory), Environment: append([]string(nil), environment...), Yolo: *yolo}
+		controller, ok := s.(domain.ProjectCodexRuntimeController)
+		if !ok {
+			return errors.New("project Codex runtime control is unavailable")
+		}
+		var activated domain.ProjectCodexActivation
+		if args[0] == "handoff" {
+			activated, err = controller.HandoffCodexProject(ctx, domain.ProjectCodexHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: *agent, Force: *force, Launch: launch})
+		} else {
+			activated, err = controller.ActivateCodexProject(ctx, domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: *agent, Launch: launch})
+		}
+		if err != nil {
+			return err
+		}
+		return writeProject(a.Out, activated.Project, false)
+	case "close", "archive":
+		f := flags("project " + args[0])
+		force := f.Bool("force", false, "release advisory authority when runtime stop is unknown")
+		if err := f.Parse(flagsAfterName(args[1:])); err != nil || len(f.Args()) != 1 {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("project %s needs PROJECT_ID", args[0])
+		}
+		project, err := get(f.Args()[0])
+		if err != nil {
+			return err
+		}
+		controller, ok := s.(domain.ProjectCodexRuntimeController)
+		if !ok {
+			return errors.New("project Codex runtime control is unavailable")
+		}
+		closed, err := controller.CloseCodexProject(ctx, domain.ProjectCodexCloseRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, Archive: args[0] == "archive", Force: *force})
+		if err != nil {
+			return err
+		}
+		return writeProject(a.Out, closed, false)
+	case "reopen":
+		if len(args) != 2 {
+			return errors.New("project reopen needs PROJECT_ID")
+		}
+		project, err := get(args[1])
+		if err != nil {
+			return err
+		}
+		project, err = s.OpenProject(ctx, project.ID, project.HeadEventID)
+		if err != nil {
+			return err
+		}
+		return writeProject(a.Out, project, false)
+	case "unarchive":
+		if len(args) != 2 {
+			return errors.New("project unarchive needs PROJECT_ID")
+		}
+		project, err := get(args[1])
+		if err != nil {
+			return err
+		}
+		project, err = s.SetProjectArchived(ctx, project.ID, project.HeadEventID, false)
+		if err != nil {
+			return err
+		}
+		return writeProject(a.Out, project, false)
+	case "check":
+		if len(args) != 3 {
+			return errors.New("project check needs PROJECT_ID RESOURCE_ID")
+		}
+		resource, err := s.CheckProjectResource(ctx, args[1], args[2])
+		if err != nil {
+			return err
+		}
+		return writeJSON(a.Out, resource)
+	case "resource":
+		return a.projectResource(ctx, s, args[1:])
+	default:
+		return fmt.Errorf("unknown project command %q", args[0])
+	}
+}
+
+func (a *App) projectResource(ctx context.Context, s domain.Store, args []string) error {
+	if len(args) < 1 {
+		return errors.New("project resource needs add, remove, replace, or primary")
+	}
+	switch args[0] {
+	case "add":
+		f := flags("project resource add")
+		primary := f.Bool("primary", false, "make this path the project primary")
+		if err := f.Parse(args[1:]); err != nil || len(f.Args()) != 2 {
+			if err != nil {
+				return err
+			}
+			return errors.New("project resource add needs PROJECT_ID PATH")
+		}
+		project, err := s.GetProject(ctx, f.Args()[0])
+		if err != nil {
+			return err
+		}
+		_, err = s.AddProjectPath(ctx, project.ID, project.HeadEventID, domain.ProjectPathInput{DisplayPath: f.Args()[1]}, *primary)
+		return err
+	case "remove", "primary":
+		if len(args) != 3 {
+			return fmt.Errorf("project resource %s needs PROJECT_ID RESOURCE_ID", args[0])
+		}
+		project, err := s.GetProject(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		if args[0] == "remove" {
+			if project.Assignment != nil {
+				_, _ = fmt.Fprintf(a.ErrOut, "warning: %s remains assigned to %s and may continue accessing the removed path\n", project.Name, project.Assignment.AgentName)
+			}
+			_, err = s.RemoveProjectResource(ctx, project.ID, project.HeadEventID, args[2])
+		} else {
+			_, err = s.SetProjectPrimaryResource(ctx, project.ID, project.HeadEventID, args[2])
+		}
+		return err
+	case "replace":
+		if len(args) != 4 {
+			return errors.New("project resource replace needs PROJECT_ID RESOURCE_ID PATH")
+		}
+		project, err := s.GetProject(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		_, err = s.ReplaceProjectPath(ctx, project.ID, project.HeadEventID, args[2], domain.ProjectPathInput{DisplayPath: args[3]})
+		return err
+	default:
+		return fmt.Errorf("unknown project resource command %q", args[0])
+	}
+}
+
+func (a *App) projectLaunchDirectory(project domain.Project, override string) (string, error) {
+	if strings.TrimSpace(override) != "" {
+		directory, err := filepath.Abs(override)
+		if err == nil && !projectPathCovers(project, directory) && a.ErrOut != nil {
+			_, _ = fmt.Fprintf(a.ErrOut, "warning: launch directory %s is outside this project's path claims\n", directory)
+		}
+		return directory, err
+	}
+	for _, resource := range project.Resources {
+		if resource.ID == project.PrimaryResourceID && resource.Kind == "path" {
+			return resource.DisplayLocator, nil
+		}
+	}
+	return a.Getwd()
+}
+
+func projectPathCovers(project domain.Project, directory string) bool {
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		resolved = filepath.Clean(directory)
+	}
+	for _, resource := range project.Resources {
+		if resource.Kind != "path" {
+			continue
+		}
+		relative, err := filepath.Rel(filepath.Clean(resource.CanonicalLocator), resolved)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func writeProject(destination io.Writer, project domain.Project, asJSON bool) error {
+	if asJSON {
+		return writeJSON(destination, project)
+	}
+	agent := "unassigned"
+	if project.Assignment != nil {
+		agent = project.Assignment.AgentName + " (" + string(project.Assignment.State) + ")"
+	}
+	_, err := fmt.Fprintf(destination, "%s\t%s\t%s\t%s\thead=%s\n", project.ID, project.Name, project.Lifecycle, agent, project.HeadEventID)
+	return err
 }
 
 func flagsAfterName(arguments []string) []string {

@@ -229,6 +229,21 @@ The creator installation is the only account administrator in this release. Back
 
 See [docs/lan.md](docs/lan.md) for the supported retained-relay setup, systemd and launchd examples, an automated smoke test, and a manual two-machine checklist.
 
+### Projects
+
+Projects keep resource claims, conversation history, assignment epochs, and execution threads attached to one durable line of work. New human messages should normally target a project; direct agent messages remain a separate control plane.
+
+```sh
+hq project create --path /work/widget --open widget
+hq project worktree --repo /work/widget --base main --destination /work/widget-fix --branch fix/widget widget-fix
+hq project send PROJECT_ID "Investigate the failing integration test"
+hq project activate PROJECT_ID --agent alice --new-thread
+hq project close PROJECT_ID
+hq project archive PROJECT_ID
+```
+
+Use `hq project list`, `show`, `reopen`, `handoff`, `check`, and `resource` for inspection and lifecycle management. `project worktree` reserves its destination on the selected home before the daemon invokes Git. `--home INSTALLATION_ID` creates or provisions on another active human-account device. Remote mutations remain visibly queued until the home returns a signed received/committed/rejected result; expected-head comparison rejects delayed stale commands. Closing and archival release HQ's advisory claims but never delete files, worktrees, branches, or containers.
+
 ## Command summary
 
 ```text
@@ -284,7 +299,7 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 The TUI subscribes before its initial snapshot and reloads immediately after local or remote commits. A five-minute repair refresh remains; active text, focus, and selection survive every reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, last receive time, account members, pending account fanout, relay-accepted sends, invalid or revoked-device traffic, and event queue counts.
 
-SQLite schema 11 includes durable named-agent session-history projections and local ownership leases in addition to mutation receipts and monotonic change revisions. Schema 7 migrates through versions 8, 9, 10, and 11; unsupported older layouts may still reset during pre-1.0 development.
+SQLite schema 24 includes durable named-agent session history, project/resource/assignment history, runtime, retirement, and worktree-provisioning workflows, remote project replicas and command state, mutation receipts, and monotonic change revisions. Schema 7 migrates forward through every supported intermediate version; unsupported older layouts may still reset during pre-1.0 development.
 
 See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for signed causal state, and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
 

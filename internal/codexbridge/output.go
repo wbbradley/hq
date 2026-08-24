@@ -40,6 +40,7 @@ type OutputRelay struct {
 	threadID   string
 	mailbox    model.Mailbox
 	repository model.RepositoryContext
+	project    *domain.ProjectOutputBinding
 
 	acceptMu sync.Mutex
 	accept   bool
@@ -66,8 +67,14 @@ func (r *OutputRelay) Bind(threadID string, mailbox model.Mailbox, repository mo
 	r.bindMu.Unlock()
 }
 
+func (r *OutputRelay) BindProject(binding domain.ProjectOutputBinding) {
+	r.bindMu.Lock()
+	r.project = &binding
+	r.bindMu.Unlock()
+}
+
 func (r *OutputRelay) HandleNotification(_ context.Context, notification Notification) {
-	threadID, _, _ := r.binding()
+	threadID, _, _, _ := r.binding()
 	if threadID == "" {
 		return
 	}
@@ -125,7 +132,7 @@ func (r *OutputRelay) run() {
 }
 
 func (r *OutputRelay) publish(output canonicalOutput) error {
-	threadID, mailbox, repository := r.binding()
+	threadID, mailbox, repository, project := r.binding()
 	if r.store == nil || r.ledger == nil || threadID == "" || mailbox.ID == "" {
 		return errors.New("Codex output relay is not bound")
 	}
@@ -151,8 +158,18 @@ func (r *OutputRelay) publish(output canonicalOutput) error {
 			r.lastCreatedAt = existing.CreatedAt
 		}
 	case errors.Is(err, domain.ErrNotFound):
-		if err := r.store.Create(context.Background(), message); err != nil {
-			return fmt.Errorf("publish Codex output: %w", err)
+		var createErr error
+		if project != nil {
+			projectStore, ok := r.store.(domain.ProjectOutputOperations)
+			if !ok {
+				return errors.New("Codex output store does not support project provenance")
+			}
+			createErr = projectStore.CreateProjectOutput(context.Background(), *project, message)
+		} else {
+			createErr = r.store.Create(context.Background(), message)
+		}
+		if createErr != nil {
+			return fmt.Errorf("publish Codex output: %w", createErr)
 		}
 	default:
 		return fmt.Errorf("reconcile Codex output: %w", err)
@@ -177,10 +194,15 @@ func (r *OutputRelay) nextCreatedAt() time.Time {
 	return createdAt
 }
 
-func (r *OutputRelay) binding() (string, model.Mailbox, model.RepositoryContext) {
+func (r *OutputRelay) binding() (string, model.Mailbox, model.RepositoryContext, *domain.ProjectOutputBinding) {
 	r.bindMu.RLock()
 	defer r.bindMu.RUnlock()
-	return r.threadID, r.mailbox, r.repository
+	var project *domain.ProjectOutputBinding
+	if r.project != nil {
+		copy := *r.project
+		project = &copy
+	}
+	return r.threadID, r.mailbox, r.repository, project
 }
 
 func canonicalOutputFromNotification(threadID string, notification Notification) (canonicalOutput, bool) {

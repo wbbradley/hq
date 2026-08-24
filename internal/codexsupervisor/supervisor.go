@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,10 +26,13 @@ type StarterFactory func(environment []string) codexbridge.ProcessStarter
 
 type Supervisor struct {
 	Store              domain.Operations
+	Projects           domain.ProjectOperations
+	Workflows          domain.ProjectWorkflowOperations
 	Ledger             codexbridge.DeliveryLedger
 	Starter            StarterFactory
 	LoadLaunchDefaults func() (domain.CodexLaunchDefaults, error)
 	Sync               func(context.Context) error
+	RunGit             GitRunner
 	Logger             *slog.Logger
 
 	ctx    context.Context
@@ -36,15 +40,18 @@ type Supervisor struct {
 	mu     sync.Mutex
 	// subsMu stays independent because store changes may publish synchronously
 	// while a supervisor operation holds mu.
-	subsMu   sync.Mutex
-	wakeWG   sync.WaitGroup
-	workers  map[string]*worker
-	receipts map[string]receipt
-	lastGood map[string]domain.CodexLaunchRequest
-	waking   map[string]bool
-	subs     map[uint64]*localSubscription
-	nextSub  uint64
+	subsMu      sync.Mutex
+	wakeWG      sync.WaitGroup
+	workers     map[string]*worker
+	receipts    map[string]receipt
+	lastGood    map[string]domain.CodexLaunchRequest
+	provisionMu sync.Mutex
+	waking      map[string]bool
+	subs        map[uint64]*localSubscription
+	nextSub     uint64
 }
+
+type GitRunner func(context.Context, string, ...string) ([]byte, error)
 
 type worker struct {
 	requestID string
@@ -54,6 +61,7 @@ type worker struct {
 	done      chan struct{}
 	runtime   domain.CodexRuntime
 	launch    domain.CodexLaunchRequest
+	projectID string
 }
 
 type receipt struct {
@@ -66,10 +74,18 @@ func New(ctx context.Context, store domain.Operations, ledger codexbridge.Delive
 	if ledger == nil {
 		ledger = codexbridge.NewMemoryLedger()
 	}
-	return &Supervisor{
+	supervisor := &Supervisor{
 		Store: store, Ledger: ledger, Logger: slog.New(slog.DiscardHandler), ctx: lifetime, cancel: cancel,
 		workers: make(map[string]*worker), receipts: make(map[string]receipt), lastGood: make(map[string]domain.CodexLaunchRequest), waking: make(map[string]bool), subs: make(map[uint64]*localSubscription),
 	}
+	if projects, ok := store.(domain.ProjectOperations); ok {
+		supervisor.Projects = projects
+	}
+	if workflows, ok := store.(domain.ProjectWorkflowOperations); ok {
+		supervisor.Workflows = workflows
+		supervisor.recoverIncompleteProjectActivations()
+	}
+	return supervisor
 }
 
 func (s *Supervisor) Close() error {
@@ -103,6 +119,15 @@ func (s *Supervisor) Close() error {
 }
 
 func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	return s.launchCodexAgent(ctx, request, nil)
+}
+
+type projectLaunchBinding struct {
+	projectID, assignmentID, expectedHead, projectThreadID, mailboxID, projectName string
+	runnable                                                                       bool
+}
+
+func (s *Supervisor) launchCodexAgent(ctx context.Context, request domain.CodexLaunchRequest, project *projectLaunchBinding) (domain.CodexRuntime, error) {
 	logger := s.logger().With("component", "codex_supervisor", "agent", request.AgentName, "request_id", request.RequestID)
 	logger.Info("Codex agent launch requested", "action", request.Action, "session_id", request.SessionID, "directory", request.Directory, "yolo", request.Yolo, "environment_variables", len(request.Environment), "has_initial_prompt", strings.TrimSpace(request.InitialPrompt) != "")
 	digest, err := validateLaunch(&request)
@@ -127,6 +152,10 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 		return previous.runtime, nil
 	}
 	if current := s.workers[request.AgentName]; current != nil {
+		if (project == nil && current.projectID != "") || (project != nil && current.projectID != "" && current.projectID != project.projectID) {
+			s.mu.Unlock()
+			return domain.CodexRuntime{}, fmt.Errorf("named agent is running for project %s: %w", current.projectID, domain.ErrAgentAssigned)
+		}
 		if current.requestID == request.RequestID {
 			if current.digest != digest {
 				s.mu.Unlock()
@@ -166,7 +195,18 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 		logger.Error("resolve named agent for Codex launch", "error", err)
 		return domain.CodexRuntime{}, err
 	}
-	resumeID, newThread, err := s.resolveAction(ctx, agent, request)
+	if agent.AssignedProjectID != "" && (project == nil || agent.AssignedProjectID != project.projectID) {
+		s.mu.Unlock()
+		logger.Warn("direct Codex launch rejected for project-assigned agent", "project_id", agent.AssignedProjectID)
+		return domain.CodexRuntime{}, fmt.Errorf("launch direct thread for assigned agent: %w", domain.ErrAgentAssigned)
+	}
+	var resumeID string
+	var newThread bool
+	if project != nil {
+		resumeID, newThread = request.SessionID, request.Action != domain.CodexSessionResume
+	} else {
+		resumeID, newThread, err = s.resolveAction(ctx, agent, request)
+	}
 	if err != nil {
 		s.mu.Unlock()
 		logger.Warn("resolve requested Codex session", "error", err)
@@ -177,7 +217,12 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 	current := &worker{
 		requestID: request.RequestID, digest: digest, cancel: cancel, ready: make(chan struct{}), done: make(chan struct{}),
 		runtime: domain.CodexRuntime{AgentName: request.AgentName, ThreadID: resumeID, Directory: request.Directory, Phase: domain.CodexRuntimeStarting, StartedAt: &started},
-		launch:  cloneLaunchRequest(request),
+		launch:  cloneLaunchRequest(request), projectID: func() string {
+			if project != nil {
+				return project.projectID
+			}
+			return ""
+		}(),
 	}
 	s.workers[request.AgentName] = current
 	logger.Info("Codex worker registered", "resume_thread_id", resumeID, "new_thread", newThread)
@@ -202,6 +247,41 @@ func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexL
 		Updates:        domain.ClientUpdates{Subscribe: s.Subscribe},
 		SuppressStatus: true,
 		OnReady:        func(ready codexbridge.BridgeReady) { s.markReady(current, ready) },
+	}
+	if project != nil {
+		options.ProjectID = project.projectID
+		options.ProjectReady = func(ready codexbridge.BridgeReady) (codexbridge.ProjectBinding, error) {
+			if project.runnable {
+				current, err := s.Projects.GetProject(s.ctx, project.projectID)
+				if err != nil {
+					return codexbridge.ProjectBinding{}, err
+				}
+				if current.Lifecycle != domain.ProjectOpen || current.Assignment == nil || current.Assignment.ID != project.assignmentID || current.Assignment.State != domain.AssignmentRunnable || current.Assignment.SelectedThreadID != project.projectThreadID {
+					return codexbridge.ProjectBinding{}, domain.ErrProjectThreadMismatch
+				}
+				threads, err := s.Projects.ListProjectThreads(s.ctx, current.ID)
+				if err != nil {
+					return codexbridge.ProjectBinding{}, err
+				}
+				matched := false
+				for _, thread := range threads {
+					if thread.ID == project.projectThreadID && thread.ExternalID == ready.ThreadID && thread.AgentName == current.Assignment.AgentName && !thread.RetiredAgent {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return codexbridge.ProjectBinding{}, domain.ErrProjectThreadMismatch
+				}
+				return codexbridge.ProjectBinding{ProjectID: current.ID, AssignmentID: current.Assignment.ID, ProjectThreadID: current.Assignment.SelectedThreadID, MailboxID: current.MailboxID, ProjectName: current.Name}, nil
+			}
+			activation := domain.ActivateProjectAssignmentRequest{ThreadID: project.projectThreadID, Harness: "codex", ExternalThread: ready.ThreadID, LaunchDirectory: ready.Directory}
+			activated, err := s.Projects.ActivateProjectAssignment(s.ctx, project.projectID, project.expectedHead, activation)
+			if err != nil {
+				return codexbridge.ProjectBinding{}, err
+			}
+			return codexbridge.ProjectBinding{ProjectID: activated.ID, AssignmentID: activated.Assignment.ID, ProjectThreadID: activated.Assignment.SelectedThreadID, MailboxID: activated.MailboxID, ProjectName: activated.Name}, nil
+		}
 	}
 	s.mu.Unlock()
 	go s.runWorker(workerContext, current, options)
@@ -333,7 +413,9 @@ func (s *Supervisor) markReady(current *worker, ready codexbridge.BridgeReady) {
 	relaunch.Repository.Directory = ready.Directory
 	relaunch.InitialPrompt = ""
 	relaunch.ConfirmSwitch = false
-	s.replaceLastGoodLocked(current.runtime.AgentName, relaunch)
+	if current.projectID == "" {
+		s.replaceLastGoodLocked(current.runtime.AgentName, relaunch)
+	}
 	clearLaunchEnvironment(&current.launch)
 	s.logger().Info("Codex worker ready", "component", "codex_supervisor", "agent", current.runtime.AgentName, "thread_id", ready.ThreadID, "directory", ready.Directory)
 	close(current.ready)
@@ -394,7 +476,11 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 			break
 		}
 	}
-	if agent.Name == "" || agent.Retired || agent.Active || agent.Harness != "codex" || agent.CurrentSessionID == "" {
+	if agent.Name == "" {
+		s.wakeCodexProject(message, environment)
+		return
+	}
+	if agent.Retired || agent.Active || agent.Harness != "codex" || agent.CurrentSessionID == "" {
 		return
 	}
 
@@ -452,6 +538,79 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 			return
 		}
 		logger.Info("automatic Codex agent wake succeeded", "directory", runtime.Directory)
+	}()
+}
+
+func (s *Supervisor) wakeCodexProject(message model.Message, environment []string) {
+	if s.Projects == nil || s.Workflows == nil {
+		return
+	}
+	projects, err := s.Projects.ListProjects(s.ctx, false)
+	if err != nil {
+		s.logger().Error("resolve project for message wake", "component", "codex_supervisor", "error", err)
+		return
+	}
+	var project domain.Project
+	for _, candidate := range projects {
+		if candidate.MailboxID == message.RecipientMailboxID {
+			project = candidate
+			break
+		}
+	}
+	if project.ID == "" || project.Lifecycle != domain.ProjectOpen || project.Assignment == nil || project.Assignment.State != domain.AssignmentRunnable {
+		return
+	}
+	threads, err := s.Projects.ListProjectThreads(s.ctx, project.ID)
+	if err != nil {
+		return
+	}
+	var selected domain.ProjectThread
+	for _, thread := range threads {
+		if thread.ID == project.Assignment.SelectedThreadID {
+			selected = thread
+			break
+		}
+	}
+	if selected.ID == "" || selected.RetiredAgent || selected.Harness != "codex" {
+		return
+	}
+	if err := projectResumeDirectorySafe(project, selected); err != nil {
+		s.logger().Warn("automatic project wake requires explicit directory decision", "component", "codex_supervisor", "project_id", project.ID, "thread_id", selected.ID, "directory", selected.LaunchDir, "error", err)
+		return
+	}
+	s.mu.Lock()
+	if s.ctx.Err() != nil || s.workers[project.Assignment.AgentName] != nil || s.waking[project.Assignment.AgentName] {
+		s.mu.Unlock()
+		return
+	}
+	s.waking[project.Assignment.AgentName] = true
+	s.wakeWG.Add(1)
+	s.mu.Unlock()
+	request := domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: project.Assignment.AgentName, Action: domain.CodexSessionResume, SessionID: selected.ExternalID, Directory: selected.LaunchDir, Repository: model.RepositoryContext{Directory: selected.LaunchDir}, Environment: append([]string(nil), environment...)}
+	if len(request.Environment) == 0 {
+		request.Environment = os.Environ()
+	}
+	if defaults, defaultsErr := s.launchDefaults(); defaultsErr == nil {
+		applyLaunchDefaults(&request, defaults)
+	} else {
+		clearLaunchEnvironment(&request)
+		s.mu.Lock()
+		delete(s.waking, project.Assignment.AgentName)
+		s.mu.Unlock()
+		s.wakeWG.Done()
+		return
+	}
+	binding := &projectLaunchBinding{projectID: project.ID, assignmentID: project.Assignment.ID, expectedHead: project.HeadEventID, projectThreadID: selected.ID, mailboxID: project.MailboxID, projectName: project.Name, runnable: true}
+	go func() {
+		defer s.wakeWG.Done()
+		runtime, launchErr := s.launchCodexAgent(s.ctx, request, binding)
+		clearLaunchEnvironment(&request)
+		s.mu.Lock()
+		delete(s.waking, project.Assignment.AgentName)
+		s.mu.Unlock()
+		if launchErr != nil || runtime.Phase != domain.CodexRuntimeRunning {
+			s.logger().Warn("automatic project wake failed", "component", "codex_supervisor", "project_id", project.ID, "agent", project.Assignment.AgentName, "error", launchErr)
+		}
 	}()
 }
 
@@ -526,6 +685,9 @@ func (s *Supervisor) StopCodexAgent(ctx context.Context, name string) (domain.Co
 	current := s.workers[strings.TrimSpace(name)]
 	if current == nil {
 		s.mu.Unlock()
+		if agent, err := s.Store.GetNamedAgent(ctx, strings.TrimSpace(name)); err == nil && agent.Active {
+			return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeConflict, Error: "runtime ownership remains active but is not controlled by this daemon"}, domain.ErrAgentOwned
+		}
 		return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
 	}
 	current.runtime.Phase = domain.CodexRuntimeStopping
@@ -539,6 +701,388 @@ func (s *Supervisor) StopCodexAgent(ctx context.Context, name string) (domain.Co
 	}
 }
 
+func (s *Supervisor) CloseCodexProject(ctx context.Context, request domain.ProjectCodexCloseRequest) (domain.Project, error) {
+	if s.Projects == nil || s.Workflows == nil {
+		return domain.Project{}, errors.New("project runtime control is unavailable")
+	}
+	project, err := s.Projects.GetProject(ctx, request.ProjectID)
+	if err != nil {
+		return project, err
+	}
+	if project.ReadOnlyReplica {
+		if request.RequestID == "" {
+			request.RequestID = uuid.NewString()
+		}
+		return s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, "codex.project.close", request)
+	}
+	if request.RequestID == "" {
+		request.RequestID = uuid.NewString()
+	}
+	operation, err := s.Workflows.BeginProjectRuntimeOperation(ctx, domain.ProjectRuntimeOperation{ID: request.RequestID, Kind: "close", ProjectID: request.ProjectID, ExpectedHead: request.ExpectedHead, Force: request.Force, Archive: request.Archive})
+	if err != nil {
+		return project, err
+	}
+	if operation.State == "blocked" || operation.State == "failed" {
+		return project, errors.New(operation.LastError)
+	}
+	project, err = s.Projects.GetProject(ctx, request.ProjectID)
+	if err != nil {
+		return project, err
+	}
+	if project.Lifecycle == domain.ProjectClosed {
+		if request.Archive && !project.Archived {
+			project, err = s.Projects.SetProjectArchived(ctx, project.ID, project.HeadEventID, true)
+			if err != nil {
+				return project, err
+			}
+		}
+		_ = s.Workflows.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "completed", project.HeadEventID, "")
+		return project, nil
+	}
+	if project.Lifecycle == domain.ProjectOpen {
+		project, err = s.Projects.BeginCloseProject(ctx, project.ID, project.HeadEventID)
+		if err != nil {
+			return project, err
+		}
+		if err := s.Workflows.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "closing", project.HeadEventID, ""); err != nil {
+			return project, err
+		}
+	} else if project.Lifecycle != domain.ProjectClosing {
+		return project, fmt.Errorf("close project: %w", domain.ErrProjectState)
+	}
+	observation := "stopped"
+	if project.Assignment != nil {
+		managed := s.hasManagedWorker(project.Assignment.AgentName)
+		var stopErr error
+		if managed {
+			_, stopErr = s.StopCodexAgent(ctx, project.Assignment.AgentName)
+		} else {
+			stopErr = domain.ErrProjectRuntimeUnknown
+		}
+		if stopErr != nil {
+			if !request.Force {
+				diagnostic := fmt.Sprintf("quiesce project runtime: %v", stopErr)
+				_ = s.Workflows.AdvanceProjectRuntimeOperation(context.Background(), request.RequestID, "blocked", project.HeadEventID, diagnostic)
+				return project, fmt.Errorf("quiesce project runtime: %w", stopErr)
+			}
+			observation = "unknown"
+		}
+	}
+	project, err = s.Projects.FinalizeCloseProject(ctx, project.ID, project.HeadEventID, request.Force, observation)
+	if err != nil {
+		return project, err
+	}
+	if request.Archive {
+		project, err = s.Projects.SetProjectArchived(ctx, project.ID, project.HeadEventID, true)
+		if err != nil {
+			return project, err
+		}
+	}
+	_ = s.Workflows.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "completed", project.HeadEventID, "")
+	return project, nil
+}
+
+func (s *Supervisor) HandoffCodexProject(ctx context.Context, request domain.ProjectCodexHandoffRequest) (domain.ProjectCodexActivation, error) {
+	if s.Projects == nil {
+		return domain.ProjectCodexActivation{}, errors.New("project runtime control is unavailable")
+	}
+	project, err := s.Projects.GetProject(ctx, request.ProjectID)
+	if err != nil {
+		return domain.ProjectCodexActivation{}, err
+	}
+	if project.ReadOnlyReplica {
+		if request.RequestID == "" {
+			request.RequestID = request.Launch.RequestID
+		}
+		if request.RequestID == "" {
+			request.RequestID = uuid.NewString()
+		}
+		request.Launch.Environment = nil
+		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, "codex.project.handoff", request)
+		return domain.ProjectCodexActivation{Project: queued, Runtime: domain.CodexRuntime{AgentName: request.NewAgentName, Phase: domain.CodexRuntimePending}}, queueErr
+	}
+	if request.RequestID == "" {
+		request.RequestID = request.Launch.RequestID
+	}
+	if request.RequestID == "" {
+		request.RequestID = uuid.NewString()
+	}
+	operation, err := s.Workflows.BeginProjectRuntimeOperation(ctx, domain.ProjectRuntimeOperation{ID: request.RequestID, Kind: "handoff", ProjectID: request.ProjectID, ExpectedHead: request.ExpectedHead, TargetAgent: request.NewAgentName, Force: request.Force})
+	if err != nil {
+		return domain.ProjectCodexActivation{}, err
+	}
+	if operation.State == "blocked" || operation.State == "failed" {
+		return domain.ProjectCodexActivation{}, errors.New(operation.LastError)
+	}
+	project, err = s.Projects.GetProject(ctx, request.ProjectID)
+	if err != nil {
+		return domain.ProjectCodexActivation{}, err
+	}
+	if project.Assignment != nil && project.Assignment.AgentName == request.NewAgentName && project.Assignment.State == domain.AssignmentRunnable {
+		_ = s.Workflows.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "completed", project.HeadEventID, "")
+		runtime, _ := s.CodexAgentRuntime(ctx, request.NewAgentName)
+		return domain.ProjectCodexActivation{Project: project, Runtime: runtime}, nil
+	}
+	if project.Lifecycle != domain.ProjectOpen || (project.Assignment == nil && operation.State == "started") {
+		return domain.ProjectCodexActivation{}, fmt.Errorf("handoff project: %w", domain.ErrProjectState)
+	}
+	if project.Assignment != nil {
+		oldAgent := project.Assignment.AgentName
+		var stopErr error
+		if s.hasManagedWorker(oldAgent) {
+			_, stopErr = s.StopCodexAgent(ctx, oldAgent)
+		} else {
+			stopErr = domain.ErrProjectRuntimeUnknown
+		}
+		observation := "stopped"
+		if stopErr != nil {
+			if !request.Force {
+				project, _ = s.Projects.BlockProjectAssignment(ctx, project.ID, project.HeadEventID, "runtime quiescence could not be confirmed")
+				diagnostic := fmt.Sprintf("quiesce project handoff: %v", stopErr)
+				_ = s.Workflows.AdvanceProjectRuntimeOperation(context.Background(), request.RequestID, "blocked", project.HeadEventID, diagnostic)
+				return domain.ProjectCodexActivation{}, fmt.Errorf("quiesce project handoff: %w", stopErr)
+			}
+			observation = "unknown"
+		}
+		project, err = s.Projects.UnassignProject(ctx, project.ID, project.HeadEventID, request.Force, observation)
+		if err != nil {
+			return domain.ProjectCodexActivation{}, err
+		}
+		if err := s.Workflows.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "unassigned", project.HeadEventID, ""); err != nil {
+			return domain.ProjectCodexActivation{}, err
+		}
+	}
+	if request.Launch.RequestID == "" {
+		request.Launch.RequestID = request.RequestID
+	}
+	_ = s.Workflows.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "activating", project.HeadEventID, "")
+	activated, err := s.ActivateCodexProject(ctx, domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: request.NewAgentName, Launch: request.Launch})
+	if err != nil {
+		_ = s.Workflows.AdvanceProjectRuntimeOperation(context.Background(), request.RequestID, "failed", project.HeadEventID, err.Error())
+		return activated, err
+	}
+	_ = s.Workflows.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "completed", activated.Project.HeadEventID, "")
+	return activated, nil
+}
+
+func (s *Supervisor) RetireCodexAgent(ctx context.Context, request domain.CodexRetireAgentRequest) error {
+	if s.Projects == nil || s.Workflows == nil {
+		return errors.New("project-aware agent retirement is unavailable")
+	}
+	if request.RequestID == "" {
+		request.RequestID = uuid.NewString()
+	}
+	agent, err := s.Store.GetNamedAgent(ctx, request.AgentName)
+	if err != nil {
+		return err
+	}
+	operation, err := s.Workflows.BeginAgentRetirement(ctx, domain.AgentRetirementOperation{ID: request.RequestID, AgentName: agent.Name, ProjectID: agent.AssignedProjectID, Force: request.Force})
+	if err != nil {
+		return err
+	}
+	if operation.State == "completed" {
+		return nil
+	}
+	if operation.State == "blocked" || operation.State == "failed" {
+		return errors.New(operation.LastError)
+	}
+	if agent.Retired {
+		return s.Workflows.AdvanceAgentRetirement(ctx, operation.ID, "completed", "")
+	}
+	if operation.State == "started" {
+		var stopErr error
+		if s.hasManagedWorker(agent.Name) {
+			_, stopErr = s.StopCodexAgent(ctx, agent.Name)
+		} else if agent.AssignedProjectID != "" {
+			stopErr = domain.ErrProjectRuntimeUnknown
+		} else {
+			_, stopErr = s.StopCodexAgent(ctx, agent.Name)
+		}
+		if stopErr != nil {
+			if !request.Force {
+				if agent.AssignedProjectID != "" {
+					if project, getErr := s.Projects.GetProject(ctx, agent.AssignedProjectID); getErr == nil {
+						_, _ = s.Projects.BlockProjectAssignment(ctx, project.ID, project.HeadEventID, "runtime quiescence could not be confirmed before retirement")
+					}
+				}
+				diagnostic := fmt.Sprintf("quiesce retiring agent: %v", stopErr)
+				_ = s.Workflows.AdvanceAgentRetirement(context.Background(), operation.ID, "blocked", diagnostic)
+				return fmt.Errorf("quiesce retiring agent: %w", stopErr)
+			}
+		}
+		if err := s.Workflows.AdvanceAgentRetirement(ctx, operation.ID, "quiesced", ""); err != nil {
+			return err
+		}
+		operation.State = "quiesced"
+	}
+	agent, err = s.Store.GetNamedAgent(ctx, request.AgentName)
+	if err != nil {
+		return err
+	}
+	if operation.State == "quiesced" && agent.AssignedProjectID != "" {
+		project, getErr := s.Projects.GetProject(ctx, agent.AssignedProjectID)
+		if getErr != nil {
+			return getErr
+		}
+		observation := "stopped"
+		if request.Force {
+			observation = "unknown"
+		}
+		if _, err = s.Projects.UnassignProject(ctx, project.ID, project.HeadEventID, request.Force, observation); err != nil {
+			return err
+		}
+		if err := s.Workflows.AdvanceAgentRetirement(ctx, operation.ID, "unassigned", ""); err != nil {
+			return err
+		}
+	}
+	if err := s.Store.RetireNamedAgent(ctx, agent.Name); err != nil && !errors.Is(err, domain.ErrAgentRetired) {
+		return err
+	}
+	return s.Workflows.AdvanceAgentRetirement(ctx, operation.ID, "completed", "")
+}
+
+func (s *Supervisor) ProvisionProjectWorktree(ctx context.Context, request domain.ProjectWorktreeRequest) (domain.Project, error) {
+	if s.Projects == nil || s.Workflows == nil {
+		return domain.Project{}, errors.New("project worktree provisioning is unavailable")
+	}
+	if request.RequestID == "" {
+		request.RequestID = uuid.NewString()
+	}
+	if request.ProjectID == "" {
+		request.ProjectID = uuid.NewString()
+	}
+	if commands, ok := s.Projects.(domain.ProjectCommandOperations); ok {
+		if queued, remote, err := commands.QueueProjectWorktreeProvision(ctx, request); remote {
+			return queued, err
+		}
+	}
+	operation, err := s.Workflows.BeginProjectWorktreeProvision(ctx, request)
+	if err != nil {
+		return domain.Project{}, err
+	}
+	if operation.State == "completed" {
+		return s.Projects.GetProject(ctx, operation.ProjectID)
+	}
+	if operation.State == "failed" {
+		return domain.Project{}, errors.New(operation.LastError)
+	}
+	s.provisionMu.Lock()
+	defer s.provisionMu.Unlock()
+	if project, getErr := s.Projects.GetProject(ctx, operation.ProjectID); getErr == nil {
+		_ = s.Workflows.AdvanceProjectWorktreeProvision(ctx, operation.ID, "completed", "")
+		return project, nil
+	} else if !errors.Is(getErr, domain.ErrProjectNotFound) {
+		return domain.Project{}, getErr
+	}
+	run := s.RunGit
+	if run == nil {
+		run = runGitCommand
+	}
+	if operation.State == "reserved" {
+		created := false
+		if _, statErr := os.Stat(operation.Request.Destination); statErr == nil {
+			created, err = verifyProvisionedWorktree(ctx, run, operation)
+			if err == nil && !created {
+				err = errors.New("worktree destination already exists but does not match the reserved repository and branch")
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			err = statErr
+		} else {
+			_, err = run(ctx, operation.Request.Repository, "worktree", "add", "-b", operation.Request.Branch, operation.Request.Destination, operation.Request.MergeBase)
+			created = err == nil
+		}
+		if err != nil || !created {
+			diagnostic := safeGitFailure(err)
+			_ = s.Workflows.AdvanceProjectWorktreeProvision(context.Background(), operation.ID, "failed", diagnostic)
+			return domain.Project{}, errors.New(diagnostic)
+		}
+		if err := s.Workflows.AdvanceProjectWorktreeProvision(ctx, operation.ID, "worktree-created", ""); err != nil {
+			return domain.Project{}, err
+		}
+	}
+	create := domain.CreateProjectRequest{ID: operation.ProjectID, HomeInstallation: operation.Request.HomeInstallation, Name: operation.Request.Name, Brief: operation.Request.Brief, PredecessorProjectID: operation.Request.PredecessorProjectID, PrimaryPath: operation.Request.PrimaryPath, Open: operation.Request.Open}
+	create.Paths = append(create.Paths, domain.ProjectPathInput{DisplayPath: operation.Request.Destination})
+	create.Paths = append(create.Paths, operation.Request.AdditionalPaths...)
+	project, err := s.Projects.CreateProject(domain.WithProjectProvisioning(ctx, operation.ID), create)
+	if err != nil {
+		return project, err
+	}
+	if err := s.Workflows.AdvanceProjectWorktreeProvision(ctx, operation.ID, "completed", ""); err != nil {
+		return project, err
+	}
+	return project, nil
+}
+
+func runGitCommand(ctx context.Context, directory string, args ...string) ([]byte, error) {
+	commandArgs := append([]string{"-C", directory}, args...)
+	command := exec.CommandContext(ctx, "git", commandArgs...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return output, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return output, nil
+}
+
+func verifyProvisionedWorktree(ctx context.Context, run GitRunner, operation domain.ProjectWorktreeOperation) (bool, error) {
+	top, err := run(ctx, operation.Request.Destination, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return false, err
+	}
+	canonicalTop, err := filepath.EvalSymlinks(strings.TrimSpace(string(top)))
+	if err != nil || filepath.Clean(canonicalTop) != operation.CanonicalDestination {
+		return false, err
+	}
+	branch, err := run(ctx, operation.Request.Destination, "branch", "--show-current")
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(string(branch)) != operation.Request.Branch {
+		return false, nil
+	}
+	repositoryCommon, err := gitCommonDirectory(ctx, run, operation.Request.Repository)
+	if err != nil {
+		return false, err
+	}
+	worktreeCommon, err := gitCommonDirectory(ctx, run, operation.Request.Destination)
+	return repositoryCommon == worktreeCommon, err
+}
+
+func gitCommonDirectory(ctx context.Context, run GitRunner, directory string) (string, error) {
+	raw, err := run(ctx, directory, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	value := strings.TrimSpace(string(raw))
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(directory, value)
+	}
+	value, err = filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(value); resolveErr == nil {
+		value = resolved
+	}
+	return filepath.Clean(value), nil
+}
+
+func safeGitFailure(err error) string {
+	if err == nil {
+		return "Git worktree provisioning did not produce the reserved destination"
+	}
+	message := strings.TrimSpace(err.Error())
+	if len(message) > 1000 {
+		message = message[:1000]
+	}
+	return message
+}
+
+func (s *Supervisor) hasManagedWorker(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.workers[strings.TrimSpace(name)] != nil
+}
+
 func (s *Supervisor) CodexAgentRuntime(_ context.Context, name string) (domain.CodexRuntime, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -546,6 +1090,257 @@ func (s *Supervisor) CodexAgentRuntime(_ context.Context, name string) (domain.C
 		return current.runtime, nil
 	}
 	return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
+}
+
+func (s *Supervisor) ActivateCodexProject(ctx context.Context, request domain.ProjectCodexActivationRequest) (result domain.ProjectCodexActivation, resultErr error) {
+	if s.Projects == nil || s.Workflows == nil {
+		return result, errors.New("project runtime control is unavailable")
+	}
+	request.AgentName = strings.TrimSpace(request.AgentName)
+	if request.ProjectID == "" || request.ExpectedHead == "" || request.AgentName == "" {
+		return result, errors.New("project activation requires project, expected head, and agent")
+	}
+	project, err := s.Projects.GetProject(ctx, request.ProjectID)
+	if err != nil {
+		return result, err
+	}
+	if project.ReadOnlyReplica {
+		request.Launch.Environment = nil
+		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, "codex.project.activate", request)
+		return domain.ProjectCodexActivation{Project: queued, Runtime: domain.CodexRuntime{AgentName: request.AgentName, Phase: domain.CodexRuntimePending}}, queueErr
+	}
+	if request.Launch.RequestID == "" {
+		request.Launch.RequestID = uuid.NewString()
+	}
+	operation, err := s.Workflows.BeginProjectActivation(ctx, request.Launch.RequestID, request.ProjectID, request.ExpectedHead, request.AgentName)
+	if err != nil {
+		return result, err
+	}
+	if operation.State == "failed" {
+		return result, errors.New(operation.LastError)
+	}
+	if operation.State == "runnable" {
+		return s.resumeCompletedProjectActivation(ctx, operation, request.Launch)
+	}
+	if operation.State == "configuring" {
+		_ = s.compensateProjectActivation(context.Background(), operation, "interrupted activation recovered before retry")
+		return result, errors.New("prior project activation was interrupted and compensated; retry with a new request")
+	}
+	project, err = s.Projects.GetProject(ctx, request.ProjectID)
+	if err != nil {
+		_ = s.Workflows.FailProjectActivation(ctx, operation.ID, err.Error())
+		return result, err
+	}
+	if operation.PriorLifecycle == domain.ProjectClosed {
+		project, err = s.Projects.OpenProject(ctx, project.ID, project.HeadEventID)
+		if err != nil {
+			_ = s.Workflows.FailProjectActivation(ctx, operation.ID, err.Error())
+			return result, err
+		}
+	} else {
+		project, err = s.Workflows.ObserveProjectResources(ctx, project.ID, project.HeadEventID)
+		if err != nil {
+			_ = s.Workflows.FailProjectActivation(ctx, operation.ID, err.Error())
+			return result, err
+		}
+	}
+	defer func() {
+		if resultErr != nil {
+			_ = s.compensateProjectActivation(context.Background(), operation, "activation failed: "+resultErr.Error())
+		}
+	}()
+	project, err = s.Projects.AssignProject(ctx, project.ID, project.HeadEventID, request.AgentName)
+	if err != nil {
+		return result, err
+	}
+	operation.AssignmentID = project.Assignment.ID
+	operation.State = "configuring"
+	if err := s.Workflows.SetProjectActivationAssignment(ctx, operation.ID, project.Assignment.ID); err != nil {
+		return result, err
+	}
+	launch := request.Launch
+	launch.AgentName = request.AgentName
+	launch.RequestID = operation.ID
+	threads, err := s.Projects.ListProjectThreads(ctx, project.ID)
+	if err != nil {
+		return result, err
+	}
+	projectThreadID := ""
+	switch launch.Action {
+	case "", domain.CodexSessionCurrent:
+		launch.Action = domain.CodexSessionNew
+		for _, thread := range threads {
+			if thread.AgentName == request.AgentName && thread.Harness == "codex" && !thread.RetiredAgent {
+				launch.Action, launch.SessionID, projectThreadID = domain.CodexSessionResume, thread.ExternalID, thread.ID
+				break
+			}
+		}
+	case domain.CodexSessionResume:
+		for _, thread := range threads {
+			if thread.AgentName == request.AgentName && thread.Harness == "codex" && thread.ExternalID == launch.SessionID && !thread.RetiredAgent {
+				projectThreadID = thread.ID
+				break
+			}
+		}
+		if projectThreadID == "" {
+			return result, domain.ErrProjectThreadMismatch
+		}
+	case domain.CodexSessionNew:
+		launch.SessionID = ""
+	default:
+		return result, fmt.Errorf("unknown Codex session action %q", launch.Action)
+	}
+	binding := &projectLaunchBinding{projectID: project.ID, assignmentID: project.Assignment.ID, expectedHead: project.HeadEventID, projectThreadID: projectThreadID, mailboxID: project.MailboxID, projectName: project.Name}
+	runtime, err := s.launchCodexAgent(ctx, launch, binding)
+	if err != nil {
+		return result, err
+	}
+	if runtime.Phase != domain.CodexRuntimeRunning {
+		return result, errors.New(runtime.Error)
+	}
+	project, err = s.Projects.GetProject(ctx, project.ID)
+	if err != nil {
+		return result, err
+	}
+	if project.Assignment == nil || project.Assignment.State != domain.AssignmentRunnable {
+		return result, errors.New("project runtime became ready without a runnable assignment")
+	}
+	if err := s.Workflows.CompleteProjectActivation(ctx, operation.ID); err != nil {
+		return result, err
+	}
+	return domain.ProjectCodexActivation{Project: project, Runtime: runtime}, nil
+}
+
+func (s *Supervisor) queueRemoteProjectRuntime(ctx context.Context, project domain.Project, expected, operation string, request any) (domain.Project, error) {
+	commands, ok := s.Projects.(domain.ProjectCommandOperations)
+	if !ok {
+		return project, errors.New("remote project command transport is unavailable")
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return project, err
+	}
+	commandID := ""
+	if mutation, ok := domain.MutationFromContext(ctx); ok {
+		commandID = mutation.ID
+	}
+	return commands.QueueProjectCommand(ctx, domain.ProjectCommand{ID: commandID, ProjectID: project.ID, ExpectedHead: expected, Operation: operation, Body: body})
+}
+
+func (s *Supervisor) compensateProjectActivation(parent context.Context, operation domain.ProjectActivationOperation, diagnostic string) error {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	_, _ = s.StopCodexAgent(ctx, operation.AgentName)
+	project, err := s.Projects.GetProject(ctx, operation.ProjectID)
+	if err != nil {
+		return err
+	}
+	if project.Assignment != nil && project.Assignment.AgentName == operation.AgentName && (operation.AssignmentID == "" || project.Assignment.ID == operation.AssignmentID) {
+		project, err = s.Projects.AbortProjectAssignment(ctx, project.ID, project.HeadEventID, diagnostic)
+		if err != nil {
+			return err
+		}
+	}
+	if operation.PriorLifecycle == domain.ProjectClosed && project.Lifecycle == domain.ProjectOpen && project.Assignment == nil {
+		project, err = s.Projects.BeginCloseProject(ctx, project.ID, project.HeadEventID)
+		if err != nil {
+			return err
+		}
+		project, err = s.Projects.FinalizeCloseProject(ctx, project.ID, project.HeadEventID, false, "runtime unavailable during activation recovery")
+		if err != nil {
+			return err
+		}
+	}
+	if operation.PriorLifecycle == domain.ProjectOpen && project.Lifecycle != domain.ProjectOpen {
+		return domain.ErrProjectState
+	}
+	if operation.PriorLifecycle == domain.ProjectClosed && project.Lifecycle != domain.ProjectClosed {
+		return domain.ErrProjectState
+	}
+	return s.Workflows.FailProjectActivation(ctx, operation.ID, diagnostic)
+}
+
+func (s *Supervisor) recoverIncompleteProjectActivations() {
+	operations, err := s.Workflows.ListIncompleteProjectActivations(s.ctx)
+	if err != nil {
+		s.logger().Error("list incomplete project activations", "error", err)
+		return
+	}
+	for _, operation := range operations {
+		if err := s.compensateProjectActivation(s.ctx, operation, "daemon restarted during project activation"); err != nil {
+			s.logger().Error("recover incomplete project activation", "project_id", operation.ProjectID, "operation_id", operation.ID, "error", err)
+		}
+	}
+}
+
+func (s *Supervisor) resumeCompletedProjectActivation(ctx context.Context, operation domain.ProjectActivationOperation, launch domain.CodexLaunchRequest) (domain.ProjectCodexActivation, error) {
+	project, err := s.Projects.GetProject(ctx, operation.ProjectID)
+	if err != nil {
+		return domain.ProjectCodexActivation{}, err
+	}
+	if project.Lifecycle != domain.ProjectOpen || project.Assignment == nil || project.Assignment.ID != operation.AssignmentID || project.Assignment.State != domain.AssignmentRunnable {
+		return domain.ProjectCodexActivation{}, domain.ErrProjectState
+	}
+	if running, _ := s.CodexAgentRuntime(ctx, operation.AgentName); running.Phase == domain.CodexRuntimeRunning {
+		return domain.ProjectCodexActivation{Project: project, Runtime: running}, nil
+	}
+	threads, err := s.Projects.ListProjectThreads(ctx, project.ID)
+	if err != nil {
+		return domain.ProjectCodexActivation{}, err
+	}
+	var selected domain.ProjectThread
+	for _, thread := range threads {
+		if thread.ID == project.Assignment.SelectedThreadID {
+			selected = thread
+			break
+		}
+	}
+	if selected.ID == "" || selected.RetiredAgent || selected.Harness != "codex" {
+		return domain.ProjectCodexActivation{}, domain.ErrProjectThreadMismatch
+	}
+	if err := projectResumeDirectorySafe(project, selected); err != nil {
+		return domain.ProjectCodexActivation{}, fmt.Errorf("resume project thread requires explicit directory decision: %w", err)
+	}
+	launch.RequestID, launch.AgentName, launch.Action, launch.SessionID = uuid.NewString(), operation.AgentName, domain.CodexSessionResume, selected.ExternalID
+	if launch.Directory == "" {
+		launch.Directory = selected.LaunchDir
+	}
+	binding := &projectLaunchBinding{projectID: project.ID, assignmentID: project.Assignment.ID, expectedHead: project.HeadEventID, projectThreadID: selected.ID, mailboxID: project.MailboxID, projectName: project.Name, runnable: true}
+	runtime, err := s.launchCodexAgent(ctx, launch, binding)
+	if err != nil {
+		return domain.ProjectCodexActivation{}, err
+	}
+	return domain.ProjectCodexActivation{Project: project, Runtime: runtime}, nil
+}
+
+func projectResumeDirectorySafe(project domain.Project, thread domain.ProjectThread) error {
+	info, err := os.Stat(thread.LaunchDir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("recorded launch path is not a directory")
+	}
+	resolved, err := filepath.EvalSymlinks(thread.LaunchDir)
+	if err != nil {
+		return err
+	}
+	resolved = filepath.Clean(resolved)
+	for _, resource := range project.Resources {
+		if resource.Kind != "path" {
+			continue
+		}
+		relative, relErr := filepath.Rel(filepath.Clean(resource.CanonicalLocator), resolved)
+		if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			probe, openErr := os.Open(resolved)
+			if openErr != nil {
+				return openErr
+			}
+			_ = probe.Close()
+			return nil
+		}
+	}
+	return errors.New("recorded launch directory is no longer covered by a project claim")
 }
 
 func sameDesiredRuntime(runtime domain.CodexRuntime, request domain.CodexLaunchRequest) bool {
@@ -563,4 +1358,5 @@ func sameDesiredRuntime(runtime domain.CodexRuntime, request domain.CodexLaunchR
 }
 
 var _ domain.CodexRuntimeController = (*Supervisor)(nil)
+var _ domain.ProjectCodexRuntimeController = (*Supervisor)(nil)
 var _ domain.CodexRuntimeAutoStarter = (*Supervisor)(nil)

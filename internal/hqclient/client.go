@@ -220,6 +220,48 @@ func (c *Client) CodexAgentRuntime(ctx context.Context, name string) (domain.Cod
 	return result, err
 }
 
+func (c *Client) ActivateCodexProject(ctx context.Context, request domain.ProjectCodexActivationRequest) (domain.ProjectCodexActivation, error) {
+	var result domain.ProjectCodexActivation
+	if request.Launch.RequestID == "" {
+		request.Launch.RequestID = uuid.NewString()
+	}
+	err := c.call(ctx, domainrpc.ActivateCodexProjectMethod, request, &result)
+	return result, err
+}
+
+func (c *Client) CloseCodexProject(ctx context.Context, request domain.ProjectCodexCloseRequest) (domain.Project, error) {
+	var result domain.Project
+	err := c.call(ctx, domainrpc.CloseCodexProjectMethod, request, &result)
+	return result, err
+}
+
+func (c *Client) HandoffCodexProject(ctx context.Context, request domain.ProjectCodexHandoffRequest) (domain.ProjectCodexActivation, error) {
+	var result domain.ProjectCodexActivation
+	if request.Launch.RequestID == "" {
+		request.Launch.RequestID = uuid.NewString()
+	}
+	err := c.call(ctx, domainrpc.HandoffCodexProjectMethod, request, &result)
+	return result, err
+}
+
+func (c *Client) ProvisionProjectWorktree(ctx context.Context, request domain.ProjectWorktreeRequest) (domain.Project, error) {
+	if request.RequestID == "" {
+		request.RequestID = uuid.NewString()
+	}
+	if request.ProjectID == "" {
+		request.ProjectID = uuid.NewString()
+	}
+	var project domain.Project
+	err := c.call(ctx, domainrpc.ProvisionProjectWorktreeMethod, request, &project)
+	return project, err
+}
+func (c *Client) RetireCodexAgent(ctx context.Context, request domain.CodexRetireAgentRequest) error {
+	if request.RequestID == "" {
+		request.RequestID = uuid.NewString()
+	}
+	return c.call(ctx, domainrpc.RetireCodexAgentMethod, request, nil)
+}
+
 func (c *Client) RetireNamedAgent(ctx context.Context, name string) error {
 	return c.mutatingCall(ctx, domainrpc.RetireNamedAgentMethod, func(id string) any { return domainrpc.NamedAgentRequest{MutationID: id, Name: name} }, nil)
 }
@@ -394,6 +436,110 @@ func (c *Client) NetworkStatus(ctx context.Context) (domain.NetworkStatus, error
 	var result domain.NetworkStatus
 	err := c.call(ctx, domainrpc.NetworkStatusMethod, nil, &result)
 	return result, err
+}
+
+func (c *Client) CreateProject(ctx context.Context, request domain.CreateProjectRequest) (domain.Project, error) {
+	var result domain.Project
+	err := c.mutatingCall(ctx, domainrpc.CreateProjectMethod, func(id string) any { return domainrpc.CreateProjectRequest{MutationID: id, Project: request} }, &result)
+	return result, err
+}
+
+func (c *Client) GetProject(ctx context.Context, id string) (domain.Project, error) {
+	var result domain.Project
+	err := c.call(ctx, domainrpc.GetProjectMethod, domainrpc.ProjectRequest{ProjectID: id}, &result)
+	return result, err
+}
+
+func (c *Client) ListProjects(ctx context.Context, includeArchived bool) ([]domain.Project, error) {
+	var result []domain.Project
+	err := c.call(ctx, domainrpc.ListProjectsMethod, domainrpc.ListProjectsRequest{IncludeArchived: includeArchived}, &result)
+	return result, err
+}
+
+func (c *Client) ListProjectThreads(ctx context.Context, projectID string) ([]domain.ProjectThread, error) {
+	var result []domain.ProjectThread
+	err := c.call(ctx, domainrpc.ListProjectThreadsMethod, domainrpc.ProjectRequest{ProjectID: projectID}, &result)
+	return result, err
+}
+
+func (c *Client) projectMutation(ctx context.Context, method, projectID, expected string, build func(domainrpc.ProjectRequest) any) (domain.Project, error) {
+	var result domain.Project
+	err := c.mutatingCall(ctx, method, func(id string) any {
+		return build(domainrpc.ProjectRequest{MutationID: id, ProjectID: projectID, ExpectedHead: expected})
+	}, &result)
+	return result, err
+}
+
+func (c *Client) OpenProject(ctx context.Context, id, expected string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.OpenProjectMethod, id, expected, func(r domainrpc.ProjectRequest) any { return r })
+}
+func (c *Client) BeginCloseProject(ctx context.Context, id, expected string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.BeginCloseProjectMethod, id, expected, func(r domainrpc.ProjectRequest) any { return r })
+}
+func (c *Client) FinalizeCloseProject(ctx context.Context, id, expected string, forced bool, observation string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.FinalizeCloseProjectMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.FinalizeCloseProjectRequest{ProjectRequest: r, Forced: forced, RuntimeObservation: observation}
+	})
+}
+func (c *Client) SetProjectArchived(ctx context.Context, id, expected string, archived bool) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.ArchiveProjectMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.ArchiveProjectRequest{ProjectRequest: r, Archived: archived}
+	})
+}
+func (c *Client) UpdateProjectMetadata(ctx context.Context, id, expected, name, brief string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.UpdateProjectMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.UpdateProjectRequest{ProjectRequest: r, Name: name, Brief: brief}
+	})
+}
+func (c *Client) AddProjectPath(ctx context.Context, id, expected string, path domain.ProjectPathInput, primary bool) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.AddProjectPathMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.ProjectPathRequest{ProjectRequest: r, Path: path, Primary: primary}
+	})
+}
+func (c *Client) RemoveProjectResource(ctx context.Context, id, expected, resourceID string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.RemoveProjectResourceMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.ProjectResourceRequest{ProjectRequest: r, ResourceID: resourceID}
+	})
+}
+func (c *Client) ReplaceProjectPath(ctx context.Context, id, expected, resourceID string, path domain.ProjectPathInput) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.ReplaceProjectPathMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.ReplaceProjectPathRequest{ProjectResourceRequest: domainrpc.ProjectResourceRequest{ProjectRequest: r, ResourceID: resourceID}, Path: path}
+	})
+}
+func (c *Client) SetProjectPrimaryResource(ctx context.Context, id, expected, resourceID string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.SetProjectPrimaryMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.ProjectResourceRequest{ProjectRequest: r, ResourceID: resourceID}
+	})
+}
+func (c *Client) CheckProjectResource(ctx context.Context, projectID, resourceID string) (domain.ProjectResource, error) {
+	var result domain.ProjectResource
+	err := c.call(ctx, domainrpc.CheckProjectResourceMethod, domainrpc.CheckProjectResourceRequest{ProjectID: projectID, ResourceID: resourceID}, &result)
+	return result, err
+}
+func (c *Client) AssignProject(ctx context.Context, id, expected, agent string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.AssignProjectMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.AssignProjectRequest{ProjectRequest: r, AgentName: agent}
+	})
+}
+func (c *Client) ActivateProjectAssignment(ctx context.Context, id, expected string, activation domain.ActivateProjectAssignmentRequest) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.ActivateProjectMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.ActivateProjectRequest{ProjectRequest: r, Activation: activation}
+	})
+}
+func (c *Client) AbortProjectAssignment(ctx context.Context, id, expected, diagnostic string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.AbortProjectAssignmentMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.EndProjectAssignmentRequest{ProjectRequest: r, RuntimeObservation: diagnostic}
+	})
+}
+func (c *Client) BlockProjectAssignment(ctx context.Context, id, expected, diagnostic string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.BlockProjectAssignmentMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.EndProjectAssignmentRequest{ProjectRequest: r, RuntimeObservation: diagnostic}
+	})
+}
+func (c *Client) UnassignProject(ctx context.Context, id, expected string, forced bool, observation string) (domain.Project, error) {
+	return c.projectMutation(ctx, domainrpc.UnassignProjectMethod, id, expected, func(r domainrpc.ProjectRequest) any {
+		return domainrpc.EndProjectAssignmentRequest{ProjectRequest: r, Forced: forced, RuntimeObservation: observation}
+	})
 }
 
 func (c *Client) Synchronize(ctx context.Context) error {

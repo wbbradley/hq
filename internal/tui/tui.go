@@ -66,6 +66,9 @@ type app struct {
 	composeContext      model.RepositoryContext
 	composeNamed        bool
 	agents              []domain.NamedAgent
+	projects            []domain.Project
+	devices             []domain.HumanDevice
+	account             domain.HumanAccount
 	threadSessions      map[string]domain.AgentSession
 	pickingRecipient    bool
 	pickerQuery         string
@@ -100,6 +103,8 @@ type app struct {
 	defaultYolo         bool
 	managingAgents      bool
 	agentManager        agentManager
+	projectSetup        *projectComposeSetup
+	composeActivation   *projectActivationPlan
 }
 
 type agentManagerStage int
@@ -153,6 +158,7 @@ type messageDraft struct {
 	composeName    string
 	composeContext model.RepositoryContext
 	composeNamed   bool
+	activation     *projectActivationPlan
 	updatedAt      time.Time
 }
 
@@ -163,6 +169,60 @@ type recipientChoice struct {
 	lastActiveAt *time.Time
 	context      model.RepositoryContext
 	named        bool
+	project      bool
+	projectID    string
+	newProject   bool
+	status       string
+}
+
+type projectSetupStage int
+
+const (
+	enterProjectName projectSetupStage = iota
+	chooseProjectHome
+	enterProjectBrief
+	enterProjectPaths
+	chooseProjectPrimary
+	enterWorktreeRepository
+	enterWorktreeBase
+	enterWorktreeDestination
+	enterWorktreeBranch
+	chooseWorktreePrimary
+	chooseProjectAgent
+	chooseProjectThread
+	enterProjectDirectory
+)
+
+type projectComposeSetup struct {
+	project             domain.Project
+	stage               projectSetupStage
+	agents              []domain.NamedAgent
+	agent               domain.NamedAgent
+	threads             []domain.ProjectThread
+	cursor              int
+	query               string
+	directory           string
+	force               bool
+	busy                bool
+	status              string
+	name                string
+	brief               string
+	home                string
+	pathsText           string
+	paths               []string
+	worktreeRepository  string
+	worktreeBase        string
+	worktreeDestination string
+	worktreeBranch      string
+}
+
+type projectActivationPlan struct {
+	projectID string
+	agentName string
+	action    domain.CodexSessionAction
+	sessionID string
+	directory string
+	force     bool
 }
 
 type paneLayout struct {
@@ -203,6 +263,9 @@ type loadedMsg struct {
 	histories     map[string][]model.Message
 	network       domain.NetworkStatus
 	agents        []domain.NamedAgent
+	projects      []domain.Project
+	devices       []domain.HumanDevice
+	account       domain.HumanAccount
 	sessions      map[string]domain.AgentSession
 	err           error
 }
@@ -216,6 +279,16 @@ type historyLoadedMsg struct {
 type answeredMsg struct {
 	err  error
 	sent bool
+}
+
+type projectThreadsMsg struct {
+	threads []domain.ProjectThread
+	err     error
+}
+
+type projectCreatedMsg struct {
+	project domain.Project
+	err     error
 }
 
 type undoAction struct {
@@ -394,6 +467,12 @@ func (m app) load() tea.Msg {
 	if err != nil {
 		return loadedMsg{err: err}
 	}
+	projects, err := m.store.ListProjects(m.ctx, false)
+	if err != nil {
+		return loadedMsg{err: err}
+	}
+	account, _ := m.store.HumanAccount(m.ctx)
+	devices, _ := m.store.HumanDevices(m.ctx)
 	sessions := make(map[string]domain.AgentSession)
 	for _, agent := range agents {
 		history, historyErr := m.store.ListNamedAgentSessions(m.ctx, agent.Name)
@@ -405,7 +484,7 @@ func (m app) load() tea.Msg {
 		}
 	}
 	network, err := m.store.NetworkStatus(m.ctx)
-	return loadedMsg{conversations: conversations, histories: histories, agents: agents, sessions: sessions, network: network, err: err}
+	return loadedMsg{conversations: conversations, histories: histories, agents: agents, projects: projects, devices: devices, account: account, sessions: sessions, network: network, err: err}
 }
 
 func (m *app) reload() tea.Cmd {
@@ -491,6 +570,12 @@ func (m app) answer() tea.Msg {
 		message.Context = m.composeContext
 		message.RecipientLabel = m.composeName
 		err = m.store.Create(m.ctx, message)
+		if err == nil && m.composeActivation != nil {
+			err = m.activateComposedProject(*m.composeActivation)
+			if err != nil {
+				return answeredMsg{err: fmt.Errorf("message is pending in the project; activation failed: %w", err), sent: true}
+			}
+		}
 	} else {
 		replyTo := m.answerID
 		message.ReplyTo = &replyTo
@@ -502,6 +587,38 @@ func (m app) answer() tea.Msg {
 		}
 	}
 	return answeredMsg{err: err, sent: err == nil}
+}
+
+func (m app) activateComposedProject(plan projectActivationPlan) error {
+	controller, ok := m.store.(domain.ProjectCodexRuntimeController)
+	if !ok {
+		return errors.New("project Codex runtime control is unavailable")
+	}
+	project, err := m.store.GetProject(m.ctx, plan.projectID)
+	if err != nil {
+		return err
+	}
+	if project.Lifecycle == domain.ProjectOpen && project.Assignment != nil && project.Assignment.AgentName == plan.agentName && project.Assignment.State == domain.AssignmentRunnable {
+		return nil
+	}
+	repository := model.RepositoryContext{Directory: plan.directory}
+	if snapshotter, ok := m.repo.(interface {
+		Snapshot(context.Context, string) model.RepositoryContext
+	}); ok {
+		repository = snapshotter.Snapshot(m.ctx, plan.directory)
+	}
+	launch := domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: plan.agentName, Action: plan.action, SessionID: plan.sessionID, Directory: plan.directory, Repository: repository, Environment: append([]string(nil), m.launchEnvironment...), Yolo: m.defaultYolo}
+	defer func() {
+		for index := range launch.Environment {
+			launch.Environment[index] = ""
+		}
+	}()
+	if project.Assignment != nil {
+		_, err = controller.HandoffCodexProject(m.ctx, domain.ProjectCodexHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: plan.agentName, Force: plan.force, Launch: launch})
+	} else {
+		_, err = controller.ActivateCodexProject(m.ctx, domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: plan.agentName, Launch: launch})
+	}
+	return err
 }
 
 func (m app) archiveAnsweredGroup() error {
@@ -595,7 +712,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.inbox, m.sent, m.archived = msg.inbox, msg.sent, msg.archived
 		}
-		m.agents, m.threadSessions, m.network, m.err = msg.agents, msg.sessions, msg.network, msg.err
+		m.agents, m.projects, m.devices, m.account, m.threadSessions, m.network, m.err = msg.agents, msg.projects, msg.devices, msg.account, msg.sessions, msg.network, msg.err
 		if choices := m.filteredRecipients(); m.pickerCursor >= len(choices) {
 			m.pickerCursor = max(0, len(choices)-1)
 		}
@@ -754,6 +871,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.composeName = ""
 			m.composeContext = model.RepositoryContext{}
 			m.composeNamed = false
+			m.composeActivation = nil
 			m.paneFocus = focusInbox
 			m.editor.Reset()
 			m.reconcileMessageViewport(true)
@@ -769,8 +887,34 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.composeName = ""
 			m.composeContext = model.RepositoryContext{}
 			m.composeNamed = false
+			m.composeActivation = nil
 			m.paneFocus = focusReply
 			m.editor.Blur()
+		}
+	case projectThreadsMsg:
+		if m.projectSetup != nil {
+			m.projectSetup.busy = false
+			m.projectSetup.threads, m.projectSetup.status = msg.threads, ""
+			if msg.err != nil {
+				m.projectSetup.status = msg.err.Error()
+			} else {
+				m.projectSetup.stage, m.projectSetup.cursor = chooseProjectThread, 0
+			}
+		}
+	case projectCreatedMsg:
+		if m.projectSetup != nil {
+			m.projectSetup.busy = false
+			if msg.err != nil {
+				m.projectSetup.status = msg.err.Error()
+			} else if msg.project.PendingCommand != nil || msg.project.MailboxID == "" {
+				m.projectSetup = nil
+				m.pickingRecipient = true
+				m.err = fmt.Errorf("project creation queued on %s; compose after the home commits it", msg.project.HomeInstallation)
+				return m, m.reload()
+			} else {
+				m.projectSetup.project = msg.project
+				m.prepareProjectAgents()
+			}
 		}
 	case archivedMsg:
 		m.err = msg.err
@@ -815,6 +959,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.pickingRecipient {
 			return m.updateRecipientPicker(msg)
+		}
+		if m.projectSetup != nil {
+			return m.updateProjectSetup(msg)
 		}
 		if m.managingAgents {
 			return m.updateAgentManager(msg)
@@ -906,6 +1053,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.composeName = ""
 				m.composeContext = model.RepositoryContext{}
 				m.composeNamed = false
+				m.composeActivation = nil
 				m.paneFocus = focusInbox
 				m.editor.Blur()
 				m.editor.Reset()
@@ -1037,17 +1185,46 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) recipients() []recipientChoice {
-	choices := []recipientChoice{{name: "self", mailboxID: model.HumanMailboxID, active: true}}
+	choices := make([]recipientChoice, 0, len(m.projects)+len(m.agents)+2)
+	for _, project := range m.projects {
+		status := string(project.Lifecycle)
+		runnable := project.Lifecycle == domain.ProjectOpen && project.Assignment != nil && project.Assignment.State == domain.AssignmentRunnable
+		if project.Assignment == nil {
+			status += " · unassigned"
+			if project.SuggestedAgentName != "" {
+				status += " · suggest " + project.SuggestedAgentName
+			}
+		} else {
+			status += " · " + project.Assignment.AgentName + " · " + string(project.Assignment.State)
+		}
+		if project.PendingCommand != nil {
+			status += " · command " + string(project.PendingCommand.Stage)
+			if project.PendingCommand.Diagnostic != "" {
+				status += " · " + project.PendingCommand.Diagnostic
+			}
+		} else if project.LatestCommand != nil && project.LatestCommand.Stage == domain.ProjectCommandRejected {
+			status += " · command rejected"
+		}
+		name := fmt.Sprintf("%s · %s/%s", project.Name, short(project.HomeInstallation, 8), short(project.ID, 8))
+		choices = append(choices, recipientChoice{name: name, mailboxID: project.MailboxID, active: runnable, project: true, projectID: project.ID, status: status})
+	}
+	if m.account.LocalInstallationID != "" {
+		choices = append(choices, recipientChoice{name: "+ new project", project: true, newProject: true, status: "choose home, resources, agent, and thread"})
+	}
+	choices = append(choices, recipientChoice{name: "self", mailboxID: model.HumanMailboxID, active: true, status: "personal"})
 	for _, agent := range m.agents {
 		if agent.Retired {
 			continue
 		}
 		choices = append(choices, recipientChoice{
 			name: agent.Name, mailboxID: agent.MailboxID, active: agent.Active,
-			lastActiveAt: agent.LastActiveAt, context: agent.Context, named: true,
+			lastActiveAt: agent.LastActiveAt, context: agent.Context, named: true, status: "direct agent",
 		})
 	}
 	sort.SliceStable(choices, func(left, right int) bool {
+		if choices[left].project != choices[right].project {
+			return choices[left].project
+		}
 		if choices[left].active != choices[right].active {
 			return choices[left].active
 		}
@@ -1352,7 +1529,11 @@ func (m app) filteredRecipients() []recipientChoice {
 	}
 	filtered := make([]recipientChoice, 0, len(choices))
 	for _, choice := range choices {
-		if strings.Contains(strings.ToLower(choice.name), query) {
+		if choice.newProject {
+			if strings.HasPrefix("new project", query) {
+				filtered = append(filtered, choice)
+			}
+		} else if strings.Contains(strings.ToLower(choice.name), query) {
 			filtered = append(filtered, choice)
 		}
 	}
@@ -1383,6 +1564,23 @@ func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		choice := choices[min(m.pickerCursor, len(choices)-1)]
+		if choice.newProject {
+			m.pickingRecipient = false
+			m.projectSetup = &projectComposeSetup{stage: enterProjectName, home: m.account.LocalInstallationID}
+			m.editor.Blur()
+			return m, nil
+		}
+		if choice.project && !choice.active {
+			for _, project := range m.projects {
+				if project.ID == choice.projectID {
+					if project.PendingCommand != nil {
+						m.err = domain.ErrProjectCommandPending
+						return m, nil
+					}
+					return m.beginProjectSetup(project)
+				}
+			}
+		}
 		m.pickingRecipient = false
 		m.answering = true
 		m.answerID = ""
@@ -1390,6 +1588,7 @@ func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.answerQ = model.Message{}
 		m.composeTo, m.composeName = choice.mailboxID, choice.name
 		m.composeContext, m.composeNamed = choice.context, choice.named
+		m.composeActivation = nil
 		m.activeDraftKey = "draft:" + uuid.NewString()
 		m.paneFocus = focusReply
 		m.resizeEditor()
@@ -1409,6 +1608,426 @@ func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.pickerCursor = 0
 	}
 	return m, nil
+}
+
+func (m app) beginProjectSetup(project domain.Project) (tea.Model, tea.Cmd) {
+	agents := make([]domain.NamedAgent, 0, len(m.agents))
+	for _, agent := range m.agents {
+		if !agent.Retired && agent.Idle {
+			agents = append(agents, agent)
+		}
+	}
+	if project.ReadOnlyReplica && project.SuggestedAgentName != "" {
+		found := false
+		for _, agent := range agents {
+			found = found || agent.Name == project.SuggestedAgentName
+		}
+		if !found {
+			agents = append(agents, domain.NamedAgent{Name: project.SuggestedAgentName, Idle: true})
+		}
+	}
+	sort.SliceStable(agents, func(i, j int) bool {
+		if agents[i].Name == project.SuggestedAgentName {
+			return true
+		}
+		if agents[j].Name == project.SuggestedAgentName {
+			return false
+		}
+		return agents[i].Name < agents[j].Name
+	})
+	m.pickingRecipient = false
+	m.projectSetup = &projectComposeSetup{project: project, stage: chooseProjectAgent, agents: agents}
+	m.editor.Blur()
+	return m, nil
+}
+
+func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	setup := m.projectSetup
+	if setup == nil {
+		return m, nil
+	}
+	if setup.busy {
+		if key.String() == "esc" {
+			m.projectSetup = nil
+			m.pickingRecipient = true
+		}
+		return m, nil
+	}
+	if key.String() == "ctrl+c" || key.String() == "esc" {
+		if setup.stage == enterProjectName || setup.stage == chooseProjectAgent && setup.project.ID != "" {
+			m.projectSetup = nil
+			m.pickingRecipient = true
+			return m, nil
+		}
+		switch setup.stage {
+		case chooseProjectHome:
+			setup.stage = enterProjectName
+		case enterProjectBrief:
+			setup.stage = chooseProjectHome
+		case enterProjectPaths:
+			setup.stage = enterProjectBrief
+		case chooseProjectPrimary:
+			setup.stage = enterProjectPaths
+		case enterWorktreeRepository:
+			setup.stage = enterProjectPaths
+		case enterWorktreeBase:
+			setup.stage = enterWorktreeRepository
+		case enterWorktreeDestination:
+			setup.stage = enterWorktreeBase
+		case enterWorktreeBranch:
+			setup.stage = enterWorktreeDestination
+		case chooseWorktreePrimary:
+			setup.stage = enterWorktreeBranch
+		case chooseProjectThread:
+			setup.stage = chooseProjectAgent
+		case enterProjectDirectory:
+			setup.stage = chooseProjectThread
+		default:
+			setup.stage = enterProjectName
+		}
+		setup.cursor, setup.status = 0, ""
+		return m, nil
+	}
+	switch setup.stage {
+	case enterProjectName:
+		switch key.String() {
+		case "enter":
+			if strings.TrimSpace(setup.name) == "" {
+				setup.status = "Project name is required."
+			} else {
+				setup.stage, setup.cursor, setup.status = chooseProjectHome, 0, ""
+			}
+		case "backspace":
+			setup.name = trimLastRune(setup.name)
+		default:
+			setup.name += printableKeyText(key)
+		}
+	case chooseProjectHome:
+		devices := m.activeProjectHomes()
+		switch key.String() {
+		case "j", "down":
+			setup.cursor = min(max(0, len(devices)-1), setup.cursor+1)
+		case "k", "up":
+			setup.cursor = max(0, setup.cursor-1)
+		case "enter":
+			if len(devices) != 0 {
+				setup.home = devices[min(setup.cursor, len(devices)-1)].InstallationID
+				setup.stage, setup.status = enterProjectBrief, ""
+			}
+		}
+	case enterProjectBrief:
+		switch key.String() {
+		case "enter":
+			setup.stage, setup.status = enterProjectPaths, ""
+		case "backspace":
+			setup.brief = trimLastRune(setup.brief)
+		default:
+			setup.brief += printableKeyText(key)
+		}
+	case enterProjectPaths:
+		switch key.String() {
+		case "tab":
+			setup.paths = splitProjectPaths(setup.pathsText)
+			setup.stage, setup.worktreeBase, setup.status = enterWorktreeRepository, "HEAD", ""
+		case "enter":
+			setup.paths = splitProjectPaths(setup.pathsText)
+			if len(setup.paths) > 1 {
+				setup.stage, setup.cursor, setup.status = chooseProjectPrimary, 0, ""
+			} else {
+				setup.busy, setup.status = true, "creating project…"
+				return m, m.createProjectFromSetup(*setup, 0)
+			}
+		case "backspace":
+			setup.pathsText = trimLastRune(setup.pathsText)
+		default:
+			setup.pathsText += printableKeyText(key)
+		}
+	case chooseProjectPrimary:
+		switch key.String() {
+		case "j", "down":
+			setup.cursor = min(len(setup.paths)-1, setup.cursor+1)
+		case "k", "up":
+			setup.cursor = max(0, setup.cursor-1)
+		case "enter":
+			setup.busy, setup.status = true, "creating project…"
+			return m, m.createProjectFromSetup(*setup, setup.cursor)
+		}
+	case enterWorktreeRepository:
+		switch key.String() {
+		case "enter":
+			if strings.TrimSpace(setup.worktreeRepository) == "" {
+				setup.status = "Repository is required."
+			} else {
+				setup.stage, setup.status = enterWorktreeBase, ""
+			}
+		case "backspace":
+			setup.worktreeRepository = trimLastRune(setup.worktreeRepository)
+		default:
+			setup.worktreeRepository += printableKeyText(key)
+		}
+	case enterWorktreeBase:
+		switch key.String() {
+		case "enter":
+			if strings.TrimSpace(setup.worktreeBase) == "" {
+				setup.worktreeBase = "HEAD"
+			}
+			setup.stage, setup.status = enterWorktreeDestination, ""
+		case "backspace":
+			setup.worktreeBase = trimLastRune(setup.worktreeBase)
+		default:
+			setup.worktreeBase += printableKeyText(key)
+		}
+	case enterWorktreeDestination:
+		switch key.String() {
+		case "enter":
+			if strings.TrimSpace(setup.worktreeDestination) == "" {
+				setup.status = "Worktree destination is required."
+			} else {
+				setup.stage, setup.status = enterWorktreeBranch, ""
+			}
+		case "backspace":
+			setup.worktreeDestination = trimLastRune(setup.worktreeDestination)
+		default:
+			setup.worktreeDestination += printableKeyText(key)
+		}
+	case enterWorktreeBranch:
+		switch key.String() {
+		case "enter":
+			if strings.TrimSpace(setup.worktreeBranch) == "" {
+				setup.status = "Branch name is required."
+			} else if len(setup.paths) != 0 {
+				setup.stage, setup.cursor, setup.status = chooseWorktreePrimary, 0, ""
+			} else {
+				setup.busy, setup.status = true, "reserving destination and creating worktree…"
+				return m, m.createWorktreeFromSetup(*setup, 0)
+			}
+		case "backspace":
+			setup.worktreeBranch = trimLastRune(setup.worktreeBranch)
+		default:
+			setup.worktreeBranch += printableKeyText(key)
+		}
+	case chooseWorktreePrimary:
+		options := append([]string{setup.worktreeDestination}, setup.paths...)
+		switch key.String() {
+		case "j", "down":
+			setup.cursor = min(len(options)-1, setup.cursor+1)
+		case "k", "up":
+			setup.cursor = max(0, setup.cursor-1)
+		case "enter":
+			setup.busy, setup.status = true, "reserving destination and creating worktree…"
+			return m, m.createWorktreeFromSetup(*setup, setup.cursor)
+		}
+	case chooseProjectAgent:
+		agents := setup.filteredAgents()
+		switch key.String() {
+		case "j", "down":
+			setup.cursor = min(max(0, len(agents)-1), setup.cursor+1)
+		case "k", "up":
+			setup.cursor = max(0, setup.cursor-1)
+		case "enter":
+			if len(agents) != 0 || setup.project.ReadOnlyReplica && strings.TrimSpace(setup.query) != "" {
+				if len(agents) != 0 {
+					setup.agent = agents[min(setup.cursor, len(agents)-1)]
+				} else {
+					setup.agent = domain.NamedAgent{Name: strings.TrimSpace(setup.query), Idle: true}
+				}
+				setup.busy = true
+				return m, func() tea.Msg {
+					threads, err := m.store.ListProjectThreads(m.ctx, setup.project.ID)
+					return projectThreadsMsg{threads: threads, err: err}
+				}
+			}
+		case "backspace":
+			runes := []rune(setup.query)
+			if len(runes) > 0 {
+				setup.query, setup.cursor = string(runes[:len(runes)-1]), 0
+			}
+		default:
+			if key.Text != "" && !strings.ContainsAny(key.Text, "\r\n\t") {
+				setup.query, setup.cursor = setup.query+key.Text, 0
+			}
+		}
+	case chooseProjectThread:
+		threads := setup.compatibleThreads()
+		switch key.String() {
+		case "j", "down":
+			setup.cursor = min(len(threads), setup.cursor+1)
+		case "k", "up":
+			setup.cursor = max(0, setup.cursor-1)
+		case "f":
+			if setup.project.Assignment != nil {
+				setup.force = !setup.force
+			}
+		case "enter":
+			if setup.project.Assignment != nil && !setup.force {
+				setup.status = "This handoff is blocked; press f to acknowledge a forced takeover."
+				return m, nil
+			}
+			if setup.cursor == 0 {
+				setup.stage, setup.directory, setup.status = enterProjectDirectory, m.projectDefaultDirectory(setup.project), ""
+				return m, nil
+			}
+			thread := threads[setup.cursor-1]
+			return m.finishProjectSetup(domain.CodexSessionResume, thread.ExternalID, thread.LaunchDir)
+		}
+	case enterProjectDirectory:
+		switch key.String() {
+		case "enter":
+			directory, err := m.validRuntimeDirectory(setup.directory)
+			if err != nil {
+				setup.status = err.Error()
+				return m, nil
+			}
+			return m.finishProjectSetup(domain.CodexSessionNew, "", directory)
+		case "backspace":
+			runes := []rune(setup.directory)
+			if len(runes) > 0 {
+				setup.directory = string(runes[:len(runes)-1])
+			}
+		default:
+			if key.Text != "" && !strings.ContainsAny(key.Text, "\r\n\t") {
+				setup.directory += key.Text
+			}
+		}
+	}
+	return m, nil
+}
+
+func (s *projectComposeSetup) filteredAgents() []domain.NamedAgent {
+	query := strings.ToLower(strings.TrimSpace(s.query))
+	if query == "" {
+		return s.agents
+	}
+	var result []domain.NamedAgent
+	for _, agent := range s.agents {
+		if strings.Contains(strings.ToLower(agent.Name), query) {
+			result = append(result, agent)
+		}
+	}
+	return result
+}
+
+func trimLastRune(value string) string {
+	runes := []rune(value)
+	if len(runes) == 0 {
+		return value
+	}
+	return string(runes[:len(runes)-1])
+}
+
+func printableKeyText(key tea.KeyPressMsg) string {
+	if key.Text == "" || strings.ContainsAny(key.Text, "\r\n\t") {
+		return ""
+	}
+	return key.Text
+}
+
+func splitProjectPaths(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' })
+	result := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if path := strings.TrimSpace(field); path != "" {
+			result = append(result, path)
+		}
+	}
+	return result
+}
+
+func (m app) activeProjectHomes() []domain.HumanDevice {
+	var result []domain.HumanDevice
+	for _, device := range m.devices {
+		if device.State == "active" {
+			result = append(result, device)
+		}
+	}
+	if len(result) == 0 && m.account.LocalInstallationID != "" {
+		result = append(result, domain.HumanDevice{InstallationID: m.account.LocalInstallationID, Label: "this device", State: "active"})
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].InstallationID == m.account.LocalInstallationID {
+			return true
+		}
+		if result[j].InstallationID == m.account.LocalInstallationID {
+			return false
+		}
+		return result[i].Label < result[j].Label
+	})
+	return result
+}
+
+func (m app) createProjectFromSetup(setup projectComposeSetup, primary int) tea.Cmd {
+	return func() tea.Msg {
+		request := domain.CreateProjectRequest{Name: strings.TrimSpace(setup.name), HomeInstallation: setup.home, Brief: strings.TrimSpace(setup.brief), PrimaryPath: primary}
+		for _, path := range setup.paths {
+			request.Paths = append(request.Paths, domain.ProjectPathInput{DisplayPath: path})
+		}
+		project, err := m.store.CreateProject(m.ctx, request)
+		return projectCreatedMsg{project: project, err: err}
+	}
+}
+
+func (m app) createWorktreeFromSetup(setup projectComposeSetup, primary int) tea.Cmd {
+	return func() tea.Msg {
+		provisioner, ok := m.store.(domain.ProjectWorktreeProvisioner)
+		if !ok {
+			return projectCreatedMsg{err: errors.New("project worktree provisioning is unavailable")}
+		}
+		request := domain.ProjectWorktreeRequest{RequestID: uuid.NewString(), ProjectID: uuid.NewString(), HomeInstallation: setup.home, Name: strings.TrimSpace(setup.name), Brief: strings.TrimSpace(setup.brief), Repository: strings.TrimSpace(setup.worktreeRepository), MergeBase: strings.TrimSpace(setup.worktreeBase), Destination: strings.TrimSpace(setup.worktreeDestination), Branch: strings.TrimSpace(setup.worktreeBranch), PrimaryPath: primary}
+		for _, path := range setup.paths {
+			request.AdditionalPaths = append(request.AdditionalPaths, domain.ProjectPathInput{DisplayPath: path})
+		}
+		project, err := provisioner.ProvisionProjectWorktree(m.ctx, request)
+		return projectCreatedMsg{project: project, err: err}
+	}
+}
+
+func (m *app) prepareProjectAgents() {
+	if m.projectSetup == nil {
+		return
+	}
+	var agents []domain.NamedAgent
+	for _, agent := range m.agents {
+		if !agent.Retired && agent.Idle {
+			agents = append(agents, agent)
+		}
+	}
+	sort.SliceStable(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
+	m.projectSetup.agents, m.projectSetup.stage, m.projectSetup.cursor, m.projectSetup.status = agents, chooseProjectAgent, 0, ""
+}
+
+func (s *projectComposeSetup) compatibleThreads() []domain.ProjectThread {
+	var result []domain.ProjectThread
+	for _, thread := range s.threads {
+		if thread.AgentName == s.agent.Name && !thread.RetiredAgent && thread.Harness == "codex" {
+			result = append(result, thread)
+		}
+	}
+	return result
+}
+
+func (m app) projectDefaultDirectory(project domain.Project) string {
+	for _, resource := range project.Resources {
+		if resource.ID == project.PrimaryResourceID && resource.Kind == "path" {
+			return resource.DisplayLocator
+		}
+	}
+	return m.launchDirectory
+}
+
+func (m app) finishProjectSetup(action domain.CodexSessionAction, sessionID, directory string) (tea.Model, tea.Cmd) {
+	setup := m.projectSetup
+	m.composeActivation = &projectActivationPlan{projectID: setup.project.ID, agentName: setup.agent.Name, action: action, sessionID: sessionID, directory: directory, force: setup.force}
+	m.projectSetup = nil
+	m.answering = true
+	m.answerID, m.answerGroupKey = "", ""
+	m.answerQ = model.Message{}
+	m.composeTo, m.composeName = setup.project.MailboxID, fmt.Sprintf("%s · %s/%s", setup.project.Name, short(setup.project.HomeInstallation, 8), short(setup.project.ID, 8))
+	m.composeContext, m.composeNamed = model.RepositoryContext{}, false
+	m.activeDraftKey = "draft:" + uuid.NewString()
+	m.paneFocus = focusReply
+	m.resizeEditor()
+	m.editor.Focus()
+	return m, textarea.Blink
 }
 
 func (m *app) resizeEditor() {
@@ -1481,7 +2100,7 @@ func (m *app) stowActiveDraft() {
 		m.drafts[key] = messageDraft{
 			key: key, body: body, answerID: m.answerID, answerGroupKey: m.answerGroupKey,
 			answerQ: m.answerQ, composeTo: m.composeTo, composeName: m.composeName,
-			composeContext: m.composeContext, composeNamed: m.composeNamed, updatedAt: time.Now(),
+			composeContext: m.composeContext, composeNamed: m.composeNamed, activation: m.composeActivation, updatedAt: time.Now(),
 		}
 	}
 	m.answering = false
@@ -1493,6 +2112,7 @@ func (m *app) stowActiveDraft() {
 	m.composeName = ""
 	m.composeContext = model.RepositoryContext{}
 	m.composeNamed = false
+	m.composeActivation = nil
 	m.editor.Blur()
 	m.editor.Reset()
 	groups := m.visibleGroups()
@@ -1514,6 +2134,7 @@ func (m *app) resumeDraft(draft messageDraft) {
 	m.composeName = draft.composeName
 	m.composeContext = draft.composeContext
 	m.composeNamed = draft.composeNamed
+	m.composeActivation = draft.activation
 	m.paneFocus = focusReply
 	m.resizeEditor()
 	m.editor.SetValue(draft.body)
@@ -2261,6 +2882,8 @@ func (m app) View() tea.View {
 	replyPane := renderMessagePanel(replyHint, layout.replyWidth, "[reply]", "", replyFocused)
 	if m.pickingRecipient {
 		replyPane = m.renderRecipientPicker(layout.replyWidth, layout.replyHeight)
+	} else if m.projectSetup != nil {
+		replyPane = m.renderProjectSetup(layout.replyWidth, layout.replyHeight)
 	} else if m.answering {
 		replyPane = m.renderReplyPane(layout.replyWidth)
 	}
@@ -2269,6 +2892,8 @@ func (m app) View() tea.View {
 	help := "tab/shift+tab focus/compose · j/k navigate · pgup/pgdown or ^u/^d page · enter reply · n new · g agents · d archive · u undo · i details · q quit"
 	if m.pickingRecipient {
 		help = "type to filter recipients · j/k or arrows move · enter select · esc cancel"
+	} else if m.projectSetup != nil {
+		help = "j/k move · enter select · f force blocked handoff · esc back"
 	} else if m.answering {
 		help = "tab/shift+tab focus · pgup/pgdown or ^u/^d page · enter submit · shift+enter/ctrl+j newline · esc cancel"
 	}
@@ -2615,13 +3240,16 @@ func (m app) renderRecipientPicker(width, height int) string {
 	}
 	body.WriteString(dim.Render("Search: " + query))
 	choices := m.filteredRecipients()
-	rows := max(1, height-3)
+	rows := max(1, height-2)
 	start, end := listWindow(len(choices), m.pickerCursor, rows)
 	for index := start; index < end; index++ {
 		choice := choices[index]
-		presence := "offline"
-		if choice.active {
-			presence = "active"
+		presence := choice.status
+		if presence == "" {
+			presence = "offline"
+			if choice.active {
+				presence = "active"
+			}
 		}
 		metadata := presence
 		if !choice.active && choice.lastActiveAt != nil {
@@ -2639,7 +3267,137 @@ func (m app) renderRecipientPicker(width, height int) string {
 		body.WriteByte('\n')
 		body.WriteString(dim.Render("No matching recipients."))
 	}
-	return renderMessagePanel(body.String(), width, "[recipient · choose a local recipient]", "", m.paneFocused(focusReply))
+	return renderMessagePanel(body.String(), width, "[project · choose project work or direct recipient]", "", m.paneFocused(focusReply))
+}
+
+func (m app) renderProjectSetup(width, height int) string {
+	setup := m.projectSetup
+	if setup == nil {
+		return ""
+	}
+	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
+	var body strings.Builder
+	if setup.project.ID == "" {
+		body.WriteString(titleStyle.Render("Create project"))
+	} else {
+		body.WriteString(titleStyle.Render(setup.project.Name))
+		body.WriteString(" · " + string(setup.project.Lifecycle))
+	}
+	if setup.project.Lifecycle == domain.ProjectClosed {
+		body.WriteString("\nClaims checked atomically on reopen:")
+		for _, resource := range setup.project.Resources {
+			body.WriteString("\n  " + truncateDisplay(resource.DisplayLocator+" · "+string(resource.Health), innerWidth-4))
+		}
+	}
+	switch setup.stage {
+	case enterProjectName:
+		body.WriteString("\n\nNew project name:\n" + setup.name)
+	case chooseProjectHome:
+		body.WriteString("\n\nChoose the immutable project home")
+		devices := m.activeProjectHomes()
+		for index, device := range devices {
+			label := device.Label
+			if label == "" {
+				label = device.InstallationID
+			}
+			if device.InstallationID == m.account.LocalInstallationID {
+				label += " · this device"
+			}
+			prefix := "  "
+			if index == setup.cursor {
+				prefix = "› "
+			}
+			body.WriteString("\n" + prefix + truncateDisplay(label+" · "+short(device.InstallationID, 12), innerWidth-2))
+		}
+	case enterProjectBrief:
+		body.WriteString("\n\nOptional project brief:\n" + setup.brief)
+		body.WriteString("\n" + dim.Render("Press enter to leave it empty."))
+	case enterProjectPaths:
+		body.WriteString("\n\nDesired path resources (comma separated):\n" + setup.pathsText)
+		body.WriteString("\n" + dim.Render("Enter: ordinary paths · Tab: add a Git worktree · paths may be missing."))
+	case chooseProjectPrimary:
+		body.WriteString("\n\nChoose the primary path")
+		for index, path := range setup.paths {
+			prefix := "  "
+			if index == setup.cursor {
+				prefix = "› "
+			}
+			body.WriteString("\n" + prefix + truncateDisplay(path, innerWidth-2))
+		}
+	case enterWorktreeRepository:
+		body.WriteString("\n\nExisting Git repository:\n" + setup.worktreeRepository)
+	case enterWorktreeBase:
+		body.WriteString("\n\nMerge base / starting ref:\n" + setup.worktreeBase)
+	case enterWorktreeDestination:
+		body.WriteString("\n\nNew worktree destination:\n" + setup.worktreeDestination)
+		body.WriteString("\n" + dim.Render("HQ reserves this path before invoking Git."))
+	case enterWorktreeBranch:
+		body.WriteString("\n\nNew branch name:\n" + setup.worktreeBranch)
+	case chooseWorktreePrimary:
+		body.WriteString("\n\nChoose the primary path")
+		options := append([]string{setup.worktreeDestination}, setup.paths...)
+		for index, path := range options {
+			prefix := "  "
+			if index == setup.cursor {
+				prefix = "› "
+			}
+			body.WriteString("\n" + prefix + truncateDisplay(path, innerWidth-2))
+		}
+	case chooseProjectAgent:
+		body.WriteString("\n\nChoose an idle local agent")
+		agents := setup.filteredAgents()
+		rows := max(1, height-8)
+		start, end := listWindow(len(agents), setup.cursor, rows)
+		for index := start; index < end; index++ {
+			label := agents[index].Name
+			if label == setup.project.SuggestedAgentName {
+				label += " · recent"
+			}
+			prefix := "  "
+			if index == setup.cursor {
+				prefix = "› "
+			}
+			body.WriteString("\n" + prefix + truncateDisplay(label, innerWidth-2))
+		}
+		if len(agents) == 0 {
+			message := "No idle local agents."
+			if setup.project.ReadOnlyReplica {
+				message = "Type an agent name on the project home; the home validates availability."
+			}
+			body.WriteString("\n" + dim.Render(message))
+		}
+	case chooseProjectThread:
+		body.WriteString("\n\nAgent: " + setup.agent.Name + "\nChoose an execution thread")
+		options := append([]domain.ProjectThread{{}}, setup.compatibleThreads()...)
+		for index, thread := range options {
+			label := "new Codex thread"
+			if index > 0 {
+				label = "resume " + shortThreadID(thread.ExternalID) + " · " + thread.LaunchDir
+			}
+			prefix := "  "
+			if index == setup.cursor {
+				prefix = "› "
+			}
+			body.WriteString("\n" + prefix + truncateDisplay(label, innerWidth-2))
+		}
+		if setup.project.Assignment != nil {
+			warning := "blocked handoff · press f to authorize force takeover"
+			if setup.force {
+				warning = "FORCE TAKEOVER authorized · old runtime may still access resources"
+			}
+			body.WriteString("\n\n" + warning)
+		}
+	case enterProjectDirectory:
+		body.WriteString("\n\nNew thread launch directory:\n" + setup.directory)
+		body.WriteString("\n" + dim.Render("An absolute directory outside claims is allowed with a warning."))
+	}
+	if setup.busy {
+		body.WriteString("\n" + dim.Render("Loading…"))
+	}
+	if setup.status != "" {
+		body.WriteString("\n" + setup.status)
+	}
+	return renderMessagePanel(body.String(), width, "[project activation]", "", true)
 }
 
 func short(s string, n int) string {

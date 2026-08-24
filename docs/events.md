@@ -101,6 +101,9 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `message.reject` | Installation-private or account-addressed; `target_event_id`, optional `reason` | Records rejection and archives the message. |
 | `peer.trust` | Installation-private; peer installation ID, signer key ID, optional name and relay hints | Allows signed peer traffic. |
 | `peer.distrust` | Installation-private; peer installation ID | Stops later peer projection. |
+| `project.event` | Account-addressed; project ID, previous event ID, operation, canonical body | Replicates the home-issued linear project history to active human devices. |
+| `project.command` | Account-addressed human-device control envelope | Queues one expected-head project mutation for its home installation. |
+| `project.command.result` | Account-addressed human-device result envelope | Reports received, committed, or rejected command state and the current project head. |
 | `mailbox.share` | Installation-private; mailbox ID and peer installation ID | Lets one peer address one agent mailbox. |
 | `mailbox.share.revoke` | Installation-private; mailbox ID and peer installation ID | Stops later direct delivery to that mailbox. |
 | `human.account.create` | Installation-private; account ID, creator installation and key, signed label | Creates a human account and makes its creator the first active device. |

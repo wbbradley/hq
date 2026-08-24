@@ -38,6 +38,8 @@ type Options struct {
 	Directory          string
 	ResumeThreadID     string
 	AgentName          string
+	ProjectID          string
+	ProjectReady       func(BridgeReady) (ProjectBinding, error)
 	NewThread          bool
 	InitialPrompt      string
 	Yolo               bool
@@ -56,6 +58,14 @@ type Options struct {
 	OnReady            func(BridgeReady)
 	SuppressStatus     bool
 	Logger             *slog.Logger
+}
+
+type ProjectBinding struct {
+	ProjectID       string
+	AssignmentID    string
+	ProjectThreadID string
+	MailboxID       string
+	ProjectName     string
 }
 
 type BridgeReady struct {
@@ -83,6 +93,9 @@ func Run(ctx context.Context, options Options) error {
 	if options.NewThread && options.ResumeThreadID != "" {
 		return errors.New("starting a new thread cannot also resume a thread")
 	}
+	if options.ProjectID != "" && options.ProjectReady == nil {
+		return errors.New("project Codex bridge requires a ready binding callback")
+	}
 	resumeThreadID := options.ResumeThreadID
 	namedStore, ok := options.Store.(NamedAgentStore)
 	if !ok {
@@ -93,7 +106,7 @@ func Run(ctx context.Context, options Options) error {
 		logger.Error("resolve named agent", "error", err)
 		return fmt.Errorf("resolve named agent %s: %w", options.AgentName, err)
 	}
-	if resumeThreadID == "" && !options.NewThread && namedAgent.CurrentSessionID != "" {
+	if options.ProjectID == "" && resumeThreadID == "" && !options.NewThread && namedAgent.CurrentSessionID != "" {
 		if namedAgent.Harness != "codex" {
 			return fmt.Errorf("named agent %s currently selects %s session %s; use --new-thread to attach Codex", options.AgentName, namedAgent.Harness, namedAgent.CurrentSessionID)
 		}
@@ -232,15 +245,34 @@ func Run(ctx context.Context, options Options) error {
 	logger = logger.With("thread_id", threadID)
 	logger.Info("Codex thread connected", "resumed", resumeThreadID != "")
 	threadState.UpdateThread(threadResponse.Thread)
-	selected, selectErr := namedStore.SelectNamedAgentSession(ctx, options.AgentName, model.SessionIdentity{Harness: "codex", ExternalSessionID: threadID}, options.Repository)
-	if selectErr != nil {
-		logger.Error("select Codex thread for named agent", "error", selectErr)
-		return fmt.Errorf("select Codex thread for named agent %s: %w", options.AgentName, selectErr)
+	var projectBinding ProjectBinding
+	if options.ProjectID != "" {
+		projectBinding, err = options.ProjectReady(BridgeReady{AgentName: options.AgentName, ThreadID: threadID, Directory: options.Directory})
+		if err != nil {
+			return fmt.Errorf("activate project Codex thread: %w", err)
+		}
+		if projectBinding.ProjectID != options.ProjectID || projectBinding.AssignmentID == "" || projectBinding.ProjectThreadID == "" || projectBinding.MailboxID == "" {
+			return errors.New("project ready callback returned an invalid binding")
+		}
+		mailbox = model.Mailbox{ID: projectBinding.MailboxID, Kind: model.MailboxProject, Harness: "codex", Label: options.AgentName + " · " + projectBinding.ProjectName, Context: options.Repository}
+	} else {
+		selected, selectErr := namedStore.SelectNamedAgentSession(ctx, options.AgentName, model.SessionIdentity{Harness: "codex", ExternalSessionID: threadID}, options.Repository)
+		if selectErr != nil {
+			logger.Error("select Codex thread for named agent", "error", selectErr)
+			return fmt.Errorf("select Codex thread for named agent %s: %w", options.AgentName, selectErr)
+		}
+		namedAgent = selected
+		mailbox = model.Mailbox{ID: namedAgent.MailboxID, Kind: model.MailboxAgent, Harness: "codex", Label: namedAgent.Name, Context: options.Repository}
 	}
-	namedAgent = selected
-	mailbox = model.Mailbox{ID: namedAgent.MailboxID, Kind: model.MailboxAgent, Harness: "codex", Label: namedAgent.Name, Context: options.Repository}
 	requestRouter.Bind(threadID, mailbox, options.Repository, options.Sync, options.Updates.Subscribe, options.RepairInterval)
 	outputRelay.Bind(threadID, mailbox, options.Repository)
+	if projectBinding.ProjectID != "" {
+		outputRelay.BindProject(domain.ProjectOutputBinding{
+			ProjectID: projectBinding.ProjectID, AssignmentID: projectBinding.AssignmentID,
+			AgentName: options.AgentName, ProjectThreadID: projectBinding.ProjectThreadID,
+			ExternalThreadID: threadID, RuntimeState: "connected",
+		})
+	}
 	if !options.SuppressStatus {
 		if err := sendStatus(ctx, options, mailbox, threadID, bridgeReadyBody(options), "The Codex app-server thread is connected and waiting for HQ input."); err != nil {
 			return err
@@ -285,6 +317,7 @@ func Run(ctx context.Context, options Options) error {
 	dispatcher := &Dispatcher{
 		Client: client, Store: options.Store, Ledger: ledger, Replies: replies, State: threadState,
 		ThreadID: threadID, MailboxID: mailbox.ID, RepairInterval: options.RepairInterval, Sync: options.Sync,
+		ProjectID: projectBinding.ProjectID, AssignmentID: projectBinding.AssignmentID, ProjectThreadID: projectBinding.ProjectThreadID,
 	}
 	if subscription != nil {
 		dispatcher.Invalidations = subscription.Changes()

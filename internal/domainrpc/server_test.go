@@ -40,6 +40,22 @@ func (r *recordingRuntime) CodexAgentRuntime(_ context.Context, name string) (do
 	r.called = CodexRuntimeMethod
 	return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
 }
+func (r *recordingRuntime) ActivateCodexProject(_ context.Context, request domain.ProjectCodexActivationRequest) (domain.ProjectCodexActivation, error) {
+	r.called = ActivateCodexProjectMethod
+	return domain.ProjectCodexActivation{Runtime: domain.CodexRuntime{AgentName: request.AgentName, Phase: domain.CodexRuntimeRunning}}, nil
+}
+func (r *recordingRuntime) CloseCodexProject(_ context.Context, request domain.ProjectCodexCloseRequest) (domain.Project, error) {
+	r.called = CloseCodexProjectMethod
+	return domain.Project{ID: request.ProjectID}, nil
+}
+func (r *recordingRuntime) HandoffCodexProject(_ context.Context, request domain.ProjectCodexHandoffRequest) (domain.ProjectCodexActivation, error) {
+	r.called = HandoffCodexProjectMethod
+	return domain.ProjectCodexActivation{}, nil
+}
+func (r *recordingRuntime) RetireCodexAgent(context.Context, domain.CodexRetireAgentRequest) error {
+	r.called = RetireCodexAgentMethod
+	return nil
+}
 func (r *recordingRuntime) WakeCodexAgent(message model.Message, environment []string) {
 	r.wakeMessages = append(r.wakeMessages, message)
 	r.wakeEnvironments = append(r.wakeEnvironments, append([]string(nil), environment...))
@@ -165,6 +181,63 @@ func (s *recordingOperations) ListRelays(context.Context) ([]domain.RelayConfig,
 func (s *recordingOperations) NetworkStatus(context.Context) (domain.NetworkStatus, error) {
 	return domain.NetworkStatus{}, s.record(NetworkStatusMethod)
 }
+func (s *recordingOperations) CreateProject(context.Context, domain.CreateProjectRequest) (domain.Project, error) {
+	return domain.Project{}, s.record(CreateProjectMethod)
+}
+func (s *recordingOperations) GetProject(context.Context, string) (domain.Project, error) {
+	return domain.Project{}, s.record(GetProjectMethod)
+}
+func (s *recordingOperations) ListProjects(context.Context, bool) ([]domain.Project, error) {
+	return nil, s.record(ListProjectsMethod)
+}
+func (s *recordingOperations) ListProjectThreads(context.Context, string) ([]domain.ProjectThread, error) {
+	return nil, s.record(ListProjectThreadsMethod)
+}
+func (s *recordingOperations) OpenProject(context.Context, string, string) (domain.Project, error) {
+	return domain.Project{}, s.record(OpenProjectMethod)
+}
+func (s *recordingOperations) BeginCloseProject(context.Context, string, string) (domain.Project, error) {
+	return domain.Project{}, s.record(BeginCloseProjectMethod)
+}
+func (s *recordingOperations) FinalizeCloseProject(context.Context, string, string, bool, string) (domain.Project, error) {
+	return domain.Project{}, s.record(FinalizeCloseProjectMethod)
+}
+func (s *recordingOperations) SetProjectArchived(context.Context, string, string, bool) (domain.Project, error) {
+	return domain.Project{}, s.record(ArchiveProjectMethod)
+}
+func (s *recordingOperations) UpdateProjectMetadata(context.Context, string, string, string, string) (domain.Project, error) {
+	return domain.Project{}, s.record(UpdateProjectMethod)
+}
+func (s *recordingOperations) AddProjectPath(context.Context, string, string, domain.ProjectPathInput, bool) (domain.Project, error) {
+	return domain.Project{}, s.record(AddProjectPathMethod)
+}
+func (s *recordingOperations) RemoveProjectResource(context.Context, string, string, string) (domain.Project, error) {
+	return domain.Project{}, s.record(RemoveProjectResourceMethod)
+}
+func (s *recordingOperations) ReplaceProjectPath(context.Context, string, string, string, domain.ProjectPathInput) (domain.Project, error) {
+	return domain.Project{}, s.record(ReplaceProjectPathMethod)
+}
+func (s *recordingOperations) SetProjectPrimaryResource(context.Context, string, string, string) (domain.Project, error) {
+	return domain.Project{}, s.record(SetProjectPrimaryMethod)
+}
+func (s *recordingOperations) CheckProjectResource(context.Context, string, string) (domain.ProjectResource, error) {
+	return domain.ProjectResource{}, s.record(CheckProjectResourceMethod)
+}
+func (s *recordingOperations) AssignProject(context.Context, string, string, string) (domain.Project, error) {
+	return domain.Project{}, s.record(AssignProjectMethod)
+}
+func (s *recordingOperations) ActivateProjectAssignment(context.Context, string, string, domain.ActivateProjectAssignmentRequest) (domain.Project, error) {
+	return domain.Project{}, s.record(ActivateProjectMethod)
+}
+func (s *recordingOperations) AbortProjectAssignment(context.Context, string, string, string) (domain.Project, error) {
+	return domain.Project{}, s.record(AbortProjectAssignmentMethod)
+}
+func (s *recordingOperations) BlockProjectAssignment(context.Context, string, string, string) (domain.Project, error) {
+	return domain.Project{}, s.record(BlockProjectAssignmentMethod)
+}
+func (s *recordingOperations) UnassignProject(context.Context, string, string, bool, string) (domain.Project, error) {
+	return domain.Project{}, s.record(UnassignProjectMethod)
+}
 
 func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 	mutationID := "0198c7ec-73b0-7cc3-a5f7-e31c77140d60"
@@ -209,6 +282,25 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{RemoveRelayMethod, MutationURLRequest{MutationID: mutationID}},
 		{ListRelaysMethod, nil},
 		{NetworkStatusMethod, nil},
+		{CreateProjectMethod, CreateProjectRequest{MutationID: mutationID}},
+		{GetProjectMethod, ProjectRequest{}},
+		{ListProjectsMethod, ListProjectsRequest{}},
+		{ListProjectThreadsMethod, ProjectRequest{}},
+		{OpenProjectMethod, ProjectRequest{MutationID: mutationID}},
+		{BeginCloseProjectMethod, ProjectRequest{MutationID: mutationID}},
+		{FinalizeCloseProjectMethod, FinalizeCloseProjectRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{ArchiveProjectMethod, ArchiveProjectRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{UpdateProjectMethod, UpdateProjectRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{AddProjectPathMethod, ProjectPathRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{RemoveProjectResourceMethod, ProjectResourceRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{ReplaceProjectPathMethod, ReplaceProjectPathRequest{ProjectResourceRequest: ProjectResourceRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}}},
+		{SetProjectPrimaryMethod, ProjectResourceRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{CheckProjectResourceMethod, CheckProjectResourceRequest{}},
+		{AssignProjectMethod, AssignProjectRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{ActivateProjectMethod, ActivateProjectRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{AbortProjectAssignmentMethod, EndProjectAssignmentRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{BlockProjectAssignmentMethod, EndProjectAssignmentRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
+		{UnassignProjectMethod, EndProjectAssignmentRequest{ProjectRequest: ProjectRequest{MutationID: mutationID}}},
 	}
 	for _, test := range tests {
 		t.Run(test.method, func(t *testing.T) {
@@ -296,16 +388,21 @@ func TestServiceDispatchesLocalCodexRuntimeWithoutMutationReceipts(t *testing.T)
 	runtime := &recordingRuntime{}
 	service := Service{Store: operations, Runtime: runtime}
 	for _, test := range []struct {
-		method string
-		value  any
+		method          string
+		value           any
+		allowsNilResult bool
 	}{
-		{LaunchCodexAgentMethod, domain.CodexLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"}},
-		{StopCodexAgentMethod, CodexAgentRequest{Name: "fred"}},
-		{CodexRuntimeMethod, CodexAgentRequest{Name: "fred"}},
+		{LaunchCodexAgentMethod, domain.CodexLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"}, false},
+		{ActivateCodexProjectMethod, domain.ProjectCodexActivationRequest{}, false},
+		{CloseCodexProjectMethod, domain.ProjectCodexCloseRequest{}, false},
+		{HandoffCodexProjectMethod, domain.ProjectCodexHandoffRequest{}, false},
+		{RetireCodexAgentMethod, domain.CodexRetireAgentRequest{}, true},
+		{StopCodexAgentMethod, CodexAgentRequest{Name: "fred"}, false},
+		{CodexRuntimeMethod, CodexAgentRequest{Name: "fred"}, false},
 	} {
 		raw, _ := json.Marshal(test.value)
 		result, rpcErr := service.Handle(context.Background(), nil, test.method, raw)
-		if rpcErr != nil || result == nil || runtime.called != test.method || operations.called != "" {
+		if rpcErr != nil || (!test.allowsNilResult && result == nil) || runtime.called != test.method || operations.called != "" {
 			t.Fatalf("%s result=%#v rpc=%v runtime=%q store=%q", test.method, result, rpcErr, runtime.called, operations.called)
 		}
 	}

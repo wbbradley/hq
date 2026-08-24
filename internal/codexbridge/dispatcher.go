@@ -19,26 +19,33 @@ type DeliveryStore interface {
 }
 
 type Dispatcher struct {
-	Client         *Client
-	Store          DeliveryStore
-	Ledger         DeliveryLedger
-	Replies        *ReplyRegistry
-	State          *ThreadState
-	ThreadID       string
-	MailboxID      string
-	Invalidations  <-chan domain.Invalidation
-	RepairInterval time.Duration
-	Sync           func(context.Context) error
+	Client          *Client
+	Store           DeliveryStore
+	Ledger          DeliveryLedger
+	Replies         *ReplyRegistry
+	State           *ThreadState
+	ThreadID        string
+	MailboxID       string
+	ProjectID       string
+	AssignmentID    string
+	ProjectThreadID string
+	Invalidations   <-chan domain.Invalidation
+	RepairInterval  time.Duration
+	Sync            func(context.Context) error
 }
 
 type claimedDelivery struct {
-	message model.Message
-	token   string
+	message    model.Message
+	token      string
+	dispatched bool
 }
 
 func (d *Dispatcher) Run(ctx context.Context) error {
 	if d.Client == nil || d.Store == nil || d.Ledger == nil || d.State == nil || d.ThreadID == "" || d.MailboxID == "" {
 		return errors.New("Codex inbound dispatcher is missing a required dependency")
+	}
+	if d.ProjectID != "" && (d.AssignmentID == "" || d.ProjectThreadID == "") {
+		return errors.New("project dispatcher requires assignment and project thread IDs")
 	}
 	interval := d.RepairInterval
 	if interval <= 0 {
@@ -75,7 +82,10 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("claim HQ message: %w", err)
 		}
-		accepted, dispatchErr := d.deliver(ctx, delivery.message)
+		accepted, dispatchErr := true, error(nil)
+		if !delivery.dispatched {
+			accepted, dispatchErr = d.deliver(ctx, delivery)
+		}
 		if dispatchErr != nil || !accepted {
 			d.release(delivery)
 			if ctx.Err() != nil {
@@ -117,6 +127,14 @@ func (d *Dispatcher) claim(ctx context.Context) (claimedDelivery, error) {
 	if err != nil {
 		return claimedDelivery{}, err
 	}
+	if d.ProjectID != "" {
+		store, ok := d.Store.(domain.ProjectDeliveryOperations)
+		if !ok {
+			return claimedDelivery{}, errors.New("project dispatcher store does not support project delivery")
+		}
+		delivery, err := store.ClaimProjectMessage(ctx, d.ProjectID, d.AssignmentID, d.ProjectThreadID, token.String())
+		return claimedDelivery{message: delivery.Message, token: token.String(), dispatched: delivery.Dispatched}, err
+	}
 	claim := domain.Claim{RecipientMailboxID: d.MailboxID, CorrelationThreadID: d.ThreadID}
 	if d.Replies != nil {
 		claim.ExcludeReplyTo = d.Replies.OutstandingIDs()
@@ -128,15 +146,25 @@ func (d *Dispatcher) claim(ctx context.Context) (claimedDelivery, error) {
 func (d *Dispatcher) release(delivery claimedDelivery) {
 	releaseContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	if d.ProjectID != "" {
+		if store, ok := d.Store.(domain.ProjectDeliveryOperations); ok {
+			_ = store.ReleaseProjectMessage(releaseContext, delivery.message.ID, delivery.token)
+		}
+		return
+	}
 	_ = d.Store.Release(releaseContext, delivery.message.ID, delivery.token)
 }
 
-func (d *Dispatcher) deliver(ctx context.Context, message model.Message) (bool, error) {
+func (d *Dispatcher) deliver(ctx context.Context, delivery claimedDelivery) (bool, error) {
+	message, token := delivery.message, delivery.token
 	record, exists, err := d.Ledger.Delivery(d.ThreadID, message.ID)
 	if err != nil {
 		return false, err
 	}
 	if exists && record.State == DeliveryAccepted {
+		if err := d.recordProjectDispatch(ctx, message.ID, token); err != nil {
+			return false, err
+		}
 		return true, nil
 	}
 	if exists && record.State == DeliveryUncertain {
@@ -145,6 +173,9 @@ func (d *Dispatcher) deliver(ctx context.Context, message model.Message) (bool, 
 			return false, err
 		}
 		if found {
+			if err := d.recordProjectDispatch(ctx, message.ID, token); err != nil {
+				return false, err
+			}
 			if err := d.Ledger.SetDelivery(d.ThreadID, message.ID, DeliveryAccepted); err != nil {
 				return false, err
 			}
@@ -159,13 +190,36 @@ func (d *Dispatcher) deliver(ctx context.Context, message model.Message) (bool, 
 	if err := d.Ledger.SetDelivery(d.ThreadID, message.ID, DeliveryUncertain); err != nil {
 		return false, err
 	}
+	if d.ProjectID != "" {
+		store, ok := d.Store.(domain.ProjectDeliveryOperations)
+		if !ok {
+			return false, errors.New("project dispatcher store does not support project delivery")
+		}
+		if err := store.MarkProjectDispatchUncertain(ctx, message.ID, token); err != nil {
+			return false, err
+		}
+	}
 	if err := d.dispatch(ctx, message); err != nil {
+		return false, err
+	}
+	if err := d.recordProjectDispatch(ctx, message.ID, token); err != nil {
 		return false, err
 	}
 	if err := d.Ledger.SetDelivery(d.ThreadID, message.ID, DeliveryAccepted); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func (d *Dispatcher) recordProjectDispatch(ctx context.Context, messageID, token string) error {
+	if d.ProjectID == "" {
+		return nil
+	}
+	store, ok := d.Store.(domain.ProjectDeliveryOperations)
+	if !ok {
+		return errors.New("project dispatcher store does not support project delivery")
+	}
+	return store.RecordProjectDispatch(ctx, messageID, token)
 }
 
 func (d *Dispatcher) dispatch(ctx context.Context, message model.Message) error {

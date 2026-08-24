@@ -11,62 +11,96 @@ import (
 )
 
 const (
-	HumanMailboxMethod        = "mailbox/human"
-	ResolveMailboxMethod      = "mailbox/resolve"
-	FindMailboxesMethod       = "mailbox/list"
-	CreateNamedAgentMethod    = "agent/create"
-	GetNamedAgentMethod       = "agent/get"
-	ListNamedAgentsMethod     = "agent/list"
-	ListAgentSessionsMethod   = "agent/session/list"
-	RenameAgentSessionMethod  = "agent/session/rename"
-	RetireNamedAgentMethod    = "agent/retire"
-	SelectAgentSessionMethod  = "agent/session/select"
-	AcquireAgentMethod        = "agent/ownership/acquire"
-	RenewAgentMethod          = "agent/ownership/renew"
-	ReleaseAgentMethod        = "agent/ownership/release"
-	LaunchCodexAgentMethod    = "codex/launch"
-	StopCodexAgentMethod      = "codex/stop"
-	CodexRuntimeMethod        = "codex/status"
-	CreateMethod              = "message/create"
-	ReplyMethod               = "message/reply"
-	GetMethod                 = "message/get"
-	ListMethod                = "message/list"
-	ListConversationsMethod   = "conversation/list"
-	ConversationHistoryMethod = "conversation/history"
-	ArchiveMethod             = "message/archive"
-	RestoreMethod             = "message/restore"
-	ClaimMethod               = "delivery/claim"
-	CompleteMethod            = "delivery/complete"
-	ReleaseMethod             = "delivery/release"
-	TrustPeerMethod           = "peer/trust"
-	DistrustPeerMethod        = "peer/distrust"
-	ListPeersMethod           = "peer/list"
-	HumanAccountMethod        = "human/account"
-	HumanDevicesMethod        = "human/devices"
-	CreateHumanInviteMethod   = "human/invite/create"
-	JoinHumanInviteMethod     = "human/invite/join"
-	RevokeHumanDeviceMethod   = "human/device/revoke"
-	SetMailboxShareMethod     = "mailbox/share/set"
-	AddRelayMethod            = "relay/add"
-	RemoveRelayMethod         = "relay/remove"
-	ListRelaysMethod          = "relay/list"
-	NetworkStatusMethod       = "status/network"
-	SynchronizeMethod         = "sync/request"
-	SubscribeChangesMethod    = "changes/subscribe"
-	InvalidatedMethod         = "changes/invalidated"
+	HumanMailboxMethod             = "mailbox/human"
+	ResolveMailboxMethod           = "mailbox/resolve"
+	FindMailboxesMethod            = "mailbox/list"
+	CreateNamedAgentMethod         = "agent/create"
+	GetNamedAgentMethod            = "agent/get"
+	ListNamedAgentsMethod          = "agent/list"
+	ListAgentSessionsMethod        = "agent/session/list"
+	RenameAgentSessionMethod       = "agent/session/rename"
+	RetireNamedAgentMethod         = "agent/retire"
+	SelectAgentSessionMethod       = "agent/session/select"
+	AcquireAgentMethod             = "agent/ownership/acquire"
+	RenewAgentMethod               = "agent/ownership/renew"
+	ReleaseAgentMethod             = "agent/ownership/release"
+	LaunchCodexAgentMethod         = "codex/launch"
+	StopCodexAgentMethod           = "codex/stop"
+	CodexRuntimeMethod             = "codex/status"
+	ActivateCodexProjectMethod     = "codex/project/activate"
+	CloseCodexProjectMethod        = "codex/project/close"
+	HandoffCodexProjectMethod      = "codex/project/handoff"
+	RetireCodexAgentMethod         = "codex/agent/retire"
+	ProvisionProjectWorktreeMethod = "project/worktree/provision"
+	CreateMethod                   = "message/create"
+	ReplyMethod                    = "message/reply"
+	GetMethod                      = "message/get"
+	ListMethod                     = "message/list"
+	ListConversationsMethod        = "conversation/list"
+	ConversationHistoryMethod      = "conversation/history"
+	ArchiveMethod                  = "message/archive"
+	RestoreMethod                  = "message/restore"
+	ClaimMethod                    = "delivery/claim"
+	CompleteMethod                 = "delivery/complete"
+	ReleaseMethod                  = "delivery/release"
+	TrustPeerMethod                = "peer/trust"
+	DistrustPeerMethod             = "peer/distrust"
+	ListPeersMethod                = "peer/list"
+	HumanAccountMethod             = "human/account"
+	HumanDevicesMethod             = "human/devices"
+	CreateHumanInviteMethod        = "human/invite/create"
+	JoinHumanInviteMethod          = "human/invite/join"
+	RevokeHumanDeviceMethod        = "human/device/revoke"
+	SetMailboxShareMethod          = "mailbox/share/set"
+	AddRelayMethod                 = "relay/add"
+	RemoveRelayMethod              = "relay/remove"
+	ListRelaysMethod               = "relay/list"
+	NetworkStatusMethod            = "status/network"
+	SynchronizeMethod              = "sync/request"
+	SubscribeChangesMethod         = "changes/subscribe"
+	InvalidatedMethod              = "changes/invalidated"
+	CreateProjectMethod            = "project/create"
+	GetProjectMethod               = "project/get"
+	ListProjectsMethod             = "project/list"
+	ListProjectThreadsMethod       = "project/thread/list"
+	OpenProjectMethod              = "project/open"
+	BeginCloseProjectMethod        = "project/close/begin"
+	FinalizeCloseProjectMethod     = "project/close/finalize"
+	ArchiveProjectMethod           = "project/archive/set"
+	UpdateProjectMethod            = "project/metadata/update"
+	AddProjectPathMethod           = "project/resource/path/add"
+	RemoveProjectResourceMethod    = "project/resource/remove"
+	ReplaceProjectPathMethod       = "project/resource/path/replace"
+	SetProjectPrimaryMethod        = "project/resource/primary"
+	CheckProjectResourceMethod     = "project/resource/check"
+	AssignProjectMethod            = "project/assignment/create"
+	ActivateProjectMethod          = "project/assignment/activate"
+	AbortProjectAssignmentMethod   = "project/assignment/abort"
+	BlockProjectAssignmentMethod   = "project/assignment/block"
+	UnassignProjectMethod          = "project/assignment/end"
 )
 
 const (
-	CodeNotFound       = "not_found"
-	CodeAlreadyHandled = "already_handled"
-	CodeNotReady       = "not_ready"
-	CodeClaimed        = "claimed"
-	CodeAgentNotFound  = "agent_not_found"
-	CodeAgentRetired   = "agent_retired"
-	CodeAgentNameTaken = "agent_name_taken"
-	CodeMailboxNamed   = "mailbox_named"
-	CodeAgentOwned     = "agent_owned"
-	CodeDomain         = "domain_error"
+	CodeNotFound              = "not_found"
+	CodeAlreadyHandled        = "already_handled"
+	CodeNotReady              = "not_ready"
+	CodeClaimed               = "claimed"
+	CodeAgentNotFound         = "agent_not_found"
+	CodeAgentRetired          = "agent_retired"
+	CodeAgentNameTaken        = "agent_name_taken"
+	CodeMailboxNamed          = "mailbox_named"
+	CodeAgentOwned            = "agent_owned"
+	CodeProjectNotFound       = "project_not_found"
+	CodeProjectStale          = "project_stale"
+	CodeProjectState          = "project_state"
+	CodeResourceConflict      = "resource_conflict"
+	CodeResourceNotFound      = "resource_not_found"
+	CodeAgentAssigned         = "agent_assigned"
+	CodeProjectAssigned       = "project_assigned"
+	CodeProjectThreadMismatch = "project_thread_mismatch"
+	CodeProjectCommandPending = "project_command_pending"
+	CodeProjectRuntimeUnknown = "project_runtime_unknown"
+	CodeDomain                = "domain_error"
 )
 
 type ResolveMailboxRequest struct {
@@ -205,6 +239,64 @@ type SubscribeChangesResponse struct {
 	Revision uint64 `json:"revision"`
 }
 
+type ProjectRequest struct {
+	MutationID   string `json:"mutation_id,omitempty"`
+	ProjectID    string `json:"project_id"`
+	ExpectedHead string `json:"expected_head_event_id,omitempty"`
+}
+
+type CreateProjectRequest struct {
+	MutationID string                      `json:"mutation_id"`
+	Project    domain.CreateProjectRequest `json:"project"`
+}
+type ListProjectsRequest struct {
+	IncludeArchived bool `json:"include_archived"`
+}
+type FinalizeCloseProjectRequest struct {
+	ProjectRequest
+	Forced             bool   `json:"forced"`
+	RuntimeObservation string `json:"runtime_observation,omitempty"`
+}
+type ArchiveProjectRequest struct {
+	ProjectRequest
+	Archived bool `json:"archived"`
+}
+type UpdateProjectRequest struct {
+	ProjectRequest
+	Name  string `json:"name"`
+	Brief string `json:"brief,omitempty"`
+}
+type ProjectPathRequest struct {
+	ProjectRequest
+	Path    domain.ProjectPathInput `json:"path"`
+	Primary bool                    `json:"primary,omitempty"`
+}
+type ProjectResourceRequest struct {
+	ProjectRequest
+	ResourceID string `json:"resource_id"`
+}
+type ReplaceProjectPathRequest struct {
+	ProjectResourceRequest
+	Path domain.ProjectPathInput `json:"path"`
+}
+type CheckProjectResourceRequest struct {
+	ProjectID  string `json:"project_id"`
+	ResourceID string `json:"resource_id"`
+}
+type AssignProjectRequest struct {
+	ProjectRequest
+	AgentName string `json:"agent_name"`
+}
+type ActivateProjectRequest struct {
+	ProjectRequest
+	Activation domain.ActivateProjectAssignmentRequest `json:"activation"`
+}
+type EndProjectAssignmentRequest struct {
+	ProjectRequest
+	Forced             bool   `json:"forced"`
+	RuntimeObservation string `json:"runtime_observation,omitempty"`
+}
+
 func EncodeError(err error) *localwire.RPCError {
 	if err == nil {
 		return nil
@@ -229,6 +321,26 @@ func EncodeError(err error) *localwire.RPCError {
 		code = CodeMailboxNamed
 	case errors.Is(err, domain.ErrAgentOwned):
 		code = CodeAgentOwned
+	case errors.Is(err, domain.ErrProjectNotFound):
+		code = CodeProjectNotFound
+	case errors.Is(err, domain.ErrProjectStale):
+		code = CodeProjectStale
+	case errors.Is(err, domain.ErrProjectState):
+		code = CodeProjectState
+	case errors.Is(err, domain.ErrResourceConflict):
+		code = CodeResourceConflict
+	case errors.Is(err, domain.ErrResourceNotFound):
+		code = CodeResourceNotFound
+	case errors.Is(err, domain.ErrAgentAssigned):
+		code = CodeAgentAssigned
+	case errors.Is(err, domain.ErrProjectAssigned):
+		code = CodeProjectAssigned
+	case errors.Is(err, domain.ErrProjectThreadMismatch):
+		code = CodeProjectThreadMismatch
+	case errors.Is(err, domain.ErrProjectCommandPending):
+		code = CodeProjectCommandPending
+	case errors.Is(err, domain.ErrProjectRuntimeUnknown):
+		code = CodeProjectRuntimeUnknown
 	}
 	return &localwire.RPCError{Code: code, Message: err.Error()}
 }
@@ -258,6 +370,26 @@ func DecodeError(err error) error {
 		sentinel = domain.ErrMailboxNamed
 	case CodeAgentOwned:
 		sentinel = domain.ErrAgentOwned
+	case CodeProjectNotFound:
+		sentinel = domain.ErrProjectNotFound
+	case CodeProjectStale:
+		sentinel = domain.ErrProjectStale
+	case CodeProjectState:
+		sentinel = domain.ErrProjectState
+	case CodeResourceConflict:
+		sentinel = domain.ErrResourceConflict
+	case CodeResourceNotFound:
+		sentinel = domain.ErrResourceNotFound
+	case CodeAgentAssigned:
+		sentinel = domain.ErrAgentAssigned
+	case CodeProjectAssigned:
+		sentinel = domain.ErrProjectAssigned
+	case CodeProjectThreadMismatch:
+		sentinel = domain.ErrProjectThreadMismatch
+	case CodeProjectCommandPending:
+		sentinel = domain.ErrProjectCommandPending
+	case CodeProjectRuntimeUnknown:
+		sentinel = domain.ErrProjectRuntimeUnknown
 	default:
 		return err
 	}

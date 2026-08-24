@@ -679,6 +679,10 @@ func (s *State) authorizedAccountEvent(item SignedEvent) bool {
 		_ = decodePayload(content.Payload, &payload)
 		target, ok := s.Records[payload.TargetEventID]
 		return ok && target.Event.Content.Audience != nil && target.Event.Content.Audience.HumanAccountID == content.Audience.HumanAccountID
+	case TypeProjectEvent:
+		return true
+	case TypeProjectCommand, TypeProjectResult:
+		return content.Sender != nil && content.Recipient != nil && content.Sender.MailboxID == s.Policy.HumanMailboxID && content.Recipient.MailboxID == s.Policy.HumanMailboxID
 	default:
 		return false
 	}

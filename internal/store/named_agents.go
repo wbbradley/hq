@@ -166,6 +166,7 @@ func getNamedAgentWith(ctx context.Context, queryer rowQueryer, name string, now
 	var agent domain.NamedAgent
 	var retired int
 	var lease, active sql.NullInt64
+	var assignedProject sql.NullString
 	err := queryer.QueryRowContext(ctx, `SELECT a.name,a.mailbox_id,a.retired,a.current_harness,a.current_session_id,
 COALESCE((SELECT s.thread_name FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),a.last_active_at,o.lease_expires_at,
 COALESCE((SELECT s.directory FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
@@ -173,9 +174,10 @@ COALESCE((SELECT s.git_common_dir FROM agent_sessions s WHERE s.agent_name=a.nam
 COALESCE((SELECT s.remote_identity FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
 COALESCE((SELECT s.worktree FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),''),
 COALESCE((SELECT s.branch FROM agent_sessions s WHERE s.agent_name=a.name AND s.harness=a.current_harness AND s.external_session_id=a.current_session_id),'')
+,(SELECT p.id FROM project_assignment_epochs e JOIN projects p ON p.id=e.project_id WHERE e.agent_name=a.name AND e.ended_event_id IS NULL)
 FROM named_agents a LEFT JOIN agent_ownership o ON o.name=a.name WHERE a.name=?`, name).Scan(
 		&agent.Name, &agent.MailboxID, &retired, &agent.Harness, &agent.CurrentSessionID, &agent.CurrentThreadName, &active, &lease,
-		&agent.Context.Directory, &agent.Context.GitCommonDir, &agent.Context.RemoteIdentity, &agent.Context.Worktree, &agent.Context.Branch)
+		&agent.Context.Directory, &agent.Context.GitCommonDir, &agent.Context.RemoteIdentity, &agent.Context.Worktree, &agent.Context.Branch, &assignedProject)
 	if errors.Is(err, sql.ErrNoRows) {
 		return agent, domain.ErrAgentNotFound
 	}
@@ -183,6 +185,8 @@ FROM named_agents a LEFT JOIN agent_ownership o ON o.name=a.name WHERE a.name=?`
 		return agent, err
 	}
 	agent.Retired = retired != 0
+	agent.AssignedProjectID = assignedProject.String
+	agent.Idle = !assignedProject.Valid
 	if active.Valid {
 		seen := time.UnixMilli(active.Int64).UTC()
 		agent.LastActiveAt = &seen
@@ -202,6 +206,9 @@ func (s *SQLite) RetireNamedAgent(ctx context.Context, name string) error {
 	}
 	if agent.Retired {
 		return s.recordMutation(ctx, nil)
+	}
+	if !agent.Idle {
+		return fmt.Errorf("retire assigned agent: %w", domain.ErrAgentAssigned)
 	}
 	payload, _ := event.MarshalPayload(event.AgentNamePayload{Name: name, MailboxID: agent.MailboxID})
 	return s.appendContents(ctx, []event.Content{{Type: event.TypeAgentRetire, Scope: event.ScopeInstallationPrivate, Payload: payload}}, []time.Time{s.clockNow()}, nil)
