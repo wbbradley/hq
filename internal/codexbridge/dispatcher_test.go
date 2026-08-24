@@ -468,7 +468,7 @@ func TestDispatcherPrioritizesRegisteredReplyOverGeneralInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	questionID := "019c0000-0000-7000-8000-000000000108"
-	question := model.Message{ID: questionID, Context: model.RepositoryContext{Directory: "/work/repo"}, SenderMailboxID: fixture.agent.ID, RecipientMailboxID: human.ID, Body: "Approve?", CreatedAt: time.Now().UTC()}
+	question := model.Message{ID: questionID, Context: model.RepositoryContext{Directory: "/work/repo"}, SenderMailboxID: fixture.agent.ID, RecipientMailboxID: human.ID, Purpose: model.MessagePurposeProtocolQuestion, Body: "Approve?", CreatedAt: time.Now().UTC()}
 	if err := fixture.store.Create(context.Background(), question); err != nil {
 		t.Fatal(err)
 	}

@@ -22,7 +22,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "24"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "25"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -291,6 +291,9 @@ func TestMailboxFilters(t *testing.T) {
 	if len(sent) != 1 || sent[0].RecipientLabel != agent.Label {
 		t.Fatalf("sent = %#v", sent)
 	}
+	if sent[0].Purpose != model.MessagePurposeConversation || sent[0].SenderAddress.Kind != model.MailboxHuman || sent[0].RecipientAddress.Kind != model.MailboxAgent || sent[0].RecipientAddress.Harness != "codex" || sent[0].RecipientAddress.Label != "codex" {
+		t.Fatalf("typed message projection = %#v", sent[0])
+	}
 	if err := s.Archive(ctx, outbound.ID); !errors.Is(err, ErrAlreadyHandled) {
 		t.Fatalf("archive agent message = %v", err)
 	}
@@ -517,7 +520,7 @@ func TestVersionTwelveMigrationBackfillsMessageCorrelation(t *testing.T) {
 	}
 	defer reopened.Close()
 	got, err := reopened.Get(ctx, item.ID)
-	if err != nil || got.CodexThreadID != "migrated-thread" || got.CodexTurnID != "migrated-turn" || got.Body != item.Body {
+	if err != nil || got.CodexThreadID != "migrated-thread" || got.CodexTurnID != "migrated-turn" || got.Purpose != model.MessagePurposeConversation || got.Body != item.Body {
 		t.Fatalf("migrated message = %#v, %v", got, err)
 	}
 }

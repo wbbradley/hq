@@ -22,6 +22,7 @@ func (s *SQLite) CreateProjectOutput(ctx context.Context, binding domain.Project
 	if message.ID == "" || message.SenderMailboxID == "" || message.RecipientMailboxID != model.HumanMailboxID {
 		return errors.New("project output message is invalid")
 	}
+	message.Purpose = model.MessagePurposeProjectOutput
 	account, parents, _, err := s.localAccountAction(ctx, "")
 	if err != nil {
 		return err
@@ -62,7 +63,7 @@ func (s *SQLite) CreateProjectOutput(ctx context.Context, binding domain.Project
 	} else {
 		details += "\n" + provenance
 	}
-	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: message.ID, Body: message.Body, Details: details, Context: contextPointer(message.Context), ActorLabel: actorLabel})
+	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: message.ID, Body: message.Body, Details: details, Purpose: message.Purpose, Context: contextPointer(message.Context), ActorLabel: actorLabel})
 	content := event.Content{
 		Type: event.TypeQuestion, Sender: s.localAddress(mailboxID),
 		Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents,

@@ -121,6 +121,9 @@ func TestValidationFailures(t *testing.T) {
 		{"root parent", func(content *Content) { content.Parents = []string{parentA} }, "account-addressed roots"},
 		{"remote private recipient", func(content *Content) { content.Recipient.InstallationID = installationB }, "remote recipient"},
 		{"empty body", func(content *Content) { content.Payload = mustPayload(t, TextPayload{}) }, "body is empty"},
+		{"unknown purpose", func(content *Content) {
+			content.Payload = mustPayload(t, TextPayload{Body: "valid", Purpose: "made-up"})
+		}, "unsupported message purpose"},
 		{"large body", func(content *Content) {
 			content.Payload = mustPayload(t, TextPayload{Body: strings.Repeat("x", MaxBodyBytes+1)})
 		}, "body is"},

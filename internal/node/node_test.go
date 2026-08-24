@@ -82,11 +82,11 @@ func TestLiveNodeDomainRoundTripAndRuntimeOwnership(t *testing.T) {
 	}
 
 	questionID := uuid.Must(uuid.NewV7()).String()
-	question := model.Message{ID: questionID, SenderMailboxID: agent.ID, RecipientMailboxID: human.ID, Body: "question", Context: repository, CreatedAt: time.Now().UTC()}
+	question := model.Message{ID: questionID, SenderMailboxID: agent.ID, RecipientMailboxID: human.ID, Purpose: model.MessagePurposeProtocolQuestion, Body: "question", Context: repository, CreatedAt: time.Now().UTC()}
 	if err := client.Create(ctx, question); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := client.Get(ctx, questionID); err != nil || got.Body != question.Body {
+	if got, err := client.Get(ctx, questionID); err != nil || got.Purpose != model.MessagePurposeProtocolQuestion || got.SenderAddress.Kind != model.MailboxAgent || got.RecipientAddress.Kind != model.MailboxHuman || got.Body != question.Body {
 		t.Fatalf("question = %#v, %v", got, err)
 	}
 	if listed, err := client.List(ctx, model.Filter{RecipientMailboxID: human.ID}); err != nil || len(listed) != 1 {
@@ -96,6 +96,9 @@ func TestLiveNodeDomainRoundTripAndRuntimeOwnership(t *testing.T) {
 	reply := model.Message{ID: replyID, SenderMailboxID: human.ID, RecipientMailboxID: agent.ID, Body: "answer", Context: repository, CreatedAt: time.Now().UTC()}
 	if err := client.Reply(ctx, questionID, reply); err != nil {
 		t.Fatal(err)
+	}
+	if got, err := client.Get(ctx, replyID); err != nil || got.Purpose != model.MessagePurposeProtocolAnswer {
+		t.Fatalf("reply purpose = %#v, %v", got, err)
 	}
 	if archived, err := client.Get(ctx, questionID); err != nil || archived.ArchivedAt == nil {
 		t.Fatalf("atomic reply/archive = %#v, %v", archived, err)

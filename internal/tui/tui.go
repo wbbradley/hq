@@ -29,6 +29,7 @@ var (
 	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	finalStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	selected     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
+	inputCursor  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dim          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	panelEdge    = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
 	dimPanelEdge = lipgloss.NewStyle().Foreground(lipgloss.Color("59"))
@@ -552,6 +553,11 @@ func (m app) answer() tea.Msg {
 	recipient := m.answerQ.SenderMailboxID
 	message := model.Message{ID: id.String(), Context: m.answerQ.Context, SenderMailboxID: model.HumanMailboxID,
 		RecipientMailboxID: recipient, SenderLabel: "human", RecipientLabel: m.answerQ.SenderLabel, Body: strings.TrimSpace(m.editor.Value()), CreatedAt: time.Now().UTC()}
+	if m.answerQ.Purpose == model.MessagePurposeProtocolQuestion {
+		message.Purpose = model.MessagePurposeProtocolAnswer
+	} else if m.answerQ.SenderAddress.Kind == model.MailboxProject {
+		message.Purpose = model.MessagePurposeProjectInput
+	}
 	if m.composeTo != "" {
 		if m.composeNamed {
 			agent, lookupErr := m.store.GetNamedAgent(m.ctx, m.composeName)
@@ -1410,11 +1416,10 @@ func (m app) defaultRuntimeDirectory() string {
 }
 
 func (m app) validRuntimeDirectory(raw string) (string, error) {
-	directory := strings.TrimSpace(raw)
-	if !filepath.IsAbs(directory) {
-		directory = filepath.Join(m.launchDirectory, directory)
+	directory, err := m.expandClientPath(raw)
+	if err != nil {
+		return "", err
 	}
-	directory = filepath.Clean(directory)
 	info, err := os.Stat(directory)
 	if err != nil {
 		return "", errors.New("directory does not exist")
@@ -1727,10 +1732,22 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case enterProjectPaths:
 		switch key.String() {
 		case "tab":
-			setup.paths = splitProjectPaths(setup.pathsText)
+			paths, err := m.expandProjectPaths(setup.pathsText)
+			if err != nil {
+				setup.status = err.Error()
+				return m, nil
+			}
+			setup.paths = paths
+			setup.pathsText = strings.Join(paths, ", ")
 			setup.stage, setup.worktreeBase, setup.status = enterWorktreeRepository, "HEAD", ""
 		case "enter":
-			setup.paths = splitProjectPaths(setup.pathsText)
+			paths, err := m.expandProjectPaths(setup.pathsText)
+			if err != nil {
+				setup.status = err.Error()
+				return m, nil
+			}
+			setup.paths = paths
+			setup.pathsText = strings.Join(paths, ", ")
 			if len(setup.paths) > 1 {
 				setup.stage, setup.cursor, setup.status = chooseProjectPrimary, 0, ""
 			} else {
@@ -1758,6 +1775,12 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(setup.worktreeRepository) == "" {
 				setup.status = "Repository is required."
 			} else {
+				repository, err := m.expandClientPath(setup.worktreeRepository)
+				if err != nil {
+					setup.status = err.Error()
+					return m, nil
+				}
+				setup.worktreeRepository = repository
 				setup.stage, setup.status = enterWorktreeBase, ""
 			}
 		case "backspace":
@@ -1783,6 +1806,12 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(setup.worktreeDestination) == "" {
 				setup.status = "Worktree destination is required."
 			} else {
+				destination, err := m.expandClientPath(setup.worktreeDestination)
+				if err != nil {
+					setup.status = err.Error()
+					return m, nil
+				}
+				setup.worktreeDestination = destination
 				setup.stage, setup.status = enterWorktreeBranch, ""
 			}
 		case "backspace":
@@ -1931,6 +1960,46 @@ func splitProjectPaths(value string) []string {
 		}
 	}
 	return result
+}
+
+func (m app) expandClientPath(value string) (string, error) {
+	value = os.ExpandEnv(strings.TrimSpace(value))
+	if value == "~" || strings.HasPrefix(value, "~"+string(filepath.Separator)) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand home directory: %w", err)
+		}
+		value = filepath.Join(home, strings.TrimPrefix(value, "~"+string(filepath.Separator)))
+	} else if strings.HasPrefix(value, "~") {
+		return "", errors.New("only the current user's ~ home path is supported")
+	}
+	if value == "" {
+		return "", errors.New("path is empty after environment expansion")
+	}
+	if !filepath.IsAbs(value) {
+		base := m.launchDirectory
+		if base == "" {
+			var err error
+			base, err = os.Getwd()
+			if err != nil {
+				return "", fmt.Errorf("resolve client working directory: %w", err)
+			}
+		}
+		value = filepath.Join(base, value)
+	}
+	return filepath.Clean(value), nil
+}
+
+func (m app) expandProjectPaths(value string) ([]string, error) {
+	paths := splitProjectPaths(value)
+	for index, path := range paths {
+		expanded, err := m.expandClientPath(path)
+		if err != nil {
+			return nil, fmt.Errorf("path %q: %w", path, err)
+		}
+		paths[index] = expanded
+	}
+	return paths, nil
 }
 
 func (m app) activeProjectHomes() []domain.HumanDevice {
@@ -2613,19 +2682,42 @@ func canArchiveGroup(group messageGroup) bool {
 	return false
 }
 
-func displayMailboxLabel(label string, context model.RepositoryContext) string {
-	if label == "human" {
+func displayMessageAddress(address model.MessageAddress, fallbackLabel string, context model.RepositoryContext) string {
+	label := address.Label
+	if label == "" {
+		label = fallbackLabel
+	}
+	switch address.Kind {
+	case model.MailboxHuman:
+		return "human"
+	case model.MailboxAgent:
+		if address.Name != "" {
+			return address.Name
+		}
+		if label == "" {
+			label = address.Harness
+		}
+		if label == "" {
+			return "agent"
+		}
+		directory := filepath.Base(filepath.Clean(context.Directory))
+		if context.Directory == "" || directory == "." || directory == string(filepath.Separator) {
+			return label
+		}
+		return label + " · " + directory
+	case model.MailboxProject:
+		if label == "" {
+			return "project"
+		}
+		return label
+	case model.MailboxRemote:
+		if label == "" {
+			return "remote"
+		}
+		return label
+	default:
 		return label
 	}
-	harness, _, found := strings.Cut(label, ":")
-	if !found || harness == "" {
-		return label
-	}
-	directory := filepath.Base(filepath.Clean(context.Directory))
-	if context.Directory == "" || directory == "." || directory == string(filepath.Separator) {
-		return harness
-	}
-	return harness + " · " + directory
 }
 
 func presentationKind(message model.Message) string {
@@ -2742,7 +2834,7 @@ func hasTechnicalIdentifiers(message model.Message) bool {
 
 func (m app) technicalContext(message model.Message) string {
 	lines := make([]string, 0, 5)
-	if recipient := displayMailboxLabel(message.RecipientLabel, message.Context); recipient != "" {
+	if recipient := displayMessageAddress(message.RecipientAddress, message.RecipientLabel, message.Context); recipient != "" {
 		lines = append(lines, "to "+recipient)
 	}
 	if message.Context.Directory != "" {
@@ -2993,9 +3085,9 @@ func (m app) renderInboxPane(width, height int) string {
 			if group.draft != nil && len(group.messages) == 0 {
 				message = model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: group.draft.composeTo, RecipientLabel: group.draft.composeName, Body: group.draft.body}
 			}
-			direction := short(displayMailboxLabel(message.SenderLabel, message.Context), 18)
+			direction := short(displayMessageAddress(message.SenderAddress, message.SenderLabel, message.Context), 18)
 			if message.SenderMailboxID == model.HumanMailboxID {
-				direction = "sent → " + short(displayMailboxLabel(message.RecipientLabel, message.Context), 16)
+				direction = "sent → " + short(displayMessageAddress(message.RecipientAddress, message.RecipientLabel, message.Context), 16)
 			}
 			kind := groupPresentationKind(group)
 			badge := presentationLabel(kind)
@@ -3032,17 +3124,22 @@ func (m app) renderInboxPane(width, height int) string {
 }
 
 func groupPresentationKind(group messageGroup) string {
+	kind, _ := groupPresentation(group)
+	return kind
+}
+
+func groupPresentation(group messageGroup) (string, model.Message) {
 	for i := len(group.messages) - 1; i >= 0; i-- {
 		if presentationKind(group.messages[i]) == "final-answer" {
-			return "final-answer"
+			return "final-answer", group.messages[i]
 		}
 	}
 	for i := len(group.messages) - 1; i >= 0; i-- {
 		if kind := presentationKind(group.messages[i]); kind != "" {
-			return kind
+			return kind, group.messages[i]
 		}
 	}
-	return ""
+	return "", group.latest()
 }
 
 func (m app) renderGroupPanel(group messageGroup, width int) string {
@@ -3063,8 +3160,8 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 		return m.cacheRenderedMessageGroup(group, width, renderedMessageGroup{panel: renderMessagePanel(body, width, "[draft]", "press enter to continue", m.paneFocused(focusMessage))})
 	}
 	latest := group.latest()
-	kind := groupPresentationKind(group)
-	sender := displayMailboxLabel(latest.SenderLabel, latest.Context)
+	kind, presentation := groupPresentation(group)
+	sender := displayMessageAddress(presentation.SenderAddress, presentation.SenderLabel, presentation.Context)
 	topLabel := presentationPanelLabel(kind, sender)
 	var body strings.Builder
 	lineCount := 0
@@ -3178,20 +3275,20 @@ func messageDirection(message model.Message) string {
 		if recipient == "" {
 			recipient = message.RecipientMailboxID
 		}
-		return "You → " + displayMailboxLabel(recipient, message.Context)
+		return "You → " + displayMessageAddress(message.RecipientAddress, recipient, message.Context)
 	}
 	sender := message.SenderLabel
 	if sender == "" {
 		sender = message.SenderMailboxID
 	}
-	return displayMailboxLabel(sender, message.Context) + " → You"
+	return displayMessageAddress(message.SenderAddress, sender, message.Context) + " → You"
 }
 
 func draftRecipient(draft messageDraft) string {
 	if draft.composeName != "" {
 		return draft.composeName
 	}
-	return displayMailboxLabel(draft.answerQ.SenderLabel, draft.answerQ.Context)
+	return displayMessageAddress(draft.answerQ.SenderAddress, draft.answerQ.SenderLabel, draft.answerQ.Context)
 }
 
 func groupHasTechnicalIdentifiers(group messageGroup) bool {
@@ -3228,7 +3325,7 @@ func (m app) composeRecipientName() string {
 			return agent.Name
 		}
 	}
-	return displayMailboxLabel(m.answerQ.SenderLabel, m.answerQ.Context)
+	return displayMessageAddress(m.answerQ.SenderAddress, m.answerQ.SenderLabel, m.answerQ.Context)
 }
 
 func (m app) renderRecipientPicker(width, height int) string {
@@ -3291,7 +3388,7 @@ func (m app) renderProjectSetup(width, height int) string {
 	}
 	switch setup.stage {
 	case enterProjectName:
-		body.WriteString("\n\nNew project name:\n" + setup.name)
+		body.WriteString("\n\nNew project name:\n" + renderProjectInput(setup.name))
 	case chooseProjectHome:
 		body.WriteString("\n\nChoose the immutable project home")
 		devices := m.activeProjectHomes()
@@ -3310,11 +3407,11 @@ func (m app) renderProjectSetup(width, height int) string {
 			body.WriteString("\n" + prefix + truncateDisplay(label+" · "+short(device.InstallationID, 12), innerWidth-2))
 		}
 	case enterProjectBrief:
-		body.WriteString("\n\nOptional project brief:\n" + setup.brief)
+		body.WriteString("\n\nOptional project brief:\n" + renderProjectInput(setup.brief))
 		body.WriteString("\n" + dim.Render("Press enter to leave it empty."))
 	case enterProjectPaths:
-		body.WriteString("\n\nDesired path resources (comma separated):\n" + setup.pathsText)
-		body.WriteString("\n" + dim.Render("Enter: ordinary paths · Tab: add a Git worktree · paths may be missing."))
+		body.WriteString("\n\nDesired path resources (comma separated):\n" + renderProjectInput(setup.pathsText))
+		body.WriteString("\n" + dim.Render("Enter: ordinary paths · Tab: add a Git worktree · ~ and $VARS expand locally."))
 	case chooseProjectPrimary:
 		body.WriteString("\n\nChoose the primary path")
 		for index, path := range setup.paths {
@@ -3325,14 +3422,14 @@ func (m app) renderProjectSetup(width, height int) string {
 			body.WriteString("\n" + prefix + truncateDisplay(path, innerWidth-2))
 		}
 	case enterWorktreeRepository:
-		body.WriteString("\n\nExisting Git repository:\n" + setup.worktreeRepository)
+		body.WriteString("\n\nExisting Git repository:\n" + renderProjectInput(setup.worktreeRepository))
 	case enterWorktreeBase:
-		body.WriteString("\n\nMerge base / starting ref:\n" + setup.worktreeBase)
+		body.WriteString("\n\nMerge base / starting ref:\n" + renderProjectInput(setup.worktreeBase))
 	case enterWorktreeDestination:
-		body.WriteString("\n\nNew worktree destination:\n" + setup.worktreeDestination)
+		body.WriteString("\n\nNew worktree destination:\n" + renderProjectInput(setup.worktreeDestination))
 		body.WriteString("\n" + dim.Render("HQ reserves this path before invoking Git."))
 	case enterWorktreeBranch:
-		body.WriteString("\n\nNew branch name:\n" + setup.worktreeBranch)
+		body.WriteString("\n\nNew branch name:\n" + renderProjectInput(setup.worktreeBranch))
 	case chooseWorktreePrimary:
 		body.WriteString("\n\nChoose the primary path")
 		options := append([]string{setup.worktreeDestination}, setup.paths...)
@@ -3345,6 +3442,7 @@ func (m app) renderProjectSetup(width, height int) string {
 		}
 	case chooseProjectAgent:
 		body.WriteString("\n\nChoose an idle local agent")
+		body.WriteString("\nFilter or home-agent name: " + renderProjectInput(setup.query))
 		agents := setup.filteredAgents()
 		rows := max(1, height-8)
 		start, end := listWindow(len(agents), setup.cursor, rows)
@@ -3388,8 +3486,8 @@ func (m app) renderProjectSetup(width, height int) string {
 			body.WriteString("\n\n" + warning)
 		}
 	case enterProjectDirectory:
-		body.WriteString("\n\nNew thread launch directory:\n" + setup.directory)
-		body.WriteString("\n" + dim.Render("An absolute directory outside claims is allowed with a warning."))
+		body.WriteString("\n\nNew thread launch directory:\n" + renderProjectInput(setup.directory))
+		body.WriteString("\n" + dim.Render("Paths outside claims are allowed with a warning · ~ and $VARS expand locally."))
 	}
 	if setup.busy {
 		body.WriteString("\n" + dim.Render("Loading…"))
@@ -3398,6 +3496,10 @@ func (m app) renderProjectSetup(width, height int) string {
 		body.WriteString("\n" + setup.status)
 	}
 	return renderMessagePanel(body.String(), width, "[project activation]", "", true)
+}
+
+func renderProjectInput(value string) string {
+	return value + inputCursor.Render("▏")
 }
 
 func short(s string, n int) string {

@@ -95,7 +95,7 @@ func (q *Questioner) Publish(ctx context.Context, spec QuestionSpec) (*PendingQu
 	details += correlationDetails(spec.Correlation, messageID.String())
 	message := model.Message{
 		ID: messageID.String(), Context: q.Repository, SenderMailboxID: q.Mailbox.ID,
-		RecipientMailboxID: human.ID, Body: spec.Body, Details: details, CreatedAt: time.Now().UTC(),
+		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeProtocolQuestion, Body: spec.Body, Details: details, CreatedAt: time.Now().UTC(),
 	}
 	if err := q.Store.Create(ctx, message); err != nil {
 		waiter.Cancel()
@@ -182,7 +182,7 @@ func (q *Questioner) Notice(ctx context.Context, body, details string, correlati
 	details += "Kind: notice\n" + correlationDetails(correlation, messageID.String())
 	message := model.Message{
 		ID: messageID.String(), Context: q.Repository, SenderMailboxID: q.Mailbox.ID,
-		RecipientMailboxID: human.ID, Body: body, Details: details, CreatedAt: time.Now().UTC(),
+		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeSystemNotice, Body: body, Details: details, CreatedAt: time.Now().UTC(),
 	}
 	if err := q.Store.Create(ctx, message); err != nil {
 		return err

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -426,6 +427,28 @@ func TestMessagePresentationKindsAndFriendlyLabels(t *testing.T) {
 	}
 }
 
+func TestTypedMailboxAddressDisplayIsExhaustive(t *testing.T) {
+	context := model.RepositoryContext{Directory: "/work/repo"}
+	tests := []struct {
+		name    string
+		address model.MessageAddress
+		want    string
+	}{
+		{name: "human", address: model.MessageAddress{Kind: model.MailboxHuman, Label: "wrong"}, want: "human"},
+		{name: "unnamed agent", address: model.MessageAddress{Kind: model.MailboxAgent, Label: "codex", Harness: "codex"}, want: "codex · repo"},
+		{name: "named agent", address: model.MessageAddress{Kind: model.MailboxAgent, Label: "alice", Harness: "codex", Name: "alice"}, want: "alice"},
+		{name: "project", address: model.MessageAddress{Kind: model.MailboxProject, Label: "TUI Work"}, want: "TUI Work"},
+		{name: "remote", address: model.MessageAddress{Kind: model.MailboxRemote, Label: "silver"}, want: "silver"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := displayMessageAddress(test.address, "fallback", context); got != test.want {
+				t.Fatalf("display = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestInboxRowsUseOnlyNeededSpaceAfterAgentName(t *testing.T) {
 	item := message("compact-row", testAgentID, model.HumanMailboxID, "Working on it")
 	item.Context.Directory = "/work/repo"
@@ -508,6 +531,24 @@ func TestMessagePanelCombinesKindAndSenderInBorder(t *testing.T) {
 	view = (app{messages: []model.Message{item}}).View().Content
 	if !strings.Contains(view, "[a final answer from codex · repo]") || strings.Contains(view, "From: codex · repo") {
 		t.Fatalf("final-answer border title: %q", view)
+	}
+}
+
+func TestFinalAnswerPanelKeepsFinalAnswerSenderAfterHumanReply(t *testing.T) {
+	answer := message("answer-id", "project-mailbox", model.HumanMailboxID, "The answer")
+	answer.SenderLabel = "alice · TUI Work"
+	answer.SenderAddress = model.MessageAddress{MailboxID: "project-mailbox", Kind: model.MailboxProject, Label: "alice · TUI Work"}
+	answer.ThreadID = "project-conversation"
+	answer.Details = "Kind: final-answer"
+	reply := message("reply-id", model.HumanMailboxID, "project-mailbox", "A follow-up")
+	reply.SenderLabel = "silver"
+	reply.RecipientLabel = "TUI Work"
+	reply.RecipientAddress = model.MessageAddress{MailboxID: "project-mailbox", Kind: model.MailboxProject, Label: "TUI Work"}
+	reply.ThreadID = answer.ThreadID
+	reply.CreatedAt = answer.CreatedAt.Add(time.Second)
+	view := (app{messages: []model.Message{answer, reply}}).View().Content
+	if !strings.Contains(view, "[a final answer from alice · TUI Work]") || strings.Contains(view, "[a final answer from silver]") || !strings.Contains(view, "You → TUI Work") {
+		t.Fatalf("replied final-answer panel attribution = %q", view)
 	}
 }
 
@@ -1795,6 +1836,7 @@ func TestNewProjectComposeCollectsHomeBriefAndResources(t *testing.T) {
 	account, _ := s.HumanAccount(ctx)
 	devices, _ := s.HumanDevices(ctx)
 	directory := t.TempDir()
+	t.Setenv("HQ_PROJECT_PATH", directory)
 	m := app{ctx: ctx, store: s, agents: []domain.NamedAgent{agent}, account: account, devices: devices, editor: textarea.New(), launchDirectory: directory}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	m = updated.(app)
@@ -1817,7 +1859,7 @@ func TestNewProjectComposeCollectsHomeBriefAndResources(t *testing.T) {
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(app)
-	for _, r := range directory {
+	for _, r := range "$HQ_PROJECT_PATH" {
 		updated, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = updated.(app)
 	}
@@ -1828,8 +1870,36 @@ func TestNewProjectComposeCollectsHomeBriefAndResources(t *testing.T) {
 	}
 	updated, _ = m.Update(cmd())
 	m = updated.(app)
-	if m.projectSetup == nil || m.projectSetup.stage != chooseProjectAgent || m.projectSetup.project.Name != "new work" || m.projectSetup.project.Brief != "brief" || len(m.projectSetup.project.Resources) != 1 {
+	if m.projectSetup == nil || m.projectSetup.stage != chooseProjectAgent || m.projectSetup.project.Name != "new work" || m.projectSetup.project.Brief != "brief" || len(m.projectSetup.project.Resources) != 1 || m.projectSetup.project.Resources[0].DisplayLocator != directory {
 		t.Fatalf("created setup = %#v", m.projectSetup)
+	}
+}
+
+func TestProjectPathsExpandAgainstClientEnvironment(t *testing.T) {
+	home := t.TempDir()
+	base := t.TempDir()
+	explicit := filepath.Join(t.TempDir(), "from-env")
+	t.Setenv("HOME", home)
+	t.Setenv("HQ_PROJECT_PATH", explicit)
+	m := app{launchDirectory: base}
+	paths, err := m.expandProjectPaths("~/home-project, $HQ_PROJECT_PATH, relative-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(home, "home-project"), explicit, filepath.Join(base, "relative-project")}
+	if !slices.Equal(paths, want) {
+		t.Fatalf("expanded paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestProjectSetupTextStagesShowCursor(t *testing.T) {
+	setup := &projectComposeSetup{name: "name", brief: "brief", pathsText: "/path", worktreeRepository: "/repo", worktreeBase: "HEAD", worktreeDestination: "/worktree", worktreeBranch: "branch", query: "agent", directory: "/cwd"}
+	m := app{projectSetup: setup, width: 90, height: 30}
+	for _, stage := range []projectSetupStage{enterProjectName, enterProjectBrief, enterProjectPaths, enterWorktreeRepository, enterWorktreeBase, enterWorktreeDestination, enterWorktreeBranch, chooseProjectAgent, enterProjectDirectory} {
+		setup.stage = stage
+		if rendered := m.renderProjectSetup(90, 30); !strings.Contains(rendered, "▏") {
+			t.Fatalf("stage %v did not render an input cursor: %q", stage, rendered)
+		}
 	}
 }
 
@@ -2160,11 +2230,15 @@ func openStore(t *testing.T) (*testDomainStore, context.Context, model.Mailbox) 
 
 func message(id, sender, recipient, body string) model.Message {
 	senderLabel, recipientLabel := "codex:0198c7ec", "codex:0198c7ec"
+	senderAddress := model.MessageAddress{MailboxID: sender, Kind: model.MailboxAgent, Label: "codex", Harness: "codex"}
+	recipientAddress := model.MessageAddress{MailboxID: recipient, Kind: model.MailboxAgent, Label: "codex", Harness: "codex"}
 	if sender == model.HumanMailboxID {
 		senderLabel = "human"
+		senderAddress = model.MessageAddress{MailboxID: sender, Kind: model.MailboxHuman, Label: "human"}
 	}
 	if recipient == model.HumanMailboxID {
 		recipientLabel = "human"
+		recipientAddress = model.MessageAddress{MailboxID: recipient, Kind: model.MailboxHuman, Label: "human"}
 	}
-	return model.Message{ID: id, Context: model.RepositoryContext{Directory: "/repo"}, SenderMailboxID: sender, RecipientMailboxID: recipient, SenderLabel: senderLabel, RecipientLabel: recipientLabel, Body: body, CreatedAt: time.Now().UTC()}
+	return model.Message{ID: id, Context: model.RepositoryContext{Directory: "/repo"}, SenderMailboxID: sender, RecipientMailboxID: recipient, SenderLabel: senderLabel, RecipientLabel: recipientLabel, SenderAddress: senderAddress, RecipientAddress: recipientAddress, Body: body, CreatedAt: time.Now().UTC()}
 }

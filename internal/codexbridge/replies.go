@@ -97,7 +97,7 @@ func (r *ReplyRegistry) ClaimOne(ctx context.Context, claimStore ClaimStore, mai
 		if err != nil {
 			return false, err
 		}
-		message, err := claimStore.Claim(ctx, domain.Claim{ReplyTo: registration.questionID, RecipientMailboxID: mailboxID}, token.String())
+		message, err := claimStore.Claim(ctx, domain.Claim{ReplyTo: registration.questionID, RecipientMailboxID: mailboxID, Purpose: model.MessagePurposeProtocolAnswer}, token.String())
 		if errors.Is(err, domain.ErrNotReady) {
 			continue
 		}

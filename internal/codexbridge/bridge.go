@@ -502,7 +502,7 @@ func sendStatusAt(ctx context.Context, options Options, mailbox model.Mailbox, t
 	details := fmt.Sprintf("Kind: status\nCodex thread: %s\nHQ mailbox: %s\nStatus: %s", threadID, mailbox.ID, status)
 	message := model.Message{
 		ID: messageID.String(), Context: options.Repository, SenderMailboxID: mailbox.ID,
-		RecipientMailboxID: human.ID, Body: body, Details: details, CreatedAt: createdAt,
+		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeSystemNotice, Body: body, Details: details, CreatedAt: createdAt,
 	}
 	if err := options.Store.Create(ctx, message); err != nil {
 		return fmt.Errorf("send Codex bridge status to HQ: %w", err)

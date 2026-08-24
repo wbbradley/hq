@@ -148,6 +148,9 @@ func (r *OutputRelay) publish(output canonicalOutput) error {
 		SenderMailboxID: mailbox.ID, RecipientMailboxID: model.HumanMailboxID,
 		Body: output.body, Details: output.details, CreatedAt: r.nextCreatedAt(),
 	}
+	if project != nil {
+		message.Purpose = model.MessagePurposeProjectOutput
+	}
 	existing, err := r.store.Get(context.Background(), message.ID)
 	switch {
 	case err == nil:
@@ -253,5 +256,5 @@ func stableOutputMessageID(threadID, key string) string {
 }
 
 func sameCanonicalOutput(existing, expected model.Message) bool {
-	return existing.ID == expected.ID && existing.SenderMailboxID == expected.SenderMailboxID && existing.RecipientMailboxID == expected.RecipientMailboxID && existing.Body == expected.Body && existing.Details == expected.Details
+	return existing.ID == expected.ID && existing.SenderMailboxID == expected.SenderMailboxID && existing.RecipientMailboxID == expected.RecipientMailboxID && existing.Purpose == model.NormalizeMessagePurpose(expected.Purpose) && existing.Body == expected.Body && existing.Details == expected.Details
 }

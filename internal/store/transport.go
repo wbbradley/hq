@@ -63,7 +63,11 @@ func (s *SQLite) CreatePeerMessage(ctx context.Context, message model.Message, r
 		}
 		message.ID = id.String()
 	}
-	payload, err := event.MarshalPayload(event.TextPayload{MessageID: message.ID, Body: message.Body, Details: message.Details, Context: contextPointer(message.Context)})
+	if !message.Purpose.Valid() {
+		return fmt.Errorf("unsupported message purpose %q", message.Purpose)
+	}
+	message.Purpose = model.NormalizeMessagePurpose(message.Purpose)
+	payload, err := event.MarshalPayload(event.TextPayload{MessageID: message.ID, Body: message.Body, Details: message.Details, Purpose: message.Purpose, Context: contextPointer(message.Context)})
 	if err != nil {
 		return err
 	}

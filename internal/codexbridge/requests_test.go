@@ -114,6 +114,9 @@ func TestRequestUserInputPublishesMultipleCorrelatedQuestions(t *testing.T) {
 	if !strings.Contains(color.Details, "Question ID: color") || !strings.Contains(color.Details, "Red — Warm") || !strings.Contains(color.Details, "Codex request: \"request-1\"") || !strings.Contains(color.Details, "HQ message: "+color.ID) {
 		t.Fatalf("color details = %q", color.Details)
 	}
+	if color.Purpose != model.MessagePurposeProtocolQuestion {
+		t.Fatalf("question purpose = %q", color.Purpose)
+	}
 	fixture.reply(t, note, "some context")
 	fixture.reply(t, color, "Blue")
 	result := receiveRequestResult(t, done)

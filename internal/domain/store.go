@@ -22,12 +22,13 @@ var (
 )
 
 type Claim struct {
-	MessageID           string   `json:"message_id,omitempty"`
-	ReplyTo             string   `json:"reply_to,omitempty"`
-	ExcludeReplyTo      []string `json:"exclude_reply_to,omitempty"`
-	RecipientMailboxID  string   `json:"recipient_mailbox_id,omitempty"`
-	CorrelationThreadID string   `json:"correlation_thread_id,omitempty"`
-	UnthreadedOnly      bool     `json:"unthreaded_only,omitempty"`
+	MessageID           string               `json:"message_id,omitempty"`
+	ReplyTo             string               `json:"reply_to,omitempty"`
+	ExcludeReplyTo      []string             `json:"exclude_reply_to,omitempty"`
+	RecipientMailboxID  string               `json:"recipient_mailbox_id,omitempty"`
+	Purpose             model.MessagePurpose `json:"purpose,omitempty"`
+	CorrelationThreadID string               `json:"correlation_thread_id,omitempty"`
+	UnthreadedOnly      bool                 `json:"unthreaded_only,omitempty"`
 }
 
 type NamedAgent struct {

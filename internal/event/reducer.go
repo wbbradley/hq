@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sort"
 	"time"
+
+	"github.com/wbbradley/hq/internal/model"
 )
 
 var (
@@ -103,6 +105,7 @@ type MessageProjection struct {
 	Parents           []string
 	Body              string
 	Details           string
+	Purpose           model.MessagePurpose
 	MessageID         string
 	AudienceAccountID string
 	ActorLabel        string
@@ -1005,7 +1008,7 @@ func (s *State) projectMessages() {
 		s.Messages[id] = MessageProjection{
 			ID: id, Type: content.Type, Sender: *content.Sender, Recipient: *recipient,
 			ThreadID: threadID, Parents: append([]string(nil), content.Parents...), Body: payload.Body,
-			MessageID: payload.MessageID, AudienceAccountID: audienceAccountID, ActorLabel: payload.ActorLabel, Context: payload.Context, Details: payload.Details, CreatedAt: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(),
+			MessageID: payload.MessageID, AudienceAccountID: audienceAccountID, ActorLabel: payload.ActorLabel, Context: payload.Context, Details: payload.Details, Purpose: model.NormalizeMessagePurpose(payload.Purpose), CreatedAt: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(),
 			Incomplete: record.Status == StatusUnresolved,
 		}
 	}

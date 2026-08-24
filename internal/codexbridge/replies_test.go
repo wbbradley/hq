@@ -25,6 +25,9 @@ func (s *replyClaimStore) Claim(_ context.Context, claim store.Claim, token stri
 		if claim.ReplyTo != "" && (message.ReplyTo == nil || *message.ReplyTo != claim.ReplyTo) {
 			continue
 		}
+		if claim.Purpose != "" && message.Purpose != claim.Purpose {
+			continue
+		}
 		s.claimed[message.ID] = token
 		return message, nil
 	}
@@ -58,7 +61,8 @@ func TestReplyRegistryClaimsOnlyMatchingReply(t *testing.T) {
 	claimStore := &replyClaimStore{claimed: make(map[string]string), messages: []model.Message{
 		{ID: "unsolicited", RecipientMailboxID: "agent"},
 		{ID: "other-reply", RecipientMailboxID: "agent", ReplyTo: &otherQuestionID},
-		{ID: "matching-reply", RecipientMailboxID: "agent", ReplyTo: &questionID, Body: "approve"},
+		{ID: "conversation-reply", RecipientMailboxID: "agent", ReplyTo: &questionID, Purpose: model.MessagePurposeConversation, Body: "do not claim as protocol"},
+		{ID: "matching-reply", RecipientMailboxID: "agent", ReplyTo: &questionID, Purpose: model.MessagePurposeProtocolAnswer, Body: "approve"},
 	}}
 	registry := NewReplyRegistry()
 	waiter, err := registry.Register(questionID)
@@ -83,7 +87,7 @@ func TestReplyRegistryClaimsOnlyMatchingReply(t *testing.T) {
 
 func TestClaimedReplyCanReleaseAfterCompletionFailure(t *testing.T) {
 	questionID := "question-1"
-	claimStore := &replyClaimStore{claimed: make(map[string]string), failFirst: true, messages: []model.Message{{ID: "reply", RecipientMailboxID: "agent", ReplyTo: &questionID}}}
+	claimStore := &replyClaimStore{claimed: make(map[string]string), failFirst: true, messages: []model.Message{{ID: "reply", RecipientMailboxID: "agent", ReplyTo: &questionID, Purpose: model.MessagePurposeProtocolAnswer}}}
 	registry := NewReplyRegistry()
 	waiter, _ := registry.Register(questionID)
 	if claimed, err := registry.ClaimOne(context.Background(), claimStore, "agent"); err != nil || !claimed {

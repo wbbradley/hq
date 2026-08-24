@@ -15,6 +15,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/wbbradley/hq/internal/model"
 )
 
 const (
@@ -110,11 +111,12 @@ type Content struct {
 }
 
 type TextPayload struct {
-	MessageID  string             `json:"message_id,omitempty"`
-	Body       string             `json:"body"`
-	Details    string             `json:"details,omitempty"`
-	Context    *RepositoryContext `json:"context,omitempty"`
-	ActorLabel string             `json:"actor_label,omitempty"`
+	MessageID  string               `json:"message_id,omitempty"`
+	Body       string               `json:"body"`
+	Details    string               `json:"details,omitempty"`
+	Purpose    model.MessagePurpose `json:"purpose,omitempty"`
+	Context    *RepositoryContext   `json:"context,omitempty"`
+	ActorLabel string               `json:"actor_label,omitempty"`
 }
 
 type RepositoryContext struct {

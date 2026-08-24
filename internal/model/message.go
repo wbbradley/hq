@@ -10,7 +10,44 @@ const (
 	MailboxHuman   MailboxKind = "human"
 	MailboxAgent   MailboxKind = "agent"
 	MailboxProject MailboxKind = "project"
+	MailboxRemote  MailboxKind = "remote"
 )
+
+type MessagePurpose string
+
+const (
+	MessagePurposeConversation     MessagePurpose = "conversation"
+	MessagePurposeProjectInput     MessagePurpose = "project-input"
+	MessagePurposeProtocolQuestion MessagePurpose = "protocol-question"
+	MessagePurposeProtocolAnswer   MessagePurpose = "protocol-answer"
+	MessagePurposeProjectOutput    MessagePurpose = "project-output"
+	MessagePurposeSystemNotice     MessagePurpose = "system-notice"
+)
+
+func NormalizeMessagePurpose(purpose MessagePurpose) MessagePurpose {
+	if purpose == "" {
+		return MessagePurposeConversation
+	}
+	return purpose
+}
+
+func (purpose MessagePurpose) Valid() bool {
+	switch purpose {
+	case "", MessagePurposeConversation, MessagePurposeProjectInput, MessagePurposeProtocolQuestion, MessagePurposeProtocolAnswer, MessagePurposeProjectOutput, MessagePurposeSystemNotice:
+		return true
+	default:
+		return false
+	}
+}
+
+type MessageAddress struct {
+	InstallationID string      `json:"installation_id"`
+	MailboxID      string      `json:"mailbox_id"`
+	Kind           MailboxKind `json:"kind"`
+	Label          string      `json:"label"`
+	Harness        string      `json:"harness,omitempty"`
+	Name           string      `json:"name,omitempty"`
+}
 
 type SessionIdentity struct {
 	Harness           string `json:"harness"`
@@ -39,6 +76,7 @@ type Message struct {
 	ID                      string            `json:"id"`
 	EventID                 string            `json:"event_id"`
 	ThreadID                string            `json:"thread_id"`
+	Purpose                 MessagePurpose    `json:"purpose"`
 	CodexThreadID           string            `json:"codex_thread_id,omitempty"`
 	CodexTurnID             string            `json:"codex_turn_id,omitempty"`
 	Incomplete              bool              `json:"incomplete_causal_history,omitempty"`
@@ -54,6 +92,8 @@ type Message struct {
 	SenderLabel             string            `json:"sender"`
 	SourceDeviceLabel       string            `json:"source_device,omitempty"`
 	RecipientLabel          string            `json:"recipient"`
+	SenderAddress           MessageAddress    `json:"sender_address"`
+	RecipientAddress        MessageAddress    `json:"recipient_address"`
 	Body                    string            `json:"body"`
 	Details                 string            `json:"details,omitempty"`
 	ReplyTo                 *string           `json:"reply_to,omitempty"`
@@ -63,16 +103,17 @@ type Message struct {
 }
 
 type Filter struct {
-	Directory             string `json:"directory,omitempty"`
-	SenderMailboxID       string `json:"sender_mailbox_id,omitempty"`
-	RecipientMailboxID    string `json:"recipient_mailbox_id,omitempty"`
-	CounterpartyMailboxID string `json:"counterparty_mailbox_id,omitempty"`
-	ThreadID              string `json:"thread_id,omitempty"`
-	CodexThreadID         string `json:"codex_thread_id,omitempty"`
-	CodexTurnID           string `json:"codex_turn_id,omitempty"`
-	ReplyTo               string `json:"reply_to,omitempty"`
-	Archived              *bool  `json:"archived,omitempty"`
-	Completed             *bool  `json:"completed,omitempty"`
-	Limit                 int    `json:"limit,omitempty"`
-	NewestFirst           bool   `json:"newest_first,omitempty"`
+	Directory             string         `json:"directory,omitempty"`
+	SenderMailboxID       string         `json:"sender_mailbox_id,omitempty"`
+	RecipientMailboxID    string         `json:"recipient_mailbox_id,omitempty"`
+	CounterpartyMailboxID string         `json:"counterparty_mailbox_id,omitempty"`
+	ThreadID              string         `json:"thread_id,omitempty"`
+	CodexThreadID         string         `json:"codex_thread_id,omitempty"`
+	CodexTurnID           string         `json:"codex_turn_id,omitempty"`
+	ReplyTo               string         `json:"reply_to,omitempty"`
+	Purpose               MessagePurpose `json:"purpose,omitempty"`
+	Archived              *bool          `json:"archived,omitempty"`
+	Completed             *bool          `json:"completed,omitempty"`
+	Limit                 int            `json:"limit,omitempty"`
+	NewestFirst           bool           `json:"newest_first,omitempty"`
 }

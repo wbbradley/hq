@@ -547,6 +547,9 @@ func validateTextPayload(raw json.RawMessage) error {
 	if payload.Context != nil && strings.TrimSpace(payload.Context.Directory) == "" {
 		return errors.New("message context needs a directory")
 	}
+	if !payload.Purpose.Valid() {
+		return fmt.Errorf("unsupported message purpose %q", payload.Purpose)
+	}
 	if !utf8.ValidString(payload.Body) || !utf8.ValidString(payload.Details) {
 		return errors.New("message text is not valid UTF-8")
 	}

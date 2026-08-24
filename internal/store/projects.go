@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
+	"github.com/wbbradley/hq/internal/model"
 )
 
 type canonicalPath struct {
@@ -925,7 +926,7 @@ func (s *SQLite) CheckProjectResource(ctx context.Context, projectID, resourceID
 			if len(details) != 0 {
 				noticeDetails += "\nHealth details: " + string(raw)
 			}
-			payload, _ := event.MarshalPayload(event.TextPayload{MessageID: messageID.String(), Body: body, Details: noticeDetails, ActorLabel: "HQ · " + projectName})
+			payload, _ := event.MarshalPayload(event.TextPayload{MessageID: messageID.String(), Body: body, Details: noticeDetails, Purpose: model.MessagePurposeSystemNotice, ActorLabel: "HQ · " + projectName})
 			content := event.Content{Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
 			signed, signErr := s.signContents(ctx, []event.Content{content}, []time.Time{now})
 			if signErr != nil {

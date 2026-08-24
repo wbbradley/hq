@@ -972,3 +972,119 @@ func TestProjectOutputRetainsAssignmentProvenanceAndMarksLateRuntime(t *testing.
 		t.Fatalf("provenance late=%d forced=%d current=%q owner=%q", markedLate, forced, currentAssignment, owner)
 	}
 }
+
+func TestReplyToProjectOutputIsAcceptedAndDispatchable(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	if _, err := s.CreateNamedAgent(ctx, "alice", ""); err != nil {
+		t.Fatal(err)
+	}
+	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "reply project", Open: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err = s.AssignProject(ctx, project.ID, project.HeadEventID, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err = s.ActivateProjectAssignment(ctx, project.ID, project.HeadEventID, domain.ActivateProjectAssignmentRequest{Harness: "codex", ExternalThread: "reply-thread", LaunchDirectory: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := domain.ProjectOutputBinding{ProjectID: project.ID, AssignmentID: project.Assignment.ID, AgentName: "alice", ProjectThreadID: project.Assignment.SelectedThreadID, ExternalThreadID: "reply-thread", RuntimeState: "connected"}
+	outputID := "019c0000-0000-7000-8000-000000000361"
+	if err := s.CreateProjectOutput(ctx, binding, model.Message{ID: outputID, SenderMailboxID: project.MailboxID, RecipientMailboxID: model.HumanMailboxID, Body: "project answer", Details: "Kind: final-answer", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	replyID := "019c0000-0000-7000-8000-000000000362"
+	reply := model.Message{ID: replyID, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: project.MailboxID, Body: "follow-up", CreatedAt: time.Now().UTC()}
+	if err := s.Reply(ctx, outputID, reply); err != nil {
+		t.Fatal(err)
+	}
+	var sequence int64
+	if err := s.db.QueryRow(`SELECT sequence FROM project_message_acceptances WHERE project_id=? AND message_id=?`, project.ID, replyID).Scan(&sequence); err != nil || sequence != 1 {
+		t.Fatalf("reply acceptance sequence = %d, %v", sequence, err)
+	}
+	original, err := s.Get(ctx, outputID)
+	if err != nil || original.ArchivedAt == nil {
+		t.Fatalf("original output = %#v, %v", original, err)
+	}
+	storedReply, err := s.Get(ctx, replyID)
+	if err != nil || storedReply.Purpose != model.MessagePurposeProjectInput || storedReply.RecipientAddress.Kind != model.MailboxProject || storedReply.RecipientLabel != project.Name {
+		t.Fatalf("stored reply = %#v, %v", storedReply, err)
+	}
+	delivery, err := s.ClaimProjectMessage(ctx, project.ID, project.Assignment.ID, project.Assignment.SelectedThreadID, "reply-owner")
+	if err != nil || delivery.Message.ID != replyID || delivery.Sequence != 1 || delivery.AgentName != "alice" {
+		t.Fatalf("reply delivery = %#v, %v", delivery, err)
+	}
+}
+
+func TestStructuredReplyToProjectQuestionIsNotAcceptedAsConversation(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "approval project", Open: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	questionID := "019c0000-0000-7000-8000-000000000365"
+	question := model.Message{ID: questionID, SenderMailboxID: project.MailboxID, RecipientMailboxID: model.HumanMailboxID, Purpose: model.MessagePurposeProtocolQuestion, Body: "Approve?", CreatedAt: time.Now().UTC()}
+	if err := s.Create(ctx, question); err != nil {
+		t.Fatal(err)
+	}
+	replyID := "019c0000-0000-7000-8000-000000000366"
+	if err := s.Reply(ctx, questionID, model.Message{ID: replyID, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: project.MailboxID, Body: "yes", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.Get(ctx, replyID)
+	if err != nil || stored.Purpose != model.MessagePurposeProtocolAnswer {
+		t.Fatalf("protocol reply = %#v, %v", stored, err)
+	}
+	var acceptances int
+	if err := s.db.QueryRow(`SELECT count(*) FROM project_message_acceptances WHERE message_id=?`, replyID).Scan(&acceptances); err != nil || acceptances != 0 {
+		t.Fatalf("protocol reply acceptances = %d, %v", acceptances, err)
+	}
+}
+
+func TestOpenRepairsPreviouslyStrandedLocalProjectReply(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	ctx := context.Background()
+	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "repair replies"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputID := "019c0000-0000-7000-8000-000000000371"
+	if err := s.Create(ctx, model.Message{ID: outputID, SenderMailboxID: project.MailboxID, RecipientMailboxID: model.HumanMailboxID, Body: "old project output", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	original, err := s.messageRecord(ctx, outputID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, parents, deviceLabel, err := s.localAccountAction(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replyID := "019c0000-0000-7000-8000-000000000372"
+	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: replyID, Body: "stranded follow-up", ActorLabel: deviceLabel})
+	content := event.Content{Type: event.TypeAnswer, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(project.MailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, ThreadID: original.eventID, Parents: uniqueSorted(append(parents, original.eventID)), Scope: event.ScopeAccountAddressed, Payload: payload}
+	if err := s.appendContents(ctx, []event.Content{content}, []time.Time{time.Now().UTC()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var before int
+	if err := s.db.QueryRow(`SELECT count(*) FROM project_message_acceptances WHERE message_id=?`, replyID).Scan(&before); err != nil || before != 0 {
+		t.Fatalf("reply was not stranded before reopen: count=%d err=%v", before, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	var sequence int64
+	if err := reopened.db.QueryRow(`SELECT sequence FROM project_message_acceptances WHERE project_id=? AND message_id=?`, project.ID, replyID).Scan(&sequence); err != nil || sequence != 1 {
+		t.Fatalf("repaired reply sequence = %d, %v", sequence, err)
+	}
+}
