@@ -19,6 +19,7 @@ import (
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/projectstate"
 	_ "modernc.org/sqlite"
 )
 
@@ -1727,7 +1728,7 @@ func (s *SQLite) createProjectMessage(ctx context.Context, projectID string, mes
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0)+1 FROM project_message_acceptances WHERE project_id=?`, projectID).Scan(&sequence); err != nil {
 		return err
 	}
-	acceptance, acceptanceBody, err := s.signProjectEventTx(ctx, tx, projectID, head, "project.message.accepted", map[string]any{"message_id": message.ID, "message_event_id": messageEvents[0].ID(), "sequence": sequence}, acceptedAt)
+	acceptance, acceptanceBody, err := s.signProjectEventTx(ctx, tx, projectID, head, projectstate.MessageAccepted{MessageID: message.ID, MessageEventID: messageEvents[0].ID(), Sequence: sequence}, acceptedAt)
 	if err != nil {
 		return err
 	}
@@ -1735,7 +1736,7 @@ func (s *SQLite) createProjectMessage(ctx context.Context, projectID string, mes
 	if _, err := s.ingestCanonicalTx(ctx, tx, events, true); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, acceptance.ID(), projectID, head, "project.message.accepted", acceptanceBody, acceptedAt.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, acceptance.ID(), projectID, head, projectstate.OperationMessageAccepted, acceptanceBody, acceptedAt.UnixMilli()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO project_message_acceptances(project_id,sequence,message_id,message_event_id,acceptance_event_id,accepted_at) VALUES (?,?,?,?,?,?)`, projectID, sequence, message.ID, messageEvents[0].ID(), acceptance.ID(), acceptedAt.UnixMilli()); err != nil {

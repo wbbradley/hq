@@ -17,6 +17,7 @@ import (
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/projectstate"
 )
 
 type canonicalPath struct {
@@ -82,8 +83,8 @@ func pathOverlap(a, b string) string {
 	return ""
 }
 
-func (s *SQLite) appendProjectEventTx(ctx context.Context, tx *sql.Tx, projectID, previous, eventType string, payload any, now int64) (string, error) {
-	signed, raw, err := s.signProjectEventTx(ctx, tx, projectID, previous, eventType, payload, time.UnixMilli(now).UTC())
+func (s *SQLite) appendProjectEventTx(ctx context.Context, tx *sql.Tx, projectID, previous string, data projectstate.Data, now int64) (string, error) {
+	signed, raw, err := s.signProjectEventTx(ctx, tx, projectID, previous, data, time.UnixMilli(now).UTC())
 	if err != nil {
 		return "", err
 	}
@@ -91,16 +92,16 @@ func (s *SQLite) appendProjectEventTx(ctx context.Context, tx *sql.Tx, projectID
 		return "", err
 	}
 	id := signed.ID()
-	_, err = tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, id, projectID, previous, eventType, raw, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, id, projectID, previous, data.Operation(), raw, now)
 	return id, err
 }
 
-func (s *SQLite) signProjectEvent(ctx context.Context, projectID, previous, eventType string, payload any, createdAt time.Time, accountID string, membershipParents []string) (event.SignedEvent, []byte, error) {
-	raw, err := marshalProjectAuditPayload(ctx, payload)
+func (s *SQLite) signProjectEvent(ctx context.Context, projectID, previous string, data projectstate.Data, createdAt time.Time, accountID string, membershipParents []string) (event.SignedEvent, []byte, error) {
+	raw, err := marshalProjectAuditPayload(ctx, data)
 	if err != nil {
 		return event.SignedEvent{}, nil, err
 	}
-	projectPayload, err := event.MarshalPayload(event.ProjectEventPayload{ProjectID: projectID, PreviousEventID: previous, Operation: eventType, Body: raw})
+	projectPayload, err := event.MarshalPayload(event.ProjectEventPayload{ProjectID: projectID, PreviousEventID: previous, Operation: string(data.Operation()), Body: raw})
 	if err != nil {
 		return event.SignedEvent{}, nil, err
 	}
@@ -118,12 +119,12 @@ func (s *SQLite) signProjectEvent(ctx context.Context, projectID, previous, even
 	return signed[0], raw, nil
 }
 
-func (s *SQLite) signProjectEventTx(ctx context.Context, tx *sql.Tx, projectID, previous, eventType string, payload any, createdAt time.Time) (event.SignedEvent, []byte, error) {
+func (s *SQLite) signProjectEventTx(ctx context.Context, tx *sql.Tx, projectID, previous string, data projectstate.Data, createdAt time.Time) (event.SignedEvent, []byte, error) {
 	accountID, parents, err := projectAccountRouteTx(ctx, tx, s.signer.InstallationID)
 	if err != nil {
 		return event.SignedEvent{}, nil, err
 	}
-	return s.signProjectEvent(ctx, projectID, previous, eventType, payload, createdAt, accountID, parents)
+	return s.signProjectEvent(ctx, projectID, previous, data, createdAt, accountID, parents)
 }
 
 func projectAccountRouteTx(ctx context.Context, tx *sql.Tx, installationID string) (string, []string, error) {
@@ -143,15 +144,19 @@ func projectAccountRouteTx(ctx context.Context, tx *sql.Tx, installationID strin
 	return accountID, []string{acceptEvent}, nil
 }
 
-func marshalProjectAuditPayload(ctx context.Context, payload any) ([]byte, error) {
+func marshalProjectAuditPayload(ctx context.Context, data projectstate.Data) ([]byte, error) {
 	requestID := ""
 	if mutation, ok := domain.MutationFromContext(ctx); ok {
 		requestID = mutation.ID
 	}
+	raw, err := projectstate.MarshalData(data)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(struct {
-		RequestID string `json:"request_id,omitempty"`
-		Data      any    `json:"data"`
-	}{RequestID: requestID, Data: payload})
+		RequestID string          `json:"request_id,omitempty"`
+		Data      json.RawMessage `json:"data"`
+	}{RequestID: requestID, Data: raw})
 }
 
 func checkProjectHeadTx(ctx context.Context, tx *sql.Tx, projectID, expected string) (domain.ProjectLifecycle, bool, string, error) {
@@ -211,12 +216,12 @@ func (s *SQLite) CreateProject(ctx context.Context, request domain.CreateProject
 	}
 	operationTime := s.now().UTC()
 	mailboxPayload, _ := event.MarshalPayload(event.MailboxPayload{MailboxID: mailboxID, Kind: "project", Label: request.Name})
-	resourceDescriptors := make([]map[string]any, len(paths))
+	resourceDescriptors := make([]projectstate.CreatedResource, len(paths))
 	for index, path := range paths {
-		resourceDescriptors[index] = map[string]any{"id": resourceIDs[index], "kind": "path", "display_locator": path.display, "canonical_locator": path.canonical, "health": path.health, "health_details": path.details, "last_checked_at": operationTime}
+		resourceDescriptors[index] = projectstate.CreatedResource{ID: resourceIDs[index], Kind: "path", DisplayLocator: path.display, CanonicalLocator: path.canonical, Health: path.health, HealthDetails: path.details, LastCheckedAt: operationTime}
 	}
 	request.HomeInstallation = s.signer.InstallationID
-	createData := map[string]any{"request": request, "mailbox_id": mailboxID, "resource_ids": resourceIDs, "resources": resourceDescriptors}
+	createData := projectstate.Created{Request: request, MailboxID: mailboxID, ResourceIDs: resourceIDs, Resources: resourceDescriptors}
 	createBody, _ := marshalProjectAuditPayload(ctx, createData)
 	account, membership, _, err := s.localAccountAction(ctx, "")
 	if err != nil {
@@ -226,7 +231,7 @@ func (s *SQLite) CreateProject(ctx context.Context, request domain.CreateProject
 	if err != nil {
 		return domain.Project{}, err
 	}
-	projectEvent, _, err := s.signProjectEvent(ctx, request.ID, "", "project.created", createData, operationTime, account.ID, membership)
+	projectEvent, _, err := s.signProjectEvent(ctx, request.ID, "", createData, operationTime, account.ID, membership)
 	if err != nil {
 		return domain.Project{}, err
 	}
@@ -254,7 +259,7 @@ func (s *SQLite) CreateProject(ctx context.Context, request domain.CreateProject
 		if _, err := tx.ExecContext(ctx, `INSERT INTO projects(id,home_installation_id,mailbox_id,predecessor_project_id,name,brief,lifecycle,archived,primary_resource_id,head_event_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, request.ID, s.signer.InstallationID, mailboxID, nullString(request.PredecessorProjectID), request.Name, request.Brief, lifecycle, false, nullString(primaryID), eventID, now, now); err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, eventID, request.ID, "", "project.created", createBody, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, eventID, request.ID, "", projectstate.OperationCreated, createBody, now); err != nil {
 			return nil, err
 		}
 		for i, path := range paths {
@@ -534,7 +539,7 @@ func (s *SQLite) OpenProject(ctx context.Context, id, expected string) (domain.P
 		if err := checkPathConflictsTx(ctx, tx, id, paths); err != nil {
 			return "", err
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.opened", map[string]any{}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.Opened{}, now)
 		if err != nil {
 			return "", err
 		}
@@ -573,7 +578,7 @@ func (s *SQLite) ObserveProjectResources(ctx context.Context, id, expected strin
 		if err := s.db.QueryRowContext(ctx, `SELECT previous_event_id,event_type FROM project_events WHERE event_id=? AND project_id=?`, head, id).Scan(&previous, &eventType); err != nil {
 			return current, &domain.StaleProjectHead{ProjectID: id, Expected: expected, Current: current.HeadEventID}
 		}
-		if eventType != "project.resource.health" {
+		if eventType != string(projectstate.OperationResourceHealth) {
 			return current, &domain.StaleProjectHead{ProjectID: id, Expected: expected, Current: current.HeadEventID}
 		}
 		head = previous
@@ -589,7 +594,7 @@ func (s *SQLite) BeginCloseProject(ctx context.Context, id, expected string) (do
 		if lifecycle != domain.ProjectOpen {
 			return "", fmt.Errorf("begin close: %w", domain.ErrProjectState)
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.closing", map[string]any{}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.Closing{}, now)
 		if err != nil {
 			return "", err
 		}
@@ -606,7 +611,7 @@ func (s *SQLite) FinalizeCloseProject(ctx context.Context, id, expected string, 
 		if lifecycle != domain.ProjectClosing {
 			return "", fmt.Errorf("finalize close: %w", domain.ErrProjectState)
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.closed", map[string]any{"forced": forced, "runtime_observation": runtimeObservation}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.Closed{Forced: forced, RuntimeObservation: runtimeObservation}, now)
 		if err != nil {
 			return "", err
 		}
@@ -632,11 +637,11 @@ func (s *SQLite) SetProjectArchived(ctx context.Context, id, expected string, ar
 		if current == archived {
 			return "", fmt.Errorf("archive: %w", domain.ErrProjectState)
 		}
-		typeName := "project.archived"
+		var data projectstate.Data = projectstate.Archived{}
 		if !archived {
-			typeName = "project.unarchived"
+			data = projectstate.Unarchived{}
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, typeName, map[string]any{}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, data, now)
 		if err != nil {
 			return "", err
 		}
@@ -654,7 +659,7 @@ func (s *SQLite) UpdateProjectMetadata(ctx context.Context, id, expected, name, 
 		return domain.Project{}, errors.New("project name must be non-empty and at most 200 bytes without line breaks")
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, _ domain.ProjectLifecycle, _ bool, head string, now int64) (string, error) {
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.metadata.updated", map[string]any{"name": name, "brief": brief}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.MetadataUpdated{Name: name, Brief: brief}, now)
 		if err != nil {
 			return "", err
 		}
@@ -692,7 +697,7 @@ func (s *SQLite) AddProjectPath(ctx context.Context, id, expected string, input 
 			return "", err
 		}
 		effectivePrimary := makePrimary || !priorPrimary.Valid
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.resource.added", map[string]any{"resource_id": resourceID, "kind": "path", "display_locator": path.display, "canonical_locator": path.canonical, "primary": effectivePrimary, "health": path.health, "health_details": path.details, "last_checked_at": time.UnixMilli(now).UTC()}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.ResourceAdded{ResourceID: resourceID, Kind: "path", DisplayLocator: path.display, CanonicalLocator: path.canonical, Primary: effectivePrimary, Health: path.health, HealthDetails: path.details, LastCheckedAt: time.UnixMilli(now).UTC()}, now)
 		if err != nil {
 			return "", err
 		}
@@ -763,7 +768,7 @@ func (s *SQLite) RemoveProjectResource(ctx context.Context, id, expected, resour
 		if current == 0 {
 			return "", domain.ErrResourceNotFound
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.resource.removed", map[string]any{"resource_id": resourceID, "assigned": projectHasAssignmentTx(ctx, tx, id)}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.ResourceRemoved{ResourceID: resourceID, Assigned: projectHasAssignmentTx(ctx, tx, id)}, now)
 		if err != nil {
 			return "", err
 		}
@@ -803,7 +808,7 @@ func (s *SQLite) ReplaceProjectPath(ctx context.Context, id, expected, oldResour
 				return "", err
 			}
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.resource.replaced", map[string]any{"old_resource_id": oldResourceID, "new_resource_id": newResourceID, "display_locator": path.display, "canonical_locator": path.canonical, "health": path.health, "health_details": path.details, "last_checked_at": time.UnixMilli(now).UTC()}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.ResourceReplaced{OldResourceID: oldResourceID, NewResourceID: newResourceID, DisplayLocator: path.display, CanonicalLocator: path.canonical, Health: path.health, HealthDetails: path.details, LastCheckedAt: time.UnixMilli(now).UTC()}, now)
 		if err != nil {
 			return "", err
 		}
@@ -845,7 +850,7 @@ func (s *SQLite) SetProjectPrimaryResource(ctx context.Context, id, expected, re
 		if current == 0 {
 			return "", domain.ErrResourceNotFound
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.primary-resource.changed", map[string]any{"resource_id": resourceID}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.PrimaryResourceChanged{ResourceID: resourceID}, now)
 		if err != nil {
 			return "", err
 		}
@@ -939,7 +944,7 @@ func (s *SQLite) CheckProjectResource(ctx context.Context, projectID, resourceID
 			if err := tx.QueryRowContext(ctx, `SELECT head_event_id FROM projects WHERE id=?`, projectID).Scan(&head); err != nil {
 				return nil, err
 			}
-			healthEvent, err := s.appendProjectEventTx(ctx, tx, projectID, head, "project.resource.health", map[string]any{"resource_id": resourceID, "health": checked.health, "health_details": details, "last_checked_at": now}, now.UnixMilli())
+			healthEvent, err := s.appendProjectEventTx(ctx, tx, projectID, head, projectstate.ResourceHealth{ResourceID: resourceID, Health: checked.health, HealthDetails: details, LastCheckedAt: now}, now.UnixMilli())
 			if err != nil {
 				return nil, err
 			}
@@ -993,7 +998,7 @@ func (s *SQLite) AssignProject(ctx context.Context, id, expected, agent string) 
 			return "", domain.ErrAgentAssigned
 		}
 		assignmentID := uuid.NewString()
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.assignment.configuring", map[string]any{"assignment_id": assignmentID, "agent": agent}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.AssignmentConfiguring{AssignmentID: assignmentID, Agent: agent}, now)
 		if err != nil {
 			return "", err
 		}
@@ -1048,7 +1053,7 @@ func (s *SQLite) ActivateProjectAssignment(ctx context.Context, id, expected str
 				return "", err
 			}
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.assignment.runnable", map[string]any{"assignment_id": assignmentID, "agent": agent, "thread_id": threadID}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.AssignmentRunnable{AssignmentID: assignmentID, Agent: agent, ThreadID: threadID}, now)
 		if err != nil {
 			return "", err
 		}
@@ -1085,7 +1090,7 @@ func (s *SQLite) BlockProjectAssignment(ctx context.Context, id, expected, diagn
 		if state == domain.AssignmentBlocked {
 			return "", fmt.Errorf("block handoff: %w", domain.ErrProjectState)
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.assignment.blocked", map[string]any{"assignment_id": assignmentID, "agent": agent, "diagnostic": diagnostic}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.AssignmentBlocked{AssignmentID: assignmentID, Agent: agent, Diagnostic: diagnostic}, now)
 		if err != nil {
 			return "", err
 		}
@@ -1110,7 +1115,7 @@ func (s *SQLite) UnassignProject(ctx context.Context, id, expected string, force
 		} else if err != nil {
 			return "", err
 		}
-		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, "project.assignment.ended", map[string]any{"assignment_id": assignmentID, "agent": agent, "forced": forced, "runtime_observation": runtimeObservation}, now)
+		eventID, err := s.appendProjectEventTx(ctx, tx, id, head, projectstate.AssignmentEnded{AssignmentID: assignmentID, Agent: agent, Forced: forced, RuntimeObservation: runtimeObservation}, now)
 		if err != nil {
 			return "", err
 		}

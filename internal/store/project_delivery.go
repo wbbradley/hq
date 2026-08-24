@@ -11,6 +11,7 @@ import (
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/event"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/projectstate"
 )
 
 const projectDispatchLease = 30 * time.Second
@@ -217,14 +218,14 @@ func (s *SQLite) RecordProjectDispatch(ctx context.Context, messageID, token str
 	if err := tx.QueryRowContext(ctx, `SELECT head_event_id FROM projects WHERE id=?`, projectID).Scan(&head); err != nil {
 		return err
 	}
-	dispatch, body, err := s.signProjectEventTx(ctx, tx, projectID, head, "project.message.dispatched", map[string]any{"message_id": messageID, "sequence": sequence, "assignment_id": assignmentID, "agent": agentName, "project_thread_id": projectThreadID, "external_thread_id": externalThreadID}, now)
+	dispatch, body, err := s.signProjectEventTx(ctx, tx, projectID, head, projectstate.MessageDispatched{MessageID: messageID, Sequence: sequence, AssignmentID: assignmentID, Agent: agentName, ProjectThreadID: projectThreadID, ExternalThreadID: externalThreadID}, now)
 	if err != nil {
 		return err
 	}
 	if _, err := s.ingestCanonicalTx(ctx, tx, []event.SignedEvent{dispatch}, true); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, dispatch.ID(), projectID, head, "project.message.dispatched", body, now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO project_events(event_id,project_id,previous_event_id,event_type,payload,created_at) VALUES (?,?,?,?,?,?)`, dispatch.ID(), projectID, head, projectstate.OperationMessageDispatched, body, now.UnixMilli()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO project_dispatch_records(message_id,project_id,sequence,assignment_id,agent_name,project_thread_id,external_thread_id,dispatch_event_id,dispatched_at) VALUES (?,?,?,?,?,?,?,?,?)`, messageID, projectID, sequence, assignmentID, agentName, projectThreadID, externalThreadID, dispatch.ID(), now.UnixMilli()); err != nil {
