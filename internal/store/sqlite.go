@@ -541,10 +541,10 @@ type SQLite struct {
 	database              string
 	afterChange           func(domain.Invalidation)
 	now                   func() time.Time
-	projectCommandHandler func(context.Context, domain.ProjectCommand) (domain.Project, error)
+	projectCommandHandler func(context.Context, domain.ProjectCommand, domain.ProjectCommandData) (domain.Project, error)
 }
 
-func (s *SQLite) SetProjectCommandHandler(handler func(context.Context, domain.ProjectCommand) (domain.Project, error)) {
+func (s *SQLite) SetProjectCommandHandler(handler func(context.Context, domain.ProjectCommand, domain.ProjectCommandData) (domain.Project, error)) {
 	s.projectCommandHandler = handler
 }
 

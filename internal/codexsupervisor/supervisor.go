@@ -780,7 +780,7 @@ func (s *Supervisor) CloseCodexProject(ctx context.Context, request domain.Proje
 		if request.RequestID == "" {
 			request.RequestID = uuid.NewString()
 		}
-		return s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, "codex.project.close", request)
+		return s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectCodexCloseCommand(request))
 	}
 	if request.RequestID == "" {
 		request.RequestID = uuid.NewString()
@@ -865,7 +865,7 @@ func (s *Supervisor) HandoffCodexProject(ctx context.Context, request domain.Pro
 			request.RequestID = uuid.NewString()
 		}
 		request.Launch.Environment = nil
-		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, "codex.project.handoff", request)
+		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectCodexHandoffCommand(request))
 		return domain.ProjectCodexActivation{Project: queued, Runtime: domain.CodexRuntime{AgentName: request.NewAgentName, Phase: domain.CodexRuntimePending}}, queueErr
 	}
 	if request.RequestID == "" {
@@ -1173,7 +1173,7 @@ func (s *Supervisor) ActivateCodexProject(ctx context.Context, request domain.Pr
 	}
 	if project.ReadOnlyReplica {
 		request.Launch.Environment = nil
-		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, "codex.project.activate", request)
+		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectCodexActivateCommand(request))
 		return domain.ProjectCodexActivation{Project: queued, Runtime: domain.CodexRuntime{AgentName: request.AgentName, Phase: domain.CodexRuntimePending}}, queueErr
 	}
 	if request.Launch.RequestID == "" {
@@ -1278,12 +1278,12 @@ func (s *Supervisor) ActivateCodexProject(ctx context.Context, request domain.Pr
 	return domain.ProjectCodexActivation{Project: project, Runtime: runtime}, nil
 }
 
-func (s *Supervisor) queueRemoteProjectRuntime(ctx context.Context, project domain.Project, expected, operation string, request any) (domain.Project, error) {
+func (s *Supervisor) queueRemoteProjectRuntime(ctx context.Context, project domain.Project, expected string, data domain.ProjectCommandData) (domain.Project, error) {
 	commands, ok := s.Projects.(domain.ProjectCommandOperations)
 	if !ok {
 		return project, errors.New("remote project command transport is unavailable")
 	}
-	body, err := json.Marshal(request)
+	operation, body, err := domain.EncodeProjectCommand(data)
 	if err != nil {
 		return project, err
 	}

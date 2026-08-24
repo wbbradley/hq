@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -65,40 +64,28 @@ func (r Runner) Run(ctx context.Context, databasePath string) error {
 			settings, err := hqconfig.Load()
 			return domain.CodexLaunchDefaults{Yolo: settings.Codex.Yolo}, err
 		}
-		database.SetProjectCommandHandler(func(commandCtx context.Context, command domain.ProjectCommand) (domain.Project, error) {
-			switch command.Operation {
-			case "codex.project.activate":
-				var request domain.ProjectCodexActivationRequest
-				if err := json.Unmarshal(command.Body, &request); err != nil {
-					return domain.Project{}, err
-				}
+		database.SetProjectCommandHandler(func(commandCtx context.Context, command domain.ProjectCommand, data domain.ProjectCommandData) (domain.Project, error) {
+			switch value := data.(type) {
+			case *domain.ProjectCodexActivateCommand:
+				request := domain.ProjectCodexActivationRequest(*value)
 				request.ProjectID, request.ExpectedHead, request.Launch.RequestID, request.Launch.Environment = command.ProjectID, command.ExpectedHead, command.ID, os.Environ()
 				result, err := supervisor.ActivateCodexProject(commandCtx, request)
 				return result.Project, err
-			case "codex.project.close":
-				var request domain.ProjectCodexCloseRequest
-				if err := json.Unmarshal(command.Body, &request); err != nil {
-					return domain.Project{}, err
-				}
+			case *domain.ProjectCodexCloseCommand:
+				request := domain.ProjectCodexCloseRequest(*value)
 				request.RequestID, request.ProjectID, request.ExpectedHead = command.ID, command.ProjectID, command.ExpectedHead
 				return supervisor.CloseCodexProject(commandCtx, request)
-			case "codex.project.handoff":
-				var request domain.ProjectCodexHandoffRequest
-				if err := json.Unmarshal(command.Body, &request); err != nil {
-					return domain.Project{}, err
-				}
+			case *domain.ProjectCodexHandoffCommand:
+				request := domain.ProjectCodexHandoffRequest(*value)
 				request.RequestID, request.ProjectID, request.ExpectedHead, request.Launch.RequestID, request.Launch.Environment = command.ID, command.ProjectID, command.ExpectedHead, command.ID, os.Environ()
 				result, err := supervisor.HandoffCodexProject(commandCtx, request)
 				return result.Project, err
-			case "project.provision-worktree":
-				var request domain.ProjectWorktreeRequest
-				if err := json.Unmarshal(command.Body, &request); err != nil {
-					return domain.Project{}, err
-				}
+			case *domain.ProjectProvisionWorktreeCommand:
+				request := domain.ProjectWorktreeRequest(*value)
 				request.RequestID, request.ProjectID, request.HomeInstallation = command.ID, command.ProjectID, command.HomeInstallation
 				return supervisor.ProvisionProjectWorktree(commandCtx, request)
 			default:
-				return domain.Project{}, fmt.Errorf("unsupported remote runtime operation %q", command.Operation)
+				return domain.Project{}, fmt.Errorf("unsupported typed runtime operation %T", data)
 			}
 		})
 		subscriptions := domainrpc.NewSubscriptionHub()

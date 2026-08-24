@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/wbbradley/hq/internal/domain"
 )
 
 func validateContent(content Content, publicKey string, schema int) (ProjectionStatus, error) {
@@ -282,7 +283,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 			if err := validUUID("project ID", payload.ProjectID); err != nil {
 				return StatusInvalid, err
 			}
-			if payload.Operation == "project.create" || payload.Operation == "project.provision-worktree" {
+			if domain.ProjectCommandCreatesProject(domain.ProjectCommandOperation(payload.Operation)) {
 				if payload.ExpectedHead != "" {
 					return StatusInvalid, errors.New("project creation command must not have an expected head")
 				}

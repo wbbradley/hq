@@ -39,7 +39,7 @@ func (s *SQLite) queueRemoteProjectCreation(ctx context.Context, request domain.
 	if pending, _ := latestProjectCommand(ctx, s.db, request.ID); pending != nil && pending.Stage != domain.ProjectCommandCommitted && pending.Stage != domain.ProjectCommandRejected {
 		return domain.Project{}, domain.ErrProjectCommandPending
 	}
-	body, err := json.Marshal(request)
+	operation, body, err := domain.EncodeProjectCommand(domain.ProjectCreateCommand(request))
 	if err != nil {
 		return domain.Project{}, err
 	}
@@ -54,10 +54,10 @@ func (s *SQLite) queueRemoteProjectCreation(ctx context.Context, request domain.
 	if err != nil {
 		return domain.Project{}, err
 	}
-	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: commandID, ProjectID: request.ID, Operation: "project.create", Body: body})
+	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: commandID, ProjectID: request.ID, Operation: string(operation), Body: body})
 	created := s.now().UTC()
 	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
-	command := domain.ProjectCommand{ID: commandID, ProjectID: request.ID, HomeInstallation: request.HomeInstallation, Operation: "project.create", Body: body, Stage: domain.ProjectCommandQueued, CreatedAt: created, UpdatedAt: created}
+	command := domain.ProjectCommand{ID: commandID, ProjectID: request.ID, HomeInstallation: request.HomeInstallation, Operation: operation, Body: body, Stage: domain.ProjectCommandQueued, CreatedAt: created, UpdatedAt: created}
 	placeholder := domain.Project{ID: request.ID, HomeInstallation: request.HomeInstallation, Name: request.Name, Brief: request.Brief, Lifecycle: domain.ProjectPreparing, ReadOnlyReplica: true, PendingCommand: &command, LatestCommand: &command, CreatedAt: created, UpdatedAt: created}
 	value, err := s.appendContentsResult(ctx, []event.Content{content}, []time.Time{created}, func(*sql.Tx) (any, error) { return placeholder, nil })
 	if err != nil {
@@ -88,7 +88,7 @@ func (s *SQLite) QueueProjectWorktreeProvision(ctx context.Context, request doma
 	if pending, _ := latestProjectCommand(ctx, s.db, request.ProjectID); pending != nil && pending.Stage != domain.ProjectCommandCommitted && pending.Stage != domain.ProjectCommandRejected {
 		return domain.Project{}, true, domain.ErrProjectCommandPending
 	}
-	body, err := json.Marshal(request)
+	operation, body, err := domain.EncodeProjectCommand(domain.ProjectProvisionWorktreeCommand(request))
 	if err != nil {
 		return domain.Project{}, true, err
 	}
@@ -96,10 +96,10 @@ func (s *SQLite) QueueProjectWorktreeProvision(ctx context.Context, request doma
 	if err != nil {
 		return domain.Project{}, true, err
 	}
-	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: request.RequestID, ProjectID: request.ProjectID, Operation: "project.provision-worktree", Body: body})
+	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: request.RequestID, ProjectID: request.ProjectID, Operation: string(operation), Body: body})
 	created := s.now().UTC()
 	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
-	command := domain.ProjectCommand{ID: request.RequestID, ProjectID: request.ProjectID, HomeInstallation: request.HomeInstallation, Operation: "project.provision-worktree", Body: body, Stage: domain.ProjectCommandQueued, CreatedAt: created, UpdatedAt: created}
+	command := domain.ProjectCommand{ID: request.RequestID, ProjectID: request.ProjectID, HomeInstallation: request.HomeInstallation, Operation: operation, Body: body, Stage: domain.ProjectCommandQueued, CreatedAt: created, UpdatedAt: created}
 	placeholder := domain.Project{ID: request.ProjectID, HomeInstallation: request.HomeInstallation, Name: request.Name, Brief: request.Brief, Lifecycle: domain.ProjectPreparing, ReadOnlyReplica: true, PendingCommand: &command, LatestCommand: &command, CreatedAt: created, UpdatedAt: created}
 	value, err := s.appendContentsResult(ctx, []event.Content{content}, []time.Time{created}, func(*sql.Tx) (any, error) { return placeholder, nil })
 	if err != nil {
@@ -125,19 +125,22 @@ func (s *SQLite) QueueProjectCommand(ctx context.Context, command domain.Project
 	if _, err := uuid.Parse(command.ID); err != nil {
 		return project, errors.New("project command ID must be a UUID")
 	}
-	if len(command.Body) == 0 {
-		command.Body = []byte(`{}`)
+	data, err := domain.DecodeProjectCommand(command.Operation, command.Body)
+	if err != nil {
+		return project, err
 	}
-	if !json.Valid(command.Body) || command.Operation == "" {
-		return project, errors.New("project command operation and JSON body are required")
+	operation, body, err := domain.EncodeProjectCommand(data)
+	if err != nil {
+		return project, err
 	}
+	command.Operation, command.Body = operation, body
 	account, membership, _, err := s.localAccountAction(ctx, "")
 	if err != nil {
 		return project, err
 	}
 	parents := append(append([]string(nil), membership...), command.ExpectedHead)
 	sort.Strings(parents)
-	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: command.ID, ProjectID: project.ID, ExpectedHead: command.ExpectedHead, Operation: command.Operation, Body: command.Body})
+	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: command.ID, ProjectID: project.ID, ExpectedHead: command.ExpectedHead, Operation: string(command.Operation), Body: command.Body})
 	created := s.now().UTC()
 	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: project.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
 	value, err := s.appendContentsResult(ctx, []event.Content{content}, []time.Time{created}, func(tx *sql.Tx) (any, error) {
@@ -156,7 +159,7 @@ func (s *SQLite) QueueProjectCommand(ctx context.Context, command domain.Project
 	return value.(domain.Project), nil
 }
 
-func (s *SQLite) queueReplicaCommand(ctx context.Context, projectID, expected, operation string, data any) (domain.Project, bool, error) {
+func (s *SQLite) queueReplicaCommand(ctx context.Context, projectID, expected string, data domain.ProjectCommandData) (domain.Project, bool, error) {
 	project, err := getProjectReplica(ctx, s.db, projectID)
 	if errors.Is(err, domain.ErrProjectNotFound) {
 		return domain.Project{}, false, nil
@@ -164,7 +167,7 @@ func (s *SQLite) queueReplicaCommand(ctx context.Context, projectID, expected, o
 	if err != nil {
 		return project, true, err
 	}
-	body, err := json.Marshal(data)
+	operation, body, err := domain.EncodeProjectCommand(data)
 	if err != nil {
 		return project, true, err
 	}
@@ -197,7 +200,7 @@ func latestProjectCommand(ctx context.Context, q projectQueryer, projectID strin
 			if json.Unmarshal(inspection.Event.Content.Payload, &payload) != nil || payload.ProjectID != projectID {
 				continue
 			}
-			command := &domain.ProjectCommand{ID: payload.CommandID, ProjectID: payload.ProjectID, HomeInstallation: inspection.Event.Content.Recipient.InstallationID, ExpectedHead: payload.ExpectedHead, Operation: payload.Operation, Body: payload.Body, Stage: domain.ProjectCommandQueued, CreatedAt: time.Unix(inspection.Event.Nostr.CreatedAt, 0).UTC(), UpdatedAt: time.Unix(inspection.Event.Nostr.CreatedAt, 0).UTC()}
+			command := &domain.ProjectCommand{ID: payload.CommandID, ProjectID: payload.ProjectID, HomeInstallation: inspection.Event.Content.Recipient.InstallationID, ExpectedHead: payload.ExpectedHead, Operation: domain.ProjectCommandOperation(payload.Operation), Body: payload.Body, Stage: domain.ProjectCommandQueued, CreatedAt: time.Unix(inspection.Event.Nostr.CreatedAt, 0).UTC(), UpdatedAt: time.Unix(inspection.Event.Nostr.CreatedAt, 0).UTC()}
 			commands[command.ID], order = command, append(order, command.ID)
 		} else {
 			var payload event.ProjectCommandResultPayload
@@ -252,25 +255,30 @@ func listPendingProjectCreations(ctx context.Context, q projectQueryer) ([]domai
 		item := event.Inspect(raw).Event
 		if item.Content.Type == event.TypeProjectCommand {
 			var payload event.ProjectCommandPayload
-			if json.Unmarshal(item.Content.Payload, &payload) != nil || payload.Operation != "project.create" && payload.Operation != "project.provision-worktree" || item.Content.Recipient == nil {
+			if json.Unmarshal(item.Content.Payload, &payload) != nil || item.Content.Recipient == nil {
+				continue
+			}
+			operation := domain.ProjectCommandOperation(payload.Operation)
+			if !domain.ProjectCommandCreatesProject(operation) {
 				continue
 			}
 			var name, brief string
-			if payload.Operation == "project.create" {
-				var request domain.CreateProjectRequest
-				if json.Unmarshal(payload.Body, &request) != nil {
-					continue
-				}
+			data, decodeErr := domain.DecodeProjectCommand(operation, payload.Body)
+			if decodeErr != nil {
+				continue
+			}
+			switch value := data.(type) {
+			case *domain.ProjectCreateCommand:
+				request := domain.CreateProjectRequest(*value)
 				name, brief = request.Name, request.Brief
-			} else {
-				var request domain.ProjectWorktreeRequest
-				if json.Unmarshal(payload.Body, &request) != nil {
-					continue
-				}
+			case *domain.ProjectProvisionWorktreeCommand:
+				request := domain.ProjectWorktreeRequest(*value)
 				name, brief = request.Name, request.Brief
+			default:
+				continue
 			}
 			created := time.Unix(item.Nostr.CreatedAt, 0).UTC()
-			command := &domain.ProjectCommand{ID: payload.CommandID, ProjectID: payload.ProjectID, HomeInstallation: item.Content.Recipient.InstallationID, Operation: payload.Operation, Body: payload.Body, Stage: domain.ProjectCommandQueued, CreatedAt: created, UpdatedAt: created}
+			command := &domain.ProjectCommand{ID: payload.CommandID, ProjectID: payload.ProjectID, HomeInstallation: item.Content.Recipient.InstallationID, Operation: operation, Body: payload.Body, Stage: domain.ProjectCommandQueued, CreatedAt: created, UpdatedAt: created}
 			projects[payload.ProjectID] = domain.Project{ID: payload.ProjectID, HomeInstallation: item.Content.Recipient.InstallationID, Name: name, Brief: brief, Lifecycle: domain.ProjectPreparing, ReadOnlyReplica: true, PendingCommand: command, LatestCommand: command, CreatedAt: created, UpdatedAt: created}
 			commands[payload.CommandID] = payload.ProjectID
 		} else {
@@ -352,7 +360,7 @@ func (s *SQLite) pendingHomeProjectCommands(ctx context.Context) ([]pendingHomeC
 		if json.Unmarshal(item.Content.Payload, &payload) != nil || item.Content.Recipient == nil || item.Content.Recipient.InstallationID != s.signer.InstallationID {
 			continue
 		}
-		commands[payload.CommandID] = pendingHomeCommand{command: domain.ProjectCommand{ID: payload.CommandID, ProjectID: payload.ProjectID, HomeInstallation: s.signer.InstallationID, ExpectedHead: payload.ExpectedHead, Operation: payload.Operation, Body: payload.Body, Stage: domain.ProjectCommandReceived}, eventID: item.ID(), issuer: item.Content.InstallationID, received: received[payload.CommandID]}
+		commands[payload.CommandID] = pendingHomeCommand{command: domain.ProjectCommand{ID: payload.CommandID, ProjectID: payload.ProjectID, HomeInstallation: s.signer.InstallationID, ExpectedHead: payload.ExpectedHead, Operation: domain.ProjectCommandOperation(payload.Operation), Body: payload.Body, Stage: domain.ProjectCommandReceived}, eventID: item.ID(), issuer: item.Content.InstallationID, received: received[payload.CommandID]}
 		order = append(order, payload.CommandID)
 	}
 	var result []pendingHomeCommand
@@ -375,14 +383,19 @@ func (s *SQLite) processProjectCommand(ctx context.Context, pending pendingHomeC
 			return err
 		}
 	}
-	digestBytes := sha256.Sum256(append([]byte(pending.command.Operation+"\x00"+pending.command.ProjectID+"\x00"+pending.command.ExpectedHead+"\x00"), pending.command.Body...))
-	mutation := domain.Mutation{ID: pending.command.ID, Method: pending.command.Operation, RequestDigest: hex.EncodeToString(digestBytes[:])}
+	data, decodeErr := domain.DecodeProjectCommand(pending.command.Operation, pending.command.Body)
+	if decodeErr != nil {
+		current, _ := s.GetProject(ctx, pending.command.ProjectID)
+		return s.publishProjectCommandResult(ctx, pending, current, domain.ProjectCommandRejected, decodeErr.Error())
+	}
+	digestBytes := sha256.Sum256(append([]byte(string(pending.command.Operation)+"\x00"+pending.command.ProjectID+"\x00"+pending.command.ExpectedHead+"\x00"), pending.command.Body...))
+	mutation := domain.Mutation{ID: pending.command.ID, Method: string(pending.command.Operation), RequestDigest: hex.EncodeToString(digestBytes[:])}
 	mutationCtx := domain.WithMutation(ctx, mutation)
 	var project domain.Project
 	if raw, found, err := s.MutationResult(ctx, mutation); err != nil {
 		return err
 	} else if found {
-		if pending.command.Operation == "project.resource.check" {
+		if pending.command.Operation == domain.ProjectCommandResourceCheck {
 			project, err = s.GetProject(ctx, pending.command.ProjectID)
 			if err != nil {
 				return err
@@ -392,134 +405,17 @@ func (s *SQLite) processProjectCommand(ctx context.Context, pending pendingHomeC
 		}
 	} else {
 		var err error
-		switch pending.command.Operation {
-		case "project.open":
-			project, err = s.OpenProject(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead)
-		case "project.create":
-			var request domain.CreateProjectRequest
-			if json.Unmarshal(pending.command.Body, &request) != nil {
-				err = errors.New("invalid project creation command")
-			} else {
-				request.ID, request.HomeInstallation = pending.command.ProjectID, s.signer.InstallationID
-				project, err = s.CreateProject(mutationCtx, request)
-			}
-		case "project.archive.set":
-			var data struct {
-				Archived bool `json:"archived"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid archive command")
-			} else {
-				project, err = s.SetProjectArchived(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.Archived)
-			}
-		case "project.metadata.update":
-			var data struct {
-				Name  string `json:"name"`
-				Brief string `json:"brief"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid metadata command")
-			} else {
-				project, err = s.UpdateProjectMetadata(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.Name, data.Brief)
-			}
-		case "project.close.begin":
-			project, err = s.BeginCloseProject(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead)
-		case "project.close.finalize":
-			var data struct {
-				Forced             bool   `json:"forced"`
-				RuntimeObservation string `json:"runtime_observation"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid close command")
-			} else {
-				project, err = s.FinalizeCloseProject(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.Forced, data.RuntimeObservation)
-			}
-		case "project.resource.add":
-			var data struct {
-				Path    domain.ProjectPathInput `json:"path"`
-				Primary bool                    `json:"primary"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid resource add command")
-			} else {
-				project, err = s.AddProjectPath(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.Path, data.Primary)
-			}
-		case "project.resource.remove", "project.resource.primary":
-			var data struct {
-				ResourceID string `json:"resource_id"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid resource command")
-			} else if pending.command.Operation == "project.resource.remove" {
-				project, err = s.RemoveProjectResource(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.ResourceID)
-			} else {
-				project, err = s.SetProjectPrimaryResource(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.ResourceID)
-			}
-		case "project.resource.replace":
-			var data struct {
-				ResourceID string                  `json:"resource_id"`
-				Path       domain.ProjectPathInput `json:"path"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid resource replace command")
-			} else {
-				project, err = s.ReplaceProjectPath(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.ResourceID, data.Path)
-			}
-		case "project.resource.check":
-			var data struct {
-				ResourceID string `json:"resource_id"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid resource check command")
-			} else if _, err = s.CheckProjectResource(mutationCtx, pending.command.ProjectID, data.ResourceID); err == nil {
-				project, err = s.GetProject(mutationCtx, pending.command.ProjectID)
-			}
-		case "project.assignment.assign":
-			var data struct {
-				Agent string `json:"agent"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid assignment command")
-			} else {
-				project, err = s.AssignProject(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.Agent)
-			}
-		case "project.assignment.activate":
-			var data domain.ActivateProjectAssignmentRequest
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid assignment activation command")
-			} else {
-				project, err = s.ActivateProjectAssignment(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data)
-			}
-		case "project.assignment.abort", "project.assignment.block":
-			var data struct {
-				Diagnostic string `json:"diagnostic"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid assignment state command")
-			} else if pending.command.Operation == "project.assignment.abort" {
-				project, err = s.AbortProjectAssignment(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.Diagnostic)
-			} else {
-				project, err = s.BlockProjectAssignment(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.Diagnostic)
-			}
-		case "project.assignment.unassign":
-			var data struct {
-				Forced             bool   `json:"forced"`
-				RuntimeObservation string `json:"runtime_observation"`
-			}
-			if json.Unmarshal(pending.command.Body, &data) != nil {
-				err = errors.New("invalid unassign command")
-			} else {
-				project, err = s.UnassignProject(mutationCtx, pending.command.ProjectID, pending.command.ExpectedHead, data.Forced, data.RuntimeObservation)
-			}
-		default:
+		if domain.ProjectCommandRequiresRuntime(pending.command.Operation) {
 			if s.projectCommandHandler == nil {
-				err = errors.New("unsupported remote project operation")
+				err = errors.New("project runtime command handler is unavailable")
 			} else {
 				// Runtime sagas perform several authoritative mutations and own
 				// idempotency through their stable operation IDs; one mutation
 				// receipt cannot span those transaction boundaries.
-				project, err = s.projectCommandHandler(ctx, pending.command)
+				project, err = s.projectCommandHandler(ctx, pending.command, data)
 			}
+		} else {
+			project, err = domain.ExecuteProjectCommand(mutationCtx, s, pending.command, data)
 		}
 		if err != nil {
 			current, _ := s.GetProject(ctx, pending.command.ProjectID)

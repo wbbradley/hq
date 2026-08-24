@@ -150,17 +150,17 @@ const (
 )
 
 type ProjectCommand struct {
-	ID               string              `json:"id"`
-	ProjectID        string              `json:"project_id"`
-	HomeInstallation string              `json:"home_installation"`
-	ExpectedHead     string              `json:"expected_head_event_id"`
-	Operation        string              `json:"operation"`
-	Body             []byte              `json:"body,omitempty"`
-	Stage            ProjectCommandStage `json:"stage"`
-	CurrentHead      string              `json:"current_head_event_id,omitempty"`
-	Diagnostic       string              `json:"diagnostic,omitempty"`
-	CreatedAt        time.Time           `json:"created_at"`
-	UpdatedAt        time.Time           `json:"updated_at"`
+	ID               string                  `json:"id"`
+	ProjectID        string                  `json:"project_id"`
+	HomeInstallation string                  `json:"home_installation"`
+	ExpectedHead     string                  `json:"expected_head_event_id"`
+	Operation        ProjectCommandOperation `json:"operation"`
+	Body             []byte                  `json:"body,omitempty"`
+	Stage            ProjectCommandStage     `json:"stage"`
+	CurrentHead      string                  `json:"current_head_event_id,omitempty"`
+	Diagnostic       string                  `json:"diagnostic,omitempty"`
+	CreatedAt        time.Time               `json:"created_at"`
+	UpdatedAt        time.Time               `json:"updated_at"`
 }
 
 type ProjectPathInput struct {

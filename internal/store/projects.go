@@ -460,7 +460,7 @@ func (s *SQLite) ListProjectThreads(ctx context.Context, projectID string) ([]do
 }
 
 func (s *SQLite) OpenProject(ctx context.Context, id, expected string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.open", map[string]any{}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectOpenCommand{}); remote {
 		return project, err
 	}
 	initial, err := s.GetProject(ctx, id)
@@ -542,7 +542,7 @@ func (s *SQLite) ObserveProjectResources(ctx context.Context, id, expected strin
 }
 
 func (s *SQLite) BeginCloseProject(ctx context.Context, id, expected string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.close.begin", map[string]any{}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectCloseBeginCommand{}); remote {
 		return project, err
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, lifecycle domain.ProjectLifecycle, archived bool, head string, now int64) (string, error) {
@@ -558,7 +558,7 @@ func (s *SQLite) BeginCloseProject(ctx context.Context, id, expected string) (do
 }
 
 func (s *SQLite) FinalizeCloseProject(ctx context.Context, id, expected string, forced bool, runtimeObservation string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.close.finalize", map[string]any{"forced": forced, "runtime_observation": runtimeObservation}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectCloseFinalizeCommand{Forced: forced, RuntimeObservation: runtimeObservation}); remote {
 		return project, err
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, lifecycle domain.ProjectLifecycle, archived bool, head string, now int64) (string, error) {
@@ -574,7 +574,7 @@ func (s *SQLite) FinalizeCloseProject(ctx context.Context, id, expected string, 
 }
 
 func (s *SQLite) SetProjectArchived(ctx context.Context, id, expected string, archived bool) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.archive.set", map[string]any{"archived": archived}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectArchiveSetCommand{Archived: archived}); remote {
 		return project, err
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, lifecycle domain.ProjectLifecycle, current bool, head string, now int64) (string, error) {
@@ -597,7 +597,7 @@ func (s *SQLite) SetProjectArchived(ctx context.Context, id, expected string, ar
 }
 
 func (s *SQLite) UpdateProjectMetadata(ctx context.Context, id, expected, name, brief string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.metadata.update", map[string]any{"name": name, "brief": brief}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectMetadataUpdateCommand{Name: name, Brief: brief}); remote {
 		return project, err
 	}
 	name = strings.TrimSpace(name)
@@ -614,7 +614,7 @@ func (s *SQLite) UpdateProjectMetadata(ctx context.Context, id, expected, name, 
 }
 
 func (s *SQLite) AddProjectPath(ctx context.Context, id, expected string, input domain.ProjectPathInput, makePrimary bool) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.resource.add", map[string]any{"path": input, "primary": makePrimary}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectResourceAddCommand{Path: input, Primary: makePrimary}); remote {
 		return project, err
 	}
 	path, err := canonicalizeProjectPath(input.DisplayPath)
@@ -674,7 +674,7 @@ func (s *SQLite) recordProjectAuditFailure(ctx context.Context, projectID, expec
 }
 
 func (s *SQLite) RemoveProjectResource(ctx context.Context, id, expected, resourceID string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.resource.remove", map[string]any{"resource_id": resourceID}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectResourceRemoveCommand{ResourceID: resourceID}); remote {
 		return project, err
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, lifecycle domain.ProjectLifecycle, _ bool, head string, now int64) (string, error) {
@@ -697,7 +697,7 @@ func (s *SQLite) RemoveProjectResource(ctx context.Context, id, expected, resour
 }
 
 func (s *SQLite) ReplaceProjectPath(ctx context.Context, id, expected, oldResourceID string, input domain.ProjectPathInput) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.resource.replace", map[string]any{"resource_id": oldResourceID, "path": input}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectResourceReplaceCommand{ResourceID: oldResourceID, Path: input}); remote {
 		return project, err
 	}
 	path, err := canonicalizeProjectPath(input.DisplayPath)
@@ -730,7 +730,7 @@ func (s *SQLite) ReplaceProjectPath(ctx context.Context, id, expected, oldResour
 }
 
 func (s *SQLite) SetProjectPrimaryResource(ctx context.Context, id, expected, resourceID string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.resource.primary", map[string]any{"resource_id": resourceID}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectResourcePrimaryCommand{ResourceID: resourceID}); remote {
 		return project, err
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, _ domain.ProjectLifecycle, _ bool, head string, now int64) (string, error) {
@@ -761,7 +761,11 @@ func (s *SQLite) CheckProjectResource(ctx context.Context, projectID, resourceID
 		if resource.ID == "" {
 			return resource, domain.ErrResourceNotFound
 		}
-		queued, err := s.QueueProjectCommand(ctx, domain.ProjectCommand{ProjectID: projectID, ExpectedHead: replica.HeadEventID, Operation: "project.resource.check", Body: []byte(`{"resource_id":"` + resourceID + `"}`)})
+		operation, body, encodeErr := domain.EncodeProjectCommand(domain.ProjectResourceCheckCommand{ResourceID: resourceID})
+		if encodeErr != nil {
+			return resource, encodeErr
+		}
+		queued, err := s.QueueProjectCommand(ctx, domain.ProjectCommand{ProjectID: projectID, ExpectedHead: replica.HeadEventID, Operation: operation, Body: body})
 		if queued.PendingCommand != nil {
 			resource.PendingCommand = queued.PendingCommand
 		}
@@ -853,7 +857,7 @@ func projectHasAssignmentTx(ctx context.Context, tx *sql.Tx, id string) bool {
 }
 
 func (s *SQLite) AssignProject(ctx context.Context, id, expected, agent string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.assignment.assign", map[string]any{"agent": agent}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectAssignmentAssignCommand{Agent: agent}); remote {
 		return project, err
 	}
 	agent = strings.TrimSpace(agent)
@@ -890,7 +894,7 @@ func (s *SQLite) AssignProject(ctx context.Context, id, expected, agent string) 
 }
 
 func (s *SQLite) ActivateProjectAssignment(ctx context.Context, id, expected string, request domain.ActivateProjectAssignmentRequest) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.assignment.activate", request); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectAssignmentActivateCommand(request)); remote {
 		return project, err
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, lifecycle domain.ProjectLifecycle, _ bool, head string, now int64) (string, error) {
@@ -945,14 +949,14 @@ func (s *SQLite) ActivateProjectAssignment(ctx context.Context, id, expected str
 }
 
 func (s *SQLite) AbortProjectAssignment(ctx context.Context, id, expected, diagnostic string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.assignment.abort", map[string]any{"diagnostic": diagnostic}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectAssignmentAbortCommand{Diagnostic: diagnostic}); remote {
 		return project, err
 	}
 	return s.UnassignProject(ctx, id, expected, false, diagnostic)
 }
 
 func (s *SQLite) BlockProjectAssignment(ctx context.Context, id, expected, diagnostic string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.assignment.block", map[string]any{"diagnostic": diagnostic}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectAssignmentBlockCommand{Diagnostic: diagnostic}); remote {
 		return project, err
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, lifecycle domain.ProjectLifecycle, _ bool, head string, now int64) (string, error) {
@@ -977,7 +981,7 @@ func (s *SQLite) BlockProjectAssignment(ctx context.Context, id, expected, diagn
 	})
 }
 func (s *SQLite) UnassignProject(ctx context.Context, id, expected string, forced bool, runtimeObservation string) (domain.Project, error) {
-	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, "project.assignment.unassign", map[string]any{"forced": forced, "runtime_observation": runtimeObservation}); remote {
+	if project, remote, err := s.queueReplicaCommand(ctx, id, expected, domain.ProjectAssignmentUnassignCommand{Forced: forced, RuntimeObservation: runtimeObservation}); remote {
 		return project, err
 	}
 	return s.mutateProject(ctx, id, expected, func(tx *sql.Tx, lifecycle domain.ProjectLifecycle, _ bool, head string, now int64) (string, error) {

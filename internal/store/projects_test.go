@@ -109,6 +109,53 @@ func TestQueuedProjectCommandEventuallyReportsUnreachableHome(t *testing.T) {
 	}
 }
 
+func TestUnknownCanonicalProjectCommandIsRejectedWithoutMutation(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "unknown command", Open: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, parents, _, err := s.localAccountAction(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parents = uniqueSorted(append(parents, project.HeadEventID))
+	commandID := "019c0000-0000-7000-8000-000000000091"
+	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: commandID, ProjectID: project.ID, ExpectedHead: project.HeadEventID, Operation: "project.future", Body: json.RawMessage(`{}`)})
+	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(model.HumanMailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	signed, err := s.signContents(ctx, []event.Content{content}, []time.Time{time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCanonical(ctx, signed); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.GetProject(ctx, project.ID)
+	if err != nil || after.HeadEventID != project.HeadEventID {
+		t.Fatalf("unknown command mutated project: %#v, %v", after, err)
+	}
+	rows, err := s.db.Query(`SELECT raw FROM canonical_events WHERE event_type=?`, event.TypeProjectResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	matched := false
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var result event.ProjectCommandResultPayload
+		if json.Unmarshal(event.Inspect(raw).Event.Content.Payload, &result) == nil && result.CommandID == commandID {
+			matched = result.Stage == string(domain.ProjectCommandRejected) && strings.Contains(result.Diagnostic, "unsupported project command operation")
+		}
+	}
+	if !matched {
+		t.Fatal("unknown command did not publish a deterministic rejection")
+	}
+}
+
 func TestWorktreeDestinationReservationBlocksOverlappingClaims(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
 	ctx := context.Background()
@@ -354,14 +401,15 @@ func TestProjectHistoryFansOutAndAuthenticatesOnAnotherHumanDevice(t *testing.T)
 	if err != nil || createdReplica.Lifecycle != domain.ProjectClosed || createdReplica.Name != "created elsewhere" || createdReplica.PendingCommand != nil || createdReplica.LatestCommand == nil || createdReplica.LatestCommand.Stage != domain.ProjectCommandCommitted {
 		t.Fatalf("converged remote creation = %#v, %v", createdReplica, err)
 	}
-	creator.SetProjectCommandHandler(func(commandCtx context.Context, command domain.ProjectCommand) (domain.Project, error) {
-		if command.Operation != "project.provision-worktree" {
+	creator.SetProjectCommandHandler(func(commandCtx context.Context, command domain.ProjectCommand, data domain.ProjectCommandData) (domain.Project, error) {
+		if command.Operation != domain.ProjectCommandProvisionWorktree {
 			return domain.Project{}, fmt.Errorf("unexpected runtime operation %s", command.Operation)
 		}
-		var request domain.ProjectWorktreeRequest
-		if err := json.Unmarshal(command.Body, &request); err != nil {
-			return domain.Project{}, err
+		value, ok := data.(*domain.ProjectProvisionWorktreeCommand)
+		if !ok {
+			return domain.Project{}, fmt.Errorf("unexpected runtime data %T", data)
 		}
+		request := domain.ProjectWorktreeRequest(*value)
 		return creator.CreateProject(domain.WithProjectProvisioning(commandCtx, command.ID), domain.CreateProjectRequest{ID: command.ProjectID, Name: request.Name, Brief: request.Brief, Paths: []domain.ProjectPathInput{{DisplayPath: request.Destination}}})
 	})
 	worktreeRequest := domain.ProjectWorktreeRequest{RequestID: "019c0000-0000-7000-8000-000000000371", ProjectID: "019c0000-0000-7000-8000-000000000372", HomeInstallation: project.HomeInstallation, Name: "remote worktree", Repository: t.TempDir(), Destination: filepath.Join(t.TempDir(), "remote-worktree"), Branch: "remote-feature"}
