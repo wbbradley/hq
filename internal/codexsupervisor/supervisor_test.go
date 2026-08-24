@@ -286,6 +286,83 @@ func TestProjectMessageWakesDurableRunnableAssignmentAfterRestart(t *testing.T) 
 	}
 }
 
+func TestProjectReplyWakesOfflineAssignmentAfterDaemonRestart(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.CreateNamedAgent(context.Background(), "reply-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	project, err := database.CreateProject(context.Background(), domain.CreateProjectRequest{Name: "reply wake", Paths: []domain.ProjectPathInput{{DisplayPath: directory}}, Open: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	first.Starter = (&scriptedStarter{}).factory
+	activated, err := first.ActivateCodexProject(context.Background(), domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "reply-agent", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputID := "019d0000-0000-7000-8000-000000000051"
+	binding := domain.ProjectOutputBinding{
+		ProjectID: activated.Project.ID, AssignmentID: activated.Project.Assignment.ID, AgentName: "reply-agent",
+		ProjectThreadID: activated.Project.Assignment.SelectedThreadID, ExternalThreadID: activated.Runtime.ThreadID, RuntimeState: "connected",
+	}
+	if err := database.CreateProjectOutput(context.Background(), binding, model.Message{ID: outputID, SenderMailboxID: activated.Project.MailboxID, RecipientMailboxID: model.HumanMailboxID, Body: "reply to continue", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	replyID := "019d0000-0000-7000-8000-000000000052"
+	if err := database.Reply(context.Background(), outputID, model.Message{ID: replyID, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: activated.Project.MailboxID, Body: "continue after restart", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	original, err := database.Get(context.Background(), outputID)
+	if err != nil || original.ArchivedAt == nil {
+		t.Fatalf("replied-to output = %#v, %v", original, err)
+	}
+
+	secondStarter := &scriptedStarter{}
+	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	second.Starter = secondStarter.factory
+	second.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) { return domain.CodexLaunchDefaults{}, nil }
+	defer second.Close()
+	second.StartWorkReconciliation()
+	runtime := waitForRunningRuntime(t, second, "reply-agent")
+	if runtime.ThreadID != activated.Runtime.ThreadID {
+		t.Fatalf("reply woke thread %q, want %q", runtime.ThreadID, activated.Runtime.ThreadID)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		reply, getErr := database.Get(context.Background(), replyID)
+		if getErr == nil && reply.CompletedAt != nil {
+			if reply.Purpose != model.MessagePurposeProjectInput || reply.ReplyTo == nil || *reply.ReplyTo != outputID {
+				t.Fatalf("dispatched reply = %#v", reply)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("project reply was not dispatched after restart: %#v, %v", reply, getErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	secondStarter.mu.Lock()
+	starts := secondStarter.starts
+	secondStarter.mu.Unlock()
+	if starts != 1 {
+		t.Fatalf("restart reconciliation launched %d workers", starts)
+	}
+}
+
 func TestSupervisorReconcilesDirectWorkFromStoreInvalidationOnce(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "hq.db")
 	keyPath, _ := identity.KeyPath(databasePath)

@@ -4,13 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/localwire"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/store"
 )
 
 type recordingOperations struct {
@@ -344,6 +348,74 @@ func TestCommittedHumanMessagesAttemptNamedAgentWakeWithTransientEnvironment(t *
 	}
 	if len(runtime.wakeMessages) != 2 || runtime.wakeMessages[0].ID != message.ID || strings.Join(runtime.wakeEnvironments[0], "|") != "PATH=/sender/bin|TOKEN=transient" {
 		t.Fatalf("wake messages=%#v environments=%#v", runtime.wakeMessages, runtime.wakeEnvironments)
+	}
+}
+
+func TestRPCProjectReplyIsAcceptedAndAssignmentDispatchable(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, err := identity.KeyPath(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+	if _, err := database.CreateNamedAgent(ctx, "rpc-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	project, err := database.CreateProject(ctx, domain.CreateProjectRequest{Name: "RPC reply", Open: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err = database.AssignProject(ctx, project.ID, project.HeadEventID, "rpc-agent")
+	if err == nil {
+		project, err = database.ActivateProjectAssignment(ctx, project.ID, project.HeadEventID, domain.ActivateProjectAssignmentRequest{Harness: "codex", ExternalThread: "rpc-thread", LaunchDirectory: t.TempDir()})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputID := "019d0000-0000-7000-8000-000000000061"
+	binding := domain.ProjectOutputBinding{ProjectID: project.ID, AssignmentID: project.Assignment.ID, AgentName: "rpc-agent", ProjectThreadID: project.Assignment.SelectedThreadID, ExternalThreadID: "rpc-thread", RuntimeState: "connected"}
+	if err := database.CreateProjectOutput(ctx, binding, model.Message{ID: outputID, SenderMailboxID: project.MailboxID, RecipientMailboxID: model.HumanMailboxID, Body: "RPC output", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	request := ReplyRequest{
+		MutationID: uuid.NewString(), OriginalID: outputID,
+		Reply: model.Message{ID: "019d0000-0000-7000-8000-000000000062", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: project.MailboxID, Body: "RPC follow-up", CreatedAt: time.Now().UTC()},
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &recordingRuntime{}
+	service := Service{Store: database, Runtime: runtime}
+	if _, rpcErr := service.Handle(ctx, nil, ReplyMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	after, err := database.GetProject(ctx, project.ID)
+	if err != nil || after.HeadEventID == project.HeadEventID {
+		t.Fatalf("RPC reply project = %#v, %v", after, err)
+	}
+	stored, err := database.Get(ctx, request.Reply.ID)
+	if err != nil || stored.Purpose != model.MessagePurposeProjectInput || stored.ReplyTo == nil || *stored.ReplyTo != outputID {
+		t.Fatalf("RPC reply = %#v, %v", stored, err)
+	}
+	delivery, err := database.ClaimProjectMessage(ctx, project.ID, project.Assignment.ID, project.Assignment.SelectedThreadID, "rpc-owner")
+	if err != nil || delivery.Message.ID != request.Reply.ID || delivery.AgentName != "rpc-agent" || delivery.ExternalThreadID != "rpc-thread" {
+		t.Fatalf("RPC reply delivery = %#v, %v", delivery, err)
+	}
+	if _, rpcErr := service.Handle(ctx, nil, ReplyMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	replayed, err := database.GetProject(ctx, project.ID)
+	if err != nil || replayed.HeadEventID != after.HeadEventID || len(runtime.wakeMessages) != 2 {
+		t.Fatalf("RPC replay project=%#v wakes=%d: %v", replayed, len(runtime.wakeMessages), err)
 	}
 }
 
