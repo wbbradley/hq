@@ -82,9 +82,9 @@ func TestOnlyNodeRuntimeOpensConcreteStore(t *testing.T) {
 	}
 }
 
-func TestHarnessNeutralPackagesHaveNoCodexDependency(t *testing.T) {
+func TestHarnessGenericLayersHaveNoCodexAdapterDependency(t *testing.T) {
 	repository := repositoryRoot(t)
-	for _, directory := range []string{"harness", "harnessbridge", "harnesssupervisor"} {
+	for _, directory := range []string{"harness", "harnessbridge", "harnesssupervisor", "domain", "store", "domainrpc", "hqclient", "cli", "tui"} {
 		files, err := productionGoFiles(filepath.Join(repository, "internal", directory))
 		if err != nil {
 			t.Fatal(err)
@@ -96,8 +96,8 @@ func TestHarnessNeutralPackagesHaveNoCodexDependency(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if strings.Contains(strings.ToLower(importPath), "codex") {
-					t.Errorf("%s imports Codex dependency %q", relativePath(repository, path), importPath)
+				if strings.Contains(strings.ToLower(importPath), "/codex") {
+					t.Errorf("%s imports Codex adapter or protocol dependency %q", relativePath(repository, path), importPath)
 				}
 			}
 		}

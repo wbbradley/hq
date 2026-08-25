@@ -39,6 +39,19 @@ type lockedBuffer struct {
 	b  bytes.Buffer
 }
 
+type recordingHarnessFactory struct {
+	harness.Factory
+	launched chan harness.Instance
+}
+
+func (f *recordingHarnessFactory) Launch(ctx context.Context, config harness.LaunchConfig) (harness.Instance, error) {
+	instance, err := f.Factory.Launch(ctx, config)
+	if err == nil {
+		f.launched <- instance
+	}
+	return instance, err
+}
+
 func (b *lockedBuffer) Write(value []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -178,12 +191,14 @@ func TestSupervisorLaunchesRegisteredNonCodexProvider(t *testing.T) {
 	defer database.Close()
 
 	const providerID harness.ProviderID = "home-built"
-	factory := fake.NewFactory(providerID)
+	provider := fake.NewFactory(providerID)
+	factory := &recordingHarnessFactory{Factory: provider, launched: make(chan harness.Instance, 4)}
 	registry, err := harness.NewRegistry(factory)
 	if err != nil {
 		t.Fatal(err)
 	}
 	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger(), registry)
+	database.SetChangeObserver(supervisor.Publish)
 	defer supervisor.Close()
 
 	runtime, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
@@ -196,6 +211,46 @@ func TestSupervisorLaunchesRegisteredNonCodexProvider(t *testing.T) {
 	if runtime.Phase != domain.HarnessRuntimeRunning || runtime.Harness != string(providerID) || runtime.SessionID != "session-1" {
 		t.Fatalf("runtime = %#v", runtime)
 	}
+	instance := receiveHarnessInstance(t, factory.launched)
+	agent, err := database.GetNamedAgent(context.Background(), runtime.AgentName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.SetNextSubmissionOutcome(harness.DeliveryUncertain, true)
+	message := model.Message{
+		ID: "019c0000-0000-7000-8000-000000000601", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID,
+		Body: "supervisor recovery input", Context: model.RepositoryContext{Directory: runtime.Directory}, CreatedAt: time.Now().UTC(),
+	}
+	if err := database.Create(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	waitForSupervisorMessage(t, database, message.ID, func(got model.Message) bool { return got.CompletedAt != nil })
+
+	if err := provider.Emit(instance, "operation-output", "output-1", harness.OutputEvent{Text: "supervisor-neutral output", Final: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitForSupervisorBody(t, database, "supervisor-neutral output")
+	_, response, err := provider.Ask(instance, "operation-question", "approval-1", harness.ApprovalRequest{Kind: "command", Summary: "Run checks", Choices: []string{"accept", "decline"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	question := waitForSupervisorBody(t, database, "Deterministic fake harness requests command approval")
+	reply := model.Message{
+		ID: "019c0000-0000-7000-8000-000000000602", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID,
+		Body: "accept", Context: question.Context, CreatedAt: time.Now().UTC(),
+	}
+	if err := database.Reply(context.Background(), question.ID, reply); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case answered := <-response:
+		decision, ok := answered.Payload.(harness.DecisionResponse)
+		if !ok || decision.Decision != "accept" {
+			t.Fatalf("interactive response = %#v", answered)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("interactive request was not answered")
+	}
 	stopped, err := supervisor.StopHarnessAgent(context.Background(), runtime.AgentName)
 	if err != nil {
 		t.Fatal(err)
@@ -203,10 +258,21 @@ func TestSupervisorLaunchesRegisteredNonCodexProvider(t *testing.T) {
 	if stopped.Phase != domain.HarnessRuntimeOffline || stopped.Harness != string(providerID) || stopped.SessionID != runtime.SessionID {
 		t.Fatalf("stopped runtime = %#v", stopped)
 	}
+	resumed, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: runtime.AgentName, Harness: string(providerID),
+		Action: domain.HarnessSessionResume, SessionID: runtime.SessionID, Directory: runtime.Directory,
+	})
+	if err != nil || resumed.Phase != domain.HarnessRuntimeRunning || resumed.SessionID != runtime.SessionID {
+		t.Fatalf("resumed runtime = %#v, %v", resumed, err)
+	}
+	_ = receiveHarnessInstance(t, factory.launched)
+	if _, err := supervisor.StopHarnessAgent(context.Background(), runtime.AgentName); err != nil {
+		t.Fatal(err)
+	}
 
-	capabilities := factory.Provider().Capabilities
+	capabilities := provider.Provider().Capabilities
 	capabilities.Resume = false
-	factory.SetCapabilities(capabilities)
+	provider.SetCapabilities(capabilities)
 	failed, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
 		RequestID: uuid.NewString(), AgentName: runtime.AgentName, Harness: string(providerID),
 		Action: domain.HarnessSessionResume, SessionID: runtime.SessionID, Directory: runtime.Directory,
@@ -220,6 +286,61 @@ func TestSupervisorLaunchesRegisteredNonCodexProvider(t *testing.T) {
 	})
 	if !errors.Is(err, harness.ErrUnknownProvider) {
 		t.Fatalf("unknown provider error = %v", err)
+	}
+}
+
+func TestSharedProviderFactoryCrashIsIsolatedToOneLogicalInstance(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	provider := fake.NewFactory("shared-provider")
+	factory := &recordingHarnessFactory{Factory: provider, launched: make(chan harness.Instance, 2)}
+	registry, err := harness.NewRegistry(factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger(), registry)
+	defer supervisor.Close()
+
+	launch := func(name string) domain.HarnessRuntime {
+		runtime, launchErr := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
+			RequestID: uuid.NewString(), AgentName: name, Harness: "shared-provider", Action: domain.HarnessSessionNew, Directory: t.TempDir(),
+		})
+		if launchErr != nil {
+			t.Fatal(launchErr)
+		}
+		return runtime
+	}
+	first := launch("isolated-first")
+	firstInstance := receiveHarnessInstance(t, factory.launched)
+	second := launch("isolated-second")
+	secondInstance := receiveHarnessInstance(t, factory.launched)
+
+	if err := provider.Crash(firstInstance, errors.New("isolated instance crash")); err != nil {
+		t.Fatal(err)
+	}
+	waitForHarnessRuntimePhase(t, supervisor, first.AgentName, domain.HarnessRuntimeOffline)
+	stillRunning, err := supervisor.HarnessAgentRuntime(context.Background(), second.AgentName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillRunning.Phase != domain.HarnessRuntimeRunning || stillRunning.SessionID != second.SessionID {
+		t.Fatalf("second runtime changed after first crashed: %#v", stillRunning)
+	}
+	if err := provider.Emit(secondInstance, "operation-2", "output-2", harness.OutputEvent{Text: "second instance survived", Final: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitForSupervisorBody(t, database, "second instance survived")
+	if stopped, err := supervisor.StopHarnessAgent(context.Background(), second.AgentName); err != nil || stopped.Phase != domain.HarnessRuntimeOffline {
+		t.Fatalf("stop second runtime = %#v, %v", stopped, err)
 	}
 }
 
@@ -1198,6 +1319,64 @@ func waitForRunningRuntime(t *testing.T, supervisor *Supervisor, name string) do
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func receiveHarnessInstance(t *testing.T, launched <-chan harness.Instance) harness.Instance {
+	t.Helper()
+	select {
+	case instance := <-launched:
+		return instance
+	case <-time.After(3 * time.Second):
+		t.Fatal("harness instance did not launch")
+		return nil
+	}
+}
+
+func waitForSupervisorMessage(t *testing.T, database *store.SQLite, id string, ready func(model.Message) bool) model.Message {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		message, err := database.Get(context.Background(), id)
+		if err == nil && ready(message) {
+			return message
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("message %s did not reach expected state", id)
+	return model.Message{}
+}
+
+func waitForSupervisorBody(t *testing.T, database *store.SQLite, body string) model.Message {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		messages, err := database.List(context.Background(), model.Filter{Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, message := range messages {
+			if message.Body == body {
+				return message
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("message body %q was not stored", body)
+	return model.Message{}
+}
+
+func waitForHarnessRuntimePhase(t *testing.T, supervisor *Supervisor, name string, phase domain.HarnessRuntimePhase) domain.HarnessRuntime {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime, err := supervisor.HarnessAgentRuntime(context.Background(), name)
+		if err == nil && runtime.Phase == phase {
+			return runtime
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("agent %s did not reach runtime phase %s", name, phase)
+	return domain.HarnessRuntime{}
 }
 
 func TestSupervisorFailureDoesNotSelectAndDoesNotEchoEnvironment(t *testing.T) {

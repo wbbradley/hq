@@ -27,6 +27,18 @@ The supervisor copies the caller's environment before constructing the starter. 
 
 The adapter owns executable selection (`codex` by default), arguments, cwd, stdio pipes, stderr forwarding, JSONL framing, the 4 MiB frame limit, process wait, and kill. None of those details belong in the neutral contract.
 
+### Adding another provider
+
+A production provider is added at the composition boundary, without changing generic delivery or supervisor algorithms:
+
+1. Implement `harness.Factory`, `harness.Instance`, and `harness.Session` in an adapter package. Keep its transport, process or remote-client topology, wire payloads, credentials, and provider diagnostics private to that package.
+2. Declare accurate capabilities and provide either idempotent stable-ID submission or stable-ID lookup/reconciliation. Registry validation and the conformance suite reject unsafe recovery contracts.
+3. Register the factory in `internal/node`, decode only that provider's opaque launch options there, and supply its display terminology. A provider may share an underlying connection while returning independently managed logical instances.
+4. Add provider-specific configuration and UI controls only where needed. Common launch requests carry the explicit provider ID and opaque `provider_options`; provider concepts such as Codex YOLO never enter the neutral contract.
+5. Run the reusable conformance suite and the supervisor integration/isolation tests, including new and resumed sessions, uncertain delivery, interactive requests, output, crash isolation, and teardown.
+
+Architecture tests prevent `internal/harness`, `internal/harnessbridge`, `internal/harnesssupervisor`, domain, store, local RPC/client, CLI, and TUI production code from importing a Codex adapter or protocol package. `internal/node` is the intentional composition root where adapter registration is allowed.
+
 ## Lifetime and state model
 
 ```mermaid
