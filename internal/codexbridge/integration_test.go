@@ -207,7 +207,7 @@ func TestCodexBridgeFullSession(t *testing.T) {
 
 	server.sendRaw(`{"id":"approval-full-session","method":"item/commandExecution/requestApproval","params":{"threadId":"` + fixture.thread + `","turnId":"turn-1","itemId":"command-1","command":"go test ./...","cwd":"/work/repo","reason":"verify the implementation"}}`)
 	question := waitForStoreMessage(t, fixture.store, model.HumanMailboxID, "Codex requests command approval")
-	if !strings.Contains(question.Details, "verify the implementation") || !strings.Contains(question.Details, "approval-full-session") {
+	if !strings.Contains(question.Details, "verify the implementation") || strings.Trim(question.Correlation.RequestID, "\"") != "approval-full-session" {
 		t.Fatalf("approval question = %#v", question)
 	}
 	approvalReply := model.Message{

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -22,9 +23,12 @@ type OutputStore interface {
 }
 
 type canonicalOutput struct {
-	key     string
-	body    string
-	details string
+	key               string
+	body              string
+	details           string
+	presentation      model.PresentationKind
+	correlation       model.MessageCorrelation
+	technicalSections []model.TechnicalSection
 }
 
 type OutputRelay struct {
@@ -147,7 +151,8 @@ func (r *OutputRelay) publish(output canonicalOutput) error {
 	message := model.Message{
 		ID: stableOutputMessageID(threadID, output.key), Context: repository,
 		SenderMailboxID: mailbox.ID, RecipientMailboxID: model.HumanMailboxID,
-		Body: output.body, Details: output.details, CreatedAt: r.nextCreatedAt(),
+		Body: output.body, Details: output.details, Presentation: output.presentation, Correlation: output.correlation,
+		TechnicalSections: output.technicalSections, CreatedAt: r.nextCreatedAt(),
 	}
 	if project != nil {
 		message.Purpose = model.MessagePurposeProjectOutput
@@ -215,12 +220,13 @@ func canonicalOutputFromNotification(threadID string, notification Notification)
 		if err := json.Unmarshal(notification.Params, &params); err != nil || params.ThreadID != threadID || params.TurnID == "" || params.Item.Type != "agentMessage" || params.Item.ID == "" || strings.TrimSpace(params.Item.Text) == "" {
 			return canonicalOutput{}, false
 		}
-		kind := "update"
+		kind := model.PresentationUpdate
 		if params.Item.Phase == "final_answer" {
-			kind = "final-answer"
+			kind = model.PresentationFinalAnswer
 		}
-		details := fmt.Sprintf("Kind: %s\nHarness provider: codex\nHarness session: %s\nHarness operation: %s\nHarness item: %s\nPhase: %s", kind, params.ThreadID, params.TurnID, params.Item.ID, valueOrNone(params.Item.Phase))
-		return canonicalOutput{key: params.Item.ID, body: params.Item.Text, details: details}, true
+		correlation := model.MessageCorrelation{Provider: "codex", SessionID: params.ThreadID, OperationID: params.TurnID, ItemID: params.Item.ID}
+		technical := []model.TechnicalSection{{Namespace: "hq.harness.output", Fields: []model.TechnicalField{{Key: "phase", Label: "Phase", Value: valueOrNone(params.Item.Phase)}}}}
+		return canonicalOutput{key: params.Item.ID, body: params.Item.Text, presentation: kind, correlation: correlation, technicalSections: technical}, true
 	case "turn/completed":
 		var params TurnNotification
 		if err := json.Unmarshal(notification.Params, &params); err != nil || params.ThreadID != threadID || params.Turn.ID == "" {
@@ -235,14 +241,17 @@ func canonicalOutputFromNotification(threadID string, notification Notification)
 				errorMessage = valueOrNone(params.Turn.Error.Message)
 				additionalDetails = strings.TrimSpace(params.Turn.Error.AdditionalDetails)
 			}
-			details := fmt.Sprintf("Kind: status\nHarness provider: codex\nHarness session: %s\nHarness operation: %s\nStatus: failed\nError: %s", params.ThreadID, params.Turn.ID, errorMessage)
+			details := "Error: " + errorMessage
 			if additionalDetails != "" {
 				details += "\nAdditional details: " + additionalDetails
 			}
-			return canonicalOutput{key: key, body: "Codex turn failed", details: details}, true
+			correlation := model.MessageCorrelation{Provider: "codex", SessionID: params.ThreadID, OperationID: params.Turn.ID}
+			technical := []model.TechnicalSection{{Namespace: "hq.harness.output", Fields: []model.TechnicalField{{Key: "status", Label: "Status", Value: "failed"}}}}
+			return canonicalOutput{key: key, body: "Codex turn failed", details: details, presentation: model.PresentationStatus, correlation: correlation, technicalSections: technical}, true
 		case "interrupted":
-			details := fmt.Sprintf("Kind: status\nHarness provider: codex\nHarness session: %s\nHarness operation: %s\nStatus: interrupted", params.ThreadID, params.Turn.ID)
-			return canonicalOutput{key: key, body: "Codex turn interrupted", details: details}, true
+			correlation := model.MessageCorrelation{Provider: "codex", SessionID: params.ThreadID, OperationID: params.Turn.ID}
+			technical := []model.TechnicalSection{{Namespace: "hq.harness.output", Fields: []model.TechnicalField{{Key: "status", Label: "Status", Value: "interrupted"}}}}
+			return canonicalOutput{key: key, body: "Codex turn interrupted", presentation: model.PresentationStatus, correlation: correlation, technicalSections: technical}, true
 		default:
 			return canonicalOutput{}, false
 		}
@@ -256,5 +265,5 @@ func stableOutputMessageID(threadID, key string) string {
 }
 
 func sameCanonicalOutput(existing, expected model.Message) bool {
-	return existing.ID == expected.ID && existing.SenderMailboxID == expected.SenderMailboxID && existing.RecipientMailboxID == expected.RecipientMailboxID && existing.Purpose == model.NormalizeMessagePurpose(expected.Purpose) && existing.Body == expected.Body && existing.Details == expected.Details
+	return existing.ID == expected.ID && existing.SenderMailboxID == expected.SenderMailboxID && existing.RecipientMailboxID == expected.RecipientMailboxID && existing.Purpose == model.NormalizeMessagePurpose(expected.Purpose) && existing.Body == expected.Body && existing.Details == expected.Details && existing.Presentation == expected.Presentation && existing.Correlation == expected.Correlation && reflect.DeepEqual(existing.TechnicalSections, expected.TechnicalSections)
 }

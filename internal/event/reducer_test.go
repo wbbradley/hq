@@ -8,6 +8,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/wbbradley/hq/internal/model"
 )
 
 func TestReduceIsIdempotentAndInputOrderIndependent(t *testing.T) {
@@ -424,7 +426,9 @@ func TestUnsupportedEventSurvivesAndReducesAfterSchemaRegistration(t *testing.T)
 		Parents:   []string{}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TextPayload{Body: "future"}),
 	}
 	future := mustSignSchema(t, content, secretA, 1)
-	oldState := Reduce([][]byte{future}, localPolicy())
+	oldPolicy := localPolicy()
+	oldPolicy.SchemaVersions = []int{Schema1}
+	oldState := Reduce([][]byte{future}, oldPolicy)
 	var id string
 	for eventID := range oldState.Records {
 		id = eventID
@@ -433,11 +437,108 @@ func TestUnsupportedEventSurvivesAndReducesAfterSchemaRegistration(t *testing.T)
 		t.Fatalf("old state = %#v", oldState.Records[id])
 	}
 	policy := localPolicy()
-	policy.SchemaVersions = []int{1, 2}
+	policy.SchemaVersions = []int{Schema1, Schema2}
 	newState := Reduce([][]byte{future}, policy)
 	if newState.Records[id].Status != StatusProjected || newState.Messages[id].Body != "future" {
 		t.Fatalf("new state = %#v, %#v", newState.Records[id], newState.Messages[id])
 	}
+}
+
+func TestSchema2MessageProjectsTypedSemanticsWithoutParsingDetails(t *testing.T) {
+	payload := TextPayload{
+		Body: "typed output", Details: "Kind: notice\nHarness session: user-authored",
+		Presentation:      model.PresentationUpdate,
+		Correlation:       model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", ItemID: "item"},
+		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.experimental", Fields: []model.TechnicalField{{Key: "opaque", Label: "Opaque", Value: "value"}}}},
+	}
+	signed := signedMessagePayload(t, Schema2, payload, 1)
+	state := Reduce(wires(signed, signed), localPolicy())
+	projected := state.Messages[signed.ID()]
+	if projected.Presentation != payload.Presentation || projected.Correlation != payload.Correlation || projected.Details != payload.Details || !reflect.DeepEqual(projected.TechnicalSections, payload.TechnicalSections) {
+		t.Fatalf("schema 2 projection = %#v", projected)
+	}
+	if !reflect.DeepEqual(state.Records[signed.ID()].Event.Wire, signed.Wire) {
+		t.Fatal("schema 2 canonical bytes changed during reduction")
+	}
+}
+
+func TestSchema1LegacyAdapterProjectsHarnessSemantics(t *testing.T) {
+	payload := TextPayload{
+		Body:    "legacy output",
+		Details: "Human explanation.\nKind: final-answer\nHarness provider: home-built\nHarness session: session-1\nHarness operation: operation-1\nHarness item: item-1\nHarness request: request-1\nHQ message: duplicate-id\nPhase: final_answer",
+	}
+	signed := signedMessagePayload(t, Schema1, payload, 1)
+	state := Reduce(wires(signed), localPolicy())
+	projected := state.Messages[signed.ID()]
+	wantCorrelation := model.MessageCorrelation{Provider: "home-built", SessionID: "session-1", OperationID: "operation-1", ItemID: "item-1", RequestID: "request-1"}
+	if projected.Presentation != model.PresentationFinalAnswer || projected.Correlation != wantCorrelation || projected.Details != "Human explanation." {
+		t.Fatalf("legacy harness projection = %#v", projected)
+	}
+	if len(projected.TechnicalSections) != 1 || projected.TechnicalSections[0].Namespace != "hq.legacy.harness" || projected.TechnicalSections[0].Fields[0].Key != "phase" {
+		t.Fatalf("legacy harness technical sections = %#v", projected.TechnicalSections)
+	}
+	if !reflect.DeepEqual(state.Records[signed.ID()].Event.Wire, signed.Wire) {
+		t.Fatal("schema 1 canonical bytes changed during reduction")
+	}
+}
+
+func TestSchema1LegacyAdapterSupportsCodexAliases(t *testing.T) {
+	signed := signedMessagePayload(t, Schema1, TextPayload{Body: "legacy", Details: "Codex thread: thread-old\nCodex turn: turn-old\nKind: update"}, 1)
+	projected := Reduce(wires(signed), localPolicy()).Messages[signed.ID()]
+	want := model.MessageCorrelation{Provider: "codex", SessionID: "thread-old", OperationID: "turn-old"}
+	if projected.Correlation != want || projected.Presentation != model.PresentationUpdate || projected.Details != "" {
+		t.Fatalf("legacy Codex projection = %#v", projected)
+	}
+}
+
+func TestSchema1ProjectProvenanceRequiresKnownPurposeAndShape(t *testing.T) {
+	const provenance = "Project: project-1\nProject assignment: assignment-1\nProject thread: thread-1"
+	projectOutput := signedMessagePayload(t, Schema1, TextPayload{Body: "output", Details: "Visible explanation.\n" + provenance, Purpose: model.MessagePurposeProjectOutput}, 1)
+	userDetails := signedMessagePayload(t, Schema1, TextPayload{Body: "ordinary", Details: provenance, Purpose: model.MessagePurposeConversation}, 2)
+	lookalike := signedMessagePayload(t, Schema1, TextPayload{Body: "ordinary", Details: "Project: project-1\nProject assignment: assignment-1", Purpose: model.MessagePurposeProjectOutput}, 3)
+	state := Reduce(wires(projectOutput, userDetails, lookalike), localPolicy())
+	projected := state.Messages[projectOutput.ID()]
+	if projected.Details != "Visible explanation." || len(projected.TechnicalSections) != 1 || projected.TechnicalSections[0].Namespace != "hq.legacy.project_output_provenance" {
+		t.Fatalf("project output projection = %#v", projected)
+	}
+	if got := state.Messages[userDetails.ID()]; got.Details != provenance || len(got.TechnicalSections) != 0 {
+		t.Fatalf("ordinary user details were reclassified = %#v", got)
+	}
+	if got := state.Messages[lookalike.ID()]; got.Details != "Project: project-1\nProject assignment: assignment-1" || len(got.TechnicalSections) != 0 {
+		t.Fatalf("incomplete project shape was reclassified = %#v", got)
+	}
+}
+
+func TestSchema1StructuralLookalikesWithoutProducerShapeRemainHumanDetails(t *testing.T) {
+	const details = "Kind: update\nPhase: final_answer\nHarness session: a sentence, not an identity"
+	signed := signedMessagePayload(t, Schema1, TextPayload{Body: "ordinary", Details: details}, 1)
+	projected := Reduce(wires(signed), localPolicy()).Messages[signed.ID()]
+	if projected.Details != details || projected.Presentation != "" || !projected.Correlation.Empty() || len(projected.TechnicalSections) != 0 {
+		t.Fatalf("schema 1 lookalike details = %#v", projected)
+	}
+}
+
+func TestSchemaMessageProjectionIsOrderAndDuplicateIndependent(t *testing.T) {
+	legacy := signedMessagePayload(t, Schema1, TextPayload{Body: "legacy", Details: "Kind: update\nHarness provider: one\nHarness session: same\nHarness operation: operation"}, 1)
+	typed := signedMessagePayload(t, Schema2, TextPayload{Body: "typed", Presentation: model.PresentationFinalAnswer, Correlation: model.MessageCorrelation{Provider: "two", SessionID: "same", OperationID: "operation"}}, 2)
+	want := Reduce(wires(legacy, typed), localPolicy())
+	for range 50 {
+		raw := wires(legacy, typed, legacy, typed)
+		rand.Shuffle(len(raw), func(i, j int) { raw[i], raw[j] = raw[j], raw[i] })
+		if got := Reduce(raw, localPolicy()); !reflect.DeepEqual(got, want) {
+			t.Fatalf("typed projection changed after reorder/duplicate\nwant: %#v\ngot: %#v", want.Messages, got.Messages)
+		}
+	}
+}
+
+func signedMessagePayload(t *testing.T, schema int, payload TextPayload, second int64) SignedEvent {
+	t.Helper()
+	return mustSign(t, Content{
+		Schema: schema, Type: TypeQuestion, InstallationID: installationA,
+		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
+		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Scope:     ScopeInstallationPrivate, Payload: mustPayload(t, payload),
+	}, time.Unix(second, 0), secretA)
 }
 
 func TestMalformedKnownEventAndUntrustedUnsupportedEventDoNotProject(t *testing.T) {
@@ -449,7 +550,7 @@ func TestMalformedKnownEventAndUntrustedUnsupportedEventDoNotProject(t *testing.
 	}
 	badWire := mustSignSchema(t, malformed, secretA, 1)
 	unknown := malformed
-	unknown.Schema = 2
+	unknown.Schema = 3
 	unknown.InstallationID = installationB
 	unknown.SignerKeyID = secretB.PublicKeyHex()
 	unknown.Sender = &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}

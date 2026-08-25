@@ -473,10 +473,13 @@ func sendStatusAt(ctx context.Context, options Options, mailbox model.Mailbox, t
 	if err != nil {
 		return fmt.Errorf("create bridge status ID: %w", err)
 	}
-	details := fmt.Sprintf("Kind: status\nHarness provider: codex\nHarness session: %s\nHQ mailbox: %s\nStatus: %s", threadID, mailbox.ID, status)
 	message := model.Message{
 		ID: messageID.String(), Context: options.Repository, SenderMailboxID: mailbox.ID,
-		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeSystemNotice, Body: body, Details: details, CreatedAt: createdAt,
+		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeSystemNotice, Body: body,
+		Presentation: model.PresentationStatus, Correlation: model.MessageCorrelation{Provider: "codex", SessionID: threadID},
+		TechnicalSections: []model.TechnicalSection{{Namespace: "hq.harness.status", Fields: []model.TechnicalField{
+			{Key: "mailbox_id", Label: "HQ mailbox", Value: mailbox.ID}, {Key: "status", Label: "Status", Value: status},
+		}}}, CreatedAt: createdAt,
 	}
 	if err := options.Store.Create(ctx, message); err != nil {
 		return fmt.Errorf("send Codex bridge status to HQ: %w", err)

@@ -22,7 +22,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "29"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "30"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -321,11 +321,11 @@ func TestMessageConversationCorrelationFilters(t *testing.T) {
 	firstAgent := resolveAgent(t, s, "codex", "correlation-one", "/repo")
 	secondAgent := resolveAgent(t, s, "codex", "correlation-two", "/repo")
 	firstInbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da1", firstAgent.ID, model.HumanMailboxID, "first inbound")
-	firstInbound.Details = "Harness provider: codex\nHarness session: shared-thread\nHarness operation: first-turn"
+	firstInbound.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "shared-thread", OperationID: "first-turn"}
 	firstOutbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da2", model.HumanMailboxID, firstAgent.ID, "first outbound")
-	firstOutbound.Details = "Harness provider: codex\nHarness session: shared-thread\nHarness operation: second-turn"
+	firstOutbound.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "shared-thread", OperationID: "second-turn"}
 	secondInbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da3", secondAgent.ID, model.HumanMailboxID, "second inbound")
-	secondInbound.Details = "Harness provider: codex\nHarness session: shared-thread\nHarness operation: first-turn"
+	secondInbound.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "shared-thread", OperationID: "first-turn"}
 	uncorrelated := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da4", firstAgent.ID, model.HumanMailboxID, "uncorrelated")
 	for _, item := range []model.Message{firstInbound, firstOutbound, secondInbound, uncorrelated} {
 		if err := s.Create(ctx, item); err != nil {
@@ -368,16 +368,16 @@ func TestConversationSummariesFilterUnionAndPagination(t *testing.T) {
 	created := time.Now().UTC().Add(-time.Minute)
 	open := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc1", agent.ID, model.HumanMailboxID, "open")
 	open.CreatedAt = created
-	open.Details = "Harness provider: codex\nHarness session: open-thread\nHarness operation: turn-one"
+	open.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "open-thread", OperationID: "turn-one"}
 	openReply := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc4", model.HumanMailboxID, agent.ID, "open conversation reply")
 	openReply.CreatedAt = created.Add(time.Second)
-	openReply.Details = "Harness provider: codex\nHarness session: open-thread\nHarness operation: turn-one"
+	openReply.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "open-thread", OperationID: "turn-one"}
 	sent := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc2", model.HumanMailboxID, agent.ID, "sent only")
 	sent.CreatedAt = created
-	sent.Details = "Harness provider: codex\nHarness session: sent-thread"
+	sent.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "sent-thread"}
 	archived := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc3", other.ID, model.HumanMailboxID, "archived only")
 	archived.CreatedAt = created
-	archived.Details = "Harness provider: codex\nHarness session: archived-thread"
+	archived.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "archived-thread"}
 	for _, item := range []model.Message{open, openReply, sent, archived} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -432,7 +432,7 @@ func TestConversationHistoryIsCompleteChronologicalAndIsolated(t *testing.T) {
 	}
 	for index := range items {
 		items[index].CreatedAt = created.Add(time.Duration(index) * time.Second)
-		items[index].Details = "Harness provider: codex\nHarness session: shared-thread\nHarness operation: turn-" + fmt.Sprint(index)
+		items[index].Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "shared-thread", OperationID: "turn-" + fmt.Sprint(index)}
 		if err := s.Create(ctx, items[index]); err != nil {
 			t.Fatal(err)
 		}
@@ -501,7 +501,7 @@ func TestHarnessConversationsNamespaceProviderLocalSessionIDs(t *testing.T) {
 			t.Fatal(err)
 		}
 		item := message(fmt.Sprintf("0198c7ec-73b0-7cc3-a5f7-e31c77140d8%d", index), agent.MailboxID, model.HumanMailboxID, provider+" output")
-		item.Details = "Harness provider: " + provider + "\nHarness session: shared-session\nHarness operation: operation-1"
+		item.Correlation = model.MessageCorrelation{Provider: provider, SessionID: "shared-session", OperationID: "operation-1"}
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
 		}
@@ -528,7 +528,7 @@ func TestVersionTwelveMigrationBackfillsMessageCorrelation(t *testing.T) {
 	ctx := context.Background()
 	agent := resolveAgent(t, s, "codex", "correlation-migration", "/repo")
 	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db1", agent.ID, model.HumanMailboxID, "preserve correlation")
-	item.Details = "Harness provider: codex\nHarness session: migrated-thread\nHarness operation: migrated-turn"
+	item.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "migrated-thread", OperationID: "migrated-turn"}
 	if err := s.Create(ctx, item); err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +564,7 @@ func TestVersionTwentyEightMigrationAddsProviderNamespace(t *testing.T) {
 	ctx := context.Background()
 	agent := resolveAgent(t, s, "codex", "provider-migration", "/repo")
 	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db2", agent.ID, model.HumanMailboxID, "preserve provider")
-	item.Details = "Harness provider: codex\nHarness session: migrated-thread\nHarness operation: migrated-turn"
+	item.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "migrated-thread", OperationID: "migrated-turn"}
 	if err := s.Create(ctx, item); err != nil {
 		t.Fatal(err)
 	}

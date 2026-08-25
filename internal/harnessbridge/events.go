@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -21,10 +22,13 @@ import (
 const eventQueueCapacity = 64
 
 type canonicalOutput struct {
-	key       string
-	operation harness.OperationID
-	body      string
-	details   string
+	key               string
+	operation         harness.OperationID
+	body              string
+	details           string
+	presentation      model.PresentationKind
+	correlation       model.MessageCorrelation
+	technicalSections []model.TechnicalSection
 }
 
 type eventWork struct {
@@ -249,13 +253,14 @@ func (r *eventRelay) canonicalize(event harness.Event) (canonicalOutput, bool) {
 		if event.Operation == "" || event.ItemID == "" || strings.TrimSpace(payload.Text) == "" {
 			return canonicalOutput{}, false
 		}
-		kind := "update"
+		kind := model.PresentationUpdate
 		phase := "commentary"
 		if payload.Final {
-			kind, phase = "final-answer", "final_answer"
+			kind, phase = model.PresentationFinalAnswer, "final_answer"
 		}
-		details := fmt.Sprintf("Kind: %s\nHarness provider: %s\nHarness session: %s\nHarness operation: %s\nHarness item: %s\nPhase: %s", kind, event.Session.Provider, event.Session.ID, event.Operation, event.ItemID, phase)
-		return canonicalOutput{key: event.ItemID, operation: event.Operation, body: payload.Text, details: details}, true
+		correlation := model.MessageCorrelation{Provider: string(event.Session.Provider), SessionID: string(event.Session.ID), OperationID: string(event.Operation), ItemID: event.ItemID}
+		technical := []model.TechnicalSection{{Namespace: "hq.harness.output", Fields: []model.TechnicalField{{Key: "phase", Label: "Phase", Value: phase}}}}
+		return canonicalOutput{key: event.ItemID, operation: event.Operation, body: payload.Text, presentation: kind, correlation: correlation, technicalSections: technical}, true
 	case harness.OperationStatusEvent:
 		if event.Operation == "" {
 			return canonicalOutput{}, false
@@ -267,11 +272,13 @@ func (r *eventRelay) canonicalize(event harness.Event) (canonicalOutput, bool) {
 			if errorMessage == "" {
 				errorMessage = "(not provided)"
 			}
-			details := fmt.Sprintf("Kind: status\nHarness provider: %s\nHarness session: %s\nHarness operation: %s\nStatus: failed\nError: %s", event.Session.Provider, event.Session.ID, event.Operation, errorMessage)
-			return canonicalOutput{key: key, operation: event.Operation, body: r.terms.ProviderName + " " + r.terms.OperationName + " failed", details: details}, true
+			correlation := model.MessageCorrelation{Provider: string(event.Session.Provider), SessionID: string(event.Session.ID), OperationID: string(event.Operation)}
+			technical := []model.TechnicalSection{{Namespace: "hq.harness.output", Fields: []model.TechnicalField{{Key: "status", Label: "Status", Value: "failed"}}}}
+			return canonicalOutput{key: key, operation: event.Operation, body: r.terms.ProviderName + " " + r.terms.OperationName + " failed", details: "Error: " + errorMessage, presentation: model.PresentationStatus, correlation: correlation, technicalSections: technical}, true
 		case harness.OperationInterrupted:
-			details := fmt.Sprintf("Kind: status\nHarness provider: %s\nHarness session: %s\nHarness operation: %s\nStatus: interrupted", event.Session.Provider, event.Session.ID, event.Operation)
-			return canonicalOutput{key: key, operation: event.Operation, body: r.terms.ProviderName + " " + r.terms.OperationName + " interrupted", details: details}, true
+			correlation := model.MessageCorrelation{Provider: string(event.Session.Provider), SessionID: string(event.Session.ID), OperationID: string(event.Operation)}
+			technical := []model.TechnicalSection{{Namespace: "hq.harness.output", Fields: []model.TechnicalField{{Key: "status", Label: "Status", Value: "interrupted"}}}}
+			return canonicalOutput{key: key, operation: event.Operation, body: r.terms.ProviderName + " " + r.terms.OperationName + " interrupted", presentation: model.PresentationStatus, correlation: correlation, technicalSections: technical}, true
 		}
 	}
 	return canonicalOutput{}, false
@@ -282,7 +289,6 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 		return errors.New("harness output relay is not bound")
 	}
 	ledgerSessionID := r.identity.Key()
-	sessionID := string(r.identity.ID)
 	sent, err := r.ledger.OutputSent(ledgerSessionID, output.key)
 	if err != nil {
 		return fmt.Errorf("read harness output ledger: %w", err)
@@ -292,7 +298,8 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 	}
 	message := model.Message{
 		ID: r.stableOutputID(output.key), Context: r.repository, SenderMailboxID: r.mailbox.ID, RecipientMailboxID: model.HumanMailboxID,
-		HarnessProvider: string(r.identity.Provider), HarnessSessionID: sessionID, HarnessOperationID: string(output.operation), Body: output.body, Details: output.details, CreatedAt: r.nextCreatedAt(),
+		Body: output.body, Details: output.details, Presentation: output.presentation, Correlation: output.correlation,
+		TechnicalSections: output.technicalSections, CreatedAt: r.nextCreatedAt(),
 	}
 	if r.project != nil {
 		message.Purpose = model.MessagePurposeProjectOutput
@@ -401,5 +408,5 @@ func (r *eventRelay) StopAndWait() {
 }
 
 func sameOutput(existing, expected model.Message) bool {
-	return existing.ID == expected.ID && existing.SenderMailboxID == expected.SenderMailboxID && existing.RecipientMailboxID == expected.RecipientMailboxID && existing.Purpose == model.NormalizeMessagePurpose(expected.Purpose) && existing.Body == expected.Body && existing.Details == expected.Details
+	return existing.ID == expected.ID && existing.SenderMailboxID == expected.SenderMailboxID && existing.RecipientMailboxID == expected.RecipientMailboxID && existing.Purpose == model.NormalizeMessagePurpose(expected.Purpose) && existing.Body == expected.Body && existing.Details == expected.Details && existing.Presentation == expected.Presentation && existing.Correlation == expected.Correlation && reflect.DeepEqual(existing.TechnicalSections, expected.TechnicalSections)
 }

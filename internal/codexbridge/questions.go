@@ -89,13 +89,10 @@ func (q *Questioner) Publish(ctx context.Context, spec QuestionSpec) (*PendingQu
 		return nil, err
 	}
 	details := strings.TrimSpace(spec.Details)
-	if details != "" {
-		details += "\n\n"
-	}
-	details += correlationDetails(spec.Correlation, messageID.String())
 	message := model.Message{
 		ID: messageID.String(), Context: q.Repository, SenderMailboxID: q.Mailbox.ID,
-		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeProtocolQuestion, Body: spec.Body, Details: details, CreatedAt: time.Now().UTC(),
+		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeProtocolQuestion, Body: spec.Body, Details: details,
+		Correlation: q.messageCorrelation(spec.Correlation), TechnicalSections: requestTechnicalSections(spec.Correlation), CreatedAt: time.Now().UTC(),
 	}
 	if err := q.Store.Create(ctx, message); err != nil {
 		waiter.Cancel()
@@ -176,13 +173,12 @@ func (q *Questioner) Notice(ctx context.Context, body, details string, correlati
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(details) != "" {
-		details += "\n\n"
-	}
-	details += "Kind: notice\n" + correlationDetails(correlation, messageID.String())
+	details = strings.TrimSpace(details)
 	message := model.Message{
 		ID: messageID.String(), Context: q.Repository, SenderMailboxID: q.Mailbox.ID,
-		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeSystemNotice, Body: body, Details: details, CreatedAt: time.Now().UTC(),
+		RecipientMailboxID: human.ID, Purpose: model.MessagePurposeSystemNotice, Body: body, Details: details,
+		Presentation: model.PresentationNotice, Correlation: q.messageCorrelation(correlation),
+		TechnicalSections: requestTechnicalSections(correlation), CreatedAt: time.Now().UTC(),
 	}
 	if err := q.Store.Create(ctx, message); err != nil {
 		return err
@@ -250,6 +246,21 @@ func (q *Questioner) await(ctx context.Context, pending *PendingQuestion) (*Clai
 	}
 }
 
-func correlationDetails(correlation RequestCorrelation, hqMessageID string) string {
-	return fmt.Sprintf("Harness provider: codex\nHarness session: %s\nHarness operation: %s\nHarness item: %s\nHarness request: %s\nHQ message: %s", correlation.ThreadID, correlation.TurnID, correlation.ItemID, correlation.RequestID, hqMessageID)
+func (q *Questioner) messageCorrelation(correlation RequestCorrelation) model.MessageCorrelation {
+	sessionID := correlation.ThreadID
+	if sessionID == "" {
+		sessionID = q.ThreadID
+	}
+	result := model.MessageCorrelation{Provider: "codex", SessionID: sessionID, OperationID: correlation.TurnID, ItemID: correlation.ItemID, RequestID: correlation.RequestID}
+	if !result.Valid() {
+		return model.MessageCorrelation{}
+	}
+	return result
+}
+
+func requestTechnicalSections(correlation RequestCorrelation) []model.TechnicalSection {
+	if correlation.RequestID == "" || correlation.TurnID != "" {
+		return nil
+	}
+	return []model.TechnicalSection{{Namespace: "hq.harness.request", Fields: []model.TechnicalField{{Key: "request_id", Label: "Request", Value: correlation.RequestID}}}}
 }

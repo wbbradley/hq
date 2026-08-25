@@ -58,7 +58,7 @@ func TestMessageMarkdownRendererCachesAndInvalidates(t *testing.T) {
 		calls++
 		return body, nil
 	})
-	message := model.Message{ID: "message", Body: "body", Details: "Kind: update"}
+	message := model.Message{ID: "message", Body: "body", Presentation: model.PresentationUpdate}
 
 	if got := renderer.Render(message, 40); got != message.Body {
 		t.Fatalf("rendered body = %q", got)
@@ -87,7 +87,7 @@ func TestMessageMarkdownRendererFallsBackToOriginalBody(t *testing.T) {
 	renderer := newMessageMarkdownRenderer(func(string, string, int) (string, error) {
 		return "", errors.New("render failed")
 	})
-	message := model.Message{ID: "message", Body: "**unrendered but visible**", Details: "Kind: final-answer"}
+	message := model.Message{ID: "message", Body: "**unrendered but visible**", Presentation: model.PresentationFinalAnswer}
 	if got := renderer.Render(message, 40); got != message.Body {
 		t.Fatalf("fallback = %q; want %q", got, message.Body)
 	}

@@ -12,14 +12,21 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/model"
 )
 
 func validateContent(content Content, publicKey string, schema int) (ProjectionStatus, error) {
 	if content.Schema != schema {
 		return StatusUnsupported, fmt.Errorf("unsupported HQ schema %d", content.Schema)
 	}
+	if schema != Schema1 && schema != Schema2 {
+		return StatusUnsupported, fmt.Errorf("unsupported HQ schema %d", schema)
+	}
 	if !knownType(content.Type) {
 		return StatusUnsupported, fmt.Errorf("unsupported HQ event type %q", content.Type)
+	}
+	if schema == Schema2 && content.Type != TypeQuestion && content.Type != TypeAnswer && content.Type != TypeMessage {
+		return StatusUnsupported, fmt.Errorf("HQ schema 2 does not define event type %q", content.Type)
 	}
 	if err := validUUID("installation ID", content.InstallationID); err != nil {
 		return StatusInvalid, err
@@ -84,7 +91,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if err := validateMessageAddresses(content, content.Type == TypeQuestion && content.Scope == ScopeAccountAddressed); err != nil {
 			return StatusInvalid, err
 		}
-		if err := validateTextPayload(content.Payload); err != nil {
+		if err := validateTextPayload(content.Payload, schema); err != nil {
 			return StatusInvalid, err
 		}
 	case TypeAnswer:
@@ -94,7 +101,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if err := validateMessageAddresses(content, false); err != nil {
 			return StatusInvalid, err
 		}
-		if err := validateTextPayload(content.Payload); err != nil {
+		if err := validateTextPayload(content.Payload, schema); err != nil {
 			return StatusInvalid, err
 		}
 	case TypeThreadCancel:
@@ -532,9 +539,9 @@ func validateControl(content Content) error {
 	return nil
 }
 
-func validateTextPayload(raw json.RawMessage) error {
-	var payload TextPayload
-	if err := decodePayload(raw, &payload); err != nil {
+func validateTextPayload(raw json.RawMessage, schema int) error {
+	payload, err := decodeTextPayload(raw, schema)
+	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(payload.Body) == "" {
@@ -560,7 +567,162 @@ func validateTextPayload(raw json.RawMessage) error {
 	if len(payload.Details) > MaxDetailBytes {
 		return fmt.Errorf("message details are %d bytes; limit is %d", len(payload.Details), MaxDetailBytes)
 	}
+	if schema == Schema2 {
+		if err := validateMessageSemantics(payload); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func decodeTextPayload(raw json.RawMessage, schema int) (TextPayload, error) {
+	if schema == Schema1 {
+		var legacy textPayloadSchema1
+		if err := decodePayload(raw, &legacy); err != nil {
+			return TextPayload{}, err
+		}
+		return TextPayload{
+			MessageID: legacy.MessageID, Body: legacy.Body, Details: legacy.Details,
+			Purpose: legacy.Purpose, Context: legacy.Context, ActorLabel: legacy.ActorLabel,
+		}, nil
+	}
+	if schema == Schema2 {
+		var payload TextPayload
+		if err := decodePayload(raw, &payload); err != nil {
+			return TextPayload{}, err
+		}
+		return payload, nil
+	}
+	return TextPayload{}, fmt.Errorf("unsupported HQ schema %d", schema)
+}
+
+func validateMessageSemantics(payload TextPayload) error {
+	if !payload.Presentation.Valid() {
+		return fmt.Errorf("unsupported message presentation %q", payload.Presentation)
+	}
+	if err := validateMessageCorrelation(payload.Correlation); err != nil {
+		return err
+	}
+	return validateTechnicalSections(payload.TechnicalSections)
+}
+
+func validateMessageCorrelation(correlation model.MessageCorrelation) error {
+	if correlation.Empty() {
+		return nil
+	}
+	if correlation.Provider == "" || correlation.SessionID == "" {
+		return errors.New("message correlation needs provider and session IDs")
+	}
+	if correlation.OperationID == "" && (correlation.ItemID != "" || correlation.RequestID != "") {
+		return errors.New("message correlation item and request IDs need an operation ID")
+	}
+	if err := validOpaqueIdentity("correlation provider", correlation.Provider, MaxCorrelationProviderBytes); err != nil {
+		return err
+	}
+	for name, value := range map[string]string{
+		"correlation session ID":   correlation.SessionID,
+		"correlation operation ID": correlation.OperationID,
+		"correlation item ID":      correlation.ItemID,
+		"correlation request ID":   correlation.RequestID,
+	} {
+		if value != "" {
+			if err := validOpaqueIdentity(name, value, MaxCorrelationIDBytes); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateTechnicalSections(sections []model.TechnicalSection) error {
+	if len(sections) > MaxTechnicalSections {
+		return fmt.Errorf("message has %d technical sections; limit is %d", len(sections), MaxTechnicalSections)
+	}
+	seen := make(map[string]struct{})
+	totalFields, totalBytes := 0, 0
+	for sectionIndex, section := range sections {
+		if err := validTechnicalName("technical namespace", section.Namespace, MaxTechnicalNamespaceBytes, true); err != nil {
+			return fmt.Errorf("technical section %d: %w", sectionIndex, err)
+		}
+		if len(section.Fields) == 0 {
+			return fmt.Errorf("technical section %q needs at least one field", section.Namespace)
+		}
+		if len(section.Fields) > MaxTechnicalFieldsPerSection {
+			return fmt.Errorf("technical section %q has %d fields; limit is %d", section.Namespace, len(section.Fields), MaxTechnicalFieldsPerSection)
+		}
+		totalBytes += len(section.Namespace)
+		for fieldIndex, field := range section.Fields {
+			if err := validTechnicalName("technical key", field.Key, MaxTechnicalKeyBytes, false); err != nil {
+				return fmt.Errorf("technical section %q field %d: %w", section.Namespace, fieldIndex, err)
+			}
+			pair := section.Namespace + "\x00" + field.Key
+			if _, ok := seen[pair]; ok {
+				return fmt.Errorf("duplicate technical namespace/key pair %q/%q", section.Namespace, field.Key)
+			}
+			seen[pair] = struct{}{}
+			if !utf8.ValidString(field.Label) || hasTextControl(field.Label) {
+				return fmt.Errorf("technical label for %q/%q must be valid printable UTF-8", section.Namespace, field.Key)
+			}
+			if len(field.Label) > MaxTechnicalLabelBytes {
+				return fmt.Errorf("technical label for %q/%q is %d bytes; limit is %d", section.Namespace, field.Key, len(field.Label), MaxTechnicalLabelBytes)
+			}
+			if !utf8.ValidString(field.Value) {
+				return fmt.Errorf("technical value for %q/%q is not valid UTF-8", section.Namespace, field.Key)
+			}
+			if len(field.Value) > MaxTechnicalValueBytes {
+				return fmt.Errorf("technical value for %q/%q is %d bytes; limit is %d", section.Namespace, field.Key, len(field.Value), MaxTechnicalValueBytes)
+			}
+			totalFields++
+			totalBytes += len(field.Key) + len(field.Label) + len(field.Value)
+		}
+	}
+	if totalFields > MaxTechnicalFields {
+		return fmt.Errorf("message has %d technical fields; limit is %d", totalFields, MaxTechnicalFields)
+	}
+	if totalBytes > MaxTechnicalPayloadBytes {
+		return fmt.Errorf("message technical payload is %d bytes; limit is %d", totalBytes, MaxTechnicalPayloadBytes)
+	}
+	return nil
+}
+
+func validOpaqueIdentity(name, value string, limit int) error {
+	if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
+		return fmt.Errorf("%s must be non-empty without surrounding whitespace", name)
+	}
+	if !utf8.ValidString(value) || hasTextControl(value) {
+		return fmt.Errorf("%s must be valid printable UTF-8", name)
+	}
+	if len(value) > limit {
+		return fmt.Errorf("%s is %d bytes; limit is %d", name, len(value), limit)
+	}
+	return nil
+}
+
+func validTechnicalName(name, value string, limit int, requireNamespace bool) error {
+	if value == "" || len(value) > limit || (requireNamespace && !strings.Contains(value, ".")) {
+		return fmt.Errorf("%s must be a bounded lowercase machine name", name)
+	}
+	for index, char := range value {
+		letterOrDigit := char >= 'a' && char <= 'z' || char >= '0' && char <= '9'
+		separator := char == '.' || char == '_' || char == '-'
+		if !letterOrDigit && !separator || (index == 0 && !letterOrDigit) {
+			return fmt.Errorf("%s must be a bounded lowercase machine name", name)
+		}
+	}
+	last := value[len(value)-1]
+	if last == '.' || last == '_' || last == '-' || strings.Contains(value, "..") {
+		return fmt.Errorf("%s must be a bounded lowercase machine name", name)
+	}
+	return nil
+}
+
+func hasTextControl(value string) bool {
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func validateTargetPayload(raw json.RawMessage, requireTarget bool) error {

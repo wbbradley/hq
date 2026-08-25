@@ -56,7 +56,7 @@ func TestOutputRelayPublishesOnlyCanonicalCompletedAgentMessages(t *testing.T) {
 		t.Fatalf("messages = %#v, %v", messages, err)
 	}
 	message := messages[0]
-	if message.Body != "Canonical final text" || !strings.Contains(message.Details, "Kind: final-answer") || !strings.Contains(message.Details, "Harness operation: turn-1") || !strings.Contains(message.Details, "Harness item: agent-1") || !strings.Contains(message.Details, "Phase: final_answer") {
+	if message.Body != "Canonical final text" || message.Presentation != model.PresentationFinalAnswer || message.Correlation.OperationID != "turn-1" || message.Correlation.ItemID != "agent-1" || !technicalFieldEquals(message.TechnicalSections, "hq.harness.output", "phase", "final_answer") {
 		t.Fatalf("message = %#v", message)
 	}
 	if message.ID != stableOutputMessageID(fixture.thread, "agent-1") {
@@ -85,12 +85,40 @@ func TestOutputRelayPublishesFailedAndInterruptedTurnStatusesInOrder(t *testing.
 	if messages[0].Body != "I got partway there" || messages[1].Body != "Codex turn failed" || messages[2].Body != "Codex turn interrupted" {
 		t.Fatalf("message order = %#v", messages)
 	}
-	if !strings.Contains(messages[0].Details, "Kind: update") || !strings.Contains(messages[1].Details, "Kind: status") || !strings.Contains(messages[2].Details, "Kind: status") {
+	if messages[0].Presentation != model.PresentationUpdate || messages[1].Presentation != model.PresentationStatus || messages[2].Presentation != model.PresentationStatus {
 		t.Fatalf("message kinds = %#v", messages)
 	}
 	if !strings.Contains(messages[1].Details, "upstream unavailable") || !strings.Contains(messages[1].Details, "retry later") {
 		t.Fatalf("failure = %#v", messages[1])
 	}
+}
+
+func technicalFieldEquals(sections []model.TechnicalSection, namespace, key, value string) bool {
+	for _, section := range sections {
+		if section.Namespace != namespace {
+			continue
+		}
+		for _, field := range section.Fields {
+			if field.Key == key && field.Value == value {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func technicalFieldContains(sections []model.TechnicalSection, namespace, key, value string) bool {
+	for _, section := range sections {
+		if section.Namespace != namespace {
+			continue
+		}
+		for _, field := range section.Fields {
+			if field.Key == key && strings.Contains(field.Value, value) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestOutputRelayDeduplicatesAcrossPersistentLedgerRestart(t *testing.T) {

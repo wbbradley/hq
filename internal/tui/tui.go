@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -624,7 +625,7 @@ func (m app) answer() tea.Msg {
 				return answeredMsg{err: fmt.Errorf("recipient %s is no longer available; choose a recipient again: %w", m.composeName, cause)}
 			}
 			if agent.Harness != "" && agent.CurrentSessionID != "" {
-				message.Details = "Harness provider: " + agent.Harness + "\nHarness session: " + agent.CurrentSessionID
+				message.Correlation = model.MessageCorrelation{Provider: agent.Harness, SessionID: agent.CurrentSessionID}
 				message.HarnessProvider, message.HarnessSessionID = agent.Harness, agent.CurrentSessionID
 			}
 		}
@@ -641,7 +642,7 @@ func (m app) answer() tea.Msg {
 	} else {
 		replyTo := m.answerID
 		message.ReplyTo = &replyTo
-		message.Details = turnCorrelationDetails(m.answerQ)
+		message.Correlation = correlationForMessage(m.answerQ)
 		err = m.store.Reply(m.ctx, m.answerID, message)
 		if err == nil {
 			err = m.archiveAnsweredGroup()
@@ -700,24 +701,12 @@ func (m app) archiveAnsweredGroup() error {
 	return nil
 }
 
-func turnCorrelationDetails(message model.Message) string {
-	provider := message.HarnessProvider
-	if provider == "" {
-		provider = detailValue(message.Details, "Harness provider:")
+func correlationForMessage(message model.Message) model.MessageCorrelation {
+	correlation := message.Correlation
+	if correlation.Empty() {
+		correlation = model.MessageCorrelation{Provider: message.HarnessProvider, SessionID: message.HarnessSessionID, OperationID: message.HarnessOperationID}
 	}
-	thread := detailValue(message.Details, "Harness session:")
-	turn := detailValue(message.Details, "Harness operation:")
-	var lines []string
-	if provider != "" {
-		lines = append(lines, "Harness provider: "+provider)
-	}
-	if thread != "" {
-		lines = append(lines, "Harness session: "+thread)
-	}
-	if turn != "" {
-		lines = append(lines, "Harness operation: "+turn)
-	}
-	return strings.Join(lines, "\n")
+	return correlation
 }
 
 func (m app) archiveGroup(group messageGroup) tea.Cmd {
@@ -2459,11 +2448,8 @@ func conversationKeyForMessage(message model.Message) model.ConversationKey {
 	if counterparty == model.HumanMailboxID {
 		counterparty = message.RecipientMailboxID
 	}
-	correlation := model.MessageCorrelation{HarnessProvider: message.HarnessProvider, HarnessSessionID: message.HarnessSessionID, HarnessOperationID: message.HarnessOperationID}
-	if correlation.HarnessSessionID == "" {
-		correlation = model.ParseMessageCorrelation(message.Details)
-	}
-	key := model.ConversationKey{CounterpartyMailboxID: counterparty, HarnessProvider: correlation.HarnessProvider, HarnessSessionID: correlation.HarnessSessionID}
+	correlation := correlationForMessage(message)
+	key := model.ConversationKey{CounterpartyMailboxID: counterparty, HarnessProvider: correlation.Provider, HarnessSessionID: correlation.SessionID}
 	if key.HarnessSessionID == "" {
 		key.ThreadID = message.ThreadID
 		if key.ThreadID == "" {
@@ -2789,7 +2775,7 @@ func replyTarget(group messageGroup) model.Message {
 	unit := actionUnitKey(oldest)
 	for i := len(group.messages) - 1; i >= 0; i-- {
 		message := group.messages[i]
-		if canReply(message) && actionUnitKey(message) == unit && detailValue(message.Details, "Harness request:") != "" {
+		if canReply(message) && actionUnitKey(message) == unit && message.Correlation.RequestID != "" {
 			return message
 		}
 	}
@@ -2812,9 +2798,9 @@ func archiveTarget(group messageGroup) model.Message {
 }
 
 func actionUnitKey(message model.Message) string {
-	turn := message.HarnessOperationID
+	turn := message.Correlation.OperationID
 	if turn == "" {
-		turn = model.ParseMessageCorrelation(message.Details).HarnessOperationID
+		turn = message.HarnessOperationID
 	}
 	if turn != "" {
 		return "operation:" + turn
@@ -2875,19 +2861,8 @@ func displayMessageAddress(address model.MessageAddress, fallbackLabel string, c
 }
 
 func presentationKind(message model.Message) string {
-	for _, line := range strings.Split(message.Details, "\n") {
-		value, found := strings.CutPrefix(strings.TrimSpace(line), "Kind:")
-		if found {
-			switch kind := strings.TrimSpace(value); kind {
-			case "final-answer", "update", "status", "notice":
-				return kind
-			}
-		}
-	}
-	for _, line := range strings.Split(message.Details, "\n") {
-		if strings.TrimSpace(line) == "Phase: final_answer" {
-			return "final-answer"
-		}
+	if message.Presentation.Valid() {
+		return string(message.Presentation)
 	}
 	return ""
 }
@@ -2975,7 +2950,7 @@ func (m app) presentationDetails(raw string, expanded bool) (string, bool) {
 }
 
 func technicalIdentifiers(message model.Message) string {
-	lines := make([]string, 0, 6)
+	lines := []string{"hq.message.identifiers"}
 	add := func(label, value string) {
 		if value != "" {
 			lines = append(lines, label+": "+value)
@@ -2988,6 +2963,28 @@ func technicalIdentifiers(message model.Message) string {
 	add("recipient installation ID", message.RecipientInstallationID)
 	if message.ReplyTo != nil {
 		add("reply-to ID", *message.ReplyTo)
+	}
+	correlation := message.Correlation
+	if correlation.Empty() && message.HarnessSessionID != "" {
+		correlation = model.MessageCorrelation{Provider: message.HarnessProvider, SessionID: message.HarnessSessionID, OperationID: message.HarnessOperationID}
+	}
+	if !correlation.Empty() {
+		lines = append(lines, "", "hq.message.correlation")
+		add("provider", correlation.Provider)
+		add("session ID", correlation.SessionID)
+		add("operation ID", correlation.OperationID)
+		add("item ID", correlation.ItemID)
+		add("request ID", correlation.RequestID)
+	}
+	for _, section := range message.TechnicalSections {
+		lines = append(lines, "", section.Namespace)
+		for _, field := range section.Fields {
+			label := field.Label
+			if label == "" {
+				label = field.Key
+			}
+			add(label, field.Value)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -3422,7 +3419,7 @@ func (m app) cachedRenderedMessageGroup(group messageGroup, width int) (rendered
 	if hasDraft {
 		draft = *group.draft
 	}
-	if cache.groupKey != group.key || !slices.Equal(cache.messages, group.messages) || !slices.Equal(cache.activities, group.activities) || cache.activityState != m.activityExpansionState(group.activities) || cache.hasDraft != hasDraft || cache.draft != draft ||
+	if cache.groupKey != group.key || !reflect.DeepEqual(cache.messages, group.messages) || !slices.Equal(cache.activities, group.activities) || cache.activityState != m.activityExpansionState(group.activities) || cache.hasDraft != hasDraft || !reflect.DeepEqual(cache.draft, draft) ||
 		cache.width != width || cache.showTechnical != m.showTechnical || cache.focused != m.paneFocused(focusMessage) ||
 		cache.contextID != m.contextID || cache.branch != m.branch || cache.remotes != m.remotes || cache.pull != m.pull {
 		return renderedMessageGroup{}, false

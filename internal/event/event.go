@@ -22,11 +22,25 @@ const (
 	// Kind is HQ's provisional regular Nostr event kind.
 	Kind uint16 = 7281
 
-	SchemaVersion  = 1
-	MaxWireBytes   = 64 << 10
-	MaxBodyBytes   = 32 << 10
-	MaxDetailBytes = 16 << 10
-	MaxParents     = 64
+	Schema1              = 1
+	Schema2              = 2
+	SchemaVersion        = Schema1 // Default for canonical event types not explicitly upgraded.
+	MessageSchemaVersion = Schema2
+	MaxWireBytes         = 64 << 10
+	MaxBodyBytes         = 32 << 10
+	MaxDetailBytes       = 16 << 10
+	MaxParents           = 64
+
+	MaxCorrelationProviderBytes  = 128
+	MaxCorrelationIDBytes        = 512
+	MaxTechnicalSections         = 16
+	MaxTechnicalFieldsPerSection = 32
+	MaxTechnicalFields           = 128
+	MaxTechnicalNamespaceBytes   = 128
+	MaxTechnicalKeyBytes         = 128
+	MaxTechnicalLabelBytes       = 256
+	MaxTechnicalValueBytes       = 4 << 10
+	MaxTechnicalPayloadBytes     = 16 << 10
 )
 
 type Type string
@@ -111,6 +125,21 @@ type Content struct {
 }
 
 type TextPayload struct {
+	MessageID         string                   `json:"message_id,omitempty"`
+	Body              string                   `json:"body"`
+	Details           string                   `json:"details,omitempty"`
+	Purpose           model.MessagePurpose     `json:"purpose,omitempty"`
+	Context           *RepositoryContext       `json:"context,omitempty"`
+	ActorLabel        string                   `json:"actor_label,omitempty"`
+	Presentation      model.PresentationKind   `json:"presentation,omitempty"`
+	Correlation       model.MessageCorrelation `json:"correlation,omitzero"`
+	TechnicalSections []model.TechnicalSection `json:"technical_sections,omitempty"`
+}
+
+// textPayloadSchema1 is the exact historical message payload. Keep this type
+// private so new writers cannot accidentally use schema 1 as a structural
+// extension channel.
+type textPayloadSchema1 struct {
 	MessageID  string               `json:"message_id,omitempty"`
 	Body       string               `json:"body"`
 	Details    string               `json:"details,omitempty"`
@@ -383,7 +412,7 @@ func Sign(content Content, createdAt time.Time, secret SecretKey) (SignedEvent, 
 	if len(content.Payload) == 0 {
 		content.Payload = json.RawMessage(`{}`)
 	}
-	if status, err := validateContent(content, "", SchemaVersion); status != StatusProjected {
+	if status, err := validateContent(content, "", content.Schema); status != StatusProjected {
 		return SignedEvent{}, err
 	}
 	rawContent, err := json.Marshal(content)
@@ -406,6 +435,9 @@ func Sign(content Content, createdAt time.Time, secret SecretKey) (SignedEvent, 
 	if err != nil {
 		return SignedEvent{}, fmt.Errorf("marshal signed event: %w", err)
 	}
+	if len(wire) > MaxWireBytes {
+		return SignedEvent{}, fmt.Errorf("signed event wire is %d bytes; limit is %d", len(wire), MaxWireBytes)
+	}
 	inspection := Inspect(wire)
 	if inspection.Status != StatusProjected {
 		return SignedEvent{}, fmt.Errorf("inspect signed event: %w", inspection.Err)
@@ -415,7 +447,7 @@ func Sign(content Content, createdAt time.Time, secret SecretKey) (SignedEvent, 
 
 // Inspect verifies the Nostr event before decoding or validating HQ content.
 func Inspect(raw []byte) Inspection {
-	return InspectWithSchemas(raw, []int{SchemaVersion})
+	return InspectWithSchemas(raw, []int{Schema1, Schema2})
 }
 
 // InspectWithSchemas permits a reducer upgraded with a compatible schema
@@ -454,7 +486,7 @@ func InspectWithSchemas(raw []byte, schemas []int) Inspection {
 		return result
 	}
 	if len(nostrEvent.Tags) != 0 {
-		result.Err = errors.New("HQ schema 1 events must have an empty tags array")
+		result.Err = errors.New("HQ canonical events must have an empty tags array")
 		return result
 	}
 	var header struct {

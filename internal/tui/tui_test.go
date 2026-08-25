@@ -146,8 +146,8 @@ func TestInvalidationReloadPreservesActiveDraftAndRearms(t *testing.T) {
 func TestStaleReloadCannotReplaceNewerConversationSnapshot(t *testing.T) {
 	previous := message("previous-snapshot", testAgentID, model.HumanMailboxID, "Previous reply")
 	latest := message("latest-snapshot", testAgentID, model.HumanMailboxID, "Latest reply")
-	previous.Details = "Harness provider: codex\nHarness session: reload-thread\nHarness operation: previous-turn"
-	latest.Details = "Harness provider: codex\nHarness session: reload-thread\nHarness operation: latest-turn"
+	setMessageSemantics(&previous, "Harness provider: codex\nHarness session: reload-thread\nHarness operation: previous-turn")
+	setMessageSemantics(&latest, "Harness provider: codex\nHarness session: reload-thread\nHarness operation: latest-turn")
 	latest.CreatedAt = previous.CreatedAt.Add(time.Second)
 	m := app{inbox: []model.Message{previous}, loadGeneration: 2, width: 80, height: 24}
 	m.setMessages()
@@ -284,13 +284,13 @@ func TestConversationLoadShowsCompleteBidirectionalHistory(t *testing.T) {
 	created := time.Now().UTC().Add(-time.Minute)
 	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df1", agent.ID, model.HumanMailboxID, "first inbound")
 	first.CreatedAt = created
-	first.Details = "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-one"
+	setMessageSemantics(&first, "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-one")
 	human := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df2", model.HumanMailboxID, agent.ID, "human response")
 	human.CreatedAt = created.Add(time.Second)
-	human.Details = "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-one"
+	setMessageSemantics(&human, "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-one")
 	second := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df3", agent.ID, model.HumanMailboxID, "second inbound")
 	second.CreatedAt = created.Add(2 * time.Second)
-	second.Details = "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-two"
+	setMessageSemantics(&second, "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-two")
 	for _, item := range []model.Message{first, human, second} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -319,9 +319,9 @@ func TestConversationLoadShowsCompleteBidirectionalHistory(t *testing.T) {
 
 func TestConversationReloadPreservesStableSelection(t *testing.T) {
 	firstMessage := message("selection-first", testAgentID, model.HumanMailboxID, "first")
-	firstMessage.Details = "Harness provider: codex\nHarness session: first-thread"
+	setMessageSemantics(&firstMessage, "Harness provider: codex\nHarness session: first-thread")
 	secondMessage := message("selection-second", testAgentID, model.HumanMailboxID, "second")
-	secondMessage.Details = "Harness provider: codex\nHarness session: second-thread"
+	setMessageSemantics(&secondMessage, "Harness provider: codex\nHarness session: second-thread")
 	first := model.ConversationSummary{Key: conversationKeyForMessage(firstMessage), Latest: firstMessage}
 	second := model.ConversationSummary{Key: conversationKeyForMessage(secondMessage), Latest: secondMessage}
 	m := app{conversations: []model.ConversationSummary{first, second}, conversationMode: true, cursor: 1}
@@ -351,7 +351,7 @@ func TestNewNamedAgentMessageRecordsCurrentCodexThread(t *testing.T) {
 	editor.SetValue("hello")
 	m := app{ctx: context.Background(), store: store, editor: editor, answering: true, composeTo: testAgentID, composeName: "fred", composeNamed: true}
 	result := m.answer().(answeredMsg)
-	if result.err != nil || store.created.Details != "Harness provider: codex\nHarness session: current-codex-thread" {
+	if result.err != nil || store.created.Correlation != (model.MessageCorrelation{Provider: "codex", SessionID: "current-codex-thread"}) || store.created.Details != "" {
 		t.Fatalf("created message = %#v, result=%#v", store.created, result)
 	}
 }
@@ -408,7 +408,7 @@ func TestMessagePresentationKindsAndFriendlyLabels(t *testing.T) {
 	for i, test := range kinds {
 		item := message(string(rune('a'+i)), testAgentID, model.HumanMailboxID, test.kind)
 		item.Context.Directory = "/work/repo"
-		item.Details = "Kind: " + test.kind
+		item.Presentation = model.PresentationKind(test.kind)
 		messages = append(messages, item)
 	}
 	view := (app{messages: messages, width: 100, height: 40}).View().Content
@@ -421,7 +421,7 @@ func TestMessagePresentationKindsAndFriendlyLabels(t *testing.T) {
 		}
 	}
 	legacy := message("legacy", testAgentID, model.HumanMailboxID, "old final")
-	legacy.Details = "Phase: final_answer"
+	setMessageSemantics(&legacy, "Phase: final_answer")
 	if got := presentationKind(legacy); got != "final-answer" {
 		t.Fatalf("legacy kind = %q", got)
 	}
@@ -452,7 +452,7 @@ func TestTypedMailboxAddressDisplayIsExhaustive(t *testing.T) {
 func TestInboxRowsUseOnlyNeededSpaceAfterAgentName(t *testing.T) {
 	item := message("compact-row", testAgentID, model.HumanMailboxID, "Working on it")
 	item.Context.Directory = "/work/repo"
-	item.Details = "Kind: update"
+	setMessageSemantics(&item, "Kind: update")
 	view := ansi.Strip((app{messages: []model.Message{item}, width: 100, height: 24}).View().Content)
 	if !strings.Contains(view, "codex · repo [update] Working on it") {
 		t.Fatalf("inbox row retained a fixed-width agent column: %q", view)
@@ -468,7 +468,7 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 	item.SenderInstallationID = "sender-installation-opaque"
 	item.RecipientInstallationID = "recipient-installation-opaque"
 	item.ReplyTo = &replyTo
-	item.Details = "Kind: update\nHarness provider: codex\nHarness session: codex-thread-opaque\nHarness operation: turn-opaque\nHQ message: hq-opaque\n\nChoose one:\n- accept\n- decline"
+	setMessageSemantics(&item, "Kind: update\nHarness provider: codex\nHarness session: codex-thread-opaque\nHarness operation: turn-opaque\nHQ message: hq-opaque\n\nChoose one:\n- accept\n- decline")
 	m := app{messages: []model.Message{item}, width: 100, height: 80}
 
 	view := m.View().Content
@@ -491,7 +491,7 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
 	view = updated.(app).View().Content
-	for _, shown := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "hq-opaque", "Kind: update"} {
+	for _, shown := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "hq.message.identifiers", "hq.message.correlation"} {
 		if !strings.Contains(view, shown) {
 			t.Fatalf("expanded view omitted %q: %q", shown, view)
 		}
@@ -501,7 +501,7 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 func TestMessagePanelCombinesKindAndSenderInBorder(t *testing.T) {
 	item := message("message-id", testAgentID, model.HumanMailboxID, "Working on it")
 	item.Context.Directory = "/work/repo"
-	item.Details = "Kind: update"
+	setMessageSemantics(&item, "Kind: update")
 	view := (app{messages: []model.Message{item}}).View().Content
 	lines := strings.Split(view, "\n")
 	bodyLine := -1
@@ -527,7 +527,7 @@ func TestMessagePanelCombinesKindAndSenderInBorder(t *testing.T) {
 		}
 	}
 
-	item.Details = "Kind: final-answer"
+	setMessageSemantics(&item, "Kind: final-answer")
 	view = (app{messages: []model.Message{item}}).View().Content
 	if !strings.Contains(view, "[a final answer from codex · repo]") || strings.Contains(view, "From: codex · repo") {
 		t.Fatalf("final-answer border title: %q", view)
@@ -539,7 +539,7 @@ func TestFinalAnswerPanelKeepsFinalAnswerSenderAfterHumanReply(t *testing.T) {
 	answer.SenderLabel = "alice · TUI Work"
 	answer.SenderAddress = model.MessageAddress{MailboxID: "project-mailbox", Kind: model.MailboxProject, Label: "alice · TUI Work"}
 	answer.ThreadID = "project-conversation"
-	answer.Details = "Kind: final-answer"
+	setMessageSemantics(&answer, "Kind: final-answer")
 	reply := message("reply-id", model.HumanMailboxID, "project-mailbox", "A follow-up")
 	reply.SenderLabel = "silver"
 	reply.RecipientLabel = "TUI Work"
@@ -554,7 +554,7 @@ func TestFinalAnswerPanelKeepsFinalAnswerSenderAfterHumanReply(t *testing.T) {
 
 func TestMessagePanelRendersOnlyBodiesAsMarkdown(t *testing.T) {
 	item := message("message-id", testAgentID, model.HumanMailboxID, "Body with **bold text**")
-	item.Details = "Kind: update\nVisible **detail markers**"
+	setMessageSemantics(&item, "Kind: update\nVisible **detail markers**")
 	m := app{messages: []model.Message{item}, width: 80, height: 30, markdown: newMessageMarkdownRenderer(renderMessageMarkdown)}
 
 	view := m.View().Content
@@ -568,7 +568,7 @@ func TestMessagePanelRendersOnlyBodiesAsMarkdown(t *testing.T) {
 
 func TestMarkdownTableFitsResponsiveMessagePane(t *testing.T) {
 	item := message("message-id", testAgentID, model.HumanMailboxID, "| Name | Description |\n| --- | --- |\n| alpha | a long value that wraps inside the available cell width |")
-	item.Details = "Kind: update"
+	setMessageSemantics(&item, "Kind: update")
 	for _, width := range []int{119, 120} {
 		m := app{messages: []model.Message{item}, width: width, height: 40, markdown: newMessageMarkdownRenderer(renderMessageMarkdown)}
 		view := m.View().Content
@@ -587,10 +587,10 @@ func TestCoalescedMessagePartsRenderMarkdownIndependently(t *testing.T) {
 	created := time.Date(2026, 8, 22, 12, 0, 0, 0, time.Local)
 	first := message("first", testAgentID, model.HumanMailboxID, "First **bold part**")
 	first.CreatedAt = created
-	first.Details = "Kind: update\nHarness provider: codex\nHarness session: thread\nHarness operation: turn"
+	setMessageSemantics(&first, "Kind: update\nHarness provider: codex\nHarness session: thread\nHarness operation: turn")
 	second := message("second", testAgentID, model.HumanMailboxID, "Second *italic part*")
 	second.CreatedAt = created.Add(time.Second)
-	second.Details = "Kind: final-answer\nHarness provider: codex\nHarness session: thread\nHarness operation: turn"
+	setMessageSemantics(&second, "Kind: final-answer\nHarness provider: codex\nHarness session: thread\nHarness operation: turn")
 	group := groupMessages([]model.Message{second, first})[0]
 	m := app{markdown: newMessageMarkdownRenderer(renderMessageMarkdown)}
 
@@ -665,7 +665,7 @@ func BenchmarkReplyEditorViewLongConversation(b *testing.B) {
 	for index := range 120 {
 		item := message(fmt.Sprintf("benchmark-message-%03d", index), testAgentID, model.HumanMailboxID, strings.Repeat("A representative message body with enough text to wrap. ", 12))
 		item.CreatedAt = created.Add(time.Duration(index) * time.Second)
-		item.Details = fmt.Sprintf("Harness provider: codex\nHarness session: benchmark-thread\nHarness operation: turn-%03d", index)
+		item.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "benchmark-thread", OperationID: fmt.Sprintf("turn-%03d", index)}
 		messages = append(messages, item)
 	}
 	editor := textarea.New()
@@ -690,13 +690,13 @@ func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
 	created := time.Date(2026, 8, 21, 15, 4, 5, 0, time.Local)
 	question := message("question", testAgentID, model.HumanMailboxID, "Which approach?")
 	question.CreatedAt = created
-	question.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1\nHarness request: request-1"
+	setMessageSemantics(&question, "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1\nHarness request: request-1")
 	update := message("update", testAgentID, model.HumanMailboxID, "First update")
 	update.CreatedAt = created.Add(time.Second)
-	update.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&update, "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	final := message("final", testAgentID, model.HumanMailboxID, "Finished")
 	final.CreatedAt = created.Add(2 * time.Second)
-	final.Details = "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&final, "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 
 	m := app{inbox: []model.Message{final, update, question}, editor: textarea.New(), width: 120, height: 30}
 	m.setMessages()
@@ -712,7 +712,7 @@ func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
 
 	late := message("late", testAgentID, model.HumanMailboxID, "Late update")
 	late.CreatedAt = created.Add(3 * time.Second)
-	late.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&late, "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	updated, _ = m.Update(loadedMsg{inbox: []model.Message{late, final, update, question}})
 	m = updated.(app)
 	view := m.View().Content
@@ -744,7 +744,7 @@ func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 		}
 	}
 	item := message("message", testAgentID, model.HumanMailboxID, "Body")
-	item.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&item, "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	editor := textarea.New()
 	editor.Focus()
 	m := app{
@@ -796,7 +796,7 @@ func TestInboxAndMessagePanesShowScrollbarsOnlyWhenScrollable(t *testing.T) {
 
 func TestResponsiveViewFitsTerminalWithVerticalPanes(t *testing.T) {
 	item := message("message", testAgentID, model.HumanMailboxID, "Body")
-	item.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&item, "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	for _, width := range []int{80, 119, 120, 200} {
 		editor := textarea.New()
 		editor.Focus()
@@ -874,12 +874,12 @@ func TestMessagePaneOppositeDirectionMovesImmediatelyAfterTopBoundary(t *testing
 
 func TestMessagePaneKeepsOldestOpenActionVisibleAfterArchivedHistory(t *testing.T) {
 	archived := message("archived-history", testAgentID, model.HumanMailboxID, strings.Repeat("archived ancestor\n", 20))
-	archived.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: old-turn"
+	setMessageSemantics(&archived, "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: old-turn")
 	archivedAt := time.Now().UTC()
 	archived.ArchivedAt = &archivedAt
 	open := message("open-history", testAgentID, model.HumanMailboxID, "oldest open action")
 	open.CreatedAt = archived.CreatedAt.Add(time.Second)
-	open.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: open-turn"
+	setMessageSemantics(&open, "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: open-turn")
 	m := app{messages: []model.Message{archived, open}, width: 80, height: 24}
 	view := m.View().Content
 	messageView := strings.Join(strings.Split(view, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:], "\n")
@@ -892,17 +892,17 @@ func TestMessagePaneAnchorsNewReplyAfterArchivedMessagesInSameTurn(t *testing.T)
 	created := time.Date(2026, 8, 23, 15, 4, 5, 0, time.Local)
 	read := message("read-reply", testAgentID, model.HumanMailboxID, strings.Repeat("already read\n", 18))
 	read.CreatedAt = created
-	read.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn"
+	setMessageSemantics(&read, "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn")
 	archivedAt := created.Add(time.Second)
 	read.ArchivedAt = &archivedAt
 
 	human := message("human-response", model.HumanMailboxID, testAgentID, "My response")
 	human.CreatedAt = created.Add(2 * time.Second)
-	human.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn"
+	setMessageSemantics(&human, "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn")
 
 	unread := message("unread-reply", testAgentID, model.HumanMailboxID, "New reply")
 	unread.CreatedAt = created.Add(3 * time.Second)
-	unread.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn"
+	setMessageSemantics(&unread, "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn")
 
 	m := app{messages: []model.Message{read, human, unread}, width: 80, height: 24}
 	m.groups = groupMessages(m.messages)
@@ -932,15 +932,15 @@ func TestMessagePaneClearsStaleAnchorWhenOnlyConversationReappears(t *testing.T)
 	created := time.Date(2026, 8, 23, 18, 4, 5, 0, time.Local)
 	previous := message("previous-reply", testAgentID, model.HumanMailboxID, strings.Repeat("previous reply\n", 20))
 	previous.CreatedAt = created
-	previous.Details = "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: previous-turn"
+	setMessageSemantics(&previous, "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: previous-turn")
 	archivedAt := created.Add(time.Second)
 	previous.ArchivedAt = &archivedAt
 	human := message("human-reply", model.HumanMailboxID, testAgentID, "My reply")
 	human.CreatedAt = created.Add(2 * time.Second)
-	human.Details = "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: previous-turn"
+	setMessageSemantics(&human, "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: previous-turn")
 	latest := message("latest-reply", testAgentID, model.HumanMailboxID, strings.Repeat("latest reply\n", 12))
 	latest.CreatedAt = created.Add(3 * time.Second)
-	latest.Details = "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: latest-turn"
+	setMessageSemantics(&latest, "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: latest-turn")
 	key := conversationKeyForMessage(latest)
 	stableKey := conversationKeyString(key)
 
@@ -976,7 +976,7 @@ func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T
 	created := time.Date(2026, 8, 23, 16, 4, 5, 0, time.Local)
 	previous := message("previous-open", testAgentID, model.HumanMailboxID, strings.Repeat("previous update\n", 18))
 	previous.CreatedAt = created
-	previous.Details = "Harness provider: codex\nHarness session: live-thread\nHarness operation: shared-turn"
+	setMessageSemantics(&previous, "Harness provider: codex\nHarness session: live-thread\nHarness operation: shared-turn")
 	key := conversationKeyForMessage(previous)
 	stableKey := conversationKeyString(key)
 	m := app{
@@ -996,7 +996,7 @@ func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T
 
 	latest := message("latest-open", testAgentID, model.HumanMailboxID, "Latest update")
 	latest.CreatedAt = created.Add(time.Second)
-	latest.Details = "Harness provider: codex\nHarness session: live-thread\nHarness operation: shared-turn"
+	setMessageSemantics(&latest, "Harness provider: codex\nHarness session: live-thread\nHarness operation: shared-turn")
 	updated, _ := m.Update(loadedMsg{
 		conversations: []model.ConversationSummary{{Key: key, Latest: latest, OldestOpen: &previous}},
 		histories:     map[string][]model.Message{stableKey: {previous, latest}},
@@ -1017,7 +1017,7 @@ func TestMessagePaneRestoresUnreadBoundaryAfterRestartAndMultipleReplies(t *test
 	makeTurnMessage := func(id, body string, offset time.Duration, sender, recipient string) model.Message {
 		item := message(id, sender, recipient, body)
 		item.CreatedAt = created.Add(offset)
-		item.Details = "Harness provider: codex\nHarness session: restart-thread"
+		setMessageSemantics(&item, "Harness provider: codex\nHarness session: restart-thread")
 		return item
 	}
 	first := makeTurnMessage("first-agent", strings.Repeat("first response\n", 10), 0, testAgentID, model.HumanMailboxID)
@@ -1066,7 +1066,7 @@ func TestMessagePaneUsesNewestContentWhenConversationHasNoOpenWork(t *testing.T)
 
 func TestManualMessageAnchorSurvivesEarlierLiveHistory(t *testing.T) {
 	current := message("current-message", testAgentID, model.HumanMailboxID, strings.Repeat("current line\n", 24))
-	current.Details = "Harness provider: codex\nHarness session: live-anchor\nHarness operation: current-turn"
+	setMessageSemantics(&current, "Harness provider: codex\nHarness session: live-anchor\nHarness operation: current-turn")
 	conversationKey := conversationKeyForMessage(current)
 	stableKey := conversationKeyString(conversationKey)
 	m := app{
@@ -1079,7 +1079,7 @@ func TestManualMessageAnchorSurvivesEarlierLiveHistory(t *testing.T) {
 	anchorID, anchorOffset := m.messageAnchorID, m.messageAnchorOffset
 	earlier := message("earlier-message", testAgentID, model.HumanMailboxID, strings.Repeat("earlier line\n", 12))
 	earlier.CreatedAt = current.CreatedAt.Add(-time.Minute)
-	earlier.Details = "Harness provider: codex\nHarness session: live-anchor\nHarness operation: earlier-turn"
+	setMessageSemantics(&earlier, "Harness provider: codex\nHarness session: live-anchor\nHarness operation: earlier-turn")
 	updated, _ := m.Update(historyLoadedMsg{key: stableKey, messages: []model.Message{earlier, current}})
 	m = updated.(app)
 	if !m.messageScrollManual || m.messageAnchorID != anchorID || m.messageAnchorOffset != anchorOffset || m.messageScroll <= 5 {
@@ -1113,10 +1113,10 @@ func TestManualMessageAnchorSurvivesResizeReflow(t *testing.T) {
 
 func TestAutomaticMessageAnchorAdvancesAndRestoresWithOpenState(t *testing.T) {
 	first := message("first-open", testAgentID, model.HumanMailboxID, strings.Repeat("first action\n", 12))
-	first.Details = "Harness provider: codex\nHarness session: state-anchor\nHarness operation: first-turn"
+	setMessageSemantics(&first, "Harness provider: codex\nHarness session: state-anchor\nHarness operation: first-turn")
 	second := message("second-open", testAgentID, model.HumanMailboxID, "second action")
 	second.CreatedAt = first.CreatedAt.Add(time.Second)
-	second.Details = "Harness provider: codex\nHarness session: state-anchor\nHarness operation: second-turn"
+	setMessageSemantics(&second, "Harness provider: codex\nHarness session: state-anchor\nHarness operation: second-turn")
 	m := app{messages: []model.Message{first, second}, width: 80, height: 24}
 	m.groups = groupMessages(m.messages)
 	m.reconcileMessageViewport(false)
@@ -1139,10 +1139,10 @@ func TestAutomaticMessageAnchorAdvancesAndRestoresWithOpenState(t *testing.T) {
 
 func TestRenderedMessageSpansTrackWrappedMessages(t *testing.T) {
 	first := message("wrapped-first", testAgentID, model.HumanMailboxID, strings.Repeat("wrapped words ", 20))
-	first.Details = "Harness provider: codex\nHarness session: span-thread\nHarness operation: first-turn"
+	setMessageSemantics(&first, "Harness provider: codex\nHarness session: span-thread\nHarness operation: first-turn")
 	second := message("wrapped-second", testAgentID, model.HumanMailboxID, "second")
 	second.CreatedAt = first.CreatedAt.Add(time.Second)
-	second.Details = "Harness provider: codex\nHarness session: span-thread\nHarness operation: second-turn"
+	setMessageSemantics(&second, "Harness provider: codex\nHarness session: span-thread\nHarness operation: second-turn")
 	m := app{markdown: newMessageMarkdownRenderer(nil)}
 	group := groupMessages([]model.Message{first, second})[0]
 	narrow := m.renderGroupPanelLayout(group, 40)
@@ -1483,7 +1483,7 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", agent.ID, model.HumanMailboxID, "Question")
 	inbound.SenderLabel = agent.Label
-	inbound.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1\nHarness request: request-1"
+	setMessageSemantics(&inbound, "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1\nHarness request: request-1")
 	if err := s.Create(ctx, inbound); err != nil {
 		t.Fatal(err)
 	}
@@ -1501,7 +1501,7 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(replies) != 1 || replies[0].RecipientMailboxID != agent.ID || replies[0].Body != "Answer" || replies[0].Details != "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1" {
+	if len(replies) != 1 || replies[0].RecipientMailboxID != agent.ID || replies[0].Body != "Answer" || replies[0].Correlation != (model.MessageCorrelation{Provider: "codex", SessionID: "thread-1", OperationID: "turn-1", RequestID: "request-1"}) || replies[0].Details != "" {
 		t.Fatalf("replies = %#v", replies)
 	}
 
@@ -2010,10 +2010,10 @@ func TestRecipientPickerShowsThreeChoicesAtMinimumHeight(t *testing.T) {
 func TestReplyArchivesEveryVisibleMessageInTurn(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d72", agent.ID, model.HumanMailboxID, "First update")
-	first.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&first, "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	final := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d73", agent.ID, model.HumanMailboxID, "Final answer")
 	final.CreatedAt = first.CreatedAt.Add(time.Second)
-	final.Details = "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&final, "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	for _, item := range []model.Message{first, final} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -2048,13 +2048,13 @@ func TestReplyArchivesEveryVisibleMessageInTurn(t *testing.T) {
 func TestArchiveTargetsOnlyOldestOpenActionUnit(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	firstUpdate := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e01", agent.ID, model.HumanMailboxID, "first update")
-	firstUpdate.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&firstUpdate, "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	firstFinal := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e02", agent.ID, model.HumanMailboxID, "first final")
 	firstFinal.CreatedAt = firstUpdate.CreatedAt.Add(time.Second)
-	firstFinal.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&firstFinal, "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	secondTurn := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e03", agent.ID, model.HumanMailboxID, "second turn")
 	secondTurn.CreatedAt = firstUpdate.CreatedAt.Add(2 * time.Second)
-	secondTurn.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-2"
+	setMessageSemantics(&secondTurn, "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-2")
 	for _, item := range []model.Message{firstUpdate, firstFinal, secondTurn} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -2123,10 +2123,10 @@ func TestDArchivesSelectionWithoutReply(t *testing.T) {
 func TestUUndoesTurnArchive(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d70", agent.ID, model.HumanMailboxID, "First")
-	first.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&first, "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	second := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d71", agent.ID, model.HumanMailboxID, "Second")
 	second.CreatedAt = first.CreatedAt.Add(time.Second)
-	second.Details = "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
+	setMessageSemantics(&second, "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1")
 	for _, item := range []model.Message{first, second} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -2255,4 +2255,42 @@ func message(id, sender, recipient, body string) model.Message {
 		recipientAddress = model.MessageAddress{MailboxID: recipient, Kind: model.MailboxHuman, Label: "human"}
 	}
 	return model.Message{ID: id, Context: model.RepositoryContext{Directory: "/repo"}, SenderMailboxID: sender, RecipientMailboxID: recipient, SenderLabel: senderLabel, RecipientLabel: recipientLabel, SenderAddress: senderAddress, RecipientAddress: recipientAddress, Body: body, CreatedAt: time.Now().UTC()}
+}
+
+func setMessageSemantics(message *model.Message, legacy string) {
+	var visible []string
+	for _, line := range strings.Split(legacy, "\n") {
+		trimmed := strings.TrimSpace(line)
+		value := func(prefix string) (string, bool) {
+			raw, found := strings.CutPrefix(trimmed, prefix)
+			return strings.TrimSpace(raw), found
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "Kind:"):
+			kind, _ := value("Kind:")
+			message.Presentation = model.PresentationKind(kind)
+		case trimmed == "Phase: final_answer":
+			message.Presentation = model.PresentationFinalAnswer
+		case strings.HasPrefix(trimmed, "Phase:"):
+			phase, _ := value("Phase:")
+			message.TechnicalSections = []model.TechnicalSection{{Namespace: "hq.legacy.harness", Fields: []model.TechnicalField{{Key: "phase", Label: "Phase", Value: phase}}}}
+		case strings.HasPrefix(trimmed, "Harness provider:"):
+			message.Correlation.Provider, _ = value("Harness provider:")
+		case strings.HasPrefix(trimmed, "Harness session:"):
+			message.Correlation.SessionID, _ = value("Harness session:")
+		case strings.HasPrefix(trimmed, "Harness operation:"):
+			message.Correlation.OperationID, _ = value("Harness operation:")
+		case strings.HasPrefix(trimmed, "Harness item:"):
+			message.Correlation.ItemID, _ = value("Harness item:")
+		case strings.HasPrefix(trimmed, "Harness request:"):
+			message.Correlation.RequestID, _ = value("Harness request:")
+		case strings.HasPrefix(trimmed, "HQ message:"), strings.HasPrefix(trimmed, "HQ mailbox:"):
+		default:
+			visible = append(visible, line)
+		}
+	}
+	message.HarnessProvider = message.Correlation.Provider
+	message.HarnessSessionID = message.Correlation.SessionID
+	message.HarnessOperationID = message.Correlation.OperationID
+	message.Details = strings.TrimSpace(strings.Join(visible, "\n"))
 }

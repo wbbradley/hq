@@ -1,51 +1,30 @@
 package model
 
-import "strings"
-
-// MessageCorrelation identifies the harness session and operation recorded in
-// line-oriented message details. These identifiers are distinct from ThreadID,
-// which is HQ's canonical causal thread root.
+// MessageCorrelation is the provider-neutral identity of one harness action.
+// The values are opaque to HQ. ThreadID remains HQ's distinct canonical causal
+// thread root.
 type MessageCorrelation struct {
-	HarnessProvider    string
-	HarnessSessionID   string
-	HarnessOperationID string
+	Provider    string `json:"provider,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+	ItemID      string `json:"item_id,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
 }
 
-// ParseMessageCorrelation extracts the first non-empty exact correlation value
-// for each supported details line.
-func ParseMessageCorrelation(details string) MessageCorrelation {
-	var correlation MessageCorrelation
-	for _, line := range strings.Split(details, "\n") {
-		line = strings.TrimSpace(line)
-		if correlation.HarnessProvider == "" {
-			correlation.HarnessProvider = correlationValue(line, "Harness provider:")
-		}
-		if correlation.HarnessSessionID == "" {
-			correlation.HarnessSessionID = correlationValue(line, "Harness session:")
-			if correlation.HarnessSessionID == "" {
-				correlation.HarnessSessionID = correlationValue(line, "Codex thread:")
-				if correlation.HarnessSessionID != "" && correlation.HarnessProvider == "" {
-					correlation.HarnessProvider = "codex"
-				}
-			}
-		}
-		if correlation.HarnessOperationID == "" {
-			correlation.HarnessOperationID = correlationValue(line, "Harness operation:")
-			if correlation.HarnessOperationID == "" {
-				correlation.HarnessOperationID = correlationValue(line, "Codex turn:")
-			}
-		}
-	}
-	return correlation
+func (c MessageCorrelation) Empty() bool {
+	return c.Provider == "" && c.SessionID == "" && c.OperationID == "" && c.ItemID == "" && c.RequestID == ""
 }
 
-func correlationValue(line, prefix string) string {
-	if !strings.HasPrefix(line, prefix) {
-		return ""
+func (c MessageCorrelation) IsZero() bool { return c.Empty() }
+
+// Valid reports whether the fields form a meaningful identity. Detailed text
+// and size validation belongs to the canonical event boundary.
+func (c MessageCorrelation) Valid() bool {
+	if c.Empty() {
+		return true
 	}
-	value := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-	if value == "(none)" {
-		return ""
+	if c.Provider == "" || c.SessionID == "" {
+		return false
 	}
-	return value
+	return c.OperationID != "" || (c.ItemID == "" && c.RequestID == "")
 }

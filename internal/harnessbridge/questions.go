@@ -109,13 +109,10 @@ func (q *questioner) publish(ctx context.Context, spec questionSpec) (*pendingQu
 		return nil, err
 	}
 	details := strings.TrimSpace(spec.details)
-	if details != "" {
-		details += "\n\n"
-	}
-	details += q.correlationDetails(spec.correlation, messageID.String())
 	message := model.Message{
 		ID: messageID.String(), Context: q.repository, SenderMailboxID: q.mailbox.ID, RecipientMailboxID: human.ID,
-		Purpose: model.MessagePurposeProtocolQuestion, Body: spec.body, Details: details, CreatedAt: time.Now().UTC(),
+		Purpose: model.MessagePurposeProtocolQuestion, Body: spec.body, Details: details,
+		Correlation: q.messageCorrelation(spec.correlation), CreatedAt: time.Now().UTC(),
 	}
 	if err := q.store.Create(ctx, message); err != nil {
 		q.replies.cancel(messageID.String())
@@ -142,11 +139,12 @@ func (q *questioner) notice(ctx context.Context, body, details string, correlati
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(details) != "" {
-		details += "\n\n"
+	details = strings.TrimSpace(details)
+	message := model.Message{
+		ID: id.String(), Context: q.repository, SenderMailboxID: q.mailbox.ID, RecipientMailboxID: human.ID,
+		Purpose: model.MessagePurposeSystemNotice, Body: body, Details: details, Presentation: model.PresentationNotice,
+		Correlation: q.messageCorrelation(correlation), CreatedAt: time.Now().UTC(),
 	}
-	details += "Kind: notice\n" + q.correlationDetails(correlation, id.String())
-	message := model.Message{ID: id.String(), Context: q.repository, SenderMailboxID: q.mailbox.ID, RecipientMailboxID: human.ID, Purpose: model.MessagePurposeSystemNotice, Body: body, Details: details, CreatedAt: time.Now().UTC()}
 	if err := q.store.Create(ctx, message); err != nil {
 		return err
 	}
@@ -219,8 +217,11 @@ func (q *questioner) cancel(pending *pendingQuestion) {
 	}
 }
 
-func (q *questioner) correlationDetails(correlation requestCorrelation, messageID string) string {
-	return fmt.Sprintf("Harness provider: %s\nHarness session: %s\nHarness operation: %s\nHarness item: %s\nHarness request: %s\nHQ message: %s", q.session.Provider, correlation.sessionID, correlation.operationID, correlation.itemID, correlation.requestID, messageID)
+func (q *questioner) messageCorrelation(correlation requestCorrelation) model.MessageCorrelation {
+	return model.MessageCorrelation{
+		Provider: string(q.session.Provider), SessionID: correlation.sessionID, OperationID: correlation.operationID,
+		ItemID: correlation.itemID, RequestID: correlation.requestID,
+	}
 }
 
 func closeSubscription(subscription domain.ChangeSubscription) {

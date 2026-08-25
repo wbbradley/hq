@@ -102,7 +102,8 @@ func TestBridgeUsesNeutralRuntimeForRecoveryRequestsAndOutput(t *testing.T) {
 	replyTo := output.ID
 	if err := database.Reply(context.Background(), output.ID, model.Message{
 		ID: replyID, Context: output.Context, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID,
-		Body: "generic follow-up", Details: "Harness provider: home-built\nHarness session: " + string(instance.Session().Identity().ID), ReplyTo: &replyTo, CreatedAt: time.Now().UTC(),
+		Body: "generic follow-up", Correlation: model.MessageCorrelation{Provider: "home-built", SessionID: string(instance.Session().Identity().ID)},
+		ReplyTo: &replyTo, CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +170,7 @@ func TestBridgePersistsInitialPromptBeforeRecoveringUncertainDelivery(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message.CompletedAt == nil || message.Body != "start durably" || message.HarnessSessionID != string(instance.Session().Identity().ID) || !strings.Contains(message.Details, "Harness provider: home-built") {
+	if message.CompletedAt == nil || message.Body != "start durably" || message.Correlation.Provider != "home-built" || message.Correlation.SessionID != string(instance.Session().Identity().ID) {
 		t.Fatalf("durable initial prompt = %#v", message)
 	}
 	cancel()

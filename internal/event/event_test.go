@@ -3,9 +3,12 @@ package event
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wbbradley/hq/internal/model"
 )
 
 const (
@@ -223,12 +226,207 @@ func TestUnsupportedSchemaCanBeRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := Inspect(wire); got.Status != StatusUnsupported {
-		t.Fatalf("default status = %s, %v", got.Status, got.Err)
+	if got := InspectWithSchemas(wire, []int{Schema1}); got.Status != StatusUnsupported || !stringSlicesEqual(got.Event.Wire, wire) {
+		t.Fatalf("schema-1-only status = %s, %v, retained=%t", got.Status, got.Err, stringSlicesEqual(got.Event.Wire, wire))
 	}
-	if got := InspectWithSchemas(wire, []int{1, 2}); got.Status != StatusProjected || got.Err != nil {
-		t.Fatalf("registered status = %s, %v", got.Status, got.Err)
+	if got := Inspect(wire); got.Status != StatusProjected || got.Err != nil {
+		t.Fatalf("current status = %s, %v", got.Status, got.Err)
 	}
+}
+
+func TestSchema2MessageSemanticsValidateSignAndInspect(t *testing.T) {
+	payload := TextPayload{
+		MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d31",
+		Body:      "done", Details: "Human-readable explanation.",
+		Presentation: model.PresentationFinalAnswer,
+		Correlation: model.MessageCorrelation{
+			Provider: "home-built", SessionID: "session-1", OperationID: "operation-1",
+			ItemID: "item-1", RequestID: "request-1",
+		},
+		TechnicalSections: []model.TechnicalSection{{
+			Namespace: "hq.harness.output",
+			Fields: []model.TechnicalField{
+				{Key: "status", Label: "Status", Value: "completed"},
+				{Key: "source_sequence", Label: "Source sequence", Value: "42"},
+			},
+		}},
+	}
+	signed := mustSign(t, schema2Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
+	inspection := Inspect(signed.Wire)
+	if inspection.Status != StatusProjected || inspection.Err != nil {
+		t.Fatalf("inspect schema 2 = %s, %v", inspection.Status, inspection.Err)
+	}
+	var decoded TextPayload
+	if err := decodePayload(inspection.Event.Content.Payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Presentation != payload.Presentation || decoded.Correlation != payload.Correlation || !technicalSectionsEqual(decoded.TechnicalSections, payload.TechnicalSections) {
+		t.Fatalf("decoded semantics = %#v", decoded)
+	}
+}
+
+func TestSchemaSpecificTextPayloadDecodingIsStrict(t *testing.T) {
+	payload := mustPayload(t, TextPayload{Body: "hello", Presentation: model.PresentationUpdate})
+	schema1 := Content{
+		Schema: Schema1, Type: TypeQuestion, InstallationID: installationA,
+		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
+		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Scope:     ScopeInstallationPrivate, Payload: payload,
+	}
+	if _, err := Sign(schema1, time.Unix(1_700_000_000, 0), secretA); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("schema 1 extended payload error = %v", err)
+	}
+	if _, err := Sign(schema2Question(t, TextPayload{Body: "hello", Presentation: model.PresentationUpdate}), time.Unix(1_700_000_000, 0), secretA); err != nil {
+		t.Fatalf("schema 2 payload: %v", err)
+	}
+}
+
+func TestSchema2SemanticValidationFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload TextPayload
+		want    string
+	}{
+		{name: "presentation", payload: TextPayload{Body: "x", Presentation: "question"}, want: "presentation"},
+		{name: "provider without session", payload: TextPayload{Body: "x", Correlation: model.MessageCorrelation{Provider: "provider"}}, want: "correlation"},
+		{name: "item without operation", payload: TextPayload{Body: "x", Correlation: model.MessageCorrelation{Provider: "provider", SessionID: "session", ItemID: "item"}}, want: "operation"},
+		{name: "namespace", payload: TextPayload{Body: "x", TechnicalSections: []model.TechnicalSection{{Namespace: "Not Namespaced", Fields: []model.TechnicalField{{Key: "key", Value: "value"}}}}}, want: "namespace"},
+		{name: "key", payload: TextPayload{Body: "x", TechnicalSections: []model.TechnicalSection{{Namespace: "hq.test", Fields: []model.TechnicalField{{Key: "Display Key", Value: "value"}}}}}, want: "key"},
+		{name: "empty fields", payload: TextPayload{Body: "x", TechnicalSections: []model.TechnicalSection{{Namespace: "hq.test"}}}, want: "field"},
+		{name: "duplicate pair", payload: TextPayload{Body: "x", TechnicalSections: []model.TechnicalSection{
+			{Namespace: "hq.test", Fields: []model.TechnicalField{{Key: "same", Value: "one"}}},
+			{Namespace: "hq.test", Fields: []model.TechnicalField{{Key: "same", Value: "two"}}},
+		}}, want: "duplicate"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Sign(schema2Question(t, test.payload), time.Unix(1_700_000_000, 0), secretA)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	invalidUTF8 := []model.TechnicalSection{{Namespace: "hq.test", Fields: []model.TechnicalField{{Key: "key", Value: string([]byte{0xff})}}}}
+	if err := validateTechnicalSections(invalidUTF8); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("invalid UTF-8 error = %v", err)
+	}
+}
+
+func TestSchema2PresentationAndCorrelationShapes(t *testing.T) {
+	presentations := []model.PresentationKind{"", model.PresentationUpdate, model.PresentationFinalAnswer, model.PresentationStatus, model.PresentationNotice}
+	for _, presentation := range presentations {
+		if _, err := Sign(schema2Question(t, TextPayload{Body: "x", Presentation: presentation}), time.Unix(1_700_000_000, 0), secretA); err != nil {
+			t.Fatalf("presentation %q: %v", presentation, err)
+		}
+	}
+	correlations := []model.MessageCorrelation{
+		{},
+		{Provider: "provider", SessionID: "session"},
+		{Provider: "provider", SessionID: "session", OperationID: "operation"},
+		{Provider: "provider", SessionID: "session", OperationID: "operation", ItemID: "item"},
+		{Provider: "provider", SessionID: "session", OperationID: "operation", RequestID: "request"},
+		{Provider: "provider", SessionID: "session", OperationID: "operation", ItemID: "item", RequestID: "request"},
+	}
+	for _, correlation := range correlations {
+		if _, err := Sign(schema2Question(t, TextPayload{Body: "x", Correlation: correlation}), time.Unix(1_700_000_000, 0), secretA); err != nil {
+			t.Fatalf("correlation %#v: %v", correlation, err)
+		}
+	}
+}
+
+func TestSchema2TechnicalAndCorrelationBounds(t *testing.T) {
+	sections := make([]model.TechnicalSection, MaxTechnicalSections+1)
+	for index := range sections {
+		sections[index] = model.TechnicalSection{Namespace: fmt.Sprintf("hq.section_%d", index), Fields: []model.TechnicalField{{Key: "key", Value: "value"}}}
+	}
+	tooManySectionFields := make([]model.TechnicalField, MaxTechnicalFieldsPerSection+1)
+	for index := range tooManySectionFields {
+		tooManySectionFields[index] = model.TechnicalField{Key: fmt.Sprintf("key_%d", index), Value: "value"}
+	}
+	tooManyTotalFields := make([]model.TechnicalSection, 5)
+	for sectionIndex := range tooManyTotalFields {
+		fields := make([]model.TechnicalField, 26)
+		for fieldIndex := range fields {
+			fields[fieldIndex] = model.TechnicalField{Key: fmt.Sprintf("key_%d", fieldIndex), Value: "value"}
+		}
+		tooManyTotalFields[sectionIndex] = model.TechnicalSection{Namespace: fmt.Sprintf("hq.total_%d", sectionIndex), Fields: fields}
+	}
+	tests := []struct {
+		name     string
+		sections []model.TechnicalSection
+		want     string
+	}{
+		{name: "section count", sections: sections, want: "technical sections"},
+		{name: "fields per section", sections: []model.TechnicalSection{{Namespace: "hq.fields", Fields: tooManySectionFields}}, want: "has 33 fields"},
+		{name: "total field count", sections: tooManyTotalFields, want: "technical fields"},
+		{name: "label bytes", sections: []model.TechnicalSection{{Namespace: "hq.label", Fields: []model.TechnicalField{{Key: "key", Label: strings.Repeat("界", MaxTechnicalLabelBytes/3+1), Value: "value"}}}}, want: "label"},
+		{name: "value bytes", sections: []model.TechnicalSection{{Namespace: "hq.value", Fields: []model.TechnicalField{{Key: "key", Value: strings.Repeat("界", MaxTechnicalValueBytes/3+1)}}}}, want: "value"},
+		{name: "aggregate bytes", sections: []model.TechnicalSection{{Namespace: "hq.aggregate", Fields: []model.TechnicalField{{Key: "one", Value: strings.Repeat("a", MaxTechnicalValueBytes)}, {Key: "two", Value: strings.Repeat("b", MaxTechnicalValueBytes)}, {Key: "three", Value: strings.Repeat("c", MaxTechnicalValueBytes)}, {Key: "four", Value: strings.Repeat("d", MaxTechnicalValueBytes)}}}}, want: "technical payload"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateTechnicalSections(test.sections); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	correlationTests := []struct {
+		name        string
+		correlation model.MessageCorrelation
+		want        string
+	}{
+		{name: "provider bytes", correlation: model.MessageCorrelation{Provider: strings.Repeat("界", MaxCorrelationProviderBytes/3+1), SessionID: "session"}, want: "provider"},
+		{name: "identity bytes", correlation: model.MessageCorrelation{Provider: "provider", SessionID: strings.Repeat("界", MaxCorrelationIDBytes/3+1)}, want: "session"},
+		{name: "identity control", correlation: model.MessageCorrelation{Provider: "provider", SessionID: "bad\nidentity"}, want: "printable"},
+		{name: "identity utf8", correlation: model.MessageCorrelation{Provider: "provider", SessionID: string([]byte{0xff})}, want: "UTF-8"},
+	}
+	for _, test := range correlationTests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateMessageCorrelation(test.correlation); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestSchema2SignedWireLimitIncludesEscaping(t *testing.T) {
+	payload := TextPayload{
+		Body:    strings.Repeat("\\", MaxBodyBytes),
+		Details: strings.Repeat("\\", MaxDetailBytes),
+	}
+	_, err := Sign(schema2Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
+	if err == nil || !strings.Contains(err.Error(), "wire") || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("escaped signed-wire error = %v", err)
+	}
+}
+
+func TestSchema2SignedWireLimitIncludesEscapedMultibyteText(t *testing.T) {
+	payload := TextPayload{
+		Body:    "x" + strings.Repeat("\u2028", (MaxBodyBytes-1)/3),
+		Details: strings.Repeat("\u2028", MaxDetailBytes/3),
+	}
+	_, err := Sign(schema2Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
+	if err == nil || !strings.Contains(err.Error(), "wire") || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("multibyte signed-wire error = %v", err)
+	}
+}
+
+func schema2Question(t *testing.T, payload TextPayload) Content {
+	t.Helper()
+	return Content{
+		Schema: Schema2, Type: TypeQuestion, InstallationID: installationA,
+		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
+		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Scope:     ScopeInstallationPrivate, Payload: mustPayload(t, payload),
+	}
+}
+
+func stringSlicesEqual(left, right []byte) bool { return string(left) == string(right) }
+
+func technicalSectionsEqual(left, right []model.TechnicalSection) bool {
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	return string(leftJSON) == string(rightJSON)
 }
 
 func TestUnknownTypeAndKindAreUnsupported(t *testing.T) {

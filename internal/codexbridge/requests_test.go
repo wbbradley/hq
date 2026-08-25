@@ -111,7 +111,7 @@ func TestRequestUserInputPublishesMultipleCorrelatedQuestions(t *testing.T) {
 	done := fixture.call(requestUserInputMethod, params)
 	color := fixture.question(t, "Choose a color")
 	note := fixture.question(t, "Add a note")
-	if !strings.Contains(color.Details, "Question ID: color") || !strings.Contains(color.Details, "Red — Warm") || !strings.Contains(color.Details, "Harness request: \"request-1\"") || !strings.Contains(color.Details, "HQ message: "+color.ID) {
+	if !strings.Contains(color.Details, "Question ID: color") || !strings.Contains(color.Details, "Red — Warm") || strings.Trim(color.Correlation.RequestID, "\"") != "request-1" || strings.Contains(color.Details, color.ID) {
 		t.Fatalf("color details = %q", color.Details)
 	}
 	if color.Purpose != model.MessagePurposeProtocolQuestion {
@@ -163,7 +163,7 @@ func TestRequestUserInputSecretIsNeverPersisted(t *testing.T) {
 		t.Fatalf("messages = %#v, %v", messages, err)
 	}
 	persisted := messages[0].Body + "\n" + messages[0].Details
-	if !strings.Contains(messages[0].Details, "Kind: notice") {
+	if messages[0].Presentation != model.PresentationNotice {
 		t.Fatalf("notice details = %q", messages[0].Details)
 	}
 	for _, secretField := range []string{"Enter swordfish", "Password", "password", "the secret"} {

@@ -178,8 +178,7 @@ func Run(ctx context.Context, options Options) error {
 		}
 		initial := model.Message{
 			ID: string(initialID), Context: options.Repository, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: mailbox.ID,
-			HarnessProvider: string(identity.Provider), HarnessSessionID: string(identity.ID), Body: prompt,
-			Details: fmt.Sprintf("Harness provider: %s\nHarness session: %s", identity.Provider, identity.ID), CreatedAt: events.nextCreatedAt(),
+			Body: prompt, Correlation: model.MessageCorrelation{Provider: string(identity.Provider), SessionID: string(identity.ID)}, CreatedAt: events.nextCreatedAt(),
 		}
 		if projectBinding.ProjectID != "" {
 			initial.Purpose = model.MessagePurposeProjectInput
@@ -187,7 +186,7 @@ func Run(ctx context.Context, options Options) error {
 		existing, getErr := options.Store.Get(ctx, initial.ID)
 		switch {
 		case getErr == nil:
-			if existing.SenderMailboxID != initial.SenderMailboxID || existing.RecipientMailboxID != initial.RecipientMailboxID || existing.Body != initial.Body || model.NormalizeMessagePurpose(existing.Purpose) != model.NormalizeMessagePurpose(initial.Purpose) || existing.HarnessProvider != initial.HarnessProvider || existing.HarnessSessionID != initial.HarnessSessionID {
+			if existing.SenderMailboxID != initial.SenderMailboxID || existing.RecipientMailboxID != initial.RecipientMailboxID || existing.Body != initial.Body || model.NormalizeMessagePurpose(existing.Purpose) != model.NormalizeMessagePurpose(initial.Purpose) || existing.Correlation != initial.Correlation {
 				return finishBeforeDispatcher(fmt.Errorf("initial harness submission ID %s already belongs to a different message", initial.ID))
 			}
 		case errors.Is(getErr, domain.ErrNotFound):

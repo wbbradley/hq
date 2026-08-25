@@ -221,6 +221,10 @@ func (r *RequestRouter) noticeMalformed(questioner *Questioner, request ServerRe
 }
 
 func requestIDText(id json.RawMessage) string {
+	var text string
+	if json.Unmarshal(id, &text) == nil {
+		return text
+	}
 	return string(id)
 }
 

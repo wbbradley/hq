@@ -341,7 +341,7 @@ func TestRunStartsYoloThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	if store.identity != (model.SessionIdentity{Harness: "codex", ExternalSessionID: "thread-new"}) || store.repo.Directory != "/work/repo" {
 		t.Fatalf("binding = %#v, %#v", store.identity, store.repo)
 	}
-	if store.messages[0].Body != "test-agent ready in /work/repo" || !strings.Contains(store.messages[0].Details, "Kind: status") || !strings.Contains(store.messages[0].Details, "thread-new") {
+	if store.messages[0].Body != "test-agent ready in /work/repo" || store.messages[0].Presentation != model.PresentationStatus || store.messages[0].Correlation != (model.MessageCorrelation{Provider: "codex", SessionID: "thread-new"}) {
 		t.Fatalf("ready message = %#v", store.messages[0])
 	}
 	cancel()
@@ -360,7 +360,7 @@ func TestRunStartsYoloThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 	}
 	waitForMessages(t, store, 3)
 	terminal := fakeStoreMessageByBody(t, store, "Codex bridge stopped")
-	if !strings.Contains(terminal.Details, "Kind: status") || !strings.Contains(terminal.Details, "cancelled") {
+	if terminal.Presentation != model.PresentationStatus || !technicalFieldContains(terminal.TechnicalSections, "hq.harness.status", "status", "cancelled") {
 		t.Fatalf("terminal message = %#v", terminal)
 	}
 }
@@ -823,7 +823,7 @@ func TestRunReportsChildProcessFailure(t *testing.T) {
 		t.Fatal("bridge did not report process failure")
 	}
 	waitForMessages(t, store, 2)
-	if !strings.Contains(store.messages[1].Details, "exit status 7") {
+	if !technicalFieldEquals(store.messages[1].TechnicalSections, "hq.harness.status", "status", "Codex app-server failed: exit status 7") {
 		t.Fatalf("terminal message = %#v", store.messages[1])
 	}
 }
@@ -999,7 +999,7 @@ func TestBridgeRoutesServerApprovalThroughTemporaryHQStore(t *testing.T) {
 	close(sendApproval)
 
 	question := waitForStoreMessage(t, fixture.store, model.HumanMailboxID, "Codex requests approval for file changes")
-	if !strings.Contains(question.Details, "update generated code") || !strings.Contains(question.Details, "file-approval-1") {
+	if !strings.Contains(question.Details, "update generated code") || strings.Trim(question.Correlation.RequestID, "\"") != "file-approval-1" {
 		t.Fatalf("question = %#v", question)
 	}
 	reply := model.Message{

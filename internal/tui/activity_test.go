@@ -20,7 +20,7 @@ func TestFakeProviderActivityRendersChronologicallyAsCollapsedAndExpandedCards(t
 	first.CreatedAt = started
 	final := message("final-message", testAgentID, model.HumanMailboxID, "Final answer")
 	final.CreatedAt = started.Add(9 * time.Second)
-	final.Details = "Kind: final-answer"
+	setMessageSemantics(&final, "Kind: final-answer")
 	activities := fakeTimelineActivities(started.Add(time.Second))
 	group := messageGroup{key: "fake-conversation", messages: []model.Message{first, final}, activities: activities}
 	m := app{groups: []messageGroup{group}, messages: []model.Message{final}, editor: textarea.New(), width: 100, height: 100, paneFocus: focusMessage, markdown: newMessageMarkdownRenderer(nil)}
@@ -57,7 +57,7 @@ func TestFakeProviderActivityRendersChronologicallyAsCollapsedAndExpandedCards(t
 
 func TestActivityExpansionPreservesDraftAndMessageActionTargets(t *testing.T) {
 	item := message("question", testAgentID, model.HumanMailboxID, "Question")
-	item.Details = "Kind: question"
+	setMessageSemantics(&item, "Kind: question")
 	group := messageGroup{
 		key: "conversation", messages: []model.Message{item},
 		activities: []domain.HarnessActivity{{MailboxID: testAgentID, Harness: "home-built", SessionID: "session", OperationID: "operation", Kind: domain.HarnessActivityProgress, ItemID: "progress", Body: "working", OccurredAt: item.CreatedAt.Add(-time.Second)}},

@@ -518,7 +518,7 @@ func TestDispatcherTreatsCurrentThreadReplyAsNormalInput(t *testing.T) {
 	if err := fixture.store.Create(context.Background(), question); err != nil {
 		t.Fatal(err)
 	}
-	reply := model.Message{ID: "019c0000-0000-7000-8000-000000000116", Context: question.Context, SenderMailboxID: human.ID, RecipientMailboxID: fixture.agent.ID, Body: "follow up", Details: "Harness provider: codex\nHarness session: " + fixture.thread, CreatedAt: time.Now().UTC()}
+	reply := model.Message{ID: "019c0000-0000-7000-8000-000000000116", Context: question.Context, SenderMailboxID: human.ID, RecipientMailboxID: fixture.agent.ID, Body: "follow up", Correlation: model.MessageCorrelation{Provider: "codex", SessionID: fixture.thread}, CreatedAt: time.Now().UTC()}
 	if err := fixture.store.Reply(context.Background(), questionID, reply); err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +545,7 @@ func TestDispatcherDoesNotDeliverReplyFromAnotherThread(t *testing.T) {
 	if err := fixture.store.Create(context.Background(), question); err != nil {
 		t.Fatal(err)
 	}
-	reply := model.Message{ID: "019c0000-0000-7000-8000-000000000120", Context: question.Context, SenderMailboxID: human.ID, RecipientMailboxID: fixture.agent.ID, Body: "stale follow up", Details: "Harness provider: codex\nHarness session: replaced-thread", CreatedAt: time.Now().UTC()}
+	reply := model.Message{ID: "019c0000-0000-7000-8000-000000000120", Context: question.Context, SenderMailboxID: human.ID, RecipientMailboxID: fixture.agent.ID, Body: "stale follow up", Correlation: model.MessageCorrelation{Provider: "codex", SessionID: "replaced-thread"}, CreatedAt: time.Now().UTC()}
 	if err := fixture.store.Reply(context.Background(), questionID, reply); err != nil {
 		t.Fatal(err)
 	}

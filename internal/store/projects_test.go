@@ -70,7 +70,7 @@ func TestOpenObservesChangedSymlinkIdentityWithoutRewritingResource(t *testing.T
 	if err := s.db.QueryRow(`SELECT count(*) FROM project_events WHERE project_id=? AND event_type='project.resource.health'`, project.ID).Scan(&healthEvents); err != nil || healthEvents != 1 {
 		t.Fatalf("health events = %d, %v", healthEvents, err)
 	}
-	if err := s.db.QueryRow(`SELECT count(*) FROM messages WHERE actor_label=? AND details LIKE '%Current health: malformed%'`, "HQ · "+project.Name).Scan(&notices); err != nil || notices != 1 {
+	if err := s.db.QueryRow(`SELECT count(*) FROM messages WHERE actor_label=? AND technical_sections_json LIKE '%"current_health"%' AND technical_sections_json LIKE '%malformed%'`, "HQ · "+project.Name).Scan(&notices); err != nil || notices != 1 {
 		t.Fatalf("health notices = %d, %v", notices, err)
 	}
 }
@@ -1005,7 +1005,7 @@ func TestProjectOutputRetainsAssignmentProvenanceAndMarksLateRuntime(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.SenderLabel != "alice · output project" || !strings.Contains(current.Details, "Project assignment: "+old.AssignmentID) {
+	if current.SenderLabel != "alice · output project" || !technicalFieldEquals(current.TechnicalSections, "hq.legacy.project_output_provenance", "assignment_id", old.AssignmentID) {
 		t.Fatalf("current output = %#v", current)
 	}
 	project, err = s.UnassignProject(ctx, project.ID, project.HeadEventID, true, "forced takeover")
@@ -1028,7 +1028,7 @@ func TestProjectOutputRetainsAssignmentProvenanceAndMarksLateRuntime(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if late.SenderLabel != "alice · output project (late from inactive assignment)" || !strings.Contains(late.Details, "Late from inactive assignment: yes") || !strings.Contains(late.Details, "Current assignment: "+project.Assignment.ID) {
+	if late.SenderLabel != "alice · output project (late from inactive assignment)" || !technicalFieldEquals(late.TechnicalSections, "hq.legacy.project_output_provenance", "late", "yes") || !technicalFieldEquals(late.TechnicalSections, "hq.legacy.project_output_provenance", "current_assignment_id", project.Assignment.ID) {
 		t.Fatalf("late output = %#v", late)
 	}
 	var markedLate, forced int
@@ -1039,6 +1039,20 @@ func TestProjectOutputRetainsAssignmentProvenanceAndMarksLateRuntime(t *testing.
 	if markedLate != 1 || forced != 1 || currentAssignment != project.Assignment.ID || owner != "old-owner" {
 		t.Fatalf("provenance late=%d forced=%d current=%q owner=%q", markedLate, forced, currentAssignment, owner)
 	}
+}
+
+func technicalFieldEquals(sections []model.TechnicalSection, namespace, key, value string) bool {
+	for _, section := range sections {
+		if section.Namespace != namespace {
+			continue
+		}
+		for _, field := range section.Fields {
+			if field.Key == key && field.Value == value {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestReplyToProjectOutputIsAcceptedAndDispatchable(t *testing.T) {

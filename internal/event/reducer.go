@@ -106,6 +106,9 @@ type MessageProjection struct {
 	Body              string
 	Details           string
 	Purpose           model.MessagePurpose
+	Presentation      model.PresentationKind
+	Correlation       model.MessageCorrelation
+	TechnicalSections []model.TechnicalSection
 	MessageID         string
 	AudienceAccountID string
 	ActorLabel        string
@@ -168,7 +171,7 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 	for _, raw := range rawEvents {
 		schemas := policy.SchemaVersions
 		if len(schemas) == 0 {
-			schemas = []int{SchemaVersion}
+			schemas = []int{Schema1, Schema2}
 		}
 		inspection := InspectWithSchemas(raw, schemas)
 		record := Record{Event: inspection.Event, Status: inspection.Status}
@@ -988,8 +991,13 @@ func (s *State) projectMessages() {
 		if content.Type != TypeQuestion && content.Type != TypeAnswer && content.Type != TypeMessage {
 			continue
 		}
-		var payload TextPayload
-		_ = decodePayload(content.Payload, &payload)
+		payload, err := decodeTextPayload(content.Payload, content.Schema)
+		if err != nil {
+			continue
+		}
+		if content.Schema == Schema1 {
+			payload = projectLegacySchema1Message(payload)
+		}
 		threadID := content.ThreadID
 		if threadID == "" {
 			threadID = id
@@ -1008,7 +1016,8 @@ func (s *State) projectMessages() {
 		s.Messages[id] = MessageProjection{
 			ID: id, Type: content.Type, Sender: *content.Sender, Recipient: *recipient,
 			ThreadID: threadID, Parents: append([]string(nil), content.Parents...), Body: payload.Body,
-			MessageID: payload.MessageID, AudienceAccountID: audienceAccountID, ActorLabel: payload.ActorLabel, Context: payload.Context, Details: payload.Details, Purpose: model.NormalizeMessagePurpose(payload.Purpose), CreatedAt: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(),
+			MessageID: payload.MessageID, AudienceAccountID: audienceAccountID, ActorLabel: payload.ActorLabel, Context: payload.Context, Details: payload.Details, Purpose: model.NormalizeMessagePurpose(payload.Purpose),
+			Presentation: payload.Presentation, Correlation: payload.Correlation, TechnicalSections: cloneTechnicalSections(payload.TechnicalSections), CreatedAt: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(),
 			Incomplete: record.Status == StatusUnresolved,
 		}
 	}

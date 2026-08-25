@@ -22,7 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 29
+const schemaVersion = 30
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -114,8 +114,9 @@ CREATE TABLE messages (
     id TEXT PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE,
     thread_event_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
+	event_type TEXT NOT NULL,
 	purpose TEXT NOT NULL DEFAULT 'conversation',
+	presentation TEXT NOT NULL DEFAULT '',
     audience_account_id TEXT NOT NULL DEFAULT '',
     directory TEXT NOT NULL DEFAULT '',
     git_common_dir TEXT NOT NULL DEFAULT '',
@@ -132,6 +133,9 @@ CREATE TABLE messages (
 	harness_provider TEXT NOT NULL DEFAULT '',
 	harness_session_id TEXT NOT NULL DEFAULT '',
 	harness_operation_id TEXT NOT NULL DEFAULT '',
+	correlation_item_id TEXT NOT NULL DEFAULT '',
+	correlation_request_id TEXT NOT NULL DEFAULT '',
+	technical_sections_json TEXT NOT NULL DEFAULT '[]',
     reply_to TEXT,
     created_at INTEGER NOT NULL,
     archived_at INTEGER,
@@ -543,7 +547,7 @@ CREATE TABLE harness_activities (
 ) STRICT;
 CREATE INDEX harness_activities_mailbox_time ON harness_activities(mailbox_id,occurred_at,harness,session_id,operation_id,kind,item_id);
 CREATE INDEX harness_activities_progress_retention ON harness_activities(harness,session_id,kind,occurred_at,item_id) WHERE kind='progress';
-PRAGMA user_version = 29;
+PRAGMA user_version = 30;
 `
 
 const (
@@ -921,6 +925,34 @@ PRAGMA user_version = 29;`
 		}
 		version = 29
 	}
+	if version == 29 {
+		columns := []struct {
+			name       string
+			definition string
+		}{
+			{name: "presentation", definition: "TEXT NOT NULL DEFAULT ''"},
+			{name: "correlation_item_id", definition: "TEXT NOT NULL DEFAULT ''"},
+			{name: "correlation_request_id", definition: "TEXT NOT NULL DEFAULT ''"},
+			{name: "technical_sections_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		}
+		for _, column := range columns {
+			var count int
+			if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name=?`, column.name).Scan(&count); err != nil {
+				return fmt.Errorf("inspect schema version 29: %w", err)
+			}
+			if count == 0 {
+				if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN `+column.name+` `+column.definition); err != nil {
+					return fmt.Errorf("add message semantic column %s: %w", column.name, err)
+				}
+			}
+		}
+		migration := `UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
+PRAGMA user_version = 30;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 30: %w", err)
+		}
+		version = 30
+	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
 			return err
@@ -1019,7 +1051,7 @@ func (s *SQLite) bootstrap(ctx context.Context) error {
 func (s *SQLite) Close() error { return s.db.Close() }
 
 func (s *SQLite) policy() event.Policy {
-	return event.Policy{InstallationID: s.signer.InstallationID, RootKeyID: s.signer.PublicKey(), HumanMailboxID: model.HumanMailboxID, SchemaVersions: []int{event.SchemaVersion}}
+	return event.Policy{InstallationID: s.signer.InstallationID, RootKeyID: s.signer.PublicKey(), HumanMailboxID: model.HumanMailboxID, SchemaVersions: []int{event.Schema1, event.Schema2}}
 }
 
 func (s *SQLite) CurrentRevision(ctx context.Context) (uint64, error) {
@@ -1439,9 +1471,13 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if message.Archived {
 			archived = message.ArchivedAt.UnixMilli()
 		}
-		correlation := model.ParseMessageCorrelation(message.Details)
-		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, purpose, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, harness_provider, harness_session_id, harness_operation_id, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, eventID, message.ThreadID, message.Type, model.NormalizeMessagePurpose(message.Purpose), message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, correlation.HarnessProvider, correlation.HarnessSessionID, correlation.HarnessOperationID, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
+		correlation := message.Correlation
+		technicalJSON, _ := json.Marshal(message.TechnicalSections)
+		if len(message.TechnicalSections) == 0 {
+			technicalJSON = []byte("[]")
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, purpose, presentation, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, technical_sections_json, harness_provider, harness_session_id, harness_operation_id, correlation_item_id, correlation_request_id, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, eventID, message.ThreadID, message.Type, model.NormalizeMessagePurpose(message.Purpose), message.Presentation, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, string(technicalJSON), correlation.Provider, correlation.SessionID, correlation.OperationID, correlation.ItemID, correlation.RequestID, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
 		if err != nil {
 			return fmt.Errorf("project message: %w", err)
 		}
@@ -1758,7 +1794,7 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 	}
 	m.Purpose = model.NormalizeMessagePurpose(m.Purpose)
 	actorLabel := sender.Label
-	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Purpose: m.Purpose, Context: contextPointer(m.Context), ActorLabel: actorLabel})
+	payload, _ := event.MarshalPayload(textPayloadForMessage(m, actorLabel))
 	typeName := event.TypeMessage
 	scope := event.ScopeInstallationPrivate
 	recipientInstallationID := s.signer.InstallationID
@@ -1766,7 +1802,7 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 	_ = s.db.QueryRowContext(ctx, `SELECT id,home_installation_id FROM project_replicas WHERE json_extract(state_json,'$.mailbox_id')=?`, m.RecipientMailboxID).Scan(&remoteProjectID, &remoteProjectHome)
 	if remoteProjectID != "" && m.SenderMailboxID == model.HumanMailboxID && m.Purpose == model.MessagePurposeConversation {
 		m.Purpose = model.MessagePurposeProjectInput
-		payload, _ = event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Purpose: m.Purpose, Context: contextPointer(m.Context), ActorLabel: actorLabel})
+		payload, _ = event.MarshalPayload(textPayloadForMessage(m, actorLabel))
 	}
 	if m.RecipientInstallationID != "" {
 		recipientInstallationID = m.RecipientInstallationID
@@ -1783,7 +1819,7 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 			return err
 		}
 		actorLabel = deviceLabel
-		payload, _ = event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Purpose: m.Purpose, Context: contextPointer(m.Context), ActorLabel: actorLabel})
+		payload, _ = event.MarshalPayload(textPayloadForMessage(m, actorLabel))
 		audience, parents, scope = &event.Audience{HumanAccountID: account.ID}, membership, event.ScopeAccountAddressed
 	} else if remoteRecipient {
 		scope = event.ScopePeerAddressed
@@ -1803,10 +1839,10 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 			return err
 		}
 		actorLabel = deviceLabel
-		payload, _ = event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Purpose: m.Purpose, Context: contextPointer(m.Context), ActorLabel: actorLabel})
+		payload, _ = event.MarshalPayload(textPayloadForMessage(m, actorLabel))
 		audience, parents, scope = &event.Audience{HumanAccountID: account.ID}, membership, event.ScopeAccountAddressed
 	}
-	content := event.Content{Type: typeName, Sender: s.localAddress(m.SenderMailboxID), Recipient: recipient, Audience: audience, Parents: parents, Scope: scope, Payload: payload}
+	content := event.Content{Schema: event.MessageSchemaVersion, Type: typeName, Sender: s.localAddress(m.SenderMailboxID), Recipient: recipient, Audience: audience, Parents: parents, Scope: scope, Payload: payload}
 	var projectID string
 	if recipientInstallationID == s.signer.InstallationID {
 		err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE mailbox_id=?`, m.RecipientMailboxID).Scan(&projectID)
@@ -1816,10 +1852,24 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 	}
 	if projectID != "" && m.SenderMailboxID == model.HumanMailboxID && m.Purpose == model.MessagePurposeConversation {
 		m.Purpose = model.MessagePurposeProjectInput
-		payload, _ = event.MarshalPayload(event.TextPayload{MessageID: m.ID, Body: m.Body, Details: m.Details, Purpose: m.Purpose, Context: contextPointer(m.Context), ActorLabel: actorLabel})
+		payload, _ = event.MarshalPayload(textPayloadForMessage(m, actorLabel))
 		content.Payload = payload
 	}
 	return s.appendContents(ctx, []event.Content{content}, []time.Time{m.CreatedAt}, nil)
+}
+
+func textPayloadForMessage(message model.Message, actorLabel string) event.TextPayload {
+	correlation := message.Correlation
+	if correlation.Empty() {
+		correlation = model.MessageCorrelation{
+			Provider: message.HarnessProvider, SessionID: message.HarnessSessionID, OperationID: message.HarnessOperationID,
+		}
+	}
+	return event.TextPayload{
+		MessageID: message.ID, Body: message.Body, Details: message.Details, Purpose: message.Purpose,
+		Context: contextPointer(message.Context), ActorLabel: actorLabel, Presentation: message.Presentation,
+		Correlation: correlation, TechnicalSections: message.TechnicalSections,
+	}
 }
 
 func contextPointer(repo model.RepositoryContext) *event.RepositoryContext {
@@ -1864,8 +1914,8 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 		parents = uniqueSorted(append(parents, membership...))
 		audience, scope, actorLabel = &event.Audience{HumanAccountID: account.ID}, event.ScopeAccountAddressed, deviceLabel
 	}
-	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: reply.ID, Body: reply.Body, Details: reply.Details, Purpose: reply.Purpose, Context: contextPointer(reply.Context), ActorLabel: actorLabel})
-	answer := event.Content{Type: event.TypeAnswer, Sender: s.localAddress(reply.SenderMailboxID), Recipient: &event.MailboxAddress{InstallationID: original.message.SenderInstallationID, MailboxID: reply.RecipientMailboxID}, Audience: audience, ThreadID: original.eventID, Parents: parents, Scope: scope, Payload: payload}
+	payload, _ := event.MarshalPayload(textPayloadForMessage(reply, actorLabel))
+	answer := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeAnswer, Sender: s.localAddress(reply.SenderMailboxID), Recipient: &event.MailboxAddress{InstallationID: original.message.SenderInstallationID, MailboxID: reply.RecipientMailboxID}, Audience: audience, ThreadID: original.eventID, Parents: parents, Scope: scope, Payload: payload}
 	archivePayload, _ := event.MarshalPayload(event.TargetPayload{TargetEventID: original.eventID})
 	archive := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Scope: scope, Payload: archivePayload}
 	if original.message.SenderInstallationID == s.signer.InstallationID {
@@ -1880,7 +1930,7 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 			}
 			if reply.Purpose == model.MessagePurposeConversation {
 				reply.Purpose = model.MessagePurposeProjectInput
-				payload, _ = event.MarshalPayload(event.TextPayload{MessageID: reply.ID, Body: reply.Body, Details: reply.Details, Purpose: reply.Purpose, Context: contextPointer(reply.Context), ActorLabel: actorLabel})
+				payload, _ = event.MarshalPayload(textPayloadForMessage(reply, actorLabel))
 				answer.Payload = payload
 			}
 			return s.appendContents(ctx, []event.Content{answer, archive}, []time.Time{reply.CreatedAt, reply.CreatedAt}, nil)
@@ -1906,7 +1956,7 @@ func (s *SQLite) messageRecord(ctx context.Context, id string) (messageWithEvent
 	return messageWithEvent{message: m, eventID: eventID}, nil
 }
 
-const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.purpose, msg.harness_provider, msg.harness_session_id, msg.harness_operation_id, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 OR o.state='rejected' THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.audience_account_id, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, COALESCE(NULLIF(msg.actor_label,''),CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN COALESCE(sn.name,NULLIF(sn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=sm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||':'||substr(sm.id,-8) WHEN sm.kind='project' THEN COALESCE(NULLIF(sm.label,''),'project:'||substr(sm.id,-8)) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END), COALESCE(sm.kind,'remote'), COALESCE(sn.current_harness,(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=sm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1),''), COALESCE(sn.name,''), COALESCE(hd.label,''), CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN COALESCE(rn.name,NULLIF(rn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=rm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||CASE WHEN rn.name IS NULL THEN ':'||substr(rm.id,-8) ELSE '' END WHEN rm.kind='project' THEN COALESCE(NULLIF(rm.label,''),'project:'||substr(rm.id,-8)) ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, COALESCE(rm.kind,'remote'), COALESCE(rn.current_harness,(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=rm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1),''), COALESCE(rn.name,''), msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
+const columns = `msg.id, msg.event_id, msg.thread_event_id, msg.purpose, msg.presentation, msg.harness_provider, msg.harness_session_id, msg.harness_operation_id, msg.correlation_item_id, msg.correlation_request_id, msg.technical_sections_json, msg.incomplete, msg.peer_received, msg.rejected, CASE WHEN msg.rejected=1 OR o.state='rejected' THEN 'rejected' WHEN msg.peer_received=1 THEN 'peer-received' WHEN o.state='relay-accepted' THEN 'relay-accepted' WHEN o.event_id IS NOT NULL THEN 'queued' ELSE 'local' END, msg.audience_account_id, msg.directory, msg.git_common_dir, msg.remote_identity, msg.worktree, msg.branch, msg.sender_installation_id, msg.recipient_installation_id, msg.sender_mailbox_id, msg.recipient_mailbox_id, COALESCE(NULLIF(msg.actor_label,''),CASE WHEN sm.kind='human' THEN 'human' WHEN sm.kind='agent' THEN COALESCE(sn.name,NULLIF(sn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=sm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||':'||substr(sm.id,-8) WHEN sm.kind='project' THEN COALESCE(NULLIF(sm.label,''),'project:'||substr(sm.id,-8)) ELSE 'remote:'||substr(msg.sender_mailbox_id,-8) END), COALESCE(sm.kind,'remote'), COALESCE(sn.current_harness,(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=sm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1),''), COALESCE(sn.name,''), COALESCE(hd.label,''), CASE WHEN rm.kind='human' THEN 'human' WHEN rm.kind='agent' THEN COALESCE(rn.name,NULLIF(rn.current_harness,''),(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=rm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1))||CASE WHEN rn.name IS NULL THEN ':'||substr(rm.id,-8) ELSE '' END WHEN rm.kind='project' THEN COALESCE(NULLIF(rm.label,''),'project:'||substr(rm.id,-8)) ELSE 'remote:'||substr(msg.recipient_mailbox_id,-8) END, COALESCE(rm.kind,'remote'), COALESCE(rn.current_harness,(SELECT b.harness FROM harness_bindings b WHERE b.mailbox_id=rm.id ORDER BY b.created_at DESC,b.harness,b.external_session_id LIMIT 1),''), COALESCE(rn.name,''), msg.body, msg.details, msg.reply_to, msg.created_at, msg.archived_at, d.completed_at`
 const joins = ` messages msg LEFT JOIN mailboxes sm ON sm.id=msg.sender_mailbox_id AND sm.installation_id=msg.sender_installation_id LEFT JOIN named_agents sn ON sn.mailbox_id=sm.id LEFT JOIN mailboxes rm ON rm.id=msg.recipient_mailbox_id AND rm.installation_id=msg.recipient_installation_id LEFT JOIN named_agents rn ON rn.mailbox_id=rm.id LEFT JOIN human_account_devices hd ON hd.account_id=msg.audience_account_id AND hd.installation_id=msg.sender_installation_id LEFT JOIN delivery_facts d ON d.message_id=msg.id LEFT JOIN (SELECT event_id,CASE WHEN SUM(CASE WHEN state='queued' THEN 1 ELSE 0 END)>0 THEN 'queued' WHEN SUM(CASE WHEN state='relay-accepted' THEN 1 ELSE 0 END)>0 THEN 'relay-accepted' WHEN SUM(CASE WHEN state='rejected' THEN 1 ELSE 0 END)>0 THEN 'rejected' ELSE '' END AS state FROM outbox GROUP BY event_id) o ON o.event_id=msg.event_id `
 
 type scanner interface{ Scan(...any) error }
@@ -1917,7 +1967,8 @@ func scanMessage(row scanner) (model.Message, error) {
 	var reply sql.NullString
 	var created int64
 	var archived, completed sql.NullInt64
-	err := row.Scan(&m.ID, &m.EventID, &m.ThreadID, &m.Purpose, &m.HarnessProvider, &m.HarnessSessionID, &m.HarnessOperationID, &m.Incomplete, &m.PeerReceived, &m.Rejected, &m.DeliveryState, &m.AudienceAccountID, &m.Context.Directory, &m.Context.GitCommonDir, &m.Context.RemoteIdentity, &m.Context.Worktree, &m.Context.Branch, &m.SenderInstallationID, &m.RecipientInstallationID, &m.SenderMailboxID, &m.RecipientMailboxID, &m.SenderLabel, &senderKind, &senderHarness, &senderName, &m.SourceDeviceLabel, &m.RecipientLabel, &recipientKind, &recipientHarness, &recipientName, &m.Body, &m.Details, &reply, &created, &archived, &completed)
+	var correlationItemID, correlationRequestID, technicalJSON string
+	err := row.Scan(&m.ID, &m.EventID, &m.ThreadID, &m.Purpose, &m.Presentation, &m.HarnessProvider, &m.HarnessSessionID, &m.HarnessOperationID, &correlationItemID, &correlationRequestID, &technicalJSON, &m.Incomplete, &m.PeerReceived, &m.Rejected, &m.DeliveryState, &m.AudienceAccountID, &m.Context.Directory, &m.Context.GitCommonDir, &m.Context.RemoteIdentity, &m.Context.Worktree, &m.Context.Branch, &m.SenderInstallationID, &m.RecipientInstallationID, &m.SenderMailboxID, &m.RecipientMailboxID, &m.SenderLabel, &senderKind, &senderHarness, &senderName, &m.SourceDeviceLabel, &m.RecipientLabel, &recipientKind, &recipientHarness, &recipientName, &m.Body, &m.Details, &reply, &created, &archived, &completed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -1925,6 +1976,10 @@ func scanMessage(row scanner) (model.Message, error) {
 		return m, err
 	}
 	m.Purpose = model.NormalizeMessagePurpose(m.Purpose)
+	m.Correlation = model.MessageCorrelation{Provider: m.HarnessProvider, SessionID: m.HarnessSessionID, OperationID: m.HarnessOperationID, ItemID: correlationItemID, RequestID: correlationRequestID}
+	if err := json.Unmarshal([]byte(technicalJSON), &m.TechnicalSections); err != nil {
+		return m, fmt.Errorf("decode message technical sections: %w", err)
+	}
 	m.SenderAddress = messageAddress(m.SenderInstallationID, m.SenderMailboxID, model.MailboxKind(senderKind), m.SenderLabel, senderHarness, senderName)
 	m.RecipientAddress = messageAddress(m.RecipientInstallationID, m.RecipientMailboxID, model.MailboxKind(recipientKind), m.RecipientLabel, recipientHarness, recipientName)
 	m.CreatedAt = time.UnixMilli(created).UTC()
