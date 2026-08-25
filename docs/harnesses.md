@@ -107,6 +107,28 @@ Every supported blocking request receives exactly one JSON-RPC response. Structu
 
 Unknown additive notifications are non-fatal and are ignored by handlers that do not recognize them. Malformed payloads for recognized notifications are also ignored by the relevant projection; malformed JSON-RPC envelopes remain fatal. Unsupported blocking server requests receive `-32601` and terminate the transport with a compatibility error because guessing a response could grant authority.
 
+### Canonical message semantics
+
+Every new harness-authored mailbox message uses canonical text schema 2. The neutral correlation is
+the provider ID and session ID plus, when available, operation, item, and interactive-request IDs.
+These values stay opaque outside the adapter: generic code neither assumes Codex vocabulary nor
+reconstructs identity from message prose. Replies copy the typed correlation of the message they
+answer, so request targeting and conversation/action grouping do not serialize and reparse labels.
+
+Output messages use typed `update` or `final-answer` presentation and the
+`hq.harness.output` technical namespace for diagnostic phase or terminal status. Runtime lifecycle
+notices use typed `status` presentation and `hq.harness.status`. Interactive questions carry typed
+request correlation when the full provider/session/operation identity is available; the
+`hq.harness.request` section is diagnostic disclosure, including compatibility cases where a
+provider request cannot form a valid full correlation.
+
+The message body remains the primary user-facing output. `Details` contains only human-readable
+errors, validation guidance, choices, schemas, and explanations. It is never parsed for
+presentation or correlation. Technical sections are ordered display metadata hidden by default in
+the TUI, not routing input or secret storage. Output reconciliation compares the complete typed
+presentation, correlation, and ordered technical sections so a stable output ID cannot silently
+collide with different content.
+
 ### Local activity projection
 
 Normalized operation status, plan, diff, completed command, completed file change, completed tool call, and progress records have a separate installation-local SQLite projection. They are not `model.Message` values, canonical signed events, mutation receipts, relay outbox work, inbox actions, reply targets, archive targets, or inputs to open/unread counts. Cross-device activity synchronization is deferred.

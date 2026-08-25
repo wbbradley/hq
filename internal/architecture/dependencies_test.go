@@ -161,6 +161,42 @@ func TestMessagePayloadWritersDoNotEmbedStructuralDetails(t *testing.T) {
 	}
 }
 
+func TestTUIPresentationDoesNotRecognizeStructuralDetailsPrefixes(t *testing.T) {
+	repository := repositoryRoot(t)
+	files, err := productionGoFiles(filepath.Join(repository, "internal", "tui"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range files {
+		file := parseFile(t, path)
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || len(call.Args) < 2 {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			packageName, packageOK := selector.X.(*ast.Ident)
+			prefix, prefixOK := call.Args[1].(*ast.BasicLit)
+			if !packageOK || packageName.Name != "strings" || (selector.Sel.Name != "HasPrefix" && selector.Sel.Name != "CutPrefix" && selector.Sel.Name != "TrimPrefix") || !prefixOK || prefix.Kind != token.STRING {
+				return true
+			}
+			value, err := strconv.Unquote(prefix.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, structural := range []string{"Kind:", "Phase:", "Harness provider:", "Harness session:", "Harness operation:", "Harness item:", "Harness request:", "HQ message:", "HQ mailbox:"} {
+				if value == structural {
+					t.Errorf("%s recognizes historical structural-details prefix %q", relativePath(repository, path), structural)
+				}
+			}
+			return true
+		})
+	}
+}
+
 func isTextPayloadType(expression ast.Expr) bool {
 	switch value := expression.(type) {
 	case *ast.Ident:

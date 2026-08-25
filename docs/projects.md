@@ -101,6 +101,18 @@ Within that distinction:
   content.
 - A **runtime delivery** is the dispatch of one project message to one selected execution thread.
 
+All newly created project mailbox messages use canonical text schema 2. Human instructions and
+supplementary explanations remain in `body` and `details`; presentation and harness correlation
+use typed fields. Project code must not recover structure from either text field.
+
+Technical sections disclose diagnostic provenance without becoming project state. Current
+HQ-owned namespaces are `hq.project.output_provenance` for agent/assignment/thread attribution,
+`hq.project.resource_health` for resource notices, and `hq.project.pending_message` for queued
+input notices. They are rendered generically and hidden with the same TUI `i` control as any unknown
+namespace. Project authorization, assignment choice, delivery, late-output classification, and
+other behavior use typed project records and message purpose/correlation—not technical namespace,
+key, label, or value checks.
+
 ## Core invariants
 
 1. A project has one immutable UUID and one immutable home installation.
@@ -294,6 +306,14 @@ idempotency and reconciliation machinery.
 Agent output retains immutable agent, thread, and assignment-epoch provenance. The project mailbox
 remains the conversation address and reply target. UIs present dual attribution such as
 `bob · project-name` rather than pretending the project itself authored the output.
+
+The output message preserves caller-supplied human details, typed presentation and correlation, and
+ordered technical sections, then appends one ordered `hq.project.output_provenance` section. The
+project's assignment and thread tables remain authoritative for behavior; the section is
+display/diagnostic provenance. Stable project-output retries compare the complete typed message and
+provenance. An identical retry is idempotent, while a changed presentation, correlation, technical
+field, or human payload under the same deterministic ID fails as a collision. Late output appends
+diagnostic old/current attribution without granting the inactive assignment authority.
 
 A reply in an old conversation remains addressed to the project. If the project is closed, HQ
 persists it as pending activation and does not silently reopen, reassign, or resume a stale thread.

@@ -6,8 +6,8 @@ subscription revisions. CLI and TUI processes are domain clients; they never ope
 events, or own Codex workers themselves. The node supervises every HQ-managed Codex bridge and
 its app-server child in process.
 
-[events.md](events.md) defines canonical event schema 1 and causal reduction.
-[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 24 stores the exact signed
+[events.md](events.md) defines canonical event schemas 1 and 2 and causal reduction.
+[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 30 stores the exact signed
 event bytes as the source of truth and rebuildable projections derived from them.
 [projects.md](projects.md) defines the project, resource-claim, assignment, mailbox, and
 remote-control model implemented by the daemon, RPC clients, CLI, and TUI.
@@ -81,6 +81,30 @@ Locally signed events and remotely decrypted/verified events share the same cano
 reduction, projection, outbox, commit, and post-commit observer. Direct SQLite edits are outside the
 supported state model.
 
+### Typed message semantics and diagnostics
+
+New question, answer, and message events use schema 2. Their presentation kind and harness-neutral
+provider/session/operation/item/request correlation are dedicated semantic fields. Conversation
+identity, action grouping, reply/archive targeting, final-answer selection, routing,
+authorization, and ordering may use only typed domain state—not body, `Details`, or generic
+technical metadata. `Details` is always supplementary human text.
+
+Namespaced technical sections are ordered diagnostic/display data. Namespaces establish
+provenance, keys establish field identity, and optional labels affect rendering only. The TUI hides
+or shows whole sections with `i` and renders unknown namespaces generically; it does not maintain a
+producer allowlist. Built-in message/event/thread/installation identifiers and repository/source
+context are derived technical presentation groups governed by the same disclosure control. Mutable
+thread names are resolved at display time from the typed provider/session pair and never copied
+into immutable message events.
+
+The canonical reducer is the sole compatibility boundary for schema-1 structural lines. Its
+isolated legacy adapter projects known historical producer shapes into typed semantics and
+`hq.legacy.*` technical sections while retaining unmatched human details. Canonical bytes remain
+unchanged, and newer unsupported schemas remain retained rather than mis-decoded. Current event,
+model, SQLite, domain RPC, and local client representations round-trip the typed fields and ordered
+technical-section JSON directly. A full projection rebuild derives the same representation from
+the canonical log.
+
 ## Revisions and subscriptions
 
 `change_revision` contains one monotonic revision allocated in the same transaction as each
@@ -102,7 +126,9 @@ fallback. TUI drafts, focus, and selection survive reloads.
 `canonical_events` retains exact signed bytes, identity fields, event type, scope, and reduction
 status. `causal_edges` indexes parents and `projection_checkpoint` records rebuild progress.
 `mailboxes`, historical bindings, named agents, selected sessions, contexts, messages, threads,
-peers, shares, human accounts, and devices are rebuildable projections.
+peers, shares, human accounts, and devices are rebuildable projections. The schema-30 `messages`
+projection stores presentation and correlation columns plus ordered technical-section JSON; these
+columns are indexes, never an alternate source of canonical truth.
 
 `outbox` contains one row per canonical event and recipient installation, including exact canonical
 bytes, recipient key and relay hints, and the exact signed gift wrap before first publish.

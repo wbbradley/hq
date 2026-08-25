@@ -468,16 +468,27 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 	item.SenderInstallationID = "sender-installation-opaque"
 	item.RecipientInstallationID = "recipient-installation-opaque"
 	item.ReplyTo = &replyTo
-	setMessageSemantics(&item, "Kind: update\nHarness provider: codex\nHarness session: codex-thread-opaque\nHarness operation: turn-opaque\nHQ message: hq-opaque\n\nChoose one:\n- accept\n- decline")
+	item.Presentation = model.PresentationUpdate
+	item.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "codex-thread-opaque", OperationID: "turn-opaque"}
+	item.TechnicalSections = []model.TechnicalSection{{Namespace: "vendor.experimental", Fields: []model.TechnicalField{
+		{Key: "opaque_key", Label: "Opaque label", Value: "opaque-value"},
+		{Key: "second_key", Value: "second-value"},
+	}}}
+	item.Details = "Kind: human heading\nHarness session: human example\nProject assignment: human note\n\nChoose one:\n- accept\n- decline"
 	m := app{messages: []model.Message{item}, width: 100, height: 80}
 
 	view := m.View().Content
-	for _, hidden := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "hq-opaque", "Kind: update"} {
+	for _, hidden := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "vendor.experimental", "Opaque label", "opaque-value", "second_key", "second-value"} {
 		if strings.Contains(view, hidden) {
 			t.Fatalf("collapsed view exposed %q: %q", hidden, view)
 		}
 	}
-	if !strings.Contains(view, "Choose one:") || !strings.Contains(view, "- accept") || !strings.Contains(view, "technical details hidden · press i to show") {
+	for _, human := range []string{"Kind: human heading", "Harness session: human example", "Project assignment: human note", "Choose one:", "- accept"} {
+		if !strings.Contains(view, human) {
+			t.Fatalf("collapsed view lost human detail %q: %q", human, view)
+		}
+	}
+	if !strings.Contains(view, "technical details hidden · press i to show") {
 		t.Fatalf("collapsed view lost human details: %q", view)
 	}
 	for _, line := range strings.Split(view, "\n") {
@@ -491,10 +502,41 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'i', Text: "i"})
 	view = updated.(app).View().Content
-	for _, shown := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "hq.message.identifiers", "hq.message.correlation"} {
+	for _, shown := range []string{item.ID, item.EventID, item.ThreadID, item.SenderInstallationID, item.RecipientInstallationID, replyTo, "codex-thread-opaque", "turn-opaque", "hq.message.identifiers", "hq.message.correlation", "vendor.experimental", "Opaque label", "opaque-value", "second_key", "second-value"} {
 		if !strings.Contains(view, shown) {
 			t.Fatalf("expanded view omitted %q: %q", shown, view)
 		}
+	}
+	if namespaceIndex, labelIndex, keyIndex := strings.Index(view, "vendor.experimental"), strings.Index(view, "Opaque label: opaque-value"), strings.Index(view, "second_key: second-value"); namespaceIndex < 0 || namespaceIndex > labelIndex || labelIndex > keyIndex {
+		t.Fatalf("technical section order changed: %q", view)
+	}
+}
+
+func TestTechnicalMetadataCannotChangeMessageBehavior(t *testing.T) {
+	created := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	question := message("question", testAgentID, model.HumanMailboxID, "Choose")
+	question.CreatedAt = created
+	question.Correlation = model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", RequestID: "request"}
+	question.TechnicalSections = []model.TechnicalSection{{Namespace: "vendor.before", Fields: []model.TechnicalField{{Key: "before", Label: "Before", Value: "one"}}}}
+	final := message("final", testAgentID, model.HumanMailboxID, "Done")
+	final.CreatedAt = created.Add(time.Second)
+	final.Presentation = model.PresentationFinalAnswer
+	final.Correlation = model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation"}
+	final.TechnicalSections = []model.TechnicalSection{{Namespace: "vendor.before", Fields: []model.TechnicalField{{Key: "before", Label: "Before", Value: "two"}}}}
+
+	before := groupMessages([]model.Message{final, question})
+	question.TechnicalSections = []model.TechnicalSection{{Namespace: "unrecognized.changed", Fields: []model.TechnicalField{{Key: "renamed", Label: "Renamed", Value: "different"}}}}
+	final.TechnicalSections = []model.TechnicalSection{{Namespace: "also.changed", Fields: []model.TechnicalField{{Key: "final_answer", Label: "Looks behavioral", Value: "no"}}}}
+	after := groupMessages([]model.Message{final, question})
+
+	if len(before) != 1 || len(after) != 1 || before[0].key != after[0].key {
+		t.Fatalf("technical metadata changed conversation grouping: before=%#v after=%#v", before, after)
+	}
+	if actionUnitKey(before[0].messages[0]) != actionUnitKey(after[0].messages[0]) || groupPresentationKind(before[0]) != "final-answer" || groupPresentationKind(after[0]) != "final-answer" {
+		t.Fatalf("technical metadata changed action or presentation: before=%#v after=%#v", before, after)
+	}
+	if replyTarget(before[0]).ID != question.ID || replyTarget(after[0]).ID != question.ID {
+		t.Fatalf("technical metadata changed reply target: before=%q after=%q", replyTarget(before[0]).ID, replyTarget(after[0]).ID)
 	}
 }
 
@@ -1724,11 +1766,11 @@ func TestAgentManagerRenamesThreadWithoutSelectingOrLaunchingIt(t *testing.T) {
 	}
 }
 
-func TestThreadNameAnnotatesExpandedCodexDetails(t *testing.T) {
+func TestThreadNameAnnotatesTypedCorrelationDetails(t *testing.T) {
 	m := app{threadSessions: map[string]domain.AgentSession{"codex\x00thread-123": {Harness: "codex", SessionID: "thread-123", ThreadName: "Fix login", Context: model.RepositoryContext{Directory: "/repo"}}}}
-	details, hidden := m.presentationDetails("Kind: status\nHarness provider: codex\nHarness session: thread-123", true)
-	if hidden || !strings.Contains(details, "Harness provider: codex\nHarness session: Fix login (thread-123)") {
-		t.Fatalf("expanded details = %q, hidden=%t", details, hidden)
+	details := m.technicalIdentifiers(model.Message{Correlation: model.MessageCorrelation{Provider: "codex", SessionID: "thread-123"}})
+	if !strings.Contains(details, "provider: codex\nsession ID: Fix login (thread-123)") {
+		t.Fatalf("typed correlation details = %q", details)
 	}
 }
 

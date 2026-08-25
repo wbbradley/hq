@@ -2887,59 +2887,7 @@ func presentationPanelLabel(kind, sender string) string {
 	}
 }
 
-func (m app) presentationDetails(raw string, expanded bool) (string, bool) {
-	if expanded || raw == "" {
-		if !expanded {
-			return raw, false
-		}
-		lines := strings.Split(raw, "\n")
-		providerID := ""
-		for _, line := range lines {
-			if value, found := strings.CutPrefix(strings.TrimSpace(line), "Harness provider:"); found {
-				providerID = strings.TrimSpace(value)
-				break
-			}
-		}
-		if providerID == "" {
-			providerID = "codex"
-		}
-		for index, line := range lines {
-			value, found := strings.CutPrefix(strings.TrimSpace(line), "Harness session:")
-			if !found {
-				continue
-			}
-			threadID := strings.TrimSpace(value)
-			if session, ok := m.threadSessions[providerID+"\x00"+threadID]; ok && session.ThreadName != "" {
-				lines[index] = "Harness session: " + threadLabel(session.ThreadName, threadID)
-			}
-		}
-		return strings.Join(lines, "\n"), false
-	}
-	prefixes := []string{
-		"Kind:", "Phase:", "Harness provider:", "Harness session:", "Harness operation:", "Harness item:",
-		"Harness request:", "HQ message:", "HQ mailbox:",
-	}
-	visible := make([]string, 0, strings.Count(raw, "\n")+1)
-	hidden := false
-	for _, line := range strings.Split(raw, "\n") {
-		technical := false
-		trimmed := strings.TrimSpace(line)
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(trimmed, prefix) {
-				technical = true
-				break
-			}
-		}
-		if technical {
-			hidden = true
-			continue
-		}
-		visible = append(visible, line)
-	}
-	return strings.TrimSpace(strings.Join(visible, "\n")), hidden
-}
-
-func technicalIdentifiers(message model.Message) string {
+func (m app) technicalIdentifiers(message model.Message) string {
 	lines := []string{"hq.message.identifiers"}
 	add := func(label, value string) {
 		if value != "" {
@@ -2955,13 +2903,14 @@ func technicalIdentifiers(message model.Message) string {
 		add("reply-to ID", *message.ReplyTo)
 	}
 	correlation := message.Correlation
-	if correlation.Empty() && message.HarnessSessionID != "" {
-		correlation = model.MessageCorrelation{Provider: message.HarnessProvider, SessionID: message.HarnessSessionID, OperationID: message.HarnessOperationID}
-	}
 	if !correlation.Empty() {
 		lines = append(lines, "", "hq.message.correlation")
 		add("provider", correlation.Provider)
-		add("session ID", correlation.SessionID)
+		sessionID := correlation.SessionID
+		if session, ok := m.threadSessions[correlation.Provider+"\x00"+correlation.SessionID]; ok && session.ThreadName != "" {
+			sessionID = threadLabel(session.ThreadName, correlation.SessionID)
+		}
+		add("session ID", sessionID)
 		add("operation ID", correlation.OperationID)
 		add("item ID", correlation.ItemID)
 		add("request ID", correlation.RequestID)
@@ -2980,7 +2929,7 @@ func technicalIdentifiers(message model.Message) string {
 }
 
 func hasTechnicalIdentifiers(message model.Message) bool {
-	return technicalIdentifiers(message) != ""
+	return message.ID != "" || message.EventID != "" || message.ThreadID != "" || message.SenderInstallationID != "" || message.RecipientInstallationID != "" || message.ReplyTo != nil || !message.Correlation.Empty() || len(message.TechnicalSections) > 0
 }
 
 func (m app) technicalContext(message model.Message) string {
@@ -3325,7 +3274,6 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 		appendRenderedText(&body, &lineCount, dim.Render("From: "+sender))
 		appendRenderedText(&body, &lineCount, "\n\n")
 	}
-	metadataHidden := false
 	var spans []messageLineSpan
 	var activitySpans []activityLineSpan
 	markdownWidth := max(1, width-panel.GetHorizontalFrameSize())
@@ -3349,14 +3297,12 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 		appendRenderedText(&body, &lineCount, dim.Render(header+" ──"))
 		appendRenderedText(&body, &lineCount, "\n")
 		appendRenderedText(&body, &lineCount, m.markdown.Render(message, markdownWidth))
-		visibleDetails, hidden := m.presentationDetails(message.Details, m.showTechnical)
-		metadataHidden = metadataHidden || hidden
-		if visibleDetails != "" {
+		if message.Details != "" {
 			appendRenderedText(&body, &lineCount, "\n\n")
-			appendRenderedText(&body, &lineCount, visibleDetails)
+			appendRenderedText(&body, &lineCount, message.Details)
 		}
 		if m.showTechnical {
-			if identifiers := technicalIdentifiers(message); identifiers != "" {
+			if identifiers := m.technicalIdentifiers(message); identifiers != "" {
 				appendRenderedText(&body, &lineCount, "\n\n")
 				appendRenderedText(&body, &lineCount, dim.Render(identifiers))
 			}
@@ -3382,7 +3328,7 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 		}
 	}
 	bottomLabel := ""
-	if !m.showTechnical && (metadataHidden || groupHasTechnicalIdentifiers(group) || m.technicalContext(latest) != "") {
+	if !m.showTechnical && (groupHasTechnicalIdentifiers(group) || m.technicalContext(latest) != "") {
 		bottomLabel = "technical details hidden · press i to show"
 	}
 	return m.cacheRenderedMessageGroup(group, width, renderedMessageGroup{panel: renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage)), spans: spans, activitySpans: activitySpans})

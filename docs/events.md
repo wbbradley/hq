@@ -1,6 +1,7 @@
 # HQ canonical event protocol
 
-Status: first-release protocol, schema version 1.
+Status: first-release protocol, schema versions 1 and 2. Schema 2 is currently used only for
+`question`, `answer`, and `message`; all other event types remain schema 1.
 
 HQ derives durable state from signed canonical events. SQLite tables, relay queues, and user views are indexes of those events. A supported HQ command must not change durable domain state without creating and applying a valid event.
 
@@ -22,7 +23,7 @@ A full mailbox address is `(installation_id, mailbox_id)`. A bare mailbox UUID i
 
 ## Nostr envelope
 
-HQ uses provisional regular Nostr kind `7281`. The project may register or change this kind before HQ 1.0. The Nostr `tags` array is empty in schema version 1. All HQ fields live in `content` as compact JSON.
+HQ uses provisional regular Nostr kind `7281`. The project may register or change this kind before HQ 1.0. The Nostr `tags` array is empty in both supported schemas. All HQ fields live in `content` as compact JSON.
 
 HQ computes the Nostr event ID from the NIP-01 serialization and signs that ID with BIP-340 Schnorr over secp256k1. A receiver must check the content-derived ID and signature before it parses or applies HQ content.
 
@@ -55,7 +56,8 @@ The Nostr `content` string contains this object in field order when HQ creates a
 
 Fields have these rules:
 
-- `schema` is a positive protocol version. Version 1 uses strict JSON fields.
+- `schema` is a positive protocol version. Versions 1 and 2 use strict, version-specific JSON
+  fields; a field valid in schema 2 is not silently accepted in schema 1.
 - `type` selects one payload schema and reducer rule.
 - `installation_id` names the installation that created the event. A message sender must belong to that installation.
 - `signer_key_id` must equal the Nostr event public key until key grants exist.
@@ -66,7 +68,51 @@ Fields have these rules:
 - `origin` may name a source installation and event for an import or forward. An origin is not a causal parent.
 - `payload` is a strict object selected by `type`.
 
-Event bodies and details must contain valid UTF-8. A body may not exceed 32,768 bytes. Details may not exceed 16,384 bytes. Schema version 1 does not carry files or binary data.
+Event bodies and details must contain valid UTF-8. A body may not exceed 32,768 bytes. Details may not exceed 16,384 bytes. Neither supported schema carries files or binary data.
+
+### Text payload schemas
+
+The exact schema-1 text payload contains `message_id`, `body`, `details`, `purpose`, `context`, and
+`actor_label`. `Details` is human-readable supplementary content, not a structural channel. Current
+writers never add new fields to this shape.
+
+Schema 2 retains those fields and adds:
+
+- `presentation`: empty or one of `update`, `final-answer`, `status`, and `notice`;
+- `correlation`: an opaque provider/session pair, with optional operation and operation-scoped item
+  and request IDs; item or request identity requires an operation;
+- `technical_sections`: ordered diagnostic/display sections with a lowercase namespaced machine
+  name and ordered fields containing a lowercase machine key, optional printable display label,
+  and UTF-8 string value.
+
+Presentation and correlation are semantics: routing, conversation and action identity, reply
+targeting, final-answer choice, and other behavior use dedicated typed fields. Technical sections
+are inert disclosure metadata. Their namespaces identify provenance, keys identify fields, and
+labels affect display only. Consumers must not inspect a technical namespace, key, label, or value
+to make a domain decision. If a value becomes behavioral, it needs a dedicated typed field.
+
+Provider values and correlation IDs are harness-neutral and opaque. Providers are at most 128
+bytes; each correlation ID is at most 512 bytes. A message may carry at most 16 technical sections,
+32 fields per section, and 128 fields total. Namespaces and keys are at most 128 bytes, labels 256
+bytes, values 4,096 bytes, and the aggregate namespace/key/label/value content 16,384 bytes.
+Namespace/key pairs may not repeat. All names and identities are validated, all text must be valid
+UTF-8, and final signing still enforces the complete 65,536-byte wire-event limit after JSON
+escaping and envelope overhead.
+
+HQ-owned namespaces begin with `hq.`. Current message producers use `hq.harness.output`,
+`hq.harness.status`, `hq.harness.request`, `hq.project.output_provenance`,
+`hq.project.resource_health`, and `hq.project.pending_message`. Schema-1 compatibility projection
+uses explicit `hq.legacy.*` namespaces. Other producers may use their own stable namespace; readers
+render unknown namespaces generically rather than maintaining an allowlist. Technical sections are
+not an access-control or secret-storage mechanism and share the message's audience.
+
+New text-message writers explicitly emit schema 2. The reducer decodes schema 1 with its exact old
+shape, then applies historical structural-line compatibility only in the isolated canonical
+projection adapter. Recognized legacy lines become typed projected semantics or `hq.legacy.*`
+technical sections; remaining human details stay readable. No store query, RPC client, or UI parses
+`Details`, and canonical schema-1 bytes are never rewritten. A schema-1-only binary retains an
+authentic schema-2 event byte-for-byte with `unsupported` status until an upgraded reducer can
+project it.
 
 Local message payloads also carry a stable message UUID and an immutable repository-context snapshot. `send` prints this UUID; it is the short user-facing handle accepted by `get`, `wait`, `answer`, and `cancel`. The Nostr event ID remains the signed deduplication key and causal reference. Remote protocol work may change the handle format before HQ 1.0.
 
@@ -92,9 +138,9 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `agent.retire` | Installation-private; `name`, `mailbox_id` | Retires a name and mailbox without permitting later reuse. |
 | `agent.session.select` | Installation-private; name, mailbox, harness, external session ID, and exact repository context | Selects the named agent's current harness session while retaining rebuildable per-session directory history and selection times. |
 | `agent.session.rename` | Installation-private; agent name, mailbox, harness, external session ID, and thread name | Sets or clears mutable display metadata for an existing bound session without selecting it or changing runtime state. |
-| `question` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts a question thread. An account question projects into every active device's human mailbox. |
-| `answer` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Adds one answer to a question thread. An account answer directly names the source agent and also replicates account state. |
-| `message` | Private, peer-addressed, or account-addressed; `body`, optional `details` | Starts an async message thread. |
+| `question` | Private, peer-addressed, or account-addressed; schema-2 text payload | Starts a question thread. An account question projects into every active device's human mailbox. |
+| `answer` | Private, peer-addressed, or account-addressed; schema-2 text payload | Adds one answer to a question thread. An account answer directly names the source agent and also replicates account state. |
+| `message` | Private, peer-addressed, or account-addressed; schema-2 text payload | Starts an async message thread. |
 | `thread.cancel` | Private, peer-addressed, or account-addressed; optional `reason` | Records cancellation without deleting answers. |
 | `message.archive` | Installation-private or account-addressed; `target_event_id`, optional `reason` | Hides a message from open views. |
 | `message.restore` | Installation-private or account-addressed; `target_event_id` | Causally supersedes an archive and returns the message to open views. |
