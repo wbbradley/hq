@@ -1,7 +1,7 @@
 # HQ canonical event protocol
 
-Status: first-release protocol, schema versions 1 and 2. Schema 2 is currently used only for
-`question`, `answer`, and `message`; all other event types remain schema 1.
+Status: first-release protocol, schema versions 1 and 2. Schema 2 defines `question`, `answer`,
+`message`, and `harness.activity`; all other event types remain schema 1.
 
 HQ derives durable state from signed canonical events. SQLite tables, relay queues, and user views are indexes of those events. A supported HQ command must not change durable domain state without creating and applying a valid event.
 
@@ -61,7 +61,9 @@ Fields have these rules:
 - `type` selects one payload schema and reducer rule.
 - `installation_id` names the installation that created the event. A message sender must belong to that installation.
 - `signer_key_id` must equal the Nostr event public key until key grants exist.
-- `sender` is present on message events. A direct route has at most one `recipient`. An account question omits `recipient` and names a human account in `audience`.
+- `sender` is present on message and activity events. A direct message route has at most one
+  `recipient`. An account question or activity omits `recipient` and names a human account in
+  `audience`.
 - `thread_id` is present on child thread events and absent on a root question or async message.
 - `parents` is a set of causal event IDs in lexical order. It may contain at most 64 IDs and no duplicate.
 - `scope` is `installation-private`, `peer-addressed`, or `account-addressed`. Account-addressed events require a matching human-account audience. `public` is reserved and rejected in the first release.
@@ -116,6 +118,29 @@ project it.
 
 Local message payloads also carry a stable message UUID and an immutable repository-context snapshot. `send` prints this UUID; it is the short user-facing handle accepted by `get`, `wait`, `answer`, and `cancel`. The Nostr event ID remains the signed deduplication key and causal reference. Remote protocol work may change the handle format before HQ 1.0.
 
+### Harness activity payload
+
+`harness.activity` is a schema-2 canonical event and a conversation entry, but it is not a message.
+Its strict harness-neutral payload contains typed provider/session/operation correlation, an
+optional operation-scoped item ID, activity kind and status, bounded title/body, explicit
+truncation, occurrence time in Unix milliseconds, runtime-lifetime ID, and a positive provider
+event sequence. The supported kinds are operation status, plan, diff, completed command, completed
+file change, completed tool call, and progress. Provider method names, JSON-RPC envelopes, raw model
+responses, reasoning, token deltas, and message technical sections are not activity payload data.
+
+The event sender is the originating full agent mailbox address. The provider and correlation IDs
+are opaque namespaces, not network identities; the reducer's coalescing key includes source
+installation, source mailbox, provider, session, operation, kind, and item. An activity has no
+recipient or HQ thread ID. It may be installation-private for a genuinely local conversation, or
+account-addressed to the selected human account with current membership parents. It may never be
+peer-addressed or public. The current harness writer uses the account audience and ordinary
+per-active-device encrypted outbox fanout.
+
+Titles are limited to 1 KiB, general and command bodies to 12 KiB, and progress bodies to 4 KiB.
+Truncation preserves valid UTF-8 and sets `truncated`. The authoring path also measures the complete
+escaped, signed envelope and may shorten the body further to stay below 65,536 bytes; the nominal
+field bounds are not a substitute for the wire bound.
+
 ## Threads and causal links
 
 Canonical events form a directed acyclic graph through `parents`. HQ defines no installation-wide or global sequence.
@@ -141,6 +166,7 @@ Events may arrive before a parent. HQ retains a valid and authorized child as `u
 | `question` | Private, peer-addressed, or account-addressed; schema-2 text payload | Starts a question thread. An account question projects into every active device's human mailbox. |
 | `answer` | Private, peer-addressed, or account-addressed; schema-2 text payload | Adds one answer to a question thread. An account answer directly names the source agent and also replicates account state. |
 | `message` | Private, peer-addressed, or account-addressed; schema-2 text payload | Starts an async message thread. |
+| `harness.activity` | Installation-private or account-addressed; schema-2 typed activity payload | Adds non-actionable runtime telemetry to a provider/session conversation. |
 | `thread.cancel` | Private, peer-addressed, or account-addressed; optional `reason` | Records cancellation without deleting answers. |
 | `message.archive` | Installation-private or account-addressed; `target_event_id`, optional `reason` | Hides a message from open views. |
 | `message.restore` | Installation-private or account-addressed; `target_event_id` | Causally supersedes an archive and returns the message to open views. |
@@ -179,6 +205,12 @@ Peer trust and human account authority stay separate. A trusted peer is not an a
 
 Every account action must causally include the current membership frontier for its signer. A receiver checks membership at that causal point, not only the receiver's latest device view. A valid event from before a later revoke stays valid. A revoked device cannot create a valid later account action. One canonical account event fans out through separate encrypted wrappers, but every device reduces the same canonical event ID.
 
+Account-addressed activity follows this exact rule. An active source device can fan one canonical
+activity event to all active human devices. A wrapper from a revoked source is decrypted, rejected
+by causal membership authorization, and quarantined without changing messages, activity, or inbox
+state. An unrelated account audience does not route to the local account, and peer/public activity
+fails validation before projection.
+
 ## Reduction
 
 The reducer assigns one status to each event:
@@ -193,7 +225,21 @@ An authentic event from a newer compatible schema stays byte-for-byte intact as 
 
 Reduction must be idempotent and return the same state for every topological arrival order. Repeated wire forms with one Nostr event ID represent one canonical event. Implementations must not use receipt order or wall-clock order to choose semantic state.
 
-The display order places parents before children. Among ready concurrent events, it sorts by signed `created_at` and then event ID. Display order has no semantic force.
+Conversation display order places parents before children. Among ready events it sorts by signed
+`created_at`; activity from the same signed second additionally uses occurrence milliseconds,
+source/runtime identity, provider sequence, and event ID as stable tie-breakers. Receipt time and
+SQLite row order are never inputs. This order is presentation order, not causal authority.
+
+Messages and activity share this reducer order but remain separate semantic streams. The typed
+`conversation/entries` read pages projected messages and activity by `(display_order,event_id)`.
+Its message values retain typed schema-2 presentation, correlation, and technical sections. The
+legacy `conversation/history` shape remains message-only. Conversation summaries, open/unread
+counts, delivery, reply/archive targets, drafts, and final-answer selection are also message-only.
+
+Activity projection is latest-wins per full source/provider/session/operation/kind/item key.
+Operation, plan, and diff are snapshots; repeated item and progress keys coalesce; completed
+command/file/tool events and terminal operation states remain durable logical history. Winner
+selection uses canonical conversation order and source sequence, never receiver clocks.
 
 ## Answers and cancellation
 
@@ -212,6 +258,18 @@ The wait phase of `ask`, and `wait QUESTION_ID`, requires the local question eve
 ## Retention and non-domain state
 
 The first release keeps canonical events without automatic pruning. Projections are disposable caches and must rebuild from the event log.
+
+Canonical and projected activity retention intentionally differ. Superseded snapshots and progress
+events remain exact signed canonical bytes. `harness_activities` contains only reducer-selected
+winners and retains the newest 200 projected progress keys per source mailbox/provider session. A
+full rebuild deterministically reapplies that cap. The legacy activity-list read returns at most the
+newest 1,000 projected rows in chronological order; unified conversation pages use the normal
+200-entry page cap and expose the same disposable projection, not every superseded canonical event.
+
+Schema 31 deliberately discarded legacy unsigned `harness_activities` rows and rebuilt the table
+only from canonical `harness.activity` events. It did not manufacture signatures or synchronized
+history for old best-effort rows. Schema 32 adds reducer display order to message rows so mixed
+conversation history can rebuild and paginate by one canonical order.
 
 These node facts are not canonical events and remain unsigned:
 

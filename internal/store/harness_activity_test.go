@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -179,8 +180,10 @@ func TestHarnessActivityDynamicallyFitsEscapedSignedWire(t *testing.T) {
 
 func TestHarnessActivityAccountFanoutConvergesAcrossDevices(t *testing.T) {
 	ctx := context.Background()
-	creator := openStore(t, filepath.Join(t.TempDir(), "creator", "hq.db"))
-	desktop := openStore(t, filepath.Join(t.TempDir(), "desktop", "hq.db"))
+	root := t.TempDir()
+	creatorPath, desktopPath := filepath.Join(root, "creator", "hq.db"), filepath.Join(root, "desktop", "hq.db")
+	creator := openStore(t, creatorPath)
+	desktop := openStore(t, desktopPath)
 	creatorID, _ := creator.InstallationIdentity()
 	desktopID, desktopKey := desktop.InstallationIdentity()
 	const relay = "wss://activity.relay.test"
@@ -196,12 +199,30 @@ func TestHarnessActivityAccountFanoutConvergesAcrossDevices(t *testing.T) {
 		t.Fatal(err)
 	}
 	mailbox := harnessActivityMailbox(t, creator, "fanout-session")
+	correlation := model.MessageCorrelation{Provider: "home-built", SessionID: "fanout-session", OperationID: "operation"}
+	first := model.Message{
+		ID: "019c0000-0000-7000-8000-000000000901", SenderMailboxID: mailbox.ID, RecipientMailboxID: model.HumanMailboxID,
+		Body: "first synchronized message", Details: "visible details", Presentation: model.PresentationUpdate,
+		Correlation: correlation, TechnicalSections: []model.TechnicalSection{{Namespace: "test.fanout", Fields: []model.TechnicalField{{Key: "source", Value: "creator"}}}},
+		CreatedAt: time.Unix(19, 0),
+	}
+	if err := creator.Create(ctx, first); err != nil {
+		t.Fatal(err)
+	}
 	activity := canonicalHarnessActivity(domain.HarnessActivity{
 		MailboxID: mailbox.ID, Harness: "home-built", SessionID: "fanout-session", OperationID: "operation",
 		Kind: domain.HarnessActivityTool, ItemID: "tool", Status: domain.HarnessActivityCompleted,
 		Title: "inspect", Body: "done", OccurredAt: time.Unix(20, 0),
 	})
 	if err := creator.UpsertHarnessActivity(ctx, activity); err != nil {
+		t.Fatal(err)
+	}
+	second := model.Message{
+		ID: "019c0000-0000-7000-8000-000000000902", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: mailbox.ID,
+		Body: "second synchronized message", Presentation: model.PresentationNotice,
+		Correlation: correlation, CreatedAt: time.Unix(21, 0),
+	}
+	if err := creator.Create(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 	local, err := creator.ListHarnessActivities(ctx, domain.HarnessActivityFilter{InstallationID: creatorID, MailboxID: mailbox.ID})
@@ -215,10 +236,25 @@ func TestHarnessActivityAccountFanoutConvergesAcrossDevices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	key := model.ConversationKey{CounterpartyMailboxID: mailbox.ID, HarnessProvider: correlation.Provider, HarnessSessionID: correlation.SessionID}
+	wantEntries, err := creator.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: key, Limit: 20})
+	if err != nil || len(wantEntries.Entries) != 3 || wantEntries.Entries[0].Message == nil || wantEntries.Entries[1].Activity == nil || wantEntries.Entries[2].Message == nil {
+		t.Fatalf("local mixed conversation = %#v, %v", wantEntries, err)
+	}
+	wantLegacy, err := creator.ListConversationHistory(ctx, model.ConversationHistoryFilter{Key: key, Limit: 20})
+	if err != nil || len(wantLegacy.Messages) != 2 {
+		t.Fatalf("local legacy conversation = %#v, %v", wantLegacy, err)
+	}
+	var changes []domain.Invalidation
+	desktop.SetChangeObserver(func(change domain.Invalidation) { changes = append(changes, change) })
 	found := false
-	for _, job := range jobs {
+	var activityJob *RelayJob
+	for index := len(jobs) - 1; index >= 0; index-- {
+		job := jobs[index]
 		if job.CanonicalEventID == local[0].EventID {
 			found = true
+			copyJob := job
+			activityJob = &copyJob
 		}
 		if _, err := desktop.ReceiveGiftWrap(ctx, job.ExactGiftWrapBytes, relay, time.Now().UTC()); err != nil {
 			t.Fatalf("receive account activity wrapper %s: %v", job.CanonicalEventID, err)
@@ -227,9 +263,165 @@ func TestHarnessActivityAccountFanoutConvergesAcrossDevices(t *testing.T) {
 	if !found {
 		t.Fatalf("activity event %s absent from account outbox jobs %#v", local[0].EventID, jobs)
 	}
+	changesBeforeDuplicate := len(changes)
+	if duplicate, err := desktop.ReceiveGiftWrap(ctx, activityJob.ExactGiftWrapBytes, relay, time.Now().UTC()); err != nil || duplicate.Status != "duplicate-wrapper" || len(changes) != changesBeforeDuplicate {
+		t.Fatalf("duplicate activity wrapper = %#v, %v; changes %d -> %d", duplicate, err, changesBeforeDuplicate, len(changes))
+	}
 	remote, err := desktop.ListHarnessActivities(ctx, domain.HarnessActivityFilter{InstallationID: creatorID, MailboxID: mailbox.ID})
 	if err != nil || len(remote) != 1 || remote[0].EventID != local[0].EventID || remote[0].AudienceAccountID == "" || remote[0].AudienceAccountID != local[0].AudienceAccountID || remote[0].Correlation != local[0].Correlation || remote[0].DisplayOrder != local[0].DisplayOrder {
 		t.Fatalf("remote activity = %#v, %v; local=%#v", remote, err, local)
+	}
+	gotEntries, err := desktop.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: key, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertConversationEntryPagesConverge(t, gotEntries, wantEntries)
+	gotLegacy, err := desktop.ListConversationHistory(ctx, model.ConversationHistoryFilter{Key: key, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertConversationMessagesConverge(t, gotLegacy.Messages, wantLegacy.Messages)
+	if gotLegacy.NextCursor != wantLegacy.NextCursor {
+		t.Fatalf("remote legacy cursor = %q; want %q", gotLegacy.NextCursor, wantLegacy.NextCursor)
+	}
+	if err := creator.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := desktop.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt, err := desktop.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: key, Limit: 20}); err != nil {
+		t.Fatal(err)
+	} else {
+		assertConversationEntryPagesConverge(t, rebuilt, wantEntries)
+	}
+	if err := creator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := desktop.Close(); err != nil {
+		t.Fatal(err)
+	}
+	creator, desktop = openStore(t, creatorPath), openStore(t, desktopPath)
+	for label, database := range map[string]*SQLite{"creator": creator, "desktop": desktop} {
+		restarted, restartErr := database.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: key, Limit: 20})
+		if restartErr != nil {
+			t.Fatal(restartErr)
+		}
+		t.Run(label+" restarted projection", func(t *testing.T) { assertConversationEntryPagesConverge(t, restarted, wantEntries) })
+	}
+}
+
+func assertConversationEntryPagesConverge(t *testing.T, got, want domain.ConversationEntryPage) {
+	t.Helper()
+	if got.NextCursor != want.NextCursor || len(got.Entries) != len(want.Entries) {
+		t.Fatalf("conversation entry page shape = %d/%q; want %d/%q", len(got.Entries), got.NextCursor, len(want.Entries), want.NextCursor)
+	}
+	for index := range want.Entries {
+		gotEntry, wantEntry := got.Entries[index], want.Entries[index]
+		if gotEntry.Kind != wantEntry.Kind || gotEntry.EventID != wantEntry.EventID || gotEntry.DisplayOrder != wantEntry.DisplayOrder {
+			t.Fatalf("conversation entry %d identity/order = %#v; want %#v", index, gotEntry, wantEntry)
+		}
+		if gotEntry.Kind == domain.ConversationEntryActivity {
+			if !reflect.DeepEqual(gotEntry.Activity, wantEntry.Activity) {
+				t.Fatalf("conversation activity %d = %#v; want %#v", index, gotEntry.Activity, wantEntry.Activity)
+			}
+			continue
+		}
+		assertConversationMessagesConverge(t, []model.Message{*gotEntry.Message}, []model.Message{*wantEntry.Message})
+	}
+}
+
+func assertConversationMessagesConverge(t *testing.T, got, want []model.Message) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("conversation messages = %d; want %d", len(got), len(want))
+	}
+	normalize := func(message model.Message) model.Message {
+		message.DeliveryState = ""
+		message.RecipientInstallationID = ""
+		message.SenderLabel, message.SourceDeviceLabel, message.RecipientLabel = "", "", ""
+		message.SenderAddress, message.RecipientAddress = model.MessageAddress{}, model.MessageAddress{}
+		return message
+	}
+	for index := range want {
+		if normalizedGot, normalizedWant := normalize(got[index]), normalize(want[index]); !reflect.DeepEqual(normalizedGot, normalizedWant) {
+			gotJSON, _ := json.MarshalIndent(normalizedGot, "", "  ")
+			wantJSON, _ := json.MarshalIndent(normalizedWant, "", "  ")
+			t.Fatalf("conversation message %d = %s; want %s", index, gotJSON, wantJSON)
+		}
+	}
+}
+
+func TestRevokedDeviceHarnessActivityGiftWrapFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	creator := openStore(t, filepath.Join(root, "creator", "hq.db"))
+	revoked := openStore(t, filepath.Join(root, "revoked", "hq.db"))
+	revokedID, revokedKey := revoked.InstallationIdentity()
+	bundle, err := creator.CreateHumanInvite(ctx, HumanInviteRequest{InstallationID: revokedID, SignerKeyID: revokedKey, Name: "revoked device"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawBundle, _ := json.Marshal(bundle)
+	if err := revoked.JoinHumanInvite(ctx, rawBundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := creator.AppendCanonical(ctx, []event.SignedEvent{canonicalEventByTypeAndInstallation(t, revoked, event.TypeHumanDeviceAccept, revokedID)}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox := harnessActivityMailbox(t, revoked, "revoked-session")
+	if err := creator.RevokeHumanDevice(ctx, revokedID); err != nil {
+		t.Fatal(err)
+	}
+	revocation := canonicalEventByType(t, creator, event.TypeHumanDeviceRevoke)
+	if err := revoked.AppendCanonical(ctx, []event.SignedEvent{revocation}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := event.MarshalPayload(event.HarnessActivityPayload{
+		Correlation: model.MessageCorrelation{Provider: "home-built", SessionID: "revoked-session", OperationID: "operation", ItemID: "progress"},
+		Kind:        domain.HarnessActivityProgress, Status: domain.HarnessActivityRunning, Body: "must not project",
+		OccurredAt: time.Unix(100, 0).UnixMilli(), RuntimeID: "revoked-runtime", Sequence: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	late, err := revoked.signer.Sign(ctx, event.Content{
+		Schema: event.Schema2, Type: event.TypeHarnessActivity, Sender: revoked.localAddress(mailbox.ID),
+		Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: []string{revocation.ID()},
+		Scope: event.ScopeAccountAddressed, Payload: payload,
+	}, time.Unix(100, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, creatorKey := creator.InstallationIdentity()
+	wrapper, err := revoked.WireCodec(nil, nil).Wrap(late, creatorKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := model.ConversationKey{CounterpartyMailboxID: mailbox.ID, HarnessProvider: "home-built", HarnessSessionID: "revoked-session"}
+	beforeConversations, err := creator.ListConversations(ctx, model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalBefore := tableCount(t, creator, "canonical_events")
+	deliveryBefore := tableCount(t, creator, "delivery_facts")
+	if _, err := creator.ReceiveGiftWrap(ctx, wrapper.ExactWire, "wss://activity.relay.test", time.Now().UTC()); err == nil {
+		t.Fatal("revoked device activity projected through gift wrap")
+	}
+	if tableCount(t, creator, "canonical_events") != canonicalBefore || tableCount(t, creator, "delivery_facts") != deliveryBefore || tableCount(t, creator, "harness_activities") != 0 {
+		t.Fatal("revoked activity changed canonical, delivery, or activity projections")
+	}
+	entries, err := creator.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: key, Limit: 20})
+	if err != nil || len(entries.Entries) != 0 {
+		t.Fatalf("revoked activity conversation = %#v, %v", entries, err)
+	}
+	afterConversations, err := creator.ListConversations(ctx, model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Limit: 20})
+	if err != nil || !reflect.DeepEqual(afterConversations, beforeConversations) {
+		t.Fatalf("revoked activity changed summaries: %#v -> %#v, %v", beforeConversations, afterConversations, err)
+	}
+	status, err := creator.NetworkStatus(ctx)
+	if err != nil || status.RevokedDeviceTraffic != 1 || status.Quarantined == 0 {
+		t.Fatalf("revoked activity network status = %#v, %v", status, err)
 	}
 }
 

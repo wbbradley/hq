@@ -101,7 +101,23 @@ The generic contract must preserve the three externally meaningful canceled-call
 
 ## Events, interactive requests, and ordering
 
-The transport reads frames serially. Response correlation and notification observation therefore follow wire order. Notification handlers run synchronously in registration order: active-operation state first, then normalized event extraction. Each normalized event enters one bounded 64-entry persistence work queue; its canonical output, when present, is persisted before its installation-local activity projection. Canonical outputs therefore retain queue order, and activity cannot overtake or replace a final answer. Server-initiated requests run concurrently so a human wait cannot block response and notification reads; their responses may complete in a different order from request arrival.
+The transport reads frames serially. Response correlation and notification observation therefore
+follow wire order. Notification handlers run synchronously in registration order: active-operation
+state first, then normalized event extraction. Each supported event becomes one indivisible work
+item in a bounded 64-item FIFO/coalescing buffer. If it contains canonical output, output persists
+before activity; successive work items retain source order. The relay assigns canonical time before
+enqueue or coalescing, so persistence delay and receiver clocks cannot reorder output and activity.
+Server-initiated requests run concurrently so a human wait cannot block response and notification
+reads; their responses may complete in a different order from request arrival.
+
+Assistant output, failed/interrupted output, terminal operation state, and completed
+command/file/tool activity are durable work. A full buffer applies cancellation-aware backpressure
+until they are accepted; accepted durable work is never dropped. Running operation state, plan,
+diff, and progress are replaceable snapshots. A newer pending value for the same full logical key
+removes the older value and moves to the tail, preserving order relative to intervening durable
+work. A new key at capacity also backpressures. Capacity bounds pending work, excluding the item
+currently being persisted; raw reasoning, model payloads, token deltas, spinners, and unsupported
+provider noise normalize to no work and never enter the buffer.
 
 Every supported blocking request receives exactly one JSON-RPC response. Structured questions are correlated by session, operation, item, and request ID. Secret-input requests are rejected without persisting their prompt fields. Cancellation releases any claimed answer, cancels remaining questions, and returns a fail-closed response. An interactive request may block its own operation while waiting for a human, but remains cancelable during shutdown.
 
@@ -129,21 +145,57 @@ the TUI, not routing input or secret storage. Output reconciliation compares the
 presentation, correlation, and ordered technical sections so a stable output ID cannot silently
 collide with different content.
 
-### Local activity projection
+### Canonical activity stream
 
-Normalized operation status, plan, diff, completed command, completed file change, completed tool call, and progress records have a separate installation-local SQLite projection. They are not `model.Message` values, canonical signed events, mutation receipts, relay outbox work, inbox actions, reply targets, archive targets, or inputs to open/unread counts. Cross-device activity synchronization is deferred.
+Normalized operation status, plan, diff, completed command, completed file change, completed tool
+call, and progress records are schema-2 `harness.activity` events. They use the same signing,
+canonical log, active-human-account audience, membership parents, per-device encrypted outbox,
+inbound authorization, replay, and rebuild path as account messages. They remain a separate
+non-message stream: an activity is not a mutation receipt, inbox row, unread unit, delivery claim,
+reply/archive/draft target, action unit, or final-answer candidate.
 
-Rows are keyed by provider session, operation, activity kind, and item ID. Operation, plan, and diff snapshots coalesce; repeated item and progress keys replace deterministically. Titles are limited to 1 KiB, general bodies to 64 KiB, completed command output to 16 KiB, and progress bodies to 4 KiB. Truncation is explicit, and only the most recent 200 progress records per provider session are retained. The query surface returns at most 1,000 chronological records per mailbox request and emits the dedicated local `activities` change topic only for a material write.
+Canonical source identity is the originating installation and agent mailbox. Provider/session/
+operation/item values remain opaque correlation. Projection keys include both identities, so equal
+provider session IDs from different providers or source mailboxes cannot merge. Operation, plan,
+and diff snapshots are latest-wins; repeated item/progress keys coalesce deterministically; terminal
+operation and completed item records remain logical history. Titles are limited to 1 KiB, general
+and command bodies to 12 KiB, and progress to 4 KiB. UTF-8 truncation is explicit, and authoring may
+shorten further after JSON escaping to fit the complete 64 KiB signed wire envelope.
 
-The TUI queries activity only for the selected counterparty mailbox and, when known, its selected harness session. It merges those rows chronologically into conversation detail as compact non-actionable cards; focus the message pane, scroll to a card, and press `e` to expand or collapse the card nearest the viewport. Failed states and truncation are disclosed in both presentations. Activity remains outside conversation summaries and message groups used for inbox counts, selection, replies, archive/restore, action-unit grouping, final-answer styling, and drafts. Manual scrolling stays anchored to logical message IDs when coalesced activity changes height.
+The canonical log retains superseded activity. The disposable SQLite projection retains only
+selected winners and the newest 200 progress records per source/provider session; a rebuild
+reproduces that projection. The legacy activity query returns at most 1,000 chronological projected
+rows. Mixed `conversation/entries` pages place typed messages and projected activity in reducer
+display order; the TUI consumes that order directly rather than sorting occurrence timestamps.
+
+The TUI shows activity as compact non-actionable cards in the selected provider/session
+conversation. Focus the message pane, scroll to a card, and press `e` to expand or collapse the card
+nearest the viewport. Failed states and truncation are disclosed in both presentations. Activity
+never creates or selects an inbox row and does not affect open/unread counts, replies,
+archive/restore, drafts, action-unit grouping, final-answer styling, or delivery. Manual scrolling
+anchors only to logical message IDs across coalescing, rebuild reordering, and resize.
 
 ## Failure, cancellation, and shutdown
 
 Protocol EOF, malformed JSON, an invalid JSON-RPC version, an oversized frame, a read/write failure, or an unsupported server request stops the transport and fails pending calls. Child-process failure is reported separately from ordinary EOF. When process and transport completion race, HQ briefly prefers an already available process result after transport closure and allows the transport reader to observe closure after process exit. The adapter refactor must retain deterministic typed causes for both orders.
 
-Canceling an individual RPC wait removes its response slot but does not poison the connection; a late response is ignored. For a submission, the durable `uncertain` checkpoint still requires reconciliation. Current bridge cancellation stops mailbox dispatch, cancels interactive requests, drains the normalized event relay, and begins instance teardown. Explicit interruption uses the optional neutral capability, which the Codex adapter maps to `turn/interrupt`.
+Canceling an individual RPC wait removes its response slot but does not poison the connection; a
+late response is ignored. For a submission, the durable `uncertain` checkpoint still requires
+reconciliation. Bridge intake cancellation unblocks any enqueue waiting for buffer capacity.
+Activity persistence uses a relay-owned context rather than the request/worker context, so ordinary
+provider shutdown closes intake and drains every accepted durable item plus the latest accepted
+coalesced value. Explicit interruption uses the optional neutral capability, which the Codex
+adapter maps to `turn/interrupt`.
 
-Teardown stops new blocking requests and waits for in-flight handlers, stops and drains accepted output work, closes app-server stdin, and waits up to two seconds for graceful process exit. It then kills the child and waits for `Wait` to complete. Supervisor shutdown cancels every logical worker and waits for all worker lifetimes before returning. Stopping one worker releases only that named agent's ownership and does not mutate another worker's runtime state.
+An item containing output and activity is not one SQLite transaction. Stable output IDs and the
+delivery ledger reconcile output first if activity persistence fails after output commits; retry
+then appends the deterministic activity without duplicating the message. Teardown stops new
+blocking requests and waits for in-flight handlers, shuts down the provider so its event stream
+closes, drains the persistence buffer, closes app-server stdin, and waits up to two seconds for
+graceful process exit. A drain timeout cancels persistence and surfaces relay failure rather than
+hanging silently. The child is then killed if necessary and `Wait` completes. Supervisor shutdown
+cancels every logical worker and waits for all worker lifetimes. Stopping one worker releases only
+that named agent's ownership and does not mutate another worker's runtime state.
 
 ## Codex 0.149.0 protocol boundary
 
@@ -177,15 +229,15 @@ HQ consumes these notifications and item variants:
 
 | Notification or item | Current use |
 | --- | --- |
-| `turn/started` | Set the active operation and coalesce a local running-status activity after matching the bound session |
-| `turn/completed` | Clear the matching active operation and coalesce completed, failed, or interrupted activity; failed/interrupted states also retain their canonical status message |
-| `turn/plan/updated` | Render typed plan steps into the coalesced local plan snapshot |
-| `turn/diff/updated` | Replace the coalesced aggregate local diff snapshot |
+| `turn/started` | Set the active operation and coalesce a canonical running-status activity after matching the bound session |
+| `turn/completed` | Clear the matching active operation and coalesce completed, failed, or interrupted canonical activity; failed/interrupted states also retain their canonical status message |
+| `turn/plan/updated` | Render typed plan steps into the coalesced canonical plan snapshot |
+| `turn/diff/updated` | Replace the coalesced aggregate canonical diff snapshot |
 | Supported `item/started` command, file, MCP/dynamic/collaboration tool, web-search, and plan variants | Persist a compact bounded progress record |
 | `item/completed` with `agentMessage` | Persist non-empty completed text, marking `final_answer` separately |
-| `item/completed` with `plan` | Replace streaming/intermediate plan content with the authoritative completed local plan |
-| `item/completed` with command, file, MCP/dynamic/collaboration tool, or web-search variants | Persist the authoritative terminal local activity with typed status and bounded summaries |
-| `item/plan/delta`, command/file output delta, or MCP progress | Replace the item-keyed bounded local progress record; completed items remain authoritative |
+| `item/completed` with `plan` | Replace streaming/intermediate plan content with the authoritative completed canonical plan |
+| `item/completed` with command, file, MCP/dynamic/collaboration tool, or web-search variants | Persist authoritative terminal canonical activity with typed status and bounded summaries |
+| `item/plan/delta`, command/file output delta, or MCP progress | Replace the item-keyed bounded canonical progress record; completed items remain authoritative |
 | Reasoning items/deltas, agent-message deltas, unsupported item variants, and additive notifications | Ignore without stopping the instance; raw reasoning and raw model responses never enter activity |
 
 HQ intentionally ignores additive fields when decoding supported payloads. Adapter-native raw payload is not a source of generic behavior. The current diagnostics retain only selected typed fields; the neutral contract may allow bounded, explicitly redacted metadata, but never unbounded vendor payloads or secrets.

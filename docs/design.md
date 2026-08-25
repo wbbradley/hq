@@ -7,7 +7,7 @@ events, or own Codex workers themselves. The node supervises every HQ-managed Co
 its app-server child in process.
 
 [events.md](events.md) defines canonical event schemas 1 and 2 and causal reduction.
-[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 30 stores the exact signed
+[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 32 stores the exact signed
 event bytes as the source of truth and rebuildable projections derived from them.
 [projects.md](projects.md) defines the project, resource-claim, assignment, mailbox, and
 remote-control model implemented by the daemon, RPC clients, CLI, and TUI.
@@ -33,8 +33,8 @@ correlation attributes rather than embedding context in prose.
 
 `identity reset --yes` stops being safe once a node is using that identity: stop the node first. It
 deletes the key, database, and SQLite side files. HQ remains pre-1.0 and unsupported schema versions
-may be reset rather than migrated; schema 7 migrates through durable mutation receipts (8), change
-revisions (9), named-agent projections (10), and per-session history (11).
+may be reset rather than migrated; schema 7 migrates through every supported intermediate version
+to schema 32.
 
 ## The local node
 
@@ -105,6 +105,28 @@ model, SQLite, domain RPC, and local client representations round-trip the typed
 technical-section JSON directly. A full projection rebuild derives the same representation from
 the canonical log.
 
+### Dual-stream conversations
+
+A provider-namespaced harness session is one conversation with two ordered semantic streams.
+Messages carry inbox, open/unread, delivery, reply, archive, draft, action-unit, and final-answer
+behavior. Schema-2 `harness.activity` carries non-actionable operation status, plan, diff, completed
+command/file/tool, and progress telemetry. Both use typed provider/session/operation/item
+correlation and one reducer conversation order; neither reconstructs identity or presentation from
+body or `Details`.
+
+The `conversation/entries` domain read is a discriminated message/activity union. Every entry has a
+canonical event ID and reducer display order, and exactly one full typed message or activity. It
+pages by `(display_order,event_id)`. Messages hydrate their public UUID and typed semantics for
+actions; activity has no action ID. The legacy `conversation/history` API remains message-only and
+conversation summaries continue to derive only from messages.
+
+Canonical source identity and correlation are different axes. Activity is associated with its full
+originating installation/mailbox address. Provider/session/operation/item IDs are opaque adapter
+correlation. Projection and query keys include source mailbox plus provider namespace so collisions
+do not merge. Device-local message address labels, recipient installation presentation, and
+delivery state may differ between devices even when canonical event IDs, typed semantics, and
+mixed reducer order converge.
+
 ## Revisions and subscriptions
 
 `change_revision` contains one monotonic revision allocated in the same transaction as each
@@ -125,10 +147,12 @@ fallback. TUI drafts, focus, and selection survive reloads.
 
 `canonical_events` retains exact signed bytes, identity fields, event type, scope, and reduction
 status. `causal_edges` indexes parents and `projection_checkpoint` records rebuild progress.
-`mailboxes`, historical bindings, named agents, selected sessions, contexts, messages, threads,
-peers, shares, human accounts, and devices are rebuildable projections. The schema-30 `messages`
-projection stores presentation and correlation columns plus ordered technical-section JSON; these
-columns are indexes, never an alternate source of canonical truth.
+`mailboxes`, historical bindings, named agents, selected sessions, contexts, messages, harness
+activity, threads, peers, shares, human accounts, and devices are rebuildable projections. The
+schema-32 `messages` projection stores presentation/correlation, ordered technical-section JSON,
+and reducer display order. `harness_activities` stores canonical source/audience identity, typed
+correlation, runtime/sequence, truncation, and the same reducer order. These columns are indexes,
+never alternate sources of canonical truth.
 
 `outbox` contains one row per canonical event and recipient installation, including exact canonical
 bytes, recipient key and relay hints, and the exact signed gift wrap before first publish.
@@ -136,7 +160,7 @@ bytes, recipient key and relay hints, and the exact signed gift wrap before firs
 unsigned transport facts. Mutation receipts and change revisions provide local RPC recovery and
 subscriptions.
 
-Delivery claims, mailbox activity, and named-agent ownership are unsigned local node facts. A named
+Delivery claims and named-agent ownership are unsigned local node facts. A named
 agent lease persists across node restarts, expires naturally after crashes, and is never published
 as a relay heartbeat. A suspended process may revive its expired lease only while its exact owner
 token remains stored; any intervening acquisition replaces the token and defeats the stale renewal.
@@ -166,7 +190,8 @@ per-session repository context are signed installation-private facts. A thread-n
 separate from selection and runtime state: it updates the session projection without starting,
 stopping, or switching a worker. Presentation code resolves names through the agent-session domain
 abstraction instead of copying mutable labels into immutable messages or runtime records. Mailbox
-questions, answers, messages, and relay delivery are the Nostr data plane.
+questions, answers, messages, canonical harness activity, and relay delivery are the Nostr data
+plane.
 
 A committed local human message or answer addressed to an offline named Codex mailbox asks the
 supervisor to resume the selected thread asynchronously. Concurrent messages coalesce into one wake.
@@ -175,6 +200,15 @@ setting are reused; after restart, the selected session context is combined with
 environment and launch defaults loaded by the daemon when it constructs the request. Initial prompts
 are never replayed. Mutation-receipt replays repeat the idempotent wake attempt so a crash between
 message commit and dispatch does not permanently strand queued input.
+
+Supported provider events enter one bounded serialized persistence buffer. Assistant output,
+terminal operation state, and completed command/file/tool records backpressure until accepted.
+Running/plan/diff/progress snapshots can replace the same pending logical key at the buffer tail;
+new keys also backpressure at capacity. One relay timeline is assigned before buffering and an
+indivisible work item persists output before activity. Stable output IDs and the delivery ledger
+reconcile a partial output-then-activity write. Normal provider shutdown closes intake and drains
+all accepted durable/latest coalesced work using a relay-owned persistence context; a drain timeout
+is surfaced as failure.
 
 Node stop or restart cancels every worker and leaves its durable selection intact and offline;
 workers restart on demand when a local human message arrives. A future remote controller must address
@@ -197,6 +231,12 @@ root public key, label, and relay hints. A trusted peer can address the human ma
 mailbox additionally requires an active signed share. Revocation stops later projection but cannot
 erase already received data.
 
+Harness activity uses the same account fanout. The writer includes the active membership frontier,
+creates one outbox row and encrypted wrapper per other active device, and receivers decrypt then
+re-run causal membership authorization. Revoked-source activity is quarantined and changes no
+projection. Activity cannot be public or peer-addressed; the protocol permits installation-private
+activity only for genuinely local state.
+
 Mailbox IDs are opaque UUIDs. Signed bindings namespace external IDs by harness (`codex`,
 `claude-code`, `pi`, or `custom`). Signed repository context aids display and abandoned-mailbox
 search but grants no access.
@@ -213,3 +253,10 @@ mailbox routing rights, schema support, and causal validity. Durable canonical I
 receipts, exact gift-wrap reuse, wrapper/logical deduplication, and retained-relay catch-up make
 restarts and retries idempotent. Quarantine is bounded to 1,000 rows, 16 MiB, and 30 days; transient
 receive failures enter staging.
+
+Canonical retention is broader than presentation retention. Exact activity events—including
+superseded snapshots and progress that later falls out—remain in `canonical_events`. The disposable
+activity projection coalesces logical keys and keeps only the newest 200 progress rows per source
+mailbox/provider session; rebuild deterministically reapplies those rules. Legacy unsigned activity
+from schema 30 was discarded during migration to schema 31 rather than assigned manufactured
+signatures. Schema 32 adds message display order for stable mixed-history rebuild and pagination.

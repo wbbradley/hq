@@ -84,6 +84,12 @@ func TestHarnessActivityValidationRejectsInvalidShapesAndBounds(t *testing.T) {
 	}{
 		{"schema 1", func(content *Content, _ *HarnessActivityPayload) { content.Schema = Schema1 }},
 		{"peer scope", func(content *Content, _ *HarnessActivityPayload) { content.Scope = ScopePeerAddressed }},
+		{"public scope", func(content *Content, _ *HarnessActivityPayload) { content.Scope = ScopePublic }},
+		{"account without audience", func(content *Content, _ *HarnessActivityPayload) { content.Scope = ScopeAccountAddressed }},
+		{"account without parents", func(content *Content, _ *HarnessActivityPayload) {
+			content.Scope = ScopeAccountAddressed
+			content.Audience = &Audience{HumanAccountID: accountA}
+		}},
 		{"recipient", func(content *Content, _ *HarnessActivityPayload) {
 			content.Recipient = &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA}
 		}},

@@ -130,7 +130,11 @@ Structured questions and approvals appear as separate HQ inbox rows with Codex t
 
 HQ persists message bodies. A Codex input field marked secret is therefore rejected before its label, question, options, or answer can be stored; the inbox receives only a generic diagnostic. Use Codex directly when a workflow genuinely requires non-persistent secret entry.
 
-Only final `item/completed` agent-message content is relayed. Streaming deltas, reasoning, raw events, command output, and tool progress stay out of HQ. Failed or interrupted turns get one concise status after any completed output.
+Only final `item/completed` agent-message content becomes a message. Supported operation status,
+plan, diff, completed command/file/tool, and progress updates become bounded canonical activity
+entries in the same provider/session conversation. Raw provider events, model responses, reasoning,
+token deltas, and spinners stay out of HQ. Failed or interrupted turns get one concise status after
+any completed output.
 
 ### Restart and delivery boundary
 
@@ -138,7 +142,11 @@ The bridge stores delivery and emitted-output checkpoints beside the resolved HQ
 
 This is an exactly-once recovery boundary for daemon-owned workers, not a distributed lock. HQ claims expire after 30 seconds and Codex steering errors are not a stable typed API in v0.149.0.
 
-On cancellation, EOF, child failure, or a fatal output error, the bridge stops accepting input, releases uncommitted claims, cancels pending structured waits, drains accepted canonical output, emits one terminal HQ status when the store remains available, then closes or kills the child.
+On cancellation, EOF, child failure, or a fatal output error, the bridge stops accepting input,
+releases uncommitted claims, cancels pending structured waits, drains accepted durable output and
+activity plus the latest accepted coalesced snapshots, emits one terminal HQ status when the store
+remains available, then closes or kills the child. Durable work and new activity keys backpressure
+at the bounded persistence buffer; accepted work is not dropped.
 
 Troubleshooting:
 
@@ -178,17 +186,43 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - `x`: toggle archived inbox messages
 - `v`: toggle relay and event status
 - `i`: toggle derived message/context identifiers, typed harness correlation, and all namespaced technical sections
+- `e`: expand or collapse the activity card nearest the Message-pane viewport
 - `g`: manage named harness agents and sessions; use `r` on a session to rename it
 - `r`: refresh
 - `q`: quit
 
-Sent and Archived are independent filters. This lets the human view conversations with open work, add conversations represented only by sent messages, add conversations represented only by archived messages, or show their deduplicated union. One inbox row represents a counterparty conversation: Codex-correlated messages use the Codex thread, while other messages fall back to their HQ causal thread. The selected conversation's Message pane shows every message HQ has persisted in either direction, chronologically and independently of the inbox filters; it does not synthesize arbitrary items from a Codex transcript. Human-authored entries are labeled `You → recipient`. Codex turns remain action units within a conversation, so reply and archive operate only on the oldest open turn. Here, “open” means an incoming message to the human mailbox that has not been archived.
+Sent and Archived are independent filters. This lets the human view conversations with open work,
+add conversations represented only by sent messages, add conversations represented only by
+archived messages, or show their deduplicated union. One inbox row represents a counterparty
+conversation: provider-correlated messages use the provider/session namespace, while other
+messages fall back to their HQ causal thread. The selected Message pane shows every persisted
+message in either direction plus supported canonical harness activity in reducer order; it does not
+synthesize arbitrary items from a provider transcript. Activity appears as collapsed/expandable
+cards with failed and truncated states disclosed, but never creates an inbox row or unread/action
+target. Human-authored messages are labeled `You → recipient`. Provider operations remain action
+units within a conversation, so reply and archive operate only on the oldest open message unit.
+Here, “open” means an incoming message to the human mailbox that has not been archived.
 
 The `n` picker is searchable and lists `self` plus non-retired named agents from this HQ installation, with advisory active/offline and last-active state. Offline agents remain selectable and receive durable queued root messages; selecting `self` creates a durable note in the human inbox. New-message drafts do not archive or inherit reply correlation from the selected turn. Remote agent discovery and qualified addresses such as `fred@laptop` are future work and are not inferred from relay presence.
 
 The TUI always fits its terminal viewport. The full-width inbox is a fixed, selection-scrolling pane occupying 25% of terminal height. The full-width message and compose panes are always stacked beneath it. The compose pane uses 15% of terminal height with a six-line minimum, including its border, and the message pane receives the remaining space. Selecting a conversation automatically places its oldest open action at the first Message-pane content line; conversations without open work open at their newest content. Once the human scrolls, the pane preserves that logical message position across Markdown reflow, resize, and history refreshes that contain no new inbound content; a newly arriving message resumes automatic scrolling and places that content as high as the end-of-thread boundary permits. Tab and Shift+Tab move focus among the three panes; entering the compose pane starts or resumes a reply for the selected turn, or opens the new-message recipient picker when no replyable turn is selected. Its border identifies the active action and durable recipient name as `Replying to alice` or `New message to alice`. Leaving a non-empty composer stows it as a resumable draft, returns inbox navigation to normal, marks reply drafts on their conversation and action, and gives new-message drafts their own outbound inbox row. Empty composers are discarded, including previously saved drafts that were resumed and cleared. Unfocused outlines use a subdued frame while the active pane uses a brighter purple. Page Up/Page Down, Ctrl+U/Ctrl+D, and `j`/`k` act on the focused pane with bounded scrolling; the compose textarea manages its own cursor and scrolling while focused.
 
-Incoming rows begin directly with a friendly sender label such as `codex · hq`. Detail panels combine the typed message presentation and sender in the upper border, for example `[an update from codex · hq]` or `[a final answer from codex · hq]`. Each message body is rendered as terminal Markdown, including emphasis, headings, lists, links, code, and width-aware GFM tables; timestamps and supplementary human details remain literal TUI content and are never hidden or parsed as structure. The source device, repository path, git branch, compact remotes, asynchronously loaded open pull request, opaque message identifiers, typed provider/session/operation correlation, and every namespaced technical section stay hidden until technical details are expanded with `i`. Sections render in producer order with their namespace visible, including namespaces the TUI has never seen. Known harness session IDs are annotated with mutable thread names resolved from the typed provider/session pair while the immutable ID remains visible. The collapsed-state hint is right-aligned in the panel's lower border. Codex final answers retain their green treatment, while progress updates, statuses, and one-shot notices use the normal body color.
+Incoming rows begin directly with a friendly sender label such as `codex · hq`. Detail panels
+combine the typed message presentation and sender in the upper border, for example `[an update from
+codex · hq]` or `[a final answer from codex · hq]`. Each message body is rendered as terminal
+Markdown, including emphasis, headings, lists, links, code, and width-aware GFM tables; timestamps
+and supplementary human details remain literal TUI content and are never hidden or parsed as
+structure. Activity cards use their typed kind/status/title/body and never parse message body or
+`Details`; the TUI follows canonical reducer order rather than sorting local occurrence clocks.
+The source device, repository path, git branch, compact remotes, asynchronously loaded open pull
+request, opaque message identifiers, typed provider/session/operation correlation, and every
+namespaced technical section stay hidden until technical details are expanded with `i`. Sections
+render in producer order with their namespace visible, including namespaces the TUI has never
+seen. Known harness session IDs are annotated with mutable thread names resolved from the typed
+provider/session pair while the immutable ID remains visible. The collapsed-state hint is
+right-aligned in the panel's lower border. Final answers retain their green treatment, while
+updates, statuses, and one-shot notices use the normal body color. Activity cannot become a reply,
+archive, draft, delivery, final-answer, or logical scroll-anchor target.
 
 When stdin or stdout is not a terminal, bare `hq` lists open messages in the human mailbox for the current work directory.
 
@@ -203,6 +237,10 @@ hq cancel MESSAGE_ID
 ### Pair another installation
 
 Each machine keeps its own installation ID, root key, SQLite database, and local node. A signed device grant can place both installations in one logical human account without sharing those files or identities.
+
+Account-addressed messages and canonical harness activity fan one signed event out through separate
+encrypted wrappers to every other active device. Each receiver verifies causal membership again;
+traffic from a revoked device is quarantined and cannot alter either stream.
 
 On the machine being added, get its identity:
 
@@ -300,9 +338,19 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 The TUI subscribes before its initial snapshot and reloads immediately after local or remote commits. A five-minute repair refresh remains; active text, focus, and selection survive every reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, last receive time, account members, pending account fanout, relay-accepted sends, invalid or revoked-device traffic, and event queue counts.
 
-SQLite schema 30 includes typed message presentation/correlation and ordered technical-section projections alongside durable named-agent session history, project/resource/assignment history, runtime, retirement, and worktree-provisioning workflows, remote project replicas and command state, mutation receipts, and monotonic change revisions. Schema 7 migrates forward through every supported intermediate version; unsupported older layouts may still reset during pre-1.0 development.
+SQLite schema 32 includes typed message presentation/correlation, ordered technical sections,
+canonical display order, and projected canonical harness activity alongside durable named-agent
+session history, project/resource/assignment history, runtime, retirement, and
+worktree-provisioning workflows, remote project replicas and command state, mutation receipts, and
+monotonic change revisions. Canonical activity survives projection rebuild; only coalesced winners
+and the newest 200 progress records remain in the disposable activity view. Schema 7 migrates
+forward through every supported intermediate version; schema 31 intentionally discarded legacy
+unsigned activity rows rather than manufacturing signed history. Unsupported older layouts may
+still reset during pre-1.0 development.
 
-See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for signed causal state, and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
+See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for
+signed causal state, [docs/harnesses.md](docs/harnesses.md) for persistence and shutdown behavior,
+and [docs/nostr.md](docs/nostr.md) for encrypted relay transport.
 
 ## Development
 
