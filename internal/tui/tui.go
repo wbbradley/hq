@@ -29,7 +29,7 @@ const repairInterval = 5 * time.Minute
 
 var (
 	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	finalStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	finalStyle   = lipgloss.NewStyle().Bold(true)
 	selected     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
 	inputCursor  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dim          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))

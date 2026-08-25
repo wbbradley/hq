@@ -770,7 +770,7 @@ func TestCoalescedMessagePartsRenderMarkdownIndependently(t *testing.T) {
 			t.Fatalf("coalesced panel omitted timestamp %q: %q", timestamp, panel)
 		}
 	}
-	if !strings.Contains(panel, "\x1b[1m") || !strings.Contains(panel, ";3m") {
+	if !strings.Contains(panel, "\x1b[1m") || !strings.Contains(panel, "\x1b[3m") {
 		t.Fatalf("coalesced bodies omitted independent emphasis: %q", panel)
 	}
 }

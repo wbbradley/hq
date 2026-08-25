@@ -220,8 +220,8 @@ namespaced technical section stay hidden until technical details are expanded wi
 render in producer order with their namespace visible, including namespaces the TUI has never
 seen. Known harness session IDs are annotated with mutable thread names resolved from the typed
 provider/session pair while the immutable ID remains visible. The collapsed-state hint is
-right-aligned in the panel's lower border. Final answers retain their green treatment, while
-updates, statuses, and one-shot notices use the normal body color. Activity cannot become a reply,
+right-aligned in the panel's lower border. Final answers use the normal body color, as do updates,
+statuses, and one-shot notices. Activity cannot become a reply,
 archive, draft, delivery, final-answer, or logical scroll-anchor target.
 
 When stdin or stdout is not a terminal, bare `hq` lists open messages in the human mailbox for the current work directory.

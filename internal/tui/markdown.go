@@ -122,9 +122,6 @@ func messageMarkdownStyle(kind string) ansi.StyleConfig {
 	style.CodeBlock.Margin = &zero
 	style.Heading.Color = markdownString("212")
 	style.H1.BackgroundColor = markdownString("62")
-	if kind == "final-answer" {
-		style.Document.Color = markdownString("42")
-	}
 	return style
 }
 

@@ -42,12 +42,12 @@ func TestRenderMessageMarkdownPreservesPlainTextNewlines(t *testing.T) {
 	}
 }
 
-func TestRenderMessageMarkdownPreservesFinalAnswerColor(t *testing.T) {
+func TestRenderMessageMarkdownUsesNormalFinalAnswerColor(t *testing.T) {
 	rendered, err := renderMessageMarkdown("Final answer with **specific emphasis**", "final-answer", 50)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(rendered, "38;5;42") || !strings.Contains(rendered, ";1m") {
+	if strings.Contains(rendered, "38;5;42") || !strings.Contains(rendered, "\x1b[1m") {
 		t.Fatalf("final-answer styling = %q", rendered)
 	}
 }
