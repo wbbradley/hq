@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 )
 
@@ -38,6 +39,113 @@ func TestReduceIsIdempotentAndInputOrderIndependent(t *testing.T) {
 			t.Fatalf("reduction changed after shuffle\nwant: %#v\ngot:  %#v", want, got)
 		}
 	}
+}
+
+func TestHarnessActivityProjectionIsDeterministicAndMessageInert(t *testing.T) {
+	root := signedMessagePayload(t, Schema2, TextPayload{Body: "message"}, 10)
+	first := signedActivity(t, activityPayload(domain.HarnessActivityPlan, "", ""), []string{root.ID()}, 1)
+	secondPayload := activityPayload(domain.HarnessActivityPlan, "", "")
+	secondPayload.Body, secondPayload.Sequence = "new plan", 2
+	second := signedActivity(t, secondPayload, []string{first.ID()}, 2)
+	command := signedActivity(t, activityPayload(domain.HarnessActivityCommand, "command", domain.HarnessActivityCompleted), []string{second.ID()}, 3)
+	otherProviderPayload := secondPayload
+	otherProviderPayload.Correlation.Provider = "other"
+	otherProvider := signedActivity(t, otherProviderPayload, []string{root.ID()}, 4)
+	otherMailbox := mustSign(t, Content{
+		Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA,
+		Sender:  &MailboxAddress{InstallationID: installationA, MailboxID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d13"},
+		Parents: []string{root.ID()}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, secondPayload),
+	}, time.Unix(5, 0), secretA)
+	raw := wires(root, first, second, command, otherProvider, otherMailbox, second)
+	want := Reduce(raw, localPolicy())
+	if len(want.Messages) != 1 || len(want.Threads) != 1 || len(want.HarnessActivities) != 4 {
+		t.Fatalf("activity changed message state or projection count: messages=%#v threads=%#v activities=%#v", want.Messages, want.Threads, want.HarnessActivities)
+	}
+	var foundPlan, foundCommand, foundOther bool
+	for _, activity := range want.HarnessActivities {
+		switch {
+		case activity.Kind == domain.HarnessActivityPlan && activity.Correlation.Provider == "home-built" && activity.Sender.MailboxID == mailboxAgentA:
+			foundPlan = activity.EventID == second.ID() && activity.Body == "new plan" && activity.Sequence == 2
+		case activity.Kind == domain.HarnessActivityCommand:
+			foundCommand = activity.EventID == command.ID()
+		case activity.Correlation.Provider == "other":
+			foundOther = true
+		}
+	}
+	if !foundPlan || !foundCommand || !foundOther || len(want.ConversationOrder) != 6 || want.ConversationOrder[0] != root.ID() {
+		t.Fatalf("activity projection/order = %#v order=%#v", want.HarnessActivities, want.ConversationOrder)
+	}
+	for range 50 {
+		shuffled := append([][]byte(nil), raw...)
+		rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+		if got := Reduce(shuffled, localPolicy()); !reflect.DeepEqual(got, want) {
+			t.Fatalf("activity reduction changed after reorder/duplicate\nwant=%#v\ngot=%#v", want.HarnessActivities, got.HarnessActivities)
+		}
+	}
+}
+
+func TestHarnessActivityUnsupportedAndAccountAuthorization(t *testing.T) {
+	local := signedActivity(t, activityPayload(domain.HarnessActivityOperation, "", domain.HarnessActivityRunning), nil, 1)
+	oldPolicy := localPolicy()
+	oldPolicy.SchemaVersions = []int{Schema1}
+	old := Reduce(wires(local), oldPolicy)
+	if old.Records[local.ID()].Status != StatusUnsupported || len(old.Records[local.ID()].Event.Wire) == 0 {
+		t.Fatalf("old reader activity = %#v", old.Records[local.ID()])
+	}
+	create, grant, accept := humanMembershipEvents(t)
+	payload := activityPayload(domain.HarnessActivityProgress, "progress", domain.HarnessActivityRunning)
+	accountActivity := mustSign(t, Content{
+		Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationB,
+		Sender:   &MailboxAddress{InstallationID: installationB, MailboxID: mailboxAgentA},
+		Audience: &Audience{HumanAccountID: accountA}, Parents: []string{accept.ID()}, Scope: ScopeAccountAddressed,
+		Payload: mustPayload(t, payload),
+	}, time.Unix(5, 0), secretB)
+	state := Reduce(wires(create, grant, accept, accountActivity), localPolicy())
+	if state.Records[accountActivity.ID()].Status != StatusProjected || len(state.HarnessActivities) != 1 {
+		t.Fatalf("active account activity = %#v %#v", state.Records[accountActivity.ID()], state.HarnessActivities)
+	}
+	oldAccountPolicy := localPolicy()
+	oldAccountPolicy.SchemaVersions = []int{Schema1}
+	oldAccount := Reduce(wires(create, grant, accept, accountActivity), oldAccountPolicy)
+	if oldAccount.Records[accountActivity.ID()].Status != StatusUnsupported || len(oldAccount.Records[accountActivity.ID()].Event.Wire) == 0 {
+		t.Fatalf("old account reader activity = %#v", oldAccount.Records[accountActivity.ID()])
+	}
+	wrong := accountActivity.Content
+	wrong.Audience = &Audience{HumanAccountID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d22"}
+	wrong.Payload = mustPayload(t, payload)
+	wrongRaw := mustSignSchema(t, wrong, secretB, 6)
+	wrongState := Reduce(append(wires(create, grant, accept), wrongRaw), localPolicy())
+	for _, record := range wrongState.Records {
+		if record.Event.Content.Type == TypeHarnessActivity && record.Status != StatusUnauthorized {
+			t.Fatalf("unrelated account activity = %#v", record)
+		}
+	}
+	revoke := mustSign(t, Content{
+		Type: TypeHumanDeviceRevoke, InstallationID: installationA,
+		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
+		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Audience:  &Audience{HumanAccountID: accountA}, Parents: []string{accept.ID()}, Scope: ScopeAccountAddressed,
+		Payload: mustPayload(t, humanDevicePayload()),
+	}, time.Unix(7, 0), secretA)
+	revokedContent := accountActivity.Content
+	revokedContent.Parents = []string{revoke.ID()}
+	revokedContent.Payload = mustPayload(t, payload)
+	revokedRaw := mustSignSchema(t, revokedContent, secretB, 8)
+	revokedState := Reduce(append(wires(create, grant, accept, revoke), revokedRaw), localPolicy())
+	for _, record := range revokedState.Records {
+		if record.Event.Content.Type == TypeHarnessActivity && record.Status != StatusUnauthorized {
+			t.Fatalf("revoked account activity = %#v", record)
+		}
+	}
+}
+
+func signedActivity(t *testing.T, payload HarnessActivityPayload, parents []string, second int64) SignedEvent {
+	t.Helper()
+	return mustSign(t, Content{
+		Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA,
+		Sender:  &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
+		Parents: parents, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, payload),
+	}, time.Unix(second, 0), secretA)
 }
 
 func TestMultipleAnswersAndCancellationRelationsUseCausality(t *testing.T) {

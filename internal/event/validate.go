@@ -25,7 +25,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 	if !knownType(content.Type) {
 		return StatusUnsupported, fmt.Errorf("unsupported HQ event type %q", content.Type)
 	}
-	if schema == Schema2 && content.Type != TypeQuestion && content.Type != TypeAnswer && content.Type != TypeMessage {
+	if schema == Schema2 && content.Type != TypeQuestion && content.Type != TypeAnswer && content.Type != TypeMessage && content.Type != TypeHarnessActivity {
 		return StatusUnsupported, fmt.Errorf("HQ schema 2 does not define event type %q", content.Type)
 	}
 	if err := validUUID("installation ID", content.InstallationID); err != nil {
@@ -84,6 +84,31 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 	}
 
 	switch content.Type {
+	case TypeHarnessActivity:
+		if schema != Schema2 {
+			return StatusUnsupported, errors.New("harness activity is defined only in HQ schema 2")
+		}
+		if content.Scope != ScopeInstallationPrivate && content.Scope != ScopeAccountAddressed {
+			return StatusInvalid, errors.New("harness activity must be installation-private or account-addressed")
+		}
+		if content.ThreadID != "" || content.Sender == nil || content.Recipient != nil {
+			return StatusInvalid, errors.New("harness activity needs one sender and no recipient or thread")
+		}
+		if err := validateAddress("sender", *content.Sender); err != nil {
+			return StatusInvalid, err
+		}
+		if content.Sender.InstallationID != content.InstallationID {
+			return StatusInvalid, errors.New("harness activity sender installation does not match event installation")
+		}
+		if content.Sender.MailboxID == model.HumanMailboxID {
+			return StatusInvalid, errors.New("harness activity cannot originate from the human mailbox")
+		}
+		if content.Scope == ScopeAccountAddressed && len(content.Parents) == 0 {
+			return StatusInvalid, errors.New("account-addressed harness activity needs membership parents")
+		}
+		if err := validateHarnessActivityPayload(content.Payload); err != nil {
+			return StatusInvalid, err
+		}
 	case TypeQuestion, TypeMessage:
 		if content.ThreadID != "" || (content.Scope != ScopeAccountAddressed && len(content.Parents) != 0) || (content.Scope == ScopeAccountAddressed && len(content.Parents) == 0) {
 			return StatusInvalid, errors.New("root question and message events must omit thread_id and account-addressed roots need membership parents")
@@ -423,7 +448,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 
 func knownType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeAgentSessionRename, TypeQuestion, TypeAnswer, TypeMessage,
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeAgentSessionRename, TypeQuestion, TypeAnswer, TypeMessage, TypeHarnessActivity,
 		TypeThreadCancel, TypeMessageArchive, TypeMessageRestore, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
 		TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountCreate, TypeHumanAccountSelect,
 		TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke, TypeProjectEvent, TypeProjectCommand, TypeProjectResult:
@@ -431,6 +456,68 @@ func knownType(kind Type) bool {
 	default:
 		return false
 	}
+}
+
+func validateHarnessActivityPayload(raw json.RawMessage) error {
+	if !utf8.Valid(raw) {
+		return errors.New("harness activity payload is not valid UTF-8")
+	}
+	var payload HarnessActivityPayload
+	if err := decodePayload(raw, &payload); err != nil {
+		return err
+	}
+	if err := validateMessageCorrelation(payload.Correlation); err != nil {
+		return err
+	}
+	if payload.Correlation.OperationID == "" || payload.Correlation.RequestID != "" {
+		return errors.New("harness activity needs operation correlation and cannot carry a request ID")
+	}
+	if err := validOpaqueIdentity("harness activity runtime ID", payload.RuntimeID, MaxHarnessActivityRuntimeBytes); err != nil {
+		return err
+	}
+	if payload.Sequence == 0 {
+		return errors.New("harness activity sequence must be positive")
+	}
+	if payload.OccurredAt <= 0 || payload.OccurredAt > 253402300799999 {
+		return errors.New("harness activity occurrence time is invalid")
+	}
+	if !utf8.ValidString(payload.Title) || !utf8.ValidString(payload.Body) {
+		return errors.New("harness activity text is not valid UTF-8")
+	}
+	if len(payload.Title) > MaxHarnessActivityTitleBytes || len(payload.Body) > MaxHarnessActivityBodyBytes {
+		return errors.New("harness activity text exceeds its byte limit")
+	}
+	hasItem := payload.Correlation.ItemID != ""
+	switch payload.Kind {
+	case domain.HarnessActivityOperation:
+		if hasItem || payload.Status == "" {
+			return errors.New("operation activity forbids an item and requires status")
+		}
+	case domain.HarnessActivityPlan, domain.HarnessActivityDiff:
+		if hasItem || strings.TrimSpace(payload.Body) == "" {
+			return fmt.Errorf("harness activity %s forbids an item and requires a body", payload.Kind)
+		}
+	case domain.HarnessActivityProgress:
+		if !hasItem || strings.TrimSpace(payload.Body) == "" {
+			return errors.New("progress activity requires an item and body")
+		}
+	case domain.HarnessActivityCommand, domain.HarnessActivityFile, domain.HarnessActivityTool:
+		if !hasItem || strings.TrimSpace(payload.Title) == "" || !terminalHarnessActivityStatus(payload.Status) {
+			return fmt.Errorf("harness activity %s requires an item, title, and terminal status", payload.Kind)
+		}
+	default:
+		return fmt.Errorf("unknown harness activity kind %q", payload.Kind)
+	}
+	switch payload.Status {
+	case "", domain.HarnessActivityRunning, domain.HarnessActivityCompleted, domain.HarnessActivityFailed, domain.HarnessActivityInterrupted:
+	default:
+		return fmt.Errorf("unknown harness activity status %q", payload.Status)
+	}
+	return nil
+}
+
+func terminalHarnessActivityStatus(status domain.HarnessActivityStatus) bool {
+	return status == domain.HarnessActivityCompleted || status == domain.HarnessActivityFailed || status == domain.HarnessActivityInterrupted
 }
 
 func validAgentName(name string) error {

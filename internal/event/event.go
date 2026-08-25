@@ -15,6 +15,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 )
 
@@ -41,6 +42,10 @@ const (
 	MaxTechnicalLabelBytes       = 256
 	MaxTechnicalValueBytes       = 4 << 10
 	MaxTechnicalPayloadBytes     = 16 << 10
+
+	MaxHarnessActivityTitleBytes   = 1 << 10
+	MaxHarnessActivityBodyBytes    = 12 << 10
+	MaxHarnessActivityRuntimeBytes = 512
 )
 
 type Type string
@@ -73,6 +78,7 @@ const (
 	TypeProjectEvent       Type = "project.event"
 	TypeProjectCommand     Type = "project.command"
 	TypeProjectResult      Type = "project.command.result"
+	TypeHarnessActivity    Type = "harness.activity"
 )
 
 type Scope string
@@ -134,6 +140,18 @@ type TextPayload struct {
 	Presentation      model.PresentationKind   `json:"presentation,omitempty"`
 	Correlation       model.MessageCorrelation `json:"correlation,omitzero"`
 	TechnicalSections []model.TechnicalSection `json:"technical_sections,omitempty"`
+}
+
+type HarnessActivityPayload struct {
+	Correlation model.MessageCorrelation     `json:"correlation"`
+	Kind        domain.HarnessActivityKind   `json:"kind"`
+	Status      domain.HarnessActivityStatus `json:"status,omitempty"`
+	Title       string                       `json:"title,omitempty"`
+	Body        string                       `json:"body,omitempty"`
+	Truncated   bool                         `json:"truncated,omitempty"`
+	OccurredAt  int64                        `json:"occurred_at"`
+	RuntimeID   string                       `json:"runtime_id"`
+	Sequence    uint64                       `json:"sequence"`
 }
 
 // textPayloadSchema1 is the exact historical message payload. Keep this type

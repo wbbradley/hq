@@ -3,6 +3,8 @@ package domain
 import (
 	"context"
 	"time"
+
+	"github.com/wbbradley/hq/internal/model"
 )
 
 type HarnessActivityKind string
@@ -34,20 +36,27 @@ const (
 	HarnessActivityProgressRetained = 200
 )
 
-// HarnessActivity is an installation-local, non-actionable runtime projection.
-// It is never a signed message and cannot be replied to or archived.
+// HarnessActivity is a non-actionable runtime projection. Canonical activities
+// carry EventID and source identity; legacy local rows leave those fields empty.
+// An activity is never a message and cannot be replied to or archived.
 type HarnessActivity struct {
-	MailboxID   string                `json:"mailbox_id"`
-	Harness     string                `json:"harness"`
-	SessionID   string                `json:"session_id"`
-	OperationID string                `json:"operation_id"`
-	Kind        HarnessActivityKind   `json:"kind"`
-	ItemID      string                `json:"item_id,omitempty"`
-	Status      HarnessActivityStatus `json:"status,omitempty"`
-	Title       string                `json:"title,omitempty"`
-	Body        string                `json:"body,omitempty"`
-	Truncated   bool                  `json:"truncated,omitempty"`
-	OccurredAt  time.Time             `json:"occurred_at"`
+	EventID        string                   `json:"event_id,omitempty"`
+	InstallationID string                   `json:"installation_id,omitempty"`
+	MailboxID      string                   `json:"mailbox_id"`
+	Harness        string                   `json:"harness"`
+	SessionID      string                   `json:"session_id"`
+	OperationID    string                   `json:"operation_id"`
+	Correlation    model.MessageCorrelation `json:"correlation,omitzero"`
+	RuntimeID      string                   `json:"runtime_id,omitempty"`
+	Sequence       uint64                   `json:"sequence,omitempty"`
+	DisplayOrder   int                      `json:"display_order,omitempty"`
+	Kind           HarnessActivityKind      `json:"kind"`
+	ItemID         string                   `json:"item_id,omitempty"`
+	Status         HarnessActivityStatus    `json:"status,omitempty"`
+	Title          string                   `json:"title,omitempty"`
+	Body           string                   `json:"body,omitempty"`
+	Truncated      bool                     `json:"truncated,omitempty"`
+	OccurredAt     time.Time                `json:"occurred_at"`
 }
 
 type HarnessActivityFilter struct {

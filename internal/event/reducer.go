@@ -1,12 +1,14 @@
 package event
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"sort"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 )
 
@@ -121,6 +123,22 @@ type MessageProjection struct {
 	PeerReceived      bool
 }
 
+type HarnessActivityProjection struct {
+	EventID           string
+	Sender            MailboxAddress
+	AudienceAccountID string
+	Correlation       model.MessageCorrelation
+	Kind              domain.HarnessActivityKind
+	Status            domain.HarnessActivityStatus
+	Title             string
+	Body              string
+	Truncated         bool
+	OccurredAt        time.Time
+	RuntimeID         string
+	Sequence          uint64
+	DisplayOrder      int
+}
+
 type CancellationRelation string
 
 const (
@@ -140,33 +158,37 @@ type ThreadProjection struct {
 }
 
 type State struct {
-	Policy           Policy
-	Records          map[string]Record
-	Invalid          []Record
-	Mailboxes        map[string]MailboxProjection
-	NamedAgents      map[string]NamedAgentProjection
-	Peers            map[string]PeerProjection
-	Shares           map[string]MailboxShareProjection
-	Accounts         map[string]HumanAccountProjection
-	DefaultAccountID string
-	Messages         map[string]MessageProjection
-	Threads          map[string]ThreadProjection
-	DisplayOrder     []string
+	Policy               Policy
+	Records              map[string]Record
+	Invalid              []Record
+	Mailboxes            map[string]MailboxProjection
+	NamedAgents          map[string]NamedAgentProjection
+	Peers                map[string]PeerProjection
+	Shares               map[string]MailboxShareProjection
+	Accounts             map[string]HumanAccountProjection
+	DefaultAccountID     string
+	Messages             map[string]MessageProjection
+	Threads              map[string]ThreadProjection
+	HarnessActivities    map[string]HarnessActivityProjection
+	HarnessActivityOrder []string
+	ConversationOrder    []string
+	DisplayOrder         []string
 }
 
 // Reduce verifies and reduces a complete event set. Callers may pass the events
 // in any order and may pass the same event more than once.
 func Reduce(rawEvents [][]byte, policy Policy) State {
 	state := State{
-		Policy:      policy,
-		Records:     make(map[string]Record),
-		Mailboxes:   make(map[string]MailboxProjection),
-		NamedAgents: make(map[string]NamedAgentProjection),
-		Peers:       make(map[string]PeerProjection),
-		Shares:      make(map[string]MailboxShareProjection),
-		Accounts:    make(map[string]HumanAccountProjection),
-		Messages:    make(map[string]MessageProjection),
-		Threads:     make(map[string]ThreadProjection),
+		Policy:            policy,
+		Records:           make(map[string]Record),
+		Mailboxes:         make(map[string]MailboxProjection),
+		NamedAgents:       make(map[string]NamedAgentProjection),
+		Peers:             make(map[string]PeerProjection),
+		Shares:            make(map[string]MailboxShareProjection),
+		Accounts:          make(map[string]HumanAccountProjection),
+		Messages:          make(map[string]MessageProjection),
+		Threads:           make(map[string]ThreadProjection),
+		HarnessActivities: make(map[string]HarnessActivityProjection),
 	}
 	for _, raw := range rawEvents {
 		schemas := policy.SchemaVersions
@@ -204,6 +226,8 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 	state.applyMessageState()
 	state.projectThreads()
 	state.DisplayOrder = state.orderMessages()
+	state.ConversationOrder = state.orderConversationEvents()
+	state.projectHarnessActivities()
 	return state
 }
 
@@ -466,6 +490,13 @@ func (s *State) classifyUnsupported() {
 			continue
 		}
 		keyID := record.Event.Nostr.PubKey
+		if record.Event.Content.Type == "" {
+			var content Content
+			if err := json.Unmarshal([]byte(record.Event.Nostr.Content), &content); err == nil {
+				record.Event.Content = content
+				s.Records[id] = record
+			}
+		}
 		authorized := keyID == s.Policy.RootKeyID
 		if !authorized {
 			for _, peer := range s.Peers {
@@ -474,6 +505,9 @@ func (s *State) classifyUnsupported() {
 					break
 				}
 			}
+		}
+		if !authorized && record.Event.Content.Scope == ScopeAccountAddressed && record.Event.Content.Audience != nil {
+			authorized = s.accountMembershipAt(record.Event.Content.Audience.HumanAccountID, record.Event.Content.InstallationID, keyID, id)
 		}
 		if !authorized {
 			record.Status = StatusUnauthorized
@@ -687,6 +721,8 @@ func (s *State) authorizedAccountEvent(item SignedEvent) bool {
 		return ok && target.Event.Content.Audience != nil && target.Event.Content.Audience.HumanAccountID == content.Audience.HumanAccountID
 	case TypeProjectEvent:
 		return true
+	case TypeHarnessActivity:
+		return content.Sender != nil && content.Recipient == nil && content.Sender.InstallationID == content.InstallationID && content.Sender.MailboxID != humanMailbox
 	case TypeProjectCommand, TypeProjectResult:
 		return content.Sender != nil && content.Recipient != nil && content.Sender.MailboxID == s.Policy.HumanMailboxID && content.Recipient.MailboxID == s.Policy.HumanMailboxID
 	default:
@@ -1034,6 +1070,100 @@ func (s *State) projectMessages() {
 		}
 		s.Messages[id] = message
 	}
+}
+
+func (s *State) projectHarnessActivities() {
+	for order, id := range s.ConversationOrder {
+		record := s.Records[id]
+		if record.Event.Content.Type != TypeHarnessActivity {
+			continue
+		}
+		var payload HarnessActivityPayload
+		if err := decodePayload(record.Event.Content.Payload, &payload); err != nil || record.Event.Content.Sender == nil {
+			continue
+		}
+		audience := ""
+		if record.Event.Content.Audience != nil {
+			audience = record.Event.Content.Audience.HumanAccountID
+		}
+		projection := HarnessActivityProjection{
+			EventID: id, Sender: *record.Event.Content.Sender, AudienceAccountID: audience,
+			Correlation: payload.Correlation, Kind: payload.Kind, Status: payload.Status,
+			Title: payload.Title, Body: payload.Body, Truncated: payload.Truncated,
+			OccurredAt: time.UnixMilli(payload.OccurredAt).UTC(), RuntimeID: payload.RuntimeID,
+			Sequence: payload.Sequence, DisplayOrder: order,
+		}
+		key := harnessActivityProjectionKey(projection)
+		s.HarnessActivities[key] = projection
+	}
+	s.HarnessActivityOrder = make([]string, 0, len(s.HarnessActivities))
+	for key := range s.HarnessActivities {
+		s.HarnessActivityOrder = append(s.HarnessActivityOrder, key)
+	}
+	sort.Slice(s.HarnessActivityOrder, func(i, j int) bool {
+		left, right := s.HarnessActivities[s.HarnessActivityOrder[i]], s.HarnessActivities[s.HarnessActivityOrder[j]]
+		if left.DisplayOrder != right.DisplayOrder {
+			return left.DisplayOrder < right.DisplayOrder
+		}
+		return s.HarnessActivityOrder[i] < s.HarnessActivityOrder[j]
+	})
+}
+
+func (s *State) orderConversationEvents() []string {
+	selected := make(map[string]bool)
+	for id, record := range s.Records {
+		switch record.Event.Content.Type {
+		case TypeQuestion, TypeAnswer, TypeMessage:
+			selected[id] = record.Status == StatusProjected || record.Status == StatusUnresolved
+		case TypeHarnessActivity:
+			selected[id] = record.Status == StatusProjected
+		}
+		if !selected[id] {
+			delete(selected, id)
+		}
+	}
+	remaining := make(map[string]int, len(selected))
+	children := make(map[string][]string)
+	for id := range selected {
+		for _, parent := range s.Records[id].Event.Content.Parents {
+			if selected[parent] {
+				remaining[id]++
+				children[parent] = append(children[parent], id)
+			}
+		}
+	}
+	ready := make([]string, 0)
+	for id := range selected {
+		if remaining[id] == 0 {
+			ready = append(ready, id)
+		}
+	}
+	var ordered []string
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool {
+			left, right := s.Records[ready[i]].Event, s.Records[ready[j]].Event
+			if left.Nostr.CreatedAt != right.Nostr.CreatedAt {
+				return left.Nostr.CreatedAt < right.Nostr.CreatedAt
+			}
+			return ready[i] < ready[j]
+		})
+		id := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, id)
+		for _, child := range children[id] {
+			remaining[child]--
+			if remaining[child] == 0 {
+				ready = append(ready, child)
+			}
+		}
+	}
+	return ordered
+}
+
+func harnessActivityProjectionKey(activity HarnessActivityProjection) string {
+	return activity.Sender.InstallationID + "\x00" + activity.Sender.MailboxID + "\x00" +
+		activity.Correlation.Provider + "\x00" + activity.Correlation.SessionID + "\x00" +
+		activity.Correlation.OperationID + "\x00" + string(activity.Kind) + "\x00" + activity.Correlation.ItemID
 }
 
 func (s *State) applyMessageState() {

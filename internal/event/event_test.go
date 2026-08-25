@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 )
 
@@ -48,6 +49,105 @@ func TestCanonicalEventFixture(t *testing.T) {
 	if got := Inspect(event.Wire); got.Status != StatusProjected || got.Err != nil {
 		t.Fatalf("inspect fixture = %s, %v", got.Status, got.Err)
 	}
+}
+
+func TestHarnessActivityKindsValidateSignAndInspect(t *testing.T) {
+	tests := []HarnessActivityPayload{
+		activityPayload(domain.HarnessActivityOperation, "", domain.HarnessActivityRunning),
+		activityPayload(domain.HarnessActivityPlan, "", ""),
+		activityPayload(domain.HarnessActivityDiff, "", ""),
+		activityPayload(domain.HarnessActivityCommand, "command", domain.HarnessActivityCompleted),
+		activityPayload(domain.HarnessActivityFile, "file", domain.HarnessActivityFailed),
+		activityPayload(domain.HarnessActivityTool, "tool", domain.HarnessActivityInterrupted),
+		activityPayload(domain.HarnessActivityProgress, "progress", domain.HarnessActivityRunning),
+	}
+	for _, payload := range tests {
+		t.Run(string(payload.Kind), func(t *testing.T) {
+			signed := mustSign(t, Content{
+				Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA,
+				Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
+				Scope:  ScopeInstallationPrivate, Payload: mustPayload(t, payload),
+			}, time.Unix(1_700_000_000, 0), secretA)
+			inspection := Inspect(signed.Wire)
+			if inspection.Status != StatusProjected || inspection.Err != nil || inspection.Event.ID() != signed.ID() {
+				t.Fatalf("activity inspection = %#v", inspection)
+			}
+		})
+	}
+}
+
+func TestHarnessActivityValidationRejectsInvalidShapesAndBounds(t *testing.T) {
+	valid := activityPayload(domain.HarnessActivityProgress, "progress", domain.HarnessActivityRunning)
+	tests := []struct {
+		name   string
+		mutate func(*Content, *HarnessActivityPayload)
+	}{
+		{"schema 1", func(content *Content, _ *HarnessActivityPayload) { content.Schema = Schema1 }},
+		{"peer scope", func(content *Content, _ *HarnessActivityPayload) { content.Scope = ScopePeerAddressed }},
+		{"recipient", func(content *Content, _ *HarnessActivityPayload) {
+			content.Recipient = &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA}
+		}},
+		{"human sender", func(content *Content, _ *HarnessActivityPayload) { content.Sender.MailboxID = mailboxHumanA }},
+		{"missing operation", func(_ *Content, payload *HarnessActivityPayload) { payload.Correlation.OperationID = "" }},
+		{"request", func(_ *Content, payload *HarnessActivityPayload) { payload.Correlation.RequestID = "request" }},
+		{"missing item", func(_ *Content, payload *HarnessActivityPayload) { payload.Correlation.ItemID = "" }},
+		{"zero sequence", func(_ *Content, payload *HarnessActivityPayload) { payload.Sequence = 0 }},
+		{"bad occurrence", func(_ *Content, payload *HarnessActivityPayload) { payload.OccurredAt = 0 }},
+		{"missing runtime", func(_ *Content, payload *HarnessActivityPayload) { payload.RuntimeID = "" }},
+		{"unknown status", func(_ *Content, payload *HarnessActivityPayload) { payload.Status = "unknown" }},
+		{"plan item", func(_ *Content, payload *HarnessActivityPayload) { payload.Kind = domain.HarnessActivityPlan }},
+		{"command title", func(_ *Content, payload *HarnessActivityPayload) {
+			payload.Kind, payload.Status, payload.Title = domain.HarnessActivityCommand, domain.HarnessActivityCompleted, ""
+		}},
+		{"title bound", func(_ *Content, payload *HarnessActivityPayload) {
+			payload.Title = strings.Repeat("x", MaxHarnessActivityTitleBytes+1)
+		}},
+		{"body bound", func(_ *Content, payload *HarnessActivityPayload) {
+			payload.Body = strings.Repeat("x", MaxHarnessActivityBodyBytes+1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := valid
+			content := Content{Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate}
+			test.mutate(&content, &payload)
+			content.Payload = mustPayload(t, payload)
+			if _, err := Sign(content, time.Unix(1_700_000_000, 0), secretA); err == nil {
+				t.Fatal("invalid activity signed")
+			}
+		})
+	}
+	invalidUTF8 := append([]byte(`{"correlation":{"provider":"p","session_id":"s","operation_id":"o","item_id":"i"},"kind":"progress","body":"`), 0xff)
+	invalidUTF8 = append(invalidUTF8, []byte(`","occurred_at":1,"runtime_id":"r","sequence":1}`)...)
+	if err := validateHarnessActivityPayload(invalidUTF8); err == nil {
+		t.Fatal("invalid UTF-8 activity payload validated")
+	}
+	unknownField := append([]byte(nil), mustPayload(t, valid)...)
+	unknownField = append(unknownField[:len(unknownField)-1], []byte(`,"unknown":true}`)...)
+	if err := validateHarnessActivityPayload(unknownField); err == nil {
+		t.Fatal("activity payload with unknown field validated")
+	}
+	escaped := valid
+	escaped.Body = strings.Repeat("\\", MaxHarnessActivityBodyBytes)
+	if _, err := Sign(Content{Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, escaped)}, time.Unix(1, 0), secretA); err != nil {
+		t.Fatalf("bounded escaped activity did not fit signed wire: %v", err)
+	}
+	multibyte := valid
+	multibyte.Body = strings.Repeat("界", MaxHarnessActivityBodyBytes/3)
+	if _, err := Sign(Content{Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, multibyte)}, time.Unix(1, 0), secretA); err != nil {
+		t.Fatalf("bounded multibyte activity did not fit signed wire: %v", err)
+	}
+}
+
+func activityPayload(kind domain.HarnessActivityKind, item string, status domain.HarnessActivityStatus) HarnessActivityPayload {
+	payload := HarnessActivityPayload{
+		Correlation: model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", ItemID: item},
+		Kind:        kind, Status: status, Body: "body", OccurredAt: 1_700_000_000_123, RuntimeID: "runtime", Sequence: 1,
+	}
+	if kind == domain.HarnessActivityCommand || kind == domain.HarnessActivityFile || kind == domain.HarnessActivityTool {
+		payload.Title = "title"
+	}
+	return payload
 }
 
 func TestHumanAccountEventFixture(t *testing.T) {
