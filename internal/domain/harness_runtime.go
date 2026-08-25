@@ -28,6 +28,14 @@ const (
 	HarnessRuntimePending  HarnessRuntimePhase = "pending-home-command"
 )
 
+type HarnessWorkState string
+
+const (
+	HarnessWorkWaiting HarnessWorkState = "waiting"
+	HarnessWorkWorking HarnessWorkState = "working"
+	HarnessWorkUnknown HarnessWorkState = "unknown"
+)
+
 // HarnessLaunchDefaults contains local preferences used when the daemon must
 // construct a launch request itself. Explicit client launch requests already
 // contain their resolved values.
@@ -80,13 +88,22 @@ type HarnessLaunchRequest struct {
 }
 
 type HarnessRuntime struct {
-	AgentName string              `json:"agent_name"`
-	Harness   string              `json:"harness"`
-	SessionID string              `json:"session_id,omitempty"`
-	Directory string              `json:"directory,omitempty"`
-	Phase     HarnessRuntimePhase `json:"phase"`
-	StartedAt *time.Time          `json:"started_at,omitempty"`
-	Error     string              `json:"error,omitempty"`
+	AgentName         string              `json:"agent_name"`
+	Harness           string              `json:"harness"`
+	SessionID         string              `json:"session_id,omitempty"`
+	Directory         string              `json:"directory,omitempty"`
+	Phase             HarnessRuntimePhase `json:"phase"`
+	StartedAt         *time.Time          `json:"started_at,omitempty"`
+	Error             string              `json:"error,omitempty"`
+	WorkState         HarnessWorkState    `json:"work_state,omitempty"`
+	ActiveOperationID string              `json:"active_operation_id,omitempty"`
+}
+
+type ProjectHarnessClosePreview struct {
+	Project       Project                     `json:"project"`
+	Runtime       HarnessRuntime              `json:"runtime"`
+	Resources     []ResourceReleaseAssessment `json:"resources,omitempty"`
+	RequiresForce bool                        `json:"requires_force"`
 }
 
 type HarnessRuntimeController interface {
@@ -115,6 +132,17 @@ type ProjectHarnessCloseRequest struct {
 	Archive      bool   `json:"archive,omitempty"`
 }
 
+type ProjectHarnessReplaceRequest struct {
+	RequestID          string               `json:"request_id"`
+	SourceProjectID    string               `json:"source_project_id"`
+	SourceExpectedHead string               `json:"source_expected_head_event_id"`
+	TargetProjectID    string               `json:"target_project_id"`
+	TargetExpectedHead string               `json:"target_expected_head_event_id"`
+	AgentName          string               `json:"agent_name"`
+	Force              bool                 `json:"force,omitempty"`
+	Launch             HarnessLaunchRequest `json:"launch"`
+}
+
 type ProjectHarnessHandoffRequest struct {
 	RequestID    string               `json:"request_id"`
 	ProjectID    string               `json:"project_id"`
@@ -133,6 +161,8 @@ type HarnessRetireAgentRequest struct {
 type ProjectHarnessRuntimeController interface {
 	ActivateHarnessProject(context.Context, ProjectHarnessActivationRequest) (ProjectHarnessActivation, error)
 	CloseHarnessProject(context.Context, ProjectHarnessCloseRequest) (Project, error)
+	PreviewHarnessProjectClose(context.Context, string) (ProjectHarnessClosePreview, error)
+	ReplaceHarnessProject(context.Context, ProjectHarnessReplaceRequest) (ProjectHarnessActivation, error)
 	HandoffHarnessProject(context.Context, ProjectHarnessHandoffRequest) (ProjectHarnessActivation, error)
 	RetireHarnessAgent(context.Context, HarnessRetireAgentRequest) error
 }

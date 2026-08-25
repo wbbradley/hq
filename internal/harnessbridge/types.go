@@ -113,6 +113,7 @@ type Options struct {
 	AgentRenewInterval  time.Duration
 	ProjectReady        func(Ready) (ProjectBinding, error)
 	OnReady             func(Ready)
+	OnOperationChange   func(harness.OperationID)
 	PublishStatus       func(context.Context, model.Mailbox, harness.SessionIdentity, string, string, time.Time) error
 	SuppressStatus      bool
 	Terminology         Terminology

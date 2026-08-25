@@ -219,6 +219,26 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return controller.CloseHarnessProject(ctx, request)
+	case PreviewHarnessProjectCloseMethod:
+		controller, ok := s.Runtime.(domain.ProjectHarnessRuntimeController)
+		if !ok {
+			return nil, errors.New("project harness runtime control is unavailable")
+		}
+		var request ProjectRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return controller.PreviewHarnessProjectClose(ctx, request.ProjectID)
+	case ReplaceHarnessProjectMethod:
+		controller, ok := s.Runtime.(domain.ProjectHarnessRuntimeController)
+		if !ok {
+			return nil, errors.New("project harness runtime control is unavailable")
+		}
+		var request domain.ProjectHarnessReplaceRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return controller.ReplaceHarnessProject(ctx, request)
 	case HandoffHarnessProjectMethod:
 		controller, ok := s.Runtime.(domain.ProjectHarnessRuntimeController)
 		if !ok {

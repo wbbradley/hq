@@ -14,12 +14,19 @@ import (
 )
 
 type operationTracker struct {
-	mu      sync.Mutex
-	active  harness.OperationID
-	changed chan struct{}
+	mu       sync.Mutex
+	active   harness.OperationID
+	changed  chan struct{}
+	onChange func(harness.OperationID)
 }
 
-func newOperationTracker() *operationTracker { return &operationTracker{changed: make(chan struct{})} }
+func newOperationTracker(callback ...func(harness.OperationID)) *operationTracker {
+	t := &operationTracker{changed: make(chan struct{})}
+	if len(callback) != 0 {
+		t.onChange = callback[0]
+	}
+	return t
+}
 
 func (t *operationTracker) activeID() harness.OperationID {
 	t.mu.Lock()
@@ -29,12 +36,17 @@ func (t *operationTracker) activeID() harness.OperationID {
 
 func (t *operationTracker) set(operation harness.OperationID) {
 	t.mu.Lock()
+	changed := false
 	if t.active != operation {
 		t.active = operation
+		changed = true
 		close(t.changed)
 		t.changed = make(chan struct{})
 	}
 	t.mu.Unlock()
+	if changed && t.onChange != nil {
+		t.onChange(operation)
+	}
 }
 
 func (t *operationTracker) apply(event harness.Event) {
@@ -51,6 +63,11 @@ func (t *operationTracker) apply(event harness.Event) {
 		t.active = ""
 		close(t.changed)
 		t.changed = make(chan struct{})
+		t.mu.Unlock()
+		if t.onChange != nil {
+			t.onChange("")
+		}
+		return
 	}
 	t.mu.Unlock()
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/wbbradley/hq/internal/harness"
 	"github.com/wbbradley/hq/internal/harnessbridge"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/projectresource"
 )
 
 type FactoryResolver func(harness.ProviderID, []string) (harness.Factory, error)
@@ -28,16 +29,17 @@ type OptionsDecoder func(harness.ProviderID, string, json.RawMessage) (harness.P
 type TerminologyResolver func(harness.ProviderID) harnessbridge.Terminology
 
 type Supervisor struct {
-	Store              domain.ProjectRuntimeStore
-	Ledger             harnessbridge.DeliveryLedger
-	Registry           *harness.Registry
-	ResolveFactory     FactoryResolver
-	DecodeOptions      OptionsDecoder
-	Terminology        TerminologyResolver
-	LoadLaunchDefaults func() (domain.HarnessLaunchDefaults, error)
-	Sync               func(context.Context) error
-	RunGit             GitRunner
-	Logger             *slog.Logger
+	Store                     domain.ProjectRuntimeStore
+	Ledger                    harnessbridge.DeliveryLedger
+	Registry                  *harness.Registry
+	ResolveFactory            FactoryResolver
+	DecodeOptions             OptionsDecoder
+	Terminology               TerminologyResolver
+	LoadLaunchDefaults        func() (domain.HarnessLaunchDefaults, error)
+	Sync                      func(context.Context) error
+	RunGit                    GitRunner
+	ResourceReleaseInspectors map[string]domain.ResourceReleaseInspector
+	Logger                    *slog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -91,6 +93,15 @@ func New(ctx context.Context, store domain.ProjectRuntimeStore, ledger harnessbr
 	supervisor := &Supervisor{
 		Store: store, Ledger: ledger, Registry: registry, Logger: slog.New(slog.DiscardHandler), ctx: lifetime, cancel: cancel,
 		workers: make(map[string]*worker), receipts: make(map[string]receipt), lastGood: make(map[string]domain.HarnessLaunchRequest), waking: make(map[string]bool), subs: make(map[uint64]*localSubscription), reconcileTrigger: make(chan struct{}, 1),
+	}
+	supervisor.ResourceReleaseInspectors = map[string]domain.ResourceReleaseInspector{
+		"path": projectresource.PathReleaseInspector{RunGit: func(ctx context.Context, directory string, args ...string) ([]byte, error) {
+			run := supervisor.RunGit
+			if run == nil {
+				run = runGitCommand
+			}
+			return run(ctx, directory, args...)
+		}},
 	}
 	supervisor.recoverIncompleteProjectActivations()
 	return supervisor
@@ -260,7 +271,8 @@ func (s *Supervisor) launchHarnessAgent(ctx context.Context, request domain.Harn
 			}
 			return harnessbridge.Terminology{ProviderName: provider.DisplayName}
 		}(),
-		OnReady: func(ready harnessbridge.Ready) { s.markReady(current, ready) },
+		OnReady:           func(ready harnessbridge.Ready) { s.markReady(current, ready) },
+		OnOperationChange: func(operation harness.OperationID) { s.markOperation(current, operation) },
 	}
 	if project != nil {
 		options.ProjectStore = s.Store
@@ -479,6 +491,9 @@ func (s *Supervisor) markReady(current *worker, ready harnessbridge.Ready) {
 	current.runtime.Harness = string(ready.Session.Provider)
 	current.runtime.SessionID = string(ready.Session.ID)
 	current.runtime.Directory = ready.Directory
+	if current.runtime.ActiveOperationID == "" {
+		current.runtime.WorkState = domain.HarnessWorkWaiting
+	}
 	relaunch := cloneLaunchRequest(current.launch)
 	relaunch.RequestID = ""
 	relaunch.Action = domain.HarnessSessionResume
@@ -494,6 +509,20 @@ func (s *Supervisor) markReady(current *worker, ready harnessbridge.Ready) {
 	clearLaunchEnvironment(&current.launch)
 	s.logger().Info("harness worker ready", "component", "harness_supervisor", "harness", ready.Session.Provider, "agent", current.runtime.AgentName, "session_id", ready.Session.ID, "directory", ready.Directory)
 	close(current.ready)
+}
+
+func (s *Supervisor) markOperation(current *worker, operation harness.OperationID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.workers[current.runtime.AgentName] != current {
+		return
+	}
+	current.runtime.ActiveOperationID = string(operation)
+	if operation == "" {
+		current.runtime.WorkState = domain.HarnessWorkWaiting
+	} else {
+		current.runtime.WorkState = domain.HarnessWorkWorking
+	}
 }
 
 func (s *Supervisor) runWorker(ctx context.Context, current *worker, options harnessbridge.Options) {
@@ -819,6 +848,43 @@ func (s *Supervisor) StopHarnessAgent(ctx context.Context, name string) (domain.
 	}
 }
 
+func (s *Supervisor) PreviewHarnessProjectClose(ctx context.Context, projectID string) (domain.ProjectHarnessClosePreview, error) {
+	project, err := s.Store.GetProject(ctx, projectID)
+	if err != nil {
+		return domain.ProjectHarnessClosePreview{}, err
+	}
+	preview := domain.ProjectHarnessClosePreview{Project: project, Runtime: domain.HarnessRuntime{Phase: domain.HarnessRuntimeOffline}}
+	if project.Assignment != nil {
+		preview.Runtime, err = s.HarnessAgentRuntime(ctx, project.Assignment.AgentName)
+		if err != nil {
+			return preview, err
+		}
+		if preview.Runtime.Phase == domain.HarnessRuntimeOffline {
+			agent, agentErr := s.Store.GetNamedAgent(ctx, project.Assignment.AgentName)
+			if agentErr == nil && agent.Active {
+				preview.Runtime.Phase = domain.HarnessRuntimeConflict
+				preview.Runtime.WorkState = domain.HarnessWorkUnknown
+			}
+		}
+		if preview.Runtime.Phase == domain.HarnessRuntimeRunning && preview.Runtime.WorkState == "" {
+			preview.Runtime.WorkState = domain.HarnessWorkUnknown
+		}
+		preview.RequiresForce = preview.Runtime.WorkState == domain.HarnessWorkWorking || preview.Runtime.WorkState == domain.HarnessWorkUnknown || preview.Runtime.Phase == domain.HarnessRuntimeConflict
+	}
+	for _, resource := range project.Resources {
+		inspector := s.ResourceReleaseInspectors[resource.Kind]
+		assessment := domain.ResourceReleaseAssessment{ResourceID: resource.ID, Kind: resource.Kind, Locator: resource.DisplayLocator, State: domain.ResourceReleaseUnknown, Summary: "no release inspector is registered"}
+		if inspector != nil {
+			assessment = inspector.AssessRelease(ctx, resource)
+		}
+		preview.Resources = append(preview.Resources, assessment)
+		if assessment.State == domain.ResourceReleaseDirty || assessment.State == domain.ResourceReleaseUnknown {
+			preview.RequiresForce = true
+		}
+	}
+	return preview, nil
+}
+
 func (s *Supervisor) CloseHarnessProject(ctx context.Context, request domain.ProjectHarnessCloseRequest) (domain.Project, error) {
 	project, err := s.Store.GetProject(ctx, request.ProjectID)
 	if err != nil {
@@ -829,6 +895,30 @@ func (s *Supervisor) CloseHarnessProject(ctx context.Context, request domain.Pro
 			request.RequestID = uuid.NewString()
 		}
 		return s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectHarnessCloseCommand(request))
+	}
+	if project.Lifecycle == domain.ProjectOpen && project.HeadEventID != request.ExpectedHead {
+		return project, domain.ErrProjectStale
+	}
+	if project.Lifecycle == domain.ProjectOpen {
+		preview, previewErr := s.PreviewHarnessProjectClose(ctx, project.ID)
+		if previewErr != nil {
+			return project, previewErr
+		}
+		if preview.RequiresForce && !request.Force {
+			var risks []string
+			if preview.Runtime.WorkState == domain.HarnessWorkWorking {
+				risks = append(risks, "runtime is actively working")
+			}
+			if preview.Runtime.WorkState == domain.HarnessWorkUnknown || preview.Runtime.Phase == domain.HarnessRuntimeConflict {
+				risks = append(risks, "runtime state is unknown")
+			}
+			for _, assessment := range preview.Resources {
+				if assessment.State == domain.ResourceReleaseDirty || assessment.State == domain.ResourceReleaseUnknown {
+					risks = append(risks, assessment.Locator+" is "+string(assessment.State))
+				}
+			}
+			return project, fmt.Errorf("close project %s (%s): %w", project.Name, strings.Join(risks, "; "), domain.ErrProjectCloseForceRequired)
+		}
 	}
 	if request.RequestID == "" {
 		request.RequestID = uuid.NewString()
@@ -867,13 +957,7 @@ func (s *Supervisor) CloseHarnessProject(ctx context.Context, request domain.Pro
 	}
 	observation := "stopped"
 	if project.Assignment != nil {
-		managed := s.hasManagedWorker(project.Assignment.AgentName)
-		var stopErr error
-		if managed {
-			_, stopErr = s.StopHarnessAgent(ctx, project.Assignment.AgentName)
-		} else {
-			stopErr = domain.ErrProjectRuntimeUnknown
-		}
+		_, stopErr := s.StopHarnessAgent(ctx, project.Assignment.AgentName)
 		if stopErr != nil {
 			if !request.Force {
 				diagnostic := fmt.Sprintf("quiesce project runtime: %v", stopErr)
@@ -895,6 +979,40 @@ func (s *Supervisor) CloseHarnessProject(ctx context.Context, request domain.Pro
 	}
 	_ = s.Store.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "completed", project.HeadEventID, "")
 	return project, nil
+}
+
+func (s *Supervisor) ReplaceHarnessProject(ctx context.Context, request domain.ProjectHarnessReplaceRequest) (domain.ProjectHarnessActivation, error) {
+	if request.SourceProjectID == "" || request.TargetProjectID == "" || strings.TrimSpace(request.AgentName) == "" || request.SourceProjectID == request.TargetProjectID {
+		return domain.ProjectHarnessActivation{}, errors.New("project replacement requires distinct source and target projects and an agent")
+	}
+	source, err := s.Store.GetProject(ctx, request.SourceProjectID)
+	if err != nil {
+		return domain.ProjectHarnessActivation{}, err
+	}
+	if source.HeadEventID != request.SourceExpectedHead || source.Assignment == nil || source.Assignment.AgentName != request.AgentName {
+		return domain.ProjectHarnessActivation{}, domain.ErrProjectStale
+	}
+	target, err := s.Store.GetProject(ctx, request.TargetProjectID)
+	if err != nil {
+		return domain.ProjectHarnessActivation{}, err
+	}
+	if target.HeadEventID != request.TargetExpectedHead {
+		return domain.ProjectHarnessActivation{}, domain.ErrProjectStale
+	}
+	if target.Assignment != nil || target.HomeInstallation != source.HomeInstallation || target.ReadOnlyReplica {
+		return domain.ProjectHarnessActivation{}, domain.ErrProjectState
+	}
+	if _, err = s.CloseHarnessProject(ctx, domain.ProjectHarnessCloseRequest{RequestID: request.RequestID, ProjectID: source.ID, ExpectedHead: source.HeadEventID, Force: request.Force}); err != nil {
+		return domain.ProjectHarnessActivation{}, err
+	}
+	target, err = s.Store.GetProject(ctx, request.TargetProjectID)
+	if err != nil {
+		return domain.ProjectHarnessActivation{}, err
+	}
+	if target.HeadEventID != request.TargetExpectedHead {
+		return domain.ProjectHarnessActivation{}, domain.ErrProjectStale
+	}
+	return s.ActivateHarnessProject(ctx, domain.ProjectHarnessActivationRequest{ProjectID: target.ID, ExpectedHead: target.HeadEventID, AgentName: request.AgentName, Launch: request.Launch})
 }
 
 func (s *Supervisor) HandoffHarnessProject(ctx context.Context, request domain.ProjectHarnessHandoffRequest) (domain.ProjectHarnessActivation, error) {

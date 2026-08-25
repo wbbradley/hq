@@ -235,6 +235,24 @@ func (c *Client) CloseHarnessProject(ctx context.Context, request domain.Project
 	return result, err
 }
 
+func (c *Client) PreviewHarnessProjectClose(ctx context.Context, projectID string) (domain.ProjectHarnessClosePreview, error) {
+	var result domain.ProjectHarnessClosePreview
+	err := c.call(ctx, domainrpc.PreviewHarnessProjectCloseMethod, domainrpc.ProjectRequest{ProjectID: projectID}, &result)
+	return result, err
+}
+
+func (c *Client) ReplaceHarnessProject(ctx context.Context, request domain.ProjectHarnessReplaceRequest) (domain.ProjectHarnessActivation, error) {
+	var result domain.ProjectHarnessActivation
+	if request.RequestID == "" {
+		request.RequestID = uuid.NewString()
+	}
+	if request.Launch.RequestID == "" {
+		request.Launch.RequestID = uuid.NewString()
+	}
+	err := c.call(ctx, domainrpc.ReplaceHarnessProjectMethod, request, &result)
+	return result, err
+}
+
 func (c *Client) HandoffHarnessProject(ctx context.Context, request domain.ProjectHarnessHandoffRequest) (domain.ProjectHarnessActivation, error) {
 	var result domain.ProjectHarnessActivation
 	if request.Launch.RequestID == "" {

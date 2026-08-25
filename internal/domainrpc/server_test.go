@@ -63,6 +63,14 @@ func (r *recordingRuntime) CloseHarnessProject(_ context.Context, request domain
 	r.called = CloseHarnessProjectMethod
 	return domain.Project{ID: request.ProjectID}, nil
 }
+func (r *recordingRuntime) PreviewHarnessProjectClose(_ context.Context, projectID string) (domain.ProjectHarnessClosePreview, error) {
+	r.called = PreviewHarnessProjectCloseMethod
+	return domain.ProjectHarnessClosePreview{Project: domain.Project{ID: projectID}}, nil
+}
+func (r *recordingRuntime) ReplaceHarnessProject(_ context.Context, request domain.ProjectHarnessReplaceRequest) (domain.ProjectHarnessActivation, error) {
+	r.called = ReplaceHarnessProjectMethod
+	return domain.ProjectHarnessActivation{Project: domain.Project{ID: request.TargetProjectID}}, nil
+}
 func (r *recordingRuntime) HandoffHarnessProject(_ context.Context, request domain.ProjectHarnessHandoffRequest) (domain.ProjectHarnessActivation, error) {
 	r.called = HandoffHarnessProjectMethod
 	return domain.ProjectHarnessActivation{}, nil
@@ -547,6 +555,8 @@ func TestServiceDispatchesLocalHarnessRuntimeWithoutMutationReceipts(t *testing.
 		{LaunchHarnessAgentMethod, domain.HarnessLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"}, false},
 		{ActivateHarnessProjectMethod, domain.ProjectHarnessActivationRequest{}, false},
 		{CloseHarnessProjectMethod, domain.ProjectHarnessCloseRequest{}, false},
+		{PreviewHarnessProjectCloseMethod, ProjectRequest{}, false},
+		{ReplaceHarnessProjectMethod, domain.ProjectHarnessReplaceRequest{}, false},
 		{HandoffHarnessProjectMethod, domain.ProjectHarnessHandoffRequest{}, false},
 		{RetireHarnessAgentMethod, domain.HarnessRetireAgentRequest{}, true},
 		{StopHarnessAgentMethod, HarnessAgentRequest{Name: "fred"}, false},

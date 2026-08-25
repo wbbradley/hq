@@ -1150,7 +1150,7 @@ func (a *App) project(ctx context.Context, s domain.Store, args []string) error 
 		return writeProject(a.Out, activated.Project, false)
 	case "close", "archive":
 		f := flags("project " + args[0])
-		force := f.Bool("force", false, "release advisory authority when runtime stop is unknown")
+		force := f.Bool("force", false, "interrupt active/unknown runtime or release dirty/unknown resources")
 		if err := f.Parse(flagsAfterName(args[1:])); err != nil || len(f.Args()) != 1 {
 			if err != nil {
 				return err

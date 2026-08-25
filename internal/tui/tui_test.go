@@ -2028,6 +2028,34 @@ func TestClosedProjectComposeGuidesAgentThreadAndDirectory(t *testing.T) {
 	}
 }
 
+func TestProjectAgentPickerShowsAssignedProjectAndRequiresTypedForce(t *testing.T) {
+	source := domain.Project{ID: "source-project", Name: "active work", Lifecycle: domain.ProjectOpen}
+	target := domain.Project{ID: "target-project", Name: "next work", Lifecycle: domain.ProjectClosed, HomeInstallation: "local"}
+	agent := domain.NamedAgent{Name: "alice", AssignedProjectID: source.ID}
+	m := app{account: domain.HumanAccount{LocalInstallationID: "local"}, projects: []domain.Project{source, target}, agents: []domain.NamedAgent{agent}, editor: textarea.New(), width: 100, height: 30}
+	updated, _ := m.beginProjectSetup(target)
+	m = updated.(app)
+	if len(m.projectSetup.agents) != 1 || !strings.Contains(m.renderProjectSetup(100, 30), "alice · assigned to active work") {
+		t.Fatalf("assigned agent picker = %q, %#v", m.renderProjectSetup(100, 30), m.projectSetup)
+	}
+	m.projectSetup.agent = agent
+	preview := domain.ProjectHarnessClosePreview{Project: source, Runtime: domain.HarnessRuntime{Phase: domain.HarnessRuntimeRunning, WorkState: domain.HarnessWorkWorking}, RequiresForce: true, Resources: []domain.ResourceReleaseAssessment{{Locator: "/repo", State: domain.ResourceReleaseDirty, Summary: "Git worktree has changes"}}}
+	updated, _ = m.Update(projectClosePreviewMsg{preview: preview})
+	m = updated.(app)
+	if m.projectSetup.stage != forceProjectReplacement || !strings.Contains(m.renderProjectSetup(100, 30), "DANGER") {
+		t.Fatalf("force preview = %q, %#v", m.renderProjectSetup(100, 30), m.projectSetup)
+	}
+	for _, r := range source.Name {
+		updated, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		m = updated.(app)
+	}
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if !m.projectSetup.force || !m.projectSetup.busy || cmd == nil {
+		t.Fatalf("typed force was not accepted: %#v", m.projectSetup)
+	}
+}
+
 func TestNewProjectComposeCollectsHomeBriefAndResources(t *testing.T) {
 	s, ctx, _ := openStore(t)
 	if _, err := s.CreateNamedAgent(ctx, "alice", ""); err != nil {

@@ -182,7 +182,9 @@ records the action in structured logs and audit history.
 
 ## Resource health
 
-Each resource kind may implement a read-only `check` operation. Path checks can report states such
+Each resource kind may implement a read-only `check` operation and a polymorphic release
+assessment. The lifecycle driver aggregates release assessments without interpreting kind-specific
+details. Path checks can report states such
 as `healthy`, `missing`, `inaccessible`, `malformed`, or `unknown`, plus a timestamp and structured
 details.
 
@@ -194,6 +196,11 @@ Health is observational rather than part of the project lifecycle:
 - A broken non-primary resource can warn without necessarily blocking launch.
 - V1 checks at meaningful boundaries: project open, project inspection, resource mutation, and
   thread bring-up. Continuous polling is deferred.
+
+Before a close or archive releases claims, every resource kind reports `clean`, `dirty`, `unknown`,
+or `not-applicable`. Dirty and unknown assessments require explicit force. The path implementation
+owns Git worktree discovery and treats staged, unstaged, deleted, and untracked files as dirty;
+non-Git paths are not applicable.
 
 The home daemon emits a durable project notice only when the observed condition changes materially:
 one notice on degradation, another when the error changes, and a recovery notice when healthy
@@ -346,7 +353,7 @@ For project initiation, the UI is project-first; agent-first composition means d
 A new project-message composer begins with project selection:
 
 - **Runnable project:** compose immediately.
-- **Open, unassigned project:** choose an idle local agent and select or create a compatible thread.
+- **Open, unassigned project:** choose a local agent and select or create a compatible thread.
 - **Closed project:** preview resource conflicts, then reopen, assign, and select a thread.
 - **New project:** choose the home, desired resources, primary path, optional brief, agent, and
   execution thread.
@@ -354,7 +361,13 @@ A new project-message composer begins with project selection:
 The UI should suggest a project's most recently assigned agent when that agent is idle, reflecting
 the human's temporal affinity between an agent and a line of work without making the affinity an
 ownership rule. A compound activation failure leaves the composed message pending and restores the
-prior stable project/assignment state.
+prior stable project/assignment state unless an explicitly confirmed replacement already closed a
+different source project; that source remains closed and the agent remains available for retry.
+
+Assigned local agents remain visible with their current project and runtime work state. Choosing
+one previews closing its current project. A waiting runtime with clean resources uses an ordinary
+confirmation; working or unknown runtimes and dirty or unknown resources require typing the old
+project name before force close. Closing preserves the old execution thread and transcript.
 
 Git worktree creation is one option inside new-project resource selection. Its modal can choose the
 repository, merge base, worktree destination, branch name, and primary path. Provisioning is an

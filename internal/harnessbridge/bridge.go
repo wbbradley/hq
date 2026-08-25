@@ -133,7 +133,7 @@ func Run(ctx context.Context, options Options) error {
 		sync: options.Sync, subscribe: options.Updates.Subscribe, repairInterval: options.RepairInterval, terms: terms,
 	}
 	requests := startRequestPump(workersContext, instance, questioner)
-	operations := newOperationTracker()
+	operations := newOperationTracker(options.OnOperationChange)
 	var projectOutput *domain.ProjectOutputBinding
 	if projectBinding.ProjectID != "" {
 		projectOutput = &domain.ProjectOutputBinding{

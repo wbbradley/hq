@@ -34,6 +34,44 @@ type scriptedStarter struct {
 	fail         error
 }
 
+type staticReleaseInspector struct{ state domain.ResourceReleaseState }
+
+func (staticReleaseInspector) Kind() string { return "path" }
+func (s staticReleaseInspector) AssessRelease(_ context.Context, resource domain.ProjectResource) domain.ResourceReleaseAssessment {
+	return domain.ResourceReleaseAssessment{ResourceID: resource.ID, Kind: resource.Kind, Locator: resource.DisplayLocator, State: s.state}
+}
+
+func TestProjectCloseDelegatesReleaseSafetyToResourceKind(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	project, err := database.CreateProject(context.Background(), domain.CreateProjectRequest{Name: "guarded", Open: true, Paths: []domain.ProjectPathInput{{DisplayPath: t.TempDir()}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResourceReleaseInspectors = map[string]domain.ResourceReleaseInspector{"path": staticReleaseInspector{state: domain.ResourceReleaseDirty}}
+	defer supervisor.Close()
+	preview, err := supervisor.PreviewHarnessProjectClose(context.Background(), project.ID)
+	if err != nil || !preview.RequiresForce || len(preview.Resources) != 1 || preview.Resources[0].State != domain.ResourceReleaseDirty {
+		t.Fatalf("preview = %#v, %v", preview, err)
+	}
+	if _, err := supervisor.CloseHarnessProject(context.Background(), domain.ProjectHarnessCloseRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID}); !errors.Is(err, domain.ErrProjectCloseForceRequired) {
+		t.Fatalf("close = %v", err)
+	}
+	current, _ := database.GetProject(context.Background(), project.ID)
+	if current.Lifecycle != domain.ProjectOpen {
+		t.Fatalf("guard mutated project = %#v", current)
+	}
+}
+
 type lockedBuffer struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -769,6 +807,53 @@ func TestProjectCloseQuiescesRuntimeAndArchivePreservesFiles(t *testing.T) {
 	}
 }
 
+func TestReplaceHarnessProjectClosesSourceAndActivatesTarget(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.CreateNamedAgent(context.Background(), "fred", ""); err != nil {
+		t.Fatal(err)
+	}
+	sourceDir, targetDir := t.TempDir(), t.TempDir()
+	source, err := database.CreateProject(context.Background(), domain.CreateProjectRequest{Name: "source", Open: true, Paths: []domain.ProjectPathInput{{DisplayPath: sourceDir}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := database.CreateProject(context.Background(), domain.CreateProjectRequest{Name: "target", Paths: []domain.ProjectPathInput{{DisplayPath: targetDir}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
+	defer supervisor.Close()
+	activated, err := supervisor.ActivateHarnessProject(context.Background(), domain.ProjectHarnessActivationRequest{ProjectID: source.ID, ExpectedHead: source.HeadEventID, AgentName: "fred", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: sourceDir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := supervisor.ReplaceHarnessProject(context.Background(), domain.ProjectHarnessReplaceRequest{RequestID: uuid.NewString(), SourceProjectID: source.ID, SourceExpectedHead: activated.Project.HeadEventID, TargetProjectID: target.ID, TargetExpectedHead: target.HeadEventID, AgentName: "fred", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: targetDir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, _ := database.GetProject(context.Background(), source.ID)
+	if closed.Lifecycle != domain.ProjectClosed || closed.Assignment != nil {
+		t.Fatalf("source = %#v", closed)
+	}
+	if replaced.Project.Lifecycle != domain.ProjectOpen || replaced.Project.Assignment == nil || replaced.Project.Assignment.AgentName != "fred" {
+		t.Fatalf("target = %#v", replaced.Project)
+	}
+	threads, err := database.ListProjectThreads(context.Background(), source.ID)
+	if err != nil || len(threads) != 1 {
+		t.Fatalf("source threads = %#v, %v", threads, err)
+	}
+}
+
 func TestProjectCloseRequiresForceWhenRuntimeOwnershipIsUnknown(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "hq.db")
 	keyPath, _ := identity.KeyPath(databasePath)
@@ -801,15 +886,15 @@ func TestProjectCloseRequiresForceWhenRuntimeOwnershipIsUnknown(t *testing.T) {
 	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
 	defer supervisor.Close()
 	_, err = supervisor.CloseHarnessProject(context.Background(), domain.ProjectHarnessCloseRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID})
-	if !errors.Is(err, domain.ErrProjectRuntimeUnknown) {
+	if !errors.Is(err, domain.ErrProjectCloseForceRequired) {
 		t.Fatalf("normal close with unknown runtime = %v", err)
 	}
 	closing, err := database.GetProject(context.Background(), project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closing.Lifecycle != domain.ProjectClosing {
-		t.Fatalf("project did not remain closing: %#v", closing)
+	if closing.Lifecycle != domain.ProjectOpen {
+		t.Fatalf("project changed before force confirmation: %#v", closing)
 	}
 	closed, err := supervisor.CloseHarnessProject(context.Background(), domain.ProjectHarnessCloseRequest{ProjectID: project.ID, ExpectedHead: closing.HeadEventID, Force: true})
 	if err != nil || closed.Lifecycle != domain.ProjectClosed {

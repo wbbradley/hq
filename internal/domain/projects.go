@@ -10,16 +10,17 @@ import (
 )
 
 var (
-	ErrProjectNotFound       = errors.New("project not found")
-	ErrProjectStale          = errors.New("project head is stale")
-	ErrProjectState          = errors.New("project lifecycle does not allow this operation")
-	ErrResourceConflict      = errors.New("project resource conflicts with an active claim")
-	ErrResourceNotFound      = errors.New("project resource not found")
-	ErrAgentAssigned         = errors.New("agent is already assigned to a project")
-	ErrProjectAssigned       = errors.New("project is already assigned to an agent")
-	ErrProjectThreadMismatch = errors.New("execution thread scope does not match the assignment")
-	ErrProjectCommandPending = errors.New("project already has an unresolved remote command")
-	ErrProjectRuntimeUnknown = errors.New("project runtime quiescence is unknown")
+	ErrProjectNotFound           = errors.New("project not found")
+	ErrProjectStale              = errors.New("project head is stale")
+	ErrProjectState              = errors.New("project lifecycle does not allow this operation")
+	ErrResourceConflict          = errors.New("project resource conflicts with an active claim")
+	ErrResourceNotFound          = errors.New("project resource not found")
+	ErrAgentAssigned             = errors.New("agent is already assigned to a project")
+	ErrProjectAssigned           = errors.New("project is already assigned to an agent")
+	ErrProjectThreadMismatch     = errors.New("execution thread scope does not match the assignment")
+	ErrProjectCommandPending     = errors.New("project already has an unresolved remote command")
+	ErrProjectRuntimeUnknown     = errors.New("project runtime quiescence is unknown")
+	ErrProjectCloseForceRequired = errors.New("project close requires force")
 )
 
 type ProjectLifecycle string
@@ -49,6 +50,30 @@ const (
 	ResourceMalformed    ResourceHealthState = "malformed"
 	ResourceUnknown      ResourceHealthState = "unknown"
 )
+
+type ResourceReleaseState string
+
+const (
+	ResourceReleaseClean         ResourceReleaseState = "clean"
+	ResourceReleaseDirty         ResourceReleaseState = "dirty"
+	ResourceReleaseUnknown       ResourceReleaseState = "unknown"
+	ResourceReleaseNotApplicable ResourceReleaseState = "not-applicable"
+)
+
+type ResourceReleaseAssessment struct {
+	ResourceID string               `json:"resource_id"`
+	Kind       string               `json:"kind"`
+	Locator    string               `json:"locator"`
+	Identity   string               `json:"identity,omitempty"`
+	State      ResourceReleaseState `json:"state"`
+	Summary    string               `json:"summary,omitempty"`
+	Details    []string             `json:"details,omitempty"`
+}
+
+type ResourceReleaseInspector interface {
+	Kind() string
+	AssessRelease(context.Context, ProjectResource) ResourceReleaseAssessment
+}
 
 type ProjectResource struct {
 	ID               string              `json:"id"`

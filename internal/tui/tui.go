@@ -201,6 +201,8 @@ const (
 	enterWorktreeBranch
 	chooseWorktreePrimary
 	chooseProjectAgent
+	confirmProjectReplacement
+	forceProjectReplacement
 	enterProjectHarness
 	chooseProjectThread
 	enterProjectDirectory
@@ -217,6 +219,8 @@ type projectComposeSetup struct {
 	query               string
 	directory           string
 	force               bool
+	closePreview        *domain.ProjectHarnessClosePreview
+	forceConfirmation   string
 	busy                bool
 	status              string
 	name                string
@@ -231,13 +235,15 @@ type projectComposeSetup struct {
 }
 
 type projectActivationPlan struct {
-	projectID string
-	agentName string
-	harness   string
-	action    domain.HarnessSessionAction
-	sessionID string
-	directory string
-	force     bool
+	projectID          string
+	agentName          string
+	harness            string
+	action             domain.HarnessSessionAction
+	sessionID          string
+	directory          string
+	force              bool
+	sourceProjectID    string
+	sourceExpectedHead string
 }
 
 type paneLayout struct {
@@ -302,6 +308,11 @@ type answeredMsg struct {
 
 type projectThreadsMsg struct {
 	threads []domain.ProjectThread
+	err     error
+}
+
+type projectClosePreviewMsg struct {
+	preview domain.ProjectHarnessClosePreview
 	err     error
 }
 
@@ -682,7 +693,9 @@ func (m app) activateComposedProject(plan projectActivationPlan) error {
 			launch.Environment[index] = ""
 		}
 	}()
-	if project.Assignment != nil {
+	if plan.sourceProjectID != "" {
+		_, err = controller.ReplaceHarnessProject(m.ctx, domain.ProjectHarnessReplaceRequest{RequestID: uuid.NewString(), SourceProjectID: plan.sourceProjectID, SourceExpectedHead: plan.sourceExpectedHead, TargetProjectID: project.ID, TargetExpectedHead: project.HeadEventID, AgentName: plan.agentName, Force: plan.force, Launch: launch})
+	} else if project.Assignment != nil {
 		_, err = controller.HandoffHarnessProject(m.ctx, domain.ProjectHarnessHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: plan.agentName, Force: plan.force, Launch: launch})
 	} else {
 		_, err = controller.ActivateHarnessProject(m.ctx, domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: plan.agentName, Launch: launch})
@@ -971,6 +984,21 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.projectSetup.harness = "codex"
 				}
 				m.projectSetup.stage, m.projectSetup.cursor = enterProjectHarness, 0
+			}
+		}
+	case projectClosePreviewMsg:
+		if m.projectSetup != nil {
+			m.projectSetup.busy = false
+			if msg.err != nil {
+				m.projectSetup.status = msg.err.Error()
+			} else {
+				m.projectSetup.closePreview = &msg.preview
+				m.projectSetup.status = ""
+				if msg.preview.RequiresForce {
+					m.projectSetup.stage = forceProjectReplacement
+				} else {
+					m.projectSetup.stage = confirmProjectReplacement
+				}
 			}
 		}
 	case projectCreatedMsg:
@@ -1743,7 +1771,7 @@ func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m app) beginProjectSetup(project domain.Project) (tea.Model, tea.Cmd) {
 	agents := make([]domain.NamedAgent, 0, len(m.agents))
 	for _, agent := range m.agents {
-		if !agent.Retired && agent.Idle {
+		if !agent.Retired && (project.HomeInstallation == m.account.LocalInstallationID || agent.Idle) {
 			agents = append(agents, agent)
 		}
 	}
@@ -1762,6 +1790,9 @@ func (m app) beginProjectSetup(project domain.Project) (tea.Model, tea.Cmd) {
 		}
 		if agents[j].Name == project.SuggestedAgentName {
 			return false
+		}
+		if agents[i].Idle != agents[j].Idle {
+			return agents[i].Idle
 		}
 		return agents[i].Name < agents[j].Name
 	})
@@ -1790,6 +1821,8 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch setup.stage {
+		case confirmProjectReplacement, forceProjectReplacement:
+			setup.stage, setup.closePreview, setup.forceConfirmation = chooseProjectAgent, nil, ""
 		case chooseProjectHome:
 			setup.stage = enterProjectName
 		case enterProjectBrief:
@@ -1988,10 +2021,17 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					setup.agent = domain.NamedAgent{Name: strings.TrimSpace(setup.query), Idle: true}
 				}
 				setup.busy = true
-				return m, func() tea.Msg {
-					threads, err := m.store.ListProjectThreads(m.ctx, setup.project.ID)
-					return projectThreadsMsg{threads: threads, err: err}
+				if setup.agent.AssignedProjectID != "" && setup.agent.AssignedProjectID != setup.project.ID {
+					return m, func() tea.Msg {
+						controller, ok := m.store.(domain.ProjectHarnessRuntimeController)
+						if !ok {
+							return projectClosePreviewMsg{err: errors.New("project harness runtime control is unavailable")}
+						}
+						preview, err := controller.PreviewHarnessProjectClose(m.ctx, setup.agent.AssignedProjectID)
+						return projectClosePreviewMsg{preview: preview, err: err}
+					}
 				}
+				return m, m.loadProjectThreads()
 			}
 		case "backspace":
 			runes := []rune(setup.query)
@@ -2002,6 +2042,25 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if key.Text != "" && !strings.ContainsAny(key.Text, "\r\n\t") {
 				setup.query, setup.cursor = setup.query+key.Text, 0
 			}
+		}
+	case confirmProjectReplacement:
+		if key.String() == "enter" {
+			setup.busy, setup.force = true, false
+			return m, m.loadProjectThreads()
+		}
+	case forceProjectReplacement:
+		switch key.String() {
+		case "enter":
+			if setup.closePreview == nil || setup.forceConfirmation != setup.closePreview.Project.Name {
+				setup.status = "Type the current project name exactly to force close it."
+			} else {
+				setup.busy, setup.force = true, true
+				return m, m.loadProjectThreads()
+			}
+		case "backspace":
+			setup.forceConfirmation = trimLastRune(setup.forceConfirmation)
+		default:
+			setup.forceConfirmation += printableKeyText(key)
 		}
 	case enterProjectHarness:
 		switch key.String() {
@@ -2203,12 +2262,27 @@ func (m *app) prepareProjectAgents() {
 	}
 	var agents []domain.NamedAgent
 	for _, agent := range m.agents {
-		if !agent.Retired && agent.Idle {
+		if !agent.Retired && (m.projectSetup.project.HomeInstallation == m.account.LocalInstallationID || agent.Idle) {
 			agents = append(agents, agent)
 		}
 	}
-	sort.SliceStable(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
+	sort.SliceStable(agents, func(i, j int) bool {
+		if agents[i].Idle != agents[j].Idle {
+			return agents[i].Idle
+		}
+		return agents[i].Name < agents[j].Name
+	})
 	m.projectSetup.agents, m.projectSetup.stage, m.projectSetup.cursor, m.projectSetup.status = agents, chooseProjectAgent, 0, ""
+}
+
+func (m app) loadProjectThreads() tea.Cmd {
+	return func() tea.Msg {
+		if m.projectSetup == nil {
+			return projectThreadsMsg{err: errors.New("project setup was cancelled")}
+		}
+		threads, err := m.store.ListProjectThreads(m.ctx, m.projectSetup.project.ID)
+		return projectThreadsMsg{threads: threads, err: err}
+	}
 }
 
 func (s *projectComposeSetup) compatibleThreads() []domain.ProjectThread {
@@ -2232,7 +2306,12 @@ func (m app) projectDefaultDirectory(project domain.Project) string {
 
 func (m app) finishProjectSetup(action domain.HarnessSessionAction, sessionID, directory string) (tea.Model, tea.Cmd) {
 	setup := m.projectSetup
-	m.composeActivation = &projectActivationPlan{projectID: setup.project.ID, agentName: setup.agent.Name, harness: setup.harness, action: action, sessionID: sessionID, directory: directory, force: setup.force}
+	plan := &projectActivationPlan{projectID: setup.project.ID, agentName: setup.agent.Name, harness: setup.harness, action: action, sessionID: sessionID, directory: directory, force: setup.force}
+	if setup.closePreview != nil {
+		plan.sourceProjectID = setup.closePreview.Project.ID
+		plan.sourceExpectedHead = setup.closePreview.Project.HeadEventID
+	}
+	m.composeActivation = plan
 	m.projectSetup = nil
 	m.answering = true
 	m.answerID, m.answerGroupKey = "", ""
@@ -3572,13 +3651,25 @@ func (m app) renderProjectSetup(width, height int) string {
 			body.WriteString("\n" + prefix + truncateDisplay(path, innerWidth-2))
 		}
 	case chooseProjectAgent:
-		body.WriteString("\n\nChoose an idle local agent")
+		body.WriteString("\n\nChoose a local agent")
 		body.WriteString("\nFilter or home-agent name: " + renderProjectInput(setup.query))
 		agents := setup.filteredAgents()
 		rows := max(1, height-8)
 		start, end := listWindow(len(agents), setup.cursor, rows)
 		for index := start; index < end; index++ {
 			label := agents[index].Name
+			if agents[index].AssignedProjectID != "" {
+				projectName := short(agents[index].AssignedProjectID, 8)
+				for _, project := range m.projects {
+					if project.ID == agents[index].AssignedProjectID {
+						projectName = project.Name
+						break
+					}
+				}
+				label += " · assigned to " + projectName
+			} else {
+				label += " · idle"
+			}
 			if label == setup.project.SuggestedAgentName {
 				label += " · recent"
 			}
@@ -3589,11 +3680,41 @@ func (m app) renderProjectSetup(width, height int) string {
 			body.WriteString("\n" + prefix + truncateDisplay(label, innerWidth-2))
 		}
 		if len(agents) == 0 {
-			message := "No idle local agents."
+			message := "No local agents."
 			if setup.project.ReadOnlyReplica {
 				message = "Type an agent name on the project home; the home validates availability."
 			}
 			body.WriteString("\n" + dim.Render(message))
+		}
+	case confirmProjectReplacement, forceProjectReplacement:
+		preview := setup.closePreview
+		if preview != nil {
+			body.WriteString("\n\nClose " + preview.Project.Name + " and move " + setup.agent.Name + " to " + setup.project.Name + "?")
+			work := string(preview.Runtime.WorkState)
+			if work == "" {
+				work = string(preview.Runtime.Phase)
+			}
+			body.WriteString("\nRuntime: " + work)
+			for _, assessment := range preview.Resources {
+				body.WriteString("\n" + assessment.Locator + " · " + string(assessment.State))
+				if assessment.Summary != "" {
+					body.WriteString(" · " + assessment.Summary)
+				}
+				for index, detail := range assessment.Details {
+					if index == 3 {
+						body.WriteString("\n  …")
+						break
+					}
+					body.WriteString("\n  " + truncateDisplay(detail, innerWidth-4))
+				}
+			}
+			body.WriteString("\n\nClosing releases resource claims; the old thread and transcript remain resumable.")
+			if setup.stage == forceProjectReplacement {
+				body.WriteString("\n\nDANGER: this may interrupt active work or release unclean resources.")
+				body.WriteString("\nType “" + preview.Project.Name + "” to force close:\n" + renderProjectInput(setup.forceConfirmation))
+			} else {
+				body.WriteString("\n\nEnter confirms · Esc cancels")
+			}
 		}
 	case enterProjectHarness:
 		body.WriteString("\n\nAgent: " + setup.agent.Name + "\nHarness provider:\n" + renderProjectInput(setup.harness))
