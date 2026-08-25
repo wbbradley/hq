@@ -1,5 +1,5 @@
-// Package codexsupervisor owns daemon-local Codex bridge lifecycles.
-package codexsupervisor
+// Package harnesssupervisor owns daemon-local harness runtime lifecycles.
+package harnesssupervisor
 
 import (
 	"context"
@@ -17,19 +17,24 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/domain"
-	"github.com/wbbradley/hq/internal/logging"
+	"github.com/wbbradley/hq/internal/harness"
+	"github.com/wbbradley/hq/internal/harnessbridge"
 	"github.com/wbbradley/hq/internal/model"
 )
 
-type StarterFactory func(environment []string) codexbridge.ProcessStarter
+type FactoryResolver func(harness.ProviderID, []string) (harness.Factory, error)
+type OptionsDecoder func(harness.ProviderID, string, json.RawMessage) (harness.ProviderOptions, error)
+type TerminologyResolver func(harness.ProviderID) harnessbridge.Terminology
 
 type Supervisor struct {
 	Store              domain.ProjectRuntimeStore
-	Ledger             codexbridge.DeliveryLedger
-	Starter            StarterFactory
-	LoadLaunchDefaults func() (domain.CodexLaunchDefaults, error)
+	Ledger             harnessbridge.DeliveryLedger
+	Registry           *harness.Registry
+	ResolveFactory     FactoryResolver
+	DecodeOptions      OptionsDecoder
+	Terminology        TerminologyResolver
+	LoadLaunchDefaults func() (domain.HarnessLaunchDefaults, error)
 	Sync               func(context.Context) error
 	RunGit             GitRunner
 	Logger             *slog.Logger
@@ -47,7 +52,7 @@ type Supervisor struct {
 	ReconcileInterval time.Duration
 	workers           map[string]*worker
 	receipts          map[string]receipt
-	lastGood          map[string]domain.CodexLaunchRequest
+	lastGood          map[string]domain.HarnessLaunchRequest
 	provisionMu       sync.Mutex
 	waking            map[string]bool
 	subs              map[uint64]*localSubscription
@@ -62,32 +67,38 @@ type worker struct {
 	cancel    context.CancelFunc
 	ready     chan struct{}
 	done      chan struct{}
-	runtime   domain.CodexRuntime
-	launch    domain.CodexLaunchRequest
+	runtime   domain.HarnessRuntime
+	err       error
+	launch    domain.HarnessLaunchRequest
 	projectID string
 }
 
 type receipt struct {
 	digest  [32]byte
-	runtime domain.CodexRuntime
+	runtime domain.HarnessRuntime
+	err     error
 }
 
-func New(ctx context.Context, store domain.ProjectRuntimeStore, ledger codexbridge.DeliveryLedger) *Supervisor {
+func New(ctx context.Context, store domain.ProjectRuntimeStore, ledger harnessbridge.DeliveryLedger, registries ...*harness.Registry) *Supervisor {
 	lifetime, cancel := context.WithCancel(ctx)
 	if ledger == nil {
-		ledger = codexbridge.NewMemoryLedger()
+		ledger = harnessbridge.NewMemoryLedger()
+	}
+	registry, _ := harness.NewRegistry()
+	if len(registries) > 0 && registries[0] != nil {
+		registry = registries[0]
 	}
 	supervisor := &Supervisor{
-		Store: store, Ledger: ledger, Logger: slog.New(slog.DiscardHandler), ctx: lifetime, cancel: cancel,
-		workers: make(map[string]*worker), receipts: make(map[string]receipt), lastGood: make(map[string]domain.CodexLaunchRequest), waking: make(map[string]bool), subs: make(map[uint64]*localSubscription), reconcileTrigger: make(chan struct{}, 1),
+		Store: store, Ledger: ledger, Registry: registry, Logger: slog.New(slog.DiscardHandler), ctx: lifetime, cancel: cancel,
+		workers: make(map[string]*worker), receipts: make(map[string]receipt), lastGood: make(map[string]domain.HarnessLaunchRequest), waking: make(map[string]bool), subs: make(map[uint64]*localSubscription), reconcileTrigger: make(chan struct{}, 1),
 	}
 	supervisor.recoverIncompleteProjectActivations()
 	return supervisor
 }
 
 func (s *Supervisor) Close() error {
-	logger := s.logger().With("component", "codex_supervisor")
-	logger.Info("Codex supervisor stopping")
+	logger := s.logger().With("component", "harness_supervisor")
+	logger.Info("harness supervisor stopping")
 	s.cancel()
 	s.reconcileWG.Wait()
 	// Wake registration is gated by mu and checks the canceled lifetime. Cross
@@ -112,12 +123,12 @@ func (s *Supervisor) Close() error {
 		delete(s.lastGood, name)
 	}
 	s.mu.Unlock()
-	logger.Info("Codex supervisor stopped", "workers", len(workers))
+	logger.Info("harness supervisor stopped", "workers", len(workers))
 	return nil
 }
 
-func (s *Supervisor) LaunchCodexAgent(ctx context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
-	return s.launchCodexAgent(ctx, request, nil)
+func (s *Supervisor) LaunchHarnessAgent(ctx context.Context, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
+	return s.launchHarnessAgent(ctx, request, nil)
 }
 
 type projectLaunchBinding struct {
@@ -125,64 +136,63 @@ type projectLaunchBinding struct {
 	runnable                                                                       bool
 }
 
-func (s *Supervisor) launchCodexAgent(ctx context.Context, request domain.CodexLaunchRequest, project *projectLaunchBinding) (domain.CodexRuntime, error) {
-	logger := s.logger().With("component", "codex_supervisor", "agent", request.AgentName, "request_id", request.RequestID)
-	logger.Info("Codex agent launch requested", "action", request.Action, "session_id", request.SessionID, "directory", request.Directory, "yolo", request.Yolo, "environment_variables", len(request.Environment), "has_initial_prompt", strings.TrimSpace(request.InitialPrompt) != "")
+func (s *Supervisor) launchHarnessAgent(ctx context.Context, request domain.HarnessLaunchRequest, project *projectLaunchBinding) (domain.HarnessRuntime, error) {
+	logger := s.logger().With("component", "harness_supervisor", "harness", request.Harness, "agent", request.AgentName, "request_id", request.RequestID)
+	logger.Info("harness agent launch requested", "action", request.Action, "session_id", request.SessionID, "directory", request.Directory, "environment_variables", len(request.Environment), "has_initial_prompt", strings.TrimSpace(request.InitialPrompt) != "")
 	digest, err := validateLaunch(&request)
 	if err != nil {
-		logger.Warn("Codex agent launch rejected", "error", err)
-		return domain.CodexRuntime{}, err
+		logger.Warn("harness agent launch rejected", "error", err)
+		return domain.HarnessRuntime{}, err
 	}
-	logger = s.logger().With("component", "codex_supervisor", "agent", request.AgentName, "request_id", request.RequestID, "directory", request.Directory)
+	logger = s.logger().With("component", "harness_supervisor", "harness", request.Harness, "agent", request.AgentName, "request_id", request.RequestID, "directory", request.Directory)
 
 	s.mu.Lock()
 	if s.ctx.Err() != nil {
 		s.mu.Unlock()
-		return domain.CodexRuntime{}, errors.New("Codex supervisor is stopped")
+		return domain.HarnessRuntime{}, errors.New("harness supervisor is stopped")
 	}
 	if previous, ok := s.receipts[request.RequestID]; ok {
 		s.mu.Unlock()
 		if previous.digest != digest {
-			logger.Warn("Codex launch request ID reused with different options")
-			return domain.CodexRuntime{}, errors.New("Codex launch request ID was reused for different options")
+			logger.Warn("harness launch request ID reused with different options")
+			return domain.HarnessRuntime{}, errors.New("harness launch request ID was reused for different options")
 		}
-		logger.Debug("returning prior Codex launch receipt", "phase", previous.runtime.Phase, "thread_id", previous.runtime.ThreadID)
-		return previous.runtime, nil
+		logger.Debug("returning prior harness launch receipt", "phase", previous.runtime.Phase, "session_id", previous.runtime.SessionID)
+		return previous.runtime, previous.err
 	}
 	if current := s.workers[request.AgentName]; current != nil {
 		if (project == nil && current.projectID != "") || (project != nil && current.projectID != "" && current.projectID != project.projectID) {
 			s.mu.Unlock()
-			return domain.CodexRuntime{}, fmt.Errorf("named agent is running for project %s: %w", current.projectID, domain.ErrAgentAssigned)
+			return domain.HarnessRuntime{}, fmt.Errorf("named agent is running for project %s: %w", current.projectID, domain.ErrAgentAssigned)
 		}
 		if current.requestID == request.RequestID {
 			if current.digest != digest {
 				s.mu.Unlock()
-				logger.Warn("active Codex launch request ID reused with different options")
-				return domain.CodexRuntime{}, errors.New("Codex launch request ID was reused for different options")
+				logger.Warn("active harness launch request ID reused with different options")
+				return domain.HarnessRuntime{}, errors.New("harness launch request ID was reused for different options")
 			}
 			s.mu.Unlock()
 			return s.waitForLaunch(ctx, current, digest)
 		}
-		if sameDesiredRuntime(current.runtime, request) && current.runtime.Phase == domain.CodexRuntimeRunning {
+		if sameDesiredRuntime(current.runtime, request) && current.runtime.Phase == domain.HarnessRuntimeRunning {
 			result := current.runtime
 			s.receipts[request.RequestID] = receipt{digest: digest, runtime: result}
 			s.mu.Unlock()
-			logger.Info("Codex agent already running in requested session", "thread_id", result.ThreadID)
-			return result, nil
+			logger.Info("harness agent already running in requested session", "session_id", result.SessionID)
 		}
 		if !request.ConfirmSwitch {
 			s.mu.Unlock()
-			logger.Warn("Codex session switch requires confirmation", "current_thread_id", current.runtime.ThreadID)
-			return domain.CodexRuntime{}, errors.New("named agent is already running; confirm the session switch")
+			logger.Warn("harness session switch requires confirmation", "current_session_id", current.runtime.SessionID)
+			return domain.HarnessRuntime{}, errors.New("named agent is already running; confirm the session switch")
 		}
-		logger.Info("stopping Codex worker for confirmed session switch", "current_thread_id", current.runtime.ThreadID)
-		current.runtime.Phase = domain.CodexRuntimeStopping
+		logger.Info("stopping harness worker for confirmed session switch", "current_session_id", current.runtime.SessionID)
+		current.runtime.Phase = domain.HarnessRuntimeStopping
 		current.cancel()
 		s.mu.Unlock()
 		select {
 		case <-current.done:
 		case <-ctx.Done():
-			return domain.CodexRuntime{}, ctx.Err()
+			return domain.HarnessRuntime{}, ctx.Err()
 		}
 		s.mu.Lock()
 	}
@@ -190,31 +200,42 @@ func (s *Supervisor) launchCodexAgent(ctx context.Context, request domain.CodexL
 	agent, err := s.Store.CreateNamedAgent(ctx, request.AgentName, "")
 	if err != nil {
 		s.mu.Unlock()
-		logger.Error("resolve named agent for Codex launch", "error", err)
-		return domain.CodexRuntime{}, err
+		logger.Error("resolve named agent for harness launch", "error", err)
+		return domain.HarnessRuntime{}, err
 	}
 	if agent.AssignedProjectID != "" && (project == nil || agent.AssignedProjectID != project.projectID) {
 		s.mu.Unlock()
-		logger.Warn("direct Codex launch rejected for project-assigned agent", "project_id", agent.AssignedProjectID)
-		return domain.CodexRuntime{}, fmt.Errorf("launch direct thread for assigned agent: %w", domain.ErrAgentAssigned)
+		logger.Warn("direct harness launch rejected for project-assigned agent", "project_id", agent.AssignedProjectID)
+		return domain.HarnessRuntime{}, fmt.Errorf("launch direct thread for assigned agent: %w", domain.ErrAgentAssigned)
 	}
 	var resumeID string
 	var newThread bool
 	if project != nil {
-		resumeID, newThread = request.SessionID, request.Action != domain.CodexSessionResume
+		resumeID, newThread = request.SessionID, request.Action != domain.HarnessSessionResume
 	} else {
 		resumeID, newThread, err = s.resolveAction(ctx, agent, request)
 	}
 	if err != nil {
 		s.mu.Unlock()
-		logger.Warn("resolve requested Codex session", "error", err)
-		return domain.CodexRuntime{}, err
+		logger.Warn("resolve requested harness session", "error", err)
+		return domain.HarnessRuntime{}, err
+	}
+	factory, err := s.factory(harness.ProviderID(request.Harness), request.Environment)
+	if err != nil {
+		s.mu.Unlock()
+		return domain.HarnessRuntime{}, err
+	}
+	provider := factory.Provider()
+	providerOptions, err := s.decodeOptions(provider.ID, request.AgentName, request.ProviderOptions)
+	if err != nil {
+		s.mu.Unlock()
+		return domain.HarnessRuntime{}, err
 	}
 	workerContext, cancel := context.WithCancel(s.ctx)
 	started := time.Now().UTC()
 	current := &worker{
 		requestID: request.RequestID, digest: digest, cancel: cancel, ready: make(chan struct{}), done: make(chan struct{}),
-		runtime: domain.CodexRuntime{AgentName: request.AgentName, ThreadID: resumeID, Directory: request.Directory, Phase: domain.CodexRuntimeStarting, StartedAt: &started},
+		runtime: domain.HarnessRuntime{AgentName: request.AgentName, Harness: request.Harness, SessionID: resumeID, Directory: request.Directory, Phase: domain.HarnessRuntimeStarting, StartedAt: &started},
 		launch:  cloneLaunchRequest(request), projectID: func() string {
 			if project != nil {
 				return project.projectID
@@ -223,63 +244,57 @@ func (s *Supervisor) launchCodexAgent(ctx context.Context, request domain.CodexL
 		}(),
 	}
 	s.workers[request.AgentName] = current
-	logger.Info("Codex worker registered", "resume_thread_id", resumeID, "new_thread", newThread)
+	logger.Info("harness worker registered", "resume_session_id", resumeID, "new_session", newThread)
 	environment := append([]string(nil), request.Environment...)
 	request.Environment = nil
-	starterFactory := s.Starter
-	if starterFactory == nil {
-		starterFactory = func(environment []string) codexbridge.ProcessStarter {
-			return &codexbridge.ExecStarter{Environment: environment, UseEnvironment: true, Logger: logger.With("component", "codex_process")}
-		}
-	}
-	starter := starterFactory(append([]string(nil), environment...))
-	for index := range environment {
-		environment[index] = ""
-	}
-	environment = nil
-	options := codexbridge.Options{
-		Directory: request.Directory, ResumeThreadID: resumeID, AgentName: request.AgentName, NewThread: newThread,
-		InitialPrompt: request.InitialPrompt, Yolo: request.Yolo, Repository: request.Repository,
-		Store: s.Store, Starter: starter, Stderr: logging.NewLineWriter(logger.With("component", "codex_process"), slog.LevelWarn, "Codex app-server stderr"), Sync: s.Sync, Ledger: s.Ledger,
-		Logger:         logger.With("component", "codex_bridge"),
+	options := harnessbridge.Options{
+		Directory: request.Directory, Environment: environment, RequestedSession: harness.SessionID(resumeID), AgentName: request.AgentName, NewSession: newThread,
+		InitialPrompt: request.InitialPrompt, Repository: request.Repository, Factory: factory, ProviderOptions: providerOptions,
+		Store: s.Store, Sync: s.Sync, Ledger: s.Ledger, Logger: logger.With("component", "harness_bridge"),
 		Updates:        domain.ClientUpdates{Subscribe: s.Subscribe},
 		SuppressStatus: true,
-		OnReady:        func(ready codexbridge.BridgeReady) { s.markReady(current, ready) },
+		Terminology: func() harnessbridge.Terminology {
+			if s.Terminology != nil {
+				return s.Terminology(provider.ID)
+			}
+			return harnessbridge.Terminology{ProviderName: provider.DisplayName}
+		}(),
+		OnReady: func(ready harnessbridge.Ready) { s.markReady(current, ready) },
 	}
 	if project != nil {
 		options.ProjectStore = s.Store
 		options.ProjectID = project.projectID
-		options.ProjectReady = func(ready codexbridge.BridgeReady) (codexbridge.ProjectBinding, error) {
+		options.ProjectReady = func(ready harnessbridge.Ready) (harnessbridge.ProjectBinding, error) {
 			if project.runnable {
 				current, err := s.Store.GetProject(s.ctx, project.projectID)
 				if err != nil {
-					return codexbridge.ProjectBinding{}, err
+					return harnessbridge.ProjectBinding{}, err
 				}
 				if current.Lifecycle != domain.ProjectOpen || current.Assignment == nil || current.Assignment.ID != project.assignmentID || current.Assignment.State != domain.AssignmentRunnable || current.Assignment.SelectedThreadID != project.projectThreadID {
-					return codexbridge.ProjectBinding{}, domain.ErrProjectThreadMismatch
+					return harnessbridge.ProjectBinding{}, domain.ErrProjectThreadMismatch
 				}
 				threads, err := s.Store.ListProjectThreads(s.ctx, current.ID)
 				if err != nil {
-					return codexbridge.ProjectBinding{}, err
+					return harnessbridge.ProjectBinding{}, err
 				}
 				matched := false
 				for _, thread := range threads {
-					if thread.ID == project.projectThreadID && thread.ExternalID == ready.ThreadID && thread.AgentName == current.Assignment.AgentName && !thread.RetiredAgent {
+					if thread.ID == project.projectThreadID && thread.ExternalID == string(ready.Session.ID) && thread.AgentName == current.Assignment.AgentName && !thread.RetiredAgent {
 						matched = true
 						break
 					}
 				}
 				if !matched {
-					return codexbridge.ProjectBinding{}, domain.ErrProjectThreadMismatch
+					return harnessbridge.ProjectBinding{}, domain.ErrProjectThreadMismatch
 				}
-				return codexbridge.ProjectBinding{ProjectID: current.ID, AssignmentID: current.Assignment.ID, ProjectThreadID: current.Assignment.SelectedThreadID, MailboxID: current.MailboxID, ProjectName: current.Name}, nil
+				return harnessbridge.ProjectBinding{ProjectID: current.ID, AssignmentID: current.Assignment.ID, ProjectThreadID: current.Assignment.SelectedThreadID, MailboxID: current.MailboxID, ProjectName: current.Name}, nil
 			}
-			activation := domain.ActivateProjectAssignmentRequest{ThreadID: project.projectThreadID, Harness: "codex", ExternalThread: ready.ThreadID, LaunchDirectory: ready.Directory}
+			activation := domain.ActivateProjectAssignmentRequest{ThreadID: project.projectThreadID, Harness: request.Harness, ExternalThread: string(ready.Session.ID), LaunchDirectory: ready.Directory}
 			activated, err := s.Store.ActivateProjectAssignment(s.ctx, project.projectID, project.expectedHead, activation)
 			if err != nil {
-				return codexbridge.ProjectBinding{}, err
+				return harnessbridge.ProjectBinding{}, err
 			}
-			return codexbridge.ProjectBinding{ProjectID: activated.ID, AssignmentID: activated.Assignment.ID, ProjectThreadID: activated.Assignment.SelectedThreadID, MailboxID: activated.MailboxID, ProjectName: activated.Name}, nil
+			return harnessbridge.ProjectBinding{ProjectID: activated.ID, AssignmentID: activated.Assignment.ID, ProjectThreadID: activated.Assignment.SelectedThreadID, MailboxID: activated.MailboxID, ProjectName: activated.Name}, nil
 		}
 	}
 	s.mu.Unlock()
@@ -375,93 +390,99 @@ func (s *Supervisor) runWorkReconciliation() {
 }
 
 func (s *Supervisor) reconcilePendingWork() {
-	work, err := s.Store.ListCodexPendingWork(s.ctx)
+	work, err := s.Store.ListHarnessPendingWork(s.ctx)
 	if err != nil {
 		if s.ctx.Err() == nil {
-			s.logger().Warn("scan durable Codex pending work", "component", "codex_supervisor", "error", err)
+			s.logger().Warn("scan durable harness pending work", "component", "harness_supervisor", "error", err)
 		}
 		return
 	}
 	for _, item := range work {
-		s.WakeCodexAgent(model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: item.MailboxID}, nil)
+		s.WakeHarnessAgent(model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: item.MailboxID}, nil)
 	}
 }
 
-func validateLaunch(request *domain.CodexLaunchRequest) ([32]byte, error) {
+func validateLaunch(request *domain.HarnessLaunchRequest) ([32]byte, error) {
 	if _, err := uuid.Parse(request.RequestID); err != nil {
-		return [32]byte{}, errors.New("Codex launch request_id must be a UUID")
+		return [32]byte{}, errors.New("harness launch request_id must be a UUID")
 	}
 	request.AgentName = strings.TrimSpace(request.AgentName)
 	if request.AgentName == "" {
-		return [32]byte{}, errors.New("Codex launch requires an agent name")
+		return [32]byte{}, errors.New("harness launch requires an agent name")
+	}
+	request.Harness = strings.TrimSpace(request.Harness)
+	if request.Harness == "" {
+		return [32]byte{}, errors.New("harness launch requires an explicit provider")
 	}
 	if request.Action == "" {
-		request.Action = domain.CodexSessionCurrent
+		request.Action = domain.HarnessSessionCurrent
 	}
-	if request.Action != domain.CodexSessionCurrent && request.Action != domain.CodexSessionNew && request.Action != domain.CodexSessionResume {
-		return [32]byte{}, fmt.Errorf("unknown Codex session action %q", request.Action)
+	if request.Action != domain.HarnessSessionCurrent && request.Action != domain.HarnessSessionNew && request.Action != domain.HarnessSessionResume {
+		return [32]byte{}, fmt.Errorf("unknown harness session action %q", request.Action)
 	}
-	if request.Action == domain.CodexSessionResume && strings.TrimSpace(request.SessionID) == "" {
-		return [32]byte{}, errors.New("resuming Codex requires an exact thread ID")
+	if request.Action == domain.HarnessSessionResume && strings.TrimSpace(request.SessionID) == "" {
+		return [32]byte{}, errors.New("resuming a harness requires an exact session ID")
 	}
 	request.Directory = filepath.Clean(strings.TrimSpace(request.Directory))
 	if !filepath.IsAbs(request.Directory) {
-		return [32]byte{}, errors.New("Codex working directory must be absolute")
+		return [32]byte{}, errors.New("harness working directory must be absolute")
 	}
 	info, err := os.Stat(request.Directory)
 	if err != nil {
-		return [32]byte{}, errors.New("Codex working directory does not exist")
+		return [32]byte{}, errors.New("harness working directory does not exist")
 	}
 	if !info.IsDir() {
-		return [32]byte{}, errors.New("Codex working directory is not a directory")
+		return [32]byte{}, errors.New("harness working directory is not a directory")
 	}
 	request.Repository.Directory = request.Directory
 	raw, err := json.Marshal(request)
 	if err != nil {
-		return [32]byte{}, errors.New("encode Codex launch request")
+		return [32]byte{}, errors.New("encode harness launch request")
 	}
 	return sha256.Sum256(raw), nil
 }
 
-func (s *Supervisor) resolveAction(ctx context.Context, agent domain.NamedAgent, request domain.CodexLaunchRequest) (string, bool, error) {
+func (s *Supervisor) resolveAction(ctx context.Context, agent domain.NamedAgent, request domain.HarnessLaunchRequest) (string, bool, error) {
 	switch request.Action {
-	case domain.CodexSessionNew:
+	case domain.HarnessSessionNew:
 		return "", true, nil
-	case domain.CodexSessionResume:
+	case domain.HarnessSessionResume:
 		sessions, err := s.Store.ListNamedAgentSessions(ctx, request.AgentName)
 		if err != nil {
 			return "", false, err
 		}
 		for _, session := range sessions {
-			if session.Harness == "codex" && session.SessionID == request.SessionID {
+			if session.Harness == request.Harness && session.SessionID == request.SessionID {
 				return request.SessionID, false, nil
 			}
 		}
-		return "", false, errors.New("Codex thread is not in this agent's session history")
+		return "", false, errors.New("harness session is not in this agent's session history")
 	default:
 		if agent.CurrentSessionID == "" {
 			return "", true, nil
 		}
-		if agent.Harness != "codex" {
-			return "", false, errors.New("named agent's current session does not belong to Codex")
+		if agent.Harness != request.Harness {
+			return "", false, errors.New("named agent's current session belongs to another harness")
 		}
 		return agent.CurrentSessionID, false, nil
 	}
 }
 
-func (s *Supervisor) markReady(current *worker, ready codexbridge.BridgeReady) {
+func (s *Supervisor) markReady(current *worker, ready harnessbridge.Ready) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current.runtime.Phase != domain.CodexRuntimeStarting {
+	if current.runtime.Phase != domain.HarnessRuntimeStarting {
 		return
 	}
-	current.runtime.Phase = domain.CodexRuntimeRunning
-	current.runtime.ThreadID = ready.ThreadID
+	current.runtime.Phase = domain.HarnessRuntimeRunning
+	current.runtime.Harness = string(ready.Session.Provider)
+	current.runtime.SessionID = string(ready.Session.ID)
 	current.runtime.Directory = ready.Directory
 	relaunch := cloneLaunchRequest(current.launch)
 	relaunch.RequestID = ""
-	relaunch.Action = domain.CodexSessionResume
-	relaunch.SessionID = ready.ThreadID
+	relaunch.Action = domain.HarnessSessionResume
+	relaunch.Harness = string(ready.Session.Provider)
+	relaunch.SessionID = string(ready.Session.ID)
 	relaunch.Directory = ready.Directory
 	relaunch.Repository.Directory = ready.Directory
 	relaunch.InitialPrompt = ""
@@ -470,29 +491,31 @@ func (s *Supervisor) markReady(current *worker, ready codexbridge.BridgeReady) {
 		s.replaceLastGoodLocked(current.runtime.AgentName, relaunch)
 	}
 	clearLaunchEnvironment(&current.launch)
-	s.logger().Info("Codex worker ready", "component", "codex_supervisor", "agent", current.runtime.AgentName, "thread_id", ready.ThreadID, "directory", ready.Directory)
+	s.logger().Info("harness worker ready", "component", "harness_supervisor", "harness", ready.Session.Provider, "agent", current.runtime.AgentName, "session_id", ready.Session.ID, "directory", ready.Directory)
 	close(current.ready)
 }
 
-func (s *Supervisor) runWorker(ctx context.Context, current *worker, options codexbridge.Options) {
-	logger := s.logger().With("component", "codex_supervisor", "agent", current.runtime.AgentName, "request_id", current.requestID)
-	logger.Info("Codex worker starting", "directory", current.runtime.Directory, "requested_thread_id", current.runtime.ThreadID)
-	err := codexbridge.Run(ctx, options)
+func (s *Supervisor) runWorker(ctx context.Context, current *worker, options harnessbridge.Options) {
+	logger := s.logger().With("component", "harness_supervisor", "harness", current.runtime.Harness, "agent", current.runtime.AgentName, "request_id", current.requestID)
+	logger.Info("harness worker starting", "directory", current.runtime.Directory, "requested_session_id", current.runtime.SessionID)
+	err := harnessbridge.Run(ctx, options)
 	s.mu.Lock()
-	if current.runtime.Phase == domain.CodexRuntimeStarting {
+	if current.runtime.Phase == domain.HarnessRuntimeStarting {
 		if ctx.Err() != nil {
-			current.runtime.Phase = domain.CodexRuntimeOffline
+			current.runtime.Phase = domain.HarnessRuntimeOffline
 			current.runtime.Error = ""
 		} else if errors.Is(err, domain.ErrAgentOwned) {
-			current.runtime.Phase = domain.CodexRuntimeConflict
+			current.runtime.Phase = domain.HarnessRuntimeConflict
 			current.runtime.Error = "named agent is owned by another process"
+			current.err = domain.ErrAgentOwned
 		} else {
-			current.runtime.Phase = domain.CodexRuntimeFailed
+			current.runtime.Phase = domain.HarnessRuntimeFailed
 			current.runtime.Error = safeWorkerFailure(err)
+			current.err = safeWorkerError(err)
 		}
 		close(current.ready)
 	} else {
-		current.runtime.Phase = domain.CodexRuntimeOffline
+		current.runtime.Phase = domain.HarnessRuntimeOffline
 		current.runtime.Error = ""
 	}
 	if s.workers[current.runtime.AgentName] == current {
@@ -502,24 +525,44 @@ func (s *Supervisor) runWorker(ctx context.Context, current *worker, options cod
 	close(current.done)
 	s.mu.Unlock()
 	if err != nil {
-		logger.Error("Codex worker exited", "phase", current.runtime.Phase, "thread_id", current.runtime.ThreadID, "error", err)
+		logger.Error("harness worker exited", "phase", current.runtime.Phase, "session_id", current.runtime.SessionID, "error", err)
 	} else {
-		logger.Info("Codex worker exited", "phase", current.runtime.Phase, "thread_id", current.runtime.ThreadID, "reason", "context canceled")
+		logger.Info("harness worker exited", "phase", current.runtime.Phase, "session_id", current.runtime.SessionID, "reason", "context canceled")
 	}
 }
 
-// WakeCodexAgent asynchronously resumes the offline named Codex agent addressed
+func (s *Supervisor) factory(provider harness.ProviderID, environment []string) (harness.Factory, error) {
+	if s.ResolveFactory != nil {
+		return s.ResolveFactory(provider, append([]string(nil), environment...))
+	}
+	if s.Registry == nil {
+		return nil, &harness.ProviderError{Provider: provider, Operation: "resolve provider", Cause: harness.ErrUnknownProvider}
+	}
+	return s.Registry.Factory(provider)
+}
+
+func (s *Supervisor) decodeOptions(provider harness.ProviderID, agentName string, raw json.RawMessage) (harness.ProviderOptions, error) {
+	if s.DecodeOptions != nil {
+		return s.DecodeOptions(provider, agentName, append(json.RawMessage(nil), raw...))
+	}
+	if len(raw) != 0 && string(raw) != "null" && string(raw) != "{}" {
+		return nil, fmt.Errorf("harness provider %q options are unavailable", provider)
+	}
+	return nil, nil
+}
+
+// WakeHarnessAgent asynchronously resumes the offline named harness agent addressed
 // by a newly committed local human message. The exact last successful launch
 // configuration wins while this daemon remains alive. After a daemon restart,
-// the durable selected thread and cwd are combined with the sending client's
+// the durable selected session and cwd are combined with the sending client's
 // environment.
-func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string) {
+func (s *Supervisor) WakeHarnessAgent(message model.Message, environment []string) {
 	if message.SenderMailboxID != model.HumanMailboxID || strings.TrimSpace(message.RecipientMailboxID) == "" {
 		return
 	}
 	agents, err := s.Store.ListNamedAgents(s.ctx)
 	if err != nil {
-		s.logger().Error("resolve named agent for message wake", "component", "codex_supervisor", "recipient_mailbox_id", message.RecipientMailboxID, "error", err)
+		s.logger().Error("resolve named agent for message wake", "component", "harness_supervisor", "recipient_mailbox_id", message.RecipientMailboxID, "error", err)
 		return
 	}
 	var agent domain.NamedAgent
@@ -530,10 +573,10 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 		}
 	}
 	if agent.Name == "" {
-		s.wakeCodexProject(message, environment)
+		s.wakeHarnessProject(message, environment)
 		return
 	}
-	if agent.Retired || agent.Active || agent.Harness != "codex" || agent.CurrentSessionID == "" {
+	if agent.Retired || agent.Active || agent.Harness == "" || agent.CurrentSessionID == "" {
 		return
 	}
 
@@ -543,11 +586,11 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 		return
 	}
 	request, found := s.lastGood[agent.Name]
-	if found && request.SessionID == agent.CurrentSessionID {
+	if found && request.Harness == agent.Harness && request.SessionID == agent.CurrentSessionID {
 		request = cloneLaunchRequest(request)
 	} else {
 		found = false
-		request = domain.CodexLaunchRequest{
+		request = domain.HarnessLaunchRequest{
 			Directory: agent.Context.Directory, Repository: agent.Context,
 			Environment: append([]string(nil), environment...),
 		}
@@ -557,7 +600,8 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 	}
 	request.RequestID = uuid.NewString()
 	request.AgentName = agent.Name
-	request.Action = domain.CodexSessionResume
+	request.Harness = agent.Harness
+	request.Action = domain.HarnessSessionResume
 	request.SessionID = agent.CurrentSessionID
 	request.InitialPrompt = ""
 	request.ConfirmSwitch = false
@@ -572,7 +616,7 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 			delete(s.waking, agent.Name)
 			s.mu.Unlock()
 			s.wakeWG.Done()
-			s.logger().Warn("automatic Codex agent wake could not load launch defaults", "component", "codex_supervisor", "agent", agent.Name, "error", defaultsErr)
+			s.logger().Warn("automatic harness agent wake could not load launch defaults", "component", "harness_supervisor", "agent", agent.Name, "error", defaultsErr)
 			return
 		}
 		applyLaunchDefaults(&request, defaults)
@@ -580,24 +624,24 @@ func (s *Supervisor) WakeCodexAgent(message model.Message, environment []string)
 
 	go func() {
 		defer s.wakeWG.Done()
-		runtime, launchErr := s.LaunchCodexAgent(s.ctx, request)
+		runtime, launchErr := s.LaunchHarnessAgent(s.ctx, request)
 		clearLaunchEnvironment(&request)
 		s.mu.Lock()
 		delete(s.waking, agent.Name)
 		s.mu.Unlock()
-		logger := s.logger().With("component", "codex_supervisor", "agent", agent.Name, "thread_id", agent.CurrentSessionID)
-		if launchErr != nil || runtime.Phase != domain.CodexRuntimeRunning {
-			logger.Warn("automatic Codex agent wake failed", "phase", runtime.Phase, "error", launchErr)
+		logger := s.logger().With("component", "harness_supervisor", "harness", agent.Harness, "agent", agent.Name, "session_id", agent.CurrentSessionID)
+		if launchErr != nil || runtime.Phase != domain.HarnessRuntimeRunning {
+			logger.Warn("automatic harness agent wake failed", "phase", runtime.Phase, "error", launchErr)
 			return
 		}
-		logger.Info("automatic Codex agent wake succeeded", "directory", runtime.Directory)
+		logger.Info("automatic harness agent wake succeeded", "directory", runtime.Directory)
 	}()
 }
 
-func (s *Supervisor) wakeCodexProject(message model.Message, environment []string) {
+func (s *Supervisor) wakeHarnessProject(message model.Message, environment []string) {
 	projects, err := s.Store.ListProjects(s.ctx, false)
 	if err != nil {
-		s.logger().Error("resolve project for message wake", "component", "codex_supervisor", "error", err)
+		s.logger().Error("resolve project for message wake", "component", "harness_supervisor", "error", err)
 		return
 	}
 	var project domain.Project
@@ -621,11 +665,11 @@ func (s *Supervisor) wakeCodexProject(message model.Message, environment []strin
 			break
 		}
 	}
-	if selected.ID == "" || selected.RetiredAgent || selected.Harness != "codex" {
+	if selected.ID == "" || selected.RetiredAgent || selected.Harness == "" {
 		return
 	}
 	if err := projectResumeDirectorySafe(project, selected); err != nil {
-		s.logger().Warn("automatic project wake requires explicit directory decision", "component", "codex_supervisor", "project_id", project.ID, "thread_id", selected.ID, "directory", selected.LaunchDir, "error", err)
+		s.logger().Warn("automatic project wake requires explicit directory decision", "component", "harness_supervisor", "project_id", project.ID, "project_thread_id", selected.ID, "directory", selected.LaunchDir, "error", err)
 		return
 	}
 	s.mu.Lock()
@@ -636,7 +680,7 @@ func (s *Supervisor) wakeCodexProject(message model.Message, environment []strin
 	s.waking[project.Assignment.AgentName] = true
 	s.wakeWG.Add(1)
 	s.mu.Unlock()
-	request := domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: project.Assignment.AgentName, Action: domain.CodexSessionResume, SessionID: selected.ExternalID, Directory: selected.LaunchDir, Repository: model.RepositoryContext{Directory: selected.LaunchDir}, Environment: append([]string(nil), environment...)}
+	request := domain.HarnessLaunchRequest{RequestID: uuid.NewString(), AgentName: project.Assignment.AgentName, Harness: selected.Harness, Action: domain.HarnessSessionResume, SessionID: selected.ExternalID, Directory: selected.LaunchDir, Repository: model.RepositoryContext{Directory: selected.LaunchDir}, Environment: append([]string(nil), environment...)}
 	if len(request.Environment) == 0 {
 		request.Environment = os.Environ()
 	}
@@ -653,41 +697,43 @@ func (s *Supervisor) wakeCodexProject(message model.Message, environment []strin
 	binding := &projectLaunchBinding{projectID: project.ID, assignmentID: project.Assignment.ID, expectedHead: project.HeadEventID, projectThreadID: selected.ID, mailboxID: project.MailboxID, projectName: project.Name, runnable: true}
 	go func() {
 		defer s.wakeWG.Done()
-		runtime, launchErr := s.launchCodexAgent(s.ctx, request, binding)
+		runtime, launchErr := s.launchHarnessAgent(s.ctx, request, binding)
 		clearLaunchEnvironment(&request)
 		s.mu.Lock()
 		delete(s.waking, project.Assignment.AgentName)
 		s.mu.Unlock()
-		if launchErr != nil || runtime.Phase != domain.CodexRuntimeRunning {
-			s.logger().Warn("automatic project wake failed", "component", "codex_supervisor", "project_id", project.ID, "agent", project.Assignment.AgentName, "error", launchErr)
+		if launchErr != nil || runtime.Phase != domain.HarnessRuntimeRunning {
+			s.logger().Warn("automatic project wake failed", "component", "harness_supervisor", "project_id", project.ID, "agent", project.Assignment.AgentName, "error", launchErr)
 		}
 	}()
 }
 
-func (s *Supervisor) launchDefaults() (domain.CodexLaunchDefaults, error) {
+func (s *Supervisor) launchDefaults() (domain.HarnessLaunchDefaults, error) {
 	if s.LoadLaunchDefaults == nil {
-		return domain.CodexLaunchDefaults{}, nil
+		return domain.HarnessLaunchDefaults{}, nil
 	}
 	return s.LoadLaunchDefaults()
 }
 
-func applyLaunchDefaults(request *domain.CodexLaunchRequest, defaults domain.CodexLaunchDefaults) {
-	request.Yolo = defaults.Yolo
+func applyLaunchDefaults(request *domain.HarnessLaunchRequest, defaults domain.HarnessLaunchDefaults) {
+	if defaults.Harness == "" || defaults.Harness == request.Harness {
+		request.ProviderOptions = append(json.RawMessage(nil), defaults.ProviderOptions...)
+	}
 }
 
-func (s *Supervisor) replaceLastGoodLocked(name string, request domain.CodexLaunchRequest) {
+func (s *Supervisor) replaceLastGoodLocked(name string, request domain.HarnessLaunchRequest) {
 	if previous, ok := s.lastGood[name]; ok {
 		clearLaunchEnvironment(&previous)
 	}
 	s.lastGood[name] = request
 }
 
-func cloneLaunchRequest(request domain.CodexLaunchRequest) domain.CodexLaunchRequest {
+func cloneLaunchRequest(request domain.HarnessLaunchRequest) domain.HarnessLaunchRequest {
 	request.Environment = append([]string(nil), request.Environment...)
 	return request
 }
 
-func clearLaunchEnvironment(request *domain.CodexLaunchRequest) {
+func clearLaunchEnvironment(request *domain.HarnessLaunchRequest) {
 	for index := range request.Environment {
 		request.Environment[index] = ""
 	}
@@ -702,56 +748,77 @@ func (s *Supervisor) logger() *slog.Logger {
 }
 
 func safeWorkerFailure(err error) string {
+	switch {
+	case errors.Is(err, harness.ErrUnknownProvider):
+		return "requested harness provider is not registered on this node"
+	case errors.Is(err, harness.ErrProviderUnavailable):
+		return "requested harness provider is unavailable on this node"
+	case errors.Is(err, harness.ErrCapabilityUnavailable):
+		return "requested harness provider lacks a required capability"
+	case errors.Is(err, harness.ErrSessionNotFound):
+		return "requested harness session is unavailable on this node; the durable selection was not changed"
+	}
 	message := strings.ToLower(fmt.Sprint(err))
 	switch {
-	case strings.Contains(message, "no rollout found"), strings.Contains(message, "resume codex thread"):
-		return "requested Codex thread is unavailable on this node; the durable selection was not changed"
-	case strings.Contains(message, "start codex app-server"):
-		return "Codex app-server process could not be started"
-	case strings.Contains(message, "initialize codex app-server"):
-		return "Codex app-server initialization failed"
-	case strings.Contains(message, "start codex thread"):
-		return "Codex thread could not be started; the durable selection was not changed"
+	case strings.Contains(message, "no rollout found"), strings.Contains(message, "resume harness session"):
+		return "requested harness session is unavailable on this node; the durable selection was not changed"
 	default:
-		return "Codex worker failed before becoming ready"
+		return "harness worker failed before becoming ready"
 	}
 }
 
-func (s *Supervisor) waitForLaunch(ctx context.Context, current *worker, digest [32]byte) (domain.CodexRuntime, error) {
+func safeWorkerError(err error) error {
+	message := safeWorkerFailure(err)
+	switch {
+	case errors.Is(err, harness.ErrUnknownProvider):
+		return fmt.Errorf("%w: %s", harness.ErrUnknownProvider, message)
+	case errors.Is(err, harness.ErrProviderUnavailable):
+		return fmt.Errorf("%w: %s", harness.ErrProviderUnavailable, message)
+	case errors.Is(err, harness.ErrCapabilityUnavailable):
+		return fmt.Errorf("%w: %s", harness.ErrCapabilityUnavailable, message)
+	case errors.Is(err, harness.ErrSessionNotFound):
+		return fmt.Errorf("%w: %s", harness.ErrSessionNotFound, message)
+	default:
+		return errors.New(message)
+	}
+}
+
+func (s *Supervisor) waitForLaunch(ctx context.Context, current *worker, digest [32]byte) (domain.HarnessRuntime, error) {
 	select {
 	case <-current.ready:
 	case <-ctx.Done():
-		return domain.CodexRuntime{}, ctx.Err()
+		return domain.HarnessRuntime{}, ctx.Err()
 	}
 	s.mu.Lock()
 	result := current.runtime
-	s.receipts[current.requestID] = receipt{digest: digest, runtime: result}
+	s.receipts[current.requestID] = receipt{digest: digest, runtime: result, err: current.err}
+	launchErr := current.err
 	s.mu.Unlock()
-	return result, nil
+	return result, launchErr
 }
 
-func (s *Supervisor) StopCodexAgent(ctx context.Context, name string) (domain.CodexRuntime, error) {
+func (s *Supervisor) StopHarnessAgent(ctx context.Context, name string) (domain.HarnessRuntime, error) {
 	s.mu.Lock()
 	current := s.workers[strings.TrimSpace(name)]
 	if current == nil {
 		s.mu.Unlock()
 		if agent, err := s.Store.GetNamedAgent(ctx, strings.TrimSpace(name)); err == nil && agent.Active {
-			return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeConflict, Error: "runtime ownership remains active but is not controlled by this daemon"}, domain.ErrAgentOwned
+			return domain.HarnessRuntime{AgentName: name, Phase: domain.HarnessRuntimeConflict, Error: "runtime ownership remains active but is not controlled by this daemon"}, domain.ErrAgentOwned
 		}
-		return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
+		return domain.HarnessRuntime{AgentName: name, Phase: domain.HarnessRuntimeOffline}, nil
 	}
-	current.runtime.Phase = domain.CodexRuntimeStopping
+	current.runtime.Phase = domain.HarnessRuntimeStopping
 	current.cancel()
 	s.mu.Unlock()
 	select {
 	case <-current.done:
-		return domain.CodexRuntime{AgentName: name, ThreadID: current.runtime.ThreadID, Directory: current.runtime.Directory, Phase: domain.CodexRuntimeOffline}, nil
+		return domain.HarnessRuntime{AgentName: name, Harness: current.runtime.Harness, SessionID: current.runtime.SessionID, Directory: current.runtime.Directory, Phase: domain.HarnessRuntimeOffline}, nil
 	case <-ctx.Done():
-		return domain.CodexRuntime{}, ctx.Err()
+		return domain.HarnessRuntime{}, ctx.Err()
 	}
 }
 
-func (s *Supervisor) CloseCodexProject(ctx context.Context, request domain.ProjectCodexCloseRequest) (domain.Project, error) {
+func (s *Supervisor) CloseHarnessProject(ctx context.Context, request domain.ProjectHarnessCloseRequest) (domain.Project, error) {
 	project, err := s.Store.GetProject(ctx, request.ProjectID)
 	if err != nil {
 		return project, err
@@ -760,7 +827,7 @@ func (s *Supervisor) CloseCodexProject(ctx context.Context, request domain.Proje
 		if request.RequestID == "" {
 			request.RequestID = uuid.NewString()
 		}
-		return s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectCodexCloseCommand(request))
+		return s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectHarnessCloseCommand(request))
 	}
 	if request.RequestID == "" {
 		request.RequestID = uuid.NewString()
@@ -802,7 +869,7 @@ func (s *Supervisor) CloseCodexProject(ctx context.Context, request domain.Proje
 		managed := s.hasManagedWorker(project.Assignment.AgentName)
 		var stopErr error
 		if managed {
-			_, stopErr = s.StopCodexAgent(ctx, project.Assignment.AgentName)
+			_, stopErr = s.StopHarnessAgent(ctx, project.Assignment.AgentName)
 		} else {
 			stopErr = domain.ErrProjectRuntimeUnknown
 		}
@@ -829,10 +896,10 @@ func (s *Supervisor) CloseCodexProject(ctx context.Context, request domain.Proje
 	return project, nil
 }
 
-func (s *Supervisor) HandoffCodexProject(ctx context.Context, request domain.ProjectCodexHandoffRequest) (domain.ProjectCodexActivation, error) {
+func (s *Supervisor) HandoffHarnessProject(ctx context.Context, request domain.ProjectHarnessHandoffRequest) (domain.ProjectHarnessActivation, error) {
 	project, err := s.Store.GetProject(ctx, request.ProjectID)
 	if err != nil {
-		return domain.ProjectCodexActivation{}, err
+		return domain.ProjectHarnessActivation{}, err
 	}
 	if project.ReadOnlyReplica {
 		if request.RequestID == "" {
@@ -842,8 +909,8 @@ func (s *Supervisor) HandoffCodexProject(ctx context.Context, request domain.Pro
 			request.RequestID = uuid.NewString()
 		}
 		request.Launch.Environment = nil
-		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectCodexHandoffCommand(request))
-		return domain.ProjectCodexActivation{Project: queued, Runtime: domain.CodexRuntime{AgentName: request.NewAgentName, Phase: domain.CodexRuntimePending}}, queueErr
+		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectHarnessHandoffCommand(request))
+		return domain.ProjectHarnessActivation{Project: queued, Runtime: domain.HarnessRuntime{AgentName: request.NewAgentName, Phase: domain.HarnessRuntimePending}}, queueErr
 	}
 	if request.RequestID == "" {
 		request.RequestID = request.Launch.RequestID
@@ -853,28 +920,28 @@ func (s *Supervisor) HandoffCodexProject(ctx context.Context, request domain.Pro
 	}
 	operation, err := s.Store.BeginProjectRuntimeOperation(ctx, domain.ProjectRuntimeOperation{ID: request.RequestID, Kind: "handoff", ProjectID: request.ProjectID, ExpectedHead: request.ExpectedHead, TargetAgent: request.NewAgentName, Force: request.Force})
 	if err != nil {
-		return domain.ProjectCodexActivation{}, err
+		return domain.ProjectHarnessActivation{}, err
 	}
 	if operation.State == "blocked" || operation.State == "failed" {
-		return domain.ProjectCodexActivation{}, errors.New(operation.LastError)
+		return domain.ProjectHarnessActivation{}, errors.New(operation.LastError)
 	}
 	project, err = s.Store.GetProject(ctx, request.ProjectID)
 	if err != nil {
-		return domain.ProjectCodexActivation{}, err
+		return domain.ProjectHarnessActivation{}, err
 	}
 	if project.Assignment != nil && project.Assignment.AgentName == request.NewAgentName && project.Assignment.State == domain.AssignmentRunnable {
 		_ = s.Store.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "completed", project.HeadEventID, "")
-		runtime, _ := s.CodexAgentRuntime(ctx, request.NewAgentName)
-		return domain.ProjectCodexActivation{Project: project, Runtime: runtime}, nil
+		runtime, _ := s.HarnessAgentRuntime(ctx, request.NewAgentName)
+		return domain.ProjectHarnessActivation{Project: project, Runtime: runtime}, nil
 	}
 	if project.Lifecycle != domain.ProjectOpen || (project.Assignment == nil && operation.State == "started") {
-		return domain.ProjectCodexActivation{}, fmt.Errorf("handoff project: %w", domain.ErrProjectState)
+		return domain.ProjectHarnessActivation{}, fmt.Errorf("handoff project: %w", domain.ErrProjectState)
 	}
 	if project.Assignment != nil {
 		oldAgent := project.Assignment.AgentName
 		var stopErr error
 		if s.hasManagedWorker(oldAgent) {
-			_, stopErr = s.StopCodexAgent(ctx, oldAgent)
+			_, stopErr = s.StopHarnessAgent(ctx, oldAgent)
 		} else {
 			stopErr = domain.ErrProjectRuntimeUnknown
 		}
@@ -884,23 +951,23 @@ func (s *Supervisor) HandoffCodexProject(ctx context.Context, request domain.Pro
 				project, _ = s.Store.BlockProjectAssignment(ctx, project.ID, project.HeadEventID, "runtime quiescence could not be confirmed")
 				diagnostic := fmt.Sprintf("quiesce project handoff: %v", stopErr)
 				_ = s.Store.AdvanceProjectRuntimeOperation(context.Background(), request.RequestID, "blocked", project.HeadEventID, diagnostic)
-				return domain.ProjectCodexActivation{}, fmt.Errorf("quiesce project handoff: %w", stopErr)
+				return domain.ProjectHarnessActivation{}, fmt.Errorf("quiesce project handoff: %w", stopErr)
 			}
 			observation = "unknown"
 		}
 		project, err = s.Store.UnassignProject(ctx, project.ID, project.HeadEventID, request.Force, observation)
 		if err != nil {
-			return domain.ProjectCodexActivation{}, err
+			return domain.ProjectHarnessActivation{}, err
 		}
 		if err := s.Store.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "unassigned", project.HeadEventID, ""); err != nil {
-			return domain.ProjectCodexActivation{}, err
+			return domain.ProjectHarnessActivation{}, err
 		}
 	}
 	if request.Launch.RequestID == "" {
 		request.Launch.RequestID = request.RequestID
 	}
 	_ = s.Store.AdvanceProjectRuntimeOperation(ctx, request.RequestID, "activating", project.HeadEventID, "")
-	activated, err := s.ActivateCodexProject(ctx, domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: request.NewAgentName, Launch: request.Launch})
+	activated, err := s.ActivateHarnessProject(ctx, domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: request.NewAgentName, Launch: request.Launch})
 	if err != nil {
 		_ = s.Store.AdvanceProjectRuntimeOperation(context.Background(), request.RequestID, "failed", project.HeadEventID, err.Error())
 		return activated, err
@@ -909,7 +976,7 @@ func (s *Supervisor) HandoffCodexProject(ctx context.Context, request domain.Pro
 	return activated, nil
 }
 
-func (s *Supervisor) RetireCodexAgent(ctx context.Context, request domain.CodexRetireAgentRequest) error {
+func (s *Supervisor) RetireHarnessAgent(ctx context.Context, request domain.HarnessRetireAgentRequest) error {
 	if request.RequestID == "" {
 		request.RequestID = uuid.NewString()
 	}
@@ -933,11 +1000,11 @@ func (s *Supervisor) RetireCodexAgent(ctx context.Context, request domain.CodexR
 	if operation.State == "started" {
 		var stopErr error
 		if s.hasManagedWorker(agent.Name) {
-			_, stopErr = s.StopCodexAgent(ctx, agent.Name)
+			_, stopErr = s.StopHarnessAgent(ctx, agent.Name)
 		} else if agent.AssignedProjectID != "" {
 			stopErr = domain.ErrProjectRuntimeUnknown
 		} else {
-			_, stopErr = s.StopCodexAgent(ctx, agent.Name)
+			_, stopErr = s.StopHarnessAgent(ctx, agent.Name)
 		}
 		if stopErr != nil {
 			if !request.Force {
@@ -1119,16 +1186,16 @@ func (s *Supervisor) hasManagedWorker(name string) bool {
 	return s.workers[strings.TrimSpace(name)] != nil
 }
 
-func (s *Supervisor) CodexAgentRuntime(_ context.Context, name string) (domain.CodexRuntime, error) {
+func (s *Supervisor) HarnessAgentRuntime(_ context.Context, name string) (domain.HarnessRuntime, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if current := s.workers[strings.TrimSpace(name)]; current != nil {
 		return current.runtime, nil
 	}
-	return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
+	return domain.HarnessRuntime{AgentName: name, Phase: domain.HarnessRuntimeOffline}, nil
 }
 
-func (s *Supervisor) ActivateCodexProject(ctx context.Context, request domain.ProjectCodexActivationRequest) (result domain.ProjectCodexActivation, resultErr error) {
+func (s *Supervisor) ActivateHarnessProject(ctx context.Context, request domain.ProjectHarnessActivationRequest) (result domain.ProjectHarnessActivation, resultErr error) {
 	request.AgentName = strings.TrimSpace(request.AgentName)
 	if request.ProjectID == "" || request.ExpectedHead == "" || request.AgentName == "" {
 		return result, errors.New("project activation requires project, expected head, and agent")
@@ -1139,8 +1206,8 @@ func (s *Supervisor) ActivateCodexProject(ctx context.Context, request domain.Pr
 	}
 	if project.ReadOnlyReplica {
 		request.Launch.Environment = nil
-		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectCodexActivateCommand(request))
-		return domain.ProjectCodexActivation{Project: queued, Runtime: domain.CodexRuntime{AgentName: request.AgentName, Phase: domain.CodexRuntimePending}}, queueErr
+		queued, queueErr := s.queueRemoteProjectRuntime(ctx, project, request.ExpectedHead, domain.ProjectHarnessActivateCommand(request))
+		return domain.ProjectHarnessActivation{Project: queued, Runtime: domain.HarnessRuntime{AgentName: request.AgentName, Phase: domain.HarnessRuntimePending}}, queueErr
 	}
 	if request.Launch.RequestID == "" {
 		request.Launch.RequestID = uuid.NewString()
@@ -1194,23 +1261,26 @@ func (s *Supervisor) ActivateCodexProject(ctx context.Context, request domain.Pr
 	launch := request.Launch
 	launch.AgentName = request.AgentName
 	launch.RequestID = operation.ID
+	if strings.TrimSpace(launch.Harness) == "" {
+		return result, errors.New("project activation requires an explicit harness provider")
+	}
 	threads, err := s.Store.ListProjectThreads(ctx, project.ID)
 	if err != nil {
 		return result, err
 	}
 	projectThreadID := ""
 	switch launch.Action {
-	case "", domain.CodexSessionCurrent:
-		launch.Action = domain.CodexSessionNew
+	case "", domain.HarnessSessionCurrent:
+		launch.Action = domain.HarnessSessionNew
 		for _, thread := range threads {
-			if thread.AgentName == request.AgentName && thread.Harness == "codex" && !thread.RetiredAgent {
-				launch.Action, launch.SessionID, projectThreadID = domain.CodexSessionResume, thread.ExternalID, thread.ID
+			if thread.AgentName == request.AgentName && thread.Harness == launch.Harness && !thread.RetiredAgent {
+				launch.Action, launch.SessionID, projectThreadID = domain.HarnessSessionResume, thread.ExternalID, thread.ID
 				break
 			}
 		}
-	case domain.CodexSessionResume:
+	case domain.HarnessSessionResume:
 		for _, thread := range threads {
-			if thread.AgentName == request.AgentName && thread.Harness == "codex" && thread.ExternalID == launch.SessionID && !thread.RetiredAgent {
+			if thread.AgentName == request.AgentName && thread.Harness == launch.Harness && thread.ExternalID == launch.SessionID && !thread.RetiredAgent {
 				projectThreadID = thread.ID
 				break
 			}
@@ -1218,17 +1288,17 @@ func (s *Supervisor) ActivateCodexProject(ctx context.Context, request domain.Pr
 		if projectThreadID == "" {
 			return result, domain.ErrProjectThreadMismatch
 		}
-	case domain.CodexSessionNew:
+	case domain.HarnessSessionNew:
 		launch.SessionID = ""
 	default:
-		return result, fmt.Errorf("unknown Codex session action %q", launch.Action)
+		return result, fmt.Errorf("unknown harness session action %q", launch.Action)
 	}
 	binding := &projectLaunchBinding{projectID: project.ID, assignmentID: project.Assignment.ID, expectedHead: project.HeadEventID, projectThreadID: projectThreadID, mailboxID: project.MailboxID, projectName: project.Name}
-	runtime, err := s.launchCodexAgent(ctx, launch, binding)
+	runtime, err := s.launchHarnessAgent(ctx, launch, binding)
 	if err != nil {
 		return result, err
 	}
-	if runtime.Phase != domain.CodexRuntimeRunning {
+	if runtime.Phase != domain.HarnessRuntimeRunning {
 		return result, errors.New(runtime.Error)
 	}
 	project, err = s.Store.GetProject(ctx, project.ID)
@@ -1241,7 +1311,7 @@ func (s *Supervisor) ActivateCodexProject(ctx context.Context, request domain.Pr
 	if err := s.Store.CompleteProjectActivation(ctx, operation.ID); err != nil {
 		return result, err
 	}
-	return domain.ProjectCodexActivation{Project: project, Runtime: runtime}, nil
+	return domain.ProjectHarnessActivation{Project: project, Runtime: runtime}, nil
 }
 
 func (s *Supervisor) queueRemoteProjectRuntime(ctx context.Context, project domain.Project, expected string, data domain.ProjectCommandData) (domain.Project, error) {
@@ -1259,7 +1329,7 @@ func (s *Supervisor) queueRemoteProjectRuntime(ctx context.Context, project doma
 func (s *Supervisor) compensateProjectActivation(parent context.Context, operation domain.ProjectActivationOperation, diagnostic string) error {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
-	_, _ = s.StopCodexAgent(ctx, operation.AgentName)
+	_, _ = s.StopHarnessAgent(ctx, operation.AgentName)
 	project, err := s.Store.GetProject(ctx, operation.ProjectID)
 	if err != nil {
 		return err
@@ -1302,20 +1372,20 @@ func (s *Supervisor) recoverIncompleteProjectActivations() {
 	}
 }
 
-func (s *Supervisor) resumeCompletedProjectActivation(ctx context.Context, operation domain.ProjectActivationOperation, launch domain.CodexLaunchRequest) (domain.ProjectCodexActivation, error) {
+func (s *Supervisor) resumeCompletedProjectActivation(ctx context.Context, operation domain.ProjectActivationOperation, launch domain.HarnessLaunchRequest) (domain.ProjectHarnessActivation, error) {
 	project, err := s.Store.GetProject(ctx, operation.ProjectID)
 	if err != nil {
-		return domain.ProjectCodexActivation{}, err
+		return domain.ProjectHarnessActivation{}, err
 	}
 	if project.Lifecycle != domain.ProjectOpen || project.Assignment == nil || project.Assignment.ID != operation.AssignmentID || project.Assignment.State != domain.AssignmentRunnable {
-		return domain.ProjectCodexActivation{}, domain.ErrProjectState
+		return domain.ProjectHarnessActivation{}, domain.ErrProjectState
 	}
-	if running, _ := s.CodexAgentRuntime(ctx, operation.AgentName); running.Phase == domain.CodexRuntimeRunning {
-		return domain.ProjectCodexActivation{Project: project, Runtime: running}, nil
+	if running, _ := s.HarnessAgentRuntime(ctx, operation.AgentName); running.Phase == domain.HarnessRuntimeRunning {
+		return domain.ProjectHarnessActivation{Project: project, Runtime: running}, nil
 	}
 	threads, err := s.Store.ListProjectThreads(ctx, project.ID)
 	if err != nil {
-		return domain.ProjectCodexActivation{}, err
+		return domain.ProjectHarnessActivation{}, err
 	}
 	var selected domain.ProjectThread
 	for _, thread := range threads {
@@ -1324,22 +1394,22 @@ func (s *Supervisor) resumeCompletedProjectActivation(ctx context.Context, opera
 			break
 		}
 	}
-	if selected.ID == "" || selected.RetiredAgent || selected.Harness != "codex" {
-		return domain.ProjectCodexActivation{}, domain.ErrProjectThreadMismatch
+	if selected.ID == "" || selected.RetiredAgent || selected.Harness == "" {
+		return domain.ProjectHarnessActivation{}, domain.ErrProjectThreadMismatch
 	}
 	if err := projectResumeDirectorySafe(project, selected); err != nil {
-		return domain.ProjectCodexActivation{}, fmt.Errorf("resume project thread requires explicit directory decision: %w", err)
+		return domain.ProjectHarnessActivation{}, fmt.Errorf("resume project thread requires explicit directory decision: %w", err)
 	}
-	launch.RequestID, launch.AgentName, launch.Action, launch.SessionID = uuid.NewString(), operation.AgentName, domain.CodexSessionResume, selected.ExternalID
+	launch.RequestID, launch.AgentName, launch.Harness, launch.Action, launch.SessionID = uuid.NewString(), operation.AgentName, selected.Harness, domain.HarnessSessionResume, selected.ExternalID
 	if launch.Directory == "" {
 		launch.Directory = selected.LaunchDir
 	}
 	binding := &projectLaunchBinding{projectID: project.ID, assignmentID: project.Assignment.ID, expectedHead: project.HeadEventID, projectThreadID: selected.ID, mailboxID: project.MailboxID, projectName: project.Name, runnable: true}
-	runtime, err := s.launchCodexAgent(ctx, launch, binding)
+	runtime, err := s.launchHarnessAgent(ctx, launch, binding)
 	if err != nil {
-		return domain.ProjectCodexActivation{}, err
+		return domain.ProjectHarnessActivation{}, err
 	}
-	return domain.ProjectCodexActivation{Project: project, Runtime: runtime}, nil
+	return domain.ProjectHarnessActivation{Project: project, Runtime: runtime}, nil
 }
 
 func projectResumeDirectorySafe(project domain.Project, thread domain.ProjectThread) error {
@@ -1372,21 +1442,21 @@ func projectResumeDirectorySafe(project domain.Project, thread domain.ProjectThr
 	return errors.New("recorded launch directory is no longer covered by a project claim")
 }
 
-func sameDesiredRuntime(runtime domain.CodexRuntime, request domain.CodexLaunchRequest) bool {
-	if runtime.AgentName != request.AgentName || runtime.Directory != request.Directory {
+func sameDesiredRuntime(runtime domain.HarnessRuntime, request domain.HarnessLaunchRequest) bool {
+	if runtime.AgentName != request.AgentName || runtime.Harness != request.Harness || runtime.Directory != request.Directory {
 		return false
 	}
 	switch request.Action {
-	case domain.CodexSessionResume:
-		return runtime.ThreadID == request.SessionID
-	case domain.CodexSessionNew:
+	case domain.HarnessSessionResume:
+		return runtime.SessionID == request.SessionID
+	case domain.HarnessSessionNew:
 		return false
 	default:
 		return true
 	}
 }
 
-var _ domain.CodexRuntimeController = (*Supervisor)(nil)
-var _ domain.ProjectCodexRuntimeController = (*Supervisor)(nil)
-var _ domain.CodexRuntimeAutoStarter = (*Supervisor)(nil)
+var _ domain.HarnessRuntimeController = (*Supervisor)(nil)
+var _ domain.ProjectHarnessRuntimeController = (*Supervisor)(nil)
+var _ domain.HarnessRuntimeAutoStarter = (*Supervisor)(nil)
 var _ domain.ProjectWorktreeProvisioner = (*Supervisor)(nil)

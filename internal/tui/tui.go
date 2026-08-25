@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -113,6 +114,7 @@ type agentManagerStage int
 const (
 	chooseRuntimeAgent agentManagerStage = iota
 	chooseRuntimeSession
+	enterRuntimeHarness
 	enterRuntimeDirectory
 	confirmRuntimeSwitch
 	enterThreadName
@@ -124,11 +126,12 @@ type agentManager struct {
 	cursor        int
 	agent         domain.NamedAgent
 	sessions      []domain.AgentSession
-	runtime       domain.CodexRuntime
+	runtime       domain.HarnessRuntime
+	harness       string
 	directory     string
 	threadName    string
 	renameSession domain.AgentSession
-	pending       domain.CodexLaunchRequest
+	pending       domain.HarnessLaunchRequest
 	yolo          bool
 	busy          bool
 	status        string
@@ -190,6 +193,7 @@ const (
 	enterWorktreeBranch
 	chooseWorktreePrimary
 	chooseProjectAgent
+	enterProjectHarness
 	chooseProjectThread
 	enterProjectDirectory
 )
@@ -199,6 +203,7 @@ type projectComposeSetup struct {
 	stage               projectSetupStage
 	agents              []domain.NamedAgent
 	agent               domain.NamedAgent
+	harness             string
 	threads             []domain.ProjectThread
 	cursor              int
 	query               string
@@ -220,7 +225,8 @@ type projectComposeSetup struct {
 type projectActivationPlan struct {
 	projectID string
 	agentName string
-	action    domain.CodexSessionAction
+	harness   string
+	action    domain.HarnessSessionAction
 	sessionID string
 	directory string
 	force     bool
@@ -316,12 +322,12 @@ type connectionMsg struct{ state domain.ConnectionUpdate }
 type agentSessionsMsg struct {
 	agent    domain.NamedAgent
 	sessions []domain.AgentSession
-	runtime  domain.CodexRuntime
+	runtime  domain.HarnessRuntime
 	err      error
 }
 
-type codexRuntimeMsg struct {
-	runtime domain.CodexRuntime
+type harnessRuntimeMsg struct {
+	runtime domain.HarnessRuntime
 	err     error
 }
 
@@ -596,9 +602,9 @@ func (m app) answer() tea.Msg {
 }
 
 func (m app) activateComposedProject(plan projectActivationPlan) error {
-	controller, ok := m.store.(domain.ProjectCodexRuntimeController)
+	controller, ok := m.store.(domain.ProjectHarnessRuntimeController)
 	if !ok {
-		return errors.New("project Codex runtime control is unavailable")
+		return errors.New("project harness runtime control is unavailable")
 	}
 	project, err := m.store.GetProject(m.ctx, plan.projectID)
 	if err != nil {
@@ -613,16 +619,16 @@ func (m app) activateComposedProject(plan projectActivationPlan) error {
 	}); ok {
 		repository = snapshotter.Snapshot(m.ctx, plan.directory)
 	}
-	launch := domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: plan.agentName, Action: plan.action, SessionID: plan.sessionID, Directory: plan.directory, Repository: repository, Environment: append([]string(nil), m.launchEnvironment...), Yolo: m.defaultYolo}
+	launch := domain.HarnessLaunchRequest{RequestID: uuid.NewString(), AgentName: plan.agentName, Harness: plan.harness, Action: plan.action, SessionID: plan.sessionID, Directory: plan.directory, Repository: repository, Environment: append([]string(nil), m.launchEnvironment...), ProviderOptions: providerOptions(plan.harness, m.defaultYolo)}
 	defer func() {
 		for index := range launch.Environment {
 			launch.Environment[index] = ""
 		}
 	}()
 	if project.Assignment != nil {
-		_, err = controller.HandoffCodexProject(m.ctx, domain.ProjectCodexHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: plan.agentName, Force: plan.force, Launch: launch})
+		_, err = controller.HandoffHarnessProject(m.ctx, domain.ProjectHarnessHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: plan.agentName, Force: plan.force, Launch: launch})
 	} else {
-		_, err = controller.ActivateCodexProject(m.ctx, domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: plan.agentName, Launch: launch})
+		_, err = controller.ActivateHarnessProject(m.ctx, domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: plan.agentName, Launch: launch})
 	}
 	return err
 }
@@ -790,13 +796,13 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.agentManager.stage, m.agentManager.cursor, m.agentManager.status = chooseRuntimeSession, 0, ""
 		return m, nil
-	case codexRuntimeMsg:
+	case harnessRuntimeMsg:
 		m.agentManager.busy = false
 		m.agentManager.runtime = msg.runtime
 		if msg.err != nil {
 			m.agentManager.status = msg.err.Error()
 		} else {
-			m.agentManager.status = fmt.Sprintf("%s · %s · %s", msg.runtime.Phase, threadLabel(m.managedThreadName(msg.runtime.ThreadID), msg.runtime.ThreadID), msg.runtime.Directory)
+			m.agentManager.status = fmt.Sprintf("%s · %s · %s", msg.runtime.Phase, threadLabel(m.managedThreadName(msg.runtime.SessionID), msg.runtime.SessionID), msg.runtime.Directory)
 		}
 		return m, m.reload()
 	case renamedAgentSessionMsg:
@@ -814,7 +820,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.agentManager.agent.CurrentThreadName = msg.session.ThreadName
 		}
 		m.agentManager.stage = chooseRuntimeSession
-		m.agentManager.status = "thread renamed"
+		m.agentManager.status = "session renamed"
 		return m, m.reload()
 	case syncMsg:
 		m.syncErr = msg.err
@@ -904,7 +910,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.projectSetup.status = msg.err.Error()
 			} else {
-				m.projectSetup.stage, m.projectSetup.cursor = chooseProjectThread, 0
+				m.projectSetup.harness = m.projectSetup.agent.Harness
+				if m.projectSetup.harness == "" {
+					m.projectSetup.harness = "codex"
+				}
+				m.projectSetup.stage, m.projectSetup.cursor = enterProjectHarness, 0
 			}
 		}
 	case projectCreatedMsg:
@@ -1271,9 +1281,9 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.agentManager.stage == chooseRuntimeAgent {
 			m.managingAgents = false
-		} else if m.agentManager.stage == enterRuntimeDirectory || m.agentManager.stage == confirmRuntimeSwitch || m.agentManager.stage == enterThreadName {
+		} else if m.agentManager.stage == enterRuntimeHarness || m.agentManager.stage == enterRuntimeDirectory || m.agentManager.stage == confirmRuntimeSwitch || m.agentManager.stage == enterThreadName {
 			m.agentManager.stage = chooseRuntimeSession
-			m.agentManager.pending = domain.CodexLaunchRequest{}
+			m.agentManager.pending = domain.HarnessLaunchRequest{}
 			m.agentManager.renameSession = domain.AgentSession{}
 			m.agentManager.status = ""
 		} else {
@@ -1314,7 +1324,7 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			m.agentManager.cursor = max(0, m.agentManager.cursor-1)
 		case "n":
-			m.beginNewRuntimeDirectory()
+			m.beginNewRuntimeHarness()
 		case "s":
 			m.agentManager.busy = true
 			return m, m.stopManagedAgent()
@@ -1330,7 +1340,7 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.agentManager.cursor == 0 {
-				m.beginNewRuntimeDirectory()
+				m.beginNewRuntimeHarness()
 				return m, nil
 			}
 			session := m.agentManager.sessions[m.agentManager.cursor-1]
@@ -1344,8 +1354,24 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.agentManager.status = err.Error()
 				return m, nil
 			}
-			request := m.runtimeRequest(domain.CodexSessionResume, session.SessionID, directory)
+			request := m.runtimeRequest(domain.HarnessSessionResume, session.SessionID, directory)
 			return m.confirmOrLaunch(request)
+		}
+	case enterRuntimeHarness:
+		switch key.String() {
+		case "enter":
+			m.agentManager.harness = strings.TrimSpace(m.agentManager.harness)
+			if m.agentManager.harness == "" {
+				m.agentManager.status = "Harness provider is required."
+				return m, nil
+			}
+			m.agentManager.stage = enterRuntimeDirectory
+			m.agentManager.directory = m.defaultRuntimeDirectory()
+			m.agentManager.status = ""
+		case "backspace":
+			m.agentManager.harness = trimLastRune(m.agentManager.harness)
+		default:
+			m.agentManager.harness += printableKeyText(key)
 		}
 	case enterRuntimeDirectory:
 		switch key.String() {
@@ -1355,7 +1381,7 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.agentManager.status = err.Error()
 				return m, nil
 			}
-			request := m.runtimeRequest(domain.CodexSessionNew, "", directory)
+			request := m.runtimeRequest(domain.HarnessSessionNew, "", directory)
 			return m.confirmOrLaunch(request)
 		case "backspace":
 			runes := []rune(m.agentManager.directory)
@@ -1373,20 +1399,20 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			request := m.agentManager.pending
 			request.ConfirmSwitch = true
 			m.agentManager.busy = true
-			m.agentManager.status = "switching Codex runtime…"
+			m.agentManager.status = "switching harness runtime…"
 			return m, m.launchManagedAgent(request)
 		case "n":
 			for index := range m.agentManager.pending.Environment {
 				m.agentManager.pending.Environment[index] = ""
 			}
 			m.agentManager.stage = chooseRuntimeSession
-			m.agentManager.pending = domain.CodexLaunchRequest{}
+			m.agentManager.pending = domain.HarnessLaunchRequest{}
 		}
 	case enterThreadName:
 		switch key.String() {
 		case "enter":
 			m.agentManager.busy = true
-			m.agentManager.status = "renaming thread…"
+			m.agentManager.status = "renaming session…"
 			return m, m.renameManagedThread(m.agentManager.renameSession, m.agentManager.threadName)
 		case "backspace":
 			runes := []rune(m.agentManager.threadName)
@@ -1402,9 +1428,12 @@ func (m app) updateAgentManager(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *app) beginNewRuntimeDirectory() {
-	m.agentManager.stage = enterRuntimeDirectory
-	m.agentManager.directory = m.defaultRuntimeDirectory()
+func (m *app) beginNewRuntimeHarness() {
+	m.agentManager.stage = enterRuntimeHarness
+	m.agentManager.harness = m.agentManager.agent.Harness
+	if m.agentManager.harness == "" {
+		m.agentManager.harness = "codex"
+	}
 	m.agentManager.status = ""
 }
 
@@ -1430,69 +1459,99 @@ func (m app) validRuntimeDirectory(raw string) (string, error) {
 	return directory, nil
 }
 
-func (m app) runtimeRequest(action domain.CodexSessionAction, sessionID, directory string) domain.CodexLaunchRequest {
+func (m app) runtimeRequest(action domain.HarnessSessionAction, sessionID, directory string) domain.HarnessLaunchRequest {
 	repository := model.RepositoryContext{Directory: directory}
 	if snapshotter, ok := m.repo.(interface {
 		Snapshot(context.Context, string) model.RepositoryContext
 	}); ok {
 		repository = snapshotter.Snapshot(m.ctx, directory)
 	}
-	return domain.CodexLaunchRequest{
-		RequestID: uuid.NewString(), AgentName: m.agentManager.agent.Name, Action: action, SessionID: sessionID,
+	harnessID := m.agentManager.agent.Harness
+	if action == domain.HarnessSessionNew {
+		harnessID = m.agentManager.harness
+	}
+	for _, session := range m.agentManager.sessions {
+		if session.SessionID == sessionID {
+			harnessID = session.Harness
+			break
+		}
+	}
+	return domain.HarnessLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: m.agentManager.agent.Name, Harness: harnessID, Action: action, SessionID: sessionID,
 		Directory: directory, Repository: repository, Environment: append([]string(nil), m.launchEnvironment...),
-		Yolo: m.agentManager.yolo,
+		ProviderOptions: providerOptions(harnessID, m.agentManager.yolo),
 	}
 }
 
-func (m app) confirmOrLaunch(request domain.CodexLaunchRequest) (tea.Model, tea.Cmd) {
-	if m.agentManager.runtime.Phase == domain.CodexRuntimeRunning && (request.Action == domain.CodexSessionNew || request.SessionID != m.agentManager.runtime.ThreadID) {
+func providerOptions(harnessID string, yolo bool) json.RawMessage {
+	if harnessID != "codex" {
+		return nil
+	}
+	return codexProviderOptions(yolo)
+}
+
+func codexProviderOptions(yolo bool) json.RawMessage {
+	raw, _ := json.Marshal(map[string]any{"yolo": yolo})
+	return raw
+}
+
+func providerYolo(raw json.RawMessage) bool {
+	var options struct {
+		Yolo bool `json:"yolo"`
+	}
+	_ = json.Unmarshal(raw, &options)
+	return options.Yolo
+}
+
+func (m app) confirmOrLaunch(request domain.HarnessLaunchRequest) (tea.Model, tea.Cmd) {
+	if m.agentManager.runtime.Phase == domain.HarnessRuntimeRunning && (request.Harness != m.agentManager.runtime.Harness || request.Action == domain.HarnessSessionNew || request.SessionID != m.agentManager.runtime.SessionID) {
 		m.agentManager.stage = confirmRuntimeSwitch
 		m.agentManager.pending = request
-		m.agentManager.status = "replace the running Codex worker? y/n"
+		m.agentManager.status = "replace the running harness worker? y/n"
 		return m, nil
 	}
 	m.agentManager.busy = true
-	m.agentManager.status = "starting Codex runtime…"
+	m.agentManager.status = "starting harness runtime…"
 	return m, m.launchManagedAgent(request)
 }
 
 func (m app) loadAgentSessions(agent domain.NamedAgent) tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := m.store.ListNamedAgentSessions(m.ctx, agent.Name)
-		controller, ok := m.store.(domain.CodexRuntimeController)
+		controller, ok := m.store.(domain.HarnessRuntimeController)
 		if err == nil && !ok {
-			err = errors.New("Codex runtime control is unavailable")
+			err = errors.New("harness runtime control is unavailable")
 		}
-		var runtime domain.CodexRuntime
+		var runtime domain.HarnessRuntime
 		if err == nil {
-			runtime, err = controller.CodexAgentRuntime(m.ctx, agent.Name)
+			runtime, err = controller.HarnessAgentRuntime(m.ctx, agent.Name)
 		}
 		return agentSessionsMsg{agent: agent, sessions: sessions, runtime: runtime, err: err}
 	}
 }
 
-func (m app) launchManagedAgent(request domain.CodexLaunchRequest) tea.Cmd {
+func (m app) launchManagedAgent(request domain.HarnessLaunchRequest) tea.Cmd {
 	return func() tea.Msg {
-		controller, ok := m.store.(domain.CodexRuntimeController)
+		controller, ok := m.store.(domain.HarnessRuntimeController)
 		if !ok {
-			return codexRuntimeMsg{err: errors.New("Codex runtime control is unavailable")}
+			return harnessRuntimeMsg{err: errors.New("harness runtime control is unavailable")}
 		}
-		runtime, err := controller.LaunchCodexAgent(m.ctx, request)
+		runtime, err := controller.LaunchHarnessAgent(m.ctx, request)
 		for index := range request.Environment {
 			request.Environment[index] = ""
 		}
-		return codexRuntimeMsg{runtime: runtime, err: err}
+		return harnessRuntimeMsg{runtime: runtime, err: err}
 	}
 }
 
 func (m app) stopManagedAgent() tea.Cmd {
 	return func() tea.Msg {
-		controller, ok := m.store.(domain.CodexRuntimeController)
+		controller, ok := m.store.(domain.HarnessRuntimeController)
 		if !ok {
-			return codexRuntimeMsg{err: errors.New("Codex runtime control is unavailable")}
+			return harnessRuntimeMsg{err: errors.New("harness runtime control is unavailable")}
 		}
-		runtime, err := controller.StopCodexAgent(m.ctx, m.agentManager.agent.Name)
-		return codexRuntimeMsg{runtime: runtime, err: err}
+		runtime, err := controller.StopHarnessAgent(m.ctx, m.agentManager.agent.Name)
+		return harnessRuntimeMsg{runtime: runtime, err: err}
 	}
 }
 
@@ -1683,8 +1742,10 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			setup.stage = enterWorktreeDestination
 		case chooseWorktreePrimary:
 			setup.stage = enterWorktreeBranch
-		case chooseProjectThread:
+		case enterProjectHarness:
 			setup.stage = chooseProjectAgent
+		case chooseProjectThread:
+			setup.stage = enterProjectHarness
 		case enterProjectDirectory:
 			setup.stage = chooseProjectThread
 		default:
@@ -1876,6 +1937,20 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				setup.query, setup.cursor = setup.query+key.Text, 0
 			}
 		}
+	case enterProjectHarness:
+		switch key.String() {
+		case "enter":
+			setup.harness = strings.TrimSpace(setup.harness)
+			if setup.harness == "" {
+				setup.status = "Harness provider is required."
+			} else {
+				setup.stage, setup.cursor, setup.status = chooseProjectThread, 0, ""
+			}
+		case "backspace":
+			setup.harness = trimLastRune(setup.harness)
+		default:
+			setup.harness += printableKeyText(key)
+		}
 	case chooseProjectThread:
 		threads := setup.compatibleThreads()
 		switch key.String() {
@@ -1897,7 +1972,7 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			thread := threads[setup.cursor-1]
-			return m.finishProjectSetup(domain.CodexSessionResume, thread.ExternalID, thread.LaunchDir)
+			return m.finishProjectSetup(domain.HarnessSessionResume, thread.ExternalID, thread.LaunchDir)
 		}
 	case enterProjectDirectory:
 		switch key.String() {
@@ -1907,7 +1982,7 @@ func (m app) updateProjectSetup(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				setup.status = err.Error()
 				return m, nil
 			}
-			return m.finishProjectSetup(domain.CodexSessionNew, "", directory)
+			return m.finishProjectSetup(domain.HarnessSessionNew, "", directory)
 		case "backspace":
 			runes := []rune(setup.directory)
 			if len(runes) > 0 {
@@ -2073,7 +2148,7 @@ func (m *app) prepareProjectAgents() {
 func (s *projectComposeSetup) compatibleThreads() []domain.ProjectThread {
 	var result []domain.ProjectThread
 	for _, thread := range s.threads {
-		if thread.AgentName == s.agent.Name && !thread.RetiredAgent && thread.Harness == "codex" {
+		if thread.AgentName == s.agent.Name && !thread.RetiredAgent && thread.Harness == s.harness {
 			result = append(result, thread)
 		}
 	}
@@ -2089,9 +2164,9 @@ func (m app) projectDefaultDirectory(project domain.Project) string {
 	return m.launchDirectory
 }
 
-func (m app) finishProjectSetup(action domain.CodexSessionAction, sessionID, directory string) (tea.Model, tea.Cmd) {
+func (m app) finishProjectSetup(action domain.HarnessSessionAction, sessionID, directory string) (tea.Model, tea.Cmd) {
 	setup := m.projectSetup
-	m.composeActivation = &projectActivationPlan{projectID: setup.project.ID, agentName: setup.agent.Name, action: action, sessionID: sessionID, directory: directory, force: setup.force}
+	m.composeActivation = &projectActivationPlan{projectID: setup.project.ID, agentName: setup.agent.Name, harness: setup.harness, action: action, sessionID: sessionID, directory: directory, force: setup.force}
 	m.projectSetup = nil
 	m.answering = true
 	m.answerID, m.answerGroupKey = "", ""
@@ -2869,7 +2944,7 @@ func (m app) technicalContext(message model.Message) string {
 func (m app) renderAgentManager() string {
 	width := max(40, m.width)
 	var body strings.Builder
-	body.WriteString(titleStyle.Render("Codex agents"))
+	body.WriteString(titleStyle.Render("Harness agents"))
 	body.WriteString("\n\n")
 	switch m.agentManager.stage {
 	case chooseRuntimeAgent:
@@ -2900,8 +2975,8 @@ func (m app) renderAgentManager() string {
 		if m.agentManager.yolo {
 			yolo = "ON"
 		}
-		body.WriteString("YOLO mode: " + yolo + " (y to toggle)\n\n")
-		newLine := "+ new Codex thread"
+		body.WriteString("Codex YOLO: " + yolo + " (y to toggle)\n\n")
+		newLine := "+ new harness session"
 		if m.agentManager.cursor == 0 {
 			newLine = selected.Render(newLine)
 		}
@@ -2917,21 +2992,24 @@ func (m app) renderAgentManager() string {
 			}
 			body.WriteString(line + "\n")
 		}
+	case enterRuntimeHarness:
+		body.WriteString("New session for " + m.agentManager.agent.Name + "\n\n")
+		body.WriteString("Harness provider: " + m.agentManager.harness + "\n")
 	case enterRuntimeDirectory:
-		body.WriteString("New Codex thread for " + m.agentManager.agent.Name + "\n\n")
+		body.WriteString("New " + m.agentManager.harness + " session for " + m.agentManager.agent.Name + "\n\n")
 		body.WriteString("Directory: " + m.agentManager.directory + "\n")
 		if m.agentManager.yolo {
-			body.WriteString("YOLO mode: ON\n")
+			body.WriteString("Codex YOLO: ON\n")
 		}
 	case confirmRuntimeSwitch:
 		body.WriteString("Agent " + m.agentManager.agent.Name + " is running.\n")
-		if m.agentManager.pending.Yolo {
+		if providerYolo(m.agentManager.pending.ProviderOptions) {
 			body.WriteString("Requested YOLO mode: ON\n")
 		}
 		body.WriteString("Stop it and switch to the requested session? y/n\n")
 	case enterThreadName:
 		body.WriteString("Rename " + threadLabel(m.agentManager.renameSession.ThreadName, m.agentManager.renameSession.SessionID) + "\n\n")
-		body.WriteString("Thread name: " + m.agentManager.threadName + "\n")
+		body.WriteString("Session name: " + m.agentManager.threadName + "\n")
 		body.WriteString(dim.Render("Leave empty to clear the name."))
 	}
 	if m.agentManager.busy {
@@ -2942,7 +3020,9 @@ func (m app) renderAgentManager() string {
 	}
 	help := "type to search · j/k move · enter select · esc back"
 	if m.agentManager.stage == chooseRuntimeSession {
-		help = "j/k move · enter resume/new · y YOLO · r rename · n new · s stop · esc back"
+		help = "j/k move · enter resume/new · y Codex YOLO · r rename · n new · s stop · esc back"
+	} else if m.agentManager.stage == enterRuntimeHarness {
+		help = "type harness provider · enter continue · esc back"
 	} else if m.agentManager.stage == enterRuntimeDirectory {
 		help = "type directory · enter launch · esc back"
 	} else if m.agentManager.stage == confirmRuntimeSwitch {
@@ -3470,11 +3550,13 @@ func (m app) renderProjectSetup(width, height int) string {
 			}
 			body.WriteString("\n" + dim.Render(message))
 		}
+	case enterProjectHarness:
+		body.WriteString("\n\nAgent: " + setup.agent.Name + "\nHarness provider:\n" + renderProjectInput(setup.harness))
 	case chooseProjectThread:
-		body.WriteString("\n\nAgent: " + setup.agent.Name + "\nChoose an execution thread")
+		body.WriteString("\n\nAgent: " + setup.agent.Name + " · " + setup.harness + "\nChoose an execution session")
 		options := append([]domain.ProjectThread{{}}, setup.compatibleThreads()...)
 		for index, thread := range options {
-			label := "new Codex thread"
+			label := "new " + setup.harness + " session"
 			if index > 0 {
 				label = "resume " + shortThreadID(thread.ExternalID) + " · " + thread.LaunchDir
 			}
@@ -3492,7 +3574,7 @@ func (m app) renderProjectSetup(width, height int) string {
 			body.WriteString("\n\n" + warning)
 		}
 	case enterProjectDirectory:
-		body.WriteString("\n\nNew thread launch directory:\n" + renderProjectInput(setup.directory))
+		body.WriteString("\n\nNew session launch directory:\n" + renderProjectInput(setup.directory))
 		body.WriteString("\n" + dim.Render("Paths outside claims are allowed with a warning · ~ and $VARS expand locally."))
 	}
 	if setup.busy {

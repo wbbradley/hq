@@ -61,7 +61,7 @@ func Run(ctx context.Context, options Options) error {
 			ProviderName: "Codex", SessionName: "thread", OperationName: "turn", ItemName: "item",
 			ReadyBody: bridgeReadyBody(options), ReadyStatus: "The Codex app-server thread is connected and waiting for HQ input.",
 			StoppedBody: "Codex bridge stopped", CancelledStatus: "Bridge cancelled; the app-server process is being terminated.",
-			OutputNamespace: "hq-codex-output", NewSessionHint: "use --new-thread to attach Codex",
+			OutputNamespace: "hq-codex-output", NewSessionHint: "use hq harness --provider codex --new-session to attach Codex",
 		},
 		PublishStatus: func(statusContext context.Context, mailbox model.Mailbox, identity harness.SessionIdentity, body, status string, createdAt time.Time) error {
 			return sendStatusAt(statusContext, options, mailbox, string(identity.ID), body, status, createdAt)
@@ -94,6 +94,12 @@ func Run(ctx context.Context, options Options) error {
 }
 
 type codexLedgerAdapter struct{ ledger DeliveryLedger }
+
+// AdaptDeliveryLedger exposes the existing on-disk ledger through the neutral
+// bridge contract while its persisted format remains backward compatible.
+func AdaptDeliveryLedger(ledger DeliveryLedger) harnessbridge.DeliveryLedger {
+	return codexLedgerAdapter{ledger: ledger}
+}
 
 func (a codexLedgerAdapter) Delivery(sessionID, messageID string) (harnessbridge.DeliveryState, bool, error) {
 	record, exists, err := a.ledger.Delivery(sessionID, messageID)

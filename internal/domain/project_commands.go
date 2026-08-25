@@ -27,9 +27,9 @@ const (
 	ProjectCommandAssignmentAbort    ProjectCommandOperation = "project.assignment.abort"
 	ProjectCommandAssignmentBlock    ProjectCommandOperation = "project.assignment.block"
 	ProjectCommandAssignmentUnassign ProjectCommandOperation = "project.assignment.unassign"
-	ProjectCommandCodexActivate      ProjectCommandOperation = "codex.project.activate"
-	ProjectCommandCodexClose         ProjectCommandOperation = "codex.project.close"
-	ProjectCommandCodexHandoff       ProjectCommandOperation = "codex.project.handoff"
+	ProjectCommandHarnessActivate    ProjectCommandOperation = "harness.project.activate"
+	ProjectCommandHarnessClose       ProjectCommandOperation = "harness.project.close"
+	ProjectCommandHarnessHandoff     ProjectCommandOperation = "harness.project.handoff"
 	ProjectCommandProvisionWorktree  ProjectCommandOperation = "project.provision-worktree"
 )
 
@@ -85,9 +85,9 @@ type ProjectAssignmentUnassignCommand struct {
 	Forced             bool   `json:"forced"`
 	RuntimeObservation string `json:"runtime_observation"`
 }
-type ProjectCodexActivateCommand ProjectCodexActivationRequest
-type ProjectCodexCloseCommand ProjectCodexCloseRequest
-type ProjectCodexHandoffCommand ProjectCodexHandoffRequest
+type ProjectHarnessActivateCommand ProjectHarnessActivationRequest
+type ProjectHarnessCloseCommand ProjectHarnessCloseRequest
+type ProjectHarnessHandoffCommand ProjectHarnessHandoffRequest
 type ProjectProvisionWorktreeCommand ProjectWorktreeRequest
 
 func (ProjectCreateCommand) Operation() ProjectCommandOperation     { return ProjectCommandCreate }
@@ -130,12 +130,14 @@ func (ProjectAssignmentBlockCommand) Operation() ProjectCommandOperation {
 func (ProjectAssignmentUnassignCommand) Operation() ProjectCommandOperation {
 	return ProjectCommandAssignmentUnassign
 }
-func (ProjectCodexActivateCommand) Operation() ProjectCommandOperation {
-	return ProjectCommandCodexActivate
+func (ProjectHarnessActivateCommand) Operation() ProjectCommandOperation {
+	return ProjectCommandHarnessActivate
 }
-func (ProjectCodexCloseCommand) Operation() ProjectCommandOperation { return ProjectCommandCodexClose }
-func (ProjectCodexHandoffCommand) Operation() ProjectCommandOperation {
-	return ProjectCommandCodexHandoff
+func (ProjectHarnessCloseCommand) Operation() ProjectCommandOperation {
+	return ProjectCommandHarnessClose
+}
+func (ProjectHarnessHandoffCommand) Operation() ProjectCommandOperation {
+	return ProjectCommandHarnessHandoff
 }
 func (ProjectProvisionWorktreeCommand) Operation() ProjectCommandOperation {
 	return ProjectCommandProvisionWorktree
@@ -157,9 +159,9 @@ func (ProjectAssignmentActivateCommand) projectCommandData() {}
 func (ProjectAssignmentAbortCommand) projectCommandData()    {}
 func (ProjectAssignmentBlockCommand) projectCommandData()    {}
 func (ProjectAssignmentUnassignCommand) projectCommandData() {}
-func (ProjectCodexActivateCommand) projectCommandData()      {}
-func (ProjectCodexCloseCommand) projectCommandData()         {}
-func (ProjectCodexHandoffCommand) projectCommandData()       {}
+func (ProjectHarnessActivateCommand) projectCommandData()    {}
+func (ProjectHarnessCloseCommand) projectCommandData()       {}
+func (ProjectHarnessHandoffCommand) projectCommandData()     {}
 func (ProjectProvisionWorktreeCommand) projectCommandData()  {}
 
 type ProjectCommandDefinition struct {
@@ -248,9 +250,9 @@ func buildProjectCommandRegistry() map[ProjectCommandOperation]registeredProject
 		value := data.(*ProjectAssignmentUnassignCommand)
 		return target.UnassignProject(ctx, command.ProjectID, command.ExpectedHead, value.Forced, value.RuntimeObservation)
 	})
-	runtime(ProjectCommandCodexActivate, false, func() ProjectCommandData { return &ProjectCodexActivateCommand{} })
-	runtime(ProjectCommandCodexClose, false, func() ProjectCommandData { return &ProjectCodexCloseCommand{} })
-	runtime(ProjectCommandCodexHandoff, false, func() ProjectCommandData { return &ProjectCodexHandoffCommand{} })
+	runtime(ProjectCommandHarnessActivate, false, func() ProjectCommandData { return &ProjectHarnessActivateCommand{} })
+	runtime(ProjectCommandHarnessClose, false, func() ProjectCommandData { return &ProjectHarnessCloseCommand{} })
+	runtime(ProjectCommandHarnessHandoff, false, func() ProjectCommandData { return &ProjectHarnessHandoffCommand{} })
 	runtime(ProjectCommandProvisionWorktree, true, func() ProjectCommandData { return &ProjectProvisionWorktreeCommand{} })
 	registry[ProjectCommandCreate] = withCreation(registry[ProjectCommandCreate])
 	return registry

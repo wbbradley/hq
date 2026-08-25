@@ -2,16 +2,20 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 
 	"github.com/wbbradley/hq/internal/codexbridge"
-	"github.com/wbbradley/hq/internal/codexsupervisor"
 	hqconfig "github.com/wbbradley/hq/internal/config"
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/domainrpc"
+	"github.com/wbbradley/hq/internal/harness"
+	"github.com/wbbradley/hq/internal/harnessbridge"
+	"github.com/wbbradley/hq/internal/harnesssupervisor"
 	"github.com/wbbradley/hq/internal/localwire"
 	"github.com/wbbradley/hq/internal/logging"
 	"github.com/wbbradley/hq/internal/store"
@@ -58,27 +62,56 @@ func (r Runner) Run(ctx context.Context, databasePath string) error {
 			logger.Error("open Codex delivery ledger", "error", err)
 			return syncer.Runtime{}, err
 		}
-		supervisor := codexsupervisor.New(ctx, database, ledger)
+		codexFactory := &codexbridge.HarnessFactory{Logger: logger.With("component", "codex_adapter"), Stderr: logging.NewLineWriter(logger.With("component", "codex_process"), slog.LevelWarn, "Codex app-server stderr")}
+		registry, err := harness.NewRegistry(codexFactory)
+		if err != nil {
+			database.Close()
+			return syncer.Runtime{}, err
+		}
+		supervisor := harnesssupervisor.New(ctx, database, codexbridge.AdaptDeliveryLedger(ledger), registry)
 		supervisor.Logger = logger
-		supervisor.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) {
+		supervisor.LoadLaunchDefaults = func() (domain.HarnessLaunchDefaults, error) {
 			settings, err := hqconfig.Load()
-			return domain.CodexLaunchDefaults{Yolo: settings.Codex.Yolo}, err
+			raw, marshalErr := json.Marshal(codexbridge.CodexOptions{Yolo: settings.Codex.Yolo})
+			if err == nil {
+				err = marshalErr
+			}
+			return domain.HarnessLaunchDefaults{Harness: string(codexbridge.CodexProviderID), ProviderOptions: raw}, err
+		}
+		supervisor.DecodeOptions = func(provider harness.ProviderID, agentName string, raw json.RawMessage) (harness.ProviderOptions, error) {
+			if provider != codexbridge.CodexProviderID {
+				return nil, &harness.ProviderError{Provider: provider, Operation: "decode options", Cause: harness.ErrUnknownProvider}
+			}
+			var options codexbridge.CodexOptions
+			if len(raw) != 0 {
+				if err := json.Unmarshal(raw, &options); err != nil {
+					return nil, fmt.Errorf("decode Codex provider options: %w", err)
+				}
+			}
+			options.DeveloperInstructions = codexbridge.NamedAgentDeveloperInstructions(agentName)
+			return options, nil
+		}
+		supervisor.Terminology = func(provider harness.ProviderID) harnessbridge.Terminology {
+			if provider == codexbridge.CodexProviderID {
+				return harnessbridge.Terminology{ProviderName: "Codex", SessionName: "thread", OperationName: "turn", ItemName: "item", OutputNamespace: "hq-codex-output"}
+			}
+			return harnessbridge.Terminology{}
 		}
 		database.SetProjectCommandHandler(func(commandCtx context.Context, command domain.ProjectCommand, data domain.ProjectCommandData) (domain.Project, error) {
 			switch value := data.(type) {
-			case *domain.ProjectCodexActivateCommand:
-				request := domain.ProjectCodexActivationRequest(*value)
+			case *domain.ProjectHarnessActivateCommand:
+				request := domain.ProjectHarnessActivationRequest(*value)
 				request.ProjectID, request.ExpectedHead, request.Launch.RequestID, request.Launch.Environment = command.ProjectID, command.ExpectedHead, command.ID, os.Environ()
-				result, err := supervisor.ActivateCodexProject(commandCtx, request)
+				result, err := supervisor.ActivateHarnessProject(commandCtx, request)
 				return result.Project, err
-			case *domain.ProjectCodexCloseCommand:
-				request := domain.ProjectCodexCloseRequest(*value)
+			case *domain.ProjectHarnessCloseCommand:
+				request := domain.ProjectHarnessCloseRequest(*value)
 				request.RequestID, request.ProjectID, request.ExpectedHead = command.ID, command.ProjectID, command.ExpectedHead
-				return supervisor.CloseCodexProject(commandCtx, request)
-			case *domain.ProjectCodexHandoffCommand:
-				request := domain.ProjectCodexHandoffRequest(*value)
+				return supervisor.CloseHarnessProject(commandCtx, request)
+			case *domain.ProjectHarnessHandoffCommand:
+				request := domain.ProjectHarnessHandoffRequest(*value)
 				request.RequestID, request.ProjectID, request.ExpectedHead, request.Launch.RequestID, request.Launch.Environment = command.ID, command.ProjectID, command.ExpectedHead, command.ID, os.Environ()
-				result, err := supervisor.HandoffCodexProject(commandCtx, request)
+				result, err := supervisor.HandoffHarnessProject(commandCtx, request)
 				return result.Project, err
 			case *domain.ProjectProvisionWorktreeCommand:
 				request := domain.ProjectWorktreeRequest(*value)

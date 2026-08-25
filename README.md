@@ -78,17 +78,18 @@ hq agent list --json
 hq agent retire fred --yes
 ```
 
-## Codex app-server bridge
+## Harness runtime and Codex adapter
 
-`hq codex` is a local control client for a daemon-owned, durable named agent. It requires an installed and authenticated Codex CLI **v0.149.0** on the caller's `PATH` and an initialized HQ identity:
+`hq harness` is the harness-neutral local control client for a daemon-owned, durable named agent. Select the provider explicitly. The bundled `codex` provider requires an installed and authenticated Codex CLI **v0.149.0** on the caller's `PATH` and an initialized HQ identity:
 
 ```mermaid
 flowchart LR
-    CLI[hq codex client] -->|local RPC: environment, cwd, desired session| Node
+    CLI[hq harness client] -->|local RPC: provider, environment, cwd, desired session| Node
     TUI[HQ TUI] -->|same local RPC| Node
     subgraph Local["installation-local control plane"]
-        Node[(HQ daemon)] --> Supervisor[Named-agent supervisor]
-        Supervisor -->|stdio child| AppServer[Codex app-server]
+        Node[(HQ daemon)] --> Supervisor[Harness supervisor]
+        Supervisor -->|registered factory| Adapter[Codex adapter]
+        Adapter -->|stdio child| AppServer[Codex app-server]
         Supervisor -.-> Ledger[(shared delivery ledger)]
     end
     subgraph Data["Nostr data plane"]
@@ -105,21 +106,21 @@ hq identity init
 Launch or resume a named agent in the current directory, optionally with an initial prompt:
 
 ```sh
-hq codex --agent fred
-hq codex --agent fred --cwd . "Inspect the failing tests and propose a fix"
-hq codex --agent fred --new-thread
-hq codex --agent fred --session 019c0000-0000-7000-8000-000000000001
+hq harness --provider codex --agent fred
+hq harness --provider codex --agent fred --cwd . "Inspect the failing tests and propose a fix"
+hq harness --provider codex --agent fred --new-session
+hq harness --provider codex --agent fred --session 019c0000-0000-7000-8000-000000000001
 ```
 
-`--agent NAME` is required; anonymous bridges and the old top-level `--resume` form are unsupported and no anonymous bridge state is migrated. `--cwd` defaults to the invoking client's current directory, and relative values are resolved there before the request is sent. The daemon validates the absolute path on its own machine, starts or resumes the exact requested thread, and changes the durable selection only after Codex acknowledges success. A missing rollout is an actionable failure and never silently creates a replacement.
+`--provider ID` and `--agent NAME` are required. `--cwd` defaults to the invoking client's current directory, and relative values are resolved there before the request is sent. The daemon validates the absolute path on its own machine, starts or resumes the exact requested session through the selected factory, and changes the durable selection only after the provider acknowledges success. A missing session is an actionable failure and never silently creates a replacement.
 
-The client transmits its complete environment snapshot as a sensitive local-RPC input so the child sees the caller's credentials, `PATH`, and Codex configuration. After a successful launch, the daemon retains one exact last-known-good launch template per agent in memory so an offline agent can be resumed with the same environment, cwd, repository context, and yolo setting. Templates are replaced and wiped in memory and are never added to SQLite, signed events, mutation receipts, the ledger, Nostr, HQ-authored log attributes, diagnostics, status, or RPC results. The protected diagnostic log does capture Codex app-server stderr verbatim, so anything the child itself prints there is retained. `--yolo` sets `approvalPolicy` to `never` and `sandbox` to `danger-full-access` on both new and resumed app-server threads; use it only when the surrounding environment provides the required isolation. Set its local default with `hq config set codex.yolo true` (stored in `$XDG_CONFIG_HOME/hq/config.json` or `~/.config/hq/config.json`), inspect it with `hq config get codex.yolo`, and override an enabled default for one CLI launch with `--yolo=false`.
+The client transmits its complete environment snapshot as a sensitive local-RPC input so the selected provider sees the caller's credentials, `PATH`, and configuration. After a successful launch, the daemon retains one exact last-known-good launch template per agent in memory so an offline agent can be resumed with the same environment, cwd, repository context, and provider options. Templates are replaced and wiped in memory and are never added to SQLite, signed events, mutation receipts, the ledger, Nostr, HQ-authored log attributes, diagnostics, status, or RPC results. The protected diagnostic log does capture Codex app-server stderr verbatim, so anything the child itself prints there is retained. The adapter-scoped `--codex-yolo` option sets `approvalPolicy` to `never` and `sandbox` to `danger-full-access` on both new and resumed Codex threads; it is rejected for other providers. Set its local default with `hq config set codex.yolo true` and override it for one launch with `--codex-yolo=false`.
 
-The CLI waits for a definitive running or failed acknowledgement, prints the agent, selected thread, directory, and status, and exits. The bridge and app-server remain children of the daemon; they survive CLI or TUI exit and stop cleanly when the daemon stops or restarts. Workers remain offline after a node restart until needed. Committing a local human message or answer to an offline named Codex agent automatically attempts to resume its selected thread. While the daemon remains alive, HQ reuses the exact last-known-good launch template. After a daemon restart, the durable selected thread and cwd are combined with the sending client's current environment and current local launch defaults, including `codex.yolo`. The original initial prompt is never replayed. Message creation remains successful and queued if the asynchronous wake fails.
+The CLI waits for a definitive running or failed acknowledgement, prints the agent, provider, selected session, directory, and status, and exits. The generic bridge and provider instance remain owned by the daemon; they survive CLI or TUI exit and stop cleanly when the daemon stops or restarts. Workers remain offline after a node restart until needed. Committing a local human message or answer to an offline named harness agent automatically attempts to resume its selected session with that session's provider. While the daemon remains alive, HQ reuses the exact last-known-good launch template. After a daemon restart, the durable selected session and cwd are combined with the sending client's current environment and current provider defaults. The original initial prompt is never replayed. Message creation remains successful and queued if the asynchronous wake fails.
 
 A newly created agent has no selected session until its first successful `thread/start`. New threads receive developer instructions naming the durable agent and requiring structured human input; exact resumes do not replace the thread's instructions. Starting another thread preserves historical bindings and their exact repository/directory context, creation time, and most-recent selection time. One thread can never be reassigned to another agent.
 
-Press `g` in the TUI to search non-retired agents, inspect active/offline state and current and historical sessions, resume an exact thread, start a new thread with a directory input, rename a thread with `r`, or stop a local worker. Press `y` in the session chooser to toggle YOLO mode for either a new or resumed thread; the initial state comes from `codex.yolo`. Thread names are mutable installation-private metadata: they do not change the immutable Codex thread ID, select the thread, or restart its worker. Session rows show the friendly name with a shortened ID, exact directory, and last-selection time; unnamed sessions fall back to the shortened ID. Switching a live worker requires confirmation and all operations run asynchronously without discarding inbox position, focus, or drafts.
+Press `g` in the TUI to search non-retired agents, inspect active/offline state and current and historical sessions, resume an exact session, choose a provider for a new session, rename a session with `r`, or stop a local worker. Press `y` to toggle the Codex-only YOLO option; the initial state comes from `codex.yolo` and the option is omitted for other providers. Session names are mutable installation-private metadata: they do not change the immutable provider session ID, select the session, or restart its worker. Session rows show the friendly name with a shortened ID, exact directory, and last-selection time; unnamed sessions fall back to the shortened ID. Switching a live worker requires confirmation and all operations run asynchronously without discarding inbox position, focus, or drafts.
 
 Named bridges hold a local 30-second ownership lease renewed every 10 seconds as the final exclusion boundary. After machine suspension, an expired lease may be revived only by the exact persisted owner token; a missing lease or replacement token still stops the old worker. A conflicting independently owned lease is reported rather than killed. Repeated local launch request IDs are idempotent, different named agents may run concurrently, and one daemon-shared ledger serializes their delivery checkpoints.
 
@@ -141,7 +142,7 @@ On cancellation, EOF, child failure, or a fatal output error, the bridge stops a
 
 Troubleshooting:
 
-- Run `hq help codex` to confirm syntax and `codex --version` to confirm v0.149.0.
+- Run `hq help harness` to confirm syntax and `codex --version` to confirm v0.149.0.
 - An unsupported server request stops the bridge with compatibility guidance instead of guessing a permissive response.
 - If readiness fails, verify Codex authentication, the caller environment, the working directory, and HQ identity; sensitive child environment and raw child stderr are deliberately absent from diagnostics.
 - If an immediate relay sync request is undesirable, use global `--no-sync`; local HQ and Codex delivery still operate, but a network-enabled node may still publish durable outbox work.
@@ -177,7 +178,7 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - `x`: toggle archived inbox messages
 - `v`: toggle relay and event status
 - `i`: toggle technical message IDs and Codex correlation details
-- `g`: manage named Codex agents and sessions; use `r` on a session to rename it
+- `g`: manage named harness agents and sessions; use `r` on a session to rename it
 - `r`: refresh
 - `q`: quit
 
@@ -237,7 +238,7 @@ Projects keep resource claims, conversation history, assignment epochs, and exec
 hq project create --path /work/widget --open widget
 hq project worktree --repo /work/widget --base main --destination /work/widget-fix --branch fix/widget widget-fix
 hq project send PROJECT_ID "Investigate the failing integration test"
-hq project activate PROJECT_ID --agent alice --new-thread
+hq project activate PROJECT_ID --agent alice --harness codex --new-session
 hq project close PROJECT_ID
 hq project archive PROJECT_ID
 ```
@@ -280,14 +281,14 @@ hq sync
 hq daemon run|status|stop|restart
 hq answer MESSAGE_ID [RESPONSE]
 hq cancel MESSAGE_ID
-hq codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]
+hq harness --provider ID --agent NAME [--cwd PATH] [--new-session | --session SESSION_ID] [--codex-yolo] [INITIAL PROMPT...]
 hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
 ```
 
 Set `HQ_DB` or pass global `--db PATH` before the command to use another database. Mutating commands ask the node to commit their signed event and may wait up to three seconds for an immediate relay synchronization request. `--no-sync` skips only that client request; it is not a node-wide offline switch. Relay errors go to stderr and never undo the local event.
 
-The local node is required and normally auto-starts on the first client connection. `hq daemon run` runs it in the foreground; systemd or launchd may keep it warm for uninterrupted relay subscriptions. The node appends debug-level structured `log/slog` text records to `~/logs/hq.log`; HQ creates `~/logs` with mode `0700` when absent and always protects the file with mode `0600`. Records cover daemon ownership, control sockets, sync and restart lifecycle, named-agent launch decisions, bridge readiness and termination, app-server PID and exit status, forced kills, and line-oriented app-server stderr. Correlate worker records with the `agent`, `request_id`, `thread_id`, and `pid` attributes. `hq daemon status` reads the protected lifecycle RPC, `stop` requests a clean stop, and `restart` replaces the in-process runtime while connected clients reconnect and resubscribe. Because `restart` does not reload the daemon executable, after installing a new HQ build use `hq daemon stop`, wait for it to exit, and let the next normal command auto-start the new binary. `hq sync` asks the owning node to wake its network engine. Build drift is allowed when wire ranges remain compatible and is shown with restart guidance; incompatible ranges identify the stale side.
+The local node is required and normally auto-starts on the first client connection. `hq daemon run` runs it in the foreground; systemd or launchd may keep it warm for uninterrupted relay subscriptions. The node appends debug-level structured `log/slog` text records to `~/logs/hq.log`; HQ creates `~/logs` with mode `0700` when absent and always protects the file with mode `0600`. Records cover daemon ownership, control sockets, sync and restart lifecycle, named-agent launch decisions, bridge readiness and termination, and adapter diagnostics. Codex additionally records app-server PID, exit status, forced kills, and line-oriented stderr. Correlate generic worker records with the `harness`, `agent`, `request_id`, and `session_id` attributes. `hq daemon status` reads the protected lifecycle RPC, `stop` requests a clean stop, and `restart` replaces the in-process runtime while connected clients reconnect and resubscribe. Because `restart` does not reload the daemon executable, after installing a new HQ build use `hq daemon stop`, wait for it to exit, and let the next normal command auto-start the new binary. `hq sync` asks the owning node to wake its network engine. Build drift is allowed when wire ranges remain compatible and is shown with restart guidance; incompatible ranges identify the stale side.
 
 ## Message and delivery rules
 

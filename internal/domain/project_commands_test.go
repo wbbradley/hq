@@ -25,9 +25,9 @@ func projectCommandSamples() []ProjectCommandData {
 		ProjectAssignmentAbortCommand{Diagnostic: "abort"},
 		ProjectAssignmentBlockCommand{Diagnostic: "block"},
 		ProjectAssignmentUnassignCommand{Forced: true, RuntimeObservation: "stopped"},
-		ProjectCodexActivateCommand{AgentName: "alice"},
-		ProjectCodexCloseCommand{Force: true},
-		ProjectCodexHandoffCommand{NewAgentName: "bob"},
+		ProjectHarnessActivateCommand{AgentName: "alice"},
+		ProjectHarnessCloseCommand{Force: true},
+		ProjectHarnessHandoffCommand{NewAgentName: "bob"},
 		ProjectProvisionWorktreeCommand{Name: "worktree", Destination: "/worktree"},
 	}
 }
@@ -60,7 +60,7 @@ func TestProjectCommandRegistryHasTypedCodecForEveryOperation(t *testing.T) {
 		if !seen[definition.Operation] {
 			t.Fatalf("registry operation %s has no typed round-trip sample", definition.Operation)
 		}
-		if definition.RequiresRuntime != (definition.Operation == ProjectCommandCodexActivate || definition.Operation == ProjectCommandCodexClose || definition.Operation == ProjectCommandCodexHandoff || definition.Operation == ProjectCommandProvisionWorktree) {
+		if definition.RequiresRuntime != (definition.Operation == ProjectCommandHarnessActivate || definition.Operation == ProjectCommandHarnessClose || definition.Operation == ProjectCommandHarnessHandoff || definition.Operation == ProjectCommandProvisionWorktree) {
 			t.Fatalf("runtime metadata for %s = %t", definition.Operation, definition.RequiresRuntime)
 		}
 	}

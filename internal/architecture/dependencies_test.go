@@ -84,7 +84,7 @@ func TestOnlyNodeRuntimeOpensConcreteStore(t *testing.T) {
 
 func TestHarnessNeutralPackagesHaveNoCodexDependency(t *testing.T) {
 	repository := repositoryRoot(t)
-	for _, directory := range []string{"harness", "harnessbridge"} {
+	for _, directory := range []string{"harness", "harnessbridge", "harnesssupervisor"} {
 		files, err := productionGoFiles(filepath.Join(repository, "internal", directory))
 		if err != nil {
 			t.Fatal(err)

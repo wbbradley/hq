@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/harness"
 	"github.com/wbbradley/hq/internal/localwire"
 	"github.com/wbbradley/hq/internal/model"
 )
@@ -24,13 +25,13 @@ const (
 	AcquireAgentMethod             = "agent/ownership/acquire"
 	RenewAgentMethod               = "agent/ownership/renew"
 	ReleaseAgentMethod             = "agent/ownership/release"
-	LaunchCodexAgentMethod         = "codex/launch"
-	StopCodexAgentMethod           = "codex/stop"
-	CodexRuntimeMethod             = "codex/status"
-	ActivateCodexProjectMethod     = "codex/project/activate"
-	CloseCodexProjectMethod        = "codex/project/close"
-	HandoffCodexProjectMethod      = "codex/project/handoff"
-	RetireCodexAgentMethod         = "codex/agent/retire"
+	LaunchHarnessAgentMethod       = "harness/agent/launch"
+	StopHarnessAgentMethod         = "harness/agent/stop"
+	HarnessRuntimeMethod           = "harness/agent/status"
+	ActivateHarnessProjectMethod   = "harness/project/activate"
+	CloseHarnessProjectMethod      = "harness/project/close"
+	HandoffHarnessProjectMethod    = "harness/project/handoff"
+	RetireHarnessAgentMethod       = "harness/agent/retire"
 	ProvisionProjectWorktreeMethod = "project/worktree/provision"
 	CreateMethod                   = "message/create"
 	ReplyMethod                    = "message/reply"
@@ -100,6 +101,9 @@ const (
 	CodeProjectThreadMismatch = "project_thread_mismatch"
 	CodeProjectCommandPending = "project_command_pending"
 	CodeProjectRuntimeUnknown = "project_runtime_unknown"
+	CodeHarnessUnknown        = "harness_unknown"
+	CodeHarnessUnavailable    = "harness_unavailable"
+	CodeHarnessIncapable      = "harness_incapable"
 	CodeDomain                = "domain_error"
 )
 
@@ -129,14 +133,14 @@ type AgentSessionRequest struct {
 }
 
 type AgentSessionRenameRequest struct {
-	MutationID string `json:"mutation_id"`
-	Name       string `json:"name"`
-	Harness    string `json:"harness"`
-	SessionID  string `json:"session_id"`
-	ThreadName string `json:"thread_name"`
+	MutationID  string `json:"mutation_id"`
+	Name        string `json:"name"`
+	Harness     string `json:"harness"`
+	SessionID   string `json:"session_id"`
+	SessionName string `json:"session_name"`
 }
 
-type CodexAgentRequest struct {
+type HarnessAgentRequest struct {
 	Name string `json:"name"`
 }
 
@@ -341,6 +345,12 @@ func EncodeError(err error) *localwire.RPCError {
 		code = CodeProjectCommandPending
 	case errors.Is(err, domain.ErrProjectRuntimeUnknown):
 		code = CodeProjectRuntimeUnknown
+	case errors.Is(err, harness.ErrUnknownProvider):
+		code = CodeHarnessUnknown
+	case errors.Is(err, harness.ErrProviderUnavailable):
+		code = CodeHarnessUnavailable
+	case errors.Is(err, harness.ErrCapabilityUnavailable):
+		code = CodeHarnessIncapable
 	}
 	return &localwire.RPCError{Code: code, Message: err.Error()}
 }
@@ -390,6 +400,12 @@ func DecodeError(err error) error {
 		sentinel = domain.ErrProjectCommandPending
 	case CodeProjectRuntimeUnknown:
 		sentinel = domain.ErrProjectRuntimeUnknown
+	case CodeHarnessUnknown:
+		sentinel = harness.ErrUnknownProvider
+	case CodeHarnessUnavailable:
+		sentinel = harness.ErrProviderUnavailable
+	case CodeHarnessIncapable:
+		sentinel = harness.ErrCapabilityUnavailable
 	default:
 		return err
 	}

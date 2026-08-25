@@ -191,56 +191,56 @@ func (c *Client) ListNamedAgentSessions(ctx context.Context, name string) ([]dom
 	return result, err
 }
 
-func (c *Client) RenameNamedAgentSession(ctx context.Context, name string, session model.SessionIdentity, threadName string) (domain.AgentSession, error) {
+func (c *Client) RenameNamedAgentSession(ctx context.Context, name string, session model.SessionIdentity, sessionName string) (domain.AgentSession, error) {
 	var result domain.AgentSession
 	err := c.mutatingCall(ctx, domainrpc.RenameAgentSessionMethod, func(id string) any {
-		return domainrpc.AgentSessionRenameRequest{MutationID: id, Name: name, Harness: session.Harness, SessionID: session.ExternalSessionID, ThreadName: threadName}
+		return domainrpc.AgentSessionRenameRequest{MutationID: id, Name: name, Harness: session.Harness, SessionID: session.ExternalSessionID, SessionName: sessionName}
 	}, &result)
 	return result, err
 }
 
-func (c *Client) LaunchCodexAgent(ctx context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
-	var result domain.CodexRuntime
+func (c *Client) LaunchHarnessAgent(ctx context.Context, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
+	var result domain.HarnessRuntime
 	if request.RequestID == "" {
 		request.RequestID = uuid.NewString()
 	}
-	err := c.call(ctx, domainrpc.LaunchCodexAgentMethod, request, &result)
+	err := c.call(ctx, domainrpc.LaunchHarnessAgentMethod, request, &result)
 	return result, err
 }
 
-func (c *Client) StopCodexAgent(ctx context.Context, name string) (domain.CodexRuntime, error) {
-	var result domain.CodexRuntime
-	err := c.call(ctx, domainrpc.StopCodexAgentMethod, domainrpc.CodexAgentRequest{Name: name}, &result)
+func (c *Client) StopHarnessAgent(ctx context.Context, name string) (domain.HarnessRuntime, error) {
+	var result domain.HarnessRuntime
+	err := c.call(ctx, domainrpc.StopHarnessAgentMethod, domainrpc.HarnessAgentRequest{Name: name}, &result)
 	return result, err
 }
 
-func (c *Client) CodexAgentRuntime(ctx context.Context, name string) (domain.CodexRuntime, error) {
-	var result domain.CodexRuntime
-	err := c.call(ctx, domainrpc.CodexRuntimeMethod, domainrpc.CodexAgentRequest{Name: name}, &result)
+func (c *Client) HarnessAgentRuntime(ctx context.Context, name string) (domain.HarnessRuntime, error) {
+	var result domain.HarnessRuntime
+	err := c.call(ctx, domainrpc.HarnessRuntimeMethod, domainrpc.HarnessAgentRequest{Name: name}, &result)
 	return result, err
 }
 
-func (c *Client) ActivateCodexProject(ctx context.Context, request domain.ProjectCodexActivationRequest) (domain.ProjectCodexActivation, error) {
-	var result domain.ProjectCodexActivation
+func (c *Client) ActivateHarnessProject(ctx context.Context, request domain.ProjectHarnessActivationRequest) (domain.ProjectHarnessActivation, error) {
+	var result domain.ProjectHarnessActivation
 	if request.Launch.RequestID == "" {
 		request.Launch.RequestID = uuid.NewString()
 	}
-	err := c.call(ctx, domainrpc.ActivateCodexProjectMethod, request, &result)
+	err := c.call(ctx, domainrpc.ActivateHarnessProjectMethod, request, &result)
 	return result, err
 }
 
-func (c *Client) CloseCodexProject(ctx context.Context, request domain.ProjectCodexCloseRequest) (domain.Project, error) {
+func (c *Client) CloseHarnessProject(ctx context.Context, request domain.ProjectHarnessCloseRequest) (domain.Project, error) {
 	var result domain.Project
-	err := c.call(ctx, domainrpc.CloseCodexProjectMethod, request, &result)
+	err := c.call(ctx, domainrpc.CloseHarnessProjectMethod, request, &result)
 	return result, err
 }
 
-func (c *Client) HandoffCodexProject(ctx context.Context, request domain.ProjectCodexHandoffRequest) (domain.ProjectCodexActivation, error) {
-	var result domain.ProjectCodexActivation
+func (c *Client) HandoffHarnessProject(ctx context.Context, request domain.ProjectHarnessHandoffRequest) (domain.ProjectHarnessActivation, error) {
+	var result domain.ProjectHarnessActivation
 	if request.Launch.RequestID == "" {
 		request.Launch.RequestID = uuid.NewString()
 	}
-	err := c.call(ctx, domainrpc.HandoffCodexProjectMethod, request, &result)
+	err := c.call(ctx, domainrpc.HandoffHarnessProjectMethod, request, &result)
 	return result, err
 }
 
@@ -255,11 +255,11 @@ func (c *Client) ProvisionProjectWorktree(ctx context.Context, request domain.Pr
 	err := c.call(ctx, domainrpc.ProvisionProjectWorktreeMethod, request, &project)
 	return project, err
 }
-func (c *Client) RetireCodexAgent(ctx context.Context, request domain.CodexRetireAgentRequest) error {
+func (c *Client) RetireHarnessAgent(ctx context.Context, request domain.HarnessRetireAgentRequest) error {
 	if request.RequestID == "" {
 		request.RequestID = uuid.NewString()
 	}
-	return c.call(ctx, domainrpc.RetireCodexAgentMethod, request, nil)
+	return c.call(ctx, domainrpc.RetireHarnessAgentMethod, request, nil)
 }
 
 func (c *Client) RetireNamedAgent(ctx context.Context, name string) error {
@@ -547,7 +547,7 @@ func (c *Client) Synchronize(ctx context.Context) error {
 }
 
 var _ domain.Store = (*Client)(nil)
-var _ domain.CodexRuntimeController = (*Client)(nil)
-var _ domain.ProjectCodexRuntimeController = (*Client)(nil)
+var _ domain.HarnessRuntimeController = (*Client)(nil)
+var _ domain.ProjectHarnessRuntimeController = (*Client)(nil)
 var _ domain.ProjectWorktreeProvisioner = (*Client)(nil)
 var _ io.Closer = (*Client)(nil)

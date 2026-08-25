@@ -51,8 +51,8 @@ Human commands:
   cancel  Archive one inbox message
 
 Other commands:
-  codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]
-             Ask the local daemon to run a durable Codex agent
+  harness --provider ID --agent NAME [--cwd PATH] [--new-session | --session SESSION_ID] [INITIAL PROMPT...]
+             Ask the local daemon to run a durable harness agent
   agent      Create, list, or retire durable named agents
   project    Create, inspect, message, activate, hand off, close, or archive projects
   mailboxes  Find agent mailboxes seen in this repository
@@ -76,38 +76,39 @@ Local client transport currently requires Unix; Windows named-pipe support is no
 already-durable outbox work through its configured network engine.
 `
 
-const codexUsage = `hq codex asks the local HQ daemon to run a durable named Codex agent.
+const harnessUsage = `hq harness asks the local HQ daemon to run a durable named agent.
 
 Usage:
-  hq [--db PATH] [--no-sync] codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]
+  hq [--db PATH] [--no-sync] harness --provider ID --agent NAME [--cwd PATH] [--new-session | --session SESSION_ID] [INITIAL PROMPT...]
 
 Requirements:
-  Install and authenticate Codex CLI v0.149.0, and run hq identity init once.
+  Install and authenticate the selected harness, and run hq identity init once.
 
 Options:
-  --cwd PATH          Thread working directory. Defaults to the current directory;
+  --provider ID       Required harness provider, such as codex.
+  --cwd PATH          Session working directory. Defaults to the current directory;
                       relative paths are resolved from the current directory.
   --agent NAME        Required durable installation-local agent name. Creates it when
-                      absent and resumes its selected Codex thread when one exists.
-  --new-thread        Start and select a replacement thread for --agent while retaining
-                      its mailbox, queued root messages, and historical thread bindings.
-  --session THREAD_ID Resume this exact thread from the named agent's history.
-  --yolo              Set the app-server thread to never approve and danger-full-access.
-                      Defaults to config codex.yolo; use --yolo=false to override it.
+                      absent and resumes its selected harness session when one exists.
+  --new-session       Start and select a replacement session for --agent while retaining
+                      its mailbox, queued root messages, and historical session bindings.
+  --session SESSION_ID Resume this exact session from the named agent's history.
+  --codex-yolo        For provider codex only: never approve and use danger-full-access.
+                      Defaults to config codex.yolo; use --codex-yolo=false to override it.
                       Use only inside an externally secured environment.
 
 Remaining arguments are joined as the optional initial prompt. The client sends its current
 directory and complete environment to the local daemon, waits for a ready or failed acknowledgement,
 then exits. The daemon retains the last successful launch only in memory so a later message can wake
-an offline agent. The daemon owns the bridge and Codex child until stopped or the node shuts down.
-New threads receive the durable agent name and structured-human-input instruction; resumed threads
+an offline agent. The daemon owns the bridge and harness instance until stopped or the node shuts down.
+New sessions receive provider-specific durable-agent instructions; resumed sessions
 keep their existing instructions.
 
 Questions, approvals, and final output appear in the human HQ inbox; local runtime status stays
 in the CLI/TUI control plane.
 Approval replies must exactly match the choices shown by HQ. Secret-marked requests are
 rejected because HQ persists messages. The daemon enforces one worker per named agent and
-one owner per thread. --no-sync does not disable node-owned networking.
+one owner per session. --no-sync does not disable node-owned networking.
 `
 
 var ErrNoMessages = errors.New("no messages ready")
@@ -115,29 +116,29 @@ var ErrNoMessages = errors.New("no messages ready")
 const replyRepairInterval = 5 * time.Minute
 
 type App struct {
-	In               io.Reader
-	Out              io.Writer
-	ErrOut           io.Writer
-	Getwd            func() (string, error)
-	Getenv           func(string) string
-	Environ          func() []string
-	Hostname         func() (string, error)
-	IsTTY            func() bool
-	Open             func(context.Context, string) (domain.Store, error)
-	RunTUI           func(context.Context, domain.Store, io.Reader, io.Writer) error
-	RunTUIWithSync   func(context.Context, domain.Store, io.Reader, io.Writer, func(context.Context) error) error
-	RunTUIWithClient func(context.Context, domain.Store, io.Reader, io.Writer, domain.ClientUpdates, func(context.Context) error) error
-	RepoContext      func(context.Context, string) model.RepositoryContext
-	Sessions         session.IdentityResolver
-	ReadPassword     func(string) ([]byte, error)
-	Synchronize      func(context.Context, domain.Store) error
-	RunDaemon        func(context.Context, string) error
-	DaemonStatus     func(string) (string, error)
-	StopDaemon       func(string) error
-	RestartDaemon    func(string) error
-	LaunchCodexAgent func(context.Context, domain.Store, domain.CodexLaunchRequest) (domain.CodexRuntime, error)
-	LoadConfig       func() (hqconfig.Settings, error)
-	SaveConfig       func(hqconfig.Settings) error
+	In                 io.Reader
+	Out                io.Writer
+	ErrOut             io.Writer
+	Getwd              func() (string, error)
+	Getenv             func(string) string
+	Environ            func() []string
+	Hostname           func() (string, error)
+	IsTTY              func() bool
+	Open               func(context.Context, string) (domain.Store, error)
+	RunTUI             func(context.Context, domain.Store, io.Reader, io.Writer) error
+	RunTUIWithSync     func(context.Context, domain.Store, io.Reader, io.Writer, func(context.Context) error) error
+	RunTUIWithClient   func(context.Context, domain.Store, io.Reader, io.Writer, domain.ClientUpdates, func(context.Context) error) error
+	RepoContext        func(context.Context, string) model.RepositoryContext
+	Sessions           session.IdentityResolver
+	ReadPassword       func(string) ([]byte, error)
+	Synchronize        func(context.Context, domain.Store) error
+	RunDaemon          func(context.Context, string) error
+	DaemonStatus       func(string) (string, error)
+	StopDaemon         func(string) error
+	RestartDaemon      func(string) error
+	LaunchHarnessAgent func(context.Context, domain.Store, domain.HarnessLaunchRequest) (domain.HarnessRuntime, error)
+	LoadConfig         func() (hqconfig.Settings, error)
+	SaveConfig         func(hqconfig.Settings) error
 }
 
 func New() *App {
@@ -156,12 +157,12 @@ func New() *App {
 		DaemonStatus:     syncer.DaemonStatus,
 		StopDaemon:       syncer.StopDaemon,
 		RestartDaemon:    syncer.RestartDaemon,
-		LaunchCodexAgent: func(ctx context.Context, store domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
-			controller, ok := store.(domain.CodexRuntimeController)
+		LaunchHarnessAgent: func(ctx context.Context, store domain.Store, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
+			controller, ok := store.(domain.HarnessRuntimeController)
 			if !ok {
-				return domain.CodexRuntime{}, errors.New("Codex runtime control is unavailable")
+				return domain.HarnessRuntime{}, errors.New("harness runtime control is unavailable")
 			}
-			return controller.LaunchCodexAgent(ctx, request)
+			return controller.LaunchHarnessAgent(ctx, request)
 		},
 		LoadConfig: hqconfig.Load,
 		SaveConfig: hqconfig.Save,
@@ -196,18 +197,18 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		command, args = args[0], args[1:]
 	}
 	if command == "help" || command == "-h" || command == "--help" {
-		if len(args) == 1 && args[0] == "codex" {
-			_, err := io.WriteString(a.Out, codexUsage)
+		if len(args) == 1 && args[0] == "harness" {
+			_, err := io.WriteString(a.Out, harnessUsage)
 			return err
 		}
 		if len(args) != 0 {
-			return fmt.Errorf("help takes no arguments or the topic codex")
+			return fmt.Errorf("help takes no arguments or the topic harness")
 		}
 		_, err := io.WriteString(a.Out, usage)
 		return err
 	}
-	if command == "codex" && hasHelpFlag(args) {
-		_, err := io.WriteString(a.Out, codexUsage)
+	if command == "harness" && hasHelpFlag(args) {
+		_, err := io.WriteString(a.Out, harnessUsage)
 		return err
 	}
 	if command == "agents" {
@@ -238,7 +239,7 @@ func (a *App) Run(ctx context.Context, args []string) error {
 	}
 	defer s.Close()
 	updates := clientUpdates(s)
-	if command != "tui" && command != "codex" {
+	if command != "tui" && command != "harness" {
 		a.writeConnectionDiagnostic(updates.Initial)
 	}
 	var commandErr error
@@ -268,8 +269,8 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		commandErr = a.answer(ctx, s, args)
 	case "cancel":
 		commandErr = a.cancel(ctx, s, args)
-	case "codex":
-		return a.codex(ctx, s, args, dbPath, noSync)
+	case "harness":
+		return a.harnessCommand(ctx, s, args, dbPath, noSync)
 	case "peer":
 		commandErr = a.peer(ctx, s, args)
 	case "human":
@@ -336,26 +337,40 @@ func hasHelpFlag(args []string) bool {
 	return false
 }
 
-func (a *App) codex(ctx context.Context, s domain.Store, args []string, _ string, _ bool) error {
-	f := flags("codex")
-	workingDirectory := f.String("cwd", "", "Codex thread working directory")
+func (a *App) harnessCommand(ctx context.Context, s domain.Store, args []string, _ string, _ bool) error {
+	f := flags("harness")
+	provider := f.String("provider", "", "harness provider")
+	workingDirectory := f.String("cwd", "", "harness session working directory")
 	agentName := f.String("agent", "", "durable named agent")
-	newThread := f.Bool("new-thread", false, "start and select a replacement named-agent thread")
-	sessionID := f.String("session", "", "resume an exact thread from the named agent's history")
+	newSession := f.Bool("new-session", false, "start and select a replacement named-agent session")
+	sessionID := f.String("session", "", "resume an exact session from the named agent's history")
 	settings, err := a.loadConfig()
 	if err != nil {
 		return err
 	}
-	yolo := f.Bool("yolo", settings.Codex.Yolo, "disable Codex approvals and sandboxing")
+	codexYolo := f.Bool("codex-yolo", false, "disable Codex approvals and sandboxing")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
 	name := strings.TrimSpace(*agentName)
-	if name == "" {
-		return errors.New("codex requires --agent NAME")
+	harnessID := strings.TrimSpace(*provider)
+	codexYoloSet := false
+	f.Visit(func(option *flag.Flag) { codexYoloSet = codexYoloSet || option.Name == "codex-yolo" })
+	yoloValue := *codexYolo
+	if harnessID == "codex" && !codexYoloSet {
+		yoloValue = settings.Codex.Yolo
 	}
-	if *newThread && strings.TrimSpace(*sessionID) != "" {
-		return errors.New("codex cannot combine --new-thread and --session")
+	if harnessID == "" {
+		return errors.New("harness requires --provider ID")
+	}
+	if name == "" {
+		return errors.New("harness requires --agent NAME")
+	}
+	if *newSession && strings.TrimSpace(*sessionID) != "" {
+		return errors.New("harness cannot combine --new-session and --session")
+	}
+	if harnessID != "codex" && codexYoloSet {
+		return errors.New("--codex-yolo requires --provider codex")
 	}
 	baseDirectory, err := a.workDirectory()
 	if err != nil {
@@ -368,25 +383,29 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, _ string
 		directory = filepath.Join(baseDirectory, directory)
 	}
 	directory = filepath.Clean(directory)
-	if a.LaunchCodexAgent == nil {
-		return errors.New("Codex runtime client is unavailable")
+	if a.LaunchHarnessAgent == nil {
+		return errors.New("harness runtime client is unavailable")
 	}
-	action := domain.CodexSessionCurrent
-	if *newThread {
-		action = domain.CodexSessionNew
+	action := domain.HarnessSessionCurrent
+	if *newSession {
+		action = domain.HarnessSessionNew
 	} else if strings.TrimSpace(*sessionID) != "" {
-		action = domain.CodexSessionResume
+		action = domain.HarnessSessionResume
 	}
 	environment := os.Environ()
 	if a.Environ != nil {
 		environment = a.Environ()
 	}
-	request := domain.CodexLaunchRequest{
-		RequestID: uuid.NewString(), AgentName: name, Action: action, SessionID: strings.TrimSpace(*sessionID),
-		Directory: directory, Repository: a.repositoryContext(ctx, directory), Environment: append([]string(nil), environment...),
-		InitialPrompt: strings.Join(f.Args(), " "), Yolo: *yolo,
+	providerOptions, _ := json.Marshal(map[string]any{"yolo": yoloValue})
+	if harnessID != "codex" {
+		providerOptions = nil
 	}
-	result, err := a.LaunchCodexAgent(ctx, s, request)
+	request := domain.HarnessLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: name, Harness: harnessID, Action: action, SessionID: strings.TrimSpace(*sessionID),
+		Directory: directory, Repository: a.repositoryContext(ctx, directory), Environment: append([]string(nil), environment...),
+		InitialPrompt: strings.Join(f.Args(), " "), ProviderOptions: providerOptions,
+	}
+	result, err := a.LaunchHarnessAgent(ctx, s, request)
 	for index := range request.Environment {
 		request.Environment[index] = ""
 	}
@@ -396,20 +415,20 @@ func (a *App) codex(ctx context.Context, s domain.Store, args []string, _ string
 	threadName := ""
 	if sessions, listErr := s.ListNamedAgentSessions(ctx, result.AgentName); listErr == nil {
 		for _, session := range sessions {
-			if session.Harness == "codex" && session.SessionID == result.ThreadID {
+			if session.Harness == result.Harness && session.SessionID == result.SessionID {
 				threadName = session.ThreadName
 				break
 			}
 		}
 	}
-	if _, err = fmt.Fprintf(a.Out, "agent=%s thread=%s thread_name=%q directory=%s status=%s\n", result.AgentName, result.ThreadID, threadName, result.Directory, result.Phase); err != nil {
+	if _, err = fmt.Fprintf(a.Out, "agent=%s harness=%s session=%s session_name=%q directory=%s status=%s\n", result.AgentName, result.Harness, result.SessionID, threadName, result.Directory, result.Phase); err != nil {
 		return err
 	}
-	if result.Phase != domain.CodexRuntimeRunning {
+	if result.Phase != domain.HarnessRuntimeRunning {
 		if result.Error == "" {
-			result.Error = "Codex runtime did not become ready"
+			result.Error = "harness runtime did not become ready"
 		}
-		if result.Phase == domain.CodexRuntimeConflict {
+		if result.Phase == domain.HarnessRuntimeConflict {
 			return fmt.Errorf("%w: %s", domain.ErrAgentOwned, result.Error)
 		}
 		return errors.New(result.Error)
@@ -928,8 +947,8 @@ func (a *App) agent(ctx context.Context, s domain.Store, args []string) error {
 		if !*yes {
 			return errors.New("agent retirement is permanent; pass --yes to confirm")
 		}
-		if controller, ok := s.(domain.ProjectCodexRuntimeController); ok {
-			return controller.RetireCodexAgent(ctx, domain.CodexRetireAgentRequest{RequestID: uuid.NewString(), AgentName: f.Args()[0], Force: *force})
+		if controller, ok := s.(domain.ProjectHarnessRuntimeController); ok {
+			return controller.RetireHarnessAgent(ctx, domain.HarnessRetireAgentRequest{RequestID: uuid.NewString(), AgentName: f.Args()[0], Force: *force})
 		}
 		return s.RetireNamedAgent(ctx, f.Args()[0])
 	default:
@@ -1066,20 +1085,33 @@ func (a *App) project(ctx context.Context, s domain.Store, args []string) error 
 		return err
 	case "activate", "handoff":
 		f := flags("project " + args[0])
+		provider := f.String("harness", "", "harness provider")
 		agent := f.String("agent", "", "idle local named agent")
-		cwd := f.String("cwd", "", "new thread launch directory")
-		sessionID := f.String("session", "", "compatible historical Codex thread to resume")
-		newThread := f.Bool("new-thread", false, "start a fresh Codex thread")
-		yolo := f.Bool("yolo", false, "use danger-full-access without approvals")
+		cwd := f.String("cwd", "", "new session launch directory")
+		sessionID := f.String("session", "", "compatible historical harness session to resume")
+		newSession := f.Bool("new-session", false, "start a fresh harness session")
+		codexYolo := f.Bool("codex-yolo", false, "for Codex, use danger-full-access without approvals")
 		force := f.Bool("force", false, "force takeover when old runtime quiescence is unknown")
 		if err := f.Parse(flagsAfterName(args[1:])); err != nil {
 			return err
 		}
-		if len(f.Args()) != 1 || strings.TrimSpace(*agent) == "" {
-			return fmt.Errorf("project %s needs PROJECT_ID and --agent NAME", args[0])
+		codexYoloSet := false
+		f.Visit(func(option *flag.Flag) { codexYoloSet = codexYoloSet || option.Name == "codex-yolo" })
+		if len(f.Args()) != 1 || strings.TrimSpace(*agent) == "" || strings.TrimSpace(*provider) == "" {
+			return fmt.Errorf("project %s needs PROJECT_ID, --agent NAME, and --harness ID", args[0])
 		}
-		if *newThread && *sessionID != "" {
-			return errors.New("--new-thread and --session are mutually exclusive")
+		if *newSession && *sessionID != "" {
+			return errors.New("--new-session and --session are mutually exclusive")
+		}
+		if *provider != "codex" && codexYoloSet {
+			return errors.New("--codex-yolo requires --harness codex")
+		}
+		if *provider == "codex" && !codexYoloSet {
+			settings, loadErr := a.loadConfig()
+			if loadErr != nil {
+				return loadErr
+			}
+			*codexYolo = settings.Codex.Yolo
 		}
 		project, err := get(f.Args()[0])
 		if err != nil {
@@ -1089,24 +1121,28 @@ func (a *App) project(ctx context.Context, s domain.Store, args []string) error 
 		if err != nil {
 			return err
 		}
-		action := domain.CodexSessionNew
+		action := domain.HarnessSessionNew
 		if *sessionID != "" {
-			action = domain.CodexSessionResume
+			action = domain.HarnessSessionResume
 		}
 		environment := os.Environ()
 		if a.Environ != nil {
 			environment = a.Environ()
 		}
-		launch := domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: *agent, Action: action, SessionID: *sessionID, Directory: directory, Repository: a.repositoryContext(ctx, directory), Environment: append([]string(nil), environment...), Yolo: *yolo}
-		controller, ok := s.(domain.ProjectCodexRuntimeController)
-		if !ok {
-			return errors.New("project Codex runtime control is unavailable")
+		var providerOptions json.RawMessage
+		if *provider == "codex" {
+			providerOptions, _ = json.Marshal(map[string]any{"yolo": *codexYolo})
 		}
-		var activated domain.ProjectCodexActivation
+		launch := domain.HarnessLaunchRequest{RequestID: uuid.NewString(), AgentName: *agent, Harness: *provider, Action: action, SessionID: *sessionID, Directory: directory, Repository: a.repositoryContext(ctx, directory), Environment: append([]string(nil), environment...), ProviderOptions: providerOptions}
+		controller, ok := s.(domain.ProjectHarnessRuntimeController)
+		if !ok {
+			return errors.New("project harness runtime control is unavailable")
+		}
+		var activated domain.ProjectHarnessActivation
 		if args[0] == "handoff" {
-			activated, err = controller.HandoffCodexProject(ctx, domain.ProjectCodexHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: *agent, Force: *force, Launch: launch})
+			activated, err = controller.HandoffHarnessProject(ctx, domain.ProjectHarnessHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: *agent, Force: *force, Launch: launch})
 		} else {
-			activated, err = controller.ActivateCodexProject(ctx, domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: *agent, Launch: launch})
+			activated, err = controller.ActivateHarnessProject(ctx, domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: *agent, Launch: launch})
 		}
 		if err != nil {
 			return err
@@ -1125,11 +1161,11 @@ func (a *App) project(ctx context.Context, s domain.Store, args []string) error 
 		if err != nil {
 			return err
 		}
-		controller, ok := s.(domain.ProjectCodexRuntimeController)
+		controller, ok := s.(domain.ProjectHarnessRuntimeController)
 		if !ok {
-			return errors.New("project Codex runtime control is unavailable")
+			return errors.New("project harness runtime control is unavailable")
 		}
-		closed, err := controller.CloseCodexProject(ctx, domain.ProjectCodexCloseRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, Archive: args[0] == "archive", Force: *force})
+		closed, err := controller.CloseHarnessProject(ctx, domain.ProjectHarnessCloseRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, Archive: args[0] == "archive", Force: *force})
 		if err != nil {
 			return err
 		}

@@ -24,7 +24,7 @@ type Service struct {
 	}
 	Synchronize   func(context.Context) error
 	Subscriptions *SubscriptionHub
-	Runtime       domain.CodexRuntimeController
+	Runtime       domain.HarnessRuntimeController
 }
 
 func (s Service) Handle(ctx context.Context, session *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
@@ -164,7 +164,7 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		return s.Store.RenameNamedAgentSession(ctx, request.Name, model.SessionIdentity{Harness: request.Harness, ExternalSessionID: request.SessionID}, request.ThreadName)
+		return s.Store.RenameNamedAgentSession(ctx, request.Name, model.SessionIdentity{Harness: request.Harness, ExternalSessionID: request.SessionID}, request.SessionName)
 	case AcquireAgentMethod, RenewAgentMethod:
 		var request AgentOwnershipRequest
 		if err := decodeRequest(raw, &request); err != nil {
@@ -180,55 +180,55 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return nil, s.Store.ReleaseNamedAgent(ctx, request.Name, request.OwnerToken)
-	case LaunchCodexAgentMethod:
+	case LaunchHarnessAgentMethod:
 		if s.Runtime == nil {
-			return nil, errors.New("Codex runtime control is unavailable")
+			return nil, errors.New("harness runtime control is unavailable")
 		}
-		var request domain.CodexLaunchRequest
+		var request domain.HarnessLaunchRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		return s.Runtime.LaunchCodexAgent(ctx, request)
-	case ActivateCodexProjectMethod:
-		controller, ok := s.Runtime.(domain.ProjectCodexRuntimeController)
+		return s.Runtime.LaunchHarnessAgent(ctx, request)
+	case ActivateHarnessProjectMethod:
+		controller, ok := s.Runtime.(domain.ProjectHarnessRuntimeController)
 		if !ok {
-			return nil, errors.New("project Codex runtime control is unavailable")
+			return nil, errors.New("project harness runtime control is unavailable")
 		}
-		var request domain.ProjectCodexActivationRequest
+		var request domain.ProjectHarnessActivationRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		return controller.ActivateCodexProject(ctx, request)
-	case CloseCodexProjectMethod:
-		controller, ok := s.Runtime.(domain.ProjectCodexRuntimeController)
+		return controller.ActivateHarnessProject(ctx, request)
+	case CloseHarnessProjectMethod:
+		controller, ok := s.Runtime.(domain.ProjectHarnessRuntimeController)
 		if !ok {
-			return nil, errors.New("project Codex runtime control is unavailable")
+			return nil, errors.New("project harness runtime control is unavailable")
 		}
-		var request domain.ProjectCodexCloseRequest
+		var request domain.ProjectHarnessCloseRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		return controller.CloseCodexProject(ctx, request)
-	case HandoffCodexProjectMethod:
-		controller, ok := s.Runtime.(domain.ProjectCodexRuntimeController)
+		return controller.CloseHarnessProject(ctx, request)
+	case HandoffHarnessProjectMethod:
+		controller, ok := s.Runtime.(domain.ProjectHarnessRuntimeController)
 		if !ok {
-			return nil, errors.New("project Codex runtime control is unavailable")
+			return nil, errors.New("project harness runtime control is unavailable")
 		}
-		var request domain.ProjectCodexHandoffRequest
+		var request domain.ProjectHarnessHandoffRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		return controller.HandoffCodexProject(ctx, request)
-	case RetireCodexAgentMethod:
-		controller, ok := s.Runtime.(domain.ProjectCodexRuntimeController)
+		return controller.HandoffHarnessProject(ctx, request)
+	case RetireHarnessAgentMethod:
+		controller, ok := s.Runtime.(domain.ProjectHarnessRuntimeController)
 		if !ok {
-			return nil, errors.New("Codex retirement control is unavailable")
+			return nil, errors.New("harness retirement control is unavailable")
 		}
-		var request domain.CodexRetireAgentRequest
+		var request domain.HarnessRetireAgentRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		return nil, controller.RetireCodexAgent(ctx, request)
+		return nil, controller.RetireHarnessAgent(ctx, request)
 	case ProvisionProjectWorktreeMethod:
 		controller, ok := s.Runtime.(domain.ProjectWorktreeProvisioner)
 		if !ok {
@@ -239,18 +239,18 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return controller.ProvisionProjectWorktree(ctx, request)
-	case StopCodexAgentMethod, CodexRuntimeMethod:
+	case StopHarnessAgentMethod, HarnessRuntimeMethod:
 		if s.Runtime == nil {
-			return nil, errors.New("Codex runtime control is unavailable")
+			return nil, errors.New("harness runtime control is unavailable")
 		}
-		var request CodexAgentRequest
+		var request HarnessAgentRequest
 		if err := decodeRequest(raw, &request); err != nil {
 			return nil, err
 		}
-		if method == StopCodexAgentMethod {
-			return s.Runtime.StopCodexAgent(ctx, request.Name)
+		if method == StopHarnessAgentMethod {
+			return s.Runtime.StopHarnessAgent(ctx, request.Name)
 		}
-		return s.Runtime.CodexAgentRuntime(ctx, request.Name)
+		return s.Runtime.HarnessAgentRuntime(ctx, request.Name)
 	case CreateMethod:
 		var request MessageRequest
 		if err := decodeRequest(raw, &request); err != nil {
@@ -260,7 +260,7 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 		if err := s.Store.Create(ctx, request.Message); err != nil {
 			return nil, err
 		}
-		s.wakeCodexAgent(request.Message, request.Environment)
+		s.wakeHarnessAgent(request.Message, request.Environment)
 		return nil, nil
 	case ReplyMethod:
 		var request ReplyRequest
@@ -271,7 +271,7 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 		if err := s.Store.Reply(ctx, request.OriginalID, request.Reply); err != nil {
 			return nil, err
 		}
-		s.wakeCodexAgent(request.Reply, request.Environment)
+		s.wakeHarnessAgent(request.Reply, request.Environment)
 		return nil, nil
 	case GetMethod:
 		var request IDRequest
@@ -512,9 +512,9 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 	}
 }
 
-func (s Service) wakeCodexAgent(message model.Message, environment []string) {
-	if runtime, ok := s.Runtime.(domain.CodexRuntimeAutoStarter); ok {
-		runtime.WakeCodexAgent(message, environment)
+func (s Service) wakeHarnessAgent(message model.Message, environment []string) {
+	if runtime, ok := s.Runtime.(domain.HarnessRuntimeAutoStarter); ok {
+		runtime.WakeHarnessAgent(message, environment)
 	}
 }
 
@@ -523,13 +523,13 @@ func (s Service) wakeForReplayedMessageMutation(method string, raw json.RawMessa
 	case CreateMethod:
 		var request MessageRequest
 		if json.Unmarshal(raw, &request) == nil {
-			s.wakeCodexAgent(request.Message, request.Environment)
+			s.wakeHarnessAgent(request.Message, request.Environment)
 			clearEnvironment(request.Environment)
 		}
 	case ReplyMethod:
 		var request ReplyRequest
 		if json.Unmarshal(raw, &request) == nil {
-			s.wakeCodexAgent(request.Reply, request.Environment)
+			s.wakeHarnessAgent(request.Reply, request.Environment)
 			clearEnvironment(request.Environment)
 		}
 	}

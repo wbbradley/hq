@@ -15,6 +15,7 @@ import (
 )
 
 func Run(ctx context.Context, options Options) error {
+	defer clearEnvironment(options.Environment)
 	logger := options.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -79,10 +80,14 @@ func Run(ctx context.Context, options Options) error {
 	if requestedSession != "" {
 		mode = harness.SessionResume
 	}
+	launchEnvironment := append([]string(nil), options.Environment...)
 	instance, err := options.Factory.Launch(ctx, harness.LaunchConfig{
 		InstanceID: harness.InstanceID(options.AgentName), AgentName: options.AgentName, Directory: options.Directory,
-		SessionMode: mode, RequestedSession: requestedSession, Options: options.ProviderOptions,
+		Environment: launchEnvironment, SessionMode: mode, RequestedSession: requestedSession, Options: options.ProviderOptions,
 	})
+	clearEnvironment(launchEnvironment)
+	clearEnvironment(options.Environment)
+	options.Environment = nil
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -224,6 +229,12 @@ func Run(ctx context.Context, options Options) error {
 		_ = options.PublishStatus(context.Background(), mailbox, identity, terms.StoppedBody, status, events.nextCreatedAt())
 	}
 	return bridgeErr
+}
+
+func clearEnvironment(environment []string) {
+	for index := range environment {
+		environment[index] = ""
+	}
 }
 
 func normalizeTerminology(terms Terminology, provider harness.Provider) Terminology {

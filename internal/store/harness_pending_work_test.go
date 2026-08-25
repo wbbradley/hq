@@ -10,7 +10,7 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 )
 
-func TestListCodexPendingWorkReturnsOnlyRunnableDurableTargets(t *testing.T) {
+func TestListHarnessPendingWorkReturnsOnlyRunnableDurableTargets(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
 	ctx := context.Background()
 	directDirectory := t.TempDir()
@@ -46,17 +46,17 @@ func TestListCodexPendingWorkReturnsOnlyRunnableDurableTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	work, err := s.ListCodexPendingWork(ctx)
+	work, err := s.ListHarnessPendingWork(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(work) != 2 {
 		t.Fatalf("pending work = %#v", work)
 	}
-	if work[0].Kind != domain.CodexPendingDirect || work[0].AgentName != direct.Name || work[0].SessionID != "direct-thread" || work[0].Repository.Directory != directDirectory || work[0].Repository.Branch != "main" {
+	if work[0].Kind != domain.HarnessPendingDirect || work[0].AgentName != direct.Name || work[0].SessionID != "direct-thread" || work[0].Repository.Directory != directDirectory || work[0].Repository.Branch != "main" {
 		t.Fatalf("direct pending work = %#v", work[0])
 	}
-	if work[1].Kind != domain.CodexPendingProject || work[1].ProjectID != project.ID || work[1].AssignmentID != project.Assignment.ID || work[1].ProjectThreadID != project.Assignment.SelectedThreadID || work[1].SessionID != "project-thread" || work[1].Repository.Directory != projectDirectory {
+	if work[1].Kind != domain.HarnessPendingProject || work[1].ProjectID != project.ID || work[1].AssignmentID != project.Assignment.ID || work[1].ProjectThreadID != project.Assignment.SelectedThreadID || work[1].SessionID != "project-thread" || work[1].Repository.Directory != projectDirectory {
 		t.Fatalf("project pending work = %#v", work[1])
 	}
 
@@ -68,11 +68,11 @@ func TestListCodexPendingWorkReturnsOnlyRunnableDurableTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	work, err = s.ListCodexPendingWork(ctx)
+	work, err = s.ListHarnessPendingWork(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(work) != 1 || work[0].Kind != domain.CodexPendingDirect {
+	if len(work) != 1 || work[0].Kind != domain.HarnessPendingDirect {
 		t.Fatalf("closing project remained runnable: %#v (closing=%#v)", work, closing)
 	}
 
@@ -83,7 +83,7 @@ func TestListCodexPendingWorkReturnsOnlyRunnableDurableTargets(t *testing.T) {
 	if err := s.Complete(ctx, claimed.ID, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	work, err = s.ListCodexPendingWork(ctx)
+	work, err = s.ListHarnessPendingWork(ctx)
 	if err != nil || len(work) != 0 {
 		t.Fatalf("completed/non-runnable work = %#v, %v", work, err)
 	}

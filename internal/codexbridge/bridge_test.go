@@ -653,7 +653,7 @@ func TestRunNamedAgentRejectsCrossHarnessSelectionWithoutRotation(t *testing.T) 
 	store := newFakeMailboxStore()
 	store.namedAgent = domain.NamedAgent{Name: "fred", MailboxID: "named-mailbox", Harness: "claude-code", CurrentSessionID: "claude-session"}
 	err := Run(context.Background(), Options{Directory: "/work", AgentName: "fred", Store: store, Starter: fakeStarter{newFakeProcess()}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
-	if err == nil || !strings.Contains(err.Error(), "--new-thread") || !strings.Contains(err.Error(), "claude-code") {
+	if err == nil || !strings.Contains(err.Error(), "--new-session") || !strings.Contains(err.Error(), "claude-code") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -704,7 +704,7 @@ func TestRunNamedAgentResumeFailureRequiresExplicitRotation(t *testing.T) {
 	store := newFakeMailboxStore()
 	store.namedAgent = domain.NamedAgent{Name: "fred", MailboxID: "named-mailbox", Harness: "codex", CurrentSessionID: "thread-missing"}
 	err := Run(context.Background(), Options{Directory: "/work", AgentName: "fred", Store: store, Starter: fakeStarter{process}, Stderr: io.Discard, Ledger: NewMemoryLedger()})
-	if err == nil || !strings.Contains(err.Error(), "--new-thread") || !strings.Contains(err.Error(), "thread-missing") {
+	if err == nil || !strings.Contains(err.Error(), "--new-session") || !strings.Contains(err.Error(), "thread-missing") {
 		t.Fatalf("error = %v", err)
 	}
 	store.mu.Lock()

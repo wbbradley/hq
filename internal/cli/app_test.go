@@ -33,6 +33,14 @@ type updatingTestStore struct {
 	updates domain.ClientUpdates
 }
 
+func launchYolo(request domain.HarnessLaunchRequest) bool {
+	var options struct {
+		Yolo bool `json:"yolo"`
+	}
+	_ = json.Unmarshal(request.ProviderOptions, &options)
+	return options.Yolo
+}
+
 func (s *updatingTestStore) Updates() domain.ClientUpdates { return s.updates }
 
 func testApp(t *testing.T, input string) (*App, *bytes.Buffer) {
@@ -74,19 +82,19 @@ func initializeTestIdentity(t *testing.T, database string) {
 func TestCodexCommandBuildsDaemonLaunchRequest(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	var received domain.CodexLaunchRequest
-	a.LaunchCodexAgent = func(_ context.Context, _ domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	var received domain.HarnessLaunchRequest
+	a.LaunchHarnessAgent = func(_ context.Context, _ domain.Store, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
 		received = request
 		received.Environment = append([]string(nil), request.Environment...)
-		return domain.CodexRuntime{AgentName: request.AgentName, ThreadID: request.SessionID, Directory: request.Directory, Phase: domain.CodexRuntimeRunning}, nil
+		return domain.HarnessRuntime{AgentName: request.AgentName, Harness: request.Harness, SessionID: request.SessionID, Directory: request.Directory, Phase: domain.HarnessRuntimeRunning}, nil
 	}
-	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "codex", "--agent", "fred", "--cwd", "child", "--session", "thread-42", "--yolo", "continue", "working"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--no-sync", "--db", database, "harness", "--provider", "codex", "--agent", "fred", "--cwd", "child", "--session", "thread-42", "--codex-yolo", "continue", "working"}); err != nil {
 		t.Fatal(err)
 	}
-	if received.AgentName != "fred" || received.Directory != "/work/repo/child" || received.SessionID != "thread-42" || received.Action != domain.CodexSessionResume || received.InitialPrompt != "continue working" {
+	if received.AgentName != "fred" || received.Directory != "/work/repo/child" || received.SessionID != "thread-42" || received.Action != domain.HarnessSessionResume || received.InitialPrompt != "continue working" {
 		t.Fatalf("request = %#v", received)
 	}
-	if received.Repository.Directory != "/work/repo/child" || strings.Join(received.Environment, "|") != "PATH=/caller/bin|TOKEN=secret" || !received.Yolo || received.RequestID == "" {
+	if received.Harness != "codex" || received.Repository.Directory != "/work/repo/child" || strings.Join(received.Environment, "|") != "PATH=/caller/bin|TOKEN=secret" || !launchYolo(received) || received.RequestID == "" {
 		t.Fatalf("launch context = %#v", received)
 	}
 }
@@ -94,15 +102,15 @@ func TestCodexCommandBuildsDaemonLaunchRequest(t *testing.T) {
 func TestCodexCommandDefaultsToCallerDirectory(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	var received domain.CodexLaunchRequest
-	a.LaunchCodexAgent = func(_ context.Context, _ domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	var received domain.HarnessLaunchRequest
+	a.LaunchHarnessAgent = func(_ context.Context, _ domain.Store, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
 		received = request
-		return domain.CodexRuntime{AgentName: request.AgentName, ThreadID: "new-thread", Directory: request.Directory, Phase: domain.CodexRuntimeRunning}, nil
+		return domain.HarnessRuntime{AgentName: request.AgentName, Harness: request.Harness, SessionID: "new-thread", Directory: request.Directory, Phase: domain.HarnessRuntimeRunning}, nil
 	}
-	if err := a.Run(context.Background(), []string{"--db", database, "codex", "--agent", "fred"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", database, "harness", "--provider", "codex", "--agent", "fred"}); err != nil {
 		t.Fatal(err)
 	}
-	if received.Directory != "/work/repo" || received.InitialPrompt != "" || received.Action != domain.CodexSessionCurrent || received.Yolo {
+	if received.Directory != "/work/repo" || received.InitialPrompt != "" || received.Action != domain.HarnessSessionCurrent || launchYolo(received) {
 		t.Fatalf("request = %#v", received)
 	}
 }
@@ -113,20 +121,20 @@ func TestCodexCommandUsesConfiguredYoloDefaultAndAllowsOverride(t *testing.T) {
 	a.LoadConfig = func() (hqconfig.Settings, error) {
 		return hqconfig.Settings{Codex: hqconfig.CodexSettings{Yolo: true}}, nil
 	}
-	var launches []domain.CodexLaunchRequest
-	a.LaunchCodexAgent = func(_ context.Context, _ domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	var launches []domain.HarnessLaunchRequest
+	a.LaunchHarnessAgent = func(_ context.Context, _ domain.Store, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
 		launches = append(launches, request)
-		return domain.CodexRuntime{AgentName: request.AgentName, ThreadID: "thread", Directory: request.Directory, Phase: domain.CodexRuntimeRunning}, nil
+		return domain.HarnessRuntime{AgentName: request.AgentName, Harness: request.Harness, SessionID: "thread", Directory: request.Directory, Phase: domain.HarnessRuntimeRunning}, nil
 	}
 	for _, args := range [][]string{
-		{"--db", database, "codex", "--agent", "fred"},
-		{"--db", database, "codex", "--agent", "fred", "--yolo=false"},
+		{"--db", database, "harness", "--provider", "codex", "--agent", "fred"},
+		{"--db", database, "harness", "--provider", "codex", "--agent", "fred", "--codex-yolo=false"},
 	} {
 		if err := a.Run(context.Background(), args); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(launches) != 2 || !launches[0].Yolo || launches[1].Yolo {
+	if len(launches) != 2 || !launchYolo(launches[0]) || launchYolo(launches[1]) {
 		t.Fatalf("launches = %#v", launches)
 	}
 }
@@ -155,12 +163,12 @@ func TestConfigCommandGetsAndSetsCodexYolo(t *testing.T) {
 	}
 }
 
-func TestCodexHelpDoesNotOpenStore(t *testing.T) {
+func TestHarnessHelpDoesNotOpenStore(t *testing.T) {
 	var outputs []string
-	for _, args := range [][]string{{"codex", "--help"}, {"help", "codex"}} {
+	for _, args := range [][]string{{"harness", "--help"}, {"help", "harness"}} {
 		a, out := testApp(t, "")
 		a.Open = func(context.Context, string) (domain.Store, error) {
-			t.Fatal("Codex help opened the store")
+			t.Fatal("harness help opened the store")
 			return nil, nil
 		}
 		if err := a.Run(context.Background(), args); err != nil {
@@ -168,23 +176,23 @@ func TestCodexHelpDoesNotOpenStore(t *testing.T) {
 		}
 		outputs = append(outputs, out.String())
 	}
-	if outputs[0] != outputs[1] || outputs[0] != codexUsage {
+	if outputs[0] != outputs[1] || outputs[0] != harnessUsage {
 		t.Fatalf("help outputs differ:\n%s\n---\n%s", outputs[0], outputs[1])
 	}
-	for _, required := range []string{"Codex CLI v0.149.0", "--session THREAD_ID", "--agent NAME", "--new-thread", "--yolo", "never approve and danger-full-access", "complete environment", "daemon owns"} {
+	for _, required := range []string{"--provider ID", "--session SESSION_ID", "--agent NAME", "--new-session", "--codex-yolo", "never approve and use danger-full-access", "complete environment", "daemon owns"} {
 		if !strings.Contains(outputs[0], required) {
-			t.Fatalf("Codex help is missing %q", required)
+			t.Fatalf("harness help is missing %q", required)
 		}
 	}
 }
 
-func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
+func TestGlobalHelpIncludesHarnessSynopsisAndRejectsUnknownTopic(t *testing.T) {
 	a, out := testApp(t, "")
 	a.Open = func(context.Context, string) (domain.Store, error) { t.Fatal("help opened store"); return nil, nil }
 	if err := a.Run(context.Background(), []string{"help"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "codex --agent NAME [--cwd PATH] [--new-thread | --session THREAD_ID] [--yolo] [INITIAL PROMPT...]") {
+	if !strings.Contains(out.String(), "harness --provider ID --agent NAME [--cwd PATH] [--new-session | --session SESSION_ID] [INITIAL PROMPT...]") {
 		t.Fatalf("global help = %q", out.String())
 	}
 	a, _ = testApp(t, "")
@@ -193,7 +201,7 @@ func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 		return nil, nil
 	}
 	err := a.Run(context.Background(), []string{"help", "future"})
-	if err == nil || !strings.Contains(err.Error(), "topic codex") {
+	if err == nil || !strings.Contains(err.Error(), "topic harness") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -201,25 +209,25 @@ func TestGlobalHelpIncludesCodexSynopsisAndRejectsUnknownTopic(t *testing.T) {
 func TestCodexNamedAgentOptionsAndConflicts(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	a, _ := testApp(t, "")
-	var received domain.CodexLaunchRequest
-	a.LaunchCodexAgent = func(_ context.Context, _ domain.Store, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+	var received domain.HarnessLaunchRequest
+	a.LaunchHarnessAgent = func(_ context.Context, _ domain.Store, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
 		received = request
-		return domain.CodexRuntime{AgentName: request.AgentName, ThreadID: "new", Directory: request.Directory, Phase: domain.CodexRuntimeRunning}, nil
+		return domain.HarnessRuntime{AgentName: request.AgentName, SessionID: "new", Directory: request.Directory, Phase: domain.HarnessRuntimeRunning}, nil
 	}
-	if err := a.Run(context.Background(), []string{"--db", database, "codex", "--agent", "fred", "--new-thread", "continue"}); err != nil {
+	if err := a.Run(context.Background(), []string{"--db", database, "harness", "--provider", "codex", "--agent", "fred", "--new-session", "continue"}); err != nil {
 		t.Fatal(err)
 	}
-	if received.AgentName != "fred" || received.Action != domain.CodexSessionNew || received.InitialPrompt != "continue" {
+	if received.AgentName != "fred" || received.Action != domain.HarnessSessionNew || received.InitialPrompt != "continue" {
 		t.Fatalf("request = %#v", received)
 	}
 	for _, args := range [][]string{
-		{"--db", database, "codex", "--agent", "fred", "--new-thread", "--session", "thread"},
+		{"--db", database, "harness", "--provider", "codex", "--agent", "fred", "--new-session", "--session", "thread"},
 		{"--db", database, "codex"},
 	} {
 		a, _ := testApp(t, "")
-		a.LaunchCodexAgent = func(context.Context, domain.Store, domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+		a.LaunchHarnessAgent = func(context.Context, domain.Store, domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
 			t.Fatal("invalid options launched Codex")
-			return domain.CodexRuntime{}, nil
+			return domain.HarnessRuntime{}, nil
 		}
 		if err := a.Run(context.Background(), args); err == nil {
 			t.Fatalf("args %#v succeeded", args)

@@ -313,7 +313,7 @@ type ProjectRuntimeStore interface {
 	ProjectOutputOperations
 	ProjectCommandOperations
 	ProjectWorkflowOperations
-	CodexPendingWorkOperations
+	HarnessPendingWorkOperations
 }
 
 type AgentRetirementOperation struct {

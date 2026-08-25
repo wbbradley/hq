@@ -30,8 +30,8 @@ func (*testDomainStore) Synchronize(context.Context) error { return nil }
 
 type runtimeTestStore struct {
 	*testDomainStore
-	runtime  domain.CodexRuntime
-	launches []domain.CodexLaunchRequest
+	runtime  domain.HarnessRuntime
+	launches []domain.HarnessLaunchRequest
 }
 
 type pagedHistoryStore struct {
@@ -77,23 +77,23 @@ func (s *outboundCaptureStore) Create(_ context.Context, created model.Message) 
 	return nil
 }
 
-func (s *runtimeTestStore) LaunchCodexAgent(_ context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
+func (s *runtimeTestStore) LaunchHarnessAgent(_ context.Context, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
 	copyRequest := request
 	copyRequest.Environment = append([]string(nil), request.Environment...)
 	s.launches = append(s.launches, copyRequest)
-	s.runtime = domain.CodexRuntime{AgentName: request.AgentName, ThreadID: request.SessionID, Directory: request.Directory, Phase: domain.CodexRuntimeRunning}
-	if s.runtime.ThreadID == "" {
-		s.runtime.ThreadID = "thread-new"
+	s.runtime = domain.HarnessRuntime{AgentName: request.AgentName, Harness: request.Harness, SessionID: request.SessionID, Directory: request.Directory, Phase: domain.HarnessRuntimeRunning}
+	if s.runtime.SessionID == "" {
+		s.runtime.SessionID = "thread-new"
 	}
 	return s.runtime, nil
 }
 
-func (s *runtimeTestStore) StopCodexAgent(_ context.Context, name string) (domain.CodexRuntime, error) {
-	s.runtime = domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}
+func (s *runtimeTestStore) StopHarnessAgent(_ context.Context, name string) (domain.HarnessRuntime, error) {
+	s.runtime = domain.HarnessRuntime{AgentName: name, Phase: domain.HarnessRuntimeOffline}
 	return s.runtime, nil
 }
 
-func (s *runtimeTestStore) CodexAgentRuntime(context.Context, string) (domain.CodexRuntime, error) {
+func (s *runtimeTestStore) HarnessAgentRuntime(context.Context, string) (domain.HarnessRuntime, error) {
 	return s.runtime, nil
 }
 
@@ -1589,7 +1589,7 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 		}
 	}
 	named, _ = base.GetNamedAgent(ctx, "fred")
-	runtimeStore := &runtimeTestStore{testDomainStore: base, runtime: domain.CodexRuntime{AgentName: "fred", Phase: domain.CodexRuntimeOffline}}
+	runtimeStore := &runtimeTestStore{testDomainStore: base, runtime: domain.HarnessRuntime{AgentName: "fred", Phase: domain.HarnessRuntimeOffline}}
 	editor := textarea.New()
 	editor.SetValue("preserved draft")
 	m := app{
@@ -1610,7 +1610,7 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	m = updated.(app)
-	if !m.agentManager.yolo || !strings.Contains(m.renderAgentManager(), "YOLO mode: ON") {
+	if !m.agentManager.yolo || !strings.Contains(m.renderAgentManager(), "Codex YOLO: ON") {
 		t.Fatalf("YOLO switch = %#v", m.agentManager)
 	}
 	for index, session := range m.agentManager.sessions {
@@ -1625,7 +1625,7 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 	}
 	updated, _ = m.Update(cmd())
 	m = updated.(app)
-	if len(runtimeStore.launches) != 1 || runtimeStore.launches[0].SessionID != "thread-one" || runtimeStore.launches[0].Directory != directoryOne || strings.Join(runtimeStore.launches[0].Environment, "|") != "PATH=/tui/bin|TOKEN=transient" || !runtimeStore.launches[0].Yolo {
+	if len(runtimeStore.launches) != 1 || runtimeStore.launches[0].Harness != "codex" || runtimeStore.launches[0].SessionID != "thread-one" || runtimeStore.launches[0].Directory != directoryOne || strings.Join(runtimeStore.launches[0].Environment, "|") != "PATH=/tui/bin|TOKEN=transient" || !providerYolo(runtimeStore.launches[0].ProviderOptions) {
 		t.Fatalf("resume request = %#v", runtimeStore.launches)
 	}
 	if m.cursor != 3 || m.messageScroll != 2 || m.editor.Value() != "preserved draft" {
@@ -1633,11 +1633,16 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 	}
 
 	m.agentManager.stage, m.agentManager.cursor = chooseRuntimeSession, 0
-	m.agentManager.runtime = domain.CodexRuntime{AgentName: "fred", ThreadID: "thread-one", Directory: directoryOne, Phase: domain.CodexRuntimeRunning}
+	m.agentManager.runtime = domain.HarnessRuntime{AgentName: "fred", Harness: "codex", SessionID: "thread-one", Directory: directoryOne, Phase: domain.HarnessRuntimeRunning}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.agentManager.stage != enterRuntimeHarness || m.agentManager.harness != "codex" {
+		t.Fatalf("new session harness stage = %#v", m.agentManager)
+	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(app)
 	if m.agentManager.stage != enterRuntimeDirectory {
-		t.Fatalf("new thread stage = %v", m.agentManager.stage)
+		t.Fatalf("new session directory stage = %v", m.agentManager.stage)
 	}
 	m.agentManager.directory = directoryTwo
 	updated, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -1651,7 +1656,7 @@ func TestAgentManagerResumesHistoryAndConfirmsLiveSwitchWithoutChangingInboxStat
 	}
 	m = updated.(app)
 	_ = cmd()
-	if len(runtimeStore.launches) != 2 || !runtimeStore.launches[1].ConfirmSwitch || runtimeStore.launches[1].Action != domain.CodexSessionNew || runtimeStore.launches[1].Directory != directoryTwo || !runtimeStore.launches[1].Yolo {
+	if len(runtimeStore.launches) != 2 || !runtimeStore.launches[1].ConfirmSwitch || runtimeStore.launches[1].Action != domain.HarnessSessionNew || runtimeStore.launches[1].Directory != directoryTwo || !providerYolo(runtimeStore.launches[1].ProviderOptions) {
 		t.Fatalf("new-thread request = %#v", runtimeStore.launches)
 	}
 }
@@ -1812,8 +1817,13 @@ func TestClosedProjectComposeGuidesAgentThreadAndDirectory(t *testing.T) {
 	}
 	updated, _ = m.Update(cmd())
 	m = updated.(app)
-	if m.projectSetup == nil || m.projectSetup.stage != chooseProjectThread {
-		t.Fatalf("thread setup = %#v", m.projectSetup)
+	if m.projectSetup == nil || m.projectSetup.stage != enterProjectHarness || m.projectSetup.harness != "codex" {
+		t.Fatalf("harness setup = %#v", m.projectSetup)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(app)
+	if m.projectSetup.stage != chooseProjectThread {
+		t.Fatalf("session setup = %#v", m.projectSetup)
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(app)
@@ -1822,7 +1832,7 @@ func TestClosedProjectComposeGuidesAgentThreadAndDirectory(t *testing.T) {
 	}
 	updated, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(app)
-	if !m.answering || m.composeActivation == nil || m.composeActivation.projectID != project.ID || m.composeActivation.agentName != "alice" || m.composeActivation.action != domain.CodexSessionNew {
+	if !m.answering || m.composeActivation == nil || m.composeActivation.projectID != project.ID || m.composeActivation.agentName != "alice" || m.composeActivation.harness != "codex" || m.composeActivation.action != domain.HarnessSessionNew {
 		t.Fatalf("guided compose = %#v", m.composeActivation)
 	}
 }

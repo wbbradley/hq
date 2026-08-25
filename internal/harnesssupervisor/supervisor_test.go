@@ -1,4 +1,4 @@
-package codexsupervisor
+package harnesssupervisor
 
 import (
 	"bufio"
@@ -19,6 +19,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/codexbridge"
 	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/harness"
+	"github.com/wbbradley/hq/internal/harness/fake"
+	"github.com/wbbradley/hq/internal/harnessbridge"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
@@ -61,6 +64,40 @@ func (s *scriptedStarter) factory(environment []string) codexbridge.ProcessStart
 		s.starts++
 		return newScriptedProcess("thread-" + string(rune('0'+s.starts))), nil
 	})
+}
+
+func codexFactoryResolver(starterFactory func([]string) codexbridge.ProcessStarter) FactoryResolver {
+	return func(provider harness.ProviderID, environment []string) (harness.Factory, error) {
+		if provider != codexbridge.CodexProviderID {
+			return nil, &harness.ProviderError{Provider: provider, Operation: "resolve provider", Cause: harness.ErrUnknownProvider}
+		}
+		return &codexbridge.HarnessFactory{Starter: starterFactory(environment), Stderr: io.Discard}, nil
+	}
+}
+
+func codexOptions(yolo bool) json.RawMessage {
+	raw, _ := json.Marshal(codexbridge.CodexOptions{Yolo: yolo})
+	return raw
+}
+
+func decodeCodexTestOptions(provider harness.ProviderID, agentName string, raw json.RawMessage) (harness.ProviderOptions, error) {
+	if provider != codexbridge.CodexProviderID {
+		return nil, harness.ErrUnknownProvider
+	}
+	var options codexbridge.CodexOptions
+	if len(raw) != 0 {
+		if err := json.Unmarshal(raw, &options); err != nil {
+			return nil, err
+		}
+	}
+	options.DeveloperInstructions = codexbridge.NamedAgentDeveloperInstructions(agentName)
+	return options, nil
+}
+
+func codexYolo(raw json.RawMessage) bool {
+	var options codexbridge.CodexOptions
+	_ = json.Unmarshal(raw, &options)
+	return options.Yolo
 }
 
 type processStarterFunc func(string) (codexbridge.Process, error)
@@ -128,6 +165,64 @@ func (p *scriptedProcess) Kill() error {
 	return nil
 }
 
+func TestSupervisorLaunchesRegisteredNonCodexProvider(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	const providerID harness.ProviderID = "home-built"
+	factory := fake.NewFactory(providerID)
+	registry, err := harness.NewRegistry(factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger(), registry)
+	defer supervisor.Close()
+
+	runtime, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: "generic-agent", Harness: string(providerID),
+		Action: domain.HarnessSessionNew, Directory: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Phase != domain.HarnessRuntimeRunning || runtime.Harness != string(providerID) || runtime.SessionID != "session-1" {
+		t.Fatalf("runtime = %#v", runtime)
+	}
+	stopped, err := supervisor.StopHarnessAgent(context.Background(), runtime.AgentName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.Phase != domain.HarnessRuntimeOffline || stopped.Harness != string(providerID) || stopped.SessionID != runtime.SessionID {
+		t.Fatalf("stopped runtime = %#v", stopped)
+	}
+
+	capabilities := factory.Provider().Capabilities
+	capabilities.Resume = false
+	factory.SetCapabilities(capabilities)
+	failed, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: runtime.AgentName, Harness: string(providerID),
+		Action: domain.HarnessSessionResume, SessionID: runtime.SessionID, Directory: runtime.Directory,
+	})
+	if !errors.Is(err, harness.ErrCapabilityUnavailable) || failed.Phase != domain.HarnessRuntimeFailed {
+		t.Fatalf("incapable resume = %#v, %v", failed, err)
+	}
+	_, err = supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
+		RequestID: uuid.NewString(), AgentName: "unknown-agent", Harness: "missing-provider",
+		Action: domain.HarnessSessionNew, Directory: t.TempDir(),
+	})
+	if !errors.Is(err, harness.ErrUnknownProvider) {
+		t.Fatalf("unknown provider error = %v", err)
+	}
+}
+
 func TestSupervisorLaunchCanPublishAgentCreationInvalidation(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "hq.db")
 	keyPath, _ := identity.KeyPath(databasePath)
@@ -140,15 +235,15 @@ func TestSupervisorLaunchCanPublishAgentCreationInvalidation(t *testing.T) {
 	}
 	defer database.Close()
 
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = (&scriptedStarter{}).factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
 	database.SetChangeObserver(supervisor.Publish)
 	defer supervisor.Close()
 
-	result, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{
-		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: t.TempDir(),
+	result, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex",
+		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew, Directory: t.TempDir(),
 	})
-	if err != nil || result.Phase != domain.CodexRuntimeRunning {
+	if err != nil || result.Phase != domain.HarnessRuntimeRunning {
 		t.Fatalf("launch with synchronous change publication = %#v, %v", result, err)
 	}
 }
@@ -172,14 +267,14 @@ func TestProjectActivationOpensAssignsAndBindsNewThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = (&scriptedStarter{}).factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
 	defer supervisor.Close()
-	activated, err := supervisor.ActivateCodexProject(context.Background(), domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	activated, err := supervisor.ActivateHarnessProject(context.Background(), domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if activated.Project.Lifecycle != domain.ProjectOpen || activated.Project.Assignment == nil || activated.Project.Assignment.State != domain.AssignmentRunnable || activated.Runtime.ThreadID != "thread-1" {
+	if activated.Project.Lifecycle != domain.ProjectOpen || activated.Project.Assignment == nil || activated.Project.Assignment.State != domain.AssignmentRunnable || activated.Runtime.SessionID != "thread-1" {
 		t.Fatalf("activation = %#v", activated)
 	}
 	threads, err := database.ListProjectThreads(context.Background(), project.ID)
@@ -189,7 +284,7 @@ func TestProjectActivationOpensAssignsAndBindsNewThread(t *testing.T) {
 	if sessions, err := database.ListNamedAgentSessions(context.Background(), "fred"); err != nil || len(sessions) != 0 {
 		t.Fatalf("project thread leaked into direct sessions: %#v, %v", sessions, err)
 	}
-	if _, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionCurrent, Directory: directory}); !errors.Is(err, domain.ErrAgentAssigned) {
+	if _, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionCurrent, Directory: directory}); !errors.Is(err, domain.ErrAgentAssigned) {
 		t.Fatalf("direct launch of assigned agent = %v", err)
 	}
 }
@@ -212,10 +307,10 @@ func TestFailedClosedProjectActivationCompensatesToClosedUnassigned(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = (&scriptedStarter{fail: errors.New("start failed")}).factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{fail: errors.New("start failed")}).factory)
 	defer supervisor.Close()
-	_, err = supervisor.ActivateCodexProject(context.Background(), domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: t.TempDir()}})
+	_, err = supervisor.ActivateHarnessProject(context.Background(), domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: t.TempDir()}})
 	if err == nil {
 		t.Fatal("failed runtime activation succeeded")
 	}
@@ -250,9 +345,9 @@ func TestProjectMessageWakesDurableRunnableAssignmentAfterRestart(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	first.Starter = (&scriptedStarter{}).factory
-	activated, err := first.ActivateCodexProject(context.Background(), domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	first := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	first.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
+	activated, err := first.ActivateHarnessProject(context.Background(), domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,14 +359,14 @@ func TestProjectMessageWakesDurableRunnableAssignmentAfterRestart(t *testing.T) 
 		t.Fatal(err)
 	}
 	secondStarter := &scriptedStarter{}
-	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	second.Starter = secondStarter.factory
-	second.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) { return domain.CodexLaunchDefaults{}, nil }
+	second := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	second.ResolveFactory = codexFactoryResolver(secondStarter.factory)
+	second.LoadLaunchDefaults = func() (domain.HarnessLaunchDefaults, error) { return domain.HarnessLaunchDefaults{}, nil }
 	defer second.Close()
 	second.StartWorkReconciliation()
 	runtime := waitForRunningRuntime(t, second, "fred")
-	if runtime.ThreadID != activated.Runtime.ThreadID {
-		t.Fatalf("woke thread %q, want %q", runtime.ThreadID, activated.Runtime.ThreadID)
+	if runtime.SessionID != activated.Runtime.SessionID {
+		t.Fatalf("woke thread %q, want %q", runtime.SessionID, activated.Runtime.SessionID)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -305,16 +400,16 @@ func TestProjectReplyWakesOfflineAssignmentAfterDaemonRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	first.Starter = (&scriptedStarter{}).factory
-	activated, err := first.ActivateCodexProject(context.Background(), domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "reply-agent", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	first := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	first.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
+	activated, err := first.ActivateHarnessProject(context.Background(), domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "reply-agent", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	outputID := "019d0000-0000-7000-8000-000000000051"
 	binding := domain.ProjectOutputBinding{
 		ProjectID: activated.Project.ID, AssignmentID: activated.Project.Assignment.ID, AgentName: "reply-agent",
-		ProjectThreadID: activated.Project.Assignment.SelectedThreadID, ExternalThreadID: activated.Runtime.ThreadID, RuntimeState: "connected",
+		ProjectThreadID: activated.Project.Assignment.SelectedThreadID, ExternalThreadID: activated.Runtime.SessionID, RuntimeState: "connected",
 	}
 	if err := database.CreateProjectOutput(context.Background(), binding, model.Message{ID: outputID, SenderMailboxID: activated.Project.MailboxID, RecipientMailboxID: model.HumanMailboxID, Body: "reply to continue", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
@@ -332,14 +427,14 @@ func TestProjectReplyWakesOfflineAssignmentAfterDaemonRestart(t *testing.T) {
 	}
 
 	secondStarter := &scriptedStarter{}
-	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	second.Starter = secondStarter.factory
-	second.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) { return domain.CodexLaunchDefaults{}, nil }
+	second := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	second.ResolveFactory = codexFactoryResolver(secondStarter.factory)
+	second.LoadLaunchDefaults = func() (domain.HarnessLaunchDefaults, error) { return domain.HarnessLaunchDefaults{}, nil }
 	defer second.Close()
 	second.StartWorkReconciliation()
 	runtime := waitForRunningRuntime(t, second, "reply-agent")
-	if runtime.ThreadID != activated.Runtime.ThreadID {
-		t.Fatalf("reply woke thread %q, want %q", runtime.ThreadID, activated.Runtime.ThreadID)
+	if runtime.SessionID != activated.Runtime.SessionID {
+		t.Fatalf("reply woke thread %q, want %q", runtime.SessionID, activated.Runtime.SessionID)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -375,9 +470,9 @@ func TestSupervisorReconcilesDirectWorkFromStoreInvalidationOnce(t *testing.T) {
 	}
 	defer database.Close()
 	directory := t.TempDir()
-	first := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	first.Starter = (&scriptedStarter{}).factory
-	launched, err := first.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: "direct", Action: domain.CodexSessionNew, Directory: directory})
+	first := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	first.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
+	launched, err := first.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), AgentName: "direct", Action: domain.HarnessSessionNew, Directory: directory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,9 +481,9 @@ func TestSupervisorReconcilesDirectWorkFromStoreInvalidationOnce(t *testing.T) {
 	}
 
 	secondStarter := &scriptedStarter{}
-	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	second.Starter = secondStarter.factory
-	second.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) { return domain.CodexLaunchDefaults{}, nil }
+	second := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	second.ResolveFactory = codexFactoryResolver(secondStarter.factory)
+	second.LoadLaunchDefaults = func() (domain.HarnessLaunchDefaults, error) { return domain.HarnessLaunchDefaults{}, nil }
 	database.SetChangeObserver(second.Publish)
 	second.StartWorkReconciliation()
 	defer second.Close()
@@ -404,7 +499,7 @@ func TestSupervisorReconcilesDirectWorkFromStoreInvalidationOnce(t *testing.T) {
 		second.Publish(domain.Invalidation{Topics: []domain.ChangeTopic{domain.TopicMessages}})
 	}
 	runtime := waitForRunningRuntime(t, second, "direct")
-	if runtime.ThreadID != launched.ThreadID || runtime.Directory != directory {
+	if runtime.SessionID != launched.SessionID || runtime.Directory != directory {
 		t.Fatalf("reconciled runtime = %#v", runtime)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -460,7 +555,7 @@ func TestSupervisorStartupRecoversInterruptedProjectActivation(t *testing.T) {
 	if err := database.SetProjectActivationAssignment(context.Background(), operationID, project.Assignment.ID); err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
 	defer supervisor.Close()
 	got, err := database.GetProject(context.Background(), project.ID)
 	if err != nil {
@@ -498,14 +593,14 @@ func TestProjectCloseQuiescesRuntimeAndArchivePreservesFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = (&scriptedStarter{}).factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
 	defer supervisor.Close()
-	activated, err := supervisor.ActivateCodexProject(context.Background(), domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	activated, err := supervisor.ActivateHarnessProject(context.Background(), domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	closed, err := supervisor.CloseCodexProject(context.Background(), domain.ProjectCodexCloseRequest{ProjectID: project.ID, ExpectedHead: activated.Project.HeadEventID, Archive: true})
+	closed, err := supervisor.CloseHarnessProject(context.Background(), domain.ProjectHarnessCloseRequest{ProjectID: project.ID, ExpectedHead: activated.Project.HeadEventID, Archive: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,9 +641,9 @@ func TestProjectCloseRequiresForceWhenRuntimeOwnershipIsUnknown(t *testing.T) {
 	if _, err := database.AcquireNamedAgent(context.Background(), "fred", "orphan-owner", time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
 	defer supervisor.Close()
-	_, err = supervisor.CloseCodexProject(context.Background(), domain.ProjectCodexCloseRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID})
+	_, err = supervisor.CloseHarnessProject(context.Background(), domain.ProjectHarnessCloseRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID})
 	if !errors.Is(err, domain.ErrProjectRuntimeUnknown) {
 		t.Fatalf("normal close with unknown runtime = %v", err)
 	}
@@ -559,7 +654,7 @@ func TestProjectCloseRequiresForceWhenRuntimeOwnershipIsUnknown(t *testing.T) {
 	if closing.Lifecycle != domain.ProjectClosing {
 		t.Fatalf("project did not remain closing: %#v", closing)
 	}
-	closed, err := supervisor.CloseCodexProject(context.Background(), domain.ProjectCodexCloseRequest{ProjectID: project.ID, ExpectedHead: closing.HeadEventID, Force: true})
+	closed, err := supervisor.CloseHarnessProject(context.Background(), domain.ProjectHarnessCloseRequest{ProjectID: project.ID, ExpectedHead: closing.HeadEventID, Force: true})
 	if err != nil || closed.Lifecycle != domain.ProjectClosed {
 		t.Fatalf("force close = %#v, %v", closed, err)
 	}
@@ -580,7 +675,7 @@ func TestProjectCloseRetryResumesDurableClosingOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := domain.ProjectCodexCloseRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID}
+	request := domain.ProjectHarnessCloseRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID}
 	if _, err := database.BeginProjectRuntimeOperation(context.Background(), domain.ProjectRuntimeOperation{ID: request.RequestID, Kind: "close", ProjectID: project.ID, ExpectedHead: project.HeadEventID}); err != nil {
 		t.Fatal(err)
 	}
@@ -591,9 +686,9 @@ func TestProjectCloseRetryResumesDurableClosingOperation(t *testing.T) {
 	if err := database.AdvanceProjectRuntimeOperation(context.Background(), request.RequestID, "closing", closing.HeadEventID, ""); err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
 	defer supervisor.Close()
-	closed, err := supervisor.CloseCodexProject(context.Background(), request)
+	closed, err := supervisor.CloseHarnessProject(context.Background(), request)
 	if err != nil || closed.Lifecycle != domain.ProjectClosed {
 		t.Fatalf("retried close = %#v, %v", closed, err)
 	}
@@ -628,7 +723,7 @@ func TestProjectHandoffRetryResumesAfterDurableUnassign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := domain.ProjectCodexHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: "bob", Force: true, Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}}
+	request := domain.ProjectHarnessHandoffRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: "bob", Force: true, Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}}
 	if _, err := database.BeginProjectRuntimeOperation(context.Background(), domain.ProjectRuntimeOperation{ID: request.RequestID, Kind: "handoff", ProjectID: project.ID, ExpectedHead: project.HeadEventID, TargetAgent: "bob", Force: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -639,10 +734,10 @@ func TestProjectHandoffRetryResumesAfterDurableUnassign(t *testing.T) {
 	if err := database.AdvanceProjectRuntimeOperation(context.Background(), request.RequestID, "unassigned", unassigned.HeadEventID, ""); err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = (&scriptedStarter{}).factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
 	defer supervisor.Close()
-	activated, err := supervisor.HandoffCodexProject(context.Background(), request)
+	activated, err := supervisor.HandoffHarnessProject(context.Background(), request)
 	if err != nil || activated.Project.Assignment == nil || activated.Project.Assignment.AgentName != "bob" || activated.Project.Assignment.State != domain.AssignmentRunnable {
 		t.Fatalf("retried handoff = %#v, %v", activated, err)
 	}
@@ -672,7 +767,7 @@ func TestProjectWorktreeProvisioningReservesCreatesAndNeverDeletes(t *testing.T)
 	runTestGit(t, repository, "add", "README")
 	runTestGit(t, repository, "commit", "-m", "seed")
 	destination := filepath.Join(filepath.Dir(repository), "feature-worktree")
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
 	defer supervisor.Close()
 	request := domain.ProjectWorktreeRequest{RequestID: uuid.NewString(), ProjectID: uuid.NewString(), Name: "feature", Repository: repository, MergeBase: "HEAD", Destination: destination, Branch: "feature-test", Open: true}
 	project, err := supervisor.ProvisionProjectWorktree(context.Background(), request)
@@ -685,7 +780,7 @@ func TestProjectWorktreeProvisioningReservesCreatesAndNeverDeletes(t *testing.T)
 	if got := strings.TrimSpace(runTestGit(t, destination, "branch", "--show-current")); got != request.Branch {
 		t.Fatalf("worktree branch = %q", got)
 	}
-	closed, err := supervisor.CloseCodexProject(context.Background(), domain.ProjectCodexCloseRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, Archive: true})
+	closed, err := supervisor.CloseHarnessProject(context.Background(), domain.ProjectHarnessCloseRequest{RequestID: uuid.NewString(), ProjectID: project.ID, ExpectedHead: project.HeadEventID, Archive: true})
 	if err != nil || !closed.Archived {
 		t.Fatalf("archive provisioned project = %#v, %v", closed, err)
 	}
@@ -729,18 +824,18 @@ func TestProjectHandoffQuiescesOldAgentAndStartsFreshScopedThread(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = (&scriptedStarter{}).factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
 	defer supervisor.Close()
-	first, err := supervisor.ActivateCodexProject(context.Background(), domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "alice", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	first, err := supervisor.ActivateHarnessProject(context.Background(), domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "alice", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := supervisor.HandoffCodexProject(context.Background(), domain.ProjectCodexHandoffRequest{ProjectID: project.ID, ExpectedHead: first.Project.HeadEventID, NewAgentName: "bob", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	second, err := supervisor.HandoffHarnessProject(context.Background(), domain.ProjectHarnessHandoffRequest{ProjectID: project.ID, ExpectedHead: first.Project.HeadEventID, NewAgentName: "bob", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Project.Assignment == nil || second.Project.Assignment.AgentName != "bob" || second.Runtime.ThreadID == first.Runtime.ThreadID {
+	if second.Project.Assignment == nil || second.Project.Assignment.AgentName != "bob" || second.Runtime.SessionID == first.Runtime.SessionID {
 		t.Fatalf("handoff = first %#v second %#v", first, second)
 	}
 	threads, err := database.ListProjectThreads(context.Background(), project.ID)
@@ -784,10 +879,10 @@ func TestProjectHandoffBlocksUntilExplicitForceTakeover(t *testing.T) {
 	if _, err := database.AcquireNamedAgent(context.Background(), "alice", "orphan-owner", time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = (&scriptedStarter{}).factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
 	defer supervisor.Close()
-	_, err = supervisor.HandoffCodexProject(context.Background(), domain.ProjectCodexHandoffRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: "bob", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	_, err = supervisor.HandoffHarnessProject(context.Background(), domain.ProjectHarnessHandoffRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, NewAgentName: "bob", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if !errors.Is(err, domain.ErrProjectRuntimeUnknown) {
 		t.Fatalf("normal handoff = %v", err)
 	}
@@ -798,7 +893,7 @@ func TestProjectHandoffBlocksUntilExplicitForceTakeover(t *testing.T) {
 	if blocked.Assignment == nil || blocked.Assignment.State != domain.AssignmentBlocked || blocked.Assignment.AgentName != "alice" {
 		t.Fatalf("blocked project = %#v", blocked)
 	}
-	taken, err := supervisor.HandoffCodexProject(context.Background(), domain.ProjectCodexHandoffRequest{ProjectID: project.ID, ExpectedHead: blocked.HeadEventID, NewAgentName: "bob", Force: true, Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	taken, err := supervisor.HandoffHarnessProject(context.Background(), domain.ProjectHarnessHandoffRequest{ProjectID: project.ID, ExpectedHead: blocked.HeadEventID, NewAgentName: "bob", Force: true, Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -826,14 +921,14 @@ func TestRetiringAssignedAgentQuiescesAndLeavesProjectOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = (&scriptedStarter{}).factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver((&scriptedStarter{}).factory)
 	defer supervisor.Close()
-	activated, err := supervisor.ActivateCodexProject(context.Background(), domain.ProjectCodexActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.CodexLaunchRequest{RequestID: uuid.NewString(), Action: domain.CodexSessionNew, Directory: directory}})
+	activated, err := supervisor.ActivateHarnessProject(context.Background(), domain.ProjectHarnessActivationRequest{ProjectID: project.ID, ExpectedHead: project.HeadEventID, AgentName: "fred", Launch: domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), Action: domain.HarnessSessionNew, Directory: directory}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := supervisor.RetireCodexAgent(context.Background(), domain.CodexRetireAgentRequest{AgentName: "fred"}); err != nil {
+	if err := supervisor.RetireHarnessAgent(context.Background(), domain.HarnessRetireAgentRequest{AgentName: "fred"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := database.GetProject(context.Background(), activated.Project.ID)
@@ -874,7 +969,7 @@ func TestAgentRetirementRetryResumesAfterDurableUnassign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := domain.CodexRetireAgentRequest{RequestID: uuid.NewString(), AgentName: "alice", Force: true}
+	request := domain.HarnessRetireAgentRequest{RequestID: uuid.NewString(), AgentName: "alice", Force: true}
 	if _, err := database.BeginAgentRetirement(context.Background(), domain.AgentRetirementOperation{ID: request.RequestID, AgentName: "alice", ProjectID: project.ID, Force: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -888,9 +983,9 @@ func TestAgentRetirementRetryResumesAfterDurableUnassign(t *testing.T) {
 	if err := database.AdvanceAgentRetirement(context.Background(), request.RequestID, "unassigned", ""); err != nil {
 		t.Fatal(err)
 	}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
 	defer supervisor.Close()
-	if err := supervisor.RetireCodexAgent(context.Background(), request); err != nil {
+	if err := supervisor.RetireHarnessAgent(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
 	agent, err := database.GetNamedAgent(context.Background(), "alice")
@@ -913,34 +1008,34 @@ func TestSupervisorLaunchIsDetachedIdempotentConcurrentAndEnvironmentPrivate(t *
 	lifetime, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	starter := &scriptedStarter{}
-	supervisor := New(lifetime, database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = starter.factory
+	supervisor := New(lifetime, database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver(starter.factory)
 	defer supervisor.Close()
 	directory := t.TempDir()
 	secret := "environment-secret-must-not-persist"
-	request := domain.CodexLaunchRequest{
-		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: directory,
+	request := domain.HarnessLaunchRequest{Harness: "codex",
+		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew, Directory: directory,
 		Environment: []string{"PATH=/caller/bin", "TOKEN=" + secret}, InitialPrompt: "begin",
 	}
-	result, err := supervisor.LaunchCodexAgent(context.Background(), request)
-	if err != nil || result.Phase != domain.CodexRuntimeRunning || result.ThreadID != "thread-1" {
+	result, err := supervisor.LaunchHarnessAgent(context.Background(), request)
+	if err != nil || result.Phase != domain.HarnessRuntimeRunning || result.SessionID != "thread-1" {
 		t.Fatalf("launch = %#v, %v", result, err)
 	}
-	duplicate, err := supervisor.LaunchCodexAgent(context.Background(), request)
-	if err != nil || duplicate.ThreadID != result.ThreadID || starter.starts != 1 {
+	duplicate, err := supervisor.LaunchHarnessAgent(context.Background(), request)
+	if err != nil || duplicate.SessionID != result.SessionID || starter.starts != 1 {
 		t.Fatalf("duplicate = %#v, %v, starts=%d", duplicate, err, starter.starts)
 	}
 	changed := request
 	changed.InitialPrompt = "different"
-	if _, err := supervisor.LaunchCodexAgent(context.Background(), changed); err == nil || strings.Contains(err.Error(), secret) {
+	if _, err := supervisor.LaunchHarnessAgent(context.Background(), changed); err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("request ID conflict = %v", err)
 	}
-	second := domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: "jane", Action: domain.CodexSessionNew, Directory: directory, Environment: []string{"TOKEN=" + secret}}
-	secondResult, err := supervisor.LaunchCodexAgent(context.Background(), second)
-	if err != nil || secondResult.Phase != domain.CodexRuntimeRunning || starter.starts != 2 {
+	second := domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), AgentName: "jane", Action: domain.HarnessSessionNew, Directory: directory, Environment: []string{"TOKEN=" + secret}}
+	secondResult, err := supervisor.LaunchHarnessAgent(context.Background(), second)
+	if err != nil || secondResult.Phase != domain.HarnessRuntimeRunning || starter.starts != 2 {
 		t.Fatalf("second agent = %#v, %v, starts=%d", secondResult, err, starter.starts)
 	}
-	if running, _ := supervisor.CodexAgentRuntime(context.Background(), "fred"); running.Phase != domain.CodexRuntimeRunning {
+	if running, _ := supervisor.HarnessAgentRuntime(context.Background(), "fred"); running.Phase != domain.HarnessRuntimeRunning {
 		t.Fatalf("first agent stopped when second launched: %#v", running)
 	}
 	if len(starter.environments) != 2 || strings.Join(starter.environments[0], "|") != "PATH=/caller/bin|TOKEN="+secret {
@@ -973,32 +1068,33 @@ func TestMessageWakesOfflineAgentWithLastKnownGoodLaunch(t *testing.T) {
 	}
 	defer database.Close()
 	starter := &scriptedStarter{}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = starter.factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver(starter.factory)
+	supervisor.DecodeOptions = decodeCodexTestOptions
 	defaultLoads := 0
-	supervisor.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) {
+	supervisor.LoadLaunchDefaults = func() (domain.HarnessLaunchDefaults, error) {
 		defaultLoads++
-		return domain.CodexLaunchDefaults{}, nil
+		return domain.HarnessLaunchDefaults{}, nil
 	}
 	defer supervisor.Close()
 	directory := t.TempDir()
 	originalEnvironment := []string{"PATH=/original/bin", "TOKEN=original-secret"}
-	launched, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{
-		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew,
+	launched, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex",
+		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew,
 		Directory: directory, Repository: model.RepositoryContext{Directory: directory, Branch: "main"},
-		Environment: originalEnvironment, InitialPrompt: "begin once", Yolo: true,
+		Environment: originalEnvironment, InitialPrompt: "begin once", ProviderOptions: codexOptions(true),
 	})
-	if err != nil || launched.Phase != domain.CodexRuntimeRunning {
+	if err != nil || launched.Phase != domain.HarnessRuntimeRunning {
 		t.Fatalf("initial launch = %#v, %v", launched, err)
 	}
 	supervisor.mu.Lock()
 	lastGood := cloneLaunchRequest(supervisor.lastGood["fred"])
 	supervisor.mu.Unlock()
 	defer clearLaunchEnvironment(&lastGood)
-	if lastGood.SessionID != launched.ThreadID || lastGood.InitialPrompt != "" || !lastGood.Yolo || strings.Join(lastGood.Environment, "|") != strings.Join(originalEnvironment, "|") {
+	if lastGood.SessionID != launched.SessionID || lastGood.InitialPrompt != "" || !codexYolo(lastGood.ProviderOptions) || strings.Join(lastGood.Environment, "|") != strings.Join(originalEnvironment, "|") {
 		t.Fatalf("last known good launch = %#v", lastGood)
 	}
-	if _, err := supervisor.StopCodexAgent(context.Background(), "fred"); err != nil {
+	if _, err := supervisor.StopHarnessAgent(context.Background(), "fred"); err != nil {
 		t.Fatal(err)
 	}
 	agent, err := database.GetNamedAgent(context.Background(), "fred")
@@ -1006,10 +1102,10 @@ func TestMessageWakesOfflineAgentWithLastKnownGoodLaunch(t *testing.T) {
 		t.Fatalf("offline agent = %#v, %v", agent, err)
 	}
 	message := model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID, Body: "wake up"}
-	supervisor.WakeCodexAgent(message, []string{"PATH=/new/sender", "TOKEN=new-secret"})
-	supervisor.WakeCodexAgent(message, []string{"PATH=/duplicate"})
+	supervisor.WakeHarnessAgent(message, []string{"PATH=/new/sender", "TOKEN=new-secret"})
+	supervisor.WakeHarnessAgent(message, []string{"PATH=/duplicate"})
 	woken := waitForRunningRuntime(t, supervisor, "fred")
-	if woken.ThreadID != launched.ThreadID || woken.Directory != directory {
+	if woken.SessionID != launched.SessionID || woken.Directory != directory {
 		t.Fatalf("woken runtime = %#v", woken)
 	}
 	starter.mu.Lock()
@@ -1037,13 +1133,14 @@ func TestMessageWakeAfterDaemonRestartUsesPersistedThreadAndSenderEnvironment(t 
 	defer database.Close()
 	directory := t.TempDir()
 	firstStarter := &scriptedStarter{}
-	first := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	first.Starter = firstStarter.factory
-	launched, err := first.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{
-		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew,
-		Directory: directory, Repository: model.RepositoryContext{Directory: directory}, Environment: []string{"TOKEN=old-daemon-secret"}, Yolo: true,
+	first := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	first.ResolveFactory = codexFactoryResolver(firstStarter.factory)
+	first.DecodeOptions = decodeCodexTestOptions
+	launched, err := first.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex",
+		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew,
+		Directory: directory, Repository: model.RepositoryContext{Directory: directory}, Environment: []string{"TOKEN=old-daemon-secret"}, ProviderOptions: codexOptions(true),
 	})
-	if err != nil || launched.Phase != domain.CodexRuntimeRunning {
+	if err != nil || launched.Phase != domain.HarnessRuntimeRunning {
 		t.Fatalf("initial launch = %#v, %v", launched, err)
 	}
 	if err := first.Close(); err != nil {
@@ -1051,22 +1148,23 @@ func TestMessageWakeAfterDaemonRestartUsesPersistedThreadAndSenderEnvironment(t 
 	}
 
 	secondStarter := &scriptedStarter{}
-	second := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	second.Starter = secondStarter.factory
+	second := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	second.ResolveFactory = codexFactoryResolver(secondStarter.factory)
+	second.DecodeOptions = decodeCodexTestOptions
 	defaultLoads := 0
-	second.LoadLaunchDefaults = func() (domain.CodexLaunchDefaults, error) {
+	second.LoadLaunchDefaults = func() (domain.HarnessLaunchDefaults, error) {
 		defaultLoads++
-		return domain.CodexLaunchDefaults{Yolo: true}, nil
+		return domain.HarnessLaunchDefaults{Harness: "codex", ProviderOptions: codexOptions(true)}, nil
 	}
 	defer second.Close()
 	agent, err := database.GetNamedAgent(context.Background(), "fred")
-	if err != nil || agent.Active || agent.CurrentSessionID != launched.ThreadID {
+	if err != nil || agent.Active || agent.CurrentSessionID != launched.SessionID {
 		t.Fatalf("persisted agent = %#v, %v", agent, err)
 	}
 	senderEnvironment := []string{"PATH=/sender/bin", "TOKEN=sender-secret"}
-	second.WakeCodexAgent(model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID}, senderEnvironment)
+	second.WakeHarnessAgent(model.Message{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID}, senderEnvironment)
 	woken := waitForRunningRuntime(t, second, "fred")
-	if woken.ThreadID != launched.ThreadID || woken.Directory != directory {
+	if woken.SessionID != launched.SessionID || woken.Directory != directory {
 		t.Fatalf("woken runtime = %#v", woken)
 	}
 	secondStarter.mu.Lock()
@@ -1079,20 +1177,20 @@ func TestMessageWakeAfterDaemonRestartUsesPersistedThreadAndSenderEnvironment(t 
 	lastGood := cloneLaunchRequest(second.lastGood["fred"])
 	second.mu.Unlock()
 	defer clearLaunchEnvironment(&lastGood)
-	if defaultLoads != 1 || !lastGood.Yolo {
+	if defaultLoads != 1 || !codexYolo(lastGood.ProviderOptions) {
 		t.Fatalf("restart launch defaults: loads=%d request=%#v", defaultLoads, lastGood)
 	}
 }
 
-func waitForRunningRuntime(t *testing.T, supervisor *Supervisor, name string) domain.CodexRuntime {
+func waitForRunningRuntime(t *testing.T, supervisor *Supervisor, name string) domain.HarnessRuntime {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		runtime, err := supervisor.CodexAgentRuntime(context.Background(), name)
+		runtime, err := supervisor.HarnessAgentRuntime(context.Background(), name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if runtime.Phase == domain.CodexRuntimeRunning {
+		if runtime.Phase == domain.HarnessRuntimeRunning {
 			return runtime
 		}
 		if time.Now().After(deadline) {
@@ -1115,15 +1213,15 @@ func TestSupervisorFailureDoesNotSelectAndDoesNotEchoEnvironment(t *testing.T) {
 	defer database.Close()
 	secret := "do-not-echo-this"
 	starter := &scriptedStarter{fail: errors.New("failed with " + secret)}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = starter.factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver(starter.factory)
 	var diagnostics lockedBuffer
 	supervisor.Logger = slog.New(slog.NewTextHandler(&diagnostics, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	defer supervisor.Close()
-	result, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{
-		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: t.TempDir(), Environment: []string{"TOKEN=" + secret},
+	result, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex",
+		RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew, Directory: t.TempDir(), Environment: []string{"TOKEN=" + secret},
 	})
-	if err != nil || result.Phase != domain.CodexRuntimeFailed || strings.Contains(result.Error, secret) {
+	if !errors.Is(err, harness.ErrProviderUnavailable) || result.Phase != domain.HarnessRuntimeFailed || strings.Contains(result.Error, secret) || strings.Contains(err.Error(), secret) {
 		t.Fatalf("failed launch = %#v, %v", result, err)
 	}
 	agent, getErr := database.GetNamedAgent(context.Background(), "fred")
@@ -1131,11 +1229,11 @@ func TestSupervisorFailureDoesNotSelectAndDoesNotEchoEnvironment(t *testing.T) {
 		t.Fatalf("failed launch selected a session: %#v, %v", agent, getErr)
 	}
 	deadline := time.Now().Add(time.Second)
-	for !strings.Contains(diagnostics.String(), `msg="Codex worker exited"`) && time.Now().Before(deadline) {
+	for !strings.Contains(diagnostics.String(), `msg="harness worker exited"`) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	log := diagnostics.String()
-	for _, expected := range []string{`msg="Codex agent launch requested"`, `msg="Codex worker registered"`, `msg="Codex worker exited"`} {
+	for _, expected := range []string{`msg="harness agent launch requested"`, `msg="harness worker registered"`, `msg="harness worker exited"`} {
 		if !strings.Contains(log, expected) {
 			t.Fatalf("supervisor log omitted %q: %s", expected, log)
 		}
@@ -1156,10 +1254,10 @@ func TestSupervisorShutdownStopsWorkersAndKeepsSelection(t *testing.T) {
 	defer database.Close()
 	starter := &scriptedStarter{}
 	lifetime, cancel := context.WithCancel(context.Background())
-	supervisor := New(lifetime, database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = starter.factory
+	supervisor := New(lifetime, database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver(starter.factory)
 	directory := t.TempDir()
-	result, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: directory})
+	result, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew, Directory: directory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1175,7 +1273,7 @@ func TestSupervisorShutdownStopsWorkersAndKeepsSelection(t *testing.T) {
 		t.Fatal("supervisor shutdown did not stop workers")
 	}
 	agent, err := database.GetNamedAgent(context.Background(), "fred")
-	if err != nil || agent.CurrentSessionID != result.ThreadID || agent.Active {
+	if err != nil || agent.CurrentSessionID != result.SessionID || agent.Active {
 		t.Fatalf("offline selection = %#v, %v", agent, err)
 	}
 }
@@ -1190,29 +1288,29 @@ func TestSupervisorFailedLiveReplacementKeepsPriorSelection(t *testing.T) {
 	}
 	defer database.Close()
 	starter := &scriptedStarter{}
-	supervisor := New(context.Background(), database, codexbridge.NewMemoryLedger())
-	supervisor.Starter = starter.factory
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver(starter.factory)
 	defer supervisor.Close()
 	directory := t.TempDir()
-	first, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: directory})
-	if err != nil || first.ThreadID == "" {
+	first, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew, Directory: directory})
+	if err != nil || first.SessionID == "" {
 		t.Fatalf("first launch = %#v, %v", first, err)
 	}
-	if _, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: directory}); err == nil || !strings.Contains(err.Error(), "confirm") {
+	if _, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew, Directory: directory}); err == nil || !strings.Contains(err.Error(), "confirm") {
 		t.Fatalf("unconfirmed replacement = %v", err)
 	}
-	if running, _ := supervisor.CodexAgentRuntime(context.Background(), "fred"); running.Phase != domain.CodexRuntimeRunning || running.ThreadID != first.ThreadID {
+	if running, _ := supervisor.HarnessAgentRuntime(context.Background(), "fred"); running.Phase != domain.HarnessRuntimeRunning || running.SessionID != first.SessionID {
 		t.Fatalf("unconfirmed replacement disturbed worker: %#v", running)
 	}
 	starter.mu.Lock()
 	starter.fail = errors.New("replacement unavailable")
 	starter.mu.Unlock()
-	replacement, err := supervisor.LaunchCodexAgent(context.Background(), domain.CodexLaunchRequest{RequestID: uuid.NewString(), AgentName: "fred", Action: domain.CodexSessionNew, Directory: directory, ConfirmSwitch: true})
-	if err != nil || replacement.Phase != domain.CodexRuntimeFailed {
+	replacement, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{Harness: "codex", RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew, Directory: directory, ConfirmSwitch: true})
+	if !errors.Is(err, harness.ErrProviderUnavailable) || replacement.Phase != domain.HarnessRuntimeFailed {
 		t.Fatalf("replacement = %#v, %v", replacement, err)
 	}
 	agent, err := database.GetNamedAgent(context.Background(), "fred")
-	if err != nil || agent.CurrentSessionID != first.ThreadID || agent.Active {
+	if err != nil || agent.CurrentSessionID != first.SessionID || agent.Active {
 		t.Fatalf("selection after failed replacement = %#v, %v", agent, err)
 	}
 }

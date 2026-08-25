@@ -115,15 +115,16 @@ agent lease persists across node restarts, expires naturally after crashes, and 
 as a relay heartbeat. A suspended process may revive its expired lease only while its exact owner
 token remains stored; any intervening acquisition replaces the token and defeats the stale renewal.
 Claims use a 30-second lease because
-stdout or a Codex app-server call cannot share the SQLite transaction. The Codex sidecar ledger and
-deterministic app-server IDs reconcile the remaining crash window.
+stdout or a harness submission cannot share the SQLite transaction. The delivery ledger and stable
+submission IDs reconcile the remaining crash window.
 
-## Codex control plane and data plane
+## Harness control plane and data plane
 
-`hq codex` and the TUI capture their process environment and launch directory, ensure the node is
-running, and issue the same local runtime RPC. The node-owned supervisor validates directories,
-hosts one worker per durable agent, starts only `codex app-server --stdio`, waits for an exact
-`thread/start` or `thread/resume` acknowledgement, then commits the selected session. Stable request
+`hq harness --provider ID` and the TUI capture their process environment and launch directory, ensure
+the node is running, and issue the same local runtime RPC. The node-owned supervisor validates
+directories, hosts one logical instance per durable agent, and invokes the selected registered
+factory. The Codex adapter starts `codex app-server --stdio` and translates exact `thread/start` or
+`thread/resume` acknowledgements into neutral session readiness before selection. Stable request
 IDs make a lost local response safe to retry, while the named-agent lease rejects any independent
 legacy owner. One shared thread-keyed ledger supports concurrent agents without sidecar races.
 

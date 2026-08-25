@@ -1,6 +1,6 @@
 # Harness runtime contract
 
-This document characterizes HQ's current Codex app-server integration before it is moved behind a harness-neutral port. It is a compatibility contract for that refactor, not a proposal to expose Codex vocabulary or JSON-RPC types to generic packages.
+This document characterizes the Codex app-server behavior preserved behind HQ's harness-neutral port. It is an adapter compatibility contract, not a proposal to expose Codex vocabulary or JSON-RPC types to generic packages.
 
 The executable vendor baseline is Codex CLI `0.149.0`. The checked-in schema bundles in `internal/codexbridge/testdata/schema/v0.149.0` were produced by the installed binary with:
 
@@ -12,7 +12,7 @@ The JSON-RPC fixtures under `internal/codexbridge/testdata/v0.149.0` are version
 
 ## Ownership and factory inputs
 
-Today `internal/codexsupervisor` is the factory-equivalent owner and `codexbridge.Options` is the launch boundary. The neutral factory must be able to receive the same information without depending on Codex types:
+`internal/harnesssupervisor` owns logical workers and resolves a registered `harness.Factory`; `internal/codexbridge.HarnessFactory` is one adapter implementation. The neutral launch boundary receives the following information without depending on Codex types:
 
 - durable named-agent identity and optional project binding;
 - requested new or resumed session identity;

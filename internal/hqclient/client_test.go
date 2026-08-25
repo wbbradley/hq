@@ -53,8 +53,8 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 			return []domain.AgentSession{}, nil
 		case domainrpc.RenameAgentSessionMethod:
 			return domain.AgentSession{}, nil
-		case domainrpc.LaunchCodexAgentMethod, domainrpc.StopCodexAgentMethod, domainrpc.CodexRuntimeMethod:
-			return domain.CodexRuntime{}, nil
+		case domainrpc.LaunchHarnessAgentMethod, domainrpc.StopHarnessAgentMethod, domainrpc.HarnessRuntimeMethod:
+			return domain.HarnessRuntime{}, nil
 		case domainrpc.GetMethod, domainrpc.ClaimMethod:
 			return model.Message{}, nil
 		case domainrpc.ListMethod:
@@ -112,9 +112,9 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_, _ = client.AcquireNamedAgent(ctx, "fred", "owner", time.Minute)
 	_, _ = client.RenewNamedAgent(ctx, "fred", "owner", time.Minute)
 	_ = client.ReleaseNamedAgent(ctx, "fred", "owner")
-	_, _ = client.LaunchCodexAgent(ctx, domain.CodexLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"})
-	_, _ = client.StopCodexAgent(ctx, "fred")
-	_, _ = client.CodexAgentRuntime(ctx, "fred")
+	_, _ = client.LaunchHarnessAgent(ctx, domain.HarnessLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"})
+	_, _ = client.StopHarnessAgent(ctx, "fred")
+	_, _ = client.HarnessAgentRuntime(ctx, "fred")
 	_ = client.Create(ctx, model.Message{})
 	_ = client.Reply(ctx, "original", model.Message{})
 	_, _ = client.Get(ctx, "message")
@@ -148,7 +148,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		domainrpc.HumanMailboxMethod, domainrpc.ResolveMailboxMethod, domainrpc.FindMailboxesMethod,
 		domainrpc.CreateNamedAgentMethod, domainrpc.GetNamedAgentMethod, domainrpc.ListNamedAgentsMethod, domainrpc.ListAgentSessionsMethod, domainrpc.RenameAgentSessionMethod,
 		domainrpc.RetireNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod, domainrpc.ReleaseAgentMethod,
-		domainrpc.LaunchCodexAgentMethod, domainrpc.StopCodexAgentMethod, domainrpc.CodexRuntimeMethod,
+		domainrpc.LaunchHarnessAgentMethod, domainrpc.StopHarnessAgentMethod, domainrpc.HarnessRuntimeMethod,
 		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod, domainrpc.ListConversationsMethod, domainrpc.ConversationHistoryMethod,
 		domainrpc.ArchiveMethod, domainrpc.RestoreMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
 		domainrpc.TrustPeerMethod, domainrpc.DistrustPeerMethod, domainrpc.ListPeersMethod,

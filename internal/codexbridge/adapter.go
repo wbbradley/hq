@@ -18,8 +18,8 @@ const CodexProviderID harness.ProviderID = "codex"
 const adapterStreamCapacity = 128
 
 type CodexOptions struct {
-	Yolo                  bool
-	DeveloperInstructions string
+	Yolo                  bool   `json:"yolo,omitempty"`
+	DeveloperInstructions string `json:"developer_instructions,omitempty"`
 }
 
 func (CodexOptions) Provider() harness.ProviderID { return CodexProviderID }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/harness"
 	"github.com/wbbradley/hq/internal/identity"
 	"github.com/wbbradley/hq/internal/localwire"
 	"github.com/wbbradley/hq/internal/model"
@@ -32,35 +33,35 @@ type recordingRuntime struct {
 	wakeEnvironments [][]string
 }
 
-func (r *recordingRuntime) LaunchCodexAgent(_ context.Context, request domain.CodexLaunchRequest) (domain.CodexRuntime, error) {
-	r.called = LaunchCodexAgentMethod
-	return domain.CodexRuntime{AgentName: request.AgentName, Phase: domain.CodexRuntimeRunning}, nil
+func (r *recordingRuntime) LaunchHarnessAgent(_ context.Context, request domain.HarnessLaunchRequest) (domain.HarnessRuntime, error) {
+	r.called = LaunchHarnessAgentMethod
+	return domain.HarnessRuntime{AgentName: request.AgentName, Phase: domain.HarnessRuntimeRunning}, nil
 }
-func (r *recordingRuntime) StopCodexAgent(_ context.Context, name string) (domain.CodexRuntime, error) {
-	r.called = StopCodexAgentMethod
-	return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
+func (r *recordingRuntime) StopHarnessAgent(_ context.Context, name string) (domain.HarnessRuntime, error) {
+	r.called = StopHarnessAgentMethod
+	return domain.HarnessRuntime{AgentName: name, Phase: domain.HarnessRuntimeOffline}, nil
 }
-func (r *recordingRuntime) CodexAgentRuntime(_ context.Context, name string) (domain.CodexRuntime, error) {
-	r.called = CodexRuntimeMethod
-	return domain.CodexRuntime{AgentName: name, Phase: domain.CodexRuntimeOffline}, nil
+func (r *recordingRuntime) HarnessAgentRuntime(_ context.Context, name string) (domain.HarnessRuntime, error) {
+	r.called = HarnessRuntimeMethod
+	return domain.HarnessRuntime{AgentName: name, Phase: domain.HarnessRuntimeOffline}, nil
 }
-func (r *recordingRuntime) ActivateCodexProject(_ context.Context, request domain.ProjectCodexActivationRequest) (domain.ProjectCodexActivation, error) {
-	r.called = ActivateCodexProjectMethod
-	return domain.ProjectCodexActivation{Runtime: domain.CodexRuntime{AgentName: request.AgentName, Phase: domain.CodexRuntimeRunning}}, nil
+func (r *recordingRuntime) ActivateHarnessProject(_ context.Context, request domain.ProjectHarnessActivationRequest) (domain.ProjectHarnessActivation, error) {
+	r.called = ActivateHarnessProjectMethod
+	return domain.ProjectHarnessActivation{Runtime: domain.HarnessRuntime{AgentName: request.AgentName, Phase: domain.HarnessRuntimeRunning}}, nil
 }
-func (r *recordingRuntime) CloseCodexProject(_ context.Context, request domain.ProjectCodexCloseRequest) (domain.Project, error) {
-	r.called = CloseCodexProjectMethod
+func (r *recordingRuntime) CloseHarnessProject(_ context.Context, request domain.ProjectHarnessCloseRequest) (domain.Project, error) {
+	r.called = CloseHarnessProjectMethod
 	return domain.Project{ID: request.ProjectID}, nil
 }
-func (r *recordingRuntime) HandoffCodexProject(_ context.Context, request domain.ProjectCodexHandoffRequest) (domain.ProjectCodexActivation, error) {
-	r.called = HandoffCodexProjectMethod
-	return domain.ProjectCodexActivation{}, nil
+func (r *recordingRuntime) HandoffHarnessProject(_ context.Context, request domain.ProjectHarnessHandoffRequest) (domain.ProjectHarnessActivation, error) {
+	r.called = HandoffHarnessProjectMethod
+	return domain.ProjectHarnessActivation{}, nil
 }
-func (r *recordingRuntime) RetireCodexAgent(context.Context, domain.CodexRetireAgentRequest) error {
-	r.called = RetireCodexAgentMethod
+func (r *recordingRuntime) RetireHarnessAgent(context.Context, domain.HarnessRetireAgentRequest) error {
+	r.called = RetireHarnessAgentMethod
 	return nil
 }
-func (r *recordingRuntime) WakeCodexAgent(message model.Message, environment []string) {
+func (r *recordingRuntime) WakeHarnessAgent(message model.Message, environment []string) {
 	r.wakeMessages = append(r.wakeMessages, message)
 	r.wakeEnvironments = append(r.wakeEnvironments, append([]string(nil), environment...))
 }
@@ -455,7 +456,7 @@ func TestServicePassesConversationPageRequests(t *testing.T) {
 	}
 }
 
-func TestServiceDispatchesLocalCodexRuntimeWithoutMutationReceipts(t *testing.T) {
+func TestServiceDispatchesLocalHarnessRuntimeWithoutMutationReceipts(t *testing.T) {
 	operations := &recordingOperations{}
 	runtime := &recordingRuntime{}
 	service := Service{Store: operations, Runtime: runtime}
@@ -464,13 +465,13 @@ func TestServiceDispatchesLocalCodexRuntimeWithoutMutationReceipts(t *testing.T)
 		value           any
 		allowsNilResult bool
 	}{
-		{LaunchCodexAgentMethod, domain.CodexLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"}, false},
-		{ActivateCodexProjectMethod, domain.ProjectCodexActivationRequest{}, false},
-		{CloseCodexProjectMethod, domain.ProjectCodexCloseRequest{}, false},
-		{HandoffCodexProjectMethod, domain.ProjectCodexHandoffRequest{}, false},
-		{RetireCodexAgentMethod, domain.CodexRetireAgentRequest{}, true},
-		{StopCodexAgentMethod, CodexAgentRequest{Name: "fred"}, false},
-		{CodexRuntimeMethod, CodexAgentRequest{Name: "fred"}, false},
+		{LaunchHarnessAgentMethod, domain.HarnessLaunchRequest{RequestID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d60", AgentName: "fred"}, false},
+		{ActivateHarnessProjectMethod, domain.ProjectHarnessActivationRequest{}, false},
+		{CloseHarnessProjectMethod, domain.ProjectHarnessCloseRequest{}, false},
+		{HandoffHarnessProjectMethod, domain.ProjectHarnessHandoffRequest{}, false},
+		{RetireHarnessAgentMethod, domain.HarnessRetireAgentRequest{}, true},
+		{StopHarnessAgentMethod, HarnessAgentRequest{Name: "fred"}, false},
+		{HarnessRuntimeMethod, HarnessAgentRequest{Name: "fred"}, false},
 	} {
 		raw, _ := json.Marshal(test.value)
 		result, rpcErr := service.Handle(context.Background(), nil, test.method, raw)
@@ -519,7 +520,7 @@ func TestMutationMetadataIsRequiredCanonicalAndReplayed(t *testing.T) {
 }
 
 func TestDomainSentinelErrorsRoundTrip(t *testing.T) {
-	for _, sentinel := range []error{domain.ErrNotFound, domain.ErrAlreadyHandled, domain.ErrNotReady, domain.ErrClaimed} {
+	for _, sentinel := range []error{domain.ErrNotFound, domain.ErrAlreadyHandled, domain.ErrNotReady, domain.ErrClaimed, harness.ErrUnknownProvider, harness.ErrProviderUnavailable, harness.ErrCapabilityUnavailable} {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			wireError := EncodeError(sentinel)
 			decoded := DecodeError(wireError)

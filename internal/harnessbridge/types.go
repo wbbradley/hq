@@ -92,6 +92,7 @@ type Terminology struct {
 
 type Options struct {
 	Directory          string
+	Environment        []string
 	AgentName          string
 	ProjectID          string
 	NewSession         bool
