@@ -22,7 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 30
+const schemaVersion = 31
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -532,8 +532,11 @@ CREATE INDEX messages_harness_conversation ON messages(harness_provider, harness
 CREATE INDEX messages_harness_operation ON messages(harness_provider, harness_session_id, harness_operation_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
 CREATE TABLE harness_activities (
+	 event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64),
+	 source_installation_id TEXT NOT NULL,
     mailbox_id TEXT NOT NULL,
-    harness TEXT NOT NULL,
+	 audience_account_id TEXT NOT NULL DEFAULT '',
+	 harness TEXT NOT NULL,
     session_id TEXT NOT NULL,
     operation_id TEXT NOT NULL,
     kind TEXT NOT NULL CHECK(kind IN ('operation-status','plan','diff','command','file-change','tool-call','progress')),
@@ -543,11 +546,15 @@ CREATE TABLE harness_activities (
     body TEXT NOT NULL DEFAULT '',
     truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
     occurred_at INTEGER NOT NULL,
-    PRIMARY KEY(harness,session_id,operation_id,kind,item_id)
+	 runtime_id TEXT NOT NULL,
+	 source_sequence TEXT NOT NULL,
+	 display_order INTEGER NOT NULL CHECK(display_order >= 0),
+	 UNIQUE(source_installation_id,mailbox_id,harness,session_id,operation_id,kind,item_id),
+	 FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
 ) STRICT;
-CREATE INDEX harness_activities_mailbox_time ON harness_activities(mailbox_id,occurred_at,harness,session_id,operation_id,kind,item_id);
-CREATE INDEX harness_activities_progress_retention ON harness_activities(harness,session_id,kind,occurred_at,item_id) WHERE kind='progress';
-PRAGMA user_version = 30;
+CREATE INDEX harness_activities_mailbox_time ON harness_activities(source_installation_id,mailbox_id,display_order,event_id);
+CREATE INDEX harness_activities_progress_retention ON harness_activities(source_installation_id,mailbox_id,harness,session_id,display_order,event_id) WHERE kind='progress';
+PRAGMA user_version = 31;
 `
 
 const (
@@ -576,7 +583,7 @@ type canonicalIngest struct {
 
 var canonicalChangeTopics = []domain.ChangeTopic{
 	domain.TopicMessages, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman,
-	domain.TopicAgents,
+	domain.TopicAgents, domain.TopicActivities,
 }
 
 func (s *SQLite) SetChangeObserver(observer func(domain.Invalidation)) {
@@ -952,6 +959,38 @@ PRAGMA user_version = 30;`
 			return fmt.Errorf("migrate schema to version 30: %w", err)
 		}
 		version = 30
+	}
+	if version == 30 {
+		migration := `DROP TABLE IF EXISTS harness_activities;
+CREATE TABLE harness_activities (
+    event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64),
+    source_installation_id TEXT NOT NULL,
+    mailbox_id TEXT NOT NULL,
+    audience_account_id TEXT NOT NULL DEFAULT '',
+    harness TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('operation-status','plan','diff','command','file-change','tool-call','progress')),
+    item_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '' CHECK(status IN ('','running','completed','failed','interrupted')),
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
+    occurred_at INTEGER NOT NULL,
+    runtime_id TEXT NOT NULL,
+    source_sequence TEXT NOT NULL,
+    display_order INTEGER NOT NULL CHECK(display_order >= 0),
+    UNIQUE(source_installation_id,mailbox_id,harness,session_id,operation_id,kind,item_id),
+    FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX harness_activities_mailbox_time ON harness_activities(source_installation_id,mailbox_id,display_order,event_id);
+CREATE INDEX harness_activities_progress_retention ON harness_activities(source_installation_id,mailbox_id,harness,session_id,display_order,event_id) WHERE kind='progress';
+UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
+PRAGMA user_version = 31;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 31: %w", err)
+		}
+		version = 31
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -1385,7 +1424,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 			return err
 		}
 	}
-	for _, table := range []string{"causal_edges", "threads", "messages", "mailbox_contexts", "harness_bindings", "agent_sessions", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_shares", "human_account_default", "human_account_devices", "human_accounts"} {
+	for _, table := range []string{"causal_edges", "threads", "messages", "harness_activities", "mailbox_contexts", "harness_bindings", "agent_sessions", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_shares", "human_account_default", "human_account_devices", "human_accounts"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 			return fmt.Errorf("clear %s projection: %w", table, err)
 		}
@@ -1484,6 +1523,28 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO delivery_facts(message_id) VALUES (?)`, id); err != nil {
 			return err
 		}
+	}
+	for _, key := range state.HarnessActivityOrder {
+		activity := state.HarnessActivities[key]
+		correlation := activity.Correlation
+		if _, err := tx.ExecContext(ctx, `INSERT INTO harness_activities(event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence,display_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			activity.EventID, activity.Sender.InstallationID, activity.Sender.MailboxID, activity.AudienceAccountID,
+			correlation.Provider, correlation.SessionID, correlation.OperationID, activity.Kind, correlation.ItemID,
+			activity.Status, activity.Title, activity.Body, boolInt(activity.Truncated), activity.OccurredAt.UnixMilli(),
+			activity.RuntimeID, fmt.Sprintf("%d", activity.Sequence), activity.DisplayOrder); err != nil {
+			return fmt.Errorf("project harness activity: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM harness_activities WHERE event_id IN (
+SELECT event_id FROM (
+  SELECT event_id,row_number() OVER (
+    PARTITION BY source_installation_id,mailbox_id,harness,session_id
+    ORDER BY display_order DESC,event_id DESC
+  ) AS retention_rank
+  FROM harness_activities WHERE kind='progress'
+) WHERE retention_rank > ?
+)`, domain.HarnessActivityProgressRetained); err != nil {
+		return fmt.Errorf("prune projected harness activity progress: %w", err)
 	}
 	for id, thread := range state.Threads {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO threads(event_id, answered, cancelled) VALUES (?, ?, ?)`, id, boolInt(thread.Answered), boolInt(thread.Cancelled)); err != nil {

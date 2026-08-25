@@ -133,7 +133,6 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	conversationResult, _ := client.ListConversations(ctx, wantConversationFilter)
 	wantHistoryFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", HarnessProvider: "codex", HarnessSessionID: "thread"}, Cursor: "history-cursor", Limit: 23}
 	historyResult, _ := client.ListConversationHistory(ctx, wantHistoryFilter)
-	_ = client.UpsertHarnessActivity(ctx, domain.HarnessActivity{ItemID: "activity-input"})
 	wantActivityFilter := domain.HarnessActivityFilter{MailboxID: "agent", Harness: "fake", SessionID: "session", Limit: 31}
 	activityResult, _ := client.ListHarnessActivities(ctx, wantActivityFilter)
 	_ = client.Archive(ctx, "message")
@@ -162,7 +161,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		domainrpc.RetireNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod, domainrpc.ReleaseAgentMethod,
 		domainrpc.LaunchHarnessAgentMethod, domainrpc.StopHarnessAgentMethod, domainrpc.HarnessRuntimeMethod,
 		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod, domainrpc.ListConversationsMethod, domainrpc.ConversationHistoryMethod,
-		domainrpc.UpsertHarnessActivityMethod, domainrpc.ListHarnessActivitiesMethod,
+		domainrpc.ListHarnessActivitiesMethod,
 		domainrpc.ArchiveMethod, domainrpc.RestoreMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
 		domainrpc.TrustPeerMethod, domainrpc.DistrustPeerMethod, domainrpc.ListPeersMethod,
 		domainrpc.HumanAccountMethod, domainrpc.HumanDevicesMethod, domainrpc.CreateHumanInviteMethod,

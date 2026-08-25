@@ -1145,7 +1145,12 @@ func (s *State) orderConversationEvents() []string {
 			if left.Nostr.CreatedAt != right.Nostr.CreatedAt {
 				return left.Nostr.CreatedAt < right.Nostr.CreatedAt
 			}
-			return ready[i] < ready[j]
+			leftTime, leftTie := conversationEventTie(left)
+			rightTime, rightTie := conversationEventTie(right)
+			if leftTime != rightTime {
+				return leftTime < rightTime
+			}
+			return leftTie < rightTie
 		})
 		id := ready[0]
 		ready = ready[1:]
@@ -1158,6 +1163,20 @@ func (s *State) orderConversationEvents() []string {
 		}
 	}
 	return ordered
+}
+
+func conversationEventTie(item SignedEvent) (int64, string) {
+	millis := item.Nostr.CreatedAt * 1000
+	if item.Content.Type != TypeHarnessActivity || item.Content.Sender == nil {
+		return millis, "message\x00" + item.ID()
+	}
+	var payload HarnessActivityPayload
+	if err := decodePayload(item.Content.Payload, &payload); err != nil {
+		return millis, "activity-invalid\x00" + item.ID()
+	}
+	return payload.OccurredAt, fmt.Sprintf("activity\x00%s\x00%s\x00%s\x00%s\x00%020d\x00%s",
+		item.Content.Sender.InstallationID, item.Content.Sender.MailboxID, payload.Correlation.Provider,
+		payload.RuntimeID, payload.Sequence, item.ID())
 }
 
 func harnessActivityProjectionKey(activity HarnessActivityProjection) string {

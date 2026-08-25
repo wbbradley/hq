@@ -30,8 +30,8 @@ const (
 
 const (
 	HarnessActivityTitleBytes       = 1 << 10
-	HarnessActivityBodyBytes        = 64 << 10
-	HarnessActivityCommandBodyBytes = 16 << 10
+	HarnessActivityBodyBytes        = 12 << 10
+	HarnessActivityCommandBodyBytes = 12 << 10
 	HarnessActivityProgressBytes    = 4 << 10
 	HarnessActivityProgressRetained = 200
 )
@@ -40,30 +40,32 @@ const (
 // carry EventID and source identity; legacy local rows leave those fields empty.
 // An activity is never a message and cannot be replied to or archived.
 type HarnessActivity struct {
-	EventID        string                   `json:"event_id,omitempty"`
-	InstallationID string                   `json:"installation_id,omitempty"`
-	MailboxID      string                   `json:"mailbox_id"`
-	Harness        string                   `json:"harness"`
-	SessionID      string                   `json:"session_id"`
-	OperationID    string                   `json:"operation_id"`
-	Correlation    model.MessageCorrelation `json:"correlation,omitzero"`
-	RuntimeID      string                   `json:"runtime_id,omitempty"`
-	Sequence       uint64                   `json:"sequence,omitempty"`
-	DisplayOrder   int                      `json:"display_order,omitempty"`
-	Kind           HarnessActivityKind      `json:"kind"`
-	ItemID         string                   `json:"item_id,omitempty"`
-	Status         HarnessActivityStatus    `json:"status,omitempty"`
-	Title          string                   `json:"title,omitempty"`
-	Body           string                   `json:"body,omitempty"`
-	Truncated      bool                     `json:"truncated,omitempty"`
-	OccurredAt     time.Time                `json:"occurred_at"`
+	EventID           string                   `json:"event_id,omitempty"`
+	InstallationID    string                   `json:"installation_id,omitempty"`
+	MailboxID         string                   `json:"mailbox_id"`
+	AudienceAccountID string                   `json:"audience_account_id,omitempty"`
+	Harness           string                   `json:"harness"`
+	SessionID         string                   `json:"session_id"`
+	OperationID       string                   `json:"operation_id"`
+	Correlation       model.MessageCorrelation `json:"correlation,omitzero"`
+	RuntimeID         string                   `json:"runtime_id,omitempty"`
+	Sequence          uint64                   `json:"sequence,omitempty"`
+	DisplayOrder      int                      `json:"display_order,omitempty"`
+	Kind              HarnessActivityKind      `json:"kind"`
+	ItemID            string                   `json:"item_id,omitempty"`
+	Status            HarnessActivityStatus    `json:"status,omitempty"`
+	Title             string                   `json:"title,omitempty"`
+	Body              string                   `json:"body,omitempty"`
+	Truncated         bool                     `json:"truncated,omitempty"`
+	OccurredAt        time.Time                `json:"occurred_at"`
 }
 
 type HarnessActivityFilter struct {
-	MailboxID string `json:"mailbox_id"`
-	Harness   string `json:"harness,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	InstallationID string `json:"installation_id,omitempty"`
+	MailboxID      string `json:"mailbox_id"`
+	Harness        string `json:"harness,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
 }
 
 type HarnessActivityWriter interface {

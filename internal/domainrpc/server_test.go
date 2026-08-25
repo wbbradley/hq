@@ -113,9 +113,6 @@ func (s *recordingOperations) SelectNamedAgentSession(context.Context, string, m
 func (s *recordingOperations) RenameNamedAgentSession(context.Context, string, model.SessionIdentity, string) (domain.AgentSession, error) {
 	return domain.AgentSession{}, s.record(RenameAgentSessionMethod)
 }
-func (s *recordingOperations) UpsertHarnessActivity(context.Context, domain.HarnessActivity) error {
-	return s.record(UpsertHarnessActivityMethod)
-}
 func (s *recordingOperations) ListHarnessActivities(_ context.Context, filter domain.HarnessActivityFilter) ([]domain.HarnessActivity, error) {
 	s.activityFilter = filter
 	return []domain.HarnessActivity{{ItemID: "activity-result"}}, s.record(ListHarnessActivitiesMethod)
@@ -287,7 +284,6 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{ListMethod, FilterRequest{}},
 		{ListConversationsMethod, ConversationFilterRequest{}},
 		{ConversationHistoryMethod, ConversationHistoryRequest{}},
-		{UpsertHarnessActivityMethod, HarnessActivityRequest{}},
 		{ListHarnessActivitiesMethod, HarnessActivityFilterRequest{}},
 		{ArchiveMethod, MutationIDRequest{MutationID: mutationID}},
 		{RestoreMethod, MutationIDRequest{MutationID: mutationID}},
@@ -599,7 +595,7 @@ func TestDomainSentinelErrorsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestHarnessActivityRPCWritesAndQueriesLocalProjection(t *testing.T) {
+func TestHarnessActivityRPCIsReadOnly(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "hq.db")
 	keyPath, _ := identity.KeyPath(databasePath)
 	if _, err := identity.Initialize(keyPath, nil); err != nil {
@@ -611,15 +607,22 @@ func TestHarnessActivityRPCWritesAndQueriesLocalProjection(t *testing.T) {
 	}
 	defer database.Close()
 	service := Service{Store: database}
+	mailbox, err := database.ResolveMailbox(context.Background(), model.SessionIdentity{Harness: "fake", ExternalSessionID: "session-1"}, model.RepositoryContext{Directory: "/work"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	activity := domain.HarnessActivity{
-		MailboxID: "activity-mailbox", Harness: "fake", SessionID: "session-1", OperationID: "operation-1",
-		Kind: domain.HarnessActivityProgress, ItemID: "progress-1", Body: "working", OccurredAt: time.Unix(100, 0),
+		MailboxID: mailbox.ID, Harness: "fake", SessionID: "session-1", OperationID: "operation-1",
+		Correlation: model.MessageCorrelation{Provider: "fake", SessionID: "session-1", OperationID: "operation-1", ItemID: "progress-1"},
+		RuntimeID:   "runtime-1", Sequence: 1, Kind: domain.HarnessActivityProgress, ItemID: "progress-1", Body: "working", OccurredAt: time.Unix(100, 0),
 	}
-	raw, _ := json.Marshal(HarnessActivityRequest{Activity: activity})
-	if _, rpcErr := service.Handle(context.Background(), nil, UpsertHarnessActivityMethod, raw); rpcErr != nil {
-		t.Fatal(rpcErr)
+	if err := database.UpsertHarnessActivity(context.Background(), activity); err != nil {
+		t.Fatal(err)
 	}
-	raw, _ = json.Marshal(HarnessActivityFilterRequest{Filter: domain.HarnessActivityFilter{MailboxID: activity.MailboxID}})
+	if _, rpcErr := service.Handle(context.Background(), nil, "activity/upsert", json.RawMessage(`{"activity":{}}`)); rpcErr == nil || rpcErr.Code != localwire.CodeMethodNotFound {
+		t.Fatalf("removed write RPC result = %#v", rpcErr)
+	}
+	raw, _ := json.Marshal(HarnessActivityFilterRequest{Filter: domain.HarnessActivityFilter{MailboxID: activity.MailboxID}})
 	result, rpcErr := service.Handle(context.Background(), nil, ListHarnessActivitiesMethod, raw)
 	if rpcErr != nil {
 		t.Fatal(rpcErr)

@@ -42,6 +42,7 @@ type eventRelay struct {
 	ledger       DeliveryLedger
 	sync         func(context.Context) error
 	identity     harness.SessionIdentity
+	runtimeID    harness.InstanceID
 	mailbox      model.Mailbox
 	repository   model.RepositoryContext
 	project      *domain.ProjectOutputBinding
@@ -65,7 +66,7 @@ type eventRelay struct {
 func startEventRelay(ctx context.Context, instance harness.Instance, store QuestionStore, projectStore domain.ProjectOutputOperations, ledger DeliveryLedger, syncMailbox func(context.Context) error, mailbox model.Mailbox, repository model.RepositoryContext, project *domain.ProjectOutputBinding, terms Terminology, operations *operationTracker) *eventRelay {
 	relayContext, cancel := context.WithCancel(ctx)
 	relay := &eventRelay{
-		store: store, projectStore: projectStore, ledger: ledger, sync: syncMailbox, identity: instance.Session().Identity(), mailbox: mailbox,
+		store: store, projectStore: projectStore, ledger: ledger, sync: syncMailbox, identity: instance.Session().Identity(), runtimeID: instance.ID(), mailbox: mailbox,
 		repository: repository, project: project, terms: terms, operations: operations, queue: make(chan eventWork, eventQueueCapacity), done: make(chan struct{}), failed: make(chan struct{}), cancel: cancel, now: time.Now,
 	}
 	relay.activity, _ = store.(domain.HarnessActivityWriter)
@@ -152,7 +153,8 @@ func (r *eventRelay) projectActivity(event harness.Event) (domain.HarnessActivit
 	}
 	activity := domain.HarnessActivity{
 		MailboxID: r.mailbox.ID, Harness: string(event.Session.Provider), SessionID: string(event.Session.ID),
-		OperationID: string(event.Operation), ItemID: event.ItemID,
+		OperationID: string(event.Operation), ItemID: event.ItemID, RuntimeID: string(r.runtimeID), Sequence: event.Sequence,
+		Correlation: model.MessageCorrelation{Provider: string(event.Session.Provider), SessionID: string(event.Session.ID), OperationID: string(event.Operation), ItemID: event.ItemID},
 	}
 	switch payload := event.Payload.(type) {
 	case harness.OperationStatusEvent:
@@ -210,7 +212,7 @@ func (r *eventRelay) projectActivity(event harness.Event) (domain.HarnessActivit
 	}
 	activity.Body, truncated = boundActivityText(activity.Body, bodyLimit)
 	activity.Truncated = activity.Truncated || truncated
-	valid := activity.MailboxID != "" && activity.Harness != "" && activity.SessionID != ""
+	valid := activity.MailboxID != "" && activity.Harness != "" && activity.SessionID != "" && activity.RuntimeID != "" && activity.Sequence > 0
 	if activity.Kind == domain.HarnessActivityOperation {
 		valid = valid && activity.Status != ""
 	}

@@ -84,6 +84,25 @@ func TestHarnessActivityProjectionIsDeterministicAndMessageInert(t *testing.T) {
 	}
 }
 
+func TestHarnessActivitySourceSequenceBreaksSameMillisecondTies(t *testing.T) {
+	firstPayload := activityPayload(domain.HarnessActivityPlan, "", "")
+	firstPayload.Body, firstPayload.OccurredAt, firstPayload.Sequence = "first", 1_000, 1
+	secondPayload := firstPayload
+	secondPayload.Body, secondPayload.Sequence = "second", 2
+	first := signedActivity(t, firstPayload, nil, 1)
+	second := signedActivity(t, secondPayload, nil, 1)
+
+	state := Reduce(wires(second, first), localPolicy())
+	if len(state.HarnessActivities) != 1 {
+		t.Fatalf("activity projections = %#v", state.HarnessActivities)
+	}
+	for _, activity := range state.HarnessActivities {
+		if activity.EventID != second.ID() || activity.Sequence != 2 || activity.Body != "second" {
+			t.Fatalf("same-time winner = %#v", activity)
+		}
+	}
+}
+
 func TestHarnessActivityUnsupportedAndAccountAuthorization(t *testing.T) {
 	local := signedActivity(t, activityPayload(domain.HarnessActivityOperation, "", domain.HarnessActivityRunning), nil, 1)
 	oldPolicy := localPolicy()
