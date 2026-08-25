@@ -33,6 +33,7 @@ var (
 	selected     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
 	inputCursor  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dim          = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	messageFrom  = lipgloss.NewStyle().Foreground(lipgloss.Color("215"))
 	panelEdge    = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
 	dimPanelEdge = lipgloss.NewStyle().Foreground(lipgloss.Color("59"))
 	panel        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(0, 1)
@@ -3306,11 +3307,7 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 		}
 		message := *entry.message
 		spanStart := max(0, lineCount-1)
-		header := "── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM")
-		if direction := messageDirection(message); direction != "" {
-			header += " · " + direction
-		}
-		appendRenderedText(&body, &lineCount, dim.Render(header+" ──"))
+		appendRenderedText(&body, &lineCount, renderMessageHeader(message))
 		appendRenderedText(&body, &lineCount, "\n")
 		appendRenderedText(&body, &lineCount, m.markdown.Render(message, markdownWidth))
 		if message.Details != "" {
@@ -3397,19 +3394,25 @@ func (m app) cacheRenderedMessageGroup(group messageGroup, width int, rendered r
 	return rendered
 }
 
-func messageDirection(message model.Message) string {
+func renderMessageHeader(message model.Message) string {
+	prefix := "── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM") + " · "
+	from, to := messageDirection(message)
+	return dim.Render(prefix) + messageFrom.Render(from) + dim.Render(" → "+to+" ──")
+}
+
+func messageDirection(message model.Message) (string, string) {
 	if message.SenderMailboxID == model.HumanMailboxID {
 		recipient := message.RecipientLabel
 		if recipient == "" {
 			recipient = message.RecipientMailboxID
 		}
-		return "You → " + displayMessageAddress(message.RecipientAddress, recipient, message.Context)
+		return "You", displayMessageAddress(message.RecipientAddress, recipient, message.Context)
 	}
 	sender := message.SenderLabel
 	if sender == "" {
 		sender = message.SenderMailboxID
 	}
-	return displayMessageAddress(message.SenderAddress, sender, message.Context) + " → You"
+	return displayMessageAddress(message.SenderAddress, sender, message.Context), "You"
 }
 
 func draftRecipient(draft messageDraft) string {

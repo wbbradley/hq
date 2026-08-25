@@ -343,7 +343,7 @@ func TestConversationLoadShowsCompleteBidirectionalHistory(t *testing.T) {
 			t.Fatalf("history[%d] = %q; want %q", index, groups[0].messages[index].Body, body)
 		}
 	}
-	if view := m.View().Content; !strings.Contains(view, "You →") || !strings.Contains(view, "first inbound") {
+	if view := m.View().Content; !strings.Contains(ansi.Strip(view), "You →") || !strings.Contains(view, "first inbound") {
 		t.Fatalf("bidirectional history view = %q", view)
 	}
 }
@@ -714,7 +714,8 @@ func TestFinalAnswerPanelKeepsFinalAnswerSenderAfterHumanReply(t *testing.T) {
 	reply.ThreadID = answer.ThreadID
 	reply.CreatedAt = answer.CreatedAt.Add(time.Second)
 	view := (app{messages: []model.Message{answer, reply}}).View().Content
-	if !strings.Contains(view, "[a final answer from alice · TUI Work]") || strings.Contains(view, "[a final answer from silver]") || !strings.Contains(view, "You → TUI Work") {
+	plainView := ansi.Strip(view)
+	if !strings.Contains(view, "[a final answer from alice · TUI Work]") || strings.Contains(view, "[a final answer from silver]") || !strings.Contains(plainView, "You → TUI Work") {
 		t.Fatalf("replied final-answer panel attribution = %q", view)
 	}
 }
@@ -772,6 +773,29 @@ func TestCoalescedMessagePartsRenderMarkdownIndependently(t *testing.T) {
 	}
 	if !strings.Contains(panel, "\x1b[1m") || !strings.Contains(panel, "\x1b[3m") {
 		t.Fatalf("coalesced bodies omitted independent emphasis: %q", panel)
+	}
+}
+
+func TestMessageHeadersHighlightSender(t *testing.T) {
+	inbound := message("inbound", testAgentID, model.HumanMailboxID, "Inbound")
+	inbound.SenderLabel = "codex · repo"
+	outbound := message("outbound", model.HumanMailboxID, testAgentID, "Outbound")
+	outbound.RecipientLabel = "codex · repo"
+
+	for _, test := range []struct {
+		name     string
+		message  model.Message
+		from, to string
+	}{
+		{name: "inbound", message: inbound, from: "codex · repo", to: "You"},
+		{name: "outbound", message: outbound, from: "You", to: "codex · repo"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			header := renderMessageHeader(test.message)
+			if !strings.Contains(header, "\x1b[38;5;215m"+test.from) || !strings.Contains(header, "\x1b[38;5;241m → "+test.to+" ──") {
+				t.Fatalf("header styling = %q", header)
+			}
+		})
 	}
 }
 
