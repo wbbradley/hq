@@ -328,22 +328,35 @@ func waitForAgent(t *testing.T, database *store.SQLite, name string) modelAgent 
 
 type modelAgent struct{ MailboxID string }
 
-type failingActivityStore struct{ *store.SQLite }
-
-func (s *failingActivityStore) UpsertHarnessActivity(context.Context, domain.HarnessActivity) error {
-	return errors.New("activity storage failed")
+type failingActivityStore struct {
+	*store.SQLite
+	mu     sync.Mutex
+	failed bool
 }
 
-func TestBridgePublishesCanonicalFailureBeforeReportingActivityWriteFailure(t *testing.T) {
+func (s *failingActivityStore) UpsertHarnessActivity(ctx context.Context, activity domain.HarnessActivity) error {
+	s.mu.Lock()
+	if !s.failed {
+		s.failed = true
+		s.mu.Unlock()
+		return errors.New("activity storage failed")
+	}
+	s.mu.Unlock()
+	return s.SQLite.UpsertHarnessActivity(ctx, activity)
+}
+
+func TestBridgeReconcilesCanonicalOutputAfterActivityWriteFailure(t *testing.T) {
 	database := openBridgeTestStore(t)
+	activityStore := &failingActivityStore{SQLite: database}
 	provider := fake.NewFactory("home-built")
+	ledger := newMemoryLedger()
 	factory := &recordingFactory{Factory: provider, launched: make(chan harness.Instance, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(ctx, Options{
-			Directory: "/work/repo", AgentName: "failure-agent", Factory: factory, Store: &failingActivityStore{database}, Ledger: newMemoryLedger(),
+			Directory: "/work/repo", AgentName: "failure-agent", Factory: factory, Store: activityStore, Ledger: ledger,
 			Repository: model.RepositoryContext{Directory: "/work/repo"}, SuppressStatus: true,
 		})
 	}()
@@ -363,6 +376,57 @@ func TestBridgePublishesCanonicalFailureBeforeReportingActivityWriteFailure(t *t
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("activity persistence failure did not stop the bridge")
+	}
+
+	retryFactory := &recordingFactory{Factory: provider, launched: make(chan harness.Instance, 1)}
+	retryReady := make(chan struct{})
+	retryContext, stopRetry := context.WithCancel(context.Background())
+	retryDone := make(chan error, 1)
+	go func() {
+		retryDone <- Run(retryContext, Options{
+			Directory: "/work/repo", AgentName: "failure-agent", Factory: retryFactory, Store: activityStore, Ledger: ledger,
+			Repository: model.RepositoryContext{Directory: "/work/repo"}, SuppressStatus: true, OnReady: func(Ready) { close(retryReady) },
+		})
+	}()
+	retryInstance := <-retryFactory.launched
+	select {
+	case <-retryReady:
+	case err := <-retryDone:
+		t.Fatalf("retry bridge failed before readiness: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("retry bridge did not become ready")
+	}
+	if retryInstance.Session().Identity() != instance.Session().Identity() {
+		t.Fatalf("retry session = %#v, want %#v", retryInstance.Session().Identity(), instance.Session().Identity())
+	}
+	if err := provider.Emit(retryInstance, "operation-failed", "", harness.OperationStatusEvent{Status: harness.OperationFailed, Error: "boom"}); err != nil {
+		t.Fatal(err)
+	}
+	agent := waitForAgent(t, database, "failure-agent")
+	activities := waitForHarnessActivities(t, database, agent.MailboxID, 1)
+	if !activities[0].OccurredAt.After(message.CreatedAt) || activities[0].OccurredAt.Unix() != message.CreatedAt.Unix() {
+		t.Fatalf("output/activity canonical times = %s / %s", message.CreatedAt, activities[0].OccurredAt)
+	}
+	messages, err := database.List(context.Background(), model.Filter{CounterpartyMailboxID: agent.MailboxID, Limit: 100})
+	if err != nil || len(messages) != 1 || messages[0].ID != message.ID {
+		t.Fatalf("reconciled output messages = %#v, %v", messages, err)
+	}
+	eventID := activities[0].EventID
+	if err := database.Rebuild(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt := waitForHarnessActivities(t, database, agent.MailboxID, 1)
+	if rebuilt[0].EventID != eventID || rebuilt[0].DisplayOrder != activities[0].DisplayOrder {
+		t.Fatalf("rebuilt activity order = %#v, want %#v", rebuilt[0], activities[0])
+	}
+	stopRetry()
+	select {
+	case err := <-retryDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("retry bridge did not stop")
 	}
 }
 

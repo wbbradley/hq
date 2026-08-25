@@ -16,14 +16,16 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 )
 
-// The queue bounds persistence memory while allowing the provider transport to
-// continue reading short bursts. Canonical output applies backpressure when the
-// queue is full; installation-local activity is best-effort and may be dropped.
+// The buffer bounds persistence memory while allowing the provider transport
+// to continue reading short bursts. Durable work and new replaceable keys apply
+// cancellation-aware backpressure; an already-pending replaceable key moves to
+// the tail with its latest value.
 const eventQueueCapacity = 64
 
 type canonicalOutput struct {
 	key               string
 	operation         harness.OperationID
+	createdAt         time.Time
 	body              string
 	details           string
 	presentation      model.PresentationKind
@@ -36,38 +38,58 @@ type eventWork struct {
 	activity *domain.HarnessActivity
 }
 
+func (w eventWork) coalesceKey() string {
+	if w.output != nil || w.activity == nil {
+		return ""
+	}
+	activity := w.activity
+	switch activity.Kind {
+	case domain.HarnessActivityPlan, domain.HarnessActivityDiff, domain.HarnessActivityProgress:
+	case domain.HarnessActivityOperation:
+		if activity.Status != domain.HarnessActivityRunning {
+			return ""
+		}
+	default:
+		return ""
+	}
+	correlation := activity.Correlation
+	return activity.InstallationID + "\x00" + activity.MailboxID + "\x00" + correlation.Provider + "\x00" + correlation.SessionID + "\x00" + correlation.OperationID + "\x00" + string(activity.Kind) + "\x00" + correlation.ItemID
+}
+
 type eventRelay struct {
-	store        QuestionStore
-	projectStore domain.ProjectOutputOperations
-	ledger       DeliveryLedger
-	sync         func(context.Context) error
-	identity     harness.SessionIdentity
-	runtimeID    harness.InstanceID
-	mailbox      model.Mailbox
-	repository   model.RepositoryContext
-	project      *domain.ProjectOutputBinding
-	terms        Terminology
-	operations   *operationTracker
-	activity     domain.HarnessActivityWriter
-	queue        chan eventWork
-	done         chan struct{}
-	failed       chan struct{}
-	cancel       context.CancelFunc
-	now          func() time.Time
+	store         QuestionStore
+	projectStore  domain.ProjectOutputOperations
+	ledger        DeliveryLedger
+	sync          func(context.Context) error
+	identity      harness.SessionIdentity
+	runtimeID     harness.InstanceID
+	mailbox       model.Mailbox
+	repository    model.RepositoryContext
+	project       *domain.ProjectOutputBinding
+	terms         Terminology
+	operations    *operationTracker
+	activity      domain.HarnessActivityWriter
+	queue         *eventBuffer
+	done          chan struct{}
+	failed        chan struct{}
+	cancel        context.CancelFunc
+	persistCtx    context.Context
+	cancelPersist context.CancelFunc
+	now           func() time.Time
 
 	errMu          sync.Mutex
 	err            error
 	failOnce       sync.Once
 	timeMu         sync.Mutex
-	lastCreatedAt  time.Time
-	lastActivityAt time.Time
+	lastTimelineAt time.Time
 }
 
 func startEventRelay(ctx context.Context, instance harness.Instance, store QuestionStore, projectStore domain.ProjectOutputOperations, ledger DeliveryLedger, syncMailbox func(context.Context) error, mailbox model.Mailbox, repository model.RepositoryContext, project *domain.ProjectOutputBinding, terms Terminology, operations *operationTracker) *eventRelay {
 	relayContext, cancel := context.WithCancel(ctx)
+	persistContext, cancelPersist := context.WithCancel(context.Background())
 	relay := &eventRelay{
 		store: store, projectStore: projectStore, ledger: ledger, sync: syncMailbox, identity: instance.Session().Identity(), runtimeID: instance.ID(), mailbox: mailbox,
-		repository: repository, project: project, terms: terms, operations: operations, queue: make(chan eventWork, eventQueueCapacity), done: make(chan struct{}), failed: make(chan struct{}), cancel: cancel, now: time.Now,
+		repository: repository, project: project, terms: terms, operations: operations, queue: newEventBuffer(eventQueueCapacity), done: make(chan struct{}), failed: make(chan struct{}), cancel: cancel, persistCtx: persistContext, cancelPersist: cancelPersist, now: time.Now,
 	}
 	relay.activity, _ = store.(domain.HarnessActivityWriter)
 	go relay.publishLoop()
@@ -76,7 +98,7 @@ func startEventRelay(ctx context.Context, instance harness.Instance, store Quest
 }
 
 func (r *eventRelay) ingest(ctx context.Context, events <-chan harness.Event) {
-	defer close(r.queue)
+	defer r.queue.close()
 	for {
 		select {
 		case <-ctx.Done():
@@ -93,19 +115,8 @@ func (r *eventRelay) ingest(ctx context.Context, events <-chan harness.Event) {
 			if work.output == nil && work.activity == nil {
 				continue
 			}
-			if work.output != nil {
-				select {
-				case r.queue <- work:
-				case <-ctx.Done():
-					return
-				}
-				continue
-			}
-			select {
-			case r.queue <- work:
-			default:
-				// Activity is a local projection, never canonical output. Dropping
-				// it under pressure is safer than terminating the provider worker.
+			if err := r.queue.enqueue(ctx, work); err != nil {
+				return
 			}
 		}
 	}
@@ -113,8 +124,12 @@ func (r *eventRelay) ingest(ctx context.Context, events <-chan harness.Event) {
 
 func (r *eventRelay) publishLoop() {
 	defer close(r.done)
-	for work := range r.queue {
-		if err := r.publishWork(work); err != nil {
+	for {
+		work, ok := r.queue.dequeue()
+		if !ok {
+			return
+		}
+		if err := r.publishWork(r.persistCtx, work); err != nil {
 			r.fail(err)
 		}
 	}
@@ -130,17 +145,18 @@ func (r *eventRelay) normalize(event harness.Event) eventWork {
 			work.activity = &activity
 		}
 	}
+	r.assignWorkTime(event.OccurredAt, &work)
 	return work
 }
 
-func (r *eventRelay) publishWork(work eventWork) error {
+func (r *eventRelay) publishWork(ctx context.Context, work eventWork) error {
 	if work.output != nil {
-		if err := r.publish(*work.output); err != nil {
+		if err := r.publish(ctx, *work.output); err != nil {
 			return err
 		}
 	}
 	if work.activity != nil {
-		if err := r.activity.UpsertHarnessActivity(context.Background(), *work.activity); err != nil {
+		if err := r.activity.UpsertHarnessActivity(ctx, *work.activity); err != nil {
 			return fmt.Errorf("persist harness activity: %w", err)
 		}
 	}
@@ -200,7 +216,6 @@ func (r *eventRelay) projectActivity(event harness.Event) (domain.HarnessActivit
 	default:
 		return domain.HarnessActivity{}, false
 	}
-	activity.OccurredAt = r.nextActivityAt(event.OccurredAt)
 	var truncated bool
 	activity.Title, truncated = boundActivityText(activity.Title, domain.HarnessActivityTitleBytes)
 	activity.Truncated = activity.Truncated || truncated
@@ -286,7 +301,7 @@ func (r *eventRelay) canonicalize(event harness.Event) (canonicalOutput, bool) {
 	return canonicalOutput{}, false
 }
 
-func (r *eventRelay) publish(output canonicalOutput) error {
+func (r *eventRelay) publish(ctx context.Context, output canonicalOutput) error {
 	if r.store == nil || r.ledger == nil || r.identity.ID == "" || r.mailbox.ID == "" {
 		return errors.New("harness output relay is not bound")
 	}
@@ -298,22 +313,26 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 	if sent {
 		return nil
 	}
+	createdAt := output.createdAt
+	if createdAt.IsZero() {
+		createdAt = r.nextCreatedAt()
+	}
 	message := model.Message{
 		ID: r.stableOutputID(output.key), Context: r.repository, SenderMailboxID: r.mailbox.ID, RecipientMailboxID: model.HumanMailboxID,
 		Body: output.body, Details: output.details, Presentation: output.presentation, Correlation: output.correlation,
-		TechnicalSections: output.technicalSections, CreatedAt: r.nextCreatedAt(),
+		TechnicalSections: output.technicalSections, CreatedAt: createdAt,
 	}
 	if r.project != nil {
 		message.Purpose = model.MessagePurposeProjectOutput
 	}
-	existing, err := r.store.Get(context.Background(), message.ID)
+	existing, err := r.store.Get(ctx, message.ID)
 	switch {
 	case err == nil:
 		if r.project != nil {
 			if r.projectStore == nil {
 				return errors.New("project harness output store is required")
 			}
-			if createErr := r.projectStore.CreateProjectOutput(context.Background(), *r.project, message); createErr != nil {
+			if createErr := r.projectStore.CreateProjectOutput(ctx, *r.project, message); createErr != nil {
 				return fmt.Errorf("reconcile project harness output: %w", createErr)
 			}
 		} else if !sameOutput(existing, message) {
@@ -326,9 +345,9 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 			if r.projectStore == nil {
 				return errors.New("project harness output store is required")
 			}
-			createErr = r.projectStore.CreateProjectOutput(context.Background(), *r.project, message)
+			createErr = r.projectStore.CreateProjectOutput(ctx, *r.project, message)
 		} else {
-			createErr = r.store.Create(context.Background(), message)
+			createErr = r.store.Create(ctx, message)
 		}
 		if createErr != nil {
 			return fmt.Errorf("publish harness output: %w", createErr)
@@ -337,7 +356,7 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 		return fmt.Errorf("reconcile harness output: %w", err)
 	}
 	if r.sync != nil {
-		if err := r.sync(context.Background()); err != nil {
+		if err := r.sync(ctx); err != nil {
 			return fmt.Errorf("sync harness output: %w", err)
 		}
 	}
@@ -355,34 +374,47 @@ func (r *eventRelay) stableOutputID(key string) string {
 func (r *eventRelay) nextCreatedAt() time.Time {
 	r.timeMu.Lock()
 	defer r.timeMu.Unlock()
-	createdAt := r.now().UTC()
-	if !r.lastCreatedAt.IsZero() && createdAt.Unix() <= r.lastCreatedAt.Unix() {
-		createdAt = time.Unix(r.lastCreatedAt.Unix()+1, 0).UTC()
+	createdAt := r.now().UTC().Truncate(time.Second)
+	if !r.lastTimelineAt.IsZero() && createdAt.Unix() <= r.lastTimelineAt.Unix() {
+		createdAt = time.Unix(r.lastTimelineAt.Unix()+1, 0).UTC()
 	}
-	r.lastCreatedAt = createdAt
+	r.lastTimelineAt = createdAt
 	return createdAt
 }
 
 func (r *eventRelay) advanceCreatedAt(createdAt time.Time) {
 	r.timeMu.Lock()
-	if createdAt.After(r.lastCreatedAt) {
-		r.lastCreatedAt = createdAt
+	if createdAt.After(r.lastTimelineAt) {
+		r.lastTimelineAt = createdAt
 	}
 	r.timeMu.Unlock()
 }
 
-func (r *eventRelay) nextActivityAt(occurredAt time.Time) time.Time {
+func (r *eventRelay) assignWorkTime(occurredAt time.Time, work *eventWork) {
+	if work == nil || work.output == nil && work.activity == nil {
+		return
+	}
 	r.timeMu.Lock()
 	defer r.timeMu.Unlock()
 	if occurredAt.IsZero() {
 		occurredAt = r.now()
 	}
 	occurredAt = occurredAt.UTC()
-	if !r.lastActivityAt.IsZero() && occurredAt.UnixMilli() <= r.lastActivityAt.UnixMilli() {
-		occurredAt = time.UnixMilli(r.lastActivityAt.UnixMilli() + 1).UTC()
+	subsecond := occurredAt.Sub(occurredAt.Truncate(time.Second))
+	canonicalSecond := occurredAt.Truncate(time.Second)
+	if !r.lastTimelineAt.IsZero() && canonicalSecond.Unix() <= r.lastTimelineAt.Unix() {
+		canonicalSecond = time.Unix(r.lastTimelineAt.Unix()+1, 0).UTC()
 	}
-	r.lastActivityAt = occurredAt
-	return occurredAt
+	r.lastTimelineAt = canonicalSecond
+	if work.output != nil {
+		work.output.createdAt = canonicalSecond
+	}
+	if work.activity != nil {
+		if work.output != nil && subsecond < time.Millisecond {
+			subsecond = time.Millisecond
+		}
+		work.activity.OccurredAt = canonicalSecond.Add(subsecond)
+	}
 }
 
 func (r *eventRelay) fail(err error) {
@@ -392,6 +424,9 @@ func (r *eventRelay) fail(err error) {
 	}
 	r.errMu.Unlock()
 	r.failOnce.Do(func() { close(r.failed) })
+	if r.cancel != nil {
+		r.cancel()
+	}
 }
 
 func (r *eventRelay) Err() error {
@@ -408,11 +443,21 @@ func (r *eventRelay) StopAndWait() {
 	defer timer.Stop()
 	select {
 	case <-r.done:
-		r.cancel()
-		return
 	case <-timer.C:
-		r.cancel()
+		r.fail(errors.New("harness event persistence did not drain before shutdown timeout"))
+		if r.cancel != nil {
+			r.cancel()
+		}
+		if r.cancelPersist != nil {
+			r.cancelPersist()
+		}
 		<-r.done
+	}
+	if r.cancel != nil {
+		r.cancel()
+	}
+	if r.cancelPersist != nil {
+		r.cancelPersist()
 	}
 }
 
