@@ -641,7 +641,7 @@ func (m app) answer() tea.Msg {
 	} else {
 		replyTo := m.answerID
 		message.ReplyTo = &replyTo
-		message.Correlation = correlationForMessage(m.answerQ)
+		message.Correlation = m.answerQ.Correlation
 		err = m.store.Reply(m.ctx, m.answerID, message)
 		if err == nil {
 			err = m.archiveAnsweredGroup()
@@ -698,14 +698,6 @@ func (m app) archiveAnsweredGroup() error {
 		}
 	}
 	return nil
-}
-
-func correlationForMessage(message model.Message) model.MessageCorrelation {
-	correlation := message.Correlation
-	if correlation.Empty() {
-		correlation = model.MessageCorrelation{Provider: message.HarnessProvider, SessionID: message.HarnessSessionID, OperationID: message.HarnessOperationID}
-	}
-	return correlation
 }
 
 func (m app) archiveGroup(group messageGroup) tea.Cmd {
@@ -2447,7 +2439,7 @@ func conversationKeyForMessage(message model.Message) model.ConversationKey {
 	if counterparty == model.HumanMailboxID {
 		counterparty = message.RecipientMailboxID
 	}
-	correlation := correlationForMessage(message)
+	correlation := message.Correlation
 	key := model.ConversationKey{CounterpartyMailboxID: counterparty, HarnessProvider: correlation.Provider, HarnessSessionID: correlation.SessionID}
 	if key.HarnessSessionID == "" {
 		key.ThreadID = message.ThreadID
@@ -2789,9 +2781,6 @@ func archiveTarget(group messageGroup) model.Message {
 
 func actionUnitKey(message model.Message) string {
 	turn := message.Correlation.OperationID
-	if turn == "" {
-		turn = message.HarnessOperationID
-	}
 	if turn != "" {
 		return "operation:" + turn
 	}

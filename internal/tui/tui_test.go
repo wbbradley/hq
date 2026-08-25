@@ -53,8 +53,10 @@ func (s *pagedHistoryStore) ListConversationHistory(_ context.Context, filter mo
 
 type outboundCaptureStore struct {
 	domain.Store
-	agent   domain.NamedAgent
-	created model.Message
+	agent           domain.NamedAgent
+	created         model.Message
+	replied         model.Message
+	repliedOriginal string
 }
 
 type worktreeCaptureStore struct {
@@ -74,6 +76,12 @@ func (s *outboundCaptureStore) GetNamedAgent(context.Context, string) (domain.Na
 
 func (s *outboundCaptureStore) Create(_ context.Context, created model.Message) error {
 	s.created = created
+	return nil
+}
+
+func (s *outboundCaptureStore) Reply(_ context.Context, originalID string, reply model.Message) error {
+	s.repliedOriginal = originalID
+	s.replied = reply
 	return nil
 }
 
@@ -537,6 +545,52 @@ func TestTechnicalMetadataCannotChangeMessageBehavior(t *testing.T) {
 	}
 	if replyTarget(before[0]).ID != question.ID || replyTarget(after[0]).ID != question.ID {
 		t.Fatalf("technical metadata changed reply target: before=%q after=%q", replyTarget(before[0]).ID, replyTarget(after[0]).ID)
+	}
+}
+
+func TestTypedCorrelationIsOnlyTUIHarnessBehaviorSource(t *testing.T) {
+	created := time.Date(2026, 8, 25, 13, 0, 0, 0, time.UTC)
+	flatFirst := message("flat-first", testAgentID, model.HumanMailboxID, "First")
+	flatFirst.ThreadID = "causal-one"
+	flatFirst.CreatedAt = created
+	flatFirst.HarnessProvider = "deprecated"
+	flatFirst.HarnessSessionID = "same-flat-session"
+	flatFirst.HarnessOperationID = "same-flat-operation"
+	flatSecond := message("flat-second", testAgentID, model.HumanMailboxID, "Second")
+	flatSecond.ThreadID = "causal-two"
+	flatSecond.CreatedAt = created.Add(time.Second)
+	flatSecond.HarnessProvider = flatFirst.HarnessProvider
+	flatSecond.HarnessSessionID = flatFirst.HarnessSessionID
+	flatSecond.HarnessOperationID = flatFirst.HarnessOperationID
+
+	if groups := groupMessages([]model.Message{flatSecond, flatFirst}); len(groups) != 2 {
+		t.Fatalf("flat-only compatibility fields merged causal conversations: %#v", groups)
+	}
+	if got := actionUnitKey(flatFirst); got != "thread:"+flatFirst.ThreadID {
+		t.Fatalf("flat-only operation selected action unit %q", got)
+	}
+
+	typed := model.MessageCorrelation{Provider: "typed", SessionID: "typed-session", OperationID: "typed-operation"}
+	typedFirst, typedSecond := flatFirst, flatSecond
+	typedFirst.Correlation, typedSecond.Correlation = typed, typed
+	typedFirst.HarnessProvider, typedSecond.HarnessProvider = "conflict-one", "conflict-two"
+	typedFirst.HarnessSessionID, typedSecond.HarnessSessionID = "flat-one", "flat-two"
+	typedFirst.HarnessOperationID, typedSecond.HarnessOperationID = "operation-one", "operation-two"
+	groups := groupMessages([]model.Message{typedSecond, typedFirst})
+	if len(groups) != 1 || actionUnitKey(typedFirst) != "operation:"+typed.OperationID || actionUnitKey(typedSecond) != "operation:"+typed.OperationID {
+		t.Fatalf("typed correlation did not override conflicting compatibility fields: %#v", groups)
+	}
+
+	capture := &outboundCaptureStore{}
+	editor := textarea.New()
+	editor.SetValue("Reply")
+	m := app{ctx: context.Background(), store: capture, answering: true, answerID: flatFirst.ID, answerQ: flatFirst, editor: editor}
+	result := m.answer().(answeredMsg)
+	if result.err != nil || !result.sent || capture.repliedOriginal != flatFirst.ID {
+		t.Fatalf("flat-only reply failed: result=%#v original=%q", result, capture.repliedOriginal)
+	}
+	if !capture.replied.Correlation.Empty() || capture.replied.HarnessProvider != "" || capture.replied.HarnessSessionID != "" || capture.replied.HarnessOperationID != "" {
+		t.Fatalf("flat-only compatibility fields leaked into reply: %#v", capture.replied)
 	}
 }
 
