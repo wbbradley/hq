@@ -1902,6 +1902,9 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 			reply.Purpose = model.MessagePurposeConversation
 		}
 	}
+	if reply.Correlation.Empty() && reply.HarnessProvider == "" && reply.HarnessSessionID == "" && reply.HarnessOperationID == "" {
+		reply.Correlation = original.message.Correlation
+	}
 	scope := event.ScopeInstallationPrivate
 	parents := []string{original.eventID}
 	var audience *event.Audience

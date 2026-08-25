@@ -92,6 +92,31 @@ func TestOpenChecksExpectedHeadBeforeLifecycle(t *testing.T) {
 	}
 }
 
+func TestProjectInputRoutingPreservesTypedMessageSemantics(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	project, err := s.CreateProject(ctx, domain.CreateProjectRequest{Name: "typed input routing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := model.Message{
+		ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140f21", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: project.MailboxID,
+		Body: "typed project input", Details: "human project instructions", Presentation: model.PresentationNotice,
+		Correlation:       model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", ItemID: "item", RequestID: "request"},
+		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.project_input", Fields: []model.TechnicalField{{Key: "second", Value: "2"}, {Key: "first", Label: "First", Value: "1"}}}},
+		Context:           model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC(),
+	}
+	if err := s.Create(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.Get(ctx, input.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Purpose = model.MessagePurposeProjectInput
+	assertMessageSemantics(t, stored, input)
+}
+
 func TestQueuedProjectCommandEventuallyReportsUnreachableHome(t *testing.T) {
 	command := &domain.ProjectCommand{
 		Stage:     domain.ProjectCommandQueued,

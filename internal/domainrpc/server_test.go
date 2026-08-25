@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,12 @@ type recordingOperations struct {
 	conversationFilter model.ConversationFilter
 	historyFilter      model.ConversationHistoryFilter
 	activityFilter     domain.HarnessActivityFilter
+	createdMessage     model.Message
+	repliedMessage     model.Message
+	replyOriginalID    string
+	getMessage         model.Message
+	listMessages       []model.Message
+	historyPage        model.MessagePage
 }
 
 type recordingRuntime struct {
@@ -122,19 +129,22 @@ func (s *recordingOperations) RenewNamedAgent(context.Context, string, string, t
 func (s *recordingOperations) ReleaseNamedAgent(context.Context, string, string) error {
 	return s.record(ReleaseAgentMethod)
 }
-func (s *recordingOperations) Create(context.Context, model.Message) error {
+
+func (s *recordingOperations) Create(_ context.Context, message model.Message) error {
+	s.createdMessage = message
 	return s.record(CreateMethod)
 }
-func (s *recordingOperations) Reply(context.Context, string, model.Message) error {
+func (s *recordingOperations) Reply(_ context.Context, originalID string, message model.Message) error {
+	s.replyOriginalID, s.repliedMessage = originalID, message
 	return s.record(ReplyMethod)
 }
 func (s *recordingOperations) Get(context.Context, string) (model.Message, error) {
-	return model.Message{}, s.record(GetMethod)
+	return s.getMessage, s.record(GetMethod)
 }
 
 func (s *recordingOperations) List(_ context.Context, filter model.Filter) ([]model.Message, error) {
 	s.listFilter = filter
-	return nil, s.record(ListMethod)
+	return s.listMessages, s.record(ListMethod)
 }
 func (s *recordingOperations) ListConversations(_ context.Context, filter model.ConversationFilter) (model.ConversationPage, error) {
 	s.conversationFilter = filter
@@ -142,7 +152,7 @@ func (s *recordingOperations) ListConversations(_ context.Context, filter model.
 }
 func (s *recordingOperations) ListConversationHistory(_ context.Context, filter model.ConversationHistoryFilter) (model.MessagePage, error) {
 	s.historyFilter = filter
-	return model.MessagePage{}, s.record(ConversationHistoryMethod)
+	return s.historyPage, s.record(ConversationHistoryMethod)
 }
 func (s *recordingOperations) Archive(context.Context, string) error { return s.record(ArchiveMethod) }
 func (s *recordingOperations) Restore(context.Context, string) error { return s.record(RestoreMethod) }
@@ -448,6 +458,50 @@ func TestServicePassesStructuredConversationFilter(t *testing.T) {
 	}
 	if operations.listFilter != want {
 		t.Fatalf("list filter = %#v; want %#v", operations.listFilter, want)
+	}
+}
+
+func TestServicePreservesTypedMessageRequestsAndResponses(t *testing.T) {
+	typed := model.Message{
+		ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140f01", Body: "typed", Details: "human details",
+		Presentation:      model.PresentationFinalAnswer,
+		Correlation:       model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", ItemID: "item", RequestID: "request"},
+		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.rpc", Fields: []model.TechnicalField{{Key: "second", Label: "Second", Value: "2"}, {Key: "first", Value: "1"}}}},
+	}
+	createOperations := &recordingOperations{}
+	createService := Service{Store: createOperations}
+	createRaw, _ := json.Marshal(MessageRequest{MutationID: "0198c7ec-73b0-7cc3-a5f7-e31c77140f02", Message: typed})
+	if _, rpcErr := createService.Handle(context.Background(), nil, CreateMethod, createRaw); rpcErr != nil || !reflect.DeepEqual(createOperations.createdMessage, typed) {
+		t.Fatalf("typed create = %#v, %v", createOperations.createdMessage, rpcErr)
+	}
+
+	replyOperations := &recordingOperations{}
+	replyService := Service{Store: replyOperations}
+	replyRaw, _ := json.Marshal(ReplyRequest{MutationID: "0198c7ec-73b0-7cc3-a5f7-e31c77140f03", OriginalID: "original", Reply: typed})
+	if _, rpcErr := replyService.Handle(context.Background(), nil, ReplyMethod, replyRaw); rpcErr != nil || replyOperations.replyOriginalID != "original" || !reflect.DeepEqual(replyOperations.repliedMessage, typed) {
+		t.Fatalf("typed reply = %q %#v, %v", replyOperations.replyOriginalID, replyOperations.repliedMessage, rpcErr)
+	}
+
+	readOperations := &recordingOperations{getMessage: typed, listMessages: []model.Message{typed}, historyPage: model.MessagePage{Messages: []model.Message{typed}, NextCursor: "next"}}
+	readService := Service{Store: readOperations}
+	result, rpcErr := readService.Handle(context.Background(), nil, GetMethod, json.RawMessage(`{"id":"message"}`))
+	if rpcErr != nil || !reflect.DeepEqual(result, typed) {
+		t.Fatalf("typed get = %#v, %v", result, rpcErr)
+	}
+	result, rpcErr = readService.Handle(context.Background(), nil, ListMethod, json.RawMessage(`{"filter":{}}`))
+	if rpcErr != nil || !reflect.DeepEqual(result, []model.Message{typed}) {
+		t.Fatalf("typed list = %#v, %v", result, rpcErr)
+	}
+	result, rpcErr = readService.Handle(context.Background(), nil, ConversationHistoryMethod, json.RawMessage(`{"filter":{"key":{"counterparty_mailbox_id":"agent","thread_id":"thread"}}}`))
+	if rpcErr != nil || !reflect.DeepEqual(result, readOperations.historyPage) {
+		t.Fatalf("typed history = %#v, %v", result, rpcErr)
+	}
+
+	legacyOperations := &recordingOperations{}
+	legacyService := Service{Store: legacyOperations}
+	legacyRaw := json.RawMessage(`{"mutation_id":"0198c7ec-73b0-7cc3-a5f7-e31c77140f04","message":{"id":"legacy-json","body":"compatible"}}`)
+	if _, rpcErr := legacyService.Handle(context.Background(), nil, CreateMethod, legacyRaw); rpcErr != nil || legacyOperations.createdMessage.ID != "legacy-json" || !legacyOperations.createdMessage.Correlation.Empty() {
+		t.Fatalf("legacy JSON create = %#v, %v", legacyOperations.createdMessage, rpcErr)
 	}
 }
 

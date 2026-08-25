@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -358,6 +359,145 @@ func TestMessageConversationCorrelationFilters(t *testing.T) {
 	if err != nil || len(canonical) != 1 || canonical[0].ID != uncorrelated.ID {
 		t.Fatalf("canonical thread filter = %#v, %v", canonical, err)
 	}
+}
+
+func TestTypedMessageSemanticsSurviveCreateReplyRestartAndRebuild(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "home-built", "typed-round-trip", "/repo")
+	original := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da5", agent.ID, model.HumanMailboxID, "typed original")
+	original.Details = "Kind: notice\nHarness session: this stays human text"
+	original.Presentation = model.PresentationFinalAnswer
+	original.Correlation = model.MessageCorrelation{Provider: "home-built", SessionID: "session-1", OperationID: "operation-1", ItemID: "item-1", RequestID: "request-1"}
+	original.TechnicalSections = []model.TechnicalSection{
+		{Namespace: "vendor.first", Fields: []model.TechnicalField{{Key: "zeta", Label: "Zeta", Value: "one"}, {Key: "alpha", Value: "two"}}},
+		{Namespace: "hq.harness.output", Fields: []model.TechnicalField{{Key: "status", Label: "Status", Value: "completed"}}},
+	}
+	if err := s.Create(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.Get(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMessageSemantics(t, stored, original)
+	filtered, err := s.List(ctx, model.Filter{HarnessProvider: original.Correlation.Provider, HarnessSessionID: original.Correlation.SessionID, HarnessOperationID: original.Correlation.OperationID})
+	if err != nil || len(filtered) != 1 || filtered[0].ID != original.ID {
+		t.Fatalf("typed correlation filter = %#v, %v", filtered, err)
+	}
+
+	reply := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da6", model.HumanMailboxID, agent.ID, "typed reply")
+	if err := s.Reply(ctx, original.ID, reply); err != nil {
+		t.Fatal(err)
+	}
+	storedReply, err := s.Get(ctx, reply.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedReply.Correlation != original.Correlation {
+		t.Fatalf("inherited reply correlation = %#v, want %#v", storedReply.Correlation, original.Correlation)
+	}
+
+	if _, err := s.db.Exec(`UPDATE projection_checkpoint SET event_count=-1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	rebuilt, err := reopened.Get(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMessageSemantics(t, rebuilt, original)
+	rebuiltReply, err := reopened.Get(ctx, reply.ID)
+	if err != nil || rebuiltReply.Correlation != original.Correlation {
+		t.Fatalf("rebuilt reply = %#v, %v", rebuiltReply, err)
+	}
+}
+
+func TestTypedReplyKeepsExplicitCorrelation(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "home-built", "explicit-reply-correlation", "/repo")
+	original := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da7", agent.ID, model.HumanMailboxID, "question")
+	original.Correlation = model.MessageCorrelation{Provider: "home-built", SessionID: "session-1", OperationID: "operation-1"}
+	if err := s.Create(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	reply := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da8", model.HumanMailboxID, agent.ID, "answer")
+	reply.Correlation = model.MessageCorrelation{Provider: "home-built", SessionID: "session-2", OperationID: "operation-2", ItemID: "item-2", RequestID: "request-2"}
+	if err := s.Reply(ctx, original.ID, reply); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.Get(ctx, reply.ID)
+	if err != nil || stored.Correlation != reply.Correlation {
+		t.Fatalf("explicit reply correlation = %#v, %v", stored, err)
+	}
+}
+
+func TestSchema1MessageRebuildUsesEventLegacyAdapter(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "legacy-rebuild", "/repo")
+	payload, err := event.MarshalPayload(event.TextPayload{
+		MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140da9", Body: "legacy output",
+		Details: "Visible explanation.\nKind: final-answer\nHarness provider: codex\nHarness session: legacy-session\nHarness operation: legacy-operation\nPhase: final_answer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := s.signContents(ctx, []event.Content{{
+		Schema: event.Schema1, Type: event.TypeMessage, Scope: event.ScopeInstallationPrivate,
+		Sender: s.localAddress(agent.ID), Recipient: s.localAddress(model.HumanMailboxID), Payload: payload,
+	}}, []time.Time{time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCanonical(ctx, signed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE messages SET presentation='', harness_provider='', harness_session_id='', harness_operation_id='', technical_sections_json='[]'; UPDATE projection_checkpoint SET event_count=-1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	stored, err := reopened.Get(ctx, payloadMessageID(t, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCorrelation := model.MessageCorrelation{Provider: "codex", SessionID: "legacy-session", OperationID: "legacy-operation"}
+	if stored.Presentation != model.PresentationFinalAnswer || stored.Correlation != wantCorrelation || stored.Details != "Visible explanation." || !technicalFieldEquals(stored.TechnicalSections, "hq.legacy.harness", "phase", "final_answer") {
+		t.Fatalf("rebuilt legacy message = %#v", stored)
+	}
+}
+
+func assertMessageSemantics(t *testing.T, got, want model.Message) {
+	t.Helper()
+	if got.Presentation != want.Presentation || got.Correlation != want.Correlation || got.Details != want.Details || got.Purpose != model.NormalizeMessagePurpose(want.Purpose) || got.Context != want.Context || !reflect.DeepEqual(got.TechnicalSections, want.TechnicalSections) {
+		t.Fatalf("message semantics\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func payloadMessageID(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var payload event.TextPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload.MessageID
 }
 
 func TestConversationSummariesFilterUnionAndPagination(t *testing.T) {

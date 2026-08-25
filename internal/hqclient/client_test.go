@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -203,6 +204,80 @@ func TestClientRestoresDomainSentinelErrors(t *testing.T) {
 	defer stop()
 	if _, err := client.Get(context.Background(), "missing"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestClientRoundTripsTypedMessagesOverLocalWire(t *testing.T) {
+	typed := model.Message{
+		ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140f11", Body: "typed", Details: "human details",
+		Presentation:      model.PresentationFinalAnswer,
+		Correlation:       model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", ItemID: "item", RequestID: "request"},
+		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.client", Fields: []model.TechnicalField{{Key: "second", Label: "Second", Value: "2"}, {Key: "first", Value: "1"}}}},
+	}
+	var created, replied model.Message
+	var originalID string
+	client, stop := testClient(t, func(_ context.Context, _ *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
+		switch method {
+		case domainrpc.CreateMethod:
+			var request domainrpc.MessageRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+			}
+			created = request.Message
+			return nil, nil
+		case domainrpc.ReplyMethod:
+			var request domainrpc.ReplyRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+			}
+			originalID, replied = request.OriginalID, request.Reply
+			return nil, nil
+		case domainrpc.GetMethod:
+			return typed, nil
+		case domainrpc.ListMethod:
+			return []model.Message{typed}, nil
+		case domainrpc.ConversationHistoryMethod:
+			return model.MessagePage{Messages: []model.Message{typed}, NextCursor: "next"}, nil
+		default:
+			return nil, &localwire.RPCError{Code: localwire.CodeMethodNotFound, Message: method}
+		}
+	})
+	defer stop()
+	ctx := context.Background()
+	if err := client.Create(ctx, typed); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Reply(ctx, "original", typed); err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.Get(ctx, typed.ID)
+	if err != nil || !reflect.DeepEqual(got, typed) {
+		t.Fatalf("typed get = %#v, %v", got, err)
+	}
+	listed, err := client.List(ctx, model.Filter{})
+	if err != nil || !reflect.DeepEqual(listed, []model.Message{typed}) {
+		t.Fatalf("typed list = %#v, %v", listed, err)
+	}
+	history, err := client.ListConversationHistory(ctx, model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", ThreadID: "thread"}})
+	if err != nil || history.NextCursor != "next" || !reflect.DeepEqual(history.Messages, []model.Message{typed}) {
+		t.Fatalf("typed history = %#v, %v", history, err)
+	}
+	if !reflect.DeepEqual(created, typed) || originalID != "original" || !reflect.DeepEqual(replied, typed) {
+		t.Fatalf("typed requests = created %#v, reply %q %#v", created, originalID, replied)
+	}
+}
+
+func TestClientDecodesMessageJSONWithoutTypedFields(t *testing.T) {
+	client, stop := testClient(t, func(_ context.Context, _ *localwire.Session, method string, _ json.RawMessage) (any, *localwire.RPCError) {
+		if method != domainrpc.GetMethod {
+			return nil, &localwire.RPCError{Code: localwire.CodeMethodNotFound, Message: method}
+		}
+		return map[string]any{"id": "legacy-json", "body": "compatible", "details": "visible"}, nil
+	})
+	defer stop()
+	got, err := client.Get(context.Background(), "legacy-json")
+	if err != nil || got.ID != "legacy-json" || got.Body != "compatible" || got.Details != "visible" || got.Presentation != "" || !got.Correlation.Empty() || len(got.TechnicalSections) != 0 {
+		t.Fatalf("legacy JSON message = %#v, %v", got, err)
 	}
 }
 

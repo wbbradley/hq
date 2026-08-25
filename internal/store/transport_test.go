@@ -33,7 +33,13 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 	var senderCommits, receiverCommits []domain.Invalidation
 	sender.SetChangeObserver(func(commit domain.Invalidation) { senderCommits = append(senderCommits, commit) })
 	receiver.SetChangeObserver(func(commit domain.Invalidation) { receiverCommits = append(receiverCommits, commit) })
-	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d90", SenderMailboxID: model.HumanMailboxID, Body: "wrapped hello", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	message := model.Message{
+		ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d90", SenderMailboxID: model.HumanMailboxID, Body: "wrapped hello",
+		Details: "Kind: notice stays human", Presentation: model.PresentationNotice,
+		Correlation:       model.MessageCorrelation{Provider: "home-built", SessionID: "peer-session", OperationID: "peer-operation", ItemID: "peer-item", RequestID: "peer-request"},
+		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.peer", Fields: []model.TechnicalField{{Key: "second", Label: "Second", Value: "2"}, {Key: "first", Value: "1"}}}},
+		Context:           model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC(),
+	}
 	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +65,7 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 	if err != nil || got.Body != message.Body || got.SenderInstallationID != senderID || got.RecipientInstallationID != receiverID {
 		t.Fatalf("received message = %#v, %v", got, err)
 	}
+	assertMessageSemantics(t, got, message)
 	duplicate, err := receiver.ReceiveGiftWrap(ctx, job.ExactGiftWrapBytes, relayOne, time.Now().UTC())
 	if err != nil || duplicate.Status != "duplicate-wrapper" {
 		t.Fatalf("duplicate = %#v, %v", duplicate, err)
