@@ -28,22 +28,22 @@ type messageMarkdownRenderer struct {
 }
 
 type renderedMessageGroupCache struct {
-	groupKey      string
-	entriesLoaded bool
-	entries       []domain.ConversationEntry
-	messages      []model.Message
-	activities    []domain.HarnessActivity
-	activityState string
-	draft         messageDraft
-	hasDraft      bool
-	width         int
-	showTechnical bool
-	focused       bool
-	contextID     string
-	branch        string
-	remotes       string
-	pull          string
-	rendered      renderedMessageGroup
+	groupKey       string
+	entriesLoaded  bool
+	entries        []domain.ConversationEntry
+	messages       []model.Message
+	activities     []domain.HarnessActivity
+	showActivities bool
+	draft          messageDraft
+	hasDraft       bool
+	width          int
+	showTechnical  bool
+	focused        bool
+	contextID      string
+	branch         string
+	remotes        string
+	pull           string
+	rendered       renderedMessageGroup
 }
 
 func newMessageMarkdownRenderer(render markdownRenderFunc) *messageMarkdownRenderer {

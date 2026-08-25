@@ -186,7 +186,7 @@ The default view shows open messages in the reserved `human` mailbox. Use these 
 - `x`: toggle archived inbox messages
 - `v`: toggle relay and event status
 - `i`: toggle derived message/context identifiers, typed harness correlation, and all namespaced technical sections
-- `e`: expand or collapse the activity card nearest the Message-pane viewport
+- `e`: show all activity cards expanded, or hide activity cards entirely
 - `g`: manage named harness agents and sessions; use `r` on a session to rename it
 - `r`: refresh
 - `q`: quit

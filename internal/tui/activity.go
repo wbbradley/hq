@@ -43,7 +43,8 @@ func conversationTimeline(group messageGroup) []conversationTimelineEntry {
 	}
 	for index := range group.activities {
 		activity := &group.activities[index]
-		entries = append(entries, conversationTimelineEntry{activity: activity, at: activity.OccurredAt, key: "activity:" + activityExpansionKey(*activity)})
+		key := strings.Join([]string{activity.Harness, activity.SessionID, activity.OperationID, string(activity.Kind), activity.ItemID}, "\x00")
+		entries = append(entries, conversationTimelineEntry{activity: activity, at: activity.OccurredAt, key: "activity:" + key})
 	}
 	sort.SliceStable(entries, func(left, right int) bool {
 		if entries[left].at.Equal(entries[right].at) {
@@ -54,64 +55,24 @@ func conversationTimeline(group messageGroup) []conversationTimelineEntry {
 	return entries
 }
 
-func activityExpansionKey(activity domain.HarnessActivity) string {
-	return strings.Join([]string{activity.Harness, activity.SessionID, activity.OperationID, string(activity.Kind), activity.ItemID}, "\x00")
-}
-
-func (m app) activityExpansionState(activities []domain.HarnessActivity) string {
-	var expanded []string
-	for _, activity := range activities {
-		key := activityExpansionKey(activity)
-		if m.expandedActivities[key] {
-			expanded = append(expanded, key)
-		}
-	}
-	sort.Strings(expanded)
-	return strings.Join(expanded, "\x01")
-}
-
-func (m *app) toggleSelectedActivities() bool {
+func (m *app) toggleActivities() bool {
 	group, found := m.detailGroup()
 	if !found || len(group.activities) == 0 {
 		return false
 	}
-	layout := responsivePaneLayout(m.width, m.height, m.answering)
-	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
-	if len(rendered.activitySpans) == 0 {
-		return false
-	}
-	start := m.resolvedMessageStart(group, rendered, layout.messageHeight)
-	chosen := rendered.activitySpans[0]
-	for _, span := range rendered.activitySpans {
-		if span.start > start {
-			break
-		}
-		chosen = span
-	}
-	if m.expandedActivities == nil {
-		m.expandedActivities = make(map[string]bool)
-	}
-	if m.expandedActivities[chosen.key] {
-		delete(m.expandedActivities, chosen.key)
-	} else {
-		m.expandedActivities[chosen.key] = true
-	}
+	m.showActivities = !m.showActivities
 	if m.markdown != nil {
 		m.markdown.groupCache = nil
 	}
 	return true
 }
 
-func (m app) renderHarnessActivity(activity domain.HarnessActivity, width int, expanded bool) string {
+func (m app) renderHarnessActivity(activity domain.HarnessActivity, width int) string {
 	width = max(12, width)
 	contentWidth := max(1, width-4)
-	marker := "▸"
-	if expanded {
-		marker = "▾"
-	}
 	label := strings.ToUpper(strings.ReplaceAll(string(activity.Kind), "-", " "))
 	status := strings.ToUpper(string(activity.Status))
-	header := marker + " " + label
+	header := "▾ " + label
 	if status != "" {
 		header += " · " + status
 	}
@@ -122,22 +83,6 @@ func (m app) renderHarnessActivity(activity domain.HarnessActivity, width int, e
 	header = activityStyle.Render(header)
 
 	lines := []string{dimPanelEdge.Render("╭─") + " " + header}
-	if !expanded {
-		summary := activitySummary(activity)
-		if activity.Truncated {
-			disclosure := " · [truncated]"
-			if lipgloss.Width(disclosure) >= contentWidth {
-				summary = truncateDisplay("[truncated]", contentWidth)
-			} else {
-				summary = truncateDisplay(summary, contentWidth-lipgloss.Width(disclosure)) + disclosure
-			}
-		}
-		summary = truncateDisplay(summary, contentWidth)
-		summary = activityStyle.Render(summary)
-		lines = append(lines, dimPanelEdge.Render("╰─")+" "+summary)
-		return strings.Join(lines, "\n")
-	}
-
 	content := activityExpandedContent(activity)
 	for _, line := range wrapActivityText(content, contentWidth) {
 		lines = append(lines, dimPanelEdge.Render("│ ")+activityStyle.Render(line))
@@ -147,28 +92,6 @@ func (m app) renderHarnessActivity(activity domain.HarnessActivity, width int, e
 	}
 	lines = append(lines, dimPanelEdge.Render("╰─"))
 	return strings.Join(lines, "\n")
-}
-
-func activitySummary(activity domain.HarnessActivity) string {
-	var summary string
-	switch activity.Kind {
-	case domain.HarnessActivityOperation:
-		summary = activity.Body
-		if strings.TrimSpace(summary) == "" {
-			summary = string(activity.Status)
-		}
-	case domain.HarnessActivityCommand, domain.HarnessActivityFile, domain.HarnessActivityTool:
-		summary = activity.Title
-		if activity.Status == domain.HarnessActivityFailed && strings.TrimSpace(activity.Body) != "" {
-			summary += " · " + firstActivityLine(activity.Body)
-		}
-	default:
-		summary = firstActivityLine(activity.Body)
-	}
-	if strings.TrimSpace(summary) == "" {
-		return "(no details)"
-	}
-	return singleLine(summary)
 }
 
 func activityExpandedContent(activity domain.HarnessActivity) string {
@@ -183,11 +106,6 @@ func activityExpandedContent(activity domain.HarnessActivity) string {
 		parts = append(parts, string(activity.Status))
 	}
 	return strings.Join(parts, "\n")
-}
-
-func firstActivityLine(value string) string {
-	line, _, _ := strings.Cut(value, "\n")
-	return strings.TrimSpace(line)
 }
 
 func wrapActivityText(value string, width int) []string {

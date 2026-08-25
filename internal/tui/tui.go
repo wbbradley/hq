@@ -50,7 +50,7 @@ type app struct {
 	entryHistories      map[string][]domain.ConversationEntry
 	histories           map[string][]model.Message
 	activities          map[string][]domain.HarnessActivity
-	expandedActivities  map[string]bool
+	showActivities      bool
 	inbox               []model.Message
 	sent                []model.Message
 	archived            []model.Message
@@ -256,16 +256,9 @@ type messageLineSpan struct {
 	end        int
 }
 
-type activityLineSpan struct {
-	key   string
-	start int
-	end   int
-}
-
 type renderedMessageGroup struct {
-	panel         string
-	spans         []messageLineSpan
-	activitySpans []activityLineSpan
+	panel string
+	spans []messageLineSpan
 }
 
 func (g messageGroup) latest() model.Message {
@@ -1164,7 +1157,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "e":
-				if m.paneFocus == focusMessage && m.toggleSelectedActivities() {
+				if m.paneFocus == focusMessage && m.toggleActivities() {
 					m.reconcileMessageViewport(true)
 					return m, nil
 				}
@@ -1263,7 +1256,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			return m, m.reload()
 		case "e":
-			if m.paneFocus == focusMessage && m.toggleSelectedActivities() {
+			if m.paneFocus == focusMessage && m.toggleActivities() {
 				m.reconcileMessageViewport(true)
 			}
 			return m, nil
@@ -3104,13 +3097,13 @@ func (m app) View() tea.View {
 	}
 	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0, replyFocused)
 	bottom := lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
-	help := "tab/shift+tab focus/compose · j/k navigate · pgup/pgdown or ^u/^d page · e toggle activity at viewport · enter reply · n new · g agents · d archive · u undo · i details · q quit"
+	help := "tab/shift+tab focus/compose · j/k navigate · pgup/pgdown or ^u/^d page · e show/hide activity · enter reply · n new · g agents · d archive · u undo · i details · q quit"
 	if m.pickingRecipient {
 		help = "type to filter recipients · j/k or arrows move · enter select · esc cancel"
 	} else if m.projectSetup != nil {
 		help = "j/k move · enter select · f force blocked handoff · esc back"
 	} else if m.answering {
-		help = "tab/shift+tab focus · pgup/pgdown or ^u/^d page · e toggle activity at viewport · enter submit · shift+enter/ctrl+j newline · esc cancel"
+		help = "tab/shift+tab focus · pgup/pgdown or ^u/^d page · e show/hide activity · enter submit · shift+enter/ctrl+j newline · esc cancel"
 	}
 	if m.undoNotice != "" {
 		help = m.undoNotice + " · " + help
@@ -3293,18 +3286,23 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 		appendRenderedText(&body, &lineCount, "\n\n")
 	}
 	var spans []messageLineSpan
-	var activitySpans []activityLineSpan
 	markdownWidth := max(1, width-panel.GetHorizontalFrameSize())
-	for index, entry := range conversationTimeline(group) {
-		if index > 0 {
-			appendRenderedText(&body, &lineCount, "\n\n")
-		}
+	renderedEntry := false
+	for _, entry := range conversationTimeline(group) {
 		if entry.activity != nil {
+			if !m.showActivities {
+				continue
+			}
+			if renderedEntry {
+				appendRenderedText(&body, &lineCount, "\n\n")
+			}
 			activity := *entry.activity
-			activityStart := max(0, lineCount-1)
-			appendRenderedText(&body, &lineCount, m.renderHarnessActivity(activity, markdownWidth, m.expandedActivities[activityExpansionKey(activity)]))
-			activitySpans = append(activitySpans, activityLineSpan{key: activityExpansionKey(activity), start: activityStart, end: lineCount})
+			appendRenderedText(&body, &lineCount, m.renderHarnessActivity(activity, markdownWidth))
+			renderedEntry = true
 			continue
+		}
+		if renderedEntry {
+			appendRenderedText(&body, &lineCount, "\n\n")
 		}
 		message := *entry.message
 		spanStart := max(0, lineCount-1)
@@ -3326,6 +3324,7 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 			}
 		}
 		spans = append(spans, messageLineSpan{messageID: message.ID, actionUnit: actionUnitKey(message), start: spanStart, end: lineCount})
+		renderedEntry = true
 	}
 	if group.draft != nil {
 		appendRenderedText(&body, &lineCount, "\n\n")
@@ -3349,7 +3348,7 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 	if !m.showTechnical && (groupHasTechnicalIdentifiers(group) || m.technicalContext(latest) != "") {
 		bottomLabel = "technical details hidden · press i to show"
 	}
-	return m.cacheRenderedMessageGroup(group, width, renderedMessageGroup{panel: renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage)), spans: spans, activitySpans: activitySpans})
+	return m.cacheRenderedMessageGroup(group, width, renderedMessageGroup{panel: renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage)), spans: spans})
 }
 
 func appendRenderedText(body *strings.Builder, lineCount *int, value string) {
@@ -3373,7 +3372,7 @@ func (m app) cachedRenderedMessageGroup(group messageGroup, width int) (rendered
 	if hasDraft {
 		draft = *group.draft
 	}
-	if cache.groupKey != group.key || cache.entriesLoaded != group.entriesLoaded || !reflect.DeepEqual(cache.entries, group.entries) || !reflect.DeepEqual(cache.messages, group.messages) || !slices.Equal(cache.activities, group.activities) || cache.activityState != m.activityExpansionState(group.activities) || cache.hasDraft != hasDraft || !reflect.DeepEqual(cache.draft, draft) ||
+	if cache.groupKey != group.key || cache.entriesLoaded != group.entriesLoaded || !reflect.DeepEqual(cache.entries, group.entries) || !reflect.DeepEqual(cache.messages, group.messages) || !slices.Equal(cache.activities, group.activities) || cache.showActivities != m.showActivities || cache.hasDraft != hasDraft || !reflect.DeepEqual(cache.draft, draft) ||
 		cache.width != width || cache.showTechnical != m.showTechnical || cache.focused != m.paneFocused(focusMessage) ||
 		cache.contextID != m.contextID || cache.branch != m.branch || cache.remotes != m.remotes || cache.pull != m.pull {
 		return renderedMessageGroup{}, false
@@ -3391,7 +3390,7 @@ func (m app) cacheRenderedMessageGroup(group messageGroup, width int, rendered r
 		draft = *group.draft
 	}
 	m.markdown.groupCache = &renderedMessageGroupCache{
-		groupKey: group.key, entriesLoaded: group.entriesLoaded, entries: append([]domain.ConversationEntry(nil), group.entries...), messages: append([]model.Message(nil), group.messages...), activities: append([]domain.HarnessActivity(nil), group.activities...), activityState: m.activityExpansionState(group.activities), draft: draft, hasDraft: hasDraft,
+		groupKey: group.key, entriesLoaded: group.entriesLoaded, entries: append([]domain.ConversationEntry(nil), group.entries...), messages: append([]model.Message(nil), group.messages...), activities: append([]domain.HarnessActivity(nil), group.activities...), showActivities: m.showActivities, draft: draft, hasDraft: hasDraft,
 		width: width, showTechnical: m.showTechnical, focused: m.paneFocused(focusMessage),
 		contextID: m.contextID, branch: m.branch, remotes: m.remotes, pull: m.pull, rendered: rendered,
 	}

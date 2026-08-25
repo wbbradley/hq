@@ -13,7 +13,7 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 )
 
-func TestFakeProviderActivityRendersChronologicallyAsCollapsedAndExpandedCards(t *testing.T) {
+func TestFakeProviderActivityIsHiddenOrFullyExpanded(t *testing.T) {
 	started := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	first := message("first-message", testAgentID, model.HumanMailboxID, "First message")
 	first.CreatedAt = started
@@ -25,32 +25,29 @@ func TestFakeProviderActivityRendersChronologicallyAsCollapsedAndExpandedCards(t
 	m := app{groups: []messageGroup{group}, messages: []model.Message{final}, editor: textarea.New(), width: 100, height: 100, paneFocus: focusMessage, markdown: newMessageMarkdownRenderer(nil)}
 
 	rendered := m.renderGroupPanelLayout(group, 100)
-	if len(rendered.spans) != 2 || len(rendered.activitySpans) != 7 {
-		t.Fatalf("actionable/non-actionable spans = %#v / %#v", rendered.spans, rendered.activitySpans)
+	if len(rendered.spans) != 2 {
+		t.Fatalf("message spans = %#v", rendered.spans)
 	}
-	collapsed := ansi.Strip(rendered.panel)
-	if !(strings.Index(collapsed, "First message") < strings.Index(collapsed, "▸ OPERATION STATUS") && strings.Index(collapsed, "▸ PROGRESS") < strings.Index(collapsed, "Final answer")) {
-		t.Fatalf("timeline order = %q", collapsed)
+	hidden := ansi.Strip(rendered.panel)
+	if strings.Contains(hidden, "OPERATION STATUS") || strings.Contains(hidden, "PROGRESS") {
+		t.Fatalf("hidden activity remained visible: %q", hidden)
+	}
+
+	m.showActivities = true
+	expanded := ansi.Strip(m.renderGroupPanel(m.groups[0], 100))
+	if !(strings.Index(expanded, "First message") < strings.Index(expanded, "▾ OPERATION STATUS") && strings.Index(expanded, "▾ PROGRESS") < strings.Index(expanded, "Final answer")) {
+		t.Fatalf("timeline order = %q", expanded)
 	}
 	for _, label := range []string{"OPERATION STATUS", "PLAN", "DIFF", "COMMAND", "FILE CHANGE", "TOOL CALL", "PROGRESS"} {
-		if !strings.Contains(collapsed, "▸ "+label) {
-			t.Fatalf("collapsed timeline omitted %s: %q", label, collapsed)
+		if !strings.Contains(expanded, "▾ "+label) {
+			t.Fatalf("expanded timeline omitted %s: %q", label, expanded)
 		}
 	}
-	if strings.Contains(collapsed, "second plan line") || !strings.Contains(collapsed, "FAILED") || !strings.Contains(collapsed, "[truncated]") {
-		t.Fatalf("collapsed disclosure = %q", collapsed)
+	if !strings.Contains(expanded, "second plan line") || !strings.Contains(expanded, "FAILED") || !strings.Contains(expanded, "[content truncated]") {
+		t.Fatalf("expanded disclosure = %q", expanded)
 	}
 	if kind := groupPresentationKind(group); kind != "final-answer" {
 		t.Fatalf("activity changed final-answer presentation to %q", kind)
-	}
-
-	m.expandedActivities = make(map[string]bool, len(activities))
-	for _, activity := range activities {
-		m.expandedActivities[activityExpansionKey(activity)] = true
-	}
-	expanded := ansi.Strip(m.renderGroupPanel(m.groups[0], 100))
-	if !strings.Contains(expanded, "▾ PLAN") || !strings.Contains(expanded, "second plan line") || !strings.Contains(expanded, "[content truncated]") {
-		t.Fatalf("expanded timeline = %q", expanded)
 	}
 }
 
@@ -65,19 +62,13 @@ func TestHarnessActivitiesUseMutedText(t *testing.T) {
 		domain.HarnessActivityTool,
 	} {
 		activity := domain.HarnessActivity{Kind: kind, Title: "activity title", Body: "activity body", Status: domain.HarnessActivityFailed}
-		for _, expanded := range []bool{false, true} {
-			rendered := (app{}).renderHarnessActivity(activity, 80, expanded)
-			label := strings.ToUpper(strings.ReplaceAll(string(kind), "-", " "))
-			content := "activity body"
-			if expanded || kind == domain.HarnessActivityCommand || kind == domain.HarnessActivityFile || kind == domain.HarnessActivityTool {
-				content = "activity title"
-			}
-			if !strings.Contains(rendered, "\x1b[38;5;241m▸ "+label) && !strings.Contains(rendered, "\x1b[38;5;241m▾ "+label) {
-				t.Fatalf("%s expanded=%t title was not muted: %q", kind, expanded, rendered)
-			}
-			if !strings.Contains(rendered, "\x1b[38;5;241m"+content) || strings.Contains(rendered, "\x1b[38;5;212m") || strings.Contains(rendered, "\x1b[38;5;196m") {
-				t.Fatalf("%s expanded=%t styling = %q", kind, expanded, rendered)
-			}
+		rendered := (app{}).renderHarnessActivity(activity, 80)
+		label := strings.ToUpper(strings.ReplaceAll(string(kind), "-", " "))
+		if !strings.Contains(rendered, "\x1b[38;5;241m▾ "+label) {
+			t.Fatalf("%s title was not muted: %q", kind, rendered)
+		}
+		if !strings.Contains(rendered, "\x1b[38;5;241mactivity title") || !strings.Contains(rendered, "\x1b[38;5;241mactivity body") || strings.Contains(rendered, "\x1b[38;5;212m") || strings.Contains(rendered, "\x1b[38;5;196m") {
+			t.Fatalf("%s styling = %q", kind, rendered)
 		}
 	}
 }
@@ -101,7 +92,7 @@ func TestTypedConversationEntriesRenderCanonicalOrderInsteadOfTimestamps(t *test
 		},
 		messages: []model.Message{first, final}, activities: []domain.HarnessActivity{activity},
 	}
-	m := app{groups: []messageGroup{group}, messages: []model.Message{final}, editor: textarea.New(), width: 100, height: 80, paneFocus: focusMessage, markdown: newMessageMarkdownRenderer(nil)}
+	m := app{groups: []messageGroup{group}, messages: []model.Message{final}, editor: textarea.New(), width: 100, height: 80, paneFocus: focusMessage, markdown: newMessageMarkdownRenderer(nil), showActivities: true}
 	rendered := ansi.Strip(m.renderGroupPanel(group, 100))
 	if !(strings.Index(rendered, first.Body) < strings.Index(rendered, activity.Body) && strings.Index(rendered, activity.Body) < strings.Index(rendered, final.Body)) {
 		t.Fatalf("typed timeline ignored canonical order: %q", rendered)
@@ -120,7 +111,7 @@ func TestTypedConversationEntriesRenderCanonicalOrderInsteadOfTimestamps(t *test
 	}
 }
 
-func TestActivityExpansionPreservesDraftAndMessageActionTargets(t *testing.T) {
+func TestActivityVisibilityTogglePreservesDraftAndMessageActionTargets(t *testing.T) {
 	item := message("question", testAgentID, model.HumanMailboxID, "Question")
 	setMessageSemantics(&item, "Kind: question")
 	group := messageGroup{
@@ -136,11 +127,19 @@ func TestActivityExpansionPreservesDraftAndMessageActionTargets(t *testing.T) {
 	beforeReply, beforeArchive := replyTarget(group), archiveTarget(group)
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e'})
 	m = updated.(app)
+	if !m.showActivities || !strings.Contains(ansi.Strip(m.renderGroupPanel(m.groups[0], 80)), "▾ PROGRESS") {
+		t.Fatalf("activity was not shown expanded: %#v", m)
+	}
 	if m.editor.Value() != "draft survives" || m.answerID != item.ID || m.answerGroupKey != group.key || !m.answering {
-		t.Fatalf("activity expansion changed draft/reply state: %#v", m)
+		t.Fatalf("activity visibility changed draft/reply state: %#v", m)
 	}
 	if got := replyTarget(m.groups[0]); got.ID != beforeReply.ID || archiveTarget(m.groups[0]).ID != beforeArchive.ID || actionUnitKey(got) != actionUnitKey(beforeReply) {
 		t.Fatalf("activity changed action targets: reply=%#v archive=%#v", got, archiveTarget(m.groups[0]))
+	}
+	updated, _ = m.Update(tea.KeyPressMsg{Code: 'e'})
+	m = updated.(app)
+	if m.showActivities || strings.Contains(ansi.Strip(m.renderGroupPanel(m.groups[0], 80)), "PROGRESS") {
+		t.Fatalf("activity was not hidden: %#v", m)
 	}
 }
 
@@ -158,7 +157,7 @@ func TestCoalescedActivityRefreshPreservesLogicalMessageScrollAnchor(t *testing.
 		{Kind: domain.ConversationEntryMessage, EventID: strings.Repeat("3", 64), DisplayOrder: 3, Message: &group.messages[1]},
 	}
 	m := app{
-		groups: []messageGroup{group}, messages: []model.Message{second}, expandedActivities: map[string]bool{activityExpansionKey(activity): true},
+		groups: []messageGroup{group}, messages: []model.Message{second}, showActivities: true,
 		editor: textarea.New(), markdown: newMessageMarkdownRenderer(nil), width: 80, height: 24, paneFocus: focusMessage,
 	}
 	m.reconcileMessageViewport(false)

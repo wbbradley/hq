@@ -168,9 +168,9 @@ reproduces that projection. The legacy activity query returns at most 1,000 chro
 rows. Mixed `conversation/entries` pages place typed messages and projected activity in reducer
 display order; the TUI consumes that order directly rather than sorting occurrence timestamps.
 
-The TUI shows activity as compact non-actionable cards in the selected provider/session
-conversation. Focus the message pane, scroll to a card, and press `e` to expand or collapse the card
-nearest the viewport. Failed states and truncation are disclosed in both presentations. Activity
+The TUI hides non-actionable activity cards in the selected provider/session conversation by
+default. Focus the message pane and press `e` to show every activity card fully expanded or hide
+them all again. Visible cards disclose failed states and truncation. Activity
 never creates or selects an inbox row and does not affect open/unread counts, replies,
 archive/restore, drafts, action-unit grouping, final-answer styling, or delivery. Manual scrolling
 anchors only to logical message IDs across coalescing, rebuild reordering, and resize.
