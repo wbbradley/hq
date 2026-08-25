@@ -152,6 +152,63 @@ func TestHarnessActivityBoundsUTF8AndRetainsRecentProgress(t *testing.T) {
 	}
 }
 
+func TestHarnessActivityReadCapsAtNewestThousandProjectedRows(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	mailbox := harnessActivityMailbox(t, s, "query-cap-session")
+	account, parents, _, err := s.localAccountAction(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const activityCount = harnessActivityQueryLimit + 1
+	contents := make([]event.Content, 0, activityCount)
+	times := make([]time.Time, 0, activityCount)
+	started := time.Now().UTC().Truncate(time.Second)
+	for index := 0; index < activityCount; index++ {
+		itemID := fmt.Sprintf("item-%04d", index)
+		occurredAt := started.Add(time.Duration(index) * time.Second)
+		payload, marshalErr := event.MarshalPayload(event.HarnessActivityPayload{
+			Correlation: model.MessageCorrelation{Provider: "home-built", SessionID: "query-cap-session", OperationID: "operation", ItemID: itemID},
+			Kind:        domain.HarnessActivityTool, Status: domain.HarnessActivityCompleted, Title: "tool", Body: itemID,
+			OccurredAt: occurredAt.UnixMilli(), RuntimeID: "query-cap-runtime", Sequence: uint64(index + 1),
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		contents = append(contents, event.Content{
+			Schema: event.Schema2, Type: event.TypeHarnessActivity, Sender: s.localAddress(mailbox.ID),
+			Audience: &event.Audience{HumanAccountID: account.ID}, Parents: append([]string(nil), parents...),
+			Scope: event.ScopeAccountAddressed, Payload: payload,
+		})
+		times = append(times, occurredAt)
+	}
+	signed, err := s.signContents(ctx, contents, times)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCanonical(ctx, signed); err != nil {
+		t.Fatal(err)
+	}
+	filter := domain.HarnessActivityFilter{MailboxID: mailbox.ID, Harness: "home-built", SessionID: "query-cap-session", Limit: activityCount}
+	activities, err := s.ListHarnessActivities(ctx, filter)
+	if err != nil || len(activities) != harnessActivityQueryLimit {
+		t.Fatalf("capped activities = %d, %v; want %d", len(activities), err, harnessActivityQueryLimit)
+	}
+	if activities[0].ItemID != "item-0001" || activities[len(activities)-1].ItemID != "item-1000" {
+		t.Fatalf("capped activity range = %q..%q", activities[0].ItemID, activities[len(activities)-1].ItemID)
+	}
+	for index := 1; index < len(activities); index++ {
+		if activities[index].DisplayOrder <= activities[index-1].DisplayOrder {
+			t.Fatalf("activity cap order at %d = %d after %d", index, activities[index].DisplayOrder, activities[index-1].DisplayOrder)
+		}
+	}
+	filter.Limit = 1
+	latest, err := s.ListHarnessActivities(ctx, filter)
+	if err != nil || len(latest) != 1 || latest[0].ItemID != "item-1000" {
+		t.Fatalf("latest capped activity = %#v, %v", latest, err)
+	}
+}
+
 func TestHarnessActivityDynamicallyFitsEscapedSignedWire(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
 	mailbox := harnessActivityMailbox(t, s, "escaped-session")

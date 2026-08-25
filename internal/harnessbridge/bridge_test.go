@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -252,13 +253,20 @@ func TestBridgePersistsAndCoalescesFakeProviderActivityAcrossRestart(t *testing.
 	}
 	firstSession := instance.Session().Identity().ID
 	stop(cancel, done)
+	if err := database.Rebuild(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt := waitForHarnessActivities(t, database, agent.MailboxID, len(projected))
+	if !reflect.DeepEqual(rebuilt, projected) {
+		t.Fatalf("activities after full rebuild = %#v; want %#v", rebuilt, projected)
+	}
 
 	cancel, done, resumed := start()
 	if resumed.Session().Identity().ID != firstSession {
 		t.Fatalf("resumed session = %s, want %s", resumed.Session().Identity().ID, firstSession)
 	}
-	if got := waitForHarnessActivities(t, database, agent.MailboxID, 7); len(got) != 7 {
-		t.Fatalf("activities after restart = %d", len(got))
+	if got := waitForHarnessActivities(t, database, agent.MailboxID, len(projected)); !reflect.DeepEqual(got, projected) {
+		t.Fatalf("activities after restart = %#v; want %#v", got, projected)
 	}
 	if err := provider.Emit(resumed, "operation-activity", "command", activities[4].payload); err != nil {
 		t.Fatal(err)
