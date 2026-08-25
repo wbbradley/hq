@@ -1,0 +1,178 @@
+package tui
+
+import (
+	"context"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/wbbradley/hq/internal/domain"
+	"github.com/wbbradley/hq/internal/model"
+)
+
+func TestFakeProviderActivityRendersChronologicallyAsCollapsedAndExpandedCards(t *testing.T) {
+	started := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	first := message("first-message", testAgentID, model.HumanMailboxID, "First message")
+	first.CreatedAt = started
+	final := message("final-message", testAgentID, model.HumanMailboxID, "Final answer")
+	final.CreatedAt = started.Add(9 * time.Second)
+	final.Details = "Kind: final-answer"
+	activities := fakeTimelineActivities(started.Add(time.Second))
+	group := messageGroup{key: "fake-conversation", messages: []model.Message{first, final}, activities: activities}
+	m := app{groups: []messageGroup{group}, messages: []model.Message{final}, editor: textarea.New(), width: 100, height: 100, paneFocus: focusMessage, markdown: newMessageMarkdownRenderer(nil)}
+
+	rendered := m.renderGroupPanelLayout(group, 100)
+	if len(rendered.spans) != 2 || len(rendered.activitySpans) != 7 {
+		t.Fatalf("actionable/non-actionable spans = %#v / %#v", rendered.spans, rendered.activitySpans)
+	}
+	collapsed := ansi.Strip(rendered.panel)
+	if !(strings.Index(collapsed, "First message") < strings.Index(collapsed, "▸ OPERATION STATUS") && strings.Index(collapsed, "▸ PROGRESS") < strings.Index(collapsed, "Final answer")) {
+		t.Fatalf("timeline order = %q", collapsed)
+	}
+	for _, label := range []string{"OPERATION STATUS", "PLAN", "DIFF", "COMMAND", "FILE CHANGE", "TOOL CALL", "PROGRESS"} {
+		if !strings.Contains(collapsed, "▸ "+label) {
+			t.Fatalf("collapsed timeline omitted %s: %q", label, collapsed)
+		}
+	}
+	if strings.Contains(collapsed, "second plan line") || !strings.Contains(collapsed, "FAILED") || !strings.Contains(collapsed, "[truncated]") {
+		t.Fatalf("collapsed disclosure = %q", collapsed)
+	}
+	if kind := groupPresentationKind(group); kind != "final-answer" {
+		t.Fatalf("activity changed final-answer presentation to %q", kind)
+	}
+
+	m.expandedActivities = make(map[string]bool, len(activities))
+	for _, activity := range activities {
+		m.expandedActivities[activityExpansionKey(activity)] = true
+	}
+	expanded := ansi.Strip(m.renderGroupPanel(m.groups[0], 100))
+	if !strings.Contains(expanded, "▾ PLAN") || !strings.Contains(expanded, "second plan line") || !strings.Contains(expanded, "[content truncated]") {
+		t.Fatalf("expanded timeline = %q", expanded)
+	}
+}
+
+func TestActivityExpansionPreservesDraftAndMessageActionTargets(t *testing.T) {
+	item := message("question", testAgentID, model.HumanMailboxID, "Question")
+	item.Details = "Kind: question"
+	group := messageGroup{
+		key: "conversation", messages: []model.Message{item},
+		activities: []domain.HarnessActivity{{MailboxID: testAgentID, Harness: "home-built", SessionID: "session", OperationID: "operation", Kind: domain.HarnessActivityProgress, ItemID: "progress", Body: "working", OccurredAt: item.CreatedAt.Add(-time.Second)}},
+	}
+	editor := textarea.New()
+	editor.SetValue("draft survives")
+	m := app{
+		groups: []messageGroup{group}, messages: []model.Message{item}, answering: true, answerID: item.ID, answerGroupKey: group.key, answerQ: item,
+		activeDraftKey: group.key, editor: editor, width: 80, height: 30, paneFocus: focusMessage, markdown: newMessageMarkdownRenderer(nil),
+	}
+	beforeReply, beforeArchive := replyTarget(group), archiveTarget(group)
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'e'})
+	m = updated.(app)
+	if m.editor.Value() != "draft survives" || m.answerID != item.ID || m.answerGroupKey != group.key || !m.answering {
+		t.Fatalf("activity expansion changed draft/reply state: %#v", m)
+	}
+	if got := replyTarget(m.groups[0]); got.ID != beforeReply.ID || archiveTarget(m.groups[0]).ID != beforeArchive.ID || actionUnitKey(got) != actionUnitKey(beforeReply) {
+		t.Fatalf("activity changed action targets: reply=%#v archive=%#v", got, archiveTarget(m.groups[0]))
+	}
+}
+
+func TestCoalescedActivityRefreshPreservesLogicalMessageScrollAnchor(t *testing.T) {
+	started := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	first := message("anchor-first", testAgentID, model.HumanMailboxID, strings.Repeat("first message line\n", 10))
+	first.CreatedAt = started
+	second := message("anchor-second", testAgentID, model.HumanMailboxID, strings.Repeat("second message line\n", 15))
+	second.CreatedAt = started.Add(2 * time.Second)
+	activity := domain.HarnessActivity{MailboxID: testAgentID, Harness: "home-built", SessionID: "session", OperationID: "operation", Kind: domain.HarnessActivityPlan, Body: "short plan", OccurredAt: started.Add(time.Second)}
+	group := messageGroup{key: "anchor-conversation", messages: []model.Message{first, second}, activities: []domain.HarnessActivity{activity}}
+	m := app{
+		groups: []messageGroup{group}, messages: []model.Message{second}, expandedActivities: map[string]bool{activityExpansionKey(activity): true},
+		editor: textarea.New(), markdown: newMessageMarkdownRenderer(nil), width: 80, height: 24, paneFocus: focusMessage,
+	}
+	m.reconcileMessageViewport(false)
+	m.scrollMessagePane(10_000)
+	anchorID, before := m.messageAnchorID, m.messageScroll
+	if anchorID != second.ID {
+		t.Fatalf("fixture anchor = %q, want %q", anchorID, second.ID)
+	}
+	m.groups[0].activities[0].Body = strings.Repeat("coalesced plan grew across the viewport\n", 20)
+	m.groups[0].activities[0].OccurredAt = activity.OccurredAt.Add(time.Second)
+	m.reconcileMessageViewport(true)
+	if !m.messageScrollManual || m.messageAnchorID != anchorID || m.messageScroll <= before {
+		t.Fatalf("coalesced activity lost logical anchor: scroll=%d before=%d anchor=%q", m.messageScroll, before, m.messageAnchorID)
+	}
+}
+
+func TestActivityRefreshDoesNotCreateInboxRows(t *testing.T) {
+	item := message("only-message", testAgentID, model.HumanMailboxID, "Only message")
+	key := conversationKeyForMessage(item)
+	stableKey := conversationKeyString(key)
+	summary := model.ConversationSummary{Key: key, Latest: item, OldestOpen: &item}
+	m := app{conversationMode: true, conversations: []model.ConversationSummary{summary}, histories: map[string][]model.Message{stableKey: {item}}, editor: textarea.New()}
+	m.setMessages()
+	updated, _ := m.Update(historyLoadedMsg{
+		key: stableKey, messages: []model.Message{item},
+		activities: []domain.HarnessActivity{{MailboxID: testAgentID, Harness: "home-built", SessionID: "session", OperationID: "operation", Kind: domain.HarnessActivityProgress, ItemID: "progress", Body: "working", OccurredAt: item.CreatedAt}},
+	})
+	m = updated.(app)
+	if len(m.messages) != 1 || len(m.groups) != 1 || len(m.groups[0].messages) != 1 || len(m.groups[0].activities) != 1 || m.groups[0].latest().ID != item.ID {
+		t.Fatalf("activity changed inbox rows: messages=%#v groups=%#v", m.messages, m.groups)
+	}
+}
+
+type activityCaptureStore struct {
+	domain.Store
+	filter domain.HarnessActivityFilter
+}
+
+func (s *activityCaptureStore) ListHarnessActivities(_ context.Context, filter domain.HarnessActivityFilter) ([]domain.HarnessActivity, error) {
+	s.filter = filter
+	return nil, nil
+}
+
+func TestConversationActivityQueryUsesSelectedMailboxAndSession(t *testing.T) {
+	store := &activityCaptureStore{}
+	m := app{ctx: context.Background(), store: store}
+	agent := domain.NamedAgent{MailboxID: testAgentID, Harness: "home-built", CurrentSessionID: "current-session"}
+	if _, err := m.loadConversationActivities(model.ConversationKey{CounterpartyMailboxID: testAgentID}, []domain.NamedAgent{agent}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if store.filter.MailboxID != testAgentID || store.filter.Harness != "home-built" || store.filter.SessionID != "current-session" || store.filter.Limit != 1000 {
+		t.Fatalf("current-session filter = %#v", store.filter)
+	}
+	sessions := map[string]domain.AgentSession{"codex\x00old-session": {MailboxID: testAgentID, Harness: "codex", SessionID: "old-session"}}
+	if _, err := m.loadConversationActivities(model.ConversationKey{CounterpartyMailboxID: testAgentID, CodexThreadID: "old-session"}, nil, sessions); err != nil {
+		t.Fatal(err)
+	}
+	if store.filter.Harness != "codex" || store.filter.SessionID != "old-session" {
+		t.Fatalf("historical-session filter = %#v", store.filter)
+	}
+}
+
+func TestTUISubscribesToLocalActivityChanges(t *testing.T) {
+	if !slices.Contains(tuiChangeTopics(), domain.TopicActivities) {
+		t.Fatalf("TUI change topics = %#v", tuiChangeTopics())
+	}
+}
+
+func fakeTimelineActivities(started time.Time) []domain.HarnessActivity {
+	base := domain.HarnessActivity{MailboxID: testAgentID, Harness: "home-built", SessionID: "session", OperationID: "operation"}
+	activity := func(offset time.Duration, kind domain.HarnessActivityKind, item, title, body string, status domain.HarnessActivityStatus) domain.HarnessActivity {
+		result := base
+		result.Kind, result.ItemID, result.Title, result.Body, result.Status, result.OccurredAt = kind, item, title, body, status, started.Add(offset)
+		return result
+	}
+	result := []domain.HarnessActivity{
+		activity(0, domain.HarnessActivityOperation, "", "", "", domain.HarnessActivityRunning),
+		activity(time.Second, domain.HarnessActivityPlan, "", "", "first plan line\nsecond plan line", ""),
+		activity(2*time.Second, domain.HarnessActivityDiff, "", "", "diff --git a/a b/a", ""),
+		activity(3*time.Second, domain.HarnessActivityCommand, "command", "go test ./...", "Exit code: 1\nFAIL", domain.HarnessActivityFailed),
+		activity(4*time.Second, domain.HarnessActivityFile, "file", "main.go", "updated", domain.HarnessActivityCompleted),
+		activity(5*time.Second, domain.HarnessActivityTool, "tool", "search", "found matches", domain.HarnessActivityCompleted),
+		activity(6*time.Second, domain.HarnessActivityProgress, "progress", "", "working", ""),
+	}
+	result[3].Truncated = true
+	return result
+}

@@ -6,6 +6,7 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 )
 
@@ -29,6 +30,8 @@ type messageMarkdownRenderer struct {
 type renderedMessageGroupCache struct {
 	groupKey      string
 	messages      []model.Message
+	activities    []domain.HarnessActivity
+	activityState string
 	draft         messageDraft
 	hasDraft      bool
 	width         int

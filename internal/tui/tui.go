@@ -47,6 +47,8 @@ type app struct {
 	conversations       []model.ConversationSummary
 	conversationMode    bool
 	histories           map[string][]model.Message
+	activities          map[string][]domain.HarnessActivity
+	expandedActivities  map[string]bool
 	inbox               []model.Message
 	sent                []model.Message
 	archived            []model.Message
@@ -149,6 +151,7 @@ type messageGroup struct {
 	key             string
 	conversationKey model.ConversationKey
 	messages        []model.Message
+	activities      []domain.HarnessActivity
 	draft           *messageDraft
 }
 
@@ -249,9 +252,16 @@ type messageLineSpan struct {
 	end        int
 }
 
+type activityLineSpan struct {
+	key   string
+	start int
+	end   int
+}
+
 type renderedMessageGroup struct {
-	panel string
-	spans []messageLineSpan
+	panel         string
+	spans         []messageLineSpan
+	activitySpans []activityLineSpan
 }
 
 func (g messageGroup) latest() model.Message {
@@ -268,6 +278,7 @@ type loadedMsg struct {
 	archived      []model.Message
 	conversations []model.ConversationSummary
 	histories     map[string][]model.Message
+	activities    map[string][]domain.HarnessActivity
 	network       domain.NetworkStatus
 	agents        []domain.NamedAgent
 	projects      []domain.Project
@@ -278,9 +289,10 @@ type loadedMsg struct {
 }
 
 type historyLoadedMsg struct {
-	key      string
-	messages []model.Message
-	err      error
+	key        string
+	messages   []model.Message
+	activities []domain.HarnessActivity
+	err        error
 }
 
 type answeredMsg struct {
@@ -377,7 +389,7 @@ func runWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Wri
 	var subscription domain.ChangeSubscription
 	var err error
 	if updates.Subscribe != nil {
-		subscription, err = updates.Subscribe(ctx, domain.TopicMessages, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman, domain.TopicRelays, domain.TopicAgents)
+		subscription, err = updates.Subscribe(ctx, tuiChangeTopics()...)
 		if err != nil {
 			return fmt.Errorf("subscribe to HQ updates: %w", err)
 		}
@@ -401,6 +413,10 @@ func runWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Wri
 	}
 	_, err = tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx)).Run()
 	return err
+}
+
+func tuiChangeTopics() []domain.ChangeTopic {
+	return []domain.ChangeTopic{domain.TopicMessages, domain.TopicActivities, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman, domain.TopicRelays, domain.TopicAgents}
 }
 
 func (m app) Init() tea.Cmd {
@@ -456,6 +472,7 @@ func (m app) load() tea.Msg {
 		return loadedMsg{err: err}
 	}
 	histories := make(map[string][]model.Message)
+	activities := make(map[string][]domain.HarnessActivity)
 	selectedKey := m.selectedGroupKey()
 	selectedConversation, found := conversationSummaryByString(conversations, selectedKey)
 	if !found && len(conversations) > 0 {
@@ -490,8 +507,15 @@ func (m app) load() tea.Msg {
 			sessions[session.Harness+"\x00"+session.SessionID] = session
 		}
 	}
+	if found {
+		projected, activityErr := m.loadConversationActivities(selectedConversation.Key, agents, sessions)
+		if activityErr != nil {
+			return loadedMsg{err: activityErr}
+		}
+		activities[selectedKey] = projected
+	}
 	network, err := m.store.NetworkStatus(m.ctx)
-	return loadedMsg{conversations: conversations, histories: histories, agents: agents, projects: projects, devices: devices, account: account, sessions: sessions, network: network, err: err}
+	return loadedMsg{conversations: conversations, histories: histories, activities: activities, agents: agents, projects: projects, devices: devices, account: account, sessions: sessions, network: network, err: err}
 }
 
 func (m *app) reload() tea.Cmd {
@@ -539,13 +563,44 @@ func (m app) loadAllConversationHistory(key model.ConversationKey) ([]model.Mess
 
 func (m app) loadConversationHistory(key model.ConversationKey) tea.Cmd {
 	stableKey := conversationKeyString(key)
-	if _, loaded := m.histories[stableKey]; loaded || !key.Valid() {
+	_, historyLoaded := m.histories[stableKey]
+	_, activityLoaded := m.activities[stableKey]
+	if (historyLoaded && activityLoaded) || !key.Valid() {
 		return nil
 	}
 	return func() tea.Msg {
 		messages, err := m.loadAllConversationHistory(key)
-		return historyLoadedMsg{key: stableKey, messages: messages, err: err}
+		var activities []domain.HarnessActivity
+		if err == nil {
+			activities, err = m.loadConversationActivities(key, m.agents, m.threadSessions)
+		}
+		return historyLoadedMsg{key: stableKey, messages: messages, activities: activities, err: err}
 	}
+}
+
+func (m app) loadConversationActivities(key model.ConversationKey, agents []domain.NamedAgent, sessions map[string]domain.AgentSession) ([]domain.HarnessActivity, error) {
+	reader, ok := m.store.(domain.HarnessActivityReader)
+	if !ok || key.CounterpartyMailboxID == "" || key.CounterpartyMailboxID == model.HumanMailboxID {
+		return nil, nil
+	}
+	filter := domain.HarnessActivityFilter{MailboxID: key.CounterpartyMailboxID, Limit: 1000}
+	if key.CodexThreadID != "" {
+		filter.SessionID = key.CodexThreadID
+		for _, session := range sessions {
+			if session.MailboxID == filter.MailboxID && session.SessionID == filter.SessionID {
+				filter.Harness = session.Harness
+				break
+			}
+		}
+	} else {
+		for _, agent := range agents {
+			if agent.MailboxID == filter.MailboxID && agent.CurrentSessionID != "" {
+				filter.Harness, filter.SessionID = agent.Harness, agent.CurrentSessionID
+				break
+			}
+		}
+	}
+	return reader.ListHarnessActivities(m.ctx, filter)
 }
 
 func (m app) answer() tea.Msg {
@@ -721,6 +776,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conversationMode = true
 			m.conversations = msg.conversations
 			m.histories = msg.histories
+			m.activities = msg.activities
 		} else {
 			m.inbox, m.sent, m.archived = msg.inbox, msg.sent, msg.archived
 		}
@@ -771,6 +827,10 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.histories = make(map[string][]model.Message)
 		}
 		m.histories[msg.key] = msg.messages
+		if m.activities == nil {
+			m.activities = make(map[string][]domain.HarnessActivity)
+		}
+		m.activities[msg.key] = msg.activities
 		selectedKey := m.selectedGroupKey()
 		m.setMessages()
 		if index := groupIndex(m.visibleGroups(), selectedKey); index >= 0 {
@@ -1101,6 +1161,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.answer
 				}
 				return m, nil
+			case "e":
+				if m.paneFocus == focusMessage && m.toggleSelectedActivities() {
+					m.reconcileMessageViewport(true)
+					return m, nil
+				}
 			}
 			if m.paneFocus != focusReply {
 				return m, nil
@@ -1195,6 +1260,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "r":
 			return m, m.reload()
+		case "e":
+			if m.paneFocus == focusMessage && m.toggleSelectedActivities() {
+				m.reconcileMessageViewport(true)
+			}
+			return m, nil
 		}
 	}
 	return m, nil
@@ -2313,7 +2383,7 @@ func (m *app) setMessages() {
 			if history, loaded := m.histories[key]; loaded {
 				messages = append([]model.Message(nil), history...)
 			}
-			m.groups = append(m.groups, messageGroup{key: key, conversationKey: summary.Key, messages: messages})
+			m.groups = append(m.groups, messageGroup{key: key, conversationKey: summary.Key, messages: messages, activities: append([]domain.HarnessActivity(nil), m.activities[key]...)})
 			m.messages = append(m.messages, summary.Latest)
 		}
 		return
@@ -2451,6 +2521,7 @@ func (m app) visibleGroups() []messageGroup {
 		group := messageGroup{key: key, draft: &copyDraft}
 		if draft.answerQ.ID != "" {
 			group.conversationKey = conversationKeyForMessage(draft.answerQ)
+			group.activities = append([]domain.HarnessActivity(nil), m.activities[key]...)
 			if history, loaded := m.histories[key]; loaded {
 				group.messages = append([]model.Message(nil), history...)
 			} else {
@@ -3067,13 +3138,13 @@ func (m app) View() tea.View {
 	}
 	replyPane = fitRenderedPane(replyPane, layout.replyWidth, layout.replyHeight, 0, replyFocused)
 	bottom := lipgloss.JoinVertical(lipgloss.Left, messagePane, replyPane)
-	help := "tab/shift+tab focus/compose · j/k navigate · pgup/pgdown or ^u/^d page · enter reply · n new · g agents · d archive · u undo · i details · q quit"
+	help := "tab/shift+tab focus/compose · j/k navigate · pgup/pgdown or ^u/^d page · e toggle activity at viewport · enter reply · n new · g agents · d archive · u undo · i details · q quit"
 	if m.pickingRecipient {
 		help = "type to filter recipients · j/k or arrows move · enter select · esc cancel"
 	} else if m.projectSetup != nil {
 		help = "j/k move · enter select · f force blocked handoff · esc back"
 	} else if m.answering {
-		help = "tab/shift+tab focus · pgup/pgdown or ^u/^d page · enter submit · shift+enter/ctrl+j newline · esc cancel"
+		help = "tab/shift+tab focus · pgup/pgdown or ^u/^d page · e toggle activity at viewport · enter submit · shift+enter/ctrl+j newline · esc cancel"
 	}
 	if m.undoNotice != "" {
 		help = m.undoNotice + " · " + help
@@ -3257,11 +3328,20 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 	}
 	metadataHidden := false
 	var spans []messageLineSpan
+	var activitySpans []activityLineSpan
 	markdownWidth := max(1, width-panel.GetHorizontalFrameSize())
-	for i, message := range group.messages {
-		if i > 0 {
+	for index, entry := range conversationTimeline(group) {
+		if index > 0 {
 			appendRenderedText(&body, &lineCount, "\n\n")
 		}
+		if entry.activity != nil {
+			activity := *entry.activity
+			activityStart := max(0, lineCount-1)
+			appendRenderedText(&body, &lineCount, m.renderHarnessActivity(activity, markdownWidth, m.expandedActivities[activityExpansionKey(activity)]))
+			activitySpans = append(activitySpans, activityLineSpan{key: activityExpansionKey(activity), start: activityStart, end: lineCount})
+			continue
+		}
+		message := *entry.message
 		spanStart := max(0, lineCount-1)
 		header := "── " + message.CreatedAt.Local().Format("Jan 2, 3:04:05 PM")
 		if direction := messageDirection(message); direction != "" {
@@ -3306,7 +3386,7 @@ func (m app) renderGroupPanelLayout(group messageGroup, width int) renderedMessa
 	if !m.showTechnical && (metadataHidden || groupHasTechnicalIdentifiers(group) || m.technicalContext(latest) != "") {
 		bottomLabel = "technical details hidden · press i to show"
 	}
-	return m.cacheRenderedMessageGroup(group, width, renderedMessageGroup{panel: renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage)), spans: spans})
+	return m.cacheRenderedMessageGroup(group, width, renderedMessageGroup{panel: renderMessagePanel(body.String(), width, topLabel, bottomLabel, m.paneFocused(focusMessage)), spans: spans, activitySpans: activitySpans})
 }
 
 func appendRenderedText(body *strings.Builder, lineCount *int, value string) {
@@ -3330,7 +3410,7 @@ func (m app) cachedRenderedMessageGroup(group messageGroup, width int) (rendered
 	if hasDraft {
 		draft = *group.draft
 	}
-	if cache.groupKey != group.key || !slices.Equal(cache.messages, group.messages) || cache.hasDraft != hasDraft || cache.draft != draft ||
+	if cache.groupKey != group.key || !slices.Equal(cache.messages, group.messages) || !slices.Equal(cache.activities, group.activities) || cache.activityState != m.activityExpansionState(group.activities) || cache.hasDraft != hasDraft || cache.draft != draft ||
 		cache.width != width || cache.showTechnical != m.showTechnical || cache.focused != m.paneFocused(focusMessage) ||
 		cache.contextID != m.contextID || cache.branch != m.branch || cache.remotes != m.remotes || cache.pull != m.pull {
 		return renderedMessageGroup{}, false
@@ -3348,7 +3428,7 @@ func (m app) cacheRenderedMessageGroup(group messageGroup, width int, rendered r
 		draft = *group.draft
 	}
 	m.markdown.groupCache = &renderedMessageGroupCache{
-		groupKey: group.key, messages: append([]model.Message(nil), group.messages...), draft: draft, hasDraft: hasDraft,
+		groupKey: group.key, messages: append([]model.Message(nil), group.messages...), activities: append([]domain.HarnessActivity(nil), group.activities...), activityState: m.activityExpansionState(group.activities), draft: draft, hasDraft: hasDraft,
 		width: width, showTechnical: m.showTechnical, focused: m.paneFocused(focusMessage),
 		contextID: m.contextID, branch: m.branch, remotes: m.remotes, pull: m.pull, rendered: rendered,
 	}
