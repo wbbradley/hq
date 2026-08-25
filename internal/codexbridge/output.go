@@ -219,7 +219,7 @@ func canonicalOutputFromNotification(threadID string, notification Notification)
 		if params.Item.Phase == "final_answer" {
 			kind = "final-answer"
 		}
-		details := fmt.Sprintf("Kind: %s\nCodex thread: %s\nCodex turn: %s\nCodex item: %s\nPhase: %s", kind, params.ThreadID, params.TurnID, params.Item.ID, valueOrNone(params.Item.Phase))
+		details := fmt.Sprintf("Kind: %s\nHarness provider: codex\nHarness session: %s\nHarness operation: %s\nHarness item: %s\nPhase: %s", kind, params.ThreadID, params.TurnID, params.Item.ID, valueOrNone(params.Item.Phase))
 		return canonicalOutput{key: params.Item.ID, body: params.Item.Text, details: details}, true
 	case "turn/completed":
 		var params TurnNotification
@@ -235,13 +235,13 @@ func canonicalOutputFromNotification(threadID string, notification Notification)
 				errorMessage = valueOrNone(params.Turn.Error.Message)
 				additionalDetails = strings.TrimSpace(params.Turn.Error.AdditionalDetails)
 			}
-			details := fmt.Sprintf("Kind: status\nCodex thread: %s\nCodex turn: %s\nStatus: failed\nError: %s", params.ThreadID, params.Turn.ID, errorMessage)
+			details := fmt.Sprintf("Kind: status\nHarness provider: codex\nHarness session: %s\nHarness operation: %s\nStatus: failed\nError: %s", params.ThreadID, params.Turn.ID, errorMessage)
 			if additionalDetails != "" {
 				details += "\nAdditional details: " + additionalDetails
 			}
 			return canonicalOutput{key: key, body: "Codex turn failed", details: details}, true
 		case "interrupted":
-			details := fmt.Sprintf("Kind: status\nCodex thread: %s\nCodex turn: %s\nStatus: interrupted", params.ThreadID, params.Turn.ID)
+			details := fmt.Sprintf("Kind: status\nHarness provider: codex\nHarness session: %s\nHarness operation: %s\nStatus: interrupted", params.ThreadID, params.Turn.ID)
 			return canonicalOutput{key: key, body: "Codex turn interrupted", details: details}, true
 		default:
 			return canonicalOutput{}, false

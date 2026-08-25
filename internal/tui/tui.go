@@ -584,14 +584,8 @@ func (m app) loadConversationActivities(key model.ConversationKey, agents []doma
 		return nil, nil
 	}
 	filter := domain.HarnessActivityFilter{MailboxID: key.CounterpartyMailboxID, Limit: 1000}
-	if key.CodexThreadID != "" {
-		filter.SessionID = key.CodexThreadID
-		for _, session := range sessions {
-			if session.MailboxID == filter.MailboxID && session.SessionID == filter.SessionID {
-				filter.Harness = session.Harness
-				break
-			}
-		}
+	if key.HarnessSessionID != "" {
+		filter.Harness, filter.SessionID = key.HarnessProvider, key.HarnessSessionID
 	} else {
 		for _, agent := range agents {
 			if agent.MailboxID == filter.MailboxID && agent.CurrentSessionID != "" {
@@ -629,8 +623,9 @@ func (m app) answer() tea.Msg {
 				}
 				return answeredMsg{err: fmt.Errorf("recipient %s is no longer available; choose a recipient again: %w", m.composeName, cause)}
 			}
-			if agent.Harness == "codex" && agent.CurrentSessionID != "" {
-				message.Details = "Codex thread: " + agent.CurrentSessionID
+			if agent.Harness != "" && agent.CurrentSessionID != "" {
+				message.Details = "Harness provider: " + agent.Harness + "\nHarness session: " + agent.CurrentSessionID
+				message.HarnessProvider, message.HarnessSessionID = agent.Harness, agent.CurrentSessionID
 			}
 		}
 		message.RecipientMailboxID = m.composeTo
@@ -706,14 +701,21 @@ func (m app) archiveAnsweredGroup() error {
 }
 
 func turnCorrelationDetails(message model.Message) string {
-	thread := detailValue(message.Details, "Codex thread:")
-	turn := detailValue(message.Details, "Codex turn:")
+	provider := message.HarnessProvider
+	if provider == "" {
+		provider = detailValue(message.Details, "Harness provider:")
+	}
+	thread := detailValue(message.Details, "Harness session:")
+	turn := detailValue(message.Details, "Harness operation:")
 	var lines []string
+	if provider != "" {
+		lines = append(lines, "Harness provider: "+provider)
+	}
 	if thread != "" {
-		lines = append(lines, "Codex thread: "+thread)
+		lines = append(lines, "Harness session: "+thread)
 	}
 	if turn != "" {
-		lines = append(lines, "Codex turn: "+turn)
+		lines = append(lines, "Harness operation: "+turn)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -862,7 +864,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.agentManager.status = msg.err.Error()
 		} else {
-			m.agentManager.status = fmt.Sprintf("%s · %s · %s", msg.runtime.Phase, threadLabel(m.managedThreadName(msg.runtime.SessionID), msg.runtime.SessionID), msg.runtime.Directory)
+			m.agentManager.status = fmt.Sprintf("%s · %s · %s", msg.runtime.Phase, threadLabel(m.managedThreadName(msg.runtime.Harness, msg.runtime.SessionID), msg.runtime.SessionID), msg.runtime.Directory)
 		}
 		return m, m.reload()
 	case renamedAgentSessionMsg:
@@ -1639,9 +1641,9 @@ func shortThreadID(id string) string {
 	return id[:8] + "…" + id[len(id)-4:]
 }
 
-func (m app) managedThreadName(id string) string {
+func (m app) managedThreadName(provider, id string) string {
 	for _, session := range m.agentManager.sessions {
-		if session.Harness == "codex" && session.SessionID == id {
+		if session.Harness == provider && session.SessionID == id {
 			return session.ThreadName
 		}
 	}
@@ -2457,12 +2459,12 @@ func conversationKeyForMessage(message model.Message) model.ConversationKey {
 	if counterparty == model.HumanMailboxID {
 		counterparty = message.RecipientMailboxID
 	}
-	correlation := model.MessageCorrelation{CodexThreadID: message.CodexThreadID, CodexTurnID: message.CodexTurnID}
-	if correlation.CodexThreadID == "" {
+	correlation := model.MessageCorrelation{HarnessProvider: message.HarnessProvider, HarnessSessionID: message.HarnessSessionID, HarnessOperationID: message.HarnessOperationID}
+	if correlation.HarnessSessionID == "" {
 		correlation = model.ParseMessageCorrelation(message.Details)
 	}
-	key := model.ConversationKey{CounterpartyMailboxID: counterparty, CodexThreadID: correlation.CodexThreadID}
-	if key.CodexThreadID == "" {
+	key := model.ConversationKey{CounterpartyMailboxID: counterparty, HarnessProvider: correlation.HarnessProvider, HarnessSessionID: correlation.HarnessSessionID}
+	if key.HarnessSessionID == "" {
 		key.ThreadID = message.ThreadID
 		if key.ThreadID == "" {
 			key.ThreadID = message.ID
@@ -2472,8 +2474,8 @@ func conversationKeyForMessage(message model.Message) model.ConversationKey {
 }
 
 func conversationKeyString(key model.ConversationKey) string {
-	if key.CodexThreadID != "" {
-		return "conversation:" + key.CounterpartyMailboxID + ":codex:" + key.CodexThreadID
+	if key.HarnessSessionID != "" {
+		return "conversation:" + key.CounterpartyMailboxID + ":harness:" + key.HarnessProvider + ":" + key.HarnessSessionID
 	}
 	return "conversation:" + key.CounterpartyMailboxID + ":thread:" + key.ThreadID
 }
@@ -2787,7 +2789,7 @@ func replyTarget(group messageGroup) model.Message {
 	unit := actionUnitKey(oldest)
 	for i := len(group.messages) - 1; i >= 0; i-- {
 		message := group.messages[i]
-		if canReply(message) && actionUnitKey(message) == unit && detailValue(message.Details, "Codex request:") != "" {
+		if canReply(message) && actionUnitKey(message) == unit && detailValue(message.Details, "Harness request:") != "" {
 			return message
 		}
 	}
@@ -2810,12 +2812,12 @@ func archiveTarget(group messageGroup) model.Message {
 }
 
 func actionUnitKey(message model.Message) string {
-	turn := message.CodexTurnID
+	turn := message.HarnessOperationID
 	if turn == "" {
-		turn = model.ParseMessageCorrelation(message.Details).CodexTurnID
+		turn = model.ParseMessageCorrelation(message.Details).HarnessOperationID
 	}
 	if turn != "" {
-		return "turn:" + turn
+		return "operation:" + turn
 	}
 	if message.ThreadID != "" {
 		return "thread:" + message.ThreadID
@@ -2926,21 +2928,31 @@ func (m app) presentationDetails(raw string, expanded bool) (string, bool) {
 			return raw, false
 		}
 		lines := strings.Split(raw, "\n")
+		providerID := ""
+		for _, line := range lines {
+			if value, found := strings.CutPrefix(strings.TrimSpace(line), "Harness provider:"); found {
+				providerID = strings.TrimSpace(value)
+				break
+			}
+		}
+		if providerID == "" {
+			providerID = "codex"
+		}
 		for index, line := range lines {
-			value, found := strings.CutPrefix(strings.TrimSpace(line), "Codex thread:")
+			value, found := strings.CutPrefix(strings.TrimSpace(line), "Harness session:")
 			if !found {
 				continue
 			}
 			threadID := strings.TrimSpace(value)
-			if session, ok := m.threadSessions["codex\x00"+threadID]; ok && session.ThreadName != "" {
-				lines[index] = "Codex thread: " + threadLabel(session.ThreadName, threadID)
+			if session, ok := m.threadSessions[providerID+"\x00"+threadID]; ok && session.ThreadName != "" {
+				lines[index] = "Harness session: " + threadLabel(session.ThreadName, threadID)
 			}
 		}
 		return strings.Join(lines, "\n"), false
 	}
 	prefixes := []string{
-		"Kind:", "Phase:", "Codex thread:", "Codex turn:", "Codex item:",
-		"Codex request:", "HQ message:", "HQ mailbox:",
+		"Kind:", "Phase:", "Harness provider:", "Harness session:", "Harness operation:", "Harness item:",
+		"Harness request:", "HQ message:", "HQ mailbox:",
 	}
 	visible := make([]string, 0, strings.Count(raw, "\n")+1)
 	hidden := false

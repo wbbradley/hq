@@ -143,7 +143,7 @@ func TestConversationActivityQueryUsesSelectedMailboxAndSession(t *testing.T) {
 		t.Fatalf("current-session filter = %#v", store.filter)
 	}
 	sessions := map[string]domain.AgentSession{"codex\x00old-session": {MailboxID: testAgentID, Harness: "codex", SessionID: "old-session"}}
-	if _, err := m.loadConversationActivities(model.ConversationKey{CounterpartyMailboxID: testAgentID, CodexThreadID: "old-session"}, nil, sessions); err != nil {
+	if _, err := m.loadConversationActivities(model.ConversationKey{CounterpartyMailboxID: testAgentID, HarnessProvider: "codex", HarnessSessionID: "old-session"}, nil, sessions); err != nil {
 		t.Fatal(err)
 	}
 	if store.filter.Harness != "codex" || store.filter.SessionID != "old-session" {

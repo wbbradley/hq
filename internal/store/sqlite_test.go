@@ -22,7 +22,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "27"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "29"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -321,11 +321,11 @@ func TestMessageConversationCorrelationFilters(t *testing.T) {
 	firstAgent := resolveAgent(t, s, "codex", "correlation-one", "/repo")
 	secondAgent := resolveAgent(t, s, "codex", "correlation-two", "/repo")
 	firstInbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da1", firstAgent.ID, model.HumanMailboxID, "first inbound")
-	firstInbound.Details = "Codex thread: shared-thread\nCodex turn: first-turn"
+	firstInbound.Details = "Harness provider: codex\nHarness session: shared-thread\nHarness operation: first-turn"
 	firstOutbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da2", model.HumanMailboxID, firstAgent.ID, "first outbound")
-	firstOutbound.Details = "Codex thread: shared-thread\nCodex turn: second-turn"
+	firstOutbound.Details = "Harness provider: codex\nHarness session: shared-thread\nHarness operation: second-turn"
 	secondInbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da3", secondAgent.ID, model.HumanMailboxID, "second inbound")
-	secondInbound.Details = "Codex thread: shared-thread\nCodex turn: first-turn"
+	secondInbound.Details = "Harness provider: codex\nHarness session: shared-thread\nHarness operation: first-turn"
 	uncorrelated := message("0198c7ec-73b0-7cc3-a5f7-e31c77140da4", firstAgent.ID, model.HumanMailboxID, "uncorrelated")
 	for _, item := range []model.Message{firstInbound, firstOutbound, secondInbound, uncorrelated} {
 		if err := s.Create(ctx, item); err != nil {
@@ -333,7 +333,7 @@ func TestMessageConversationCorrelationFilters(t *testing.T) {
 		}
 	}
 
-	got, err := s.List(ctx, model.Filter{CodexThreadID: "shared-thread", CounterpartyMailboxID: firstAgent.ID, Limit: 10})
+	got, err := s.List(ctx, model.Filter{HarnessSessionID: "shared-thread", CounterpartyMailboxID: firstAgent.ID, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,12 +341,12 @@ func TestMessageConversationCorrelationFilters(t *testing.T) {
 		t.Fatalf("first conversation = %#v", got)
 	}
 	for _, item := range got {
-		if item.CodexThreadID != "shared-thread" || item.CodexTurnID == "" {
+		if item.HarnessSessionID != "shared-thread" || item.HarnessOperationID == "" {
 			t.Fatalf("projected correlation = %#v", item)
 		}
 	}
 
-	turn, err := s.List(ctx, model.Filter{CodexThreadID: "shared-thread", CodexTurnID: "first-turn", CounterpartyMailboxID: secondAgent.ID})
+	turn, err := s.List(ctx, model.Filter{HarnessSessionID: "shared-thread", HarnessOperationID: "first-turn", CounterpartyMailboxID: secondAgent.ID})
 	if err != nil || len(turn) != 1 || turn[0].ID != secondInbound.ID {
 		t.Fatalf("turn filter = %#v, %v", turn, err)
 	}
@@ -368,16 +368,16 @@ func TestConversationSummariesFilterUnionAndPagination(t *testing.T) {
 	created := time.Now().UTC().Add(-time.Minute)
 	open := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc1", agent.ID, model.HumanMailboxID, "open")
 	open.CreatedAt = created
-	open.Details = "Codex thread: open-thread\nCodex turn: turn-one"
+	open.Details = "Harness provider: codex\nHarness session: open-thread\nHarness operation: turn-one"
 	openReply := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc4", model.HumanMailboxID, agent.ID, "open conversation reply")
 	openReply.CreatedAt = created.Add(time.Second)
-	openReply.Details = "Codex thread: open-thread\nCodex turn: turn-one"
+	openReply.Details = "Harness provider: codex\nHarness session: open-thread\nHarness operation: turn-one"
 	sent := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc2", model.HumanMailboxID, agent.ID, "sent only")
 	sent.CreatedAt = created
-	sent.Details = "Codex thread: sent-thread"
+	sent.Details = "Harness provider: codex\nHarness session: sent-thread"
 	archived := message("0198c7ec-73b0-7cc3-a5f7-e31c77140dc3", other.ID, model.HumanMailboxID, "archived only")
 	archived.CreatedAt = created
-	archived.Details = "Codex thread: archived-thread"
+	archived.Details = "Harness provider: codex\nHarness session: archived-thread"
 	for _, item := range []model.Message{open, openReply, sent, archived} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -388,7 +388,7 @@ func TestConversationSummariesFilterUnionAndPagination(t *testing.T) {
 	}
 
 	defaultPage, err := s.ListConversations(ctx, model.ConversationFilter{})
-	if err != nil || len(defaultPage.Conversations) != 1 || defaultPage.Conversations[0].Key.CodexThreadID != "open-thread" || defaultPage.Conversations[0].OpenCount != 1 {
+	if err != nil || len(defaultPage.Conversations) != 1 || defaultPage.Conversations[0].Key.HarnessSessionID != "open-thread" || defaultPage.Conversations[0].OpenCount != 1 {
 		t.Fatalf("default conversations = %#v, %v", defaultPage, err)
 	}
 	first, err := s.ListConversations(ctx, model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Limit: 1})
@@ -404,9 +404,9 @@ func TestConversationSummariesFilterUnionAndPagination(t *testing.T) {
 		t.Fatalf("third conversation page = %#v, %v", third, err)
 	}
 	seen := map[string]bool{
-		first.Conversations[0].Key.CodexThreadID:  true,
-		second.Conversations[0].Key.CodexThreadID: true,
-		third.Conversations[0].Key.CodexThreadID:  true,
+		first.Conversations[0].Key.HarnessSessionID:  true,
+		second.Conversations[0].Key.HarnessSessionID: true,
+		third.Conversations[0].Key.HarnessSessionID:  true,
 	}
 	for _, thread := range []string{"open-thread", "sent-thread", "archived-thread"} {
 		if !seen[thread] {
@@ -432,7 +432,7 @@ func TestConversationHistoryIsCompleteChronologicalAndIsolated(t *testing.T) {
 	}
 	for index := range items {
 		items[index].CreatedAt = created.Add(time.Duration(index) * time.Second)
-		items[index].Details = "Codex thread: shared-thread\nCodex turn: turn-" + fmt.Sprint(index)
+		items[index].Details = "Harness provider: codex\nHarness session: shared-thread\nHarness operation: turn-" + fmt.Sprint(index)
 		if err := s.Create(ctx, items[index]); err != nil {
 			t.Fatal(err)
 		}
@@ -440,7 +440,7 @@ func TestConversationHistoryIsCompleteChronologicalAndIsolated(t *testing.T) {
 	if err := s.Archive(ctx, items[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	key := model.ConversationKey{CounterpartyMailboxID: agent.ID, CodexThreadID: "shared-thread"}
+	key := model.ConversationKey{CounterpartyMailboxID: agent.ID, HarnessProvider: "codex", HarnessSessionID: "shared-thread"}
 	first, err := s.ListConversationHistory(ctx, model.ConversationHistoryFilter{Key: key, Limit: 2})
 	if err != nil || len(first.Messages) != 2 || first.NextCursor == "" {
 		t.Fatalf("first history page = %#v, %v", first, err)
@@ -489,13 +489,46 @@ func TestConversationHistoryCanonicalFallback(t *testing.T) {
 	}
 }
 
+func TestHarnessConversationsNamespaceProviderLocalSessionIDs(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent, err := s.CreateNamedAgent(ctx, "multi-provider", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, provider := range []string{"alpha", "beta"} {
+		if _, err := s.SelectNamedAgentSession(ctx, agent.Name, model.SessionIdentity{Harness: provider, ExternalSessionID: "shared-session"}, model.RepositoryContext{Directory: "/repo"}); err != nil {
+			t.Fatal(err)
+		}
+		item := message(fmt.Sprintf("0198c7ec-73b0-7cc3-a5f7-e31c77140d8%d", index), agent.MailboxID, model.HumanMailboxID, provider+" output")
+		item.Details = "Harness provider: " + provider + "\nHarness session: shared-session\nHarness operation: operation-1"
+		if err := s.Create(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := s.ListConversations(ctx, model.ConversationFilter{})
+	if err != nil || len(page.Conversations) != 2 {
+		t.Fatalf("namespaced conversations = %#v, %v", page, err)
+	}
+	providers := map[string]bool{}
+	for _, conversation := range page.Conversations {
+		providers[conversation.Key.HarnessProvider] = true
+		if conversation.Key.HarnessSessionID != "shared-session" {
+			t.Fatalf("conversation key = %#v", conversation.Key)
+		}
+	}
+	if !providers["alpha"] || !providers["beta"] {
+		t.Fatalf("conversation providers = %#v", providers)
+	}
+}
+
 func TestVersionTwelveMigrationBackfillsMessageCorrelation(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	s := openStore(t, database)
 	ctx := context.Background()
 	agent := resolveAgent(t, s, "codex", "correlation-migration", "/repo")
 	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db1", agent.ID, model.HumanMailboxID, "preserve correlation")
-	item.Details = "Codex thread: migrated-thread\nCodex turn: migrated-turn"
+	item.Details = "Harness provider: codex\nHarness session: migrated-thread\nHarness operation: migrated-turn"
 	if err := s.Create(ctx, item); err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +540,7 @@ func TestVersionTwelveMigrationBackfillsMessageCorrelation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DROP INDEX messages_codex_conversation; DROP INDEX messages_codex_turn; ALTER TABLE messages DROP COLUMN codex_thread_id; ALTER TABLE messages DROP COLUMN codex_turn_id; PRAGMA user_version = 12`); err != nil {
+	if _, err := db.Exec(`DROP INDEX messages_harness_conversation; DROP INDEX messages_harness_operation; ALTER TABLE messages DROP COLUMN harness_provider; ALTER TABLE messages DROP COLUMN harness_session_id; ALTER TABLE messages DROP COLUMN harness_operation_id; PRAGMA user_version = 12`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -520,8 +553,42 @@ func TestVersionTwelveMigrationBackfillsMessageCorrelation(t *testing.T) {
 	}
 	defer reopened.Close()
 	got, err := reopened.Get(ctx, item.ID)
-	if err != nil || got.CodexThreadID != "migrated-thread" || got.CodexTurnID != "migrated-turn" || got.Purpose != model.MessagePurposeConversation || got.Body != item.Body {
+	if err != nil || got.HarnessProvider != "codex" || got.HarnessSessionID != "migrated-thread" || got.HarnessOperationID != "migrated-turn" || got.Purpose != model.MessagePurposeConversation || got.Body != item.Body {
 		t.Fatalf("migrated message = %#v, %v", got, err)
+	}
+}
+
+func TestVersionTwentyEightMigrationAddsProviderNamespace(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "provider-migration", "/repo")
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db2", agent.ID, model.HumanMailboxID, "preserve provider")
+	item.Details = "Harness provider: codex\nHarness session: migrated-thread\nHarness operation: migrated-turn"
+	if err := s.Create(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP INDEX messages_harness_conversation; DROP INDEX messages_harness_operation; ALTER TABLE messages DROP COLUMN harness_provider; PRAGMA user_version = 28`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.Get(ctx, item.ID)
+	if err != nil || got.HarnessProvider != "codex" || got.HarnessSessionID != "migrated-thread" {
+		t.Fatalf("namespaced migrated message = %#v, %v", got, err)
 	}
 }
 

@@ -166,25 +166,44 @@ func Run(ctx context.Context, options Options) error {
 		}
 		return failure
 	}
+	initialMessageID := ""
 	if prompt := strings.TrimSpace(options.InitialPrompt); prompt != "" {
-		id, idErr := uuid.NewV7()
-		if idErr != nil {
-			return finishBeforeDispatcher(idErr)
+		initialID := options.InitialSubmissionID
+		if initialID == "" {
+			id, idErr := uuid.NewV7()
+			if idErr != nil {
+				return finishBeforeDispatcher(idErr)
+			}
+			initialID = harness.SubmissionID(id.String())
 		}
-		result, submitErr := instance.Session().Submit(ctx, harness.Submission{ID: harness.SubmissionID(id.String()), Input: []harness.InputPart{harness.TextInput{Text: prompt}}})
-		if submitErr != nil || result.State != harness.DeliveryAccepted {
-			if submitErr != nil {
-				if ctx.Err() != nil && errors.Is(submitErr, context.Canceled) {
+		initial := model.Message{
+			ID: string(initialID), Context: options.Repository, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: mailbox.ID,
+			HarnessProvider: string(identity.Provider), HarnessSessionID: string(identity.ID), Body: prompt,
+			Details: fmt.Sprintf("Harness provider: %s\nHarness session: %s", identity.Provider, identity.ID), CreatedAt: events.nextCreatedAt(),
+		}
+		if projectBinding.ProjectID != "" {
+			initial.Purpose = model.MessagePurposeProjectInput
+		}
+		existing, getErr := options.Store.Get(ctx, initial.ID)
+		switch {
+		case getErr == nil:
+			if existing.SenderMailboxID != initial.SenderMailboxID || existing.RecipientMailboxID != initial.RecipientMailboxID || existing.Body != initial.Body || model.NormalizeMessagePurpose(existing.Purpose) != model.NormalizeMessagePurpose(initial.Purpose) || existing.HarnessProvider != initial.HarnessProvider || existing.HarnessSessionID != initial.HarnessSessionID {
+				return finishBeforeDispatcher(fmt.Errorf("initial harness submission ID %s already belongs to a different message", initial.ID))
+			}
+		case errors.Is(getErr, domain.ErrNotFound):
+			if err := options.Store.Create(ctx, initial); err != nil {
+				if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 					return finishBeforeDispatcher(nil)
 				}
-				return finishBeforeDispatcher(submitErr)
+				return finishBeforeDispatcher(fmt.Errorf("persist initial harness submission: %w", err))
 			}
-			return finishBeforeDispatcher(fmt.Errorf("initial harness submission was %s", result.State))
+		default:
+			if ctx.Err() != nil && errors.Is(getErr, context.Canceled) {
+				return finishBeforeDispatcher(nil)
+			}
+			return finishBeforeDispatcher(fmt.Errorf("read initial harness submission: %w", getErr))
 		}
-		operations.set(result.OperationID)
-	}
-	if options.OnReady != nil {
-		options.OnReady(Ready{AgentName: options.AgentName, Session: identity, Directory: options.Directory})
+		initialMessageID = initial.ID
 	}
 
 	dispatcherContext, stopDispatcher := context.WithCancel(workersContext)
@@ -207,26 +226,70 @@ func Run(ctx context.Context, options Options) error {
 
 	var bridgeErr error
 	status := terms.CancelledStatus
-	select {
-	case ownershipErr := <-ownershipErrors:
-		bridgeErr, status = fmt.Errorf("named agent ownership lost: %w", ownershipErr), ownershipErr.Error()
-	case <-ctx.Done():
-	case runtimeErr := <-runtimeDone:
-		if runtimeErr == nil {
-			runtimeErr = errors.New("harness instance stopped unexpectedly")
+	terminated := false
+	for initialMessageID != "" && !terminated {
+		message, getErr := options.Store.Get(ctx, initialMessageID)
+		if getErr != nil {
+			bridgeErr, status, terminated = fmt.Errorf("read initial harness submission: %w", getErr), getErr.Error(), true
+			break
 		}
-		bridgeErr, status = runtimeErr, runtimeErr.Error()
-	case <-dispatcherDone:
-		if ctx.Err() == nil {
+		if message.CompletedAt != nil {
+			break
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case ownershipErr := <-ownershipErrors:
+			bridgeErr, status, terminated = fmt.Errorf("named agent ownership lost: %w", ownershipErr), ownershipErr.Error(), true
+		case <-ctx.Done():
+			terminated = true
+		case runtimeErr := <-runtimeDone:
+			if runtimeErr == nil {
+				runtimeErr = errors.New("harness instance stopped unexpectedly")
+			}
+			bridgeErr, status, terminated = runtimeErr, runtimeErr.Error(), true
+		case <-dispatcherDone:
 			if dispatcherErr == nil {
 				dispatcherErr = errors.New("HQ input dispatcher stopped unexpectedly")
 			}
-			bridgeErr, status = dispatcherErr, dispatcherErr.Error()
+			bridgeErr, status, terminated = dispatcherErr, dispatcherErr.Error(), true
+		case <-events.Failed():
+			bridgeErr, status, terminated = events.Err(), events.Err().Error(), true
+		case <-requests.Failed():
+			bridgeErr, status, terminated = requests.Err(), requests.Err().Error(), true
+		case <-timer.C:
 		}
-	case <-events.Failed():
-		bridgeErr, status = events.Err(), events.Err().Error()
-	case <-requests.Failed():
-		bridgeErr, status = requests.Err(), requests.Err().Error()
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+	if !terminated {
+		if options.OnReady != nil {
+			options.OnReady(Ready{AgentName: options.AgentName, Session: identity, Directory: options.Directory})
+		}
+		select {
+		case ownershipErr := <-ownershipErrors:
+			bridgeErr, status = fmt.Errorf("named agent ownership lost: %w", ownershipErr), ownershipErr.Error()
+		case <-ctx.Done():
+		case runtimeErr := <-runtimeDone:
+			if runtimeErr == nil {
+				runtimeErr = errors.New("harness instance stopped unexpectedly")
+			}
+			bridgeErr, status = runtimeErr, runtimeErr.Error()
+		case <-dispatcherDone:
+			if ctx.Err() == nil {
+				if dispatcherErr == nil {
+					dispatcherErr = errors.New("HQ input dispatcher stopped unexpectedly")
+				}
+				bridgeErr, status = dispatcherErr, dispatcherErr.Error()
+			}
+		case <-events.Failed():
+			bridgeErr, status = events.Err(), events.Err().Error()
+		case <-requests.Failed():
+			bridgeErr, status = requests.Err(), requests.Err().Error()
+		}
 	}
 	if ctx.Err() != nil && (bridgeErr == nil || errors.Is(bridgeErr, context.Canceled)) {
 		bridgeErr, status = nil, terms.CancelledStatus

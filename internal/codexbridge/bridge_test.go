@@ -34,6 +34,7 @@ type fakeMailboxStore struct {
 	repo       model.RepositoryContext
 	messages   []model.Message
 	created    chan struct{}
+	claims     map[string]string
 	namedAgent domain.NamedAgent
 	ownerToken string
 	acquireErr error
@@ -43,7 +44,7 @@ type fakeMailboxStore struct {
 }
 
 func newFakeMailboxStore() *fakeMailboxStore {
-	return &fakeMailboxStore{created: make(chan struct{}, 10)}
+	return &fakeMailboxStore{created: make(chan struct{}, 10), claims: make(map[string]string)}
 }
 
 func (s *fakeMailboxStore) ResolveMailbox(_ context.Context, identity model.SessionIdentity, repo model.RepositoryContext) (model.Mailbox, error) {
@@ -157,12 +158,53 @@ func (s *fakeMailboxStore) Archive(_ context.Context, id string) error {
 	return store.ErrNotFound
 }
 
-func (s *fakeMailboxStore) Claim(context.Context, store.Claim, string) (model.Message, error) {
+func (s *fakeMailboxStore) Claim(_ context.Context, claim store.Claim, token string) (model.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, message := range s.messages {
+		if message.CompletedAt != nil || message.ArchivedAt != nil || s.claims[message.ID] != "" {
+			continue
+		}
+		if claim.MessageID != "" && message.ID != claim.MessageID {
+			continue
+		}
+		if claim.RecipientMailboxID != "" && message.RecipientMailboxID != claim.RecipientMailboxID {
+			continue
+		}
+		if claim.CorrelationSessionID != "" && message.ReplyTo != nil && message.HarnessSessionID != claim.CorrelationSessionID {
+			continue
+		}
+		s.claims[message.ID] = token
+		return message, nil
+	}
 	return model.Message{}, store.ErrNotReady
 }
 
-func (s *fakeMailboxStore) Complete(context.Context, string, string) error { return nil }
-func (s *fakeMailboxStore) Release(context.Context, string, string) error  { return nil }
+func (s *fakeMailboxStore) Complete(_ context.Context, id, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.claims[id] != token {
+		return store.ErrNotReady
+	}
+	for index := range s.messages {
+		if s.messages[index].ID == id {
+			now := time.Now().UTC()
+			s.messages[index].CompletedAt = &now
+			delete(s.claims, id)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (s *fakeMailboxStore) Release(_ context.Context, id, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.claims[id] == token {
+		delete(s.claims, id)
+	}
+	return nil
+}
 
 type fakeProcess struct {
 	clientInput  *io.PipeWriter
@@ -316,9 +358,10 @@ func TestRunStartsYoloThreadBindsMailboxAndStartsInitialTurn(t *testing.T) {
 		t.Fatal("graceful stdin-close shutdown killed the process")
 	default:
 	}
-	waitForMessages(t, store, 2)
-	if store.messages[1].Body != "Codex bridge stopped" || !strings.Contains(store.messages[1].Details, "Kind: status") || !strings.Contains(store.messages[1].Details, "cancelled") {
-		t.Fatalf("terminal message = %#v", store.messages[1])
+	waitForMessages(t, store, 3)
+	terminal := fakeStoreMessageByBody(t, store, "Codex bridge stopped")
+	if !strings.Contains(terminal.Details, "Kind: status") || !strings.Contains(terminal.Details, "cancelled") {
+		t.Fatalf("terminal message = %#v", terminal)
 	}
 }
 
@@ -376,11 +419,13 @@ func TestRunForcesProcessShutdownAfterGracePeriod(t *testing.T) {
 	}
 }
 
-func TestRunReportsInitialTurnFailureWithSingleTerminalStatus(t *testing.T) {
+func TestRunRecoversInitialTurnFromUncertainFailure(t *testing.T) {
 	process := newFakeProcess()
+	turns := make(chan struct{}, 2)
 	go func() {
 		defer process.finish(nil)
 		scanner := bufio.NewScanner(process.serverInput)
+		turnAttempts := 0
 		for scanner.Scan() {
 			var request recordedRequest
 			if json.Unmarshal(scanner.Bytes(), &request) != nil {
@@ -391,24 +436,45 @@ func TestRunReportsInitialTurnFailureWithSingleTerminalStatus(t *testing.T) {
 				_, _ = io.WriteString(process.serverOutput, `{"id":1,"result":{}}`+"\n")
 			case "initialized":
 			case "thread/start":
-				_, _ = io.WriteString(process.serverOutput, `{"id":2,"result":{"thread":{"id":"thread-initial-failure"}}}`+"\n")
+				_, _ = io.WriteString(process.serverOutput, `{"id":`+jsonNumber(request.ID)+`,"result":{"thread":{"id":"thread-initial-failure"}}}`+"\n")
+			case "thread/read":
+				_, _ = io.WriteString(process.serverOutput, `{"id":`+jsonNumber(request.ID)+`,"result":{"thread":{"id":"thread-initial-failure","turns":[]}}}`+"\n")
 			case "turn/start":
-				_, _ = io.WriteString(process.serverOutput, `{"id":3,"error":{"code":-32000,"message":"model unavailable"}}`+"\n")
+				turnAttempts++
+				turns <- struct{}{}
+				if turnAttempts == 1 {
+					_, _ = io.WriteString(process.serverOutput, `{"id":`+jsonNumber(request.ID)+`,"error":{"code":-32000,"message":"model unavailable"}}`+"\n")
+				} else {
+					_, _ = io.WriteString(process.serverOutput, `{"id":`+jsonNumber(request.ID)+`,"result":{"turn":{"id":"turn-recovered","status":"inProgress"}}}`+"\n")
+				}
 			}
 		}
 	}()
 	store := newFakeMailboxStore()
-	err := Run(context.Background(), Options{
-		Directory: "/work/repo", AgentName: "test-agent", InitialPrompt: "begin", Starter: fakeStarter{process}, Store: store,
-		Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger(),
-	})
-	if err == nil || !strings.Contains(err.Error(), "model unavailable") {
-		t.Fatalf("error = %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{
+			Directory: "/work/repo", AgentName: "test-agent", InitialPrompt: "begin", Starter: fakeStarter{process}, Store: store,
+			Repository: model.RepositoryContext{Directory: "/work/repo"}, Stderr: io.Discard, Ledger: NewMemoryLedger(), RepairInterval: time.Millisecond,
+		})
+	}()
+	for range 2 {
+		select {
+		case <-turns:
+		case <-time.After(3 * time.Second):
+			t.Fatal("initial turn was not retried")
+		}
+	}
+	waitForFakeStoreCompleted(t, store, "begin")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 	store.mu.Lock()
 	messages := append([]model.Message(nil), store.messages...)
 	store.mu.Unlock()
-	if len(messages) != 2 || messages[0].Body != "test-agent ready in /work/repo" || messages[1].Body != "Codex bridge stopped" || !strings.Contains(messages[1].Details, "model unavailable") {
+	if len(messages) != 3 || messages[0].Body != "test-agent ready in /work/repo" || messages[1].Body != "begin" || messages[1].CompletedAt == nil || messages[2].Body != "Codex bridge stopped" {
 		t.Fatalf("messages = %#v", messages)
 	}
 }
@@ -1007,4 +1073,30 @@ func waitForMessages(t *testing.T, store *fakeMailboxStore, count int) {
 			t.Fatalf("got %d messages, want %d", current, count)
 		}
 	}
+}
+
+func fakeStoreMessageByBody(t *testing.T, store *fakeMailboxStore, body string) model.Message {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, message := range store.messages {
+		if message.Body == body {
+			return message
+		}
+	}
+	t.Fatalf("message %q was not stored", body)
+	return model.Message{}
+}
+
+func waitForFakeStoreCompleted(t *testing.T, store *fakeMailboxStore, body string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		message := fakeStoreMessageByBody(t, store, body)
+		if message.CompletedAt != nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("message %q was not completed", body)
 }

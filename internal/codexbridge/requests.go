@@ -213,7 +213,7 @@ func (r *RequestRouter) handleMCPElicitation(ctx context.Context, questioner *Qu
 func (r *RequestRouter) matchesThread(questioner *Questioner, threadID string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.questioner == questioner && questioner != nil && questioner.Mailbox.ID != "" && threadID != "" && questioner.CorrelationThreadID() == threadID
+	return r.questioner == questioner && questioner != nil && questioner.Mailbox.ID != "" && threadID != "" && questioner.CorrelationSessionID() == threadID
 }
 
 func (r *RequestRouter) noticeMalformed(questioner *Questioner, request ServerRequest, reason string) {

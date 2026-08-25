@@ -77,8 +77,9 @@ type Message struct {
 	EventID                 string            `json:"event_id"`
 	ThreadID                string            `json:"thread_id"`
 	Purpose                 MessagePurpose    `json:"purpose"`
-	CodexThreadID           string            `json:"codex_thread_id,omitempty"`
-	CodexTurnID             string            `json:"codex_turn_id,omitempty"`
+	HarnessProvider         string            `json:"harness_provider,omitempty"`
+	HarnessSessionID        string            `json:"harness_session_id,omitempty"`
+	HarnessOperationID      string            `json:"harness_operation_id,omitempty"`
 	Incomplete              bool              `json:"incomplete_causal_history,omitempty"`
 	PeerReceived            bool              `json:"peer_received,omitempty"`
 	Rejected                bool              `json:"rejected,omitempty"`
@@ -108,8 +109,9 @@ type Filter struct {
 	RecipientMailboxID    string         `json:"recipient_mailbox_id,omitempty"`
 	CounterpartyMailboxID string         `json:"counterparty_mailbox_id,omitempty"`
 	ThreadID              string         `json:"thread_id,omitempty"`
-	CodexThreadID         string         `json:"codex_thread_id,omitempty"`
-	CodexTurnID           string         `json:"codex_turn_id,omitempty"`
+	HarnessProvider       string         `json:"harness_provider,omitempty"`
+	HarnessSessionID      string         `json:"harness_session_id,omitempty"`
+	HarnessOperationID    string         `json:"harness_operation_id,omitempty"`
 	ReplyTo               string         `json:"reply_to,omitempty"`
 	Purpose               MessagePurpose `json:"purpose,omitempty"`
 	Archived              *bool          `json:"archived,omitempty"`

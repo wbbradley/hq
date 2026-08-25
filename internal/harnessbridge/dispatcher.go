@@ -185,7 +185,8 @@ func (d *Dispatcher) claim(ctx context.Context) (claimedDelivery, error) {
 		delivery, err := d.ProjectStore.ClaimProjectMessage(ctx, d.ProjectID, d.AssignmentID, d.ProjectThreadID, token.String())
 		return claimedDelivery{message: delivery.Message, token: token.String(), dispatched: delivery.Dispatched}, err
 	}
-	claim := domain.Claim{RecipientMailboxID: d.MailboxID, CorrelationThreadID: string(d.Session.Identity().ID)}
+	identity := d.Session.Identity()
+	claim := domain.Claim{RecipientMailboxID: d.MailboxID, CorrelationProvider: string(identity.Provider), CorrelationSessionID: string(identity.ID)}
 	if d.Replies != nil {
 		claim.ExcludeReplyTo = d.Replies.outstandingIDs()
 	}
@@ -204,7 +205,7 @@ func (d *Dispatcher) release(delivery claimedDelivery) {
 }
 
 func (d *Dispatcher) deliver(ctx context.Context, delivery claimedDelivery) (bool, error) {
-	sessionID, messageID := string(d.Session.Identity().ID), delivery.message.ID
+	sessionID, messageID := d.Session.Identity().Key(), delivery.message.ID
 	state, exists, err := d.Ledger.Delivery(sessionID, messageID)
 	if err != nil {
 		return false, err

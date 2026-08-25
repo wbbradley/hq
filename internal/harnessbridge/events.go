@@ -15,12 +15,16 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 )
 
+// The queue bounds persistence memory while allowing the provider transport to
+// continue reading short bursts. Canonical output applies backpressure when the
+// queue is full; installation-local activity is best-effort and may be dropped.
 const eventQueueCapacity = 64
 
 type canonicalOutput struct {
-	key     string
-	body    string
-	details string
+	key       string
+	operation harness.OperationID
+	body      string
+	details   string
 }
 
 type eventWork struct {
@@ -84,10 +88,19 @@ func (r *eventRelay) ingest(ctx context.Context, events <-chan harness.Event) {
 			if work.output == nil && work.activity == nil {
 				continue
 			}
+			if work.output != nil {
+				select {
+				case r.queue <- work:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
 			select {
 			case r.queue <- work:
 			default:
-				r.fail(errors.New("harness event persistence queue reached its 64-event bound"))
+				// Activity is a local projection, never canonical output. Dropping
+				// it under pressure is safer than terminating the provider worker.
 			}
 		}
 	}
@@ -241,24 +254,24 @@ func (r *eventRelay) canonicalize(event harness.Event) (canonicalOutput, bool) {
 		if payload.Final {
 			kind, phase = "final-answer", "final_answer"
 		}
-		details := fmt.Sprintf("Kind: %s\n%s %s: %s\n%s %s: %s\n%s %s: %s\nPhase: %s", kind, r.terms.ProviderName, r.terms.SessionName, event.Session.ID, r.terms.ProviderName, r.terms.OperationName, event.Operation, r.terms.ProviderName, r.terms.ItemName, event.ItemID, phase)
-		return canonicalOutput{key: event.ItemID, body: payload.Text, details: details}, true
+		details := fmt.Sprintf("Kind: %s\nHarness provider: %s\nHarness session: %s\nHarness operation: %s\nHarness item: %s\nPhase: %s", kind, event.Session.Provider, event.Session.ID, event.Operation, event.ItemID, phase)
+		return canonicalOutput{key: event.ItemID, operation: event.Operation, body: payload.Text, details: details}, true
 	case harness.OperationStatusEvent:
 		if event.Operation == "" {
 			return canonicalOutput{}, false
 		}
-		key := "turn-status:" + string(event.Operation)
+		key := "operation-status:" + string(event.Operation)
 		switch payload.Status {
 		case harness.OperationFailed:
 			errorMessage := strings.TrimSpace(payload.Error)
 			if errorMessage == "" {
 				errorMessage = "(not provided)"
 			}
-			details := fmt.Sprintf("Kind: status\n%s %s: %s\n%s %s: %s\nStatus: failed\nError: %s", r.terms.ProviderName, r.terms.SessionName, event.Session.ID, r.terms.ProviderName, r.terms.OperationName, event.Operation, errorMessage)
-			return canonicalOutput{key: key, body: r.terms.ProviderName + " " + r.terms.OperationName + " failed", details: details}, true
+			details := fmt.Sprintf("Kind: status\nHarness provider: %s\nHarness session: %s\nHarness operation: %s\nStatus: failed\nError: %s", event.Session.Provider, event.Session.ID, event.Operation, errorMessage)
+			return canonicalOutput{key: key, operation: event.Operation, body: r.terms.ProviderName + " " + r.terms.OperationName + " failed", details: details}, true
 		case harness.OperationInterrupted:
-			details := fmt.Sprintf("Kind: status\n%s %s: %s\n%s %s: %s\nStatus: interrupted", r.terms.ProviderName, r.terms.SessionName, event.Session.ID, r.terms.ProviderName, r.terms.OperationName, event.Operation)
-			return canonicalOutput{key: key, body: r.terms.ProviderName + " " + r.terms.OperationName + " interrupted", details: details}, true
+			details := fmt.Sprintf("Kind: status\nHarness provider: %s\nHarness session: %s\nHarness operation: %s\nStatus: interrupted", event.Session.Provider, event.Session.ID, event.Operation)
+			return canonicalOutput{key: key, operation: event.Operation, body: r.terms.ProviderName + " " + r.terms.OperationName + " interrupted", details: details}, true
 		}
 	}
 	return canonicalOutput{}, false
@@ -268,8 +281,9 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 	if r.store == nil || r.ledger == nil || r.identity.ID == "" || r.mailbox.ID == "" {
 		return errors.New("harness output relay is not bound")
 	}
+	ledgerSessionID := r.identity.Key()
 	sessionID := string(r.identity.ID)
-	sent, err := r.ledger.OutputSent(sessionID, output.key)
+	sent, err := r.ledger.OutputSent(ledgerSessionID, output.key)
 	if err != nil {
 		return fmt.Errorf("read harness output ledger: %w", err)
 	}
@@ -278,7 +292,7 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 	}
 	message := model.Message{
 		ID: r.stableOutputID(output.key), Context: r.repository, SenderMailboxID: r.mailbox.ID, RecipientMailboxID: model.HumanMailboxID,
-		Body: output.body, Details: output.details, CreatedAt: r.nextCreatedAt(),
+		HarnessProvider: string(r.identity.Provider), HarnessSessionID: sessionID, HarnessOperationID: string(output.operation), Body: output.body, Details: output.details, CreatedAt: r.nextCreatedAt(),
 	}
 	if r.project != nil {
 		message.Purpose = model.MessagePurposeProjectOutput
@@ -311,13 +325,13 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 			return fmt.Errorf("sync harness output: %w", err)
 		}
 	}
-	return r.ledger.MarkOutputSent(sessionID, output.key)
+	return r.ledger.MarkOutputSent(ledgerSessionID, output.key)
 }
 
 func (r *eventRelay) stableOutputID(key string) string {
 	namespace := r.terms.OutputNamespace
 	if namespace == "" {
-		namespace = "hq-harness-output"
+		namespace = "hq-harness-output:" + string(r.identity.Provider)
 	}
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(namespace+"\x00"+string(r.identity.ID)+"\x00"+key)).String()
 }

@@ -68,6 +68,14 @@ func TestRegistryIsDeterministicAndRejectsDuplicates(t *testing.T) {
 	}
 }
 
+func TestSessionIdentityKeyNamespacesProviderLocalIDs(t *testing.T) {
+	first := (harness.SessionIdentity{Provider: "alpha", ID: "shared"}).Key()
+	second := (harness.SessionIdentity{Provider: "beta", ID: "shared"}).Key()
+	if first == second || first != (harness.SessionIdentity{Provider: "alpha", ID: "shared"}).Key() {
+		t.Fatalf("session keys are not stable and namespaced: %q, %q", first, second)
+	}
+}
+
 func TestNormalizedActivityPayloadsStayTyped(t *testing.T) {
 	exitCode := 0
 	payloads := []harness.EventPayload{

@@ -135,7 +135,7 @@ func (d *Dispatcher) claim(ctx context.Context) (claimedDelivery, error) {
 		delivery, err := d.ProjectStore.ClaimProjectMessage(ctx, d.ProjectID, d.AssignmentID, d.ProjectThreadID, token.String())
 		return claimedDelivery{message: delivery.Message, token: token.String(), dispatched: delivery.Dispatched}, err
 	}
-	claim := domain.Claim{RecipientMailboxID: d.MailboxID, CorrelationThreadID: d.ThreadID}
+	claim := domain.Claim{RecipientMailboxID: d.MailboxID, CorrelationProvider: "codex", CorrelationSessionID: d.ThreadID}
 	if d.Replies != nil {
 		claim.ExcludeReplyTo = d.Replies.OutstandingIDs()
 	}

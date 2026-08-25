@@ -1529,3 +1529,37 @@ func TestSupervisorFailedLiveReplacementKeepsPriorSelection(t *testing.T) {
 		t.Fatalf("selection after failed replacement = %#v, %v", agent, err)
 	}
 }
+
+func TestSupervisorReturnsAlreadyRunningDesiredRuntime(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	_, _ = identity.Initialize(keyPath, nil)
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	starter := &scriptedStarter{}
+	supervisor := New(context.Background(), database, harnessbridge.NewMemoryLedger())
+	supervisor.ResolveFactory = codexFactoryResolver(starter.factory)
+	defer supervisor.Close()
+	directory := t.TempDir()
+	first, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
+		Harness: "codex", RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionNew, Directory: directory,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := supervisor.LaunchHarnessAgent(context.Background(), domain.HarnessLaunchRequest{
+		Harness: "codex", RequestID: uuid.NewString(), AgentName: "fred", Action: domain.HarnessSessionResume, SessionID: first.SessionID, Directory: directory,
+	})
+	if err != nil || second != first {
+		t.Fatalf("already-running launch = %#v, %v; want %#v", second, err, first)
+	}
+	starter.mu.Lock()
+	starts := starter.starts
+	starter.mu.Unlock()
+	if starts != 1 {
+		t.Fatalf("provider starts = %d, want 1", starts)
+	}
+}

@@ -91,29 +91,30 @@ type Terminology struct {
 }
 
 type Options struct {
-	Directory          string
-	Environment        []string
-	AgentName          string
-	ProjectID          string
-	NewSession         bool
-	RequestedSession   harness.SessionID
-	InitialPrompt      string
-	Repository         model.RepositoryContext
-	Factory            harness.Factory
-	ProviderOptions    harness.ProviderOptions
-	Store              Store
-	ProjectStore       ProjectStore
-	Ledger             DeliveryLedger
-	Stderr             io.Writer
-	Sync               func(context.Context) error
-	RepairInterval     time.Duration
-	Updates            domain.ClientUpdates
-	AgentLeaseDuration time.Duration
-	AgentRenewInterval time.Duration
-	ProjectReady       func(Ready) (ProjectBinding, error)
-	OnReady            func(Ready)
-	PublishStatus      func(context.Context, model.Mailbox, harness.SessionIdentity, string, string, time.Time) error
-	SuppressStatus     bool
-	Terminology        Terminology
-	Logger             *slog.Logger
+	Directory           string
+	Environment         []string
+	AgentName           string
+	ProjectID           string
+	NewSession          bool
+	RequestedSession    harness.SessionID
+	InitialPrompt       string
+	InitialSubmissionID harness.SubmissionID
+	Repository          model.RepositoryContext
+	Factory             harness.Factory
+	ProviderOptions     harness.ProviderOptions
+	Store               Store
+	ProjectStore        ProjectStore
+	Ledger              DeliveryLedger
+	Stderr              io.Writer
+	Sync                func(context.Context) error
+	RepairInterval      time.Duration
+	Updates             domain.ClientUpdates
+	AgentLeaseDuration  time.Duration
+	AgentRenewInterval  time.Duration
+	ProjectReady        func(Ready) (ProjectBinding, error)
+	OnReady             func(Ready)
+	PublishStatus       func(context.Context, model.Mailbox, harness.SessionIdentity, string, string, time.Time) error
+	SuppressStatus      bool
+	Terminology         Terminology
+	Logger              *slog.Logger
 }

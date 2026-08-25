@@ -97,7 +97,16 @@ func TestBridgeUsesNeutralRuntimeForRecoveryRequestsAndOutput(t *testing.T) {
 	if err := provider.Emit(instance, "operation-1", "answer-1", harness.OutputEvent{Text: "Neutral output", Final: true}); err != nil {
 		t.Fatal(err)
 	}
-	waitForBody(t, database, "Neutral output")
+	output := waitForBody(t, database, "Neutral output")
+	replyID := "019c0000-0000-7000-8000-000000000503"
+	replyTo := output.ID
+	if err := database.Reply(context.Background(), output.ID, model.Message{
+		ID: replyID, Context: output.Context, SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: agent.MailboxID,
+		Body: "generic follow-up", Details: "Harness provider: home-built\nHarness session: " + string(instance.Session().Identity().ID), ReplyTo: &replyTo, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForMessage(t, database, replyID, func(message model.Message) bool { return message.CompletedAt != nil })
 
 	_, response, err := provider.Ask(instance, "operation-1", "approval-1", harness.ApprovalRequest{Kind: "command", Summary: "Run tests", Choices: []string{"accept", "decline"}})
 	if err != nil {
@@ -129,6 +138,43 @@ func TestBridgeUsesNeutralRuntimeForRecoveryRequestsAndOutput(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("generic bridge did not stop")
+	}
+}
+
+func TestBridgePersistsInitialPromptBeforeRecoveringUncertainDelivery(t *testing.T) {
+	database := openBridgeTestStore(t)
+	provider := fake.NewFactory("home-built")
+	provider.SetNextSubmissionOutcome(harness.DeliveryUncertain, true)
+	factory := &recordingFactory{Factory: provider, launched: make(chan harness.Instance, 1)}
+	ready := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	const submissionID = "019c0000-0000-7000-8000-000000000504"
+	go func() {
+		done <- Run(ctx, Options{
+			Directory: "/work/repo", AgentName: "initial-agent", Factory: factory, Store: database, Ledger: newMemoryLedger(),
+			InitialPrompt: "start durably", InitialSubmissionID: submissionID, Repository: model.RepositoryContext{Directory: "/work/repo"},
+			RepairInterval: time.Millisecond, SuppressStatus: true, OnReady: func(Ready) { close(ready) },
+		})
+	}()
+	instance := <-factory.launched
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("bridge stopped before recovering the initial prompt: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not recover the initial prompt")
+	}
+	message, err := database.Get(context.Background(), submissionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.CompletedAt == nil || message.Body != "start durably" || message.HarnessSessionID != string(instance.Session().Identity().ID) || !strings.Contains(message.Details, "Harness provider: home-built") {
+		t.Fatalf("durable initial prompt = %#v", message)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -158,6 +158,14 @@ type SessionIdentity struct {
 	ID       SessionID
 }
 
+// Key is the opaque, provider-namespaced identity safe for use by neutral
+// downstream components. Provider session IDs need only be unique within their
+// provider.
+func (i SessionIdentity) Key() string {
+	provider := string(i.Provider)
+	return fmt.Sprintf("%d:%s:%s", len(provider), provider, i.ID)
+}
+
 type Factory interface {
 	Provider() Provider
 	// Launch returns only after the logical instance has a validated session
@@ -325,9 +333,12 @@ func (r RecoveryResult) Validate() error {
 
 type Event struct {
 	// Sequence is scoped to one logical instance and starts at one.
-	Sequence   uint64
-	Session    SessionIdentity
-	Operation  OperationID
+	Sequence  uint64
+	Session   SessionIdentity
+	Operation OperationID
+	// ItemID is provider-opaque. For OutputEvent it must be stable and unique
+	// within the session; adapters must namespace provider-local raw IDs when
+	// their provider does not make that guarantee.
 	ItemID     string
 	OccurredAt time.Time
 	Payload    EventPayload

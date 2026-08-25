@@ -55,7 +55,7 @@ type Questioner struct {
 	RepairInterval time.Duration
 }
 
-func (q *Questioner) CorrelationThreadID() string { return q.ThreadID }
+func (q *Questioner) CorrelationSessionID() string { return q.ThreadID }
 
 func (q *Questioner) Publish(ctx context.Context, spec QuestionSpec) (*PendingQuestion, error) {
 	if q.Store == nil || q.Replies == nil || q.Mailbox.ID == "" {
@@ -251,5 +251,5 @@ func (q *Questioner) await(ctx context.Context, pending *PendingQuestion) (*Clai
 }
 
 func correlationDetails(correlation RequestCorrelation, hqMessageID string) string {
-	return fmt.Sprintf("Codex thread: %s\nCodex turn: %s\nCodex item: %s\nCodex request: %s\nHQ message: %s", correlation.ThreadID, correlation.TurnID, correlation.ItemID, correlation.RequestID, hqMessageID)
+	return fmt.Sprintf("Harness provider: codex\nHarness session: %s\nHarness operation: %s\nHarness item: %s\nHarness request: %s\nHQ message: %s", correlation.ThreadID, correlation.TurnID, correlation.ItemID, correlation.RequestID, hqMessageID)
 }

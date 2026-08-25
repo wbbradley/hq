@@ -56,7 +56,7 @@ func TestOutputRelayPublishesOnlyCanonicalCompletedAgentMessages(t *testing.T) {
 		t.Fatalf("messages = %#v, %v", messages, err)
 	}
 	message := messages[0]
-	if message.Body != "Canonical final text" || !strings.Contains(message.Details, "Kind: final-answer") || !strings.Contains(message.Details, "Codex turn: turn-1") || !strings.Contains(message.Details, "Codex item: agent-1") || !strings.Contains(message.Details, "Phase: final_answer") {
+	if message.Body != "Canonical final text" || !strings.Contains(message.Details, "Kind: final-answer") || !strings.Contains(message.Details, "Harness operation: turn-1") || !strings.Contains(message.Details, "Harness item: agent-1") || !strings.Contains(message.Details, "Phase: final_answer") {
 		t.Fatalf("message = %#v", message)
 	}
 	if message.ID != stableOutputMessageID(fixture.thread, "agent-1") {

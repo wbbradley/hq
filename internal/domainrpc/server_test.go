@@ -436,8 +436,8 @@ func TestServicePassesStructuredConversationFilter(t *testing.T) {
 	want := model.Filter{
 		CounterpartyMailboxID: "counterparty",
 		ThreadID:              "hq-thread",
-		CodexThreadID:         "codex-thread",
-		CodexTurnID:           "codex-turn",
+		HarnessSessionID:      "codex-thread",
+		HarnessOperationID:    "codex-turn",
 	}
 	raw, err := json.Marshal(FilterRequest{Filter: want})
 	if err != nil {
@@ -459,7 +459,7 @@ func TestServicePassesConversationPageRequests(t *testing.T) {
 	if _, rpcErr := service.Handle(context.Background(), nil, ListConversationsMethod, raw); rpcErr != nil || operations.conversationFilter != conversationFilter {
 		t.Fatalf("conversation filter = %#v, error=%v", operations.conversationFilter, rpcErr)
 	}
-	historyFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", CodexThreadID: "thread"}, Cursor: "history-cursor", Limit: 23}
+	historyFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", HarnessProvider: "codex", HarnessSessionID: "thread"}, Cursor: "history-cursor", Limit: 23}
 	raw, _ = json.Marshal(ConversationHistoryRequest{Filter: historyFilter})
 	if _, rpcErr := service.Handle(context.Background(), nil, ConversationHistoryMethod, raw); rpcErr != nil || operations.historyFilter != historyFilter {
 		t.Fatalf("history filter = %#v, error=%v", operations.historyFilter, rpcErr)

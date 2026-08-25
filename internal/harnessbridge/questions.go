@@ -220,7 +220,7 @@ func (q *questioner) cancel(pending *pendingQuestion) {
 }
 
 func (q *questioner) correlationDetails(correlation requestCorrelation, messageID string) string {
-	return fmt.Sprintf("%s %s: %s\n%s %s: %s\n%s %s: %s\n%s request: %s\nHQ message: %s", q.terms.ProviderName, q.terms.SessionName, correlation.sessionID, q.terms.ProviderName, q.terms.OperationName, correlation.operationID, q.terms.ProviderName, q.terms.ItemName, correlation.itemID, q.terms.ProviderName, correlation.requestID, messageID)
+	return fmt.Sprintf("Harness provider: %s\nHarness session: %s\nHarness operation: %s\nHarness item: %s\nHarness request: %s\nHQ message: %s", q.session.Provider, correlation.sessionID, correlation.operationID, correlation.itemID, correlation.requestID, messageID)
 }
 
 func closeSubscription(subscription domain.ChangeSubscription) {

@@ -2,17 +2,20 @@ package model
 
 import "time"
 
-// ConversationKey identifies one counterparty conversation. CodexThreadID is
-// preferred; ThreadID is the canonical HQ fallback when Codex correlation is
+// ConversationKey identifies one counterparty conversation. HarnessSessionID is
+// preferred; ThreadID is the canonical HQ fallback when harness correlation is
 // absent.
 type ConversationKey struct {
 	CounterpartyMailboxID string `json:"counterparty_mailbox_id"`
-	CodexThreadID         string `json:"codex_thread_id,omitempty"`
+	HarnessProvider       string `json:"harness_provider,omitempty"`
+	HarnessSessionID      string `json:"harness_session_id,omitempty"`
 	ThreadID              string `json:"thread_id,omitempty"`
 }
 
 func (k ConversationKey) Valid() bool {
-	return k.CounterpartyMailboxID != "" && (k.CodexThreadID == "") != (k.ThreadID == "")
+	harnessConversation := k.HarnessProvider != "" && k.HarnessSessionID != "" && k.ThreadID == ""
+	hqConversation := k.HarnessProvider == "" && k.HarnessSessionID == "" && k.ThreadID != ""
+	return k.CounterpartyMailboxID != "" && (harnessConversation || hqConversation)
 }
 
 type ConversationFilter struct {

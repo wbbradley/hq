@@ -103,6 +103,11 @@ func AdaptDeliveryLedger(ledger DeliveryLedger) harnessbridge.DeliveryLedger {
 
 func (a codexLedgerAdapter) Delivery(sessionID, messageID string) (harnessbridge.DeliveryState, bool, error) {
 	record, exists, err := a.ledger.Delivery(sessionID, messageID)
+	if err == nil && !exists {
+		if legacySession, ok := legacyCodexSessionID(sessionID); ok {
+			record, exists, err = a.ledger.Delivery(legacySession, messageID)
+		}
+	}
 	return harnessbridge.DeliveryState(record.State), exists, err
 }
 
@@ -111,11 +116,37 @@ func (a codexLedgerAdapter) SetDelivery(sessionID, messageID string, state harne
 }
 
 func (a codexLedgerAdapter) OutputSent(sessionID, itemID string) (bool, error) {
-	return a.ledger.OutputSent(sessionID, itemID)
+	sent, err := a.ledger.OutputSent(sessionID, itemID)
+	if err == nil && !sent {
+		if legacySession, ok := legacyCodexSessionID(sessionID); ok {
+			sent, err = a.ledger.OutputSent(legacySession, legacyCodexOutputKey(itemID))
+		}
+	}
+	return sent, err
 }
 
 func (a codexLedgerAdapter) MarkOutputSent(sessionID, itemID string) error {
 	return a.ledger.MarkOutputSent(sessionID, itemID)
+}
+
+func legacyCodexSessionID(sessionKey string) (string, bool) {
+	const prefix = "5:codex:"
+	if !strings.HasPrefix(sessionKey, prefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(sessionKey, prefix), true
+}
+
+func legacyCodexOutputKey(key string) string {
+	if operation, ok := strings.CutPrefix(key, "operation-status:"); ok {
+		return "turn-status:" + operation
+	}
+	if strings.HasPrefix(key, "output\x00") {
+		if separator := strings.LastIndexByte(key, 0); separator >= 0 {
+			return key[separator+1:]
+		}
+	}
+	return key
 }
 
 var _ harnessbridge.DeliveryLedger = codexLedgerAdapter{}

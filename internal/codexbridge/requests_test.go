@@ -111,7 +111,7 @@ func TestRequestUserInputPublishesMultipleCorrelatedQuestions(t *testing.T) {
 	done := fixture.call(requestUserInputMethod, params)
 	color := fixture.question(t, "Choose a color")
 	note := fixture.question(t, "Add a note")
-	if !strings.Contains(color.Details, "Question ID: color") || !strings.Contains(color.Details, "Red — Warm") || !strings.Contains(color.Details, "Codex request: \"request-1\"") || !strings.Contains(color.Details, "HQ message: "+color.ID) {
+	if !strings.Contains(color.Details, "Question ID: color") || !strings.Contains(color.Details, "Red — Warm") || !strings.Contains(color.Details, "Harness request: \"request-1\"") || !strings.Contains(color.Details, "HQ message: "+color.ID) {
 		t.Fatalf("color details = %q", color.Details)
 	}
 	if color.Purpose != model.MessagePurposeProtocolQuestion {

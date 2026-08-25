@@ -146,8 +146,8 @@ func TestInvalidationReloadPreservesActiveDraftAndRearms(t *testing.T) {
 func TestStaleReloadCannotReplaceNewerConversationSnapshot(t *testing.T) {
 	previous := message("previous-snapshot", testAgentID, model.HumanMailboxID, "Previous reply")
 	latest := message("latest-snapshot", testAgentID, model.HumanMailboxID, "Latest reply")
-	previous.Details = "Codex thread: reload-thread\nCodex turn: previous-turn"
-	latest.Details = "Codex thread: reload-thread\nCodex turn: latest-turn"
+	previous.Details = "Harness provider: codex\nHarness session: reload-thread\nHarness operation: previous-turn"
+	latest.Details = "Harness provider: codex\nHarness session: reload-thread\nHarness operation: latest-turn"
 	latest.CreatedAt = previous.CreatedAt.Add(time.Second)
 	m := app{inbox: []model.Message{previous}, loadGeneration: 2, width: 80, height: 24}
 	m.setMessages()
@@ -284,13 +284,13 @@ func TestConversationLoadShowsCompleteBidirectionalHistory(t *testing.T) {
 	created := time.Now().UTC().Add(-time.Minute)
 	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df1", agent.ID, model.HumanMailboxID, "first inbound")
 	first.CreatedAt = created
-	first.Details = "Codex thread: history-thread\nCodex turn: turn-one"
+	first.Details = "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-one"
 	human := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df2", model.HumanMailboxID, agent.ID, "human response")
 	human.CreatedAt = created.Add(time.Second)
-	human.Details = "Codex thread: history-thread\nCodex turn: turn-one"
+	human.Details = "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-one"
 	second := message("0198c7ec-73b0-7cc3-a5f7-e31c77140df3", agent.ID, model.HumanMailboxID, "second inbound")
 	second.CreatedAt = created.Add(2 * time.Second)
-	second.Details = "Codex thread: history-thread\nCodex turn: turn-two"
+	second.Details = "Harness provider: codex\nHarness session: history-thread\nHarness operation: turn-two"
 	for _, item := range []model.Message{first, human, second} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -319,9 +319,9 @@ func TestConversationLoadShowsCompleteBidirectionalHistory(t *testing.T) {
 
 func TestConversationReloadPreservesStableSelection(t *testing.T) {
 	firstMessage := message("selection-first", testAgentID, model.HumanMailboxID, "first")
-	firstMessage.Details = "Codex thread: first-thread"
+	firstMessage.Details = "Harness provider: codex\nHarness session: first-thread"
 	secondMessage := message("selection-second", testAgentID, model.HumanMailboxID, "second")
-	secondMessage.Details = "Codex thread: second-thread"
+	secondMessage.Details = "Harness provider: codex\nHarness session: second-thread"
 	first := model.ConversationSummary{Key: conversationKeyForMessage(firstMessage), Latest: firstMessage}
 	second := model.ConversationSummary{Key: conversationKeyForMessage(secondMessage), Latest: secondMessage}
 	m := app{conversations: []model.ConversationSummary{first, second}, conversationMode: true, cursor: 1}
@@ -338,7 +338,7 @@ func TestConversationReloadPreservesStableSelection(t *testing.T) {
 func TestConversationHistoryLoaderExhaustsPages(t *testing.T) {
 	store := &pagedHistoryStore{}
 	m := app{ctx: context.Background(), store: store}
-	key := model.ConversationKey{CounterpartyMailboxID: testAgentID, CodexThreadID: "thread"}
+	key := model.ConversationKey{CounterpartyMailboxID: testAgentID, HarnessProvider: "codex", HarnessSessionID: "thread"}
 	messages, err := m.loadAllConversationHistory(key)
 	if err != nil || len(messages) != 201 || store.calls != 2 || messages[200].Body != "body-200" {
 		t.Fatalf("paged history = %d messages / %d calls / %v", len(messages), store.calls, err)
@@ -351,7 +351,7 @@ func TestNewNamedAgentMessageRecordsCurrentCodexThread(t *testing.T) {
 	editor.SetValue("hello")
 	m := app{ctx: context.Background(), store: store, editor: editor, answering: true, composeTo: testAgentID, composeName: "fred", composeNamed: true}
 	result := m.answer().(answeredMsg)
-	if result.err != nil || store.created.Details != "Codex thread: current-codex-thread" {
+	if result.err != nil || store.created.Details != "Harness provider: codex\nHarness session: current-codex-thread" {
 		t.Fatalf("created message = %#v, result=%#v", store.created, result)
 	}
 }
@@ -468,7 +468,7 @@ func TestTechnicalDetailsAreHiddenUntilExpanded(t *testing.T) {
 	item.SenderInstallationID = "sender-installation-opaque"
 	item.RecipientInstallationID = "recipient-installation-opaque"
 	item.ReplyTo = &replyTo
-	item.Details = "Kind: update\nCodex thread: codex-thread-opaque\nCodex turn: turn-opaque\nHQ message: hq-opaque\n\nChoose one:\n- accept\n- decline"
+	item.Details = "Kind: update\nHarness provider: codex\nHarness session: codex-thread-opaque\nHarness operation: turn-opaque\nHQ message: hq-opaque\n\nChoose one:\n- accept\n- decline"
 	m := app{messages: []model.Message{item}, width: 100, height: 80}
 
 	view := m.View().Content
@@ -587,10 +587,10 @@ func TestCoalescedMessagePartsRenderMarkdownIndependently(t *testing.T) {
 	created := time.Date(2026, 8, 22, 12, 0, 0, 0, time.Local)
 	first := message("first", testAgentID, model.HumanMailboxID, "First **bold part**")
 	first.CreatedAt = created
-	first.Details = "Kind: update\nCodex thread: thread\nCodex turn: turn"
+	first.Details = "Kind: update\nHarness provider: codex\nHarness session: thread\nHarness operation: turn"
 	second := message("second", testAgentID, model.HumanMailboxID, "Second *italic part*")
 	second.CreatedAt = created.Add(time.Second)
-	second.Details = "Kind: final-answer\nCodex thread: thread\nCodex turn: turn"
+	second.Details = "Kind: final-answer\nHarness provider: codex\nHarness session: thread\nHarness operation: turn"
 	group := groupMessages([]model.Message{second, first})[0]
 	m := app{markdown: newMessageMarkdownRenderer(renderMessageMarkdown)}
 
@@ -665,7 +665,7 @@ func BenchmarkReplyEditorViewLongConversation(b *testing.B) {
 	for index := range 120 {
 		item := message(fmt.Sprintf("benchmark-message-%03d", index), testAgentID, model.HumanMailboxID, strings.Repeat("A representative message body with enough text to wrap. ", 12))
 		item.CreatedAt = created.Add(time.Duration(index) * time.Second)
-		item.Details = fmt.Sprintf("Codex thread: benchmark-thread\nCodex turn: turn-%03d", index)
+		item.Details = fmt.Sprintf("Harness provider: codex\nHarness session: benchmark-thread\nHarness operation: turn-%03d", index)
 		messages = append(messages, item)
 	}
 	editor := textarea.New()
@@ -690,13 +690,13 @@ func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
 	created := time.Date(2026, 8, 21, 15, 4, 5, 0, time.Local)
 	question := message("question", testAgentID, model.HumanMailboxID, "Which approach?")
 	question.CreatedAt = created
-	question.Details = "Codex thread: thread-1\nCodex turn: turn-1\nCodex request: request-1"
+	question.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1\nHarness request: request-1"
 	update := message("update", testAgentID, model.HumanMailboxID, "First update")
 	update.CreatedAt = created.Add(time.Second)
-	update.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	update.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	final := message("final", testAgentID, model.HumanMailboxID, "Finished")
 	final.CreatedAt = created.Add(2 * time.Second)
-	final.Details = "Kind: final-answer\nCodex thread: thread-1\nCodex turn: turn-1"
+	final.Details = "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 
 	m := app{inbox: []model.Message{final, update, question}, editor: textarea.New(), width: 120, height: 30}
 	m.setMessages()
@@ -712,7 +712,7 @@ func TestTurnMessagesCoalesceAndRefreshDuringDraft(t *testing.T) {
 
 	late := message("late", testAgentID, model.HumanMailboxID, "Late update")
 	late.CreatedAt = created.Add(3 * time.Second)
-	late.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	late.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	updated, _ = m.Update(loadedMsg{inbox: []model.Message{late, final, update, question}})
 	m = updated.(app)
 	view := m.View().Content
@@ -744,7 +744,7 @@ func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 		}
 	}
 	item := message("message", testAgentID, model.HumanMailboxID, "Body")
-	item.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	item.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	editor := textarea.New()
 	editor.Focus()
 	m := app{
@@ -796,7 +796,7 @@ func TestInboxAndMessagePanesShowScrollbarsOnlyWhenScrollable(t *testing.T) {
 
 func TestResponsiveViewFitsTerminalWithVerticalPanes(t *testing.T) {
 	item := message("message", testAgentID, model.HumanMailboxID, "Body")
-	item.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	item.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	for _, width := range []int{80, 119, 120, 200} {
 		editor := textarea.New()
 		editor.Focus()
@@ -874,12 +874,12 @@ func TestMessagePaneOppositeDirectionMovesImmediatelyAfterTopBoundary(t *testing
 
 func TestMessagePaneKeepsOldestOpenActionVisibleAfterArchivedHistory(t *testing.T) {
 	archived := message("archived-history", testAgentID, model.HumanMailboxID, strings.Repeat("archived ancestor\n", 20))
-	archived.Details = "Codex thread: anchor-thread\nCodex turn: old-turn"
+	archived.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: old-turn"
 	archivedAt := time.Now().UTC()
 	archived.ArchivedAt = &archivedAt
 	open := message("open-history", testAgentID, model.HumanMailboxID, "oldest open action")
 	open.CreatedAt = archived.CreatedAt.Add(time.Second)
-	open.Details = "Codex thread: anchor-thread\nCodex turn: open-turn"
+	open.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: open-turn"
 	m := app{messages: []model.Message{archived, open}, width: 80, height: 24}
 	view := m.View().Content
 	messageView := strings.Join(strings.Split(view, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:], "\n")
@@ -892,17 +892,17 @@ func TestMessagePaneAnchorsNewReplyAfterArchivedMessagesInSameTurn(t *testing.T)
 	created := time.Date(2026, 8, 23, 15, 4, 5, 0, time.Local)
 	read := message("read-reply", testAgentID, model.HumanMailboxID, strings.Repeat("already read\n", 18))
 	read.CreatedAt = created
-	read.Details = "Codex thread: anchor-thread\nCodex turn: shared-turn"
+	read.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn"
 	archivedAt := created.Add(time.Second)
 	read.ArchivedAt = &archivedAt
 
 	human := message("human-response", model.HumanMailboxID, testAgentID, "My response")
 	human.CreatedAt = created.Add(2 * time.Second)
-	human.Details = "Codex thread: anchor-thread\nCodex turn: shared-turn"
+	human.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn"
 
 	unread := message("unread-reply", testAgentID, model.HumanMailboxID, "New reply")
 	unread.CreatedAt = created.Add(3 * time.Second)
-	unread.Details = "Codex thread: anchor-thread\nCodex turn: shared-turn"
+	unread.Details = "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: shared-turn"
 
 	m := app{messages: []model.Message{read, human, unread}, width: 80, height: 24}
 	m.groups = groupMessages(m.messages)
@@ -932,15 +932,15 @@ func TestMessagePaneClearsStaleAnchorWhenOnlyConversationReappears(t *testing.T)
 	created := time.Date(2026, 8, 23, 18, 4, 5, 0, time.Local)
 	previous := message("previous-reply", testAgentID, model.HumanMailboxID, strings.Repeat("previous reply\n", 20))
 	previous.CreatedAt = created
-	previous.Details = "Codex thread: reappearing-thread\nCodex turn: previous-turn"
+	previous.Details = "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: previous-turn"
 	archivedAt := created.Add(time.Second)
 	previous.ArchivedAt = &archivedAt
 	human := message("human-reply", model.HumanMailboxID, testAgentID, "My reply")
 	human.CreatedAt = created.Add(2 * time.Second)
-	human.Details = "Codex thread: reappearing-thread\nCodex turn: previous-turn"
+	human.Details = "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: previous-turn"
 	latest := message("latest-reply", testAgentID, model.HumanMailboxID, strings.Repeat("latest reply\n", 12))
 	latest.CreatedAt = created.Add(3 * time.Second)
-	latest.Details = "Codex thread: reappearing-thread\nCodex turn: latest-turn"
+	latest.Details = "Harness provider: codex\nHarness session: reappearing-thread\nHarness operation: latest-turn"
 	key := conversationKeyForMessage(latest)
 	stableKey := conversationKeyString(key)
 
@@ -976,7 +976,7 @@ func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T
 	created := time.Date(2026, 8, 23, 16, 4, 5, 0, time.Local)
 	previous := message("previous-open", testAgentID, model.HumanMailboxID, strings.Repeat("previous update\n", 18))
 	previous.CreatedAt = created
-	previous.Details = "Codex thread: live-thread\nCodex turn: shared-turn"
+	previous.Details = "Harness provider: codex\nHarness session: live-thread\nHarness operation: shared-turn"
 	key := conversationKeyForMessage(previous)
 	stableKey := conversationKeyString(key)
 	m := app{
@@ -996,7 +996,7 @@ func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T
 
 	latest := message("latest-open", testAgentID, model.HumanMailboxID, "Latest update")
 	latest.CreatedAt = created.Add(time.Second)
-	latest.Details = "Codex thread: live-thread\nCodex turn: shared-turn"
+	latest.Details = "Harness provider: codex\nHarness session: live-thread\nHarness operation: shared-turn"
 	updated, _ := m.Update(loadedMsg{
 		conversations: []model.ConversationSummary{{Key: key, Latest: latest, OldestOpen: &previous}},
 		histories:     map[string][]model.Message{stableKey: {previous, latest}},
@@ -1017,7 +1017,7 @@ func TestMessagePaneRestoresUnreadBoundaryAfterRestartAndMultipleReplies(t *test
 	makeTurnMessage := func(id, body string, offset time.Duration, sender, recipient string) model.Message {
 		item := message(id, sender, recipient, body)
 		item.CreatedAt = created.Add(offset)
-		item.Details = "Codex thread: restart-thread"
+		item.Details = "Harness provider: codex\nHarness session: restart-thread"
 		return item
 	}
 	first := makeTurnMessage("first-agent", strings.Repeat("first response\n", 10), 0, testAgentID, model.HumanMailboxID)
@@ -1066,7 +1066,7 @@ func TestMessagePaneUsesNewestContentWhenConversationHasNoOpenWork(t *testing.T)
 
 func TestManualMessageAnchorSurvivesEarlierLiveHistory(t *testing.T) {
 	current := message("current-message", testAgentID, model.HumanMailboxID, strings.Repeat("current line\n", 24))
-	current.Details = "Codex thread: live-anchor\nCodex turn: current-turn"
+	current.Details = "Harness provider: codex\nHarness session: live-anchor\nHarness operation: current-turn"
 	conversationKey := conversationKeyForMessage(current)
 	stableKey := conversationKeyString(conversationKey)
 	m := app{
@@ -1079,7 +1079,7 @@ func TestManualMessageAnchorSurvivesEarlierLiveHistory(t *testing.T) {
 	anchorID, anchorOffset := m.messageAnchorID, m.messageAnchorOffset
 	earlier := message("earlier-message", testAgentID, model.HumanMailboxID, strings.Repeat("earlier line\n", 12))
 	earlier.CreatedAt = current.CreatedAt.Add(-time.Minute)
-	earlier.Details = "Codex thread: live-anchor\nCodex turn: earlier-turn"
+	earlier.Details = "Harness provider: codex\nHarness session: live-anchor\nHarness operation: earlier-turn"
 	updated, _ := m.Update(historyLoadedMsg{key: stableKey, messages: []model.Message{earlier, current}})
 	m = updated.(app)
 	if !m.messageScrollManual || m.messageAnchorID != anchorID || m.messageAnchorOffset != anchorOffset || m.messageScroll <= 5 {
@@ -1113,10 +1113,10 @@ func TestManualMessageAnchorSurvivesResizeReflow(t *testing.T) {
 
 func TestAutomaticMessageAnchorAdvancesAndRestoresWithOpenState(t *testing.T) {
 	first := message("first-open", testAgentID, model.HumanMailboxID, strings.Repeat("first action\n", 12))
-	first.Details = "Codex thread: state-anchor\nCodex turn: first-turn"
+	first.Details = "Harness provider: codex\nHarness session: state-anchor\nHarness operation: first-turn"
 	second := message("second-open", testAgentID, model.HumanMailboxID, "second action")
 	second.CreatedAt = first.CreatedAt.Add(time.Second)
-	second.Details = "Codex thread: state-anchor\nCodex turn: second-turn"
+	second.Details = "Harness provider: codex\nHarness session: state-anchor\nHarness operation: second-turn"
 	m := app{messages: []model.Message{first, second}, width: 80, height: 24}
 	m.groups = groupMessages(m.messages)
 	m.reconcileMessageViewport(false)
@@ -1139,10 +1139,10 @@ func TestAutomaticMessageAnchorAdvancesAndRestoresWithOpenState(t *testing.T) {
 
 func TestRenderedMessageSpansTrackWrappedMessages(t *testing.T) {
 	first := message("wrapped-first", testAgentID, model.HumanMailboxID, strings.Repeat("wrapped words ", 20))
-	first.Details = "Codex thread: span-thread\nCodex turn: first-turn"
+	first.Details = "Harness provider: codex\nHarness session: span-thread\nHarness operation: first-turn"
 	second := message("wrapped-second", testAgentID, model.HumanMailboxID, "second")
 	second.CreatedAt = first.CreatedAt.Add(time.Second)
-	second.Details = "Codex thread: span-thread\nCodex turn: second-turn"
+	second.Details = "Harness provider: codex\nHarness session: span-thread\nHarness operation: second-turn"
 	m := app{markdown: newMessageMarkdownRenderer(nil)}
 	group := groupMessages([]model.Message{first, second})[0]
 	narrow := m.renderGroupPanelLayout(group, 40)
@@ -1483,7 +1483,7 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	inbound := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d61", agent.ID, model.HumanMailboxID, "Question")
 	inbound.SenderLabel = agent.Label
-	inbound.Details = "Codex thread: thread-1\nCodex turn: turn-1\nCodex request: request-1"
+	inbound.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1\nHarness request: request-1"
 	if err := s.Create(ctx, inbound); err != nil {
 		t.Fatal(err)
 	}
@@ -1501,7 +1501,7 @@ func TestReplyAndNewMessageUseMailboxID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(replies) != 1 || replies[0].RecipientMailboxID != agent.ID || replies[0].Body != "Answer" || replies[0].Details != "Codex thread: thread-1\nCodex turn: turn-1" {
+	if len(replies) != 1 || replies[0].RecipientMailboxID != agent.ID || replies[0].Body != "Answer" || replies[0].Details != "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1" {
 		t.Fatalf("replies = %#v", replies)
 	}
 
@@ -1726,8 +1726,8 @@ func TestAgentManagerRenamesThreadWithoutSelectingOrLaunchingIt(t *testing.T) {
 
 func TestThreadNameAnnotatesExpandedCodexDetails(t *testing.T) {
 	m := app{threadSessions: map[string]domain.AgentSession{"codex\x00thread-123": {Harness: "codex", SessionID: "thread-123", ThreadName: "Fix login", Context: model.RepositoryContext{Directory: "/repo"}}}}
-	details, hidden := m.presentationDetails("Kind: status\nCodex thread: thread-123", true)
-	if hidden || !strings.Contains(details, "Codex thread: Fix login (thread-123)") {
+	details, hidden := m.presentationDetails("Kind: status\nHarness provider: codex\nHarness session: thread-123", true)
+	if hidden || !strings.Contains(details, "Harness provider: codex\nHarness session: Fix login (thread-123)") {
 		t.Fatalf("expanded details = %q, hidden=%t", details, hidden)
 	}
 }
@@ -2010,10 +2010,10 @@ func TestRecipientPickerShowsThreeChoicesAtMinimumHeight(t *testing.T) {
 func TestReplyArchivesEveryVisibleMessageInTurn(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d72", agent.ID, model.HumanMailboxID, "First update")
-	first.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	first.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	final := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d73", agent.ID, model.HumanMailboxID, "Final answer")
 	final.CreatedAt = first.CreatedAt.Add(time.Second)
-	final.Details = "Kind: final-answer\nCodex thread: thread-1\nCodex turn: turn-1"
+	final.Details = "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	for _, item := range []model.Message{first, final} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -2048,13 +2048,13 @@ func TestReplyArchivesEveryVisibleMessageInTurn(t *testing.T) {
 func TestArchiveTargetsOnlyOldestOpenActionUnit(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	firstUpdate := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e01", agent.ID, model.HumanMailboxID, "first update")
-	firstUpdate.Details = "Codex thread: thread-1\nCodex turn: turn-1"
+	firstUpdate.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	firstFinal := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e02", agent.ID, model.HumanMailboxID, "first final")
 	firstFinal.CreatedAt = firstUpdate.CreatedAt.Add(time.Second)
-	firstFinal.Details = "Codex thread: thread-1\nCodex turn: turn-1"
+	firstFinal.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	secondTurn := message("0198c7ec-73b0-7cc3-a5f7-e31c77140e03", agent.ID, model.HumanMailboxID, "second turn")
 	secondTurn.CreatedAt = firstUpdate.CreatedAt.Add(2 * time.Second)
-	secondTurn.Details = "Codex thread: thread-1\nCodex turn: turn-2"
+	secondTurn.Details = "Harness provider: codex\nHarness session: thread-1\nHarness operation: turn-2"
 	for _, item := range []model.Message{firstUpdate, firstFinal, secondTurn} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)
@@ -2123,10 +2123,10 @@ func TestDArchivesSelectionWithoutReply(t *testing.T) {
 func TestUUndoesTurnArchive(t *testing.T) {
 	s, ctx, agent := openStore(t)
 	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d70", agent.ID, model.HumanMailboxID, "First")
-	first.Details = "Kind: update\nCodex thread: thread-1\nCodex turn: turn-1"
+	first.Details = "Kind: update\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	second := message("0198c7ec-73b0-7cc3-a5f7-e31c77140d71", agent.ID, model.HumanMailboxID, "Second")
 	second.CreatedAt = first.CreatedAt.Add(time.Second)
-	second.Details = "Kind: final-answer\nCodex thread: thread-1\nCodex turn: turn-1"
+	second.Details = "Kind: final-answer\nHarness provider: codex\nHarness session: thread-1\nHarness operation: turn-1"
 	for _, item := range []model.Message{first, second} {
 		if err := s.Create(ctx, item); err != nil {
 			t.Fatal(err)

@@ -179,6 +179,7 @@ func (s *Supervisor) launchHarnessAgent(ctx context.Context, request domain.Harn
 			s.receipts[request.RequestID] = receipt{digest: digest, runtime: result}
 			s.mu.Unlock()
 			logger.Info("harness agent already running in requested session", "session_id", result.SessionID)
+			return result, nil
 		}
 		if !request.ConfirmSwitch {
 			s.mu.Unlock()
@@ -249,7 +250,7 @@ func (s *Supervisor) launchHarnessAgent(ctx context.Context, request domain.Harn
 	request.Environment = nil
 	options := harnessbridge.Options{
 		Directory: request.Directory, Environment: environment, RequestedSession: harness.SessionID(resumeID), AgentName: request.AgentName, NewSession: newThread,
-		InitialPrompt: request.InitialPrompt, Repository: request.Repository, Factory: factory, ProviderOptions: providerOptions,
+		InitialPrompt: request.InitialPrompt, InitialSubmissionID: harness.SubmissionID(request.RequestID), Repository: request.Repository, Factory: factory, ProviderOptions: providerOptions,
 		Store: s.Store, Sync: s.Sync, Ledger: s.Ledger, Logger: logger.With("component", "harness_bridge"),
 		Updates:        domain.ClientUpdates{Subscribe: s.Subscribe},
 		SuppressStatus: true,

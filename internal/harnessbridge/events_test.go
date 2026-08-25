@@ -3,7 +3,6 @@ package harnessbridge
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +37,7 @@ func (s *blockedActivityStore) UpsertHarnessActivity(context.Context, domain.Har
 	return nil
 }
 
-func TestEventRelayFailsFastWhenPersistenceQueueIsSaturated(t *testing.T) {
+func TestEventRelayBackpressuresCanonicalOutputWhenPersistenceQueueIsSaturated(t *testing.T) {
 	factory := fake.NewFactory("bounded")
 	instance, err := factory.Launch(context.Background(), harness.LaunchConfig{
 		InstanceID: "bounded-instance", AgentName: "agent", Directory: "/work", SessionMode: harness.SessionNew,
@@ -48,25 +47,31 @@ func TestEventRelayFailsFastWhenPersistenceQueueIsSaturated(t *testing.T) {
 	}
 	store := &blockedOutputStore{release: make(chan struct{})}
 	relay := startEventRelay(context.Background(), instance, store, nil, newMemoryLedger(), nil, model.Mailbox{ID: "agent-mailbox"}, model.RepositoryContext{}, nil, Terminology{ProviderName: "Bounded", SessionName: "session", OperationName: "operation", ItemName: "item"}, newOperationTracker())
-	for index := 0; index < eventQueueCapacity+2; index++ {
-		if err := factory.Emit(instance, "operation", harnessItemID(index), harness.OutputEvent{Text: "output", Final: true}); err != nil {
-			t.Fatal(err)
+	emitted := make(chan struct{})
+	go func() {
+		defer close(emitted)
+		for index := 0; index < eventQueueCapacity+40; index++ {
+			_ = factory.Emit(instance, "operation", harnessItemID(index), harness.OutputEvent{Text: "output", Final: true})
 		}
-	}
+	}()
 	select {
 	case <-relay.Failed():
-		if err := relay.Err(); err == nil || !strings.Contains(err.Error(), "64-event bound") {
-			t.Fatalf("relay error = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("saturated relay did not fail fast")
+		t.Fatalf("canonical output saturation failed the relay: %v", relay.Err())
+	case <-emitted:
+		t.Fatal("canonical output did not apply backpressure")
+	case <-time.After(100 * time.Millisecond):
 	}
 	close(store.release)
+	select {
+	case <-emitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canonical output remained blocked after persistence resumed")
+	}
 	_ = instance.Shutdown(context.Background())
 	relay.StopAndWait()
 }
 
-func TestEventRelayFailsFastWhenActivityPersistenceQueueIsSaturated(t *testing.T) {
+func TestEventRelayDropsActivityWhenPersistenceQueueIsSaturated(t *testing.T) {
 	factory := fake.NewFactory("bounded-activity")
 	instance, err := factory.Launch(context.Background(), harness.LaunchConfig{
 		InstanceID: "bounded-activity-instance", AgentName: "agent", Directory: "/work", SessionMode: harness.SessionNew,
@@ -83,11 +88,8 @@ func TestEventRelayFailsFastWhenActivityPersistenceQueueIsSaturated(t *testing.T
 	}
 	select {
 	case <-relay.Failed():
-		if err := relay.Err(); err == nil || !strings.Contains(err.Error(), "64-event bound") {
-			t.Fatalf("relay error = %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("saturated activity relay did not fail fast")
+		t.Fatalf("activity saturation failed the relay: %v", relay.Err())
+	case <-time.After(100 * time.Millisecond):
 	}
 	close(store.activityRelease)
 	_ = instance.Shutdown(context.Background())

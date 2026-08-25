@@ -71,7 +71,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 				return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
 			}
 			conversationFilter = request.Filter
-			return model.ConversationPage{Conversations: []model.ConversationSummary{{Key: model.ConversationKey{CounterpartyMailboxID: "agent", CodexThreadID: "thread"}}}, NextCursor: "summary-next"}, nil
+			return model.ConversationPage{Conversations: []model.ConversationSummary{{Key: model.ConversationKey{CounterpartyMailboxID: "agent", HarnessProvider: "codex", HarnessSessionID: "thread"}}}, NextCursor: "summary-next"}, nil
 		case domainrpc.ConversationHistoryMethod:
 			var request domainrpc.ConversationHistoryRequest
 			if err := json.Unmarshal(raw, &request); err != nil {
@@ -126,11 +126,11 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	_ = client.Create(ctx, model.Message{})
 	_ = client.Reply(ctx, "original", model.Message{})
 	_, _ = client.Get(ctx, "message")
-	wantListFilter := model.Filter{CounterpartyMailboxID: "counterparty", ThreadID: "hq-thread", CodexThreadID: "codex-thread", CodexTurnID: "codex-turn"}
+	wantListFilter := model.Filter{CounterpartyMailboxID: "counterparty", ThreadID: "hq-thread", HarnessSessionID: "codex-thread", HarnessOperationID: "codex-turn"}
 	_, _ = client.List(ctx, wantListFilter)
 	wantConversationFilter := model.ConversationFilter{IncludeSent: true, IncludeArchived: true, Cursor: "summary-cursor", Limit: 17}
 	conversationResult, _ := client.ListConversations(ctx, wantConversationFilter)
-	wantHistoryFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", CodexThreadID: "thread"}, Cursor: "history-cursor", Limit: 23}
+	wantHistoryFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", HarnessProvider: "codex", HarnessSessionID: "thread"}, Cursor: "history-cursor", Limit: 23}
 	historyResult, _ := client.ListConversationHistory(ctx, wantHistoryFilter)
 	_ = client.UpsertHarnessActivity(ctx, domain.HarnessActivity{ItemID: "activity-input"})
 	wantActivityFilter := domain.HarnessActivityFilter{MailboxID: "agent", Harness: "fake", SessionID: "session", Limit: 31}
