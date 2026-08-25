@@ -123,6 +123,55 @@ func TestHarnessBridgeContainsNoVendorProtocolNames(t *testing.T) {
 	}
 }
 
+func TestMessagePayloadWritersDoNotEmbedStructuralDetails(t *testing.T) {
+	repository := repositoryRoot(t)
+	files, err := productionGoFiles(filepath.Join(repository, "internal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range files {
+		file := parseFile(t, path)
+		ast.Inspect(file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.CompositeLit)
+			if !ok || !isTextPayloadType(literal.Type) {
+				return true
+			}
+			for _, element := range literal.Elts {
+				field, ok := element.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				name, nameOK := field.Key.(*ast.Ident)
+				value, valueOK := field.Value.(*ast.BasicLit)
+				if !nameOK || name.Name != "Details" || !valueOK || value.Kind != token.STRING {
+					continue
+				}
+				text, err := strconv.Unquote(value.Value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, prefix := range []string{"Kind:", "Phase:", "Harness provider:", "Harness session:", "Harness operation:", "Harness item:", "Harness request:", "Project assignment:", "Project thread:"} {
+					if strings.Contains(text, prefix) {
+						t.Errorf("%s embeds structural prefix %q in a message payload Details literal", relativePath(repository, path), prefix)
+					}
+				}
+			}
+			return true
+		})
+	}
+}
+
+func isTextPayloadType(expression ast.Expr) bool {
+	switch value := expression.(type) {
+	case *ast.Ident:
+		return value.Name == "TextPayload"
+	case *ast.SelectorExpr:
+		return value.Sel.Name == "TextPayload"
+	default:
+		return false
+	}
+}
+
 func productionGoFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {

@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
+	"reflect"
 	"time"
 
 	"github.com/wbbradley/hq/internal/domain"
@@ -24,6 +24,11 @@ func (s *SQLite) CreateProjectOutput(ctx context.Context, binding domain.Project
 		return errors.New("project output message is invalid")
 	}
 	message.Purpose = model.MessagePurposeProjectOutput
+	if err := s.reconcileExistingProjectOutput(ctx, binding, message); err == nil {
+		return nil
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
 	account, parents, _, err := s.localAccountAction(ctx, "")
 	if err != nil {
 		return err
@@ -53,20 +58,14 @@ func (s *SQLite) CreateProjectOutput(ctx context.Context, binding domain.Project
 	}
 	late := ended.Valid || currentAssignment != binding.AssignmentID || currentAgent != binding.AgentName || currentThread != binding.ProjectThreadID
 	actorLabel := binding.AgentName + " · " + projectName
-	details := strings.TrimSpace(message.Details)
-	provenance := fmt.Sprintf("Project: %s\nProject assignment: %s\nProject thread: %s", binding.ProjectID, binding.AssignmentID, binding.ProjectThreadID)
+	provenance := projectOutputProvenanceSection(binding.ProjectID, binding.AssignmentID, binding.ProjectThreadID, late, currentAssignment, currentAgent, currentThread)
 	if late {
 		actorLabel += " (late from inactive assignment)"
-		provenance += fmt.Sprintf("\nLate from inactive assignment: yes\nCurrent assignment: %s\nCurrent agent: %s\nCurrent project thread: %s", valueOrNone(currentAssignment), valueOrNone(currentAgent), valueOrNone(currentThread))
 	}
-	if details == "" {
-		details = provenance
-	} else {
-		details += "\n" + provenance
-	}
-	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: message.ID, Body: message.Body, Details: details, Purpose: message.Purpose, Context: contextPointer(message.Context), ActorLabel: actorLabel})
+	message.TechnicalSections = append(append([]model.TechnicalSection(nil), message.TechnicalSections...), provenance)
+	payload, _ := event.MarshalPayload(textPayloadForMessage(message, actorLabel))
 	content := event.Content{
-		Type: event.TypeQuestion, Sender: s.localAddress(mailboxID),
+		Schema: event.MessageSchemaVersion, Type: event.TypeQuestion, Sender: s.localAddress(mailboxID),
 		Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents,
 		Scope: event.ScopeAccountAddressed, Payload: payload,
 	}
@@ -90,6 +89,49 @@ func (s *SQLite) CreateProjectOutput(ctx context.Context, binding domain.Project
 	}
 	s.notifyChange(change)
 	return nil
+}
+
+func (s *SQLite) reconcileExistingProjectOutput(ctx context.Context, binding domain.ProjectOutputBinding, message model.Message) error {
+	existing, err := s.Get(ctx, message.ID)
+	if err != nil {
+		return err
+	}
+	var projectID, assignmentID, agentName, projectThreadID, externalThreadID, currentAssignment, currentAgent, currentThread string
+	var late bool
+	err = s.db.QueryRowContext(ctx, `SELECT project_id,assignment_id,agent_name,project_thread_id,external_thread_id,late,current_assignment_id,current_agent_name,current_project_thread_id FROM project_output_provenance WHERE message_id=?`, message.ID).Scan(
+		&projectID, &assignmentID, &agentName, &projectThreadID, &externalThreadID, &late, &currentAssignment, &currentAgent, &currentThread,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("project output message ID %s collides with different HQ content", message.ID)
+	}
+	if err != nil {
+		return err
+	}
+	if projectID != binding.ProjectID || assignmentID != binding.AssignmentID || agentName != binding.AgentName || projectThreadID != binding.ProjectThreadID || externalThreadID != binding.ExternalThreadID {
+		return fmt.Errorf("project output message ID %s collides with different project provenance", message.ID)
+	}
+	message.TechnicalSections = append(append([]model.TechnicalSection(nil), message.TechnicalSections...), projectOutputProvenanceSection(projectID, assignmentID, projectThreadID, late, currentAssignment, currentAgent, currentThread))
+	if existing.SenderMailboxID != message.SenderMailboxID || existing.RecipientMailboxID != message.RecipientMailboxID || existing.Purpose != message.Purpose || existing.Body != message.Body || existing.Details != message.Details || existing.Presentation != message.Presentation || existing.Correlation != message.Correlation || existing.Context != message.Context || !reflect.DeepEqual(existing.TechnicalSections, message.TechnicalSections) {
+		return fmt.Errorf("project output message ID %s collides with different HQ content", message.ID)
+	}
+	return nil
+}
+
+func projectOutputProvenanceSection(projectID, assignmentID, projectThreadID string, late bool, currentAssignment, currentAgent, currentThread string) model.TechnicalSection {
+	section := model.TechnicalSection{Namespace: "hq.project.output_provenance", Fields: []model.TechnicalField{
+		{Key: "project_id", Label: "Project", Value: projectID},
+		{Key: "assignment_id", Label: "Project assignment", Value: assignmentID},
+		{Key: "project_thread_id", Label: "Project thread", Value: projectThreadID},
+	}}
+	if late {
+		section.Fields = append(section.Fields,
+			model.TechnicalField{Key: "late", Label: "Late from inactive assignment", Value: "yes"},
+			model.TechnicalField{Key: "current_assignment_id", Label: "Current assignment", Value: valueOrNone(currentAssignment)},
+			model.TechnicalField{Key: "current_agent", Label: "Current agent", Value: valueOrNone(currentAgent)},
+			model.TechnicalField{Key: "current_project_thread_id", Label: "Current project thread", Value: valueOrNone(currentThread)},
+		)
+	}
+	return section
 }
 
 func valueOrNone(value string) string {

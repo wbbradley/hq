@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/store"
 )
@@ -172,6 +173,47 @@ func TestOutputRelayRecoversStoreBeforeLedgerCrashWindow(t *testing.T) {
 	sent, _ = ledger.OutputSent(fixture.thread, "agent-crash-window")
 	if !sent {
 		t.Fatal("recovered output was not checkpointed")
+	}
+}
+
+type existingCanonicalOutputStore struct{ message model.Message }
+
+func (s existingCanonicalOutputStore) Create(context.Context, model.Message) error { return nil }
+func (s existingCanonicalOutputStore) Get(context.Context, string) (model.Message, error) {
+	return s.message, nil
+}
+
+type recordingCodexProjectOutputStore struct {
+	calls   int
+	binding domain.ProjectOutputBinding
+	message model.Message
+}
+
+func (s *recordingCodexProjectOutputStore) CreateProjectOutput(_ context.Context, binding domain.ProjectOutputBinding, message model.Message) error {
+	s.calls++
+	s.binding, s.message = binding, message
+	return nil
+}
+
+func TestOutputRelayDelegatesExistingProjectOutputReconciliationToProjectStore(t *testing.T) {
+	project := domain.ProjectOutputBinding{ProjectID: "project", AssignmentID: "assignment", AgentName: "agent", ProjectThreadID: "project-thread", ExternalThreadID: "thread"}
+	projectStore := &recordingCodexProjectOutputStore{}
+	relay := &OutputRelay{
+		store: existingCanonicalOutputStore{message: model.Message{CreatedAt: time.Unix(1, 0).UTC()}}, projectStore: projectStore,
+		ledger: NewMemoryLedger(), now: func() time.Time { return time.Unix(2, 0).UTC() },
+	}
+	relay.Bind("thread", model.Mailbox{ID: "project-mailbox"}, model.RepositoryContext{Directory: "/work"})
+	relay.BindProject(project)
+	output := canonicalOutput{
+		key: "item", body: "result", presentation: model.PresentationFinalAnswer,
+		correlation:       model.MessageCorrelation{Provider: "codex", SessionID: "thread", OperationID: "turn", ItemID: "item"},
+		technicalSections: []model.TechnicalSection{{Namespace: "hq.harness.output", Fields: []model.TechnicalField{{Key: "phase", Value: "final_answer"}}}},
+	}
+	if err := relay.publish(output); err != nil {
+		t.Fatal(err)
+	}
+	if projectStore.calls != 1 || projectStore.binding != project || projectStore.message.Presentation != output.presentation || projectStore.message.Correlation != output.correlation {
+		t.Fatalf("project reconciliation = calls %d, binding %#v, message %#v", projectStore.calls, projectStore.binding, projectStore.message)
 	}
 }
 

@@ -307,7 +307,14 @@ func (r *eventRelay) publish(output canonicalOutput) error {
 	existing, err := r.store.Get(context.Background(), message.ID)
 	switch {
 	case err == nil:
-		if !sameOutput(existing, message) {
+		if r.project != nil {
+			if r.projectStore == nil {
+				return errors.New("project harness output store is required")
+			}
+			if createErr := r.projectStore.CreateProjectOutput(context.Background(), *r.project, message); createErr != nil {
+				return fmt.Errorf("reconcile project harness output: %w", createErr)
+			}
+		} else if !sameOutput(existing, message) {
 			return fmt.Errorf("harness output message ID %s collides with different HQ content", message.ID)
 		}
 		r.advanceCreatedAt(existing.CreatedAt)

@@ -106,8 +106,17 @@ func (s *SQLite) appendProjectPendingNoticeTx(ctx context.Context, tx *sql.Tx, p
 	if err != nil {
 		return err
 	}
-	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: noticeID.String(), Body: "New activity is waiting for project " + name, Details: fmt.Sprintf("Kind: notice\nProject: %s\nPending message: %s\nLifecycle: %s\nArchived: %t", projectID, messageID, lifecycle, archived), Purpose: model.MessagePurposeSystemNotice, ActorLabel: "HQ · " + name})
-	content := event.Content{Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: accountID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	payload, _ := event.MarshalPayload(event.TextPayload{
+		MessageID: noticeID.String(), Body: "New activity is waiting for project " + name, Purpose: model.MessagePurposeSystemNotice, ActorLabel: "HQ · " + name,
+		Presentation: model.PresentationNotice,
+		TechnicalSections: []model.TechnicalSection{{Namespace: "hq.project.pending_message", Fields: []model.TechnicalField{
+			{Key: "project_id", Label: "Project", Value: projectID},
+			{Key: "pending_message_id", Label: "Pending message", Value: messageID},
+			{Key: "lifecycle", Label: "Lifecycle", Value: lifecycle},
+			{Key: "archived", Label: "Archived", Value: fmt.Sprintf("%t", archived)},
+		}}},
+	})
+	content := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: accountID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
 	signed, err := s.signContents(ctx, []event.Content{content}, []time.Time{created})
 	if err != nil {
 		return err

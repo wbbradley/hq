@@ -626,7 +626,6 @@ func (m app) answer() tea.Msg {
 			}
 			if agent.Harness != "" && agent.CurrentSessionID != "" {
 				message.Correlation = model.MessageCorrelation{Provider: agent.Harness, SessionID: agent.CurrentSessionID}
-				message.HarnessProvider, message.HarnessSessionID = agent.Harness, agent.CurrentSessionID
 			}
 		}
 		message.RecipientMailboxID = m.composeTo
@@ -2473,15 +2472,6 @@ func conversationSummaryByString(summaries []model.ConversationSummary, stableKe
 		}
 	}
 	return model.ConversationSummary{}, false
-}
-
-func detailValue(details, prefix string) string {
-	for _, line := range strings.Split(details, "\n") {
-		if value, found := strings.CutPrefix(strings.TrimSpace(line), prefix); found {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }
 
 func (m app) visibleGroups() []messageGroup {

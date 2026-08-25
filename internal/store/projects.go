@@ -818,12 +818,25 @@ func (s *SQLite) CheckProjectResource(ctx context.Context, projectID, resourceID
 			} else if priorState == domain.ResourceHealthy {
 				body = fmt.Sprintf("Project resource degraded (%s): %s", checked.health, resource.DisplayLocator)
 			}
-			noticeDetails := fmt.Sprintf("Kind: notice\nProject: %s\nResource: %s\nPrevious health: %s\nCurrent health: %s", projectID, resourceID, priorState, checked.health)
-			if len(details) != 0 {
-				noticeDetails += "\nHealth details: " + string(raw)
+			technicalFields := []model.TechnicalField{
+				{Key: "project_id", Label: "Project", Value: projectID},
+				{Key: "resource_id", Label: "Resource", Value: resourceID},
+				{Key: "previous_health", Label: "Previous health", Value: string(priorState)},
+				{Key: "current_health", Label: "Current health", Value: string(checked.health)},
 			}
-			payload, _ := event.MarshalPayload(event.TextPayload{MessageID: messageID.String(), Body: body, Details: noticeDetails, Purpose: model.MessagePurposeSystemNotice, ActorLabel: "HQ · " + projectName})
-			content := event.Content{Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+			if len(details) != 0 {
+				healthDetails, truncated := truncateUTF8(string(raw), event.MaxTechnicalValueBytes)
+				technicalFields = append(technicalFields, model.TechnicalField{Key: "health_details", Label: "Health details", Value: healthDetails})
+				if truncated {
+					technicalFields = append(technicalFields, model.TechnicalField{Key: "health_details_truncated", Label: "Health details truncated", Value: "yes"})
+				}
+			}
+			payload, _ := event.MarshalPayload(event.TextPayload{
+				MessageID: messageID.String(), Body: body, Purpose: model.MessagePurposeSystemNotice, ActorLabel: "HQ · " + projectName,
+				Presentation:      model.PresentationNotice,
+				TechnicalSections: []model.TechnicalSection{{Namespace: "hq.project.resource_health", Fields: technicalFields}},
+			})
+			content := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
 			signed, signErr := s.signContents(ctx, []event.Content{content}, []time.Time{now})
 			if signErr != nil {
 				return nil, signErr

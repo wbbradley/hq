@@ -70,9 +70,18 @@ func TestOpenObservesChangedSymlinkIdentityWithoutRewritingResource(t *testing.T
 	if err := s.db.QueryRow(`SELECT count(*) FROM project_events WHERE project_id=? AND event_type='project.resource.health'`, project.ID).Scan(&healthEvents); err != nil || healthEvents != 1 {
 		t.Fatalf("health events = %d, %v", healthEvents, err)
 	}
-	if err := s.db.QueryRow(`SELECT count(*) FROM messages WHERE actor_label=? AND technical_sections_json LIKE '%"current_health"%' AND technical_sections_json LIKE '%malformed%'`, "HQ · "+project.Name).Scan(&notices); err != nil || notices != 1 {
+	if err := s.db.QueryRow(`SELECT count(*) FROM messages WHERE actor_label=? AND presentation='notice' AND details='' AND technical_sections_json LIKE '%"namespace":"hq.project.resource_health"%' AND technical_sections_json LIKE '%"current_health"%' AND technical_sections_json LIKE '%malformed%'`, "HQ · "+project.Name).Scan(&notices); err != nil || notices != 1 {
 		t.Fatalf("health notices = %d, %v", notices, err)
 	}
+	var noticeID string
+	if err := s.db.QueryRow(`SELECT id FROM messages WHERE actor_label=? AND body LIKE 'Project resource condition changed%'`, "HQ · "+project.Name).Scan(&noticeID); err != nil {
+		t.Fatal(err)
+	}
+	notice, err := s.Get(ctx, noticeID)
+	if err != nil || strings.Join(technicalFieldKeys(notice.TechnicalSections, "hq.project.resource_health"), ",") != "project_id,resource_id,previous_health,current_health,health_details" {
+		t.Fatalf("resource notice = %#v, %v", notice, err)
+	}
+	assertCanonicalMessageSchema(t, s, noticeID, event.Schema2)
 }
 
 func TestOpenChecksExpectedHeadBeforeLifecycle(t *testing.T) {
@@ -825,6 +834,9 @@ func TestProjectMessagesReceiveHomeSequenceWhileClosedAndArchived(t *testing.T) 
 	if err := s.db.QueryRow(`SELECT count(*) FROM messages WHERE sender_mailbox_id=? AND recipient_mailbox_id=? AND actor_label=? AND body LIKE 'New activity is waiting%'`, project.MailboxID, model.HumanMailboxID, "HQ · "+project.Name).Scan(&notices); err != nil || notices != 2 {
 		t.Fatalf("pending project notices = %d, %v", notices, err)
 	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM messages WHERE sender_mailbox_id=? AND presentation='notice' AND details='' AND technical_sections_json LIKE '%"namespace":"hq.project.pending_message"%'`, project.MailboxID).Scan(&notices); err != nil || notices != 2 {
+		t.Fatalf("typed pending project notices = %d, %v", notices, err)
+	}
 	rows, err := s.db.Query(`SELECT sequence,message_id FROM project_message_acceptances WHERE project_id=? ORDER BY sequence`, project.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1023,16 +1035,35 @@ func TestProjectOutputRetainsAssignmentProvenanceAndMarksLateRuntime(t *testing.
 	}
 	old := domain.ProjectOutputBinding{ProjectID: project.ID, AssignmentID: project.Assignment.ID, AgentName: "alice", ProjectThreadID: project.Assignment.SelectedThreadID, ExternalThreadID: "old-output-thread", RuntimeOwner: "old-owner", RuntimeState: "connected"}
 	currentID := "019c0000-0000-7000-8000-000000000351"
-	if err := s.CreateProjectOutput(ctx, old, model.Message{ID: currentID, SenderMailboxID: project.MailboxID, RecipientMailboxID: model.HumanMailboxID, Body: "current output", CreatedAt: time.Now().UTC()}); err != nil {
+	currentInput := model.Message{
+		ID: currentID, SenderMailboxID: project.MailboxID, RecipientMailboxID: model.HumanMailboxID, Body: "current output", Details: "Visible explanation.",
+		Presentation:      model.PresentationFinalAnswer,
+		Correlation:       model.MessageCorrelation{Provider: "home-built", SessionID: "output-session", OperationID: "output-operation", ItemID: "output-item"},
+		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.output", Fields: []model.TechnicalField{{Key: "diagnostic", Value: "kept"}}}},
+		CreatedAt:         time.Now().UTC(),
+	}
+	if err := s.CreateProjectOutput(ctx, old, currentInput); err != nil {
 		t.Fatal(err)
+	}
+	if err := s.CreateProjectOutput(ctx, old, currentInput); err != nil {
+		t.Fatalf("idempotent project output retry: %v", err)
+	}
+	collision := currentInput
+	collision.Presentation = model.PresentationStatus
+	if err := s.CreateProjectOutput(ctx, old, collision); err == nil || !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("project output collision = %v", err)
 	}
 	current, err := s.Get(ctx, currentID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.SenderLabel != "alice · output project" || !technicalFieldEquals(current.TechnicalSections, "hq.legacy.project_output_provenance", "assignment_id", old.AssignmentID) {
+	if current.SenderLabel != "alice · output project" || current.Details != currentInput.Details || current.Presentation != currentInput.Presentation || current.Correlation != currentInput.Correlation || !technicalFieldEquals(current.TechnicalSections, "vendor.output", "diagnostic", "kept") || !technicalFieldEquals(current.TechnicalSections, "hq.project.output_provenance", "assignment_id", old.AssignmentID) {
 		t.Fatalf("current output = %#v", current)
 	}
+	if len(current.TechnicalSections) != 2 || current.TechnicalSections[0].Namespace != "vendor.output" || current.TechnicalSections[1].Namespace != "hq.project.output_provenance" || strings.Join(technicalFieldKeys(current.TechnicalSections, "hq.project.output_provenance"), ",") != "project_id,assignment_id,project_thread_id" {
+		t.Fatalf("current technical order = %#v", current.TechnicalSections)
+	}
+	assertCanonicalMessageSchema(t, s, currentID, event.Schema2)
 	project, err = s.UnassignProject(ctx, project.ID, project.HeadEventID, true, "forced takeover")
 	if err != nil {
 		t.Fatal(err)
@@ -1053,8 +1084,11 @@ func TestProjectOutputRetainsAssignmentProvenanceAndMarksLateRuntime(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if late.SenderLabel != "alice · output project (late from inactive assignment)" || !technicalFieldEquals(late.TechnicalSections, "hq.legacy.project_output_provenance", "late", "yes") || !technicalFieldEquals(late.TechnicalSections, "hq.legacy.project_output_provenance", "current_assignment_id", project.Assignment.ID) {
+	if late.SenderLabel != "alice · output project (late from inactive assignment)" || !technicalFieldEquals(late.TechnicalSections, "hq.project.output_provenance", "late", "yes") || !technicalFieldEquals(late.TechnicalSections, "hq.project.output_provenance", "current_assignment_id", project.Assignment.ID) {
 		t.Fatalf("late output = %#v", late)
+	}
+	if strings.Join(technicalFieldKeys(late.TechnicalSections, "hq.project.output_provenance"), ",") != "project_id,assignment_id,project_thread_id,late,current_assignment_id,current_agent,current_project_thread_id" {
+		t.Fatalf("late technical order = %#v", late.TechnicalSections)
 	}
 	var markedLate, forced int
 	var currentAssignment, owner string
@@ -1078,6 +1112,32 @@ func technicalFieldEquals(sections []model.TechnicalSection, namespace, key, val
 		}
 	}
 	return false
+}
+
+func technicalFieldKeys(sections []model.TechnicalSection, namespace string) []string {
+	for _, section := range sections {
+		if section.Namespace != namespace {
+			continue
+		}
+		keys := make([]string, len(section.Fields))
+		for index, field := range section.Fields {
+			keys[index] = field.Key
+		}
+		return keys
+	}
+	return nil
+}
+
+func assertCanonicalMessageSchema(t *testing.T, s *SQLite, messageID string, want int) {
+	t.Helper()
+	var raw []byte
+	if err := s.db.QueryRow(`SELECT c.raw FROM canonical_events c JOIN messages m ON m.event_id=c.event_id WHERE m.id=?`, messageID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	inspection := event.Inspect(raw)
+	if inspection.Status != event.StatusProjected || inspection.Event.Content.Schema != want {
+		t.Fatalf("canonical message schema = %d, status %s, error %v", inspection.Event.Content.Schema, inspection.Status, inspection.Err)
+	}
 }
 
 func TestReplyToProjectOutputIsAcceptedAndDispatchable(t *testing.T) {

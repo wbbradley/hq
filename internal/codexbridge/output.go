@@ -160,7 +160,14 @@ func (r *OutputRelay) publish(output canonicalOutput) error {
 	existing, err := r.store.Get(context.Background(), message.ID)
 	switch {
 	case err == nil:
-		if !sameCanonicalOutput(existing, message) {
+		if project != nil {
+			if r.projectStore == nil {
+				return errors.New("project Codex output store is required")
+			}
+			if createErr := r.projectStore.CreateProjectOutput(context.Background(), *project, message); createErr != nil {
+				return fmt.Errorf("reconcile project Codex output: %w", createErr)
+			}
+		} else if !sameCanonicalOutput(existing, message) {
 			return fmt.Errorf("Codex output message ID %s collides with different HQ content", message.ID)
 		}
 		if existing.CreatedAt.After(r.lastCreatedAt) {
