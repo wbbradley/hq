@@ -34,7 +34,7 @@ func NewFactory(providerID harness.ProviderID) *Factory {
 			ID: providerID, DisplayName: "Deterministic fake harness",
 			Capabilities: harness.Capabilities{
 				Resume: true, SteerActiveOperation: true, Interrupt: true, StructuredInput: true, Approvals: true,
-				IdempotentSubmission: true, SubmissionLookup: true,
+				IdempotentSubmission: true, SubmissionLookup: true, Plans: true, Diffs: true, ToolLifecycle: true, Streaming: true,
 			},
 		},
 		sessions: make(map[harness.SessionID]*sessionRecord),

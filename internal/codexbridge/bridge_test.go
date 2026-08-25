@@ -824,6 +824,13 @@ func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
 	waitForStoreBody(t, fixture.store, model.HumanMailboxID, "test-agent ready in /work/repo")
 
 	notifications := []string{
+		`{"method":"turn/started","params":{"threadId":"` + fixture.thread + `","turn":{"id":"turn-output","status":"inProgress"}}}`,
+		`{"method":"turn/plan/updated","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","plan":[{"step":"first","status":"inProgress"}]}}`,
+		`{"method":"turn/plan/updated","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","plan":[{"step":"final","status":"completed"}]}}`,
+		`{"method":"turn/diff/updated","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","diff":"diff --git a/main.go b/main.go"}}`,
+		`{"method":"item/started","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","item":{"type":"commandExecution","id":"command-output","command":"go test ./...","status":"inProgress"}}}`,
+		`{"method":"item/commandExecution/outputDelta","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","itemId":"command-output","delta":"partial command output"}}`,
+		`{"method":"item/completed","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","item":{"type":"commandExecution","id":"command-output","command":"go test ./...","status":"completed","aggregatedOutput":"ok","exitCode":0}}}`,
 		`{"method":"item/agentMessage/delta","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","itemId":"agent-output","delta":"partial"}}`,
 		`{"method":"item/completed","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","item":{"type":"reasoning","id":"reason-output","summary":["hidden"]}}}`,
 		`{"method":"item/completed","params":{"threadId":"` + fixture.thread + `","turnId":"turn-output","item":{"type":"agentMessage","id":"agent-output","text":"Authoritative answer","phase":"final_answer"}}}`,
@@ -860,6 +867,20 @@ func TestBridgeRelaysCanonicalOutputBeforeSingleTerminalStatus(t *testing.T) {
 	}
 	if len(bodies) != 4 || bodies[0] != "test-agent ready in /work/repo" || bodies[1] != "Authoritative answer" || bodies[2] != "Codex turn failed" || bodies[3] != "Codex bridge stopped" {
 		t.Fatalf("message order = %#v", bodies)
+	}
+	activities, err := fixture.store.ListHarnessActivities(context.Background(), domain.HarnessActivityFilter{MailboxID: fixture.agent.ID})
+	if err != nil || len(activities) != 5 {
+		t.Fatalf("Codex activities = %#v, %v", activities, err)
+	}
+	byKind := make(map[domain.HarnessActivityKind]domain.HarnessActivity, len(activities))
+	for index, activity := range activities {
+		if index > 0 && !activity.OccurredAt.After(activities[index-1].OccurredAt) {
+			t.Fatalf("Codex activity order = %#v", activities)
+		}
+		byKind[activity.Kind] = activity
+	}
+	if byKind[domain.HarnessActivityPlan].Body != "- [x] final" || byKind[domain.HarnessActivityProgress].Body != "partial command output" || byKind[domain.HarnessActivityCommand].Title != "go test ./..." || byKind[domain.HarnessActivityOperation].Status != domain.HarnessActivityFailed {
+		t.Fatalf("projected Codex activities = %#v", byKind)
 	}
 }
 

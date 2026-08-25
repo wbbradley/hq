@@ -47,7 +47,7 @@ func (f *HarnessFactory) Provider() harness.Provider {
 		ID: CodexProviderID, DisplayName: "Codex",
 		Capabilities: harness.Capabilities{
 			Resume: true, SteerActiveOperation: true, Interrupt: true, Approvals: true,
-			SubmissionLookup: true,
+			SubmissionLookup: true, Plans: true, Diffs: true, ToolLifecycle: true, Streaming: true,
 		},
 	}
 }

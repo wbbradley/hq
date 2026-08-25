@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/wbbradley/hq/internal/domain"
@@ -22,6 +23,11 @@ type canonicalOutput struct {
 	details string
 }
 
+type eventWork struct {
+	output   *canonicalOutput
+	activity *domain.HarnessActivity
+}
+
 type eventRelay struct {
 	store        QuestionStore
 	projectStore domain.ProjectOutputOperations
@@ -33,25 +39,28 @@ type eventRelay struct {
 	project      *domain.ProjectOutputBinding
 	terms        Terminology
 	operations   *operationTracker
-	queue        chan canonicalOutput
+	activity     domain.HarnessActivityWriter
+	queue        chan eventWork
 	done         chan struct{}
 	failed       chan struct{}
 	cancel       context.CancelFunc
 	now          func() time.Time
 
-	errMu         sync.Mutex
-	err           error
-	failOnce      sync.Once
-	timeMu        sync.Mutex
-	lastCreatedAt time.Time
+	errMu          sync.Mutex
+	err            error
+	failOnce       sync.Once
+	timeMu         sync.Mutex
+	lastCreatedAt  time.Time
+	lastActivityAt time.Time
 }
 
 func startEventRelay(ctx context.Context, instance harness.Instance, store QuestionStore, projectStore domain.ProjectOutputOperations, ledger DeliveryLedger, syncMailbox func(context.Context) error, mailbox model.Mailbox, repository model.RepositoryContext, project *domain.ProjectOutputBinding, terms Terminology, operations *operationTracker) *eventRelay {
 	relayContext, cancel := context.WithCancel(ctx)
 	relay := &eventRelay{
 		store: store, projectStore: projectStore, ledger: ledger, sync: syncMailbox, identity: instance.Session().Identity(), mailbox: mailbox,
-		repository: repository, project: project, terms: terms, operations: operations, queue: make(chan canonicalOutput, eventQueueCapacity), done: make(chan struct{}), failed: make(chan struct{}), cancel: cancel, now: time.Now,
+		repository: repository, project: project, terms: terms, operations: operations, queue: make(chan eventWork, eventQueueCapacity), done: make(chan struct{}), failed: make(chan struct{}), cancel: cancel, now: time.Now,
 	}
+	relay.activity, _ = store.(domain.HarnessActivityWriter)
 	go relay.publishLoop()
 	go relay.ingest(relayContext, instance.Events())
 	return relay
@@ -71,12 +80,12 @@ func (r *eventRelay) ingest(ctx context.Context, events <-chan harness.Event) {
 				continue
 			}
 			r.operations.apply(event)
-			output, ok := r.canonicalize(event)
-			if !ok {
+			work := r.normalize(event)
+			if work.output == nil && work.activity == nil {
 				continue
 			}
 			select {
-			case r.queue <- output:
+			case r.queue <- work:
 			default:
 				r.fail(errors.New("harness event persistence queue reached its 64-event bound"))
 			}
@@ -86,11 +95,139 @@ func (r *eventRelay) ingest(ctx context.Context, events <-chan harness.Event) {
 
 func (r *eventRelay) publishLoop() {
 	defer close(r.done)
-	for output := range r.queue {
-		if err := r.publish(output); err != nil {
+	for work := range r.queue {
+		if err := r.publishWork(work); err != nil {
 			r.fail(err)
 		}
 	}
+}
+
+func (r *eventRelay) normalize(event harness.Event) eventWork {
+	work := eventWork{}
+	if output, ok := r.canonicalize(event); ok {
+		work.output = &output
+	}
+	if r.activity != nil {
+		if activity, ok := r.projectActivity(event); ok {
+			work.activity = &activity
+		}
+	}
+	return work
+}
+
+func (r *eventRelay) publishWork(work eventWork) error {
+	if work.output != nil {
+		if err := r.publish(*work.output); err != nil {
+			return err
+		}
+	}
+	if work.activity != nil {
+		if err := r.activity.UpsertHarnessActivity(context.Background(), *work.activity); err != nil {
+			return fmt.Errorf("persist harness activity: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *eventRelay) projectActivity(event harness.Event) (domain.HarnessActivity, bool) {
+	if event.Operation == "" {
+		return domain.HarnessActivity{}, false
+	}
+	activity := domain.HarnessActivity{
+		MailboxID: r.mailbox.ID, Harness: string(event.Session.Provider), SessionID: string(event.Session.ID),
+		OperationID: string(event.Operation), ItemID: event.ItemID,
+	}
+	switch payload := event.Payload.(type) {
+	case harness.OperationStatusEvent:
+		activity.Kind = domain.HarnessActivityOperation
+		activity.Status = activityStatus(payload.Status)
+		activity.Body = strings.TrimSpace(payload.Error)
+	case harness.PlanEvent:
+		if strings.TrimSpace(payload.Text) == "" {
+			return domain.HarnessActivity{}, false
+		}
+		activity.Kind, activity.Body = domain.HarnessActivityPlan, payload.Text
+	case harness.DiffEvent:
+		if strings.TrimSpace(payload.Text) == "" {
+			return domain.HarnessActivity{}, false
+		}
+		activity.Kind, activity.Body = domain.HarnessActivityDiff, payload.Text
+	case harness.CommandEvent:
+		if event.ItemID == "" || strings.TrimSpace(payload.Command) == "" || !terminalActivityStatus(payload.Status) {
+			return domain.HarnessActivity{}, false
+		}
+		activity.Kind, activity.Title, activity.Body = domain.HarnessActivityCommand, payload.Command, payload.Output
+		activity.Status = activityStatus(payload.Status)
+		if payload.ExitCode != nil {
+			activity.Body = fmt.Sprintf("Exit code: %d\n%s", *payload.ExitCode, activity.Body)
+		}
+	case harness.FileChangeEvent:
+		if event.ItemID == "" || strings.TrimSpace(payload.Path) == "" || !terminalActivityStatus(payload.Status) {
+			return domain.HarnessActivity{}, false
+		}
+		activity.Kind, activity.Title, activity.Body = domain.HarnessActivityFile, payload.Path, payload.Summary
+		activity.Status = activityStatus(payload.Status)
+	case harness.ToolEvent:
+		if event.ItemID == "" || strings.TrimSpace(payload.Name) == "" || !terminalActivityStatus(payload.Status) {
+			return domain.HarnessActivity{}, false
+		}
+		activity.Kind, activity.Title, activity.Body = domain.HarnessActivityTool, payload.Name, payload.Summary
+		activity.Status = activityStatus(payload.Status)
+	case harness.ProgressEvent:
+		if event.ItemID == "" || strings.TrimSpace(payload.Message) == "" {
+			return domain.HarnessActivity{}, false
+		}
+		activity.Kind, activity.Body = domain.HarnessActivityProgress, payload.Message
+	default:
+		return domain.HarnessActivity{}, false
+	}
+	activity.OccurredAt = r.nextActivityAt(event.OccurredAt)
+	var truncated bool
+	activity.Title, truncated = boundActivityText(activity.Title, domain.HarnessActivityTitleBytes)
+	activity.Truncated = activity.Truncated || truncated
+	bodyLimit := domain.HarnessActivityBodyBytes
+	if activity.Kind == domain.HarnessActivityCommand {
+		bodyLimit = domain.HarnessActivityCommandBodyBytes
+	} else if activity.Kind == domain.HarnessActivityProgress {
+		bodyLimit = domain.HarnessActivityProgressBytes
+	}
+	activity.Body, truncated = boundActivityText(activity.Body, bodyLimit)
+	activity.Truncated = activity.Truncated || truncated
+	valid := activity.MailboxID != "" && activity.Harness != "" && activity.SessionID != ""
+	if activity.Kind == domain.HarnessActivityOperation {
+		valid = valid && activity.Status != ""
+	}
+	return activity, valid
+}
+
+func boundActivityText(value string, limit int) (string, bool) {
+	if len(value) <= limit {
+		return value, false
+	}
+	end := limit
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end], true
+}
+
+func activityStatus(status harness.OperationStatus) domain.HarnessActivityStatus {
+	switch status {
+	case harness.OperationRunning:
+		return domain.HarnessActivityRunning
+	case harness.OperationCompleted:
+		return domain.HarnessActivityCompleted
+	case harness.OperationFailed:
+		return domain.HarnessActivityFailed
+	case harness.OperationInterrupted:
+		return domain.HarnessActivityInterrupted
+	default:
+		return ""
+	}
+}
+
+func terminalActivityStatus(status harness.OperationStatus) bool {
+	return status == harness.OperationCompleted || status == harness.OperationFailed || status == harness.OperationInterrupted
 }
 
 func (r *eventRelay) canonicalize(event harness.Event) (canonicalOutput, bool) {
@@ -204,6 +341,20 @@ func (r *eventRelay) advanceCreatedAt(createdAt time.Time) {
 	r.timeMu.Unlock()
 }
 
+func (r *eventRelay) nextActivityAt(occurredAt time.Time) time.Time {
+	r.timeMu.Lock()
+	defer r.timeMu.Unlock()
+	if occurredAt.IsZero() {
+		occurredAt = r.now()
+	}
+	occurredAt = occurredAt.UTC()
+	if !r.lastActivityAt.IsZero() && occurredAt.UnixMilli() <= r.lastActivityAt.UnixMilli() {
+		occurredAt = time.UnixMilli(r.lastActivityAt.UnixMilli() + 1).UTC()
+	}
+	r.lastActivityAt = occurredAt
+	return occurredAt
+}
+
 func (r *eventRelay) fail(err error) {
 	r.errMu.Lock()
 	if r.err == nil {
@@ -223,8 +374,16 @@ func (r *eventRelay) Done() <-chan struct{}   { return r.done }
 func (r *eventRelay) Failed() <-chan struct{} { return r.failed }
 
 func (r *eventRelay) StopAndWait() {
-	r.cancel()
-	<-r.done
+	timer := time.NewTimer(shutdownTimeout)
+	defer timer.Stop()
+	select {
+	case <-r.done:
+		r.cancel()
+		return
+	case <-timer.C:
+		r.cancel()
+		<-r.done
+	}
 }
 
 func sameOutput(existing, expected model.Message) bool {

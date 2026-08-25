@@ -101,7 +101,7 @@ The generic contract must preserve the three externally meaningful canceled-call
 
 ## Events, interactive requests, and ordering
 
-The transport reads frames serially. Response correlation and notification observation therefore follow wire order. Notification handlers run synchronously in registration order: active-operation state first, then output extraction. Canonical outputs enter a bounded 64-entry queue and are persisted in queue order. Server-initiated requests run concurrently so a human wait cannot block response and notification reads; their responses may complete in a different order from request arrival.
+The transport reads frames serially. Response correlation and notification observation therefore follow wire order. Notification handlers run synchronously in registration order: active-operation state first, then normalized event extraction. Each normalized event enters one bounded 64-entry persistence work queue; its canonical output, when present, is persisted before its installation-local activity projection. Canonical outputs therefore retain queue order, and activity cannot overtake or replace a final answer. Server-initiated requests run concurrently so a human wait cannot block response and notification reads; their responses may complete in a different order from request arrival.
 
 Every supported blocking request receives exactly one JSON-RPC response. Structured questions are correlated by session, operation, item, and request ID. Secret-input requests are rejected without persisting their prompt fields. Cancellation releases any claimed answer, cancels remaining questions, and returns a fail-closed response. An interactive request may block its own operation while waiting for a human, but remains cancelable during shutdown.
 
@@ -117,7 +117,7 @@ Rows are keyed by provider session, operation, activity kind, and item ID. Opera
 
 Protocol EOF, malformed JSON, an invalid JSON-RPC version, an oversized frame, a read/write failure, or an unsupported server request stops the transport and fails pending calls. Child-process failure is reported separately from ordinary EOF. When process and transport completion race, HQ briefly prefers an already available process result after transport closure and allows the transport reader to observe closure after process exit. The adapter refactor must retain deterministic typed causes for both orders.
 
-Canceling an individual RPC wait removes its response slot but does not poison the connection; a late response is ignored. For a submission, the durable `uncertain` checkpoint still requires reconciliation. Current bridge cancellation does not send `turn/interrupt`; it stops mailbox dispatch, cancels interactive requests, drains the output relay, and begins instance teardown.
+Canceling an individual RPC wait removes its response slot but does not poison the connection; a late response is ignored. For a submission, the durable `uncertain` checkpoint still requires reconciliation. Current bridge cancellation stops mailbox dispatch, cancels interactive requests, drains the normalized event relay, and begins instance teardown. Explicit interruption uses the optional neutral capability, which the Codex adapter maps to `turn/interrupt`.
 
 Teardown stops new blocking requests and waits for in-flight handlers, stops and drains accepted output work, closes app-server stdin, and waits up to two seconds for graceful process exit. It then kills the child and waits for `Wait` to complete. Supervisor shutdown cancels every logical worker and waits for all worker lifetimes before returning. Stopping one worker releases only that named agent's ownership and does not mutate another worker's runtime state.
 
@@ -135,7 +135,7 @@ HQ writes these methods:
 | `turn/start` | Submit to an idle session | Delivery remains uncertain until reconciled if acceptance is unknown |
 | `turn/steer` | Submit to the expected active operation | Reconcile before retargeting or retrying |
 
-`turn/interrupt` exists in the 0.149.0 schema but is not currently called. The neutral port may expose interrupt as an optional capability; it must not claim current Codex behavior until the adapter implements it.
+`turn/interrupt` implements the neutral optional interruption capability. Codex also advertises plans, diffs, tool lifecycle, and bounded streaming activity through its normalized adapter capabilities.
 
 HQ handles these server requests:
 
@@ -153,11 +153,16 @@ HQ consumes these notifications and item variants:
 
 | Notification or item | Current use |
 | --- | --- |
-| `turn/started` | Set the active operation after matching the bound session |
-| `turn/completed` | Clear matching active operation; persist only failed/interrupted terminal status |
+| `turn/started` | Set the active operation and coalesce a local running-status activity after matching the bound session |
+| `turn/completed` | Clear the matching active operation and coalesce completed, failed, or interrupted activity; failed/interrupted states also retain their canonical status message |
+| `turn/plan/updated` | Render typed plan steps into the coalesced local plan snapshot |
+| `turn/diff/updated` | Replace the coalesced aggregate local diff snapshot |
+| Supported `item/started` command, file, MCP/dynamic/collaboration tool, web-search, and plan variants | Persist a compact bounded progress record |
 | `item/completed` with `agentMessage` | Persist non-empty completed text, marking `final_answer` separately |
-| `item/completed` with any other type | Ignore; reasoning and plan items never become messages |
-| Any other notification, including `item/started`, deltas, plan, and diff updates | Ignore without stopping the instance |
+| `item/completed` with `plan` | Replace streaming/intermediate plan content with the authoritative completed local plan |
+| `item/completed` with command, file, MCP/dynamic/collaboration tool, or web-search variants | Persist the authoritative terminal local activity with typed status and bounded summaries |
+| `item/plan/delta`, command/file output delta, or MCP progress | Replace the item-keyed bounded local progress record; completed items remain authoritative |
+| Reasoning items/deltas, agent-message deltas, unsupported item variants, and additive notifications | Ignore without stopping the instance; raw reasoning and raw model responses never enter activity |
 
 HQ intentionally ignores additive fields when decoding supported payloads. Adapter-native raw payload is not a source of generic behavior. The current diagnostics retain only selected typed fields; the neutral contract may allow bounded, explicitly redacted metadata, but never unbounded vendor payloads or secrets.
 

@@ -230,6 +230,23 @@ func TestSupervisorLaunchesRegisteredNonCodexProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForSupervisorBody(t, database, "supervisor-neutral output")
+	for _, activity := range []struct {
+		item    string
+		payload harness.EventPayload
+	}{
+		{"", harness.OperationStatusEvent{Status: harness.OperationCompleted}},
+		{"", harness.PlanEvent{Text: "supervisor plan"}},
+		{"", harness.DiffEvent{Text: "supervisor diff"}},
+		{"command", harness.CommandEvent{Command: "go test ./...", Status: harness.OperationCompleted}},
+		{"file", harness.FileChangeEvent{Path: "main.go", Summary: "updated", Status: harness.OperationCompleted}},
+		{"tool", harness.ToolEvent{Name: "search", Summary: "done", Status: harness.OperationCompleted}},
+		{"progress", harness.ProgressEvent{Message: "working"}},
+	} {
+		if err := provider.Emit(instance, "operation-activity", activity.item, activity.payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitForSupervisorActivities(t, database, agent.MailboxID, "operation-activity", 7)
 	_, response, err := provider.Ask(instance, "operation-question", "approval-1", harness.ApprovalRequest{Kind: "command", Summary: "Run checks", Choices: []string{"accept", "decline"}})
 	if err != nil {
 		t.Fatal(err)
@@ -287,6 +304,25 @@ func TestSupervisorLaunchesRegisteredNonCodexProvider(t *testing.T) {
 	if !errors.Is(err, harness.ErrUnknownProvider) {
 		t.Fatalf("unknown provider error = %v", err)
 	}
+}
+
+func waitForSupervisorActivities(t *testing.T, database *store.SQLite, mailboxID, operationID string, count int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		activities, err := database.ListHarnessActivities(context.Background(), domain.HarnessActivityFilter{MailboxID: mailboxID})
+		matched := 0
+		for _, activity := range activities {
+			if activity.OperationID == operationID {
+				matched++
+			}
+		}
+		if err == nil && matched == count {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("did not observe %d activities for operation %s", count, operationID)
 }
 
 func TestSharedProviderFactoryCrashIsIsolatedToOneLogicalInstance(t *testing.T) {

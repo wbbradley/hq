@@ -1,11 +1,13 @@
 package codexbridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wbbradley/hq/internal/harness"
 )
@@ -89,8 +91,11 @@ func (h *adapterNotificationHandler) HandleNotification(ctx context.Context, not
 		if json.Unmarshal(notification.Params, &params) == nil && params.ThreadID == string(h.instance.session.identity.ID) && params.Turn.ID != "" {
 			status := harness.OperationRunning
 			errorMessage := ""
+			valid := true
 			if notification.Method == "turn/completed" {
 				switch params.Turn.Status {
+				case "completed":
+					status = harness.OperationCompleted
 				case "failed":
 					status = harness.OperationFailed
 					if params.Turn.Error != nil {
@@ -99,20 +104,266 @@ func (h *adapterNotificationHandler) HandleNotification(ctx context.Context, not
 				case "interrupted":
 					status = harness.OperationInterrupted
 				default:
-					status = harness.OperationCompleted
+					valid = false
 				}
 			}
-			_ = h.instance.emit(harness.OperationID(params.Turn.ID), "", harness.OperationStatusEvent{Status: status, Error: errorMessage})
+			if valid {
+				_ = h.instance.emit(harness.OperationID(params.Turn.ID), "", harness.OperationStatusEvent{Status: status, Error: errorMessage})
+			}
+		}
+	case "turn/plan/updated":
+		var params TurnPlanUpdatedNotification
+		if json.Unmarshal(notification.Params, &params) == nil && params.Plan != nil && validActivityContext(h.instance, params.ThreadID, params.TurnID) {
+			plan := formatTurnPlan(params)
+			if plan == "" {
+				plan = "(no plan)"
+			}
+			_ = h.instance.emit(harness.OperationID(params.TurnID), "", harness.PlanEvent{Text: boundedAdapterText(plan, adapterActivityTextBytes)})
+		}
+	case "turn/diff/updated":
+		var params TurnDiffUpdatedNotification
+		if json.Unmarshal(notification.Params, &params) == nil && params.Diff != nil && validActivityContext(h.instance, params.ThreadID, params.TurnID) {
+			diff := *params.Diff
+			if diff == "" {
+				diff = "(no changes)"
+			}
+			_ = h.instance.emit(harness.OperationID(params.TurnID), "", harness.DiffEvent{Text: boundedAdapterText(diff, adapterActivityTextBytes)})
+		}
+	case "item/started":
+		var params ItemStartedNotification
+		if json.Unmarshal(notification.Params, &params) == nil && strings.TrimSpace(params.Item.ID) != "" && validActivityContext(h.instance, params.ThreadID, params.TurnID) {
+			if progress := startedItemProgress(params.Item); progress != "" {
+				_ = h.instance.emit(harness.OperationID(params.TurnID), params.Item.ID, harness.ProgressEvent{Message: boundedAdapterText(progress, adapterProgressTextBytes)})
+			}
 		}
 	case "item/completed":
 		var params ItemCompletedNotification
-		if json.Unmarshal(notification.Params, &params) == nil && params.ThreadID == string(h.instance.session.identity.ID) && params.TurnID != "" && params.Item.Type == "agentMessage" && params.Item.ID != "" && strings.TrimSpace(params.Item.Text) != "" {
-			_ = h.instance.emit(harness.OperationID(params.TurnID), params.Item.ID, harness.OutputEvent{Text: params.Item.Text, Final: params.Item.Phase == "final_answer"})
+		if json.Unmarshal(notification.Params, &params) == nil && strings.TrimSpace(params.Item.ID) != "" && validActivityContext(h.instance, params.ThreadID, params.TurnID) {
+			if payload := completedItemEvent(params.Item); payload != nil {
+				_ = h.instance.emit(harness.OperationID(params.TurnID), params.Item.ID, payload)
+			}
+		}
+	case "item/plan/delta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
+		var params ItemDeltaNotification
+		if json.Unmarshal(notification.Params, &params) == nil && strings.TrimSpace(params.ItemID) != "" && validActivityContext(h.instance, params.ThreadID, params.TurnID) && strings.TrimSpace(params.Delta) != "" {
+			_ = h.instance.emit(harness.OperationID(params.TurnID), params.ItemID, harness.ProgressEvent{Message: boundedAdapterText(params.Delta, adapterProgressTextBytes)})
+		}
+	case "item/mcpToolCall/progress":
+		var params ToolProgressNotification
+		if json.Unmarshal(notification.Params, &params) == nil && strings.TrimSpace(params.ItemID) != "" && validActivityContext(h.instance, params.ThreadID, params.TurnID) && strings.TrimSpace(params.Message) != "" {
+			_ = h.instance.emit(harness.OperationID(params.TurnID), params.ItemID, harness.ProgressEvent{Message: boundedAdapterText(params.Message, adapterProgressTextBytes)})
 		}
 	}
 	if h.legacy != nil {
 		h.legacy.HandleNotification(ctx, notification)
 	}
+}
+
+const (
+	adapterTitleTextBytes    = 2 << 10
+	adapterCommandTextBytes  = 32 << 10
+	adapterProgressTextBytes = 8 << 10
+	adapterActivityTextBytes = 128 << 10
+)
+
+func validActivityContext(instance *codexInstance, threadID, turnID string) bool {
+	return threadID == string(instance.session.identity.ID) && strings.TrimSpace(turnID) != ""
+}
+
+func formatTurnPlan(params TurnPlanUpdatedNotification) string {
+	parts := make([]string, 0, len(params.Plan)+1)
+	if params.Explanation != nil && strings.TrimSpace(*params.Explanation) != "" {
+		parts = append(parts, strings.TrimSpace(*params.Explanation))
+	}
+	for _, step := range params.Plan {
+		text := strings.TrimSpace(step.Step)
+		if text == "" {
+			continue
+		}
+		marker := "[ ]"
+		switch step.Status {
+		case "completed":
+			marker = "[x]"
+		case "inProgress":
+			marker = "[~]"
+		}
+		parts = append(parts, "- "+marker+" "+text)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func startedItemProgress(item ThreadItem) string {
+	switch item.Type {
+	case "commandExecution":
+		if item.Status != "inProgress" {
+			return ""
+		}
+		if command := strings.TrimSpace(item.Command); command != "" {
+			return "Running command: " + boundedAdapterText(command, adapterTitleTextBytes)
+		}
+	case "fileChange":
+		if item.Status != "inProgress" {
+			return ""
+		}
+		return "Applying file changes"
+	case "mcpToolCall":
+		if item.Status == "inProgress" && item.Server != "" && item.Tool != "" {
+			return "Calling " + boundedAdapterText(item.Server+"/"+item.Tool, adapterTitleTextBytes)
+		}
+	case "dynamicToolCall":
+		if item.Status == "inProgress" && item.Tool != "" {
+			return "Calling " + boundedAdapterText(item.Tool, adapterTitleTextBytes)
+		}
+	case "collabAgentToolCall":
+		if item.Status == "inProgress" && item.Tool != "" {
+			return "Running collaboration tool: " + boundedAdapterText(item.Tool, adapterTitleTextBytes)
+		}
+	case "webSearch":
+		if item.Query != "" {
+			return "Searching the web: " + boundedAdapterText(item.Query, adapterTitleTextBytes)
+		}
+	case "plan":
+		if strings.TrimSpace(item.Text) != "" {
+			return "Updating plan"
+		}
+	}
+	return ""
+}
+
+func completedItemEvent(item ThreadItem) harness.EventPayload {
+	switch item.Type {
+	case "agentMessage":
+		if strings.TrimSpace(item.Text) != "" {
+			return harness.OutputEvent{Text: item.Text, Final: item.Phase == "final_answer"}
+		}
+	case "plan":
+		if strings.TrimSpace(item.Text) != "" {
+			return harness.PlanEvent{Text: boundedAdapterText(item.Text, adapterActivityTextBytes)}
+		}
+	case "commandExecution":
+		status, ok := completedItemStatus(item.Status)
+		if !ok || strings.TrimSpace(item.Command) == "" {
+			return nil
+		}
+		output := ""
+		if item.AggregatedOutput != nil {
+			output = boundedAdapterText(*item.AggregatedOutput, adapterCommandTextBytes)
+		}
+		return harness.CommandEvent{Command: boundedAdapterText(item.Command, adapterTitleTextBytes), Output: output, ExitCode: item.ExitCode, Status: status}
+	case "fileChange":
+		status, ok := completedItemStatus(item.Status)
+		if !ok {
+			return nil
+		}
+		path, summary := summarizeFileChanges(item.Changes)
+		return harness.FileChangeEvent{Path: boundedAdapterText(path, adapterTitleTextBytes), Summary: boundedAdapterText(summary, adapterActivityTextBytes), Status: status}
+	case "mcpToolCall":
+		status, ok := completedItemStatus(item.Status)
+		if !ok || item.Server == "" || item.Tool == "" {
+			return nil
+		}
+		return harness.ToolEvent{Name: boundedAdapterText(item.Server+"/"+item.Tool, adapterTitleTextBytes), Summary: boundedAdapterText(toolCallSummary(item), adapterActivityTextBytes), Status: status}
+	case "dynamicToolCall":
+		status, ok := completedItemStatus(item.Status)
+		if !ok || item.Tool == "" {
+			return nil
+		}
+		return harness.ToolEvent{Name: boundedAdapterText(item.Tool, adapterTitleTextBytes), Summary: boundedAdapterText(toolCallSummary(item), adapterActivityTextBytes), Status: status}
+	case "collabAgentToolCall":
+		status, ok := completedItemStatus(item.Status)
+		if !ok || item.Tool == "" {
+			return nil
+		}
+		summary := ""
+		if len(item.ReceiverThreadIDs) > 0 {
+			summary = "Receiver threads: " + strings.Join(item.ReceiverThreadIDs, ", ")
+		}
+		return harness.ToolEvent{Name: boundedAdapterText("collab/"+item.Tool, adapterTitleTextBytes), Summary: boundedAdapterText(summary, adapterActivityTextBytes), Status: status}
+	case "webSearch":
+		if strings.TrimSpace(item.Query) != "" {
+			return harness.ToolEvent{Name: "web search", Summary: boundedAdapterText(item.Query, adapterActivityTextBytes), Status: harness.OperationCompleted}
+		}
+	}
+	return nil
+}
+
+func completedItemStatus(status string) (harness.OperationStatus, bool) {
+	switch status {
+	case "completed":
+		return harness.OperationCompleted, true
+	case "failed":
+		return harness.OperationFailed, true
+	case "declined":
+		return harness.OperationInterrupted, true
+	default:
+		return "", false
+	}
+}
+
+func summarizeFileChanges(changes []FileUpdateChange) (string, string) {
+	if len(changes) == 0 {
+		return "file changes", "No file details were provided."
+	}
+	path := strings.TrimSpace(changes[0].Path)
+	if path == "" {
+		path = "file changes"
+	}
+	if len(changes) > 1 {
+		path = fmt.Sprintf("%s (+%d more)", path, len(changes)-1)
+	}
+	parts := make([]string, 0, len(changes))
+	for _, change := range changes {
+		kind := struct {
+			Type string `json:"type"`
+		}{}
+		_ = json.Unmarshal(change.Kind, &kind)
+		header := strings.TrimSpace(strings.TrimSpace(kind.Type) + " " + strings.TrimSpace(change.Path))
+		if header == "" {
+			header = "file change"
+		}
+		if change.Diff != "" {
+			header += "\n" + change.Diff
+		}
+		parts = append(parts, header)
+	}
+	return path, strings.Join(parts, "\n\n")
+}
+
+func toolCallSummary(item ThreadItem) string {
+	parts := make([]string, 0, 3)
+	if arguments := compactJSON(item.Arguments); arguments != "" && arguments != "null" {
+		parts = append(parts, "Arguments: "+arguments)
+	}
+	if item.Error != nil && strings.TrimSpace(item.Error.Message) != "" {
+		parts = append(parts, "Error: "+strings.TrimSpace(item.Error.Message))
+	} else if result := compactJSON(item.Result); result != "" && result != "null" {
+		parts = append(parts, "Result: "+result)
+	} else if content := compactJSON(item.ContentItems); content != "" && content != "null" {
+		parts = append(parts, "Result: "+content)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func compactJSON(value json.RawMessage) string {
+	if len(value) == 0 || !json.Valid(value) {
+		return ""
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, value); err != nil {
+		return ""
+	}
+	return compact.String()
+}
+
+func boundedAdapterText(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	end := limit
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func (i *codexInstance) emit(operation harness.OperationID, itemID string, payload harness.EventPayload) error {

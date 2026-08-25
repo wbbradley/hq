@@ -61,13 +61,14 @@ func TestCodexV01490GeneratedSchemasContainConsumedProtocol(t *testing.T) {
 	v2 := readGeneratedProtocolSchema(t, "testdata/schema/v0.149.0/codex_app_server_protocol.v2.schemas.json")
 
 	assertSchemaMethods(t, v2, "ClientRequest", []string{
-		"initialize", "thread/start", "thread/resume", "thread/read", "turn/start", "turn/steer",
+		"initialize", "thread/start", "thread/resume", "thread/read", "turn/start", "turn/steer", "turn/interrupt",
 	})
 	assertSchemaMethods(t, legacy, "ServerRequest", []string{
 		requestUserInputMethod, commandApprovalMethod, fileApprovalMethod, permissionMethod, mcpElicitationMethod,
 	})
 	assertSchemaMethods(t, legacy, "ServerNotification", []string{
-		"turn/started", "turn/completed", "item/completed",
+		"turn/started", "turn/completed", "turn/plan/updated", "turn/diff/updated", "item/started", "item/completed",
+		"item/plan/delta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/mcpToolCall/progress",
 	})
 }
 

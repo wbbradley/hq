@@ -111,17 +111,79 @@ type TurnResponse struct {
 }
 
 type ThreadItem struct {
-	Type     string `json:"type"`
-	ID       string `json:"id"`
-	ClientID string `json:"clientId,omitempty"`
-	Text     string `json:"text,omitempty"`
-	Phase    string `json:"phase,omitempty"`
+	Type              string             `json:"type"`
+	ID                string             `json:"id"`
+	ClientID          string             `json:"clientId,omitempty"`
+	Text              string             `json:"text,omitempty"`
+	Phase             string             `json:"phase,omitempty"`
+	Status            string             `json:"status,omitempty"`
+	Command           string             `json:"command,omitempty"`
+	AggregatedOutput  *string            `json:"aggregatedOutput,omitempty"`
+	ExitCode          *int               `json:"exitCode,omitempty"`
+	Changes           []FileUpdateChange `json:"changes,omitempty"`
+	Server            string             `json:"server,omitempty"`
+	Tool              string             `json:"tool,omitempty"`
+	Arguments         json.RawMessage    `json:"arguments,omitempty"`
+	Result            json.RawMessage    `json:"result,omitempty"`
+	Error             *ToolCallError     `json:"error,omitempty"`
+	Success           *bool              `json:"success,omitempty"`
+	ContentItems      json.RawMessage    `json:"contentItems,omitempty"`
+	Query             string             `json:"query,omitempty"`
+	ReceiverThreadIDs []string           `json:"receiverThreadIds,omitempty"`
+}
+
+type FileUpdateChange struct {
+	Path string          `json:"path"`
+	Kind json.RawMessage `json:"kind"`
+	Diff string          `json:"diff"`
+}
+
+type ToolCallError struct {
+	Message string `json:"message"`
+}
+
+type ItemStartedNotification struct {
+	ThreadID string     `json:"threadId"`
+	TurnID   string     `json:"turnId"`
+	Item     ThreadItem `json:"item"`
 }
 
 type ItemCompletedNotification struct {
 	ThreadID string     `json:"threadId"`
 	TurnID   string     `json:"turnId"`
 	Item     ThreadItem `json:"item"`
+}
+
+type TurnPlanStep struct {
+	Step   string `json:"step"`
+	Status string `json:"status"`
+}
+
+type TurnPlanUpdatedNotification struct {
+	ThreadID    string         `json:"threadId"`
+	TurnID      string         `json:"turnId"`
+	Explanation *string        `json:"explanation"`
+	Plan        []TurnPlanStep `json:"plan"`
+}
+
+type TurnDiffUpdatedNotification struct {
+	ThreadID string  `json:"threadId"`
+	TurnID   string  `json:"turnId"`
+	Diff     *string `json:"diff"`
+}
+
+type ItemDeltaNotification struct {
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+	ItemID   string `json:"itemId"`
+	Delta    string `json:"delta"`
+}
+
+type ToolProgressNotification struct {
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+	ItemID   string `json:"itemId"`
+	Message  string `json:"message"`
 }
 
 type ThreadReadParams struct {
