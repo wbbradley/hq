@@ -50,6 +50,12 @@ func TestHarnessActivityCoalescesReplayAndNotifiesMaterialChanges(t *testing.T) 
 	if len(activities) != 1 || activities[0].Body != updated.Body || !activities[0].OccurredAt.Equal(updated.OccurredAt) {
 		t.Fatalf("activities = %#v", activities)
 	}
+	entries, err := s.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: model.ConversationKey{
+		CounterpartyMailboxID: first.MailboxID, HarnessProvider: first.Harness, HarnessSessionID: first.SessionID,
+	}})
+	if err != nil || len(entries.Entries) != 1 || entries.Entries[0].Kind != domain.ConversationEntryActivity || entries.Entries[0].Activity.Body != updated.Body || entries.Entries[0].EventID != entries.Entries[0].Activity.EventID {
+		t.Fatalf("coalesced unified entries = %#v, %v", entries, err)
+	}
 	if len(changes) != 2 {
 		t.Fatalf("material activity changes = %#v", changes)
 	}
@@ -106,6 +112,31 @@ func TestHarnessActivityBoundsUTF8AndRetainsRecentProgress(t *testing.T) {
 	}
 	if progress != domain.HarnessActivityProgressRetained {
 		t.Fatalf("retained progress = %d", progress)
+	}
+	entryFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{
+		CounterpartyMailboxID: command.MailboxID, HarnessProvider: command.Harness, HarnessSessionID: command.SessionID,
+	}, Limit: 200}
+	var entryProgress, entryCommands int
+	for {
+		page, listErr := s.ListConversationEntries(ctx, entryFilter)
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		for _, entry := range page.Entries {
+			if entry.Activity.Kind == domain.HarnessActivityProgress {
+				entryProgress++
+			}
+			if entry.Activity.Kind == domain.HarnessActivityCommand {
+				entryCommands++
+			}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		entryFilter.Cursor = page.NextCursor
+	}
+	if entryProgress != domain.HarnessActivityProgressRetained || entryCommands != 1 {
+		t.Fatalf("unified retained activity = %d progress / %d commands", entryProgress, entryCommands)
 	}
 	canonicalCount := tableCount(t, s, "canonical_events")
 	if err := s.Rebuild(ctx); err != nil {

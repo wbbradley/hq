@@ -47,6 +47,7 @@ type app struct {
 	groups              []messageGroup
 	conversations       []model.ConversationSummary
 	conversationMode    bool
+	entryHistories      map[string][]domain.ConversationEntry
 	histories           map[string][]model.Message
 	activities          map[string][]domain.HarnessActivity
 	expandedActivities  map[string]bool
@@ -151,6 +152,8 @@ const (
 type messageGroup struct {
 	key             string
 	conversationKey model.ConversationKey
+	entriesLoaded   bool
+	entries         []domain.ConversationEntry
 	messages        []model.Message
 	activities      []domain.HarnessActivity
 	draft           *messageDraft
@@ -278,6 +281,7 @@ type loadedMsg struct {
 	sent          []model.Message
 	archived      []model.Message
 	conversations []model.ConversationSummary
+	entries       map[string][]domain.ConversationEntry
 	histories     map[string][]model.Message
 	activities    map[string][]domain.HarnessActivity
 	network       domain.NetworkStatus
@@ -291,6 +295,7 @@ type loadedMsg struct {
 
 type historyLoadedMsg struct {
 	key        string
+	entries    []domain.ConversationEntry
 	messages   []model.Message
 	activities []domain.HarnessActivity
 	err        error
@@ -472,6 +477,7 @@ func (m app) load() tea.Msg {
 	if err != nil {
 		return loadedMsg{err: err}
 	}
+	entryHistories := make(map[string][]domain.ConversationEntry)
 	histories := make(map[string][]model.Message)
 	activities := make(map[string][]domain.HarnessActivity)
 	selectedKey := m.selectedGroupKey()
@@ -482,11 +488,12 @@ func (m app) load() tea.Msg {
 		found = true
 	}
 	if found {
-		history, historyErr := m.loadAllConversationHistory(selectedConversation.Key)
+		entries, historyErr := m.loadAllConversationEntries(selectedConversation.Key)
 		if historyErr != nil {
 			return loadedMsg{err: historyErr}
 		}
-		histories[selectedKey] = history
+		entryHistories[selectedKey] = entries
+		histories[selectedKey], activities[selectedKey] = splitConversationEntries(entries)
 	}
 	agents, err := m.store.ListNamedAgents(m.ctx)
 	if err != nil {
@@ -508,15 +515,8 @@ func (m app) load() tea.Msg {
 			sessions[session.Harness+"\x00"+session.SessionID] = session
 		}
 	}
-	if found {
-		projected, activityErr := m.loadConversationActivities(selectedConversation.Key, agents, sessions)
-		if activityErr != nil {
-			return loadedMsg{err: activityErr}
-		}
-		activities[selectedKey] = projected
-	}
 	network, err := m.store.NetworkStatus(m.ctx)
-	return loadedMsg{conversations: conversations, histories: histories, activities: activities, agents: agents, projects: projects, devices: devices, account: account, sessions: sessions, network: network, err: err}
+	return loadedMsg{conversations: conversations, entries: entryHistories, histories: histories, activities: activities, agents: agents, projects: projects, devices: devices, account: account, sessions: sessions, network: network, err: err}
 }
 
 func (m *app) reload() tea.Cmd {
@@ -562,40 +562,53 @@ func (m app) loadAllConversationHistory(key model.ConversationKey) ([]model.Mess
 	}
 }
 
-func (m app) loadConversationHistory(key model.ConversationKey) tea.Cmd {
-	stableKey := conversationKeyString(key)
-	_, historyLoaded := m.histories[stableKey]
-	_, activityLoaded := m.activities[stableKey]
-	if (historyLoaded && activityLoaded) || !key.Valid() {
-		return nil
-	}
-	return func() tea.Msg {
-		messages, err := m.loadAllConversationHistory(key)
-		var activities []domain.HarnessActivity
-		if err == nil {
-			activities, err = m.loadConversationActivities(key, m.agents, m.threadSessions)
+func (m app) loadAllConversationEntries(key model.ConversationKey) ([]domain.ConversationEntry, error) {
+	filter := model.ConversationHistoryFilter{Key: key, Limit: 200}
+	entries := make([]domain.ConversationEntry, 0)
+	for {
+		page, err := m.store.ListConversationEntries(m.ctx, filter)
+		if err != nil {
+			return nil, err
 		}
-		return historyLoadedMsg{key: stableKey, messages: messages, activities: activities, err: err}
+		entries = append(entries, page.Entries...)
+		if page.NextCursor == "" {
+			return entries, nil
+		}
+		filter.Cursor = page.NextCursor
 	}
 }
 
-func (m app) loadConversationActivities(key model.ConversationKey, agents []domain.NamedAgent, sessions map[string]domain.AgentSession) ([]domain.HarnessActivity, error) {
-	reader, ok := m.store.(domain.HarnessActivityReader)
-	if !ok || key.CounterpartyMailboxID == "" || key.CounterpartyMailboxID == model.HumanMailboxID {
-		return nil, nil
-	}
-	filter := domain.HarnessActivityFilter{MailboxID: key.CounterpartyMailboxID, Limit: 1000}
-	if key.HarnessSessionID != "" {
-		filter.Harness, filter.SessionID = key.HarnessProvider, key.HarnessSessionID
-	} else {
-		for _, agent := range agents {
-			if agent.MailboxID == filter.MailboxID && agent.CurrentSessionID != "" {
-				filter.Harness, filter.SessionID = agent.Harness, agent.CurrentSessionID
-				break
+func splitConversationEntries(entries []domain.ConversationEntry) ([]model.Message, []domain.HarnessActivity) {
+	messages := make([]model.Message, 0, len(entries))
+	activities := make([]domain.HarnessActivity, 0, len(entries))
+	for _, entry := range entries {
+		switch entry.Kind {
+		case domain.ConversationEntryMessage:
+			if entry.Message != nil {
+				messages = append(messages, *entry.Message)
+			}
+		case domain.ConversationEntryActivity:
+			if entry.Activity != nil {
+				activities = append(activities, *entry.Activity)
 			}
 		}
 	}
-	return reader.ListHarnessActivities(m.ctx, filter)
+	return messages, activities
+}
+
+func (m app) loadConversationHistory(key model.ConversationKey) tea.Cmd {
+	stableKey := conversationKeyString(key)
+	_, entriesLoaded := m.entryHistories[stableKey]
+	_, historyLoaded := m.histories[stableKey]
+	_, activityLoaded := m.activities[stableKey]
+	if entriesLoaded || (m.entryHistories == nil && historyLoaded && activityLoaded) || !key.Valid() {
+		return nil
+	}
+	return func() tea.Msg {
+		entries, err := m.loadAllConversationEntries(key)
+		messages, activities := splitConversationEntries(entries)
+		return historyLoadedMsg{key: stableKey, entries: entries, messages: messages, activities: activities, err: err}
+	}
 }
 
 func (m app) answer() tea.Msg {
@@ -757,6 +770,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.conversations != nil || (msg.err == nil && m.store != nil) {
 			m.conversationMode = true
 			m.conversations = msg.conversations
+			m.entryHistories = msg.entries
 			m.histories = msg.histories
 			m.activities = msg.activities
 		} else {
@@ -804,6 +818,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err
 			return m, nil
+		}
+		if msg.entries != nil {
+			if m.entryHistories == nil {
+				m.entryHistories = make(map[string][]domain.ConversationEntry)
+			}
+			m.entryHistories[msg.key] = msg.entries
 		}
 		if m.histories == nil {
 			m.histories = make(map[string][]model.Message)
@@ -2352,6 +2372,7 @@ func (m *app) setMessages() {
 		m.messages = make([]model.Message, 0, len(m.conversations))
 		for _, summary := range m.conversations {
 			key := conversationKeyString(summary.Key)
+			entries, entriesLoaded := m.entryHistories[key]
 			messages := []model.Message{summary.Latest}
 			if summary.OldestOpen != nil && summary.OldestOpen.ID != summary.Latest.ID {
 				messages = append(messages, *summary.OldestOpen)
@@ -2365,7 +2386,11 @@ func (m *app) setMessages() {
 			if history, loaded := m.histories[key]; loaded {
 				messages = append([]model.Message(nil), history...)
 			}
-			m.groups = append(m.groups, messageGroup{key: key, conversationKey: summary.Key, messages: messages, activities: append([]domain.HarnessActivity(nil), m.activities[key]...)})
+			m.groups = append(m.groups, messageGroup{
+				key: key, conversationKey: summary.Key,
+				entriesLoaded: entriesLoaded, entries: append([]domain.ConversationEntry(nil), entries...),
+				messages: messages, activities: append([]domain.HarnessActivity(nil), m.activities[key]...),
+			})
 			m.messages = append(m.messages, summary.Latest)
 		}
 		return
@@ -2491,6 +2516,10 @@ func (m app) visibleGroups() []messageGroup {
 		group := messageGroup{key: key, draft: &copyDraft}
 		if draft.answerQ.ID != "" {
 			group.conversationKey = conversationKeyForMessage(draft.answerQ)
+			group.entries, group.entriesLoaded = append([]domain.ConversationEntry(nil), m.entryHistories[key]...), false
+			if _, loaded := m.entryHistories[key]; loaded {
+				group.entriesLoaded = true
+			}
 			group.activities = append([]domain.HarnessActivity(nil), m.activities[key]...)
 			if history, loaded := m.histories[key]; loaded {
 				group.messages = append([]model.Message(nil), history...)
@@ -3344,7 +3373,7 @@ func (m app) cachedRenderedMessageGroup(group messageGroup, width int) (rendered
 	if hasDraft {
 		draft = *group.draft
 	}
-	if cache.groupKey != group.key || !reflect.DeepEqual(cache.messages, group.messages) || !slices.Equal(cache.activities, group.activities) || cache.activityState != m.activityExpansionState(group.activities) || cache.hasDraft != hasDraft || !reflect.DeepEqual(cache.draft, draft) ||
+	if cache.groupKey != group.key || cache.entriesLoaded != group.entriesLoaded || !reflect.DeepEqual(cache.entries, group.entries) || !reflect.DeepEqual(cache.messages, group.messages) || !slices.Equal(cache.activities, group.activities) || cache.activityState != m.activityExpansionState(group.activities) || cache.hasDraft != hasDraft || !reflect.DeepEqual(cache.draft, draft) ||
 		cache.width != width || cache.showTechnical != m.showTechnical || cache.focused != m.paneFocused(focusMessage) ||
 		cache.contextID != m.contextID || cache.branch != m.branch || cache.remotes != m.remotes || cache.pull != m.pull {
 		return renderedMessageGroup{}, false
@@ -3362,7 +3391,7 @@ func (m app) cacheRenderedMessageGroup(group messageGroup, width int, rendered r
 		draft = *group.draft
 	}
 	m.markdown.groupCache = &renderedMessageGroupCache{
-		groupKey: group.key, messages: append([]model.Message(nil), group.messages...), activities: append([]domain.HarnessActivity(nil), group.activities...), activityState: m.activityExpansionState(group.activities), draft: draft, hasDraft: hasDraft,
+		groupKey: group.key, entriesLoaded: group.entriesLoaded, entries: append([]domain.ConversationEntry(nil), group.entries...), messages: append([]model.Message(nil), group.messages...), activities: append([]domain.HarnessActivity(nil), group.activities...), activityState: m.activityExpansionState(group.activities), draft: draft, hasDraft: hasDraft,
 		width: width, showTechnical: m.showTechnical, focused: m.paneFocused(focusMessage),
 		contextID: m.contextID, branch: m.branch, remotes: m.remotes, pull: m.pull, rendered: rendered,
 	}

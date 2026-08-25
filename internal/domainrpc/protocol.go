@@ -39,6 +39,7 @@ const (
 	ListMethod                     = "message/list"
 	ListConversationsMethod        = "conversation/list"
 	ConversationHistoryMethod      = "conversation/history"
+	ConversationEntriesMethod      = "conversation/entries"
 	ListHarnessActivitiesMethod    = "activity/list"
 	ArchiveMethod                  = "message/archive"
 	RestoreMethod                  = "message/restore"
@@ -187,6 +188,10 @@ type ConversationFilterRequest struct {
 }
 
 type ConversationHistoryRequest struct {
+	Filter model.ConversationHistoryFilter `json:"filter"`
+}
+
+type ConversationEntriesRequest struct {
 	Filter model.ConversationHistoryFilter `json:"filter"`
 }
 

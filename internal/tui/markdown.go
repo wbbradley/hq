@@ -29,6 +29,8 @@ type messageMarkdownRenderer struct {
 
 type renderedMessageGroupCache struct {
 	groupKey      string
+	entriesLoaded bool
+	entries       []domain.ConversationEntry
 	messages      []model.Message
 	activities    []domain.HarnessActivity
 	activityState string

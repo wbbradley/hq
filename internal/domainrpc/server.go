@@ -307,6 +307,12 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return s.Store.ListConversationHistory(ctx, request.Filter)
+	case ConversationEntriesMethod:
+		var request ConversationEntriesRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return s.Store.ListConversationEntries(ctx, request.Filter)
 	case ArchiveMethod:
 		var request MutationIDRequest
 		if err := decodeRequest(raw, &request); err != nil {

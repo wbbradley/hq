@@ -342,6 +342,12 @@ func (c *Client) ListConversationHistory(ctx context.Context, filter model.Conve
 	return result, err
 }
 
+func (c *Client) ListConversationEntries(ctx context.Context, filter model.ConversationHistoryFilter) (domain.ConversationEntryPage, error) {
+	var result domain.ConversationEntryPage
+	err := c.call(ctx, domainrpc.ConversationEntriesMethod, domainrpc.ConversationEntriesRequest{Filter: filter}, &result)
+	return result, err
+}
+
 func (c *Client) ListHarnessActivities(ctx context.Context, filter domain.HarnessActivityFilter) ([]domain.HarnessActivity, error) {
 	var result []domain.HarnessActivity
 	err := c.call(ctx, domainrpc.ListHarnessActivitiesMethod, domainrpc.HarnessActivityFilterRequest{Filter: filter}, &result)

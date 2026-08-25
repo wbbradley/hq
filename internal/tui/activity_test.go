@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -55,6 +54,44 @@ func TestFakeProviderActivityRendersChronologicallyAsCollapsedAndExpandedCards(t
 	}
 }
 
+func TestTypedConversationEntriesRenderCanonicalOrderInsteadOfTimestamps(t *testing.T) {
+	started := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	first := message("canonical-first", testAgentID, model.HumanMailboxID, "First canonical message")
+	first.CreatedAt = started.Add(10 * time.Minute)
+	activity := domain.HarnessActivity{
+		EventID: strings.Repeat("b", 64), MailboxID: testAgentID, Harness: "codex", SessionID: "session", OperationID: "operation",
+		Kind: domain.HarnessActivityPlan, Body: "Canonical middle plan", OccurredAt: started.Add(-10 * time.Minute),
+	}
+	final := message("canonical-final", testAgentID, model.HumanMailboxID, "Final canonical message")
+	final.CreatedAt = started
+	group := messageGroup{
+		key: "canonical-order", entriesLoaded: true,
+		entries: []domain.ConversationEntry{
+			{Kind: domain.ConversationEntryMessage, EventID: strings.Repeat("a", 64), DisplayOrder: 10, Message: &first},
+			{Kind: domain.ConversationEntryActivity, EventID: activity.EventID, DisplayOrder: 11, Activity: &activity},
+			{Kind: domain.ConversationEntryMessage, EventID: strings.Repeat("c", 64), DisplayOrder: 12, Message: &final},
+		},
+		messages: []model.Message{first, final}, activities: []domain.HarnessActivity{activity},
+	}
+	m := app{groups: []messageGroup{group}, messages: []model.Message{final}, editor: textarea.New(), width: 100, height: 80, paneFocus: focusMessage, markdown: newMessageMarkdownRenderer(nil)}
+	rendered := ansi.Strip(m.renderGroupPanel(group, 100))
+	if !(strings.Index(rendered, first.Body) < strings.Index(rendered, activity.Body) && strings.Index(rendered, activity.Body) < strings.Index(rendered, final.Body)) {
+		t.Fatalf("typed timeline ignored canonical order: %q", rendered)
+	}
+	messageOnly := messageGroup{messages: append([]model.Message(nil), group.messages...)}
+	if replyTarget(group).ID != replyTarget(messageOnly).ID || archiveTarget(group).ID != archiveTarget(messageOnly).ID || group.latest().ID != messageOnly.latest().ID {
+		t.Fatalf("activity changed message actions: reply=%#v archive=%#v latest=%#v", replyTarget(group), archiveTarget(group), group.latest())
+	}
+
+	// Reordering only the authoritative entries must invalidate the render cache,
+	// even though the compatibility slices are unchanged.
+	group.entries[0], group.entries[1] = group.entries[1], group.entries[0]
+	reordered := ansi.Strip(m.renderGroupPanel(group, 100))
+	if strings.Index(reordered, activity.Body) >= strings.Index(reordered, first.Body) {
+		t.Fatalf("entry-only reorder reused stale render: %q", reordered)
+	}
+}
+
 func TestActivityExpansionPreservesDraftAndMessageActionTargets(t *testing.T) {
 	item := message("question", testAgentID, model.HumanMailboxID, "Question")
 	setMessageSemantics(&item, "Kind: question")
@@ -86,7 +123,12 @@ func TestCoalescedActivityRefreshPreservesLogicalMessageScrollAnchor(t *testing.
 	second := message("anchor-second", testAgentID, model.HumanMailboxID, strings.Repeat("second message line\n", 15))
 	second.CreatedAt = started.Add(2 * time.Second)
 	activity := domain.HarnessActivity{MailboxID: testAgentID, Harness: "home-built", SessionID: "session", OperationID: "operation", Kind: domain.HarnessActivityPlan, Body: "short plan", OccurredAt: started.Add(time.Second)}
-	group := messageGroup{key: "anchor-conversation", messages: []model.Message{first, second}, activities: []domain.HarnessActivity{activity}}
+	group := messageGroup{key: "anchor-conversation", entriesLoaded: true, messages: []model.Message{first, second}, activities: []domain.HarnessActivity{activity}}
+	group.entries = []domain.ConversationEntry{
+		{Kind: domain.ConversationEntryMessage, EventID: strings.Repeat("1", 64), DisplayOrder: 1, Message: &group.messages[0]},
+		{Kind: domain.ConversationEntryActivity, EventID: strings.Repeat("2", 64), DisplayOrder: 2, Activity: &group.activities[0]},
+		{Kind: domain.ConversationEntryMessage, EventID: strings.Repeat("3", 64), DisplayOrder: 3, Message: &group.messages[1]},
+	}
 	m := app{
 		groups: []messageGroup{group}, messages: []model.Message{second}, expandedActivities: map[string]bool{activityExpansionKey(activity): true},
 		editor: textarea.New(), markdown: newMessageMarkdownRenderer(nil), width: 80, height: 24, paneFocus: focusMessage,
@@ -119,35 +161,6 @@ func TestActivityRefreshDoesNotCreateInboxRows(t *testing.T) {
 	m = updated.(app)
 	if len(m.messages) != 1 || len(m.groups) != 1 || len(m.groups[0].messages) != 1 || len(m.groups[0].activities) != 1 || m.groups[0].latest().ID != item.ID {
 		t.Fatalf("activity changed inbox rows: messages=%#v groups=%#v", m.messages, m.groups)
-	}
-}
-
-type activityCaptureStore struct {
-	domain.Store
-	filter domain.HarnessActivityFilter
-}
-
-func (s *activityCaptureStore) ListHarnessActivities(_ context.Context, filter domain.HarnessActivityFilter) ([]domain.HarnessActivity, error) {
-	s.filter = filter
-	return nil, nil
-}
-
-func TestConversationActivityQueryUsesSelectedMailboxAndSession(t *testing.T) {
-	store := &activityCaptureStore{}
-	m := app{ctx: context.Background(), store: store}
-	agent := domain.NamedAgent{MailboxID: testAgentID, Harness: "home-built", CurrentSessionID: "current-session"}
-	if _, err := m.loadConversationActivities(model.ConversationKey{CounterpartyMailboxID: testAgentID}, []domain.NamedAgent{agent}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if store.filter.MailboxID != testAgentID || store.filter.Harness != "home-built" || store.filter.SessionID != "current-session" || store.filter.Limit != 1000 {
-		t.Fatalf("current-session filter = %#v", store.filter)
-	}
-	sessions := map[string]domain.AgentSession{"codex\x00old-session": {MailboxID: testAgentID, Harness: "codex", SessionID: "old-session"}}
-	if _, err := m.loadConversationActivities(model.ConversationKey{CounterpartyMailboxID: testAgentID, HarnessProvider: "codex", HarnessSessionID: "old-session"}, nil, sessions); err != nil {
-		t.Fatal(err)
-	}
-	if store.filter.Harness != "codex" || store.filter.SessionID != "old-session" {
-		t.Fatalf("historical-session filter = %#v", store.filter)
 	}
 }
 

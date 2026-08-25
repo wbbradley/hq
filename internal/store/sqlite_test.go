@@ -23,7 +23,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "31"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "32"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -680,7 +680,7 @@ func TestVersionTwelveMigrationBackfillsMessageCorrelation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DROP INDEX messages_harness_conversation; DROP INDEX messages_harness_operation; ALTER TABLE messages DROP COLUMN harness_provider; ALTER TABLE messages DROP COLUMN harness_session_id; ALTER TABLE messages DROP COLUMN harness_operation_id; PRAGMA user_version = 12`); err != nil {
+	if _, err := db.Exec(`DROP INDEX messages_harness_conversation; DROP INDEX messages_harness_operation; DROP INDEX messages_conversation_order; ALTER TABLE messages DROP COLUMN harness_provider; ALTER TABLE messages DROP COLUMN harness_session_id; ALTER TABLE messages DROP COLUMN harness_operation_id; PRAGMA user_version = 12`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -715,7 +715,7 @@ func TestVersionTwentyEightMigrationAddsProviderNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DROP INDEX messages_harness_conversation; DROP INDEX messages_harness_operation; ALTER TABLE messages DROP COLUMN harness_provider; PRAGMA user_version = 28`); err != nil {
+	if _, err := db.Exec(`DROP INDEX messages_harness_conversation; DROP INDEX messages_harness_operation; DROP INDEX messages_conversation_order; ALTER TABLE messages DROP COLUMN harness_provider; PRAGMA user_version = 28`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

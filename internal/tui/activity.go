@@ -20,6 +20,22 @@ type conversationTimelineEntry struct {
 }
 
 func conversationTimeline(group messageGroup) []conversationTimelineEntry {
+	if group.entriesLoaded {
+		entries := make([]conversationTimelineEntry, 0, len(group.entries))
+		for _, entry := range group.entries {
+			switch entry.Kind {
+			case domain.ConversationEntryMessage:
+				if entry.Message != nil {
+					entries = append(entries, conversationTimelineEntry{message: entry.Message, at: entry.Message.CreatedAt, key: "message:" + entry.EventID})
+				}
+			case domain.ConversationEntryActivity:
+				if entry.Activity != nil {
+					entries = append(entries, conversationTimelineEntry{activity: entry.Activity, at: entry.Activity.OccurredAt, key: "activity:" + entry.EventID})
+				}
+			}
+		}
+		return entries
+	}
 	entries := make([]conversationTimelineEntry, 0, len(group.messages)+len(group.activities))
 	for index := range group.messages {
 		message := &group.messages[index]

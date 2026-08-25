@@ -51,6 +51,29 @@ func (s *pagedHistoryStore) ListConversationHistory(_ context.Context, filter mo
 	return model.MessagePage{Messages: []model.Message{message("message-200", testAgentID, model.HumanMailboxID, "body-200")}}, nil
 }
 
+type pagedEntryStore struct {
+	domain.Store
+	calls   int
+	filters []model.ConversationHistoryFilter
+}
+
+func (s *pagedEntryStore) ListConversationEntries(_ context.Context, filter model.ConversationHistoryFilter) (domain.ConversationEntryPage, error) {
+	s.calls++
+	s.filters = append(s.filters, filter)
+	messageEntry := func(index int) domain.ConversationEntry {
+		item := message(fmt.Sprintf("entry-message-%03d", index), testAgentID, model.HumanMailboxID, fmt.Sprintf("entry-body-%03d", index))
+		return domain.ConversationEntry{Kind: domain.ConversationEntryMessage, EventID: fmt.Sprintf("%064x", index+1), DisplayOrder: index, Message: &item}
+	}
+	if filter.Cursor == "" {
+		entries := make([]domain.ConversationEntry, 200)
+		for index := range entries {
+			entries[index] = messageEntry(index)
+		}
+		return domain.ConversationEntryPage{Entries: entries, NextCursor: "next-entry-page"}, nil
+	}
+	return domain.ConversationEntryPage{Entries: []domain.ConversationEntry{messageEntry(200)}}, nil
+}
+
 type outboundCaptureStore struct {
 	domain.Store
 	agent           domain.NamedAgent
@@ -350,6 +373,54 @@ func TestConversationHistoryLoaderExhaustsPages(t *testing.T) {
 	messages, err := m.loadAllConversationHistory(key)
 	if err != nil || len(messages) != 201 || store.calls != 2 || messages[200].Body != "body-200" {
 		t.Fatalf("paged history = %d messages / %d calls / %v", len(messages), store.calls, err)
+	}
+}
+
+func TestUnifiedConversationLoaderExhaustsPagesAndDerivesCompatibilitySlices(t *testing.T) {
+	store := &pagedEntryStore{}
+	m := app{ctx: context.Background(), store: store}
+	key := model.ConversationKey{CounterpartyMailboxID: testAgentID, HarnessProvider: "codex", HarnessSessionID: "thread"}
+	entries, err := m.loadAllConversationEntries(key)
+	if err != nil || len(entries) != 201 || store.calls != 2 || entries[200].Message.Body != "entry-body-200" {
+		t.Fatalf("paged entries = %d entries / %d calls / %v", len(entries), store.calls, err)
+	}
+	if store.filters[0].Limit != 200 || store.filters[0].Key != key || store.filters[1].Cursor != "next-entry-page" {
+		t.Fatalf("entry filters = %#v", store.filters)
+	}
+
+	activity := domain.HarnessActivity{EventID: strings.Repeat("a", 64), MailboxID: testAgentID, Harness: "codex", SessionID: "thread", OperationID: "operation", Kind: domain.HarnessActivityPlan, Body: "plan"}
+	mixed := []domain.ConversationEntry{entries[0], {Kind: domain.ConversationEntryActivity, EventID: activity.EventID, DisplayOrder: 1, Activity: &activity}}
+	messages, activities := splitConversationEntries(mixed)
+	if len(messages) != 1 || messages[0].Body != "entry-body-000" || len(activities) != 1 || activities[0].Body != "plan" {
+		t.Fatalf("derived slices = %#v / %#v", messages, activities)
+	}
+}
+
+func TestConversationDetailRefreshUsesUnifiedEntriesAsAuthoritativeHistory(t *testing.T) {
+	store := &pagedEntryStore{}
+	key := model.ConversationKey{CounterpartyMailboxID: testAgentID, HarnessProvider: "codex", HarnessSessionID: "thread"}
+	stableKey := conversationKeyString(key)
+	m := app{
+		ctx: context.Background(), store: store, conversationMode: true,
+		conversations:  []model.ConversationSummary{{Key: key, Latest: message("summary-latest", testAgentID, model.HumanMailboxID, "summary")}},
+		entryHistories: make(map[string][]domain.ConversationEntry), histories: make(map[string][]model.Message), activities: make(map[string][]domain.HarnessActivity),
+	}
+	command := m.loadConversationHistory(key)
+	if command == nil {
+		t.Fatal("unloaded unified conversation did not schedule a detail read")
+	}
+	loaded := command().(historyLoadedMsg)
+	if loaded.err != nil || len(loaded.entries) != 201 || len(loaded.messages) != 201 || store.calls != 2 {
+		t.Fatalf("unified detail result = %#v, calls=%d", loaded, store.calls)
+	}
+	updated, _ := m.Update(loaded)
+	m = updated.(app)
+	group, found := m.groupByKey(stableKey)
+	if !found || !group.entriesLoaded || len(group.entries) != 201 || len(group.messages) != 201 || len(group.activities) != 0 {
+		t.Fatalf("authoritative detail group = %#v", group)
+	}
+	if m.loadConversationHistory(key) != nil {
+		t.Fatal("loaded unified conversation scheduled a duplicate read")
 	}
 }
 

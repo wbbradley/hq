@@ -25,6 +25,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	var listFilter model.Filter
 	var conversationFilter model.ConversationFilter
 	var historyFilter model.ConversationHistoryFilter
+	var entryFilter model.ConversationHistoryFilter
 	var activityFilter domain.HarnessActivityFilter
 	handler := func(_ context.Context, _ *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
 		lock.Lock()
@@ -80,6 +81,13 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 			}
 			historyFilter = request.Filter
 			return model.MessagePage{Messages: []model.Message{{ID: "history-message"}}, NextCursor: "history-next"}, nil
+		case domainrpc.ConversationEntriesMethod:
+			var request domainrpc.ConversationEntriesRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+			}
+			entryFilter = request.Filter
+			return domain.ConversationEntryPage{Entries: []domain.ConversationEntry{{Kind: domain.ConversationEntryActivity, EventID: "activity-event", Activity: &domain.HarnessActivity{EventID: "activity-event", ItemID: "entry-activity"}}}, NextCursor: "entry-next"}, nil
 		case domainrpc.ListHarnessActivitiesMethod:
 			var request domainrpc.HarnessActivityFilterRequest
 			if err := json.Unmarshal(raw, &request); err != nil {
@@ -133,6 +141,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	conversationResult, _ := client.ListConversations(ctx, wantConversationFilter)
 	wantHistoryFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", HarnessProvider: "codex", HarnessSessionID: "thread"}, Cursor: "history-cursor", Limit: 23}
 	historyResult, _ := client.ListConversationHistory(ctx, wantHistoryFilter)
+	entryResult, _ := client.ListConversationEntries(ctx, wantHistoryFilter)
 	wantActivityFilter := domain.HarnessActivityFilter{MailboxID: "agent", Harness: "fake", SessionID: "session", Limit: 31}
 	activityResult, _ := client.ListHarnessActivities(ctx, wantActivityFilter)
 	_ = client.Archive(ctx, "message")
@@ -160,7 +169,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		domainrpc.CreateNamedAgentMethod, domainrpc.GetNamedAgentMethod, domainrpc.ListNamedAgentsMethod, domainrpc.ListAgentSessionsMethod, domainrpc.RenameAgentSessionMethod,
 		domainrpc.RetireNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod, domainrpc.ReleaseAgentMethod,
 		domainrpc.LaunchHarnessAgentMethod, domainrpc.StopHarnessAgentMethod, domainrpc.HarnessRuntimeMethod,
-		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod, domainrpc.ListConversationsMethod, domainrpc.ConversationHistoryMethod,
+		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod, domainrpc.ListConversationsMethod, domainrpc.ConversationHistoryMethod, domainrpc.ConversationEntriesMethod,
 		domainrpc.ListHarnessActivitiesMethod,
 		domainrpc.ArchiveMethod, domainrpc.RestoreMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
 		domainrpc.TrustPeerMethod, domainrpc.DistrustPeerMethod, domainrpc.ListPeersMethod,
@@ -185,14 +194,17 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	if listFilter != wantListFilter {
 		t.Fatalf("list filter = %#v; want %#v", listFilter, wantListFilter)
 	}
-	if conversationFilter != wantConversationFilter || historyFilter != wantHistoryFilter {
-		t.Fatalf("conversation filters = %#v / %#v; want %#v / %#v", conversationFilter, historyFilter, wantConversationFilter, wantHistoryFilter)
+	if conversationFilter != wantConversationFilter || historyFilter != wantHistoryFilter || entryFilter != wantHistoryFilter {
+		t.Fatalf("conversation filters = %#v / %#v / %#v; want %#v / %#v", conversationFilter, historyFilter, entryFilter, wantConversationFilter, wantHistoryFilter)
 	}
 	if activityFilter != wantActivityFilter || len(activityResult) != 1 || activityResult[0].ItemID != "activity-result" {
 		t.Fatalf("activity result/filter = %#v / %#v", activityResult, activityFilter)
 	}
 	if len(conversationResult.Conversations) != 1 || conversationResult.NextCursor != "summary-next" || len(historyResult.Messages) != 1 || historyResult.NextCursor != "history-next" {
 		t.Fatalf("conversation results = %#v / %#v", conversationResult, historyResult)
+	}
+	if len(entryResult.Entries) != 1 || entryResult.Entries[0].Activity.ItemID != "entry-activity" || entryResult.NextCursor != "entry-next" {
+		t.Fatalf("entry result = %#v", entryResult)
 	}
 }
 
@@ -208,11 +220,23 @@ func TestClientRestoresDomainSentinelErrors(t *testing.T) {
 
 func TestClientRoundTripsTypedMessagesOverLocalWire(t *testing.T) {
 	typed := model.Message{
-		ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140f11", Body: "typed", Details: "human details",
+		ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140f11", EventID: strings.Repeat("a", 64), Body: "typed", Details: "human details",
 		Presentation:      model.PresentationFinalAnswer,
 		Correlation:       model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", ItemID: "item", RequestID: "request"},
 		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.client", Fields: []model.TechnicalField{{Key: "second", Label: "Second", Value: "2"}, {Key: "first", Value: "1"}}}},
 	}
+	activity := domain.HarnessActivity{
+		EventID: strings.Repeat("b", 64), InstallationID: "installation", MailboxID: "agent", AudienceAccountID: "account",
+		Harness: "home-built", SessionID: "session", OperationID: "operation",
+		Correlation: model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", ItemID: "item", RequestID: "request"},
+		RuntimeID:   "runtime", Sequence: 42, DisplayOrder: 13, Kind: domain.HarnessActivityCommand, ItemID: "item",
+		Status: domain.HarnessActivityFailed, Title: "go test", Body: "failed", Truncated: true,
+		OccurredAt: time.Date(2026, 8, 25, 12, 34, 56, 789000000, time.UTC),
+	}
+	wantEntries := domain.ConversationEntryPage{Entries: []domain.ConversationEntry{
+		{Kind: domain.ConversationEntryMessage, EventID: typed.EventID, DisplayOrder: 12, Message: &typed},
+		{Kind: domain.ConversationEntryActivity, EventID: activity.EventID, DisplayOrder: 13, Activity: &activity},
+	}, NextCursor: "entry-next"}
 	var created, replied model.Message
 	var originalID string
 	client, stop := testClient(t, func(_ context.Context, _ *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
@@ -237,6 +261,8 @@ func TestClientRoundTripsTypedMessagesOverLocalWire(t *testing.T) {
 			return []model.Message{typed}, nil
 		case domainrpc.ConversationHistoryMethod:
 			return model.MessagePage{Messages: []model.Message{typed}, NextCursor: "next"}, nil
+		case domainrpc.ConversationEntriesMethod:
+			return wantEntries, nil
 		default:
 			return nil, &localwire.RPCError{Code: localwire.CodeMethodNotFound, Message: method}
 		}
@@ -261,6 +287,10 @@ func TestClientRoundTripsTypedMessagesOverLocalWire(t *testing.T) {
 	if err != nil || history.NextCursor != "next" || !reflect.DeepEqual(history.Messages, []model.Message{typed}) {
 		t.Fatalf("typed history = %#v, %v", history, err)
 	}
+	entries, err := client.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", HarnessProvider: "home-built", HarnessSessionID: "session"}})
+	if err != nil || !reflect.DeepEqual(entries, wantEntries) || !entries.Entries[0].Valid() || !entries.Entries[1].Valid() {
+		t.Fatalf("typed entries = %#v, %v; want %#v", entries, err, wantEntries)
+	}
 	if !reflect.DeepEqual(created, typed) || originalID != "original" || !reflect.DeepEqual(replied, typed) {
 		t.Fatalf("typed requests = created %#v, reply %q %#v", created, originalID, replied)
 	}
@@ -277,6 +307,18 @@ func TestClientDecodesMessageJSONWithoutTypedFields(t *testing.T) {
 	got, err := client.Get(context.Background(), "legacy-json")
 	if err != nil || got.ID != "legacy-json" || got.Body != "compatible" || got.Details != "visible" || got.Presentation != "" || !got.Correlation.Empty() || len(got.TechnicalSections) != 0 {
 		t.Fatalf("legacy JSON message = %#v, %v", got, err)
+	}
+}
+
+func TestUnifiedConversationReadFailsCleanlyAgainstOlderServer(t *testing.T) {
+	client, stop := testClient(t, func(_ context.Context, _ *localwire.Session, method string, _ json.RawMessage) (any, *localwire.RPCError) {
+		return nil, &localwire.RPCError{Code: localwire.CodeMethodNotFound, Message: "unknown method " + method}
+	})
+	defer stop()
+	_, err := client.ListConversationEntries(context.Background(), model.ConversationHistoryFilter{})
+	var rpcErr *localwire.RPCError
+	if err == nil || !errors.As(err, &rpcErr) || rpcErr.Code != localwire.CodeMethodNotFound || !strings.Contains(err.Error(), domainrpc.ConversationEntriesMethod) {
+		t.Fatalf("older-server unified read error = %T %v", err, err)
 	}
 }
 

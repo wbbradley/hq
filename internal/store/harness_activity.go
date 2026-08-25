@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -126,21 +127,43 @@ ORDER BY display_order DESC,event_id DESC LIMIT ?
 	defer rows.Close()
 	var activities []domain.HarnessActivity
 	for rows.Next() {
-		var activity domain.HarnessActivity
-		var occurredAt int64
-		var sequence string
-		if err := rows.Scan(&activity.EventID, &activity.InstallationID, &activity.MailboxID, &activity.AudienceAccountID, &activity.Harness, &activity.SessionID, &activity.OperationID, &activity.Kind, &activity.ItemID, &activity.Status, &activity.Title, &activity.Body, &activity.Truncated, &occurredAt, &activity.RuntimeID, &sequence, &activity.DisplayOrder); err != nil {
-			return nil, err
+		activity, scanErr := scanHarnessActivity(rows)
+		if scanErr != nil {
+			return nil, scanErr
 		}
-		activity.Sequence, err = strconv.ParseUint(sequence, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("decode harness activity sequence: %w", err)
-		}
-		activity.Correlation = model.MessageCorrelation{Provider: activity.Harness, SessionID: activity.SessionID, OperationID: activity.OperationID, ItemID: activity.ItemID}
-		activity.OccurredAt = time.UnixMilli(occurredAt).UTC()
 		activities = append(activities, activity)
 	}
 	return activities, rows.Err()
+}
+
+type harnessActivityScanner interface {
+	Scan(...any) error
+}
+
+func scanHarnessActivity(scanner harnessActivityScanner) (domain.HarnessActivity, error) {
+	var activity domain.HarnessActivity
+	var occurredAt int64
+	var sequence string
+	if err := scanner.Scan(&activity.EventID, &activity.InstallationID, &activity.MailboxID, &activity.AudienceAccountID, &activity.Harness, &activity.SessionID, &activity.OperationID, &activity.Kind, &activity.ItemID, &activity.Status, &activity.Title, &activity.Body, &activity.Truncated, &occurredAt, &activity.RuntimeID, &sequence, &activity.DisplayOrder); err != nil {
+		return domain.HarnessActivity{}, err
+	}
+	var err error
+	activity.Sequence, err = strconv.ParseUint(sequence, 10, 64)
+	if err != nil {
+		return domain.HarnessActivity{}, fmt.Errorf("decode harness activity sequence: %w", err)
+	}
+	activity.Correlation = model.MessageCorrelation{Provider: activity.Harness, SessionID: activity.SessionID, OperationID: activity.OperationID, ItemID: activity.ItemID}
+	activity.OccurredAt = time.UnixMilli(occurredAt).UTC()
+	return activity, nil
+}
+
+func (s *SQLite) harnessActivityByEventID(ctx context.Context, eventID string) (domain.HarnessActivity, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence,display_order FROM harness_activities WHERE event_id=?`, eventID)
+	activity, err := scanHarnessActivity(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.HarnessActivity{}, domain.ErrNotFound
+	}
+	return activity, err
 }
 
 func normalizeHarnessActivity(activity domain.HarnessActivity, now func() time.Time) (domain.HarnessActivity, error) {

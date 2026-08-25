@@ -26,6 +26,7 @@ type recordingOperations struct {
 	listFilter         model.Filter
 	conversationFilter model.ConversationFilter
 	historyFilter      model.ConversationHistoryFilter
+	entryFilter        model.ConversationHistoryFilter
 	activityFilter     domain.HarnessActivityFilter
 	createdMessage     model.Message
 	repliedMessage     model.Message
@@ -33,6 +34,7 @@ type recordingOperations struct {
 	getMessage         model.Message
 	listMessages       []model.Message
 	historyPage        model.MessagePage
+	entryPage          domain.ConversationEntryPage
 }
 
 type recordingRuntime struct {
@@ -150,6 +152,10 @@ func (s *recordingOperations) ListConversations(_ context.Context, filter model.
 func (s *recordingOperations) ListConversationHistory(_ context.Context, filter model.ConversationHistoryFilter) (model.MessagePage, error) {
 	s.historyFilter = filter
 	return s.historyPage, s.record(ConversationHistoryMethod)
+}
+func (s *recordingOperations) ListConversationEntries(_ context.Context, filter model.ConversationHistoryFilter) (domain.ConversationEntryPage, error) {
+	s.entryFilter = filter
+	return s.entryPage, s.record(ConversationEntriesMethod)
 }
 func (s *recordingOperations) Archive(context.Context, string) error { return s.record(ArchiveMethod) }
 func (s *recordingOperations) Restore(context.Context, string) error { return s.record(RestoreMethod) }
@@ -284,6 +290,7 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{ListMethod, FilterRequest{}},
 		{ListConversationsMethod, ConversationFilterRequest{}},
 		{ConversationHistoryMethod, ConversationHistoryRequest{}},
+		{ConversationEntriesMethod, ConversationEntriesRequest{}},
 		{ListHarnessActivitiesMethod, HarnessActivityFilterRequest{}},
 		{ArchiveMethod, MutationIDRequest{MutationID: mutationID}},
 		{RestoreMethod, MutationIDRequest{MutationID: mutationID}},
@@ -478,7 +485,11 @@ func TestServicePreservesTypedMessageRequestsAndResponses(t *testing.T) {
 		t.Fatalf("typed reply = %q %#v, %v", replyOperations.replyOriginalID, replyOperations.repliedMessage, rpcErr)
 	}
 
-	readOperations := &recordingOperations{getMessage: typed, listMessages: []model.Message{typed}, historyPage: model.MessagePage{Messages: []model.Message{typed}, NextCursor: "next"}}
+	activity := domain.HarnessActivity{EventID: "activity-event", Body: "activity"}
+	readOperations := &recordingOperations{
+		getMessage: typed, listMessages: []model.Message{typed}, historyPage: model.MessagePage{Messages: []model.Message{typed}, NextCursor: "next"},
+		entryPage: domain.ConversationEntryPage{Entries: []domain.ConversationEntry{{Kind: domain.ConversationEntryMessage, EventID: typed.EventID, Message: &typed}, {Kind: domain.ConversationEntryActivity, EventID: activity.EventID, Activity: &activity}}, NextCursor: "entry-next"},
+	}
 	readService := Service{Store: readOperations}
 	result, rpcErr := readService.Handle(context.Background(), nil, GetMethod, json.RawMessage(`{"id":"message"}`))
 	if rpcErr != nil || !reflect.DeepEqual(result, typed) {
@@ -491,6 +502,10 @@ func TestServicePreservesTypedMessageRequestsAndResponses(t *testing.T) {
 	result, rpcErr = readService.Handle(context.Background(), nil, ConversationHistoryMethod, json.RawMessage(`{"filter":{"key":{"counterparty_mailbox_id":"agent","thread_id":"thread"}}}`))
 	if rpcErr != nil || !reflect.DeepEqual(result, readOperations.historyPage) {
 		t.Fatalf("typed history = %#v, %v", result, rpcErr)
+	}
+	result, rpcErr = readService.Handle(context.Background(), nil, ConversationEntriesMethod, json.RawMessage(`{"filter":{"key":{"counterparty_mailbox_id":"agent","thread_id":"thread"}}}`))
+	if rpcErr != nil || !reflect.DeepEqual(result, readOperations.entryPage) {
+		t.Fatalf("typed entries = %#v, %v", result, rpcErr)
 	}
 
 	legacyOperations := &recordingOperations{}
@@ -513,6 +528,10 @@ func TestServicePassesConversationPageRequests(t *testing.T) {
 	raw, _ = json.Marshal(ConversationHistoryRequest{Filter: historyFilter})
 	if _, rpcErr := service.Handle(context.Background(), nil, ConversationHistoryMethod, raw); rpcErr != nil || operations.historyFilter != historyFilter {
 		t.Fatalf("history filter = %#v, error=%v", operations.historyFilter, rpcErr)
+	}
+	raw, _ = json.Marshal(ConversationEntriesRequest{Filter: historyFilter})
+	if _, rpcErr := service.Handle(context.Background(), nil, ConversationEntriesMethod, raw); rpcErr != nil || operations.entryFilter != historyFilter {
+		t.Fatalf("entry filter = %#v, error=%v", operations.entryFilter, rpcErr)
 	}
 }
 

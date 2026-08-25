@@ -22,7 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 31
+const schemaVersion = 32
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -137,6 +137,7 @@ CREATE TABLE messages (
 	correlation_request_id TEXT NOT NULL DEFAULT '',
 	technical_sections_json TEXT NOT NULL DEFAULT '[]',
     reply_to TEXT,
+	display_order INTEGER NOT NULL CHECK(display_order >= 0),
     created_at INTEGER NOT NULL,
     archived_at INTEGER,
     incomplete INTEGER NOT NULL CHECK(incomplete IN (0, 1)),
@@ -530,6 +531,7 @@ CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DE
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX messages_harness_conversation ON messages(harness_provider, harness_session_id, created_at, id);
 CREATE INDEX messages_harness_operation ON messages(harness_provider, harness_session_id, harness_operation_id, created_at, id);
+CREATE INDEX messages_conversation_order ON messages(sender_mailbox_id,recipient_mailbox_id,harness_provider,harness_session_id,display_order,event_id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
 CREATE TABLE harness_activities (
 	 event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64),
@@ -554,7 +556,7 @@ CREATE TABLE harness_activities (
 ) STRICT;
 CREATE INDEX harness_activities_mailbox_time ON harness_activities(source_installation_id,mailbox_id,display_order,event_id);
 CREATE INDEX harness_activities_progress_retention ON harness_activities(source_installation_id,mailbox_id,harness,session_id,display_order,event_id) WHERE kind='progress';
-PRAGMA user_version = 31;
+PRAGMA user_version = 32;
 `
 
 const (
@@ -991,6 +993,24 @@ PRAGMA user_version = 31;`
 			return fmt.Errorf("migrate schema to version 31: %w", err)
 		}
 		version = 31
+	}
+	if version == 31 {
+		var displayOrderColumns int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name='display_order'`).Scan(&displayOrderColumns); err != nil {
+			return fmt.Errorf("inspect schema version 31: %w", err)
+		}
+		if displayOrderColumns == 0 {
+			if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("add message display order: %w", err)
+			}
+		}
+		migration := `CREATE INDEX IF NOT EXISTS messages_conversation_order ON messages(sender_mailbox_id,recipient_mailbox_id,harness_provider,harness_session_id,display_order,event_id);
+UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
+PRAGMA user_version = 32;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 32: %w", err)
+		}
+		version = 32
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {
@@ -1492,6 +1512,10 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		}
 		messageIDs[eventID] = id
 	}
+	conversationDisplay := make(map[string]int, len(state.ConversationOrder))
+	for order, eventID := range state.ConversationOrder {
+		conversationDisplay[eventID] = order
+	}
 	for _, eventID := range state.DisplayOrder {
 		message, ok := state.Messages[eventID]
 		if !ok {
@@ -1515,8 +1539,8 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if len(message.TechnicalSections) == 0 {
 			technicalJSON = []byte("[]")
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, purpose, presentation, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, technical_sections_json, harness_provider, harness_session_id, harness_operation_id, correlation_item_id, correlation_request_id, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, eventID, message.ThreadID, message.Type, model.NormalizeMessagePurpose(message.Purpose), message.Presentation, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, string(technicalJSON), correlation.Provider, correlation.SessionID, correlation.OperationID, correlation.ItemID, correlation.RequestID, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
+		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, purpose, presentation, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, technical_sections_json, harness_provider, harness_session_id, harness_operation_id, correlation_item_id, correlation_request_id, reply_to, display_order, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, eventID, message.ThreadID, message.Type, model.NormalizeMessagePurpose(message.Purpose), message.Presentation, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, string(technicalJSON), correlation.Provider, correlation.SessionID, correlation.OperationID, correlation.ItemID, correlation.RequestID, replyTo, conversationDisplay[eventID], message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
 		if err != nil {
 			return fmt.Errorf("project message: %w", err)
 		}
