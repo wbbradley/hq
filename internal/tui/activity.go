@@ -10,7 +10,7 @@ import (
 	"github.com/wbbradley/hq/internal/model"
 )
 
-var activityFailureStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+var activityStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 
 type conversationTimelineEntry struct {
 	message  *model.Message
@@ -119,11 +119,7 @@ func (m app) renderHarnessActivity(activity domain.HarnessActivity, width int, e
 		header += " · " + activity.OccurredAt.Local().Format("3:04:05 PM")
 	}
 	header = truncateDisplay(header, contentWidth)
-	if activity.Status == domain.HarnessActivityFailed {
-		header = activityFailureStyle.Render(header)
-	} else {
-		header = titleStyle.Render(header)
-	}
+	header = activityStyle.Render(header)
 
 	lines := []string{dimPanelEdge.Render("╭─") + " " + header}
 	if !expanded {
@@ -136,16 +132,18 @@ func (m app) renderHarnessActivity(activity domain.HarnessActivity, width int, e
 				summary = truncateDisplay(summary, contentWidth-lipgloss.Width(disclosure)) + disclosure
 			}
 		}
-		lines = append(lines, dimPanelEdge.Render("╰─")+" "+truncateDisplay(summary, contentWidth))
+		summary = truncateDisplay(summary, contentWidth)
+		summary = activityStyle.Render(summary)
+		lines = append(lines, dimPanelEdge.Render("╰─")+" "+summary)
 		return strings.Join(lines, "\n")
 	}
 
 	content := activityExpandedContent(activity)
 	for _, line := range wrapActivityText(content, contentWidth) {
-		lines = append(lines, dimPanelEdge.Render("│ ")+line)
+		lines = append(lines, dimPanelEdge.Render("│ ")+activityStyle.Render(line))
 	}
 	if activity.Truncated {
-		lines = append(lines, dimPanelEdge.Render("│ ")+activityFailureStyle.Render("[content truncated]"))
+		lines = append(lines, dimPanelEdge.Render("│ ")+activityStyle.Render("[content truncated]"))
 	}
 	lines = append(lines, dimPanelEdge.Render("╰─"))
 	return strings.Join(lines, "\n")

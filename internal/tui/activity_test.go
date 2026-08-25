@@ -54,6 +54,34 @@ func TestFakeProviderActivityRendersChronologicallyAsCollapsedAndExpandedCards(t
 	}
 }
 
+func TestHarnessActivitiesUseMutedText(t *testing.T) {
+	for _, kind := range []domain.HarnessActivityKind{
+		domain.HarnessActivityOperation,
+		domain.HarnessActivityPlan,
+		domain.HarnessActivityProgress,
+		domain.HarnessActivityCommand,
+		domain.HarnessActivityDiff,
+		domain.HarnessActivityFile,
+		domain.HarnessActivityTool,
+	} {
+		activity := domain.HarnessActivity{Kind: kind, Title: "activity title", Body: "activity body", Status: domain.HarnessActivityFailed}
+		for _, expanded := range []bool{false, true} {
+			rendered := (app{}).renderHarnessActivity(activity, 80, expanded)
+			label := strings.ToUpper(strings.ReplaceAll(string(kind), "-", " "))
+			content := "activity body"
+			if expanded || kind == domain.HarnessActivityCommand || kind == domain.HarnessActivityFile || kind == domain.HarnessActivityTool {
+				content = "activity title"
+			}
+			if !strings.Contains(rendered, "\x1b[38;5;241m▸ "+label) && !strings.Contains(rendered, "\x1b[38;5;241m▾ "+label) {
+				t.Fatalf("%s expanded=%t title was not muted: %q", kind, expanded, rendered)
+			}
+			if !strings.Contains(rendered, "\x1b[38;5;241m"+content) || strings.Contains(rendered, "\x1b[38;5;212m") || strings.Contains(rendered, "\x1b[38;5;196m") {
+				t.Fatalf("%s expanded=%t styling = %q", kind, expanded, rendered)
+			}
+		}
+	}
+}
+
 func TestTypedConversationEntriesRenderCanonicalOrderInsteadOfTimestamps(t *testing.T) {
 	started := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	first := message("canonical-first", testAgentID, model.HumanMailboxID, "First canonical message")
