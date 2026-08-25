@@ -67,3 +67,20 @@ func TestRegistryIsDeterministicAndRejectsDuplicates(t *testing.T) {
 		t.Fatalf("unknown provider error = %v", err)
 	}
 }
+
+func TestNormalizedActivityPayloadsStayTyped(t *testing.T) {
+	exitCode := 0
+	payloads := []harness.EventPayload{
+		harness.OperationStatusEvent{Status: harness.OperationRunning},
+		harness.PlanEvent{Text: "plan"},
+		harness.DiffEvent{Text: "diff"},
+		harness.CommandEvent{Command: "go test ./...", Output: "ok", ExitCode: &exitCode, Status: harness.OperationCompleted},
+		harness.FileChangeEvent{Path: "main.go", Summary: "updated", Status: harness.OperationCompleted},
+		harness.ToolEvent{Name: "search", Summary: "found matches", Status: harness.OperationCompleted},
+		harness.ProgressEvent{Message: "working"},
+		harness.OutputEvent{Text: "answer", Final: true},
+	}
+	if len(payloads) != 8 {
+		t.Fatalf("payloads = %#v", payloads)
+	}
+}

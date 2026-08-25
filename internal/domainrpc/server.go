@@ -165,6 +165,26 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return s.Store.RenameNamedAgentSession(ctx, request.Name, model.SessionIdentity{Harness: request.Harness, ExternalSessionID: request.SessionID}, request.SessionName)
+	case UpsertHarnessActivityMethod:
+		var request HarnessActivityRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		writer, ok := s.Store.(domain.HarnessActivityWriter)
+		if !ok {
+			return nil, errors.New("harness activity storage is unavailable")
+		}
+		return nil, writer.UpsertHarnessActivity(ctx, request.Activity)
+	case ListHarnessActivitiesMethod:
+		var request HarnessActivityFilterRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		reader, ok := s.Store.(domain.HarnessActivityReader)
+		if !ok {
+			return nil, errors.New("harness activity storage is unavailable")
+		}
+		return reader.ListHarnessActivities(ctx, request.Filter)
 	case AcquireAgentMethod, RenewAgentMethod:
 		var request AgentOwnershipRequest
 		if err := decodeRequest(raw, &request); err != nil {

@@ -39,6 +39,8 @@ const (
 	ListMethod                     = "message/list"
 	ListConversationsMethod        = "conversation/list"
 	ConversationHistoryMethod      = "conversation/history"
+	UpsertHarnessActivityMethod    = "activity/upsert"
+	ListHarnessActivitiesMethod    = "activity/list"
 	ArchiveMethod                  = "message/archive"
 	RestoreMethod                  = "message/restore"
 	ClaimMethod                    = "delivery/claim"
@@ -166,6 +168,14 @@ type ReplyRequest struct {
 
 type IDRequest struct {
 	ID string `json:"id"`
+}
+
+type HarnessActivityRequest struct {
+	Activity domain.HarnessActivity `json:"activity"`
+}
+
+type HarnessActivityFilterRequest struct {
+	Filter domain.HarnessActivityFilter `json:"filter"`
 }
 
 type MutationIDRequest struct {

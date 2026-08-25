@@ -22,7 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 26
+const schemaVersion = 27
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -526,7 +526,23 @@ CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_
 CREATE INDEX messages_codex_conversation ON messages(codex_thread_id, created_at, id);
 CREATE INDEX messages_codex_turn ON messages(codex_thread_id, codex_turn_id, created_at, id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
-PRAGMA user_version = 26;
+CREATE TABLE harness_activities (
+    mailbox_id TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('operation-status','plan','diff','command','file-change','tool-call','progress')),
+    item_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '' CHECK(status IN ('','running','completed','failed','interrupted')),
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
+    occurred_at INTEGER NOT NULL,
+    PRIMARY KEY(harness,session_id,operation_id,kind,item_id)
+) STRICT;
+CREATE INDEX harness_activities_mailbox_time ON harness_activities(mailbox_id,occurred_at,harness,session_id,operation_id,kind,item_id);
+CREATE INDEX harness_activities_progress_retention ON harness_activities(harness,session_id,kind,occurred_at,item_id) WHERE kind='progress';
+PRAGMA user_version = 27;
 `
 
 const (
@@ -825,6 +841,29 @@ PRAGMA user_version = 26;`
 			return fmt.Errorf("migrate schema to version 26: %w", err)
 		}
 		version = 26
+	}
+	if version == 26 {
+		migration := `CREATE TABLE IF NOT EXISTS harness_activities (
+    mailbox_id TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('operation-status','plan','diff','command','file-change','tool-call','progress')),
+    item_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '' CHECK(status IN ('','running','completed','failed','interrupted')),
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
+    occurred_at INTEGER NOT NULL,
+    PRIMARY KEY(harness,session_id,operation_id,kind,item_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS harness_activities_mailbox_time ON harness_activities(mailbox_id,occurred_at,harness,session_id,operation_id,kind,item_id);
+CREATE INDEX IF NOT EXISTS harness_activities_progress_retention ON harness_activities(harness,session_id,kind,occurred_at,item_id) WHERE kind='progress';
+PRAGMA user_version = 27;`
+		if _, err := s.db.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migrate schema to version 27: %w", err)
+		}
+		version = 27
 	}
 	if version != schemaVersion {
 		if err := s.resetSchema(ctx); err != nil {

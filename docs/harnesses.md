@@ -107,6 +107,12 @@ Every supported blocking request receives exactly one JSON-RPC response. Structu
 
 Unknown additive notifications are non-fatal and are ignored by handlers that do not recognize them. Malformed payloads for recognized notifications are also ignored by the relevant projection; malformed JSON-RPC envelopes remain fatal. Unsupported blocking server requests receive `-32601` and terminate the transport with a compatibility error because guessing a response could grant authority.
 
+### Local activity projection
+
+Normalized operation status, plan, diff, completed command, completed file change, completed tool call, and progress records have a separate installation-local SQLite projection. They are not `model.Message` values, canonical signed events, mutation receipts, relay outbox work, inbox actions, reply targets, archive targets, or inputs to open/unread counts. Cross-device activity synchronization is deferred.
+
+Rows are keyed by provider session, operation, activity kind, and item ID. Operation, plan, and diff snapshots coalesce; repeated item and progress keys replace deterministically. Titles are limited to 1 KiB, general bodies to 64 KiB, completed command output to 16 KiB, and progress bodies to 4 KiB. Truncation is explicit, and only the most recent 200 progress records per provider session are retained. The query surface returns at most 1,000 chronological records per mailbox request and emits the dedicated local `activities` change topic only for a material write.
+
 ## Failure, cancellation, and shutdown
 
 Protocol EOF, malformed JSON, an invalid JSON-RPC version, an oversized frame, a read/write failure, or an unsupported server request stops the transport and fails pending calls. Child-process failure is reported separately from ordinary EOF. When process and transport completion race, HQ briefly prefers an already available process result after transport closure and allows the transport reader to observe closure after process exit. The adapter refactor must retain deterministic typed causes for both orders.

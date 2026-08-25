@@ -342,6 +342,16 @@ func (c *Client) ListConversationHistory(ctx context.Context, filter model.Conve
 	return result, err
 }
 
+func (c *Client) UpsertHarnessActivity(ctx context.Context, activity domain.HarnessActivity) error {
+	return c.call(ctx, domainrpc.UpsertHarnessActivityMethod, domainrpc.HarnessActivityRequest{Activity: activity}, nil)
+}
+
+func (c *Client) ListHarnessActivities(ctx context.Context, filter domain.HarnessActivityFilter) ([]domain.HarnessActivity, error) {
+	var result []domain.HarnessActivity
+	err := c.call(ctx, domainrpc.ListHarnessActivitiesMethod, domainrpc.HarnessActivityFilterRequest{Filter: filter}, &result)
+	return result, err
+}
+
 func (c *Client) Archive(ctx context.Context, id string) error {
 	return c.mutatingCall(ctx, domainrpc.ArchiveMethod, func(mutationID string) any { return domainrpc.MutationIDRequest{MutationID: mutationID, ID: id} }, nil)
 }

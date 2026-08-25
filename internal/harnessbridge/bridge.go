@@ -157,8 +157,12 @@ func Run(ctx context.Context, options Options) error {
 		stopWorkers()
 		shutdownInstance(instance)
 		events.StopAndWait()
+		terminalStatus := terms.CancelledStatus
+		if failure != nil {
+			terminalStatus = failure.Error()
+		}
 		if !options.SuppressStatus && options.PublishStatus != nil {
-			_ = options.PublishStatus(context.Background(), mailbox, identity, terms.StoppedBody, failure.Error(), events.nextCreatedAt())
+			_ = options.PublishStatus(context.Background(), mailbox, identity, terms.StoppedBody, terminalStatus, events.nextCreatedAt())
 		}
 		return failure
 	}
@@ -170,6 +174,9 @@ func Run(ctx context.Context, options Options) error {
 		result, submitErr := instance.Session().Submit(ctx, harness.Submission{ID: harness.SubmissionID(id.String()), Input: []harness.InputPart{harness.TextInput{Text: prompt}}})
 		if submitErr != nil || result.State != harness.DeliveryAccepted {
 			if submitErr != nil {
+				if ctx.Err() != nil && errors.Is(submitErr, context.Canceled) {
+					return finishBeforeDispatcher(nil)
+				}
 				return finishBeforeDispatcher(submitErr)
 			}
 			return finishBeforeDispatcher(fmt.Errorf("initial harness submission was %s", result.State))
@@ -210,14 +217,19 @@ func Run(ctx context.Context, options Options) error {
 		}
 		bridgeErr, status = runtimeErr, runtimeErr.Error()
 	case <-dispatcherDone:
-		if dispatcherErr == nil {
-			dispatcherErr = errors.New("HQ input dispatcher stopped unexpectedly")
+		if ctx.Err() == nil {
+			if dispatcherErr == nil {
+				dispatcherErr = errors.New("HQ input dispatcher stopped unexpectedly")
+			}
+			bridgeErr, status = dispatcherErr, dispatcherErr.Error()
 		}
-		bridgeErr, status = dispatcherErr, dispatcherErr.Error()
 	case <-events.Failed():
 		bridgeErr, status = events.Err(), events.Err().Error()
 	case <-requests.Failed():
 		bridgeErr, status = requests.Err(), requests.Err().Error()
+	}
+	if ctx.Err() != nil && (bridgeErr == nil || errors.Is(bridgeErr, context.Canceled)) {
+		bridgeErr, status = nil, terms.CancelledStatus
 	}
 
 	stopWorkers()

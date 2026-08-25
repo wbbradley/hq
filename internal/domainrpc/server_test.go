@@ -25,6 +25,7 @@ type recordingOperations struct {
 	listFilter         model.Filter
 	conversationFilter model.ConversationFilter
 	historyFilter      model.ConversationHistoryFilter
+	activityFilter     domain.HarnessActivityFilter
 }
 
 type recordingRuntime struct {
@@ -104,6 +105,13 @@ func (s *recordingOperations) SelectNamedAgentSession(context.Context, string, m
 }
 func (s *recordingOperations) RenameNamedAgentSession(context.Context, string, model.SessionIdentity, string) (domain.AgentSession, error) {
 	return domain.AgentSession{}, s.record(RenameAgentSessionMethod)
+}
+func (s *recordingOperations) UpsertHarnessActivity(context.Context, domain.HarnessActivity) error {
+	return s.record(UpsertHarnessActivityMethod)
+}
+func (s *recordingOperations) ListHarnessActivities(_ context.Context, filter domain.HarnessActivityFilter) ([]domain.HarnessActivity, error) {
+	s.activityFilter = filter
+	return []domain.HarnessActivity{{ItemID: "activity-result"}}, s.record(ListHarnessActivitiesMethod)
 }
 func (s *recordingOperations) AcquireNamedAgent(context.Context, string, string, time.Duration) (domain.NamedAgent, error) {
 	return domain.NamedAgent{}, s.record(AcquireAgentMethod)
@@ -269,6 +277,8 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{ListMethod, FilterRequest{}},
 		{ListConversationsMethod, ConversationFilterRequest{}},
 		{ConversationHistoryMethod, ConversationHistoryRequest{}},
+		{UpsertHarnessActivityMethod, HarnessActivityRequest{}},
+		{ListHarnessActivitiesMethod, HarnessActivityFilterRequest{}},
 		{ArchiveMethod, MutationIDRequest{MutationID: mutationID}},
 		{RestoreMethod, MutationIDRequest{MutationID: mutationID}},
 		{ClaimMethod, ClaimRequest{MutationID: mutationID}},
@@ -532,5 +542,36 @@ func TestDomainSentinelErrorsRoundTrip(t *testing.T) {
 	custom := errors.New("validation failed")
 	if wireError := EncodeError(custom); wireError.Code != CodeDomain || wireError.Message != custom.Error() {
 		t.Fatalf("custom wire error = %#v", wireError)
+	}
+}
+
+func TestHarnessActivityRPCWritesAndQueriesLocalProjection(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, _ := identity.KeyPath(databasePath)
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := Service{Store: database}
+	activity := domain.HarnessActivity{
+		MailboxID: "activity-mailbox", Harness: "fake", SessionID: "session-1", OperationID: "operation-1",
+		Kind: domain.HarnessActivityProgress, ItemID: "progress-1", Body: "working", OccurredAt: time.Unix(100, 0),
+	}
+	raw, _ := json.Marshal(HarnessActivityRequest{Activity: activity})
+	if _, rpcErr := service.Handle(context.Background(), nil, UpsertHarnessActivityMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	raw, _ = json.Marshal(HarnessActivityFilterRequest{Filter: domain.HarnessActivityFilter{MailboxID: activity.MailboxID}})
+	result, rpcErr := service.Handle(context.Background(), nil, ListHarnessActivitiesMethod, raw)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	activities, ok := result.([]domain.HarnessActivity)
+	if !ok || len(activities) != 1 || activities[0].Body != activity.Body {
+		t.Fatalf("activity result = %#v", result)
 	}
 }

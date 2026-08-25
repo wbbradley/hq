@@ -366,6 +366,43 @@ type ProgressEvent struct {
 
 func (ProgressEvent) isEventPayload() {}
 
+type PlanEvent struct {
+	Text string
+}
+
+func (PlanEvent) isEventPayload() {}
+
+type DiffEvent struct {
+	Text string
+}
+
+func (DiffEvent) isEventPayload() {}
+
+type CommandEvent struct {
+	Command  string
+	Output   string
+	ExitCode *int
+	Status   OperationStatus
+}
+
+func (CommandEvent) isEventPayload() {}
+
+type FileChangeEvent struct {
+	Path    string
+	Summary string
+	Status  OperationStatus
+}
+
+func (FileChangeEvent) isEventPayload() {}
+
+type ToolEvent struct {
+	Name    string
+	Summary string
+	Status  OperationStatus
+}
+
+func (ToolEvent) isEventPayload() {}
+
 type Request struct {
 	ID        RequestID
 	Session   SessionIdentity

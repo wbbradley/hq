@@ -24,6 +24,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	var listFilter model.Filter
 	var conversationFilter model.ConversationFilter
 	var historyFilter model.ConversationHistoryFilter
+	var activityFilter domain.HarnessActivityFilter
 	handler := func(_ context.Context, _ *localwire.Session, method string, raw json.RawMessage) (any, *localwire.RPCError) {
 		lock.Lock()
 		methods = append(methods, method)
@@ -78,6 +79,13 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 			}
 			historyFilter = request.Filter
 			return model.MessagePage{Messages: []model.Message{{ID: "history-message"}}, NextCursor: "history-next"}, nil
+		case domainrpc.ListHarnessActivitiesMethod:
+			var request domainrpc.HarnessActivityFilterRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, &localwire.RPCError{Code: localwire.CodeInvalidRequest, Message: err.Error()}
+			}
+			activityFilter = request.Filter
+			return []domain.HarnessActivity{{ItemID: "activity-result"}}, nil
 		case domainrpc.ListPeersMethod:
 			return []domain.Peer{}, nil
 		case domainrpc.HumanAccountMethod:
@@ -124,6 +132,9 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	conversationResult, _ := client.ListConversations(ctx, wantConversationFilter)
 	wantHistoryFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", CodexThreadID: "thread"}, Cursor: "history-cursor", Limit: 23}
 	historyResult, _ := client.ListConversationHistory(ctx, wantHistoryFilter)
+	_ = client.UpsertHarnessActivity(ctx, domain.HarnessActivity{ItemID: "activity-input"})
+	wantActivityFilter := domain.HarnessActivityFilter{MailboxID: "agent", Harness: "fake", SessionID: "session", Limit: 31}
+	activityResult, _ := client.ListHarnessActivities(ctx, wantActivityFilter)
 	_ = client.Archive(ctx, "message")
 	_ = client.Restore(ctx, "message")
 	_, _ = client.Claim(ctx, domain.Claim{}, "token")
@@ -150,6 +161,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		domainrpc.RetireNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod, domainrpc.ReleaseAgentMethod,
 		domainrpc.LaunchHarnessAgentMethod, domainrpc.StopHarnessAgentMethod, domainrpc.HarnessRuntimeMethod,
 		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod, domainrpc.ListConversationsMethod, domainrpc.ConversationHistoryMethod,
+		domainrpc.UpsertHarnessActivityMethod, domainrpc.ListHarnessActivitiesMethod,
 		domainrpc.ArchiveMethod, domainrpc.RestoreMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
 		domainrpc.TrustPeerMethod, domainrpc.DistrustPeerMethod, domainrpc.ListPeersMethod,
 		domainrpc.HumanAccountMethod, domainrpc.HumanDevicesMethod, domainrpc.CreateHumanInviteMethod,
@@ -175,6 +187,9 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	}
 	if conversationFilter != wantConversationFilter || historyFilter != wantHistoryFilter {
 		t.Fatalf("conversation filters = %#v / %#v; want %#v / %#v", conversationFilter, historyFilter, wantConversationFilter, wantHistoryFilter)
+	}
+	if activityFilter != wantActivityFilter || len(activityResult) != 1 || activityResult[0].ItemID != "activity-result" {
+		t.Fatalf("activity result/filter = %#v / %#v", activityResult, activityFilter)
 	}
 	if len(conversationResult.Conversations) != 1 || conversationResult.NextCursor != "summary-next" || len(historyResult.Messages) != 1 || historyResult.NextCursor != "history-next" {
 		t.Fatalf("conversation results = %#v / %#v", conversationResult, historyResult)

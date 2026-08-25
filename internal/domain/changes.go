@@ -5,14 +5,15 @@ import "context"
 type ChangeTopic string
 
 const (
-	TopicMessages  ChangeTopic = "messages"
-	TopicMailboxes ChangeTopic = "mailboxes"
-	TopicNetwork   ChangeTopic = "network"
-	TopicPeers     ChangeTopic = "peers"
-	TopicHuman     ChangeTopic = "human"
-	TopicRelays    ChangeTopic = "relays"
-	TopicAgents    ChangeTopic = "agents"
-	TopicProjects  ChangeTopic = "projects"
+	TopicMessages   ChangeTopic = "messages"
+	TopicMailboxes  ChangeTopic = "mailboxes"
+	TopicNetwork    ChangeTopic = "network"
+	TopicPeers      ChangeTopic = "peers"
+	TopicHuman      ChangeTopic = "human"
+	TopicRelays     ChangeTopic = "relays"
+	TopicAgents     ChangeTopic = "agents"
+	TopicProjects   ChangeTopic = "projects"
+	TopicActivities ChangeTopic = "activities"
 )
 
 type Invalidation struct {
