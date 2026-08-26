@@ -1252,6 +1252,64 @@ func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T
 	}
 }
 
+func TestBottomAnchoredMessagePaneTailsLongNewMessage(t *testing.T) {
+	created := time.Date(2026, 8, 26, 12, 0, 0, 0, time.Local)
+	previous := message("tail-previous", testAgentID, model.HumanMailboxID, strings.Repeat("previous line\n", 24))
+	previous.CreatedAt = created
+	setMessageSemantics(&previous, "Harness provider: codex\nHarness session: tail-thread\nHarness operation: previous-turn")
+	key := conversationKeyForMessage(previous)
+	stableKey := conversationKeyString(key)
+	m := app{
+		conversations:    []model.ConversationSummary{{Key: key, Latest: previous, OldestOpen: &previous}},
+		conversationMode: true,
+		histories:        map[string][]model.Message{stableKey: {previous}},
+		width:            80,
+		height:           24,
+		paneFocus:        focusMessage,
+	}
+	m.setMessages()
+	m.reconcileMessageViewport(false)
+	m.scrollMessagePane(10_000)
+	group, found := m.detailGroup()
+	if !found {
+		t.Fatal("message group not found")
+	}
+	layout := m.paneLayout()
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	if maximum := messagePaneMaxStart(rendered.panel, layout.messageHeight); m.messageScroll != maximum {
+		t.Fatalf("fixture is not bottom anchored: scroll=%d maximum=%d", m.messageScroll, maximum)
+	}
+	historyRefresh := m
+
+	latest := message("tail-latest", testAgentID, model.HumanMailboxID, strings.Repeat("new tail line\n", 30))
+	latest.CreatedAt = created.Add(time.Second)
+	setMessageSemantics(&latest, "Harness provider: codex\nHarness session: tail-thread\nHarness operation: latest-turn")
+	updated, _ := m.Update(loadedMsg{
+		conversations: []model.ConversationSummary{{Key: key, Latest: latest, OldestOpen: &previous}},
+		histories:     map[string][]model.Message{stableKey: {previous, latest}},
+	})
+	m = updated.(app)
+	group, _ = m.detailGroup()
+	rendered = m.renderGroupPanelLayout(group, layout.messageWidth)
+	maximum := messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	if m.messageScroll != maximum {
+		t.Fatalf("new message lost bottom anchor: scroll=%d maximum=%d", m.messageScroll, maximum)
+	}
+	messageView := strings.Join(strings.Split(m.View().Content, "\n")[layout.inboxHeight:], "\n")
+	if !strings.Contains(messageView, "new tail line") || strings.Contains(messageView, "previous line") {
+		t.Fatalf("message pane did not tail new content: %q", messageView)
+	}
+
+	updated, _ = historyRefresh.Update(historyLoadedMsg{key: stableKey, messages: []model.Message{previous, latest}})
+	historyRefresh = updated.(app)
+	group, _ = historyRefresh.detailGroup()
+	rendered = historyRefresh.renderGroupPanelLayout(group, layout.messageWidth)
+	maximum = messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	if historyRefresh.messageScroll != maximum {
+		t.Fatalf("history refresh lost bottom anchor: scroll=%d maximum=%d", historyRefresh.messageScroll, maximum)
+	}
+}
+
 func TestMessagePaneRestoresUnreadBoundaryAfterRestartAndMultipleReplies(t *testing.T) {
 	created := time.Date(2026, 8, 23, 17, 4, 5, 0, time.Local)
 	makeTurnMessage := func(id, body string, offset time.Duration, sender, recipient string) model.Message {

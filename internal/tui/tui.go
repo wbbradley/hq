@@ -951,6 +951,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		selectedKey := m.selectedGroupKey()
+		followMessageTail := selectedKey != "" && m.messagePaneAtBottom()
 		knownSelectedMessages := make(map[string]bool)
 		if group, found := m.groupByKey(selectedKey); found {
 			for _, message := range group.messages {
@@ -1006,12 +1007,17 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.reconcileMessageViewport(true)
+		if followMessageTail && m.selectedGroupKey() == selectedKey {
+			m.tailMessagePane()
+		}
 		return m.withContextCommand()
 	case historyLoadedMsg:
 		if msg.err != nil {
 			m.err = msg.err
 			return m, nil
 		}
+		selectedKey := m.selectedGroupKey()
+		followMessageTail := msg.key == selectedKey && m.messagePaneAtBottom()
 		if msg.entries != nil {
 			if m.entryHistories == nil {
 				m.entryHistories = make(map[string][]domain.ConversationEntry)
@@ -1026,12 +1032,14 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activities = make(map[string][]domain.HarnessActivity)
 		}
 		m.activities[msg.key] = msg.activities
-		selectedKey := m.selectedGroupKey()
 		m.setMessages()
 		if index := groupIndex(m.visibleGroups(), selectedKey); index >= 0 {
 			m.cursor = index
 		}
 		m.reconcileMessageViewport(true)
+		if followMessageTail && m.selectedGroupKey() == selectedKey {
+			m.tailMessagePane()
+		}
 		return m.withContextCommand()
 	case repairMsg:
 		load := m.reload()
@@ -3318,6 +3326,29 @@ func (m *app) resetMessageViewport() {
 	m.messageLiveAnchorID = ""
 	m.messageAnchorID = ""
 	m.messageAnchorOffset = 0
+}
+
+func (m app) messagePaneAtBottom() bool {
+	group, found := m.detailGroup()
+	if !found {
+		return false
+	}
+	layout := m.paneLayout()
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	return m.resolvedMessageStart(group, rendered, layout.messageHeight) == messagePaneMaxStart(rendered.panel, layout.messageHeight)
+}
+
+func (m *app) tailMessagePane() {
+	group, found := m.detailGroup()
+	if !found {
+		return
+	}
+	layout := m.paneLayout()
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	m.messageScroll = messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	m.messageViewportKey = group.key
+	m.messageScrollManual = true
+	m.messageAnchorID, m.messageAnchorOffset = captureMessageAnchor(rendered, m.messageScroll)
 }
 
 func (m *app) scrollMessagePane(delta int) {
