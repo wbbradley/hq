@@ -42,6 +42,10 @@ const (
 	ListConversationsMethod          = "conversation/list"
 	ConversationHistoryMethod        = "conversation/history"
 	ConversationEntriesMethod        = "conversation/entries"
+	ListTUIDraftsMethod              = "tui/draft/list"
+	PutTUIDraftMethod                = "tui/draft/put"
+	DeleteTUIDraftMethod             = "tui/draft/delete"
+	SubmitTUIDraftMethod             = "tui/draft/submit"
 	ListHarnessActivitiesMethod      = "activity/list"
 	ArchiveMethod                    = "message/archive"
 	RestoreMethod                    = "message/restore"
@@ -109,6 +113,9 @@ const (
 	CodeHarnessUnknown            = "harness_unknown"
 	CodeHarnessUnavailable        = "harness_unavailable"
 	CodeHarnessIncapable          = "harness_incapable"
+	CodeTUIDraftNotFound          = "tui_draft_not_found"
+	CodeTUIDraftConflict          = "tui_draft_conflict"
+	CodeTUIDraftTarget            = "tui_draft_target"
 	CodeDomain                    = "domain_error"
 )
 
@@ -196,6 +203,24 @@ type ConversationHistoryRequest struct {
 
 type ConversationEntriesRequest struct {
 	Filter model.ConversationHistoryFilter `json:"filter"`
+}
+
+type PutTUIDraftRequest struct {
+	MutationID string          `json:"mutation_id"`
+	Draft      domain.TUIDraft `json:"draft"`
+}
+
+type TUIDraftVersionRequest struct {
+	MutationID string `json:"mutation_id"`
+	ID         string `json:"id"`
+	Version    uint64 `json:"version"`
+}
+
+type SubmitTUIDraftRequest struct {
+	MutationID  string   `json:"mutation_id"`
+	ID          string   `json:"id"`
+	Version     uint64   `json:"version"`
+	Environment []string `json:"environment,omitempty"`
 }
 
 type ClaimRequest struct {
@@ -338,6 +363,12 @@ func EncodeError(err error) *localwire.RPCError {
 		code = CodeMailboxNamed
 	case errors.Is(err, domain.ErrAgentOwned):
 		code = CodeAgentOwned
+	case errors.Is(err, domain.ErrTUIDraftNotFound):
+		code = CodeTUIDraftNotFound
+	case errors.Is(err, domain.ErrTUIDraftConflict):
+		code = CodeTUIDraftConflict
+	case errors.Is(err, domain.ErrTUIDraftTarget):
+		code = CodeTUIDraftTarget
 	case errors.Is(err, domain.ErrProjectNotFound):
 		code = CodeProjectNotFound
 	case errors.Is(err, domain.ErrProjectStale):
@@ -395,6 +426,12 @@ func DecodeError(err error) error {
 		sentinel = domain.ErrMailboxNamed
 	case CodeAgentOwned:
 		sentinel = domain.ErrAgentOwned
+	case CodeTUIDraftNotFound:
+		sentinel = domain.ErrTUIDraftNotFound
+	case CodeTUIDraftConflict:
+		sentinel = domain.ErrTUIDraftConflict
+	case CodeTUIDraftTarget:
+		sentinel = domain.ErrTUIDraftTarget
 	case CodeProjectNotFound:
 		sentinel = domain.ErrProjectNotFound
 	case CodeProjectStale:

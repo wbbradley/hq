@@ -14,6 +14,7 @@ const (
 	TopicAgents     ChangeTopic = "agents"
 	TopicProjects   ChangeTopic = "projects"
 	TopicActivities ChangeTopic = "activities"
+	TopicTUIDrafts  ChangeTopic = "tui-drafts"
 )
 
 type Invalidation struct {

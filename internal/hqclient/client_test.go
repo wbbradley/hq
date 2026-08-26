@@ -88,6 +88,12 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 			}
 			entryFilter = request.Filter
 			return domain.ConversationEntryPage{Entries: []domain.ConversationEntry{{Kind: domain.ConversationEntryActivity, EventID: "activity-event", Activity: &domain.HarnessActivity{EventID: "activity-event", ItemID: "entry-activity"}}}, NextCursor: "entry-next"}, nil
+		case domainrpc.ListTUIDraftsMethod:
+			return []domain.TUIDraft{{ID: "draft-result", Version: 2}}, nil
+		case domainrpc.PutTUIDraftMethod:
+			return domain.TUIDraft{ID: "draft-result", Version: 3}, nil
+		case domainrpc.SubmitTUIDraftMethod:
+			return domain.TUIDraftSubmission{MessageID: "draft-result"}, nil
 		case domainrpc.ListHarnessActivitiesMethod:
 			var request domainrpc.HarnessActivityFilterRequest
 			if err := json.Unmarshal(raw, &request); err != nil {
@@ -142,6 +148,10 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 	wantHistoryFilter := model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: "agent", HarnessProvider: "codex", HarnessSessionID: "thread"}, Cursor: "history-cursor", Limit: 23}
 	historyResult, _ := client.ListConversationHistory(ctx, wantHistoryFilter)
 	entryResult, _ := client.ListConversationEntries(ctx, wantHistoryFilter)
+	_, _ = client.ListTUIDrafts(ctx)
+	_, _ = client.PutTUIDraft(ctx, domain.TUIDraft{ID: "draft-result"})
+	_ = client.DeleteTUIDraft(ctx, "draft-result", 2)
+	_, _ = client.SubmitTUIDraft(ctx, "draft-result", 3)
 	wantActivityFilter := domain.HarnessActivityFilter{MailboxID: "agent", Harness: "fake", SessionID: "session", Limit: 31}
 	activityResult, _ := client.ListHarnessActivities(ctx, wantActivityFilter)
 	_ = client.Archive(ctx, "message")
@@ -170,6 +180,7 @@ func TestClientCallsEveryDomainMethod(t *testing.T) {
 		domainrpc.RetireNamedAgentMethod, domainrpc.SelectAgentSessionMethod, domainrpc.AcquireAgentMethod, domainrpc.RenewAgentMethod, domainrpc.ReleaseAgentMethod,
 		domainrpc.LaunchHarnessAgentMethod, domainrpc.StopHarnessAgentMethod, domainrpc.HarnessRuntimeMethod,
 		domainrpc.CreateMethod, domainrpc.ReplyMethod, domainrpc.GetMethod, domainrpc.ListMethod, domainrpc.ListConversationsMethod, domainrpc.ConversationHistoryMethod, domainrpc.ConversationEntriesMethod,
+		domainrpc.ListTUIDraftsMethod, domainrpc.PutTUIDraftMethod, domainrpc.DeleteTUIDraftMethod, domainrpc.SubmitTUIDraftMethod,
 		domainrpc.ListHarnessActivitiesMethod,
 		domainrpc.ArchiveMethod, domainrpc.RestoreMethod, domainrpc.ClaimMethod, domainrpc.CompleteMethod, domainrpc.ReleaseMethod,
 		domainrpc.TrustPeerMethod, domainrpc.DistrustPeerMethod, domainrpc.ListPeersMethod,

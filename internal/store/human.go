@@ -22,7 +22,7 @@ const pairingBundleVersion = 2
 
 func (s *SQLite) HumanAccount(ctx context.Context) (HumanAccount, error) {
 	var account HumanAccount
-	err := s.db.QueryRowContext(ctx, `SELECT a.account_id,a.label,a.creator_installation_id,a.creator_signer_key_id FROM human_account_default d JOIN human_accounts a ON a.account_id=d.account_id WHERE d.id=1`).Scan(&account.ID, &account.Label, &account.CreatorInstallationID, &account.CreatorSignerKeyID)
+	err := s.queryer(ctx).QueryRowContext(ctx, `SELECT a.account_id,a.label,a.creator_installation_id,a.creator_signer_key_id FROM human_account_default d JOIN human_accounts a ON a.account_id=d.account_id WHERE d.id=1`).Scan(&account.ID, &account.Label, &account.CreatorInstallationID, &account.CreatorSignerKeyID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return account, errors.New("this installation has no active human account")
 	}
@@ -74,7 +74,7 @@ func (s *SQLite) localAccountAction(ctx context.Context, accountID string) (Huma
 		return HumanAccount{}, nil, "", errors.New("local installation is not an active human account device")
 	}
 	var label string
-	if err := s.db.QueryRowContext(ctx, `SELECT label FROM human_account_devices WHERE account_id=? AND installation_id=? AND state='active'`, account.ID, s.signer.InstallationID).Scan(&label); err != nil {
+	if err := s.queryer(ctx).QueryRowContext(ctx, `SELECT label FROM human_account_devices WHERE account_id=? AND installation_id=? AND state='active'`, account.ID, s.signer.InstallationID).Scan(&label); err != nil {
 		return HumanAccount{}, nil, "", err
 	}
 	return account, parents, label, nil

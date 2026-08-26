@@ -34,6 +34,15 @@ type runtimeTestStore struct {
 	launches []domain.HarnessLaunchRequest
 }
 
+type draftFailureStore struct {
+	*testDomainStore
+	putErr error
+}
+
+func (s *draftFailureStore) PutTUIDraft(context.Context, domain.TUIDraft) (domain.TUIDraft, error) {
+	return domain.TUIDraft{}, s.putErr
+}
+
 type pagedHistoryStore struct {
 	domain.Store
 	calls int
@@ -1585,6 +1594,98 @@ func TestLeavingNewMessageCreatesOutboundDraftRow(t *testing.T) {
 	m = updated.(app)
 	if !m.answering || m.composeTo != "fred-id" || m.editor.Value() != "unfinished new message" {
 		t.Fatalf("new-message draft did not resume: %#v", m)
+	}
+}
+
+func TestLoadRestoresDurableDraftAndStaleReplyTarget(t *testing.T) {
+	s, ctx, _ := openStore(t)
+	stored, err := s.PutTUIDraft(ctx, domain.TUIDraft{
+		ID: "019c0000-0000-7000-8000-000000000a01", Body: "survives restart",
+		ReplyToMessageID: "019c0000-0000-7000-8000-000000000a02",
+		Conversation:     model.ConversationKey{CounterpartyMailboxID: "missing-agent", ThreadID: "missing-thread"},
+		RecipientLabel:   "alice", Repository: model.RepositoryContext{Directory: "/repo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := app{ctx: ctx, store: s, editor: textarea.New(), width: 80, height: 24}
+	loaded := m.load().(loadedMsg)
+	updated, _ := m.Update(loaded)
+	m = updated.(app)
+	groups := m.visibleGroups()
+	if len(groups) != 1 || groups[0].draft == nil || groups[0].draft.id != stored.ID || groups[0].draft.body != "survives restart" {
+		t.Fatalf("restored draft groups = %#v", groups)
+	}
+	updated, _ = m.beginComposeForSelection()
+	m = updated.(app)
+	if !m.answering || m.editor.Value() != "survives restart" {
+		t.Fatalf("resumed stale draft = %#v", m)
+	}
+	result := m.answer().(answeredMsg)
+	updated, _ = m.Update(result)
+	m = updated.(app)
+	if !errors.Is(m.err, domain.ErrTUIDraftTarget) || !m.pickingRecipient || m.editor.Value() != "survives restart" || len(m.drafts) != 1 {
+		t.Fatalf("stale target handling = %#v", m)
+	}
+}
+
+func TestDraftAutosaveSerializesNewerEdits(t *testing.T) {
+	s, ctx, agent := openStore(t)
+	m := app{
+		ctx: ctx, store: s, answering: true, activeDraftKey: "draft:019c0000-0000-7000-8000-000000000a11",
+		composeTo: agent.ID, composeName: agent.Label, editor: textarea.New(), paneFocus: focusReply,
+	}
+	m.editor.SetValue("first")
+	m.cacheActiveDraft()
+	m.draftSaveGeneration = 1
+	updated, firstSave := m.Update(draftAutosaveMsg{generation: 1})
+	m = updated.(app)
+	if firstSave == nil || !m.draftSaveInFlight {
+		t.Fatalf("first autosave did not start: %#v", m)
+	}
+	m.editor.SetValue("latest")
+	m.cacheActiveDraft()
+	m.draftSaveGeneration = 2
+	updated, cmd := m.Update(draftAutosaveMsg{generation: 2})
+	m = updated.(app)
+	if cmd != nil || !m.draftSavePending {
+		t.Fatalf("newer edit was not serialized: %#v", m)
+	}
+	updated, secondSave := m.Update(firstSave())
+	m = updated.(app)
+	if secondSave == nil {
+		t.Fatal("pending edit did not start after first save")
+	}
+	updated, _ = m.Update(secondSave())
+	m = updated.(app)
+	drafts, err := s.ListTUIDrafts(ctx)
+	if err != nil || len(drafts) != 1 || drafts[0].Body != "latest" || drafts[0].Version != 2 || m.draftSaveInFlight {
+		t.Fatalf("serialized drafts = %#v, state=%#v, err=%v", drafts, m, err)
+	}
+}
+
+func TestDraftAutosaveIgnoresSupersededDebounce(t *testing.T) {
+	m := app{answering: true, draftSaveGeneration: 2, editor: textarea.New()}
+	updated, cmd := m.Update(draftAutosaveMsg{generation: 1})
+	m = updated.(app)
+	if cmd != nil || m.draftSaveInFlight {
+		t.Fatalf("superseded debounce started a save: %#v", m)
+	}
+}
+
+func TestDraftSaveFailureKeepsEditorOpen(t *testing.T) {
+	base, ctx, agent := openStore(t)
+	want := errors.New("injected draft write failure")
+	m := app{
+		ctx: ctx, store: &draftFailureStore{testDomainStore: base, putErr: want}, answering: true,
+		activeDraftKey: "draft:019c0000-0000-7000-8000-000000000a21", composeTo: agent.ID,
+		editor: textarea.New(), paneFocus: focusReply, width: 80, height: 24,
+	}
+	m.editor.SetValue("do not lose me")
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = updated.(app)
+	if !m.answering || m.paneFocus != focusReply || m.editor.Value() != "do not lose me" || !errors.Is(m.err, want) {
+		t.Fatalf("failed stow state = %#v", m)
 	}
 }
 

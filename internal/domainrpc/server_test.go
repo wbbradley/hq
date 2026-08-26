@@ -35,6 +35,7 @@ type recordingOperations struct {
 	listMessages       []model.Message
 	historyPage        model.MessagePage
 	entryPage          domain.ConversationEntryPage
+	drafts             []domain.TUIDraft
 }
 
 type recordingRuntime struct {
@@ -164,6 +165,18 @@ func (s *recordingOperations) ListConversationHistory(_ context.Context, filter 
 func (s *recordingOperations) ListConversationEntries(_ context.Context, filter model.ConversationHistoryFilter) (domain.ConversationEntryPage, error) {
 	s.entryFilter = filter
 	return s.entryPage, s.record(ConversationEntriesMethod)
+}
+func (s *recordingOperations) ListTUIDrafts(context.Context) ([]domain.TUIDraft, error) {
+	return s.drafts, s.record(ListTUIDraftsMethod)
+}
+func (s *recordingOperations) PutTUIDraft(_ context.Context, draft domain.TUIDraft) (domain.TUIDraft, error) {
+	return draft, s.record(PutTUIDraftMethod)
+}
+func (s *recordingOperations) DeleteTUIDraft(context.Context, string, uint64) error {
+	return s.record(DeleteTUIDraftMethod)
+}
+func (s *recordingOperations) SubmitTUIDraft(_ context.Context, id string, _ uint64) (domain.TUIDraftSubmission, error) {
+	return domain.TUIDraftSubmission{MessageID: id}, s.record(SubmitTUIDraftMethod)
 }
 func (s *recordingOperations) Archive(context.Context, string) error { return s.record(ArchiveMethod) }
 func (s *recordingOperations) Restore(context.Context, string) error { return s.record(RestoreMethod) }
@@ -299,6 +312,10 @@ func TestServiceDispatchesEveryDomainMethod(t *testing.T) {
 		{ListConversationsMethod, ConversationFilterRequest{}},
 		{ConversationHistoryMethod, ConversationHistoryRequest{}},
 		{ConversationEntriesMethod, ConversationEntriesRequest{}},
+		{ListTUIDraftsMethod, nil},
+		{PutTUIDraftMethod, PutTUIDraftRequest{MutationID: mutationID}},
+		{DeleteTUIDraftMethod, TUIDraftVersionRequest{MutationID: mutationID}},
+		{SubmitTUIDraftMethod, SubmitTUIDraftRequest{MutationID: mutationID}},
 		{ListHarnessActivitiesMethod, HarnessActivityFilterRequest{}},
 		{ArchiveMethod, MutationIDRequest{MutationID: mutationID}},
 		{RestoreMethod, MutationIDRequest{MutationID: mutationID}},
@@ -380,6 +397,51 @@ func TestCommittedHumanMessagesAttemptNamedAgentWakeWithTransientEnvironment(t *
 	}
 	if len(runtime.wakeMessages) != 2 || runtime.wakeMessages[0].ID != message.ID || strings.Join(runtime.wakeEnvironments[0], "|") != "PATH=/sender/bin|TOKEN=transient" {
 		t.Fatalf("wake messages=%#v environments=%#v", runtime.wakeMessages, runtime.wakeEnvironments)
+	}
+}
+
+func TestSubmitTUIDraftReplayDoesNotDuplicateMessageAndRepairsWake(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "hq.db")
+	keyPath, err := identity.KeyPath(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := identity.Initialize(keyPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	ctx := context.Background()
+	recipient, err := database.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "draft-replay"}, model.RepositoryContext{Directory: "/repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := database.PutTUIDraft(ctx, domain.TUIDraft{ID: "019d0000-0000-7000-8000-000000000071", Body: "send exactly once", RecipientMailboxID: recipient.ID, Repository: model.RepositoryContext{Directory: "/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := SubmitTUIDraftRequest{MutationID: uuid.NewString(), ID: draft.ID, Version: draft.Version, Environment: []string{"PATH=/sender/bin"}}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &recordingRuntime{}
+	service := Service{Store: database, Runtime: runtime}
+	if _, rpcErr := service.Handle(ctx, nil, SubmitTUIDraftMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	if _, rpcErr := service.Handle(ctx, nil, SubmitTUIDraftMethod, raw); rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	messages, err := database.List(ctx, model.Filter{SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: recipient.ID})
+	if err != nil || len(messages) != 1 || messages[0].ID != draft.ID || len(runtime.wakeMessages) != 2 {
+		t.Fatalf("replayed draft messages=%#v wakes=%d err=%v", messages, len(runtime.wakeMessages), err)
+	}
+	if drafts, err := database.ListTUIDrafts(ctx); err != nil || len(drafts) != 0 {
+		t.Fatalf("drafts after replay = %#v, %v", drafts, err)
 	}
 }
 
@@ -609,7 +671,7 @@ func TestMutationMetadataIsRequiredCanonicalAndReplayed(t *testing.T) {
 }
 
 func TestDomainSentinelErrorsRoundTrip(t *testing.T) {
-	for _, sentinel := range []error{domain.ErrNotFound, domain.ErrAlreadyHandled, domain.ErrNotReady, domain.ErrClaimed, harness.ErrUnknownProvider, harness.ErrProviderUnavailable, harness.ErrCapabilityUnavailable} {
+	for _, sentinel := range []error{domain.ErrNotFound, domain.ErrAlreadyHandled, domain.ErrNotReady, domain.ErrClaimed, domain.ErrTUIDraftNotFound, domain.ErrTUIDraftConflict, domain.ErrTUIDraftTarget, harness.ErrUnknownProvider, harness.ErrProviderUnavailable, harness.ErrCapabilityUnavailable} {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			wireError := EncodeError(sentinel)
 			decoded := DecodeError(wireError)

@@ -366,6 +366,36 @@ func (c *Client) ListConversationEntries(ctx context.Context, filter model.Conve
 	return result, err
 }
 
+func (c *Client) ListTUIDrafts(ctx context.Context) ([]domain.TUIDraft, error) {
+	var result []domain.TUIDraft
+	err := c.call(ctx, domainrpc.ListTUIDraftsMethod, nil, &result)
+	return result, err
+}
+
+func (c *Client) PutTUIDraft(ctx context.Context, draft domain.TUIDraft) (domain.TUIDraft, error) {
+	var result domain.TUIDraft
+	err := c.mutatingCall(ctx, domainrpc.PutTUIDraftMethod, func(id string) any {
+		return domainrpc.PutTUIDraftRequest{MutationID: id, Draft: draft}
+	}, &result)
+	return result, err
+}
+
+func (c *Client) DeleteTUIDraft(ctx context.Context, id string, version uint64) error {
+	return c.mutatingCall(ctx, domainrpc.DeleteTUIDraftMethod, func(mutationID string) any {
+		return domainrpc.TUIDraftVersionRequest{MutationID: mutationID, ID: id, Version: version}
+	}, nil)
+}
+
+func (c *Client) SubmitTUIDraft(ctx context.Context, id string, version uint64) (domain.TUIDraftSubmission, error) {
+	var result domain.TUIDraftSubmission
+	environment := os.Environ()
+	defer clearEnvironment(environment)
+	err := c.mutatingCall(ctx, domainrpc.SubmitTUIDraftMethod, func(mutationID string) any {
+		return domainrpc.SubmitTUIDraftRequest{MutationID: mutationID, ID: id, Version: version, Environment: environment}
+	}, &result)
+	return result, err
+}
+
 func (c *Client) ListHarnessActivities(ctx context.Context, filter domain.HarnessActivityFilter) ([]domain.HarnessActivity, error) {
 	var result []domain.HarnessActivity
 	err := c.call(ctx, domainrpc.ListHarnessActivitiesMethod, domainrpc.HarnessActivityFilterRequest{Filter: filter}, &result)

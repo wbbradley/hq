@@ -27,6 +27,22 @@ const (
 	reducerVersion = 1
 )
 
+const tuiDraftSchema = `CREATE TABLE IF NOT EXISTS tui_drafts (
+    id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL CHECK(version > 0),
+    body TEXT NOT NULL,
+    reply_to_message_id TEXT NOT NULL DEFAULT '',
+    conversation_json TEXT NOT NULL DEFAULT '{}',
+    recipient_mailbox_id TEXT NOT NULL DEFAULT '',
+    recipient_label TEXT NOT NULL DEFAULT '',
+    recipient_address_json TEXT NOT NULL DEFAULT '{}',
+    recipient_named INTEGER NOT NULL CHECK(recipient_named IN (0,1)),
+    repository_json TEXT NOT NULL DEFAULT '{}',
+    activation_json TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;`
+
 const schema = `
 CREATE TABLE canonical_events (
     event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64),
@@ -311,6 +327,7 @@ CREATE TABLE delivery_facts (
     delivery_lease_until INTEGER,
     CHECK((delivery_token IS NULL) = (delivery_lease_until IS NULL))
 ) STRICT;
+` + tuiDraftSchema + `
 CREATE TABLE inbound_staging (
     id INTEGER PRIMARY KEY,
     raw_wrapper BLOB NOT NULL,
@@ -704,6 +721,11 @@ func (s *SQLite) configure(ctx context.Context) error {
 	if version != 0 && version != schemaVersion {
 		return fmt.Errorf("unsupported HQ database schema %d; archive or remove the database, then reinitialize and pair this installation", version)
 	}
+	if version == schemaVersion {
+		if _, err := s.db.ExecContext(ctx, tuiDraftSchema); err != nil {
+			return fmt.Errorf("ensure local TUI draft storage: %w", err)
+		}
+	}
 	if version == 0 {
 		var existingTables int
 		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&existingTables); err != nil {
@@ -910,6 +932,26 @@ func (s *SQLite) appendContentsResult(ctx context.Context, contents []event.Cont
 	signed, err := s.signContents(ctx, contents, times)
 	if err != nil {
 		return nil, err
+	}
+	if outer, ok := ctx.Value(canonicalTransactionContextKey{}).(*canonicalTransactionContext); ok {
+		commit, err := s.ingestCanonicalTx(ctx, outer.tx, signed, true)
+		if err != nil {
+			return nil, err
+		}
+		var value any
+		if result != nil {
+			value, err = result(outer.tx)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(commit.EventIDs) != 0 {
+			outer.addTopics(canonicalChangeTopics...)
+		}
+		if len(commit.ProjectInputAcceptanceIDs) != 0 {
+			outer.addTopics(domain.TopicProjects)
+		}
+		return value, nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1620,7 +1662,14 @@ func (s *SQLite) hasContext(ctx context.Context, mailboxID string, repo model.Re
 }
 
 func (s *SQLite) getMailbox(ctx context.Context, id string) (model.Mailbox, error) {
-	return getMailboxWith(ctx, s.db, id)
+	return getMailboxWith(ctx, s.queryer(ctx), id)
+}
+
+func (s *SQLite) queryer(ctx context.Context) rowQueryer {
+	if outer, ok := ctx.Value(canonicalTransactionContextKey{}).(*canonicalTransactionContext); ok {
+		return outer.tx
+	}
+	return s.db
 }
 
 type rowQueryer interface {
@@ -1706,7 +1755,7 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 	scope := event.ScopeInstallationPrivate
 	recipientInstallationID := s.signer.InstallationID
 	var remoteProjectID, remoteProjectHome string
-	_ = s.db.QueryRowContext(ctx, `SELECT id,home_installation_id FROM project_replicas WHERE json_extract(state_json,'$.mailbox_id')=?`, m.RecipientMailboxID).Scan(&remoteProjectID, &remoteProjectHome)
+	_ = s.queryer(ctx).QueryRowContext(ctx, `SELECT id,home_installation_id FROM project_replicas WHERE json_extract(state_json,'$.mailbox_id')=?`, m.RecipientMailboxID).Scan(&remoteProjectID, &remoteProjectHome)
 	if remoteProjectID != "" && m.SenderMailboxID == model.HumanMailboxID && m.Purpose == model.MessagePurposeConversation {
 		m.Purpose = model.MessagePurposeProjectInput
 		payload, _ = event.MarshalPayload(textPayloadForMessage(m, actorLabel))
@@ -1758,7 +1807,7 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 	content := event.Content{Schema: event.MessageSchemaVersion, Type: typeName, Sender: s.localAddress(m.SenderMailboxID), Recipient: recipient, Audience: audience, Parents: parents, Authorities: authorities, Scope: scope, Payload: payload}
 	var projectID string
 	if recipientInstallationID == s.signer.InstallationID {
-		err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE mailbox_id=?`, m.RecipientMailboxID).Scan(&projectID)
+		err := s.queryer(ctx).QueryRowContext(ctx, `SELECT id FROM projects WHERE mailbox_id=?`, m.RecipientMailboxID).Scan(&projectID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -1848,7 +1897,7 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 	}
 	if original.message.SenderInstallationID == s.signer.InstallationID {
 		var projectID string
-		err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE mailbox_id=? AND home_installation_id=?`, original.message.SenderMailboxID, s.signer.InstallationID).Scan(&projectID)
+		err := s.queryer(ctx).QueryRowContext(ctx, `SELECT id FROM projects WHERE mailbox_id=? AND home_installation_id=?`, original.message.SenderMailboxID, s.signer.InstallationID).Scan(&projectID)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -1891,12 +1940,13 @@ type messageWithEvent struct {
 }
 
 func (s *SQLite) messageRecord(ctx context.Context, id string) (messageWithEvent, error) {
-	m, err := s.Get(ctx, id)
+	queryer := s.queryer(ctx)
+	m, err := getMessageWith(ctx, queryer, id)
 	if err != nil {
 		return messageWithEvent{}, err
 	}
 	var eventID string
-	if err := s.db.QueryRowContext(ctx, `SELECT event_id FROM messages WHERE id = ?`, id).Scan(&eventID); err != nil {
+	if err := queryer.QueryRowContext(ctx, `SELECT event_id FROM messages WHERE id = ?`, id).Scan(&eventID); err != nil {
 		return messageWithEvent{}, err
 	}
 	return messageWithEvent{message: m, eventID: eventID}, nil
@@ -1971,7 +2021,7 @@ func messageAddress(installationID, mailboxID string, kind model.MailboxKind, fa
 }
 
 func (s *SQLite) Get(ctx context.Context, id string) (model.Message, error) {
-	return getMessageWith(ctx, s.db, id)
+	return getMessageWith(ctx, s.queryer(ctx), id)
 }
 
 func getMessageWith(ctx context.Context, queryer rowQueryer, id string) (model.Message, error) {

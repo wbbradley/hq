@@ -27,6 +27,7 @@ import (
 
 const (
 	repairInterval     = 5 * time.Minute
+	draftAutosaveDelay = 250 * time.Millisecond
 	mouseWheelStep     = 3
 	inboxPaneExtraRows = 3
 )
@@ -116,6 +117,9 @@ type app struct {
 	agentManager        agentManager
 	projectSetup        *projectComposeSetup
 	composeActivation   *projectActivationPlan
+	draftSaveGeneration uint64
+	draftSaveInFlight   bool
+	draftSavePending    bool
 }
 
 type agentManagerStage int
@@ -165,17 +169,23 @@ type messageGroup struct {
 }
 
 type messageDraft struct {
-	key            string
-	body           string
-	answerID       string
-	answerGroupKey string
-	answerQ        model.Message
-	composeTo      string
-	composeName    string
-	composeContext model.RepositoryContext
-	composeNamed   bool
-	activation     *projectActivationPlan
-	updatedAt      time.Time
+	key              string
+	id               string
+	version          uint64
+	body             string
+	answerID         string
+	answerGroupKey   string
+	answerQ          model.Message
+	composeTo        string
+	composeName      string
+	recipientLabel   string
+	recipientAddress model.MessageAddress
+	conversation     model.ConversationKey
+	composeContext   model.RepositoryContext
+	composeNamed     bool
+	activation       *projectActivationPlan
+	updatedAt        time.Time
+	createdAt        time.Time
 }
 
 type recipientChoice struct {
@@ -294,6 +304,9 @@ type loadedMsg struct {
 	devices       []domain.HumanDevice
 	account       domain.HumanAccount
 	sessions      map[string]domain.AgentSession
+	drafts        []domain.TUIDraft
+	draftTargets  map[string]model.Message
+	draftsLoaded  bool
 	err           error
 }
 
@@ -306,8 +319,20 @@ type historyLoadedMsg struct {
 }
 
 type answeredMsg struct {
-	err  error
-	sent bool
+	err   error
+	sent  bool
+	draft *domain.TUIDraft
+}
+
+type draftAutosaveMsg struct{ generation uint64 }
+
+type draftSavedMsg struct {
+	key        string
+	id         string
+	generation uint64
+	draft      domain.TUIDraft
+	deleted    bool
+	err        error
 }
 
 type projectThreadsMsg struct {
@@ -423,6 +448,11 @@ func runWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Wri
 		return fmt.Errorf("read TUI launch directory: %w", err)
 	}
 	m := app{ctx: ctx, store: s, repo: repoctx.GitHub{}, editor: editor, sync: sync, states: updates.States, connection: updates.Initial, markdown: newMessageMarkdownRenderer(nil), launchDirectory: launchDirectory, launchEnvironment: os.Environ(), defaultYolo: defaultYolo}
+	if drafts, targets, loaded, draftErr := m.loadTUIDrafts(); draftErr != nil {
+		m.err = fmt.Errorf("load TUI drafts: %w", draftErr)
+	} else if loaded {
+		m.mergeLoadedDrafts(drafts, targets)
+	}
 	if subscription != nil {
 		m.changes = subscription.Changes()
 	}
@@ -431,7 +461,7 @@ func runWithClient(ctx context.Context, s domain.Store, in io.Reader, out io.Wri
 }
 
 func tuiChangeTopics() []domain.ChangeTopic {
-	return []domain.ChangeTopic{domain.TopicMessages, domain.TopicActivities, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman, domain.TopicRelays, domain.TopicAgents}
+	return []domain.ChangeTopic{domain.TopicMessages, domain.TopicActivities, domain.TopicMailboxes, domain.TopicNetwork, domain.TopicPeers, domain.TopicHuman, domain.TopicRelays, domain.TopicAgents, domain.TopicTUIDrafts}
 }
 
 func (m app) Init() tea.Cmd {
@@ -482,9 +512,16 @@ func (m app) syncNow() tea.Cmd {
 }
 
 func (m app) load() tea.Msg {
-	conversations, err := m.loadAllConversations()
+	drafts, draftTargets, draftsLoaded, err := m.loadTUIDrafts()
 	if err != nil {
 		return loadedMsg{err: err}
+	}
+	loadFailure := func(err error) tea.Msg {
+		return loadedMsg{drafts: drafts, draftTargets: draftTargets, draftsLoaded: draftsLoaded, err: err}
+	}
+	conversations, err := m.loadAllConversations()
+	if err != nil {
+		return loadFailure(err)
 	}
 	entryHistories := make(map[string][]domain.ConversationEntry)
 	histories := make(map[string][]model.Message)
@@ -499,18 +536,18 @@ func (m app) load() tea.Msg {
 	if found {
 		entries, historyErr := m.loadAllConversationEntries(selectedConversation.Key)
 		if historyErr != nil {
-			return loadedMsg{err: historyErr}
+			return loadFailure(historyErr)
 		}
 		entryHistories[selectedKey] = entries
 		histories[selectedKey], activities[selectedKey] = splitConversationEntries(entries)
 	}
 	agents, err := m.store.ListNamedAgents(m.ctx)
 	if err != nil {
-		return loadedMsg{err: err}
+		return loadFailure(err)
 	}
 	projects, err := m.store.ListProjects(m.ctx, false)
 	if err != nil {
-		return loadedMsg{err: err}
+		return loadFailure(err)
 	}
 	account, _ := m.store.HumanAccount(m.ctx)
 	devices, _ := m.store.HumanDevices(m.ctx)
@@ -518,14 +555,36 @@ func (m app) load() tea.Msg {
 	for _, agent := range agents {
 		history, historyErr := m.store.ListNamedAgentSessions(m.ctx, agent.Name)
 		if historyErr != nil {
-			return loadedMsg{err: historyErr}
+			return loadFailure(historyErr)
 		}
 		for _, session := range history {
 			sessions[session.Harness+"\x00"+session.SessionID] = session
 		}
 	}
 	network, err := m.store.NetworkStatus(m.ctx)
-	return loadedMsg{conversations: conversations, entries: entryHistories, histories: histories, activities: activities, agents: agents, projects: projects, devices: devices, account: account, sessions: sessions, network: network, err: err}
+	return loadedMsg{conversations: conversations, entries: entryHistories, histories: histories, activities: activities, agents: agents, projects: projects, devices: devices, account: account, sessions: sessions, network: network, drafts: drafts, draftTargets: draftTargets, draftsLoaded: draftsLoaded, err: err}
+}
+
+func (m app) loadTUIDrafts() ([]domain.TUIDraft, map[string]model.Message, bool, error) {
+	draftStore, ok := m.store.(domain.TUIDraftOperations)
+	if !ok {
+		return nil, nil, false, nil
+	}
+	drafts, err := draftStore.ListTUIDrafts(m.ctx)
+	if err != nil {
+		return nil, nil, true, err
+	}
+	targets := make(map[string]model.Message)
+	for _, draft := range drafts {
+		if draft.ReplyToMessageID == "" {
+			continue
+		}
+		target, targetErr := m.store.Get(m.ctx, draft.ReplyToMessageID)
+		if targetErr == nil {
+			targets[draft.ID] = target
+		}
+	}
+	return drafts, targets, true, nil
 }
 
 func (m *app) reload() tea.Cmd {
@@ -623,6 +682,37 @@ func (m app) loadConversationHistory(key model.ConversationKey) tea.Cmd {
 func (m app) answer() tea.Msg {
 	if m.answerID == "" && m.composeTo == "" {
 		return answeredMsg{err: errors.New("message has no recipient")}
+	}
+	if operations, ok := m.store.(domain.TUIDraftOperations); ok {
+		if m.draftSaveInFlight {
+			return answeredMsg{err: errors.New("draft autosave is still in progress; send again when it completes")}
+		}
+		working := m
+		draft := working.cacheActiveDraft()
+		stored, err := operations.PutTUIDraft(m.ctx, working.domainDraft(draft))
+		if err != nil {
+			return answeredMsg{err: err}
+		}
+		submission, err := operations.SubmitTUIDraft(m.ctx, stored.ID, stored.Version)
+		if err != nil {
+			if errors.Is(err, domain.ErrTUIDraftTarget) {
+				if stored.ReplyToMessageID != "" {
+					err = fmt.Errorf("reply target is no longer available; choose a recipient again: %w", err)
+				} else {
+					err = fmt.Errorf("recipient %s is no longer available; choose a recipient again: %w", stored.RecipientLabel, err)
+				}
+			}
+			return answeredMsg{err: err, draft: &stored}
+		}
+		if activation := activationPlanFromDomain(submission.Activation); activation != nil {
+			if err := m.activateComposedProject(*activation); err != nil {
+				return answeredMsg{err: fmt.Errorf("message is pending in the project; activation failed: %w", err), sent: true}
+			}
+		}
+		if stored.ReplyToMessageID != "" {
+			err = m.archiveAnsweredGroup()
+		}
+		return answeredMsg{err: err, sent: true}
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
@@ -819,7 +909,9 @@ func (m app) updateMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	m.paneFocus = pane
 	m.editor.Blur()
 	if wasReply {
-		m.stowActiveDraft()
+		if !m.stowActiveDraft() {
+			return m, nil
+		}
 		m.paneFocus = pane
 		return m.withContextCommand()
 	}
@@ -875,6 +967,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inbox, m.sent, m.archived = msg.inbox, msg.sent, msg.archived
 		}
 		m.agents, m.projects, m.devices, m.account, m.threadSessions, m.network, m.err = msg.agents, msg.projects, msg.devices, msg.account, msg.sessions, msg.network, msg.err
+		if msg.draftsLoaded {
+			m.mergeLoadedDrafts(msg.drafts, msg.draftTargets)
+		}
 		if choices := m.filteredRecipients(); m.pickerCursor >= len(choices) {
 			m.pickerCursor = max(0, len(choices)-1)
 		}
@@ -1032,6 +1127,23 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case answeredMsg:
 		m.err = msg.err
+		if msg.draft != nil {
+			if current, ok := m.drafts[m.activeDraftKey]; ok && current.id == msg.draft.ID {
+				current.version = msg.draft.Version
+				current.createdAt = msg.draft.CreatedAt
+				current.updatedAt = msg.draft.UpdatedAt
+				m.drafts[m.activeDraftKey] = current
+			} else {
+				draft := messageDraftFromDomain(*msg.draft, m.answerQ)
+				if m.activeDraftKey != "" {
+					draft.key = m.activeDraftKey
+				}
+				if m.drafts == nil {
+					m.drafts = make(map[string]messageDraft)
+				}
+				m.drafts[draft.key] = draft
+			}
+		}
 		if msg.sent {
 			delete(m.drafts, m.activeDraftKey)
 			m.activeDraftKey = ""
@@ -1050,7 +1162,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			load := m.reload()
 			return m, tea.Batch(load, m.syncNow())
 		}
-		if errors.Is(msg.err, domain.ErrAgentRetired) || errors.Is(msg.err, domain.ErrAgentNotFound) {
+		if errors.Is(msg.err, domain.ErrAgentRetired) || errors.Is(msg.err, domain.ErrAgentNotFound) || errors.Is(msg.err, domain.ErrTUIDraftTarget) {
 			m.answering = false
 			m.pickingRecipient = true
 			m.pickerQuery = ""
@@ -1060,8 +1172,42 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.composeContext = model.RepositoryContext{}
 			m.composeNamed = false
 			m.composeActivation = nil
+			m.answerID = ""
+			m.answerGroupKey = ""
+			m.answerQ = model.Message{}
 			m.paneFocus = focusReply
 			m.editor.Blur()
+		}
+	case draftAutosaveMsg:
+		if msg.generation != m.draftSaveGeneration || !m.answering {
+			return m, nil
+		}
+		if m.draftSaveInFlight {
+			m.draftSavePending = true
+			return m, nil
+		}
+		return m, m.saveActiveDraft()
+	case draftSavedMsg:
+		m.draftSaveInFlight = false
+		m.err = msg.err
+		if msg.err == nil {
+			if current, ok := m.drafts[msg.key]; ok && current.id == msg.id {
+				if msg.deleted {
+					if strings.TrimSpace(current.body) == "" && msg.generation == m.draftSaveGeneration {
+						delete(m.drafts, msg.key)
+					}
+				} else {
+					current.version = msg.draft.Version
+					current.createdAt = msg.draft.CreatedAt
+					current.updatedAt = msg.draft.UpdatedAt
+					m.drafts[msg.key] = current
+				}
+			}
+		}
+		pending := m.draftSavePending || msg.generation < m.draftSaveGeneration
+		m.draftSavePending = false
+		if msg.err == nil && pending && m.answering {
+			return m, m.saveActiveDraft()
 		}
 	case projectThreadsMsg:
 		if m.projectSetup != nil {
@@ -1137,9 +1283,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.PasteMsg:
 		if m.answering && m.paneFocus == focusReply {
-			var cmd tea.Cmd
-			m.editor, cmd = m.editor.Update(msg)
-			return m, cmd
+			return m, m.updateEditor(msg)
 		}
 	case tea.MouseClickMsg:
 		return m.updateMouseClick(msg)
@@ -1148,6 +1292,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if m.connection.Blocking {
 			if msg.String() == "q" || msg.String() == "ctrl+c" {
+				if m.answering && !m.stowActiveDraft() {
+					return m, nil
+				}
 				return m, tea.Quit
 			}
 			return m, nil
@@ -1176,7 +1323,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			wasReply := m.answering && m.paneFocus == focusReply
 			m.cyclePaneFocus(1)
 			if wasReply {
-				m.stowActiveDraft()
+				if !m.stowActiveDraft() {
+					return m, nil
+				}
 				return m.withContextCommand()
 			}
 			if m.paneFocus == focusReply {
@@ -1188,7 +1337,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			wasReply := m.answering && m.paneFocus == focusReply
 			m.cyclePaneFocus(-1)
 			if wasReply {
-				m.stowActiveDraft()
+				if !m.stowActiveDraft() {
+					return m, nil
+				}
 				return m.withContextCommand()
 			}
 			if m.paneFocus == focusReply {
@@ -1238,7 +1389,12 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.answering {
 			switch msg.String() {
 			case "ctrl+c", "esc":
-				delete(m.drafts, m.activeDraftKey)
+				if err := m.discardActiveDraft(); err != nil {
+					m.err = fmt.Errorf("delete draft: %w", err)
+					m.paneFocus = focusReply
+					m.editor.Focus()
+					return m, nil
+				}
 				m.activeDraftKey = ""
 				m.answering = false
 				m.answerID = ""
@@ -1289,9 +1445,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.paneFocus != focusReply {
 				return m, nil
 			}
-			var cmd tea.Cmd
-			m.editor, cmd = m.editor.Update(msg)
-			return m, cmd
+			return m, m.updateEditor(msg)
 		}
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -1842,7 +1996,7 @@ func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.composeTo, m.composeName = choice.mailboxID, choice.name
 		m.composeContext, m.composeNamed = choice.context, choice.named
 		m.composeActivation = nil
-		m.activeDraftKey = "draft:" + uuid.NewString()
+		m.activeDraftKey = m.retargetedDraftKey()
 		m.paneFocus = focusReply
 		m.resizeEditor()
 		m.editor.Focus()
@@ -2413,7 +2567,7 @@ func (m app) finishProjectSetup(action domain.HarnessSessionAction, sessionID, d
 	m.answerQ = model.Message{}
 	m.composeTo, m.composeName = setup.project.MailboxID, fmt.Sprintf("%s · %s/%s", setup.project.Name, short(setup.project.HomeInstallation, 8), short(setup.project.ID, 8))
 	m.composeContext, m.composeNamed = model.RepositoryContext{}, false
-	m.activeDraftKey = "draft:" + uuid.NewString()
+	m.activeDraftKey = m.retargetedDraftKey()
 	m.paneFocus = focusReply
 	m.resizeEditor()
 	m.editor.Focus()
@@ -2424,6 +2578,30 @@ func (m *app) resizeEditor() {
 	layout := m.paneLayout()
 	m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
 	m.editor.SetHeight(max(1, layout.replyHeight-4))
+}
+
+func (m *app) retargetedDraftKey() string {
+	if draft, ok := m.drafts[m.activeDraftKey]; ok && draft.id != "" {
+		oldKey := m.activeDraftKey
+		newKey := "draft:" + draft.id
+		draft.key = newKey
+		draft.answerID = ""
+		draft.answerGroupKey = ""
+		draft.answerQ = model.Message{}
+		draft.conversation = model.ConversationKey{}
+		delete(m.drafts, oldKey)
+		m.drafts[newKey] = draft
+		return newKey
+	}
+	return "draft:" + newDraftID()
+}
+
+func newDraftID() string {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return uuid.NewString()
+	}
+	return id.String()
 }
 
 func (m app) beginComposeForSelection() (tea.Model, tea.Cmd) {
@@ -2467,31 +2645,19 @@ func (m *app) cyclePaneFocus(direction int) {
 	m.paneFocus = paneFocus(next)
 }
 
-func (m *app) stowActiveDraft() {
+func (m *app) stowActiveDraft() bool {
 	if !m.answering {
-		return
+		return true
 	}
 	key := m.activeDraftKey
 	if key == "" {
 		key = m.answerGroupKey
 	}
-	body := m.editor.Value()
-	if strings.TrimSpace(body) == "" {
-		if key != "" {
-			delete(m.drafts, key)
-		}
-	} else {
-		if key == "" {
-			key = "draft:" + uuid.NewString()
-		}
-		if m.drafts == nil {
-			m.drafts = make(map[string]messageDraft)
-		}
-		m.drafts[key] = messageDraft{
-			key: key, body: body, answerID: m.answerID, answerGroupKey: m.answerGroupKey,
-			answerQ: m.answerQ, composeTo: m.composeTo, composeName: m.composeName,
-			composeContext: m.composeContext, composeNamed: m.composeNamed, activation: m.composeActivation, updatedAt: time.Now(),
-		}
+	if err := m.persistActiveDraft(); err != nil {
+		m.err = fmt.Errorf("save draft before leaving editor: %w", err)
+		m.paneFocus = focusReply
+		m.editor.Focus()
+		return false
 	}
 	m.answering = false
 	m.activeDraftKey = ""
@@ -2512,6 +2678,7 @@ func (m *app) stowActiveDraft() {
 		m.cursor = max(0, len(groups)-1)
 	}
 	m.reconcileMessageViewport(true)
+	return true
 }
 
 func (m *app) resumeDraft(draft messageDraft) {
@@ -2530,6 +2697,235 @@ func (m *app) resumeDraft(draft messageDraft) {
 	m.editor.SetValue(draft.body)
 	m.editor.Focus()
 	m.reconcileMessageViewport(true)
+}
+
+func (m *app) mergeLoadedDrafts(drafts []domain.TUIDraft, targets map[string]model.Message) {
+	loaded := make(map[string]messageDraft, len(drafts))
+	activeID := ""
+	active, hasActive := m.drafts[m.activeDraftKey]
+	if hasActive {
+		current := active
+		activeID = current.id
+	}
+	for _, stored := range drafts {
+		draft := messageDraftFromDomain(stored, targets[stored.ID])
+		if m.answering && stored.ID == activeID {
+			if current, ok := m.drafts[m.activeDraftKey]; ok {
+				current.version = stored.Version
+				current.createdAt = stored.CreatedAt
+				current.updatedAt = stored.UpdatedAt
+				loaded[current.key] = current
+				continue
+			}
+		}
+		loaded[draft.key] = draft
+	}
+	if m.answering && hasActive {
+		if _, found := loaded[active.key]; !found {
+			loaded[active.key] = active
+		}
+	}
+	m.drafts = loaded
+}
+
+func messageDraftFromDomain(stored domain.TUIDraft, target model.Message) messageDraft {
+	key := "draft:" + stored.ID
+	if stored.Conversation.Valid() {
+		key = conversationKeyString(stored.Conversation)
+	} else if target.ID != "" {
+		key = messageGroupKey(target)
+	}
+	draft := messageDraft{
+		key: key, id: stored.ID, version: stored.Version, body: stored.Body,
+		answerID: stored.ReplyToMessageID, answerGroupKey: key, answerQ: target,
+		composeTo: stored.RecipientMailboxID, composeName: stored.RecipientLabel,
+		recipientLabel: stored.RecipientLabel, recipientAddress: stored.RecipientAddress,
+		conversation: stored.Conversation, composeContext: stored.Repository,
+		composeNamed: stored.RecipientNamed, activation: activationPlanFromDomain(stored.Activation),
+		createdAt: stored.CreatedAt, updatedAt: stored.UpdatedAt,
+	}
+	if stored.ReplyToMessageID != "" {
+		draft.composeTo = ""
+		draft.composeName = ""
+	}
+	return draft
+}
+
+func activationPlanFromDomain(intent *domain.ProjectActivationIntent) *projectActivationPlan {
+	if intent == nil {
+		return nil
+	}
+	return &projectActivationPlan{
+		projectID: intent.ProjectID, agentName: intent.AgentName, harness: intent.Harness,
+		action: intent.Action, sessionID: intent.SessionID, directory: intent.Directory,
+		force: intent.Force, sourceProjectID: intent.SourceProjectID, sourceExpectedHead: intent.SourceExpectedHead,
+	}
+}
+
+func activationPlanToDomain(plan *projectActivationPlan) *domain.ProjectActivationIntent {
+	if plan == nil {
+		return nil
+	}
+	return &domain.ProjectActivationIntent{
+		ProjectID: plan.projectID, AgentName: plan.agentName, Harness: plan.harness,
+		Action: plan.action, SessionID: plan.sessionID, Directory: plan.directory,
+		Force: plan.force, SourceProjectID: plan.sourceProjectID, SourceExpectedHead: plan.sourceExpectedHead,
+	}
+}
+
+func (m *app) cacheActiveDraft() messageDraft {
+	key := m.activeDraftKey
+	if key == "" {
+		key = m.answerGroupKey
+	}
+	if key == "" {
+		key = "draft:" + newDraftID()
+	}
+	draft := m.drafts[key]
+	if draft.id == "" {
+		candidate := strings.TrimPrefix(key, "draft:")
+		if _, err := uuid.Parse(candidate); err == nil {
+			draft.id = candidate
+		} else {
+			draft.id = newDraftID()
+		}
+	}
+	draft.key = key
+	draft.body = m.editor.Value()
+	draft.answerID = m.answerID
+	draft.answerGroupKey = m.answerGroupKey
+	draft.answerQ = m.answerQ
+	draft.composeTo = m.composeTo
+	draft.composeName = m.composeName
+	draft.composeContext = m.composeContext
+	draft.composeNamed = m.composeNamed
+	draft.activation = m.composeActivation
+	draft.updatedAt = time.Now().UTC()
+	if m.answerQ.ID != "" {
+		draft.recipientLabel = m.answerQ.SenderLabel
+		draft.recipientAddress = m.answerQ.SenderAddress
+		draft.conversation = conversationKeyForMessage(m.answerQ)
+	} else {
+		draft.recipientLabel = m.composeName
+		for _, project := range m.projects {
+			if project.MailboxID == m.composeTo {
+				draft.recipientAddress = model.MessageAddress{MailboxID: project.MailboxID, Kind: model.MailboxProject, Label: project.Name}
+				break
+			}
+		}
+		if draft.recipientAddress.MailboxID == "" {
+			for _, agent := range m.agents {
+				if agent.MailboxID == m.composeTo {
+					draft.recipientAddress = model.MessageAddress{MailboxID: agent.MailboxID, Kind: model.MailboxAgent, Label: agent.Name, Harness: agent.Harness, Name: agent.Name}
+					break
+				}
+			}
+		}
+	}
+	if m.drafts == nil {
+		m.drafts = make(map[string]messageDraft)
+	}
+	m.activeDraftKey = key
+	m.drafts[key] = draft
+	return draft
+}
+
+func (m app) domainDraft(draft messageDraft) domain.TUIDraft {
+	recipientID := draft.composeTo
+	label := draft.composeName
+	address := draft.recipientAddress
+	if draft.answerID != "" {
+		if draft.answerQ.ID != "" {
+			recipientID = draft.answerQ.SenderMailboxID
+			label = draft.answerQ.SenderLabel
+			address = draft.answerQ.SenderAddress
+		} else {
+			label = draft.recipientLabel
+		}
+	}
+	return domain.TUIDraft{
+		ID: draft.id, Version: draft.version, Body: draft.body, ReplyToMessageID: draft.answerID,
+		Conversation: draft.conversation, RecipientMailboxID: recipientID, RecipientLabel: label,
+		RecipientAddress: address, RecipientNamed: draft.composeNamed, Repository: draft.composeContext,
+		Activation: activationPlanToDomain(draft.activation), CreatedAt: draft.createdAt, UpdatedAt: draft.updatedAt,
+	}
+}
+
+func (m *app) persistActiveDraft() error {
+	if m.draftSaveInFlight {
+		return errors.New("draft autosave is still in progress")
+	}
+	draft := m.cacheActiveDraft()
+	operations, durable := m.store.(domain.TUIDraftOperations)
+	if strings.TrimSpace(draft.body) == "" {
+		if durable && draft.version > 0 {
+			if err := operations.DeleteTUIDraft(m.ctx, draft.id, draft.version); err != nil {
+				return err
+			}
+		}
+		delete(m.drafts, draft.key)
+		return nil
+	}
+	if !durable {
+		return nil
+	}
+	stored, err := operations.PutTUIDraft(m.ctx, m.domainDraft(draft))
+	if err != nil {
+		return err
+	}
+	m.drafts[draft.key] = messageDraftFromDomain(stored, draft.answerQ)
+	return nil
+}
+
+func (m *app) discardActiveDraft() error {
+	if m.draftSaveInFlight {
+		return errors.New("draft autosave is still in progress")
+	}
+	draft := m.cacheActiveDraft()
+	if operations, ok := m.store.(domain.TUIDraftOperations); ok && draft.version > 0 {
+		if err := operations.DeleteTUIDraft(m.ctx, draft.id, draft.version); err != nil {
+			return err
+		}
+	}
+	delete(m.drafts, draft.key)
+	return nil
+}
+
+func (m *app) updateEditor(msg tea.Msg) tea.Cmd {
+	before := m.editor.Value()
+	var editorCmd tea.Cmd
+	m.editor, editorCmd = m.editor.Update(msg)
+	if m.editor.Value() == before {
+		return editorCmd
+	}
+	m.cacheActiveDraft()
+	m.draftSaveGeneration++
+	generation := m.draftSaveGeneration
+	autosave := tea.Tick(draftAutosaveDelay, func(time.Time) tea.Msg {
+		return draftAutosaveMsg{generation: generation}
+	})
+	return tea.Batch(editorCmd, autosave)
+}
+
+func (m *app) saveActiveDraft() tea.Cmd {
+	operations, ok := m.store.(domain.TUIDraftOperations)
+	if !ok || !m.answering {
+		return nil
+	}
+	draft := m.cacheActiveDraft()
+	generation := m.draftSaveGeneration
+	m.draftSaveInFlight = true
+	return func() tea.Msg {
+		if strings.TrimSpace(draft.body) == "" {
+			if draft.version == 0 {
+				return draftSavedMsg{key: draft.key, id: draft.id, generation: generation, deleted: true}
+			}
+			err := operations.DeleteTUIDraft(m.ctx, draft.id, draft.version)
+			return draftSavedMsg{key: draft.key, id: draft.id, generation: generation, deleted: err == nil, err: err}
+		}
+		stored, err := operations.PutTUIDraft(m.ctx, m.domainDraft(draft))
+		return draftSavedMsg{key: draft.key, id: draft.id, generation: generation, draft: stored, err: err}
+	}
 }
 
 func (m app) paneFocused(pane paneFocus) bool { return m.paneFocus == pane }
@@ -3609,6 +4005,9 @@ func messageDirection(message model.Message) (string, string) {
 func draftRecipient(draft messageDraft) string {
 	if draft.composeName != "" {
 		return draft.composeName
+	}
+	if draft.recipientLabel != "" || draft.recipientAddress.MailboxID != "" {
+		return displayMessageAddress(draft.recipientAddress, draft.recipientLabel, draft.composeContext)
 	}
 	return displayMessageAddress(draft.answerQ.SenderAddress, draft.answerQ.SenderLabel, draft.answerQ.Context)
 }

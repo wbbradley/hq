@@ -195,6 +195,9 @@ func TestTUISubscribesToLocalActivityChanges(t *testing.T) {
 	if !slices.Contains(tuiChangeTopics(), domain.TopicActivities) {
 		t.Fatalf("TUI change topics = %#v", tuiChangeTopics())
 	}
+	if !slices.Contains(tuiChangeTopics(), domain.TopicTUIDrafts) {
+		t.Fatalf("TUI change topics omit durable drafts: %#v", tuiChangeTopics())
+	}
 }
 
 func fakeTimelineActivities(started time.Time) []domain.HarnessActivity {

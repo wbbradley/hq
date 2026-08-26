@@ -39,7 +39,7 @@ func (s Service) Handle(ctx context.Context, session *localwire.Session, method 
 		if result, found, lookupErr := s.Store.MutationResult(ctx, mutation); lookupErr != nil {
 			return nil, encodeMutationError(lookupErr)
 		} else if found {
-			s.wakeForReplayedMessageMutation(method, raw)
+			s.wakeForReplayedMessageMutation(ctx, method, raw)
 			return result, nil
 		}
 		ctx = domain.WithMutation(ctx, mutation)
@@ -79,7 +79,8 @@ var mutationMethods = map[string]bool{
 	ClaimMethod: true, CompleteMethod: true, ReleaseMethod: true, TrustPeerMethod: true,
 	DistrustPeerMethod: true, CreateHumanInviteMethod: true, JoinHumanInviteMethod: true,
 	RevokeHumanDeviceMethod: true, SetMailboxShareMethod: true, AddRelayMethod: true,
-	RemoveRelayMethod:   true,
+	RemoveRelayMethod: true,
+	PutTUIDraftMethod: true, DeleteTUIDraftMethod: true, SubmitTUIDraftMethod: true,
 	CreateProjectMethod: true, OpenProjectMethod: true, BeginCloseProjectMethod: true, FinalizeCloseProjectMethod: true,
 	ArchiveProjectMethod: true, UpdateProjectMethod: true, AddProjectPathMethod: true, RemoveProjectResourceMethod: true,
 	ReplaceProjectPathMethod: true, SetProjectPrimaryMethod: true, AssignProjectMethod: true, ActivateProjectMethod: true,
@@ -333,6 +334,52 @@ func (s Service) dispatch(ctx context.Context, session *localwire.Session, metho
 			return nil, err
 		}
 		return s.Store.ListConversationEntries(ctx, request.Filter)
+	case ListTUIDraftsMethod:
+		drafts, ok := s.Store.(domain.TUIDraftOperations)
+		if !ok {
+			return nil, &methodNotFoundError{method: method}
+		}
+		return drafts.ListTUIDrafts(ctx)
+	case PutTUIDraftMethod:
+		drafts, ok := s.Store.(domain.TUIDraftOperations)
+		if !ok {
+			return nil, &methodNotFoundError{method: method}
+		}
+		var request PutTUIDraftRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return drafts.PutTUIDraft(ctx, request.Draft)
+	case DeleteTUIDraftMethod:
+		drafts, ok := s.Store.(domain.TUIDraftOperations)
+		if !ok {
+			return nil, &methodNotFoundError{method: method}
+		}
+		var request TUIDraftVersionRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		return nil, drafts.DeleteTUIDraft(ctx, request.ID, request.Version)
+	case SubmitTUIDraftMethod:
+		drafts, ok := s.Store.(domain.TUIDraftOperations)
+		if !ok {
+			return nil, &methodNotFoundError{method: method}
+		}
+		var request SubmitTUIDraftRequest
+		if err := decodeRequest(raw, &request); err != nil {
+			return nil, err
+		}
+		defer clearEnvironment(request.Environment)
+		submission, err := drafts.SubmitTUIDraft(ctx, request.ID, request.Version)
+		if err != nil {
+			return nil, err
+		}
+		if _, wakes := s.Runtime.(domain.HarnessRuntimeAutoStarter); wakes {
+			if message, getErr := s.Store.Get(ctx, submission.MessageID); getErr == nil {
+				s.wakeHarnessAgent(message, request.Environment)
+			}
+		}
+		return submission, nil
 	case ArchiveMethod:
 		var request MutationIDRequest
 		if err := decodeRequest(raw, &request); err != nil {
@@ -554,7 +601,7 @@ func (s Service) wakeHarnessAgent(message model.Message, environment []string) {
 	}
 }
 
-func (s Service) wakeForReplayedMessageMutation(method string, raw json.RawMessage) {
+func (s Service) wakeForReplayedMessageMutation(ctx context.Context, method string, raw json.RawMessage) {
 	switch method {
 	case CreateMethod:
 		var request MessageRequest
@@ -566,6 +613,16 @@ func (s Service) wakeForReplayedMessageMutation(method string, raw json.RawMessa
 		var request ReplyRequest
 		if json.Unmarshal(raw, &request) == nil {
 			s.wakeHarnessAgent(request.Reply, request.Environment)
+			clearEnvironment(request.Environment)
+		}
+	case SubmitTUIDraftMethod:
+		var request SubmitTUIDraftRequest
+		if json.Unmarshal(raw, &request) == nil {
+			if _, wakes := s.Runtime.(domain.HarnessRuntimeAutoStarter); wakes {
+				if message, err := s.Store.Get(ctx, request.ID); err == nil {
+					s.wakeHarnessAgent(message, request.Environment)
+				}
+			}
 			clearEnvironment(request.Environment)
 		}
 	}

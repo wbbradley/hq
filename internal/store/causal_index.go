@@ -201,11 +201,18 @@ func resourcesForEvent(item event.SignedEvent) []canonicalResource {
 }
 
 func (s *SQLite) reduceCanonicalResources(ctx context.Context, requested ...canonicalResource) (event.State, error) {
+	if outer, ok := ctx.Value(canonicalTransactionContextKey{}).(*canonicalTransactionContext); ok {
+		return s.reduceCanonicalResourcesTx(ctx, outer.tx, requested)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return event.State{}, err
 	}
 	defer tx.Rollback()
+	return s.reduceCanonicalResourcesTx(ctx, tx, requested)
+}
+
+func (s *SQLite) reduceCanonicalResourcesTx(ctx context.Context, tx *sql.Tx, requested []canonicalResource) (event.State, error) {
 	var seeds []string
 	for _, resource := range requested {
 		rows, err := tx.QueryContext(ctx, `SELECT event_id FROM event_resources WHERE resource_kind=? AND resource_id=?`, resource.kind, resource.id)
