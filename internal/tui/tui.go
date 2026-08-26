@@ -25,7 +25,10 @@ import (
 	"github.com/wbbradley/hq/internal/repoctx"
 )
 
-const repairInterval = 5 * time.Minute
+const (
+	repairInterval = 5 * time.Minute
+	mouseWheelStep = 3
+)
 
 var (
 	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
@@ -755,6 +758,45 @@ func (m app) restoreAction(action undoAction) tea.Cmd {
 	}
 }
 
+func (m app) updateMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	if m.connection.Blocking || m.pickingRecipient || m.projectSetup != nil || m.managingAgents {
+		return m, nil
+	}
+	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	if msg.X < 0 || msg.X >= layout.width || msg.Y < 0 || msg.Y >= layout.height {
+		return m, nil
+	}
+	delta := 0
+	switch msg.Button {
+	case tea.MouseWheelUp:
+		delta = -mouseWheelStep
+	case tea.MouseWheelDown:
+		delta = mouseWheelStep
+	default:
+		return m, nil
+	}
+	if msg.Y < layout.inboxHeight {
+		groups := m.visibleGroups()
+		if len(groups) == 0 {
+			return m, nil
+		}
+		next := min(len(groups)-1, max(0, m.cursor+delta))
+		if next == m.cursor {
+			return m, nil
+		}
+		m.cursor = next
+		if m.answering {
+			return m, nil
+		}
+		m.resetMessageViewport()
+		return m.withContextCommand()
+	}
+	if msg.Y < layout.inboxHeight+layout.messageHeight {
+		m.scrollMessagePane(delta)
+	}
+	return m, nil
+}
+
 func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -1050,6 +1092,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor, cmd = m.editor.Update(msg)
 			return m, cmd
 		}
+	case tea.MouseWheelMsg:
+		return m.updateMouseWheel(msg)
 	case tea.KeyPressMsg:
 		if m.connection.Blocking {
 			if msg.String() == "q" || msg.String() == "ctrl+c" {
@@ -3145,9 +3189,7 @@ func (m app) renderAgentManager() string {
 
 func (m app) View() tea.View {
 	if m.managingAgents {
-		view := tea.NewView(m.renderAgentManager())
-		view.AltScreen = true
-		return view
+		return newAppView(m.renderAgentManager())
 	}
 	layout := responsivePaneLayout(m.width, m.height, m.answering)
 	inboxPane := m.renderInboxPane(layout.width, layout.inboxHeight)
@@ -3190,8 +3232,13 @@ func (m app) View() tea.View {
 	}
 	help = dim.Render(truncateDisplay(help, layout.width))
 	content := lipgloss.JoinVertical(lipgloss.Left, inboxPane, bottom, help)
+	return newAppView(content)
+}
+
+func newAppView(content string) tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion
 	return view
 }
 

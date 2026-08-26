@@ -88,6 +88,16 @@ type worktreeCaptureStore struct {
 	project domain.Project
 }
 
+type staticRepoProvider struct{}
+
+func (staticRepoProvider) Branch(context.Context, string) (string, error) { return "main", nil }
+func (staticRepoProvider) Remotes(context.Context, string) ([]repoctx.Remote, error) {
+	return nil, nil
+}
+func (staticRepoProvider) PullRequest(context.Context, string, string) (*repoctx.PullRequest, error) {
+	return nil, nil
+}
+
 func (s *worktreeCaptureStore) ProvisionProjectWorktree(_ context.Context, request domain.ProjectWorktreeRequest) (domain.Project, error) {
 	s.request = request
 	return s.project, nil
@@ -1614,6 +1624,205 @@ func TestPageKeysApplyToFocusedPane(t *testing.T) {
 	if m.messageScroll != previousScroll {
 		t.Fatalf("reply page-up changed message scroll from %d to %d", previousScroll, m.messageScroll)
 	}
+}
+
+func TestViewsEnableCellMotionMouseReporting(t *testing.T) {
+	for name, m := range map[string]app{
+		"normal":        {width: 80, height: 24},
+		"recipient":     {width: 80, height: 24, pickingRecipient: true},
+		"project setup": {width: 80, height: 24, projectSetup: &projectComposeSetup{}},
+		"agent manager": {width: 80, height: 24, managingAgents: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			view := m.View()
+			if !view.AltScreen || view.MouseMode != tea.MouseModeCellMotion {
+				t.Fatalf("view settings = alt:%t mouse:%v", view.AltScreen, view.MouseMode)
+			}
+		})
+	}
+}
+
+func TestMouseWheelScrollsHoveredInboxWithoutChangingFocus(t *testing.T) {
+	messages := mouseScrollMessages(10, 2)
+	m := app{
+		ctx: context.Background(), repo: staticRepoProvider{}, messages: messages,
+		width: 80, height: 24, paneFocus: focusMessage, cursor: 1,
+		messageScroll: 5, messageScrollManual: true, messageViewportKey: "old", messageAnchorID: "old",
+	}
+	layout := responsivePaneLayout(m.width, m.height, false)
+
+	updated, cmd := m.Update(mouseWheel(0, layout.inboxHeight-1, tea.MouseWheelDown))
+	m = updated.(app)
+	if m.cursor != 4 || m.paneFocus != focusMessage || cmd == nil {
+		t.Fatalf("inbox wheel down = cursor:%d focus:%v cmd:%v", m.cursor, m.paneFocus, cmd)
+	}
+	if m.messageScroll != 0 || m.messageScrollManual || m.messageViewportKey != "" || m.messageAnchorID != "" {
+		t.Fatalf("inbox wheel did not reset viewport: %#v", m)
+	}
+	wantContext := m.visibleGroups()[m.cursor].latest().ID
+	if m.contextID != wantContext {
+		t.Fatalf("context ID = %q; want %q", m.contextID, wantContext)
+	}
+
+	updated, _ = m.Update(mouseWheel(0, 0, tea.MouseWheelUp))
+	m = updated.(app)
+	if m.cursor != 1 || m.paneFocus != focusMessage {
+		t.Fatalf("inbox wheel up = cursor:%d focus:%v", m.cursor, m.paneFocus)
+	}
+
+	m.cursor = 1
+	updated, _ = m.Update(mouseWheel(0, 0, tea.MouseWheelUp))
+	m = updated.(app)
+	if m.cursor != 0 {
+		t.Fatalf("inbox upper clamp = %d", m.cursor)
+	}
+	m.cursor = len(m.visibleGroups()) - 2
+	updated, _ = m.Update(mouseWheel(0, layout.inboxHeight-1, tea.MouseWheelDown))
+	m = updated.(app)
+	if m.cursor != len(m.visibleGroups())-1 {
+		t.Fatalf("inbox lower clamp = %d", m.cursor)
+	}
+}
+
+func TestMouseWheelScrollsHoveredMessagePaneAndPreservesFocus(t *testing.T) {
+	messages := mouseScrollMessages(1, 50)
+	m := app{messages: messages, width: 80, height: 24, paneFocus: focusInbox}
+	m.reconcileMessageViewport(false)
+	layout := responsivePaneLayout(m.width, m.height, false)
+	initialScroll := m.messageScroll
+
+	updated, _ := m.Update(mouseWheel(0, layout.inboxHeight, tea.MouseWheelUp))
+	m = updated.(app)
+	wantUp := max(0, initialScroll-3)
+	if m.messageScroll != wantUp || !m.messageScrollManual {
+		t.Fatalf("message wheel up = scroll:%d manual:%t; want scroll %d", m.messageScroll, m.messageScrollManual, wantUp)
+	}
+
+	updated, _ = m.Update(mouseWheel(0, layout.inboxHeight, tea.MouseWheelDown))
+	m = updated.(app)
+	if m.messageScroll != wantUp+3 || !m.messageScrollManual || m.messageAnchorID == "" || m.paneFocus != focusInbox {
+		t.Fatalf("message wheel down = scroll:%d manual:%t anchor:%q focus:%v", m.messageScroll, m.messageScrollManual, m.messageAnchorID, m.paneFocus)
+	}
+
+	updated, _ = m.Update(mouseWheel(0, layout.inboxHeight+layout.messageHeight-1, tea.MouseWheelUp))
+	m = updated.(app)
+	if m.messageScroll != 0 || !m.messageScrollManual || m.paneFocus != focusInbox {
+		t.Fatalf("message wheel up = scroll:%d manual:%t focus:%v", m.messageScroll, m.messageScrollManual, m.paneFocus)
+	}
+
+	for range 100 {
+		updated, _ = m.Update(mouseWheel(0, layout.inboxHeight, tea.MouseWheelDown))
+		m = updated.(app)
+	}
+	group, _ := m.detailGroup()
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
+	wantMaximum := messagePaneMaxStart(rendered.panel, layout.messageHeight)
+	if m.messageScroll != wantMaximum {
+		t.Fatalf("message lower clamp = %d; want %d", m.messageScroll, wantMaximum)
+	}
+}
+
+func TestMouseWheelUsesExactPaneBoundaries(t *testing.T) {
+	layout := responsivePaneLayout(80, 24, false)
+
+	inbox := app{messages: mouseScrollMessages(8, 2), width: 80, height: 24, cursor: 1, paneFocus: focusReply}
+	updated, _ := inbox.Update(mouseWheel(0, layout.inboxHeight-1, tea.MouseWheelDown))
+	inbox = updated.(app)
+	if inbox.cursor != 4 || inbox.paneFocus != focusReply {
+		t.Fatalf("last inbox row routed incorrectly: cursor=%d focus=%v", inbox.cursor, inbox.paneFocus)
+	}
+
+	messagePane := app{messages: mouseScrollMessages(1, 50), width: 80, height: 24, cursor: 0, paneFocus: focusReply}
+	messagePane.reconcileMessageViewport(false)
+	messageStart := messagePane.messageScroll
+	updated, _ = messagePane.Update(mouseWheel(0, layout.inboxHeight, tea.MouseWheelDown))
+	messagePane = updated.(app)
+	if messagePane.messageScroll != messageStart+3 || messagePane.paneFocus != focusReply {
+		t.Fatalf("first message row routed incorrectly: scroll=%d focus=%v", messagePane.messageScroll, messagePane.paneFocus)
+	}
+	before := messagePane.messageScroll
+	updated, _ = messagePane.Update(mouseWheel(0, layout.inboxHeight+layout.messageHeight, tea.MouseWheelDown))
+	messagePane = updated.(app)
+	if messagePane.messageScroll != before {
+		t.Fatalf("first reply row changed message scroll: %d -> %d", before, messagePane.messageScroll)
+	}
+}
+
+func TestMouseWheelPreservesActiveComposerBinding(t *testing.T) {
+	messages := mouseScrollMessages(8, 8)
+	m := app{messages: messages, width: 80, height: 24, cursor: 0, paneFocus: focusReply, editor: textarea.New()}
+	answer := m.visibleGroups()[0]
+	m.answering = true
+	m.answerQ = answer.latest()
+	m.answerID = m.answerQ.ID
+	m.answerGroupKey = answer.key
+	m.activeDraftKey = answer.key
+	m.editor.SetValue("draft remains bound")
+	m.messageScroll, m.messageScrollManual, m.messageViewportKey = 2, true, answer.key
+	layout := responsivePaneLayout(m.width, m.height, true)
+
+	updated, cmd := m.Update(mouseWheel(0, layout.inboxHeight-1, tea.MouseWheelDown))
+	m = updated.(app)
+	if cmd != nil || m.cursor != 3 || m.paneFocus != focusReply || m.answerID != m.answerQ.ID || m.answerGroupKey != answer.key || m.activeDraftKey != answer.key || m.editor.Value() != "draft remains bound" {
+		t.Fatalf("composer binding changed after inbox wheel: %#v", m)
+	}
+	if m.messageScroll != 2 || !m.messageScrollManual || m.messageViewportKey != answer.key {
+		t.Fatalf("composer viewport changed after inbox wheel: %#v", m)
+	}
+}
+
+func TestMouseWheelIsInertOutsideScrollablePanesAndDuringModals(t *testing.T) {
+	base := func() app {
+		m := app{messages: mouseScrollMessages(8, 50), width: 80, height: 24, cursor: 1, paneFocus: focusMessage}
+		m.reconcileMessageViewport(false)
+		return m
+	}
+	layout := responsivePaneLayout(80, 24, false)
+	tests := []struct {
+		name   string
+		mutate func(*app)
+		msg    tea.MouseWheelMsg
+	}{
+		{name: "reply pane", msg: mouseWheel(0, layout.inboxHeight+layout.messageHeight, tea.MouseWheelDown)},
+		{name: "help row", msg: mouseWheel(0, layout.height-1, tea.MouseWheelDown)},
+		{name: "negative x", msg: mouseWheel(-1, 0, tea.MouseWheelDown)},
+		{name: "right of viewport", msg: mouseWheel(layout.width, 0, tea.MouseWheelDown)},
+		{name: "negative y", msg: mouseWheel(0, -1, tea.MouseWheelDown)},
+		{name: "below viewport", msg: mouseWheel(0, layout.height, tea.MouseWheelDown)},
+		{name: "horizontal wheel", msg: mouseWheel(0, 0, tea.MouseWheelLeft)},
+		{name: "blocking connection", mutate: func(m *app) { m.connection.Blocking = true }, msg: mouseWheel(0, 0, tea.MouseWheelDown)},
+		{name: "recipient picker", mutate: func(m *app) { m.pickingRecipient = true }, msg: mouseWheel(0, 0, tea.MouseWheelDown)},
+		{name: "project setup", mutate: func(m *app) { m.projectSetup = &projectComposeSetup{} }, msg: mouseWheel(0, 0, tea.MouseWheelDown)},
+		{name: "agent manager", mutate: func(m *app) { m.managingAgents = true }, msg: mouseWheel(0, 0, tea.MouseWheelDown)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := base()
+			if test.mutate != nil {
+				test.mutate(&m)
+			}
+			beforeCursor, beforeScroll, beforeManual, beforeFocus := m.cursor, m.messageScroll, m.messageScrollManual, m.paneFocus
+			updated, cmd := m.Update(test.msg)
+			m = updated.(app)
+			if cmd != nil || m.cursor != beforeCursor || m.messageScroll != beforeScroll || m.messageScrollManual != beforeManual || m.paneFocus != beforeFocus {
+				t.Fatalf("wheel event changed state: cursor %d->%d scroll %d->%d manual %t->%t focus %v->%v", beforeCursor, m.cursor, beforeScroll, m.messageScroll, beforeManual, m.messageScrollManual, beforeFocus, m.paneFocus)
+			}
+		})
+	}
+}
+
+func mouseScrollMessages(count, bodyLines int) []model.Message {
+	messages := make([]model.Message, 0, count)
+	for index := range count {
+		item := message(fmt.Sprintf("mouse-scroll-%02d", index), testAgentID, model.HumanMailboxID, strings.Repeat(fmt.Sprintf("line-%02d\n", index), bodyLines))
+		item.CreatedAt = time.Unix(int64(count-index), 0)
+		messages = append(messages, item)
+	}
+	return messages
+}
+
+func mouseWheel(x, y int, button tea.MouseButton) tea.MouseWheelMsg {
+	return tea.MouseWheelMsg{X: x, Y: y, Button: button}
 }
 
 func TestControlDUPageTheFocusedPane(t *testing.T) {
