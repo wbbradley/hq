@@ -979,7 +979,7 @@ func TestInboxPaneHeightIsCappedByVisibleRows(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m := app{messages: mouseScrollMessages(test.messages, 1), width: width, height: height}
-			wantInboxHeight := min(base.inboxHeight, test.messages+4)
+			wantInboxHeight := min(base.inboxHeight, test.messages+3)
 			lines := strings.Split(m.View().Content, "\n")
 			if !strings.Contains(lines[wantInboxHeight], "╭") {
 				t.Fatalf("message pane did not begin at row %d: %q", wantInboxHeight, lines[wantInboxHeight])
@@ -1841,6 +1841,64 @@ func TestMouseWheelIsInertOutsideScrollablePanesAndDuringModals(t *testing.T) {
 	}
 }
 
+func TestMouseClickFocusesHoveredPaneAndUsesComposeTransitions(t *testing.T) {
+	m := app{messages: mouseScrollMessages(8, 2), width: 80, height: 24, paneFocus: focusInbox, editor: textarea.New()}
+	layout := m.paneLayout()
+
+	updated, cmd := m.Update(mouseClick(0, layout.inboxHeight, tea.MouseLeft))
+	m = updated.(app)
+	if cmd != nil || m.paneFocus != focusMessage || m.answering {
+		t.Fatalf("message click = focus:%v answering:%t cmd:%v", m.paneFocus, m.answering, cmd)
+	}
+
+	updated, cmd = m.Update(mouseClick(0, layout.inboxHeight+layout.messageHeight, tea.MouseLeft))
+	m = updated.(app)
+	if cmd == nil || m.paneFocus != focusReply || !m.answering || m.answerID == "" {
+		t.Fatalf("reply click = focus:%v answering:%t answer:%q cmd:%v", m.paneFocus, m.answering, m.answerID, cmd)
+	}
+	draftKey := m.activeDraftKey
+	m.editor.SetValue("click preserves this draft")
+
+	updated, _ = m.Update(mouseClick(0, layout.inboxHeight-1, tea.MouseLeft))
+	m = updated.(app)
+	if m.paneFocus != focusInbox || m.answering || m.editor.Value() != "" || m.drafts[draftKey].body != "click preserves this draft" {
+		t.Fatalf("inbox click did not stow composer: %#v", m)
+	}
+}
+
+func TestMouseClickIsInertOutsidePanesAndDuringModals(t *testing.T) {
+	base := func() app {
+		return app{messages: mouseScrollMessages(8, 2), width: 80, height: 24, paneFocus: focusMessage}
+	}
+	layout := base().paneLayout()
+	tests := []struct {
+		name   string
+		mutate func(*app)
+		msg    tea.MouseClickMsg
+	}{
+		{name: "help row", msg: mouseClick(0, layout.height-1, tea.MouseLeft)},
+		{name: "outside viewport", msg: mouseClick(layout.width, 0, tea.MouseLeft)},
+		{name: "right click", msg: mouseClick(0, 0, tea.MouseRight)},
+		{name: "blocking connection", mutate: func(m *app) { m.connection.Blocking = true }, msg: mouseClick(0, 0, tea.MouseLeft)},
+		{name: "recipient picker", mutate: func(m *app) { m.pickingRecipient = true }, msg: mouseClick(0, 0, tea.MouseLeft)},
+		{name: "project setup", mutate: func(m *app) { m.projectSetup = &projectComposeSetup{} }, msg: mouseClick(0, 0, tea.MouseLeft)},
+		{name: "agent manager", mutate: func(m *app) { m.managingAgents = true }, msg: mouseClick(0, 0, tea.MouseLeft)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := base()
+			if test.mutate != nil {
+				test.mutate(&m)
+			}
+			updated, cmd := m.Update(test.msg)
+			m = updated.(app)
+			if cmd != nil || m.paneFocus != focusMessage || m.answering {
+				t.Fatalf("click changed state: focus:%v answering:%t cmd:%v", m.paneFocus, m.answering, cmd)
+			}
+		})
+	}
+}
+
 func mouseScrollMessages(count, bodyLines int) []model.Message {
 	messages := make([]model.Message, 0, count)
 	for index := range count {
@@ -1853,6 +1911,10 @@ func mouseScrollMessages(count, bodyLines int) []model.Message {
 
 func mouseWheel(x, y int, button tea.MouseButton) tea.MouseWheelMsg {
 	return tea.MouseWheelMsg{X: x, Y: y, Button: button}
+}
+
+func mouseClick(x, y int, button tea.MouseButton) tea.MouseClickMsg {
+	return tea.MouseClickMsg{X: x, Y: y, Button: button}
 }
 
 func TestControlDUPageTheFocusedPane(t *testing.T) {

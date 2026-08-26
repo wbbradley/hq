@@ -28,7 +28,7 @@ import (
 const (
 	repairInterval     = 5 * time.Minute
 	mouseWheelStep     = 3
-	inboxPaneExtraRows = 4
+	inboxPaneExtraRows = 3
 )
 
 var (
@@ -760,11 +760,12 @@ func (m app) restoreAction(action undoAction) tea.Cmd {
 }
 
 func (m app) updateMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
-	if m.connection.Blocking || m.pickingRecipient || m.projectSetup != nil || m.managingAgents {
+	if m.mouseInputBlocked() {
 		return m, nil
 	}
 	layout := m.paneLayout()
-	if msg.X < 0 || msg.X >= layout.width || msg.Y < 0 || msg.Y >= layout.height {
+	pane, found := paneAt(layout, msg.X, msg.Y)
+	if !found {
 		return m, nil
 	}
 	delta := 0
@@ -776,7 +777,8 @@ func (m app) updateMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
-	if msg.Y < layout.inboxHeight {
+	switch pane {
+	case focusInbox:
 		groups := m.visibleGroups()
 		if len(groups) == 0 {
 			return m, nil
@@ -791,11 +793,57 @@ func (m app) updateMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 		}
 		m.resetMessageViewport()
 		return m.withContextCommand()
-	}
-	if msg.Y < layout.inboxHeight+layout.messageHeight {
+	case focusMessage:
 		m.scrollMessagePane(delta)
 	}
 	return m, nil
+}
+
+func (m app) updateMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	if m.mouseInputBlocked() || msg.Button != tea.MouseLeft {
+		return m, nil
+	}
+	pane, found := paneAt(m.paneLayout(), msg.X, msg.Y)
+	if !found {
+		return m, nil
+	}
+	if pane == focusReply {
+		if m.answering {
+			m.paneFocus = focusReply
+			m.editor.Focus()
+			return m, nil
+		}
+		return m.beginComposeForSelection()
+	}
+	wasReply := m.answering && m.paneFocus == focusReply
+	m.paneFocus = pane
+	m.editor.Blur()
+	if wasReply {
+		m.stowActiveDraft()
+		m.paneFocus = pane
+		return m.withContextCommand()
+	}
+	return m, nil
+}
+
+func (m app) mouseInputBlocked() bool {
+	return m.connection.Blocking || m.pickingRecipient || m.projectSetup != nil || m.managingAgents
+}
+
+func paneAt(layout paneLayout, x, y int) (paneFocus, bool) {
+	if x < 0 || x >= layout.width || y < 0 || y >= layout.height {
+		return focusInbox, false
+	}
+	if y < layout.inboxHeight {
+		return focusInbox, true
+	}
+	if y < layout.inboxHeight+layout.messageHeight {
+		return focusMessage, true
+	}
+	if y < layout.inboxHeight+layout.messageHeight+layout.replyHeight {
+		return focusReply, true
+	}
+	return focusInbox, false
 }
 
 func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1093,6 +1141,8 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor, cmd = m.editor.Update(msg)
 			return m, cmd
 		}
+	case tea.MouseClickMsg:
+		return m.updateMouseClick(msg)
 	case tea.MouseWheelMsg:
 		return m.updateMouseWheel(msg)
 	case tea.KeyPressMsg:
