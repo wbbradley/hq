@@ -1303,6 +1303,21 @@ func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.Sta
 			return err
 		}
 	}
+	if !repair {
+		// A newly arrived revoke, block, or competing fact can remove an
+		// already-projected item from the pure state. Upserts alone cannot
+		// retract that stale row, so invalidate affected typed projections whose
+		// canonical record is no longer projected before applying the new state.
+		for _, table := range []string{"messages", "harness_activities", "threads"} {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE event_id IN (
+SELECT i.event_id FROM impacted_canonical_events i
+JOIN canonical_events c ON c.event_id=i.event_id
+WHERE c.reduction_status<>?
+)`, event.StatusProjected); err != nil {
+				return fmt.Errorf("invalidate stale %s projection: %w", table, err)
+			}
+		}
+	}
 	if repair {
 		for _, table := range []string{"threads", "messages", "harness_activities", "mailbox_contexts", "harness_bindings", "agent_sessions", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_access", "human_account_default", "human_account_devices", "human_accounts"} {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
