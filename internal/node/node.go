@@ -127,6 +127,11 @@ func (r Runner) Run(ctx context.Context, databasePath string) error {
 			supervisor.Publish(change)
 		})
 		supervisor.StartWorkReconciliation()
+		if err := database.ProcessProjectCommands(ctx); err != nil {
+			_ = supervisor.Close()
+			_ = database.Close()
+			return syncer.Runtime{}, fmt.Errorf("resume pending project commands: %w", err)
+		}
 		service := domainrpc.Service{
 			Store: database, Subscriptions: subscriptions, Runtime: supervisor,
 			Synchronize: func(context.Context) error {

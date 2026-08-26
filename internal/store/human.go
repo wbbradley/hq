@@ -65,19 +65,24 @@ func (s *SQLite) localAccountAction(ctx context.Context, accountID string) (Huma
 	if accountID != "" && account.ID != accountID {
 		return HumanAccount{}, nil, "", errors.New("message belongs to another human account")
 	}
-	state, err := s.reduceCanonicalResources(ctx, canonicalResource{kind: "account", id: account.ID})
-	if err != nil {
+	var label, acceptanceID string
+	if err := s.queryer(ctx).QueryRowContext(ctx, `SELECT label,accept_event_id FROM human_account_devices WHERE account_id=? AND installation_id=? AND state='active'`, account.ID, s.signer.InstallationID).Scan(&label, &acceptanceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return HumanAccount{}, nil, "", errors.New("local installation is not an active human account device")
+		}
 		return HumanAccount{}, nil, "", err
 	}
-	parents, active := state.AccountActionParents(account.ID, s.signer.InstallationID)
-	if !active {
-		return HumanAccount{}, nil, "", errors.New("local installation is not an active human account device")
+	if account.Creator {
+		var creationID string
+		if err := s.queryer(ctx).QueryRowContext(ctx, `SELECT creation_event_id FROM human_accounts WHERE account_id=?`, account.ID).Scan(&creationID); err != nil {
+			return HumanAccount{}, nil, "", err
+		}
+		return account, []string{creationID}, label, nil
 	}
-	var label string
-	if err := s.queryer(ctx).QueryRowContext(ctx, `SELECT label FROM human_account_devices WHERE account_id=? AND installation_id=? AND state='active'`, account.ID, s.signer.InstallationID).Scan(&label); err != nil {
-		return HumanAccount{}, nil, "", err
+	if acceptanceID == "" {
+		return HumanAccount{}, nil, "", errors.New("active account device has no acceptance authority")
 	}
-	return account, parents, label, nil
+	return account, []string{acceptanceID}, label, nil
 }
 
 func (s *SQLite) CreateHumanInvite(ctx context.Context, request HumanInviteRequest) (PairingBundle, error) {

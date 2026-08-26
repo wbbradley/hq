@@ -183,7 +183,7 @@ func TestUnknownCanonicalProjectCommandIsRejectedWithoutMutation(t *testing.T) {
 		}
 		var result event.ProjectCommandResultPayload
 		if json.Unmarshal(event.Inspect(raw).Event.Content.Payload, &result) == nil && result.CommandID == commandID {
-			matched = result.Stage == string(domain.ProjectCommandRejected) && strings.Contains(result.Diagnostic, "unsupported project command operation")
+			matched = matched || result.Stage == string(domain.ProjectCommandRejected) && strings.Contains(result.Diagnostic, "unsupported project command operation")
 		}
 	}
 	if !matched {

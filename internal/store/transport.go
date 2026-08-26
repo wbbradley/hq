@@ -423,6 +423,11 @@ func (s *SQLite) ReceiveGiftWrap(ctx context.Context, raw []byte, relayURL strin
 	if len(canonicalCommit.EventIDs) > 0 {
 		s.notifyChange(canonicalChange)
 	}
+	if logical == 0 && unwrapped.CanonicalEvent.Content.Type == event.TypeProjectCommand {
+		if err := s.ProcessProjectCommands(ctx); err != nil {
+			return result, err
+		}
+	}
 	return result, nil
 }
 

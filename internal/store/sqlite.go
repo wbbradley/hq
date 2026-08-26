@@ -43,6 +43,10 @@ const tuiDraftSchema = `CREATE TABLE IF NOT EXISTS tui_drafts (
     updated_at INTEGER NOT NULL
 ) STRICT;`
 
+const sameVersionSchema = tuiDraftSchema + `
+CREATE INDEX IF NOT EXISTS canonical_events_by_type_status_time
+ON canonical_events(event_type,reduction_status,created_at,event_id);`
+
 const schema = `
 CREATE TABLE canonical_events (
     event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64),
@@ -55,6 +59,7 @@ CREATE TABLE canonical_events (
     reduction_status TEXT NOT NULL,
     reduction_reason TEXT NOT NULL DEFAULT ''
 ) STRICT;
+CREATE INDEX canonical_events_by_type_status_time ON canonical_events(event_type,reduction_status,created_at,event_id);
 CREATE TABLE causal_edges (
     child_event_id TEXT NOT NULL,
     parent_event_id TEXT NOT NULL,
@@ -722,8 +727,8 @@ func (s *SQLite) configure(ctx context.Context) error {
 		return fmt.Errorf("unsupported HQ database schema %d; archive or remove the database, then reinitialize and pair this installation", version)
 	}
 	if version == schemaVersion {
-		if _, err := s.db.ExecContext(ctx, tuiDraftSchema); err != nil {
-			return fmt.Errorf("ensure local TUI draft storage: %w", err)
+		if _, err := s.db.ExecContext(ctx, sameVersionSchema); err != nil {
+			return fmt.Errorf("ensure same-version local schema: %w", err)
 		}
 	}
 	if version == 0 {
@@ -1044,6 +1049,16 @@ func (s *SQLite) ingestCanonicalTx(ctx context.Context, tx *sql.Tx, additions []
 }
 
 func (s *SQLite) signMailboxAccessObservationsTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent) ([]event.SignedEvent, error) {
+	grantIDs := make(map[string]bool)
+	for _, item := range additions {
+		content := item.Content
+		if content.Scope == event.ScopePeerAddressed && content.InstallationID != s.signer.InstallationID && content.Recipient != nil && content.Recipient.InstallationID == s.signer.InstallationID && len(content.Authorities) == 1 && (content.Type == event.TypeQuestion || content.Type == event.TypeAnswer || content.Type == event.TypeMessage) {
+			grantIDs[content.Authorities[0]] = true
+		}
+	}
+	if len(grantIDs) == 0 {
+		return nil, nil
+	}
 	type storedObservation struct {
 		id      string
 		grantID string
@@ -1051,27 +1066,29 @@ func (s *SQLite) signMailboxAccessObservationsTx(ctx context.Context, tx *sql.Tx
 		parents []string
 	}
 	var stored []storedObservation
-	rows, err := tx.QueryContext(ctx, `SELECT raw FROM canonical_events WHERE event_type=? AND installation_id=?`, event.TypeMailboxAccessObserve, s.signer.InstallationID)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
-			rows.Close()
+	for grantID := range grantIDs {
+		rows, err := tx.QueryContext(ctx, `SELECT c.raw FROM event_resources r JOIN canonical_events c ON c.event_id=r.event_id WHERE r.resource_kind='mailbox-access' AND r.resource_id=? AND c.event_type=? AND c.installation_id=?`, grantID, event.TypeMailboxAccessObserve, s.signer.InstallationID)
+		if err != nil {
 			return nil, err
 		}
-		inspection := event.Inspect(raw)
-		var payload event.MailboxAccessObservationPayload
-		if inspection.Status == event.StatusProjected && json.Unmarshal(inspection.Event.Content.Payload, &payload) == nil {
-			stored = append(stored, storedObservation{
-				id: inspection.Event.ID(), grantID: payload.GrantEventID,
-				message: payload.MessageEventID, parents: inspection.Event.Content.Parents,
-			})
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			inspection := event.Inspect(raw)
+			var payload event.MailboxAccessObservationPayload
+			if inspection.Status == event.StatusProjected && json.Unmarshal(inspection.Event.Content.Payload, &payload) == nil {
+				stored = append(stored, storedObservation{
+					id: inspection.Event.ID(), grantID: payload.GrantEventID,
+					message: payload.MessageEventID, parents: inspection.Event.Content.Parents,
+				})
+			}
 		}
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
 	}
 	observedMessages := make(map[string]bool, len(stored))
 	frontiers := make(map[string]map[string]bool)
@@ -1191,7 +1208,7 @@ func (s *SQLite) ingestCanonicalProjectionTx(ctx context.Context, tx *sql.Tx, ad
 	if err := patchCausalIndexesTx(ctx, tx, state, generation); err != nil {
 		return commit, err
 	}
-	return commit, s.projectStateTx(ctx, tx, state, false)
+	return commit, s.projectStateTx(ctx, tx, state, false, len(seeds))
 }
 
 func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEvent) error {
@@ -1221,16 +1238,28 @@ func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEv
 	if len(commit.EventIDs) > 0 {
 		s.notifyChange(change)
 	}
-	return s.ProcessProjectCommands(ctx)
+	if signedEventsContain(additions, event.TypeProjectCommand) {
+		return s.ProcessProjectCommands(ctx)
+	}
+	return nil
+}
+
+func signedEventsContain(items []event.SignedEvent, kind event.Type) bool {
+	for _, item := range items {
+		if item.Content.Type == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) error {
-	return s.projectStateTx(ctx, tx, state, true)
+	return s.projectStateTx(ctx, tx, state, true, 0)
 }
 
 // projectStateTx applies a pure reduction. Repair mode is the only path that
 // clears rebuildable state; ordinary ingestion upserts its affected result.
-func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.State, repair bool) error {
+func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.State, repair bool, eventCountDelta int) error {
 	// Project and assignment tables reference rebuildable projections. Their
 	// canonical rows are recreated before commit, so defer those foreign-key
 	// checks across the projection rebuild transaction.
@@ -1265,38 +1294,61 @@ func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.Sta
 		expiry int64
 	}
 	ownership := make(map[string]ownershipLease)
-	activityRows, err := tx.QueryContext(ctx, `SELECT mailbox_id,last_seen_at FROM mailbox_activity`)
-	if err == nil {
+	loadActivity := func(query string, args ...any) error {
+		activityRows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer activityRows.Close()
 		for activityRows.Next() {
 			var id string
 			var seen int64
-			if activityRows.Scan(&id, &seen) == nil {
-				activity[id] = seen
+			if err := activityRows.Scan(&id, &seen); err != nil {
+				return err
 			}
+			activity[id] = seen
 		}
-		activityRows.Close()
+		return activityRows.Err()
 	}
-	agentRows, agentErr := tx.QueryContext(ctx, `SELECT name,last_active_at FROM named_agents WHERE last_active_at IS NOT NULL`)
-	if agentErr == nil {
+	loadAgentState := func(query string, args ...any) error {
+		agentRows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		defer agentRows.Close()
 		for agentRows.Next() {
-			var name string
-			var seen int64
-			if agentRows.Scan(&name, &seen) == nil {
-				agentActivity[name] = seen
+			var name, token string
+			var seen, expiry sql.NullInt64
+			if err := agentRows.Scan(&name, &seen, &token, &expiry); err != nil {
+				return err
+			}
+			if seen.Valid {
+				agentActivity[name] = seen.Int64
+			}
+			if expiry.Valid {
+				ownership[name] = ownershipLease{token: token, expiry: expiry.Int64}
 			}
 		}
-		agentRows.Close()
+		return agentRows.Err()
 	}
-	ownershipRows, ownershipErr := tx.QueryContext(ctx, `SELECT name,owner_token,lease_expires_at FROM agent_ownership`)
-	if ownershipErr == nil {
-		for ownershipRows.Next() {
-			var name string
-			var lease ownershipLease
-			if ownershipRows.Scan(&name, &lease.token, &lease.expiry) == nil {
-				ownership[name] = lease
+	if repair {
+		if err := loadActivity(`SELECT mailbox_id,last_seen_at FROM mailbox_activity`); err != nil {
+			return err
+		}
+		if err := loadAgentState(`SELECT n.name,n.last_active_at,COALESCE(o.owner_token,''),o.lease_expires_at FROM named_agents n LEFT JOIN agent_ownership o ON o.name=n.name`); err != nil {
+			return err
+		}
+	} else {
+		for id := range state.Mailboxes {
+			if err := loadActivity(`SELECT mailbox_id,last_seen_at FROM mailbox_activity WHERE mailbox_id=?`, id); err != nil {
+				return err
 			}
 		}
-		ownershipRows.Close()
+		for name := range state.NamedAgents {
+			if err := loadAgentState(`SELECT n.name,n.last_active_at,COALESCE(o.owner_token,''),o.lease_expires_at FROM named_agents n LEFT JOIN agent_ownership o ON o.name=n.name WHERE n.name=?`, name); err != nil {
+				return err
+			}
+		}
 	}
 	for id, record := range state.Records {
 		if _, err := tx.ExecContext(ctx, `UPDATE canonical_events SET reduction_status=?,reduction_reason=? WHERE event_id=? AND (reduction_status<>? OR reduction_reason<>?)`, record.Status, record.Reason, id, record.Status, record.Reason); err != nil {
@@ -1418,16 +1470,44 @@ WHERE c.reduction_status<>?
 			return fmt.Errorf("project harness activity: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM harness_activities WHERE event_id IN (
+	type activityPartition struct {
+		installationID string
+		mailboxID      string
+		harness        string
+		sessionID      string
+	}
+	partitions := make(map[activityPartition]bool)
+	for _, activity := range state.HarnessActivities {
+		partitions[activityPartition{
+			installationID: activity.Sender.InstallationID,
+			mailboxID:      activity.Sender.MailboxID,
+			harness:        activity.Correlation.Provider,
+			sessionID:      activity.Correlation.SessionID,
+		}] = true
+	}
+	prunePartition := func(where string, args ...any) error {
+		args = append(args, domain.HarnessActivityProgressRetained)
+		_, err := tx.ExecContext(ctx, `DELETE FROM harness_activities WHERE event_id IN (
 SELECT event_id FROM (
   SELECT event_id,row_number() OVER (
     PARTITION BY source_installation_id,mailbox_id,harness,session_id
     ORDER BY occurred_at DESC,event_id DESC
   ) AS retention_rank
-  FROM harness_activities WHERE kind='progress'
+  FROM harness_activities WHERE kind='progress'`+where+`
 ) WHERE retention_rank > ?
-)`, domain.HarnessActivityProgressRetained); err != nil {
-		return fmt.Errorf("prune projected harness activity progress: %w", err)
+)`, args...)
+		return err
+	}
+	if repair {
+		if err := prunePartition(""); err != nil {
+			return fmt.Errorf("prune projected harness activity progress: %w", err)
+		}
+	} else {
+		for partition := range partitions {
+			if err := prunePartition(` AND source_installation_id=? AND mailbox_id=? AND harness=? AND session_id=?`, partition.installationID, partition.mailboxID, partition.harness, partition.sessionID); err != nil {
+				return fmt.Errorf("prune projected harness activity progress partition: %w", err)
+			}
+		}
 	}
 	for id, thread := range state.Threads {
 		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO threads(event_id, answered, cancelled) VALUES (?, ?, ?)`, id, boolInt(thread.Answered), boolInt(thread.Cancelled)); err != nil {
@@ -1547,14 +1627,10 @@ SELECT event_id FROM (
 		}
 	}
 	if repair {
-		_, err = tx.ExecContext(ctx, `INSERT INTO projection_metadata(id,reducer_version,event_count,generation,repaired_at) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET reducer_version=excluded.reducer_version,event_count=excluded.event_count,generation=excluded.generation,repaired_at=excluded.repaired_at`, reducerVersion, len(state.Records), generation, time.Now().UTC().UnixMilli())
-	} else {
-		var eventCount int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM canonical_events`).Scan(&eventCount); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO projection_metadata(id,reducer_version,event_count,generation,repaired_at) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET reducer_version=excluded.reducer_version,event_count=excluded.event_count,generation=excluded.generation`, reducerVersion, eventCount, generation, time.Now().UTC().UnixMilli())
+		_, err := tx.ExecContext(ctx, `INSERT INTO projection_metadata(id,reducer_version,event_count,generation,repaired_at) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET reducer_version=excluded.reducer_version,event_count=excluded.event_count,generation=excluded.generation,repaired_at=excluded.repaired_at`, reducerVersion, len(state.Records), generation, time.Now().UTC().UnixMilli())
+		return err
 	}
+	_, err := tx.ExecContext(ctx, `UPDATE projection_metadata SET reducer_version=?,event_count=event_count+?,generation=? WHERE id=1`, reducerVersion, eventCountDelta, generation)
 	return err
 }
 
