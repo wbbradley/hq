@@ -66,7 +66,7 @@ func (s *SQLite) CreateProjectOutput(ctx context.Context, binding domain.Project
 	payload, _ := event.MarshalPayload(textPayloadForMessage(message, actorLabel))
 	content := event.Content{
 		Schema: event.MessageSchemaVersion, Type: event.TypeQuestion, Sender: s.localAddress(mailboxID),
-		Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents,
+		Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: uniqueSorted(parents),
 		Scope: event.ScopeAccountAddressed, Payload: payload,
 	}
 	signed, err := s.signContents(ctx, []event.Content{content}, []time.Time{message.CreatedAt})

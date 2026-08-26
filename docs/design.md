@@ -6,8 +6,8 @@ subscription revisions. CLI and TUI processes are domain clients; they never ope
 events, or own Codex workers themselves. The node supervises every HQ-managed Codex bridge and
 its app-server child in process.
 
-[events.md](events.md) defines canonical event schemas 1 and 2 and causal reduction.
-[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 32 stores the exact signed
+[events.md](events.md) defines canonical schema 3 and causal reduction.
+[nostr.md](nostr.md) defines encrypted remote transport. SQLite schema 33 stores the exact signed
 event bytes as the source of truth and rebuildable projections derived from them.
 [projects.md](projects.md) defines the project, resource-claim, assignment, mailbox, and
 remote-control model implemented by the daemon, RPC clients, CLI, and TUI.
@@ -83,7 +83,7 @@ supported state model.
 
 ### Typed message semantics and diagnostics
 
-New question, answer, and message events use schema 2. Their presentation kind and harness-neutral
+New question, answer, and message events use schema 3. Their presentation kind and harness-neutral
 provider/session/operation/item/request correlation are dedicated semantic fields. Conversation
 identity, action grouping, reply/archive targeting, final-answer selection, routing,
 authorization, and ordering may use only typed domain state—not body, `Details`, or generic
@@ -97,13 +97,9 @@ context are derived technical presentation groups governed by the same disclosur
 thread names are resolved at display time from the typed provider/session pair and never copied
 into immutable message events.
 
-The canonical reducer is the sole compatibility boundary for schema-1 structural lines. Its
-isolated legacy adapter projects known historical producer shapes into typed semantics and
-`hq.legacy.*` technical sections while retaining unmatched human details. Canonical bytes remain
-unchanged, and newer unsupported schemas remain retained rather than mis-decoded. Current event,
-model, SQLite, domain RPC, and local client representations round-trip the typed fields and ordered
-technical-section JSON directly. A full projection rebuild derives the same representation from
-the canonical log.
+Canonical schema 3 has no legacy structural-line adapter. Current event, model, SQLite, domain RPC,
+and local client representations round-trip typed fields and ordered technical-section JSON
+directly. A full projection rebuild derives the same representation from the canonical log.
 
 ### Dual-stream conversations
 
@@ -226,10 +222,11 @@ win until a later grant and acceptance descend from them. Pairing bundles carry 
 authority history so a new device can verify earlier devices before relay catch-up.
 
 Account-addressed events fan one canonical fact out to every active device. Agent mailbox bindings
-and delivery leases remain installation-local. Peer trust is one-way and binds installation UUID,
-root public key, label, and relay hints. A trusted peer can address the human mailbox; an agent
-mailbox additionally requires an active signed share. Revocation stops later projection but cannot
-erase already received data.
+and delivery leases remain installation-local. A one-way peer binding records installation UUID,
+root public key, label, and relay hints for local routing. Mailbox authority comes only from a
+mailbox-owner-signed capability for one grantee installation/key and target mailbox. Peer actions
+cite that grant explicitly; receiver observations retain pre-revocation history while concurrent
+and later actions fail closed. Local blocking stops new transport without hiding authorized history.
 
 Harness activity uses the same account fanout. The writer includes the active membership frontier,
 creates one outbox row and encrypted wrapper per other active device, and receivers decrypt then

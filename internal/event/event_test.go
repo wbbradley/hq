@@ -37,8 +37,8 @@ func TestCanonicalEventFixture(t *testing.T) {
 		Scope:     ScopeInstallationPrivate, Payload: payload,
 	}, time.Unix(1_700_000_000, 0), secretA)
 
-	const wantID = "1dedba9588289d2732682a9b55035502e6caae6433cb607bfe1242e0dbf2f2a2"
-	const wantSignature = "20c6fe2d1a24cceac6d724a183df9a888adcf787bd3eeb0e5896351af35240df4908108dd22924051ec90edaba533b988e9785e6f51f00bfcfb53c2bf2303247"
+	const wantID = "97a900dfb9c07a2e92f95ea80541528f28d697a2324b325290cf417f929f337d"
+	const wantSignature = "1e7526184f70254be7747d30bba37a0aa05c6a3ac97483b89729299e0a700f2e05945729e3118331dec33d3e23a4d0a9eca25951288578000e8f8fb1aeec5f06"
 	if event.ID() != wantID || jsonSignature(event.Nostr) != wantSignature {
 		serialized, _ := event.Nostr.Serialize()
 		t.Fatalf("fixture changed:\nid = %s\nsig = %s\ncontent = %s\nserialized = %s", event.ID(), jsonSignature(event.Nostr), event.Nostr.Content, serialized)
@@ -64,7 +64,7 @@ func TestHarnessActivityKindsValidateSignAndInspect(t *testing.T) {
 	for _, payload := range tests {
 		t.Run(string(payload.Kind), func(t *testing.T) {
 			signed := mustSign(t, Content{
-				Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA,
+				Schema: Schema3, Type: TypeHarnessActivity, InstallationID: installationA,
 				Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
 				Scope:  ScopeInstallationPrivate, Payload: mustPayload(t, payload),
 			}, time.Unix(1_700_000_000, 0), secretA)
@@ -82,7 +82,7 @@ func TestHarnessActivityValidationRejectsInvalidShapesAndBounds(t *testing.T) {
 		name   string
 		mutate func(*Content, *HarnessActivityPayload)
 	}{
-		{"schema 1", func(content *Content, _ *HarnessActivityPayload) { content.Schema = Schema1 }},
+		{"legacy schema", func(content *Content, _ *HarnessActivityPayload) { content.Schema = 1 }},
 		{"peer scope", func(content *Content, _ *HarnessActivityPayload) { content.Scope = ScopePeerAddressed }},
 		{"public scope", func(content *Content, _ *HarnessActivityPayload) { content.Scope = ScopePublic }},
 		{"account without audience", func(content *Content, _ *HarnessActivityPayload) { content.Scope = ScopeAccountAddressed }},
@@ -115,7 +115,7 @@ func TestHarnessActivityValidationRejectsInvalidShapesAndBounds(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			payload := valid
-			content := Content{Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate}
+			content := Content{Schema: Schema3, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate}
 			test.mutate(&content, &payload)
 			content.Payload = mustPayload(t, payload)
 			if _, err := Sign(content, time.Unix(1_700_000_000, 0), secretA); err == nil {
@@ -135,12 +135,12 @@ func TestHarnessActivityValidationRejectsInvalidShapesAndBounds(t *testing.T) {
 	}
 	escaped := valid
 	escaped.Body = strings.Repeat("\\", MaxHarnessActivityBodyBytes)
-	if _, err := Sign(Content{Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, escaped)}, time.Unix(1, 0), secretA); err != nil {
+	if _, err := Sign(Content{Schema: Schema3, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, escaped)}, time.Unix(1, 0), secretA); err != nil {
 		t.Fatalf("bounded escaped activity did not fit signed wire: %v", err)
 	}
 	multibyte := valid
 	multibyte.Body = strings.Repeat("界", MaxHarnessActivityBodyBytes/3)
-	if _, err := Sign(Content{Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, multibyte)}, time.Unix(1, 0), secretA); err != nil {
+	if _, err := Sign(Content{Schema: Schema3, Type: TypeHarnessActivity, InstallationID: installationA, Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, multibyte)}, time.Unix(1, 0), secretA); err != nil {
 		t.Fatalf("bounded multibyte activity did not fit signed wire: %v", err)
 	}
 }
@@ -159,8 +159,8 @@ func activityPayload(kind domain.HarnessActivityKind, item string, status domain
 func TestHumanAccountEventFixture(t *testing.T) {
 	payload := mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), Label: "laptop"})
 	signed := mustSign(t, Content{Type: TypeHumanAccountCreate, InstallationID: installationA, Scope: ScopeInstallationPrivate, Payload: payload}, time.Unix(1_700_000_000, 0), secretA)
-	const wantID = "cebb4a6d69bf75643db1abfaf20facab2bd5f4fe112a37469b19249574075c82"
-	const wantSignature = "be82d6413e1ddd135eb943a132016a159b139f77febe486765b7832221bff3a4281fbc8b644f92d5df3694899264923386fe045c3960acb929f27245fa30cc51"
+	const wantID = "4fe7bc927b5eaa80a8166187817d83ecf5376c87264bd7c921dcfe13b9a04378"
+	const wantSignature = "2be6f3f11851f88e09c182c03591667b1b798379b78e84904c28d1e3fe6e1821742b33064ade2aca8e033d1dd356b7319ce72b4de30f4d0850fe3cd48c135c61"
 	if signed.ID() != wantID || signed.Nostr.Sig != wantSignature {
 		t.Fatalf("fixture changed:\nid = %s\nsig = %s\nwire = %s", signed.ID(), signed.Nostr.Sig, signed.Wire)
 	}
@@ -182,19 +182,19 @@ func TestEveryKnownEventTypeValidates(t *testing.T) {
 		{"agent session rename", control(TypeAgentSessionRename, mustPayload(t, AgentSessionRenamePayload{Name: "fred", MailboxID: mailboxAgentA, Harness: "codex", ExternalSessionID: "thread", ThreadName: "Build auth"}))},
 		{"question", Content{Type: TypeQuestion, InstallationID: installationA, Sender: localSender, Recipient: localHuman, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TextPayload{Body: "question"})}},
 		{"answer", Content{Type: TypeAnswer, InstallationID: installationA, Sender: localHuman, Recipient: localSender, ThreadID: threadB, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TextPayload{Body: "answer"})}},
-		{"message", Content{Type: TypeMessage, InstallationID: installationA, Sender: localSender, Recipient: remoteHuman, Scope: ScopePeerAddressed, Payload: mustPayload(t, TextPayload{Body: "message"})}},
+		{"message", Content{Type: TypeMessage, InstallationID: installationA, Sender: localSender, Recipient: remoteHuman, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopePeerAddressed, Payload: mustPayload(t, TextPayload{Body: "message"})}},
 		{"cancel", Content{Type: TypeThreadCancel, InstallationID: installationA, Sender: localSender, ThreadID: threadB, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TargetPayload{Reason: "done"})}},
 		{"archive", Content{Type: TypeMessageArchive, InstallationID: installationA, Sender: localSender, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TargetPayload{TargetEventID: parentA})}},
 		{"restore", Content{Type: TypeMessageRestore, InstallationID: installationA, Sender: localSender, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TargetPayload{TargetEventID: parentA})}},
 		{"reject", Content{Type: TypeMessageReject, InstallationID: installationA, Sender: localSender, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TargetPayload{TargetEventID: parentA, Reason: "wrong target"})}},
-		{"peer trust", control(TypePeerTrust, mustPayload(t, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Name: "desktop", Relays: []string{"wss://relay.example"}}))},
-		{"peer distrust", control(TypePeerDistrust, mustPayload(t, PeerPayload{InstallationID: installationB}))},
-		{"mailbox share", control(TypeMailboxShare, mustPayload(t, MailboxSharePayload{MailboxID: mailboxAgentA, PeerInstallationID: installationB}))},
-		{"mailbox share revoke", control(TypeMailboxShareRevoke, mustPayload(t, MailboxSharePayload{MailboxID: mailboxAgentA, PeerInstallationID: installationB}))},
+		{"peer trust", control(TypePeerBindingSet, mustPayload(t, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Name: "desktop", Relays: []string{"wss://relay.example"}}))},
+		{"peer distrust", control(TypePeerBindingBlock, mustPayload(t, PeerPayload{InstallationID: installationB}))},
+		{"mailbox access grant", Content{Type: TypeMailboxAccessGrant, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Scope: ScopePeerAddressed, Payload: mustPayload(t, MailboxAccessPayload{MailboxID: mailboxAgentA, GranteeInstallationID: installationB, GranteeSignerKeyID: secretB.PublicKeyHex()})}},
+		{"mailbox access revoke", Content{Type: TypeMailboxAccessRevoke, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopePeerAddressed, Payload: mustPayload(t, MailboxAccessPayload{MailboxID: mailboxAgentA, GranteeInstallationID: installationB, GranteeSignerKeyID: secretB.PublicKeyHex()})}},
 		{"human account create", control(TypeHumanAccountCreate, mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), Label: "laptop"}))},
-		{"human account select", Content{Type: TypeHumanAccountSelect, InstallationID: installationA, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, HumanAccountSelectionPayload{AccountID: accountA})}},
-		{"human device grant", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}},
-		{"human device revoke", Content{Type: TypeHumanDeviceRevoke, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}},
+		{"human account select", Content{Type: TypeHumanAccountSelect, InstallationID: installationA, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, HumanAccountSelectionPayload{AccountID: accountA})}},
+		{"human device grant", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}},
+		{"human device revoke", Content{Type: TypeHumanDeviceRevoke, InstallationID: installationA, Sender: localHuman, Recipient: remoteAccountHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -207,7 +207,7 @@ func TestEveryKnownEventTypeValidates(t *testing.T) {
 			}
 		})
 	}
-	accept := Content{Type: TypeHumanDeviceAccept, InstallationID: installationB, Sender: remoteAccountHuman, Recipient: localHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}
+	accept := Content{Type: TypeHumanDeviceAccept, InstallationID: installationB, Sender: remoteAccountHuman, Recipient: localHuman, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, HumanDevicePayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex(), InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}})}
 	if _, err := Sign(accept, time.Unix(1_700_000_000, 0), secretB); err != nil {
 		t.Fatalf("human device accept: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestValidationFailures(t *testing.T) {
 	}{
 		{"bad installation", func(content *Content) { content.InstallationID = "no" }, "canonical UUID"},
 		{"public disabled", func(content *Content) { content.Scope = ScopePublic }, "disabled"},
-		{"root parent", func(content *Content) { content.Parents = []string{parentA} }, "account-addressed roots"},
+		{"root parent", func(content *Content) { content.Parents = []string{parentA} }, "must omit parents"},
 		{"remote private recipient", func(content *Content) { content.Recipient.InstallationID = installationB }, "remote recipient"},
 		{"empty body", func(content *Content) { content.Payload = mustPayload(t, TextPayload{}) }, "body is empty"},
 		{"unknown purpose", func(content *Content) {
@@ -264,13 +264,13 @@ func TestHumanEventValidationFailures(t *testing.T) {
 		{"creator mismatch", Content{Type: TypeHumanAccountCreate, InstallationID: installationA, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationB, CreatorSignerKeyID: secretA.PublicKeyHex(), Label: "laptop"})}, secretA, "creator does not match"},
 		{"empty account label", Content{Type: TypeHumanAccountCreate, InstallationID: installationA, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, HumanAccountPayload{AccountID: accountA, CreatorInstallationID: installationA, CreatorSignerKeyID: secretA.PublicKeyHex()})}, secretA, "account label"},
 		{"grant private", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: local, Recipient: remote, Parents: []string{parentA}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, device)}, secretA, "account-addressed"},
-		{"grant wrong route", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: remote, Recipient: local, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, device)}, secretA, "sender installation"},
-		{"bad relay", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: local, Recipient: remote, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, func() HumanDevicePayload {
+		{"grant wrong route", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: remote, Recipient: local, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, device)}, secretA, "sender installation"},
+		{"bad relay", Content{Type: TypeHumanDeviceGrant, InstallationID: installationA, Sender: local, Recipient: remote, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, func() HumanDevicePayload {
 			changed := device
 			changed.Relays = []string{"https://relay.example"}
 			return changed
 		}())}, secretA, "invalid device relay"},
-		{"accept wrong key", Content{Type: TypeHumanDeviceAccept, InstallationID: installationB, Sender: remote, Recipient: local, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, device)}, secretA, "invited event signer"},
+		{"accept wrong key", Content{Type: TypeHumanDeviceAccept, InstallationID: installationB, Sender: remote, Recipient: local, Audience: &Audience{HumanAccountID: accountA}, Parents: []string{parentA}, Authorities: []string{parentA}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, device)}, secretA, "invited event signer"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -313,34 +313,7 @@ func TestInspectRejectsTamperingAndLimits(t *testing.T) {
 	}
 }
 
-func TestUnsupportedSchemaCanBeRegistered(t *testing.T) {
-	content := Content{
-		Schema: 2, Type: TypeQuestion, InstallationID: installationA, SignerKeyID: secretA.PublicKeyHex(),
-		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
-		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		Parents:   []string{}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TextPayload{Body: "future"}),
-	}
-	rawContent, err := json.Marshal(content)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nostrEvent := NostrEvent{CreatedAt: 1_700_000_000, Kind: Kind, Tags: [][]string{}, Content: string(rawContent)}
-	if err := nostrEvent.Sign(secretA); err != nil {
-		t.Fatal(err)
-	}
-	wire, err := json.Marshal(nostrEvent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := InspectWithSchemas(wire, []int{Schema1}); got.Status != StatusUnsupported || !stringSlicesEqual(got.Event.Wire, wire) {
-		t.Fatalf("schema-1-only status = %s, %v, retained=%t", got.Status, got.Err, stringSlicesEqual(got.Event.Wire, wire))
-	}
-	if got := Inspect(wire); got.Status != StatusProjected || got.Err != nil {
-		t.Fatalf("current status = %s, %v", got.Status, got.Err)
-	}
-}
-
-func TestSchema2MessageSemanticsValidateSignAndInspect(t *testing.T) {
+func TestSchema3MessageSemanticsValidateSignAndInspect(t *testing.T) {
 	payload := TextPayload{
 		MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d31",
 		Body:      "done", Details: "Human-readable explanation.",
@@ -357,10 +330,10 @@ func TestSchema2MessageSemanticsValidateSignAndInspect(t *testing.T) {
 			},
 		}},
 	}
-	signed := mustSign(t, schema2Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
+	signed := mustSign(t, schema3Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
 	inspection := Inspect(signed.Wire)
 	if inspection.Status != StatusProjected || inspection.Err != nil {
-		t.Fatalf("inspect schema 2 = %s, %v", inspection.Status, inspection.Err)
+		t.Fatalf("inspect schema 3 = %s, %v", inspection.Status, inspection.Err)
 	}
 	var decoded TextPayload
 	if err := decodePayload(inspection.Event.Content.Payload, &decoded); err != nil {
@@ -371,23 +344,7 @@ func TestSchema2MessageSemanticsValidateSignAndInspect(t *testing.T) {
 	}
 }
 
-func TestSchemaSpecificTextPayloadDecodingIsStrict(t *testing.T) {
-	payload := mustPayload(t, TextPayload{Body: "hello", Presentation: model.PresentationUpdate})
-	schema1 := Content{
-		Schema: Schema1, Type: TypeQuestion, InstallationID: installationA,
-		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
-		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		Scope:     ScopeInstallationPrivate, Payload: payload,
-	}
-	if _, err := Sign(schema1, time.Unix(1_700_000_000, 0), secretA); err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("schema 1 extended payload error = %v", err)
-	}
-	if _, err := Sign(schema2Question(t, TextPayload{Body: "hello", Presentation: model.PresentationUpdate}), time.Unix(1_700_000_000, 0), secretA); err != nil {
-		t.Fatalf("schema 2 payload: %v", err)
-	}
-}
-
-func TestSchema2SemanticValidationFailures(t *testing.T) {
+func TestSchema3SemanticValidationFailures(t *testing.T) {
 	tests := []struct {
 		name    string
 		payload TextPayload
@@ -406,7 +363,7 @@ func TestSchema2SemanticValidationFailures(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := Sign(schema2Question(t, test.payload), time.Unix(1_700_000_000, 0), secretA)
+			_, err := Sign(schema3Question(t, test.payload), time.Unix(1_700_000_000, 0), secretA)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
@@ -418,10 +375,10 @@ func TestSchema2SemanticValidationFailures(t *testing.T) {
 	}
 }
 
-func TestSchema2PresentationAndCorrelationShapes(t *testing.T) {
+func TestSchema3PresentationAndCorrelationShapes(t *testing.T) {
 	presentations := []model.PresentationKind{"", model.PresentationUpdate, model.PresentationFinalAnswer, model.PresentationStatus, model.PresentationNotice}
 	for _, presentation := range presentations {
-		if _, err := Sign(schema2Question(t, TextPayload{Body: "x", Presentation: presentation}), time.Unix(1_700_000_000, 0), secretA); err != nil {
+		if _, err := Sign(schema3Question(t, TextPayload{Body: "x", Presentation: presentation}), time.Unix(1_700_000_000, 0), secretA); err != nil {
 			t.Fatalf("presentation %q: %v", presentation, err)
 		}
 	}
@@ -434,13 +391,13 @@ func TestSchema2PresentationAndCorrelationShapes(t *testing.T) {
 		{Provider: "provider", SessionID: "session", OperationID: "operation", ItemID: "item", RequestID: "request"},
 	}
 	for _, correlation := range correlations {
-		if _, err := Sign(schema2Question(t, TextPayload{Body: "x", Correlation: correlation}), time.Unix(1_700_000_000, 0), secretA); err != nil {
+		if _, err := Sign(schema3Question(t, TextPayload{Body: "x", Correlation: correlation}), time.Unix(1_700_000_000, 0), secretA); err != nil {
 			t.Fatalf("correlation %#v: %v", correlation, err)
 		}
 	}
 }
 
-func TestSchema2TechnicalAndCorrelationBounds(t *testing.T) {
+func TestSchema3TechnicalAndCorrelationBounds(t *testing.T) {
 	sections := make([]model.TechnicalSection, MaxTechnicalSections+1)
 	for index := range sections {
 		sections[index] = model.TechnicalSection{Namespace: fmt.Sprintf("hq.section_%d", index), Fields: []model.TechnicalField{{Key: "key", Value: "value"}}}
@@ -495,32 +452,32 @@ func TestSchema2TechnicalAndCorrelationBounds(t *testing.T) {
 	}
 }
 
-func TestSchema2SignedWireLimitIncludesEscaping(t *testing.T) {
+func TestSchema3SignedWireLimitIncludesEscaping(t *testing.T) {
 	payload := TextPayload{
 		Body:    strings.Repeat("\\", MaxBodyBytes),
 		Details: strings.Repeat("\\", MaxDetailBytes),
 	}
-	_, err := Sign(schema2Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
+	_, err := Sign(schema3Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
 	if err == nil || !strings.Contains(err.Error(), "wire") || !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("escaped signed-wire error = %v", err)
 	}
 }
 
-func TestSchema2SignedWireLimitIncludesEscapedMultibyteText(t *testing.T) {
+func TestSchema3SignedWireLimitIncludesEscapedMultibyteText(t *testing.T) {
 	payload := TextPayload{
 		Body:    "x" + strings.Repeat("\u2028", (MaxBodyBytes-1)/3),
 		Details: strings.Repeat("\u2028", MaxDetailBytes/3),
 	}
-	_, err := Sign(schema2Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
+	_, err := Sign(schema3Question(t, payload), time.Unix(1_700_000_000, 0), secretA)
 	if err == nil || !strings.Contains(err.Error(), "wire") || !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("multibyte signed-wire error = %v", err)
 	}
 }
 
-func schema2Question(t *testing.T, payload TextPayload) Content {
+func schema3Question(t *testing.T, payload TextPayload) Content {
 	t.Helper()
 	return Content{
-		Schema: Schema2, Type: TypeQuestion, InstallationID: installationA,
+		Schema: Schema3, Type: TypeQuestion, InstallationID: installationA,
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
 		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Scope:     ScopeInstallationPrivate, Payload: mustPayload(t, payload),

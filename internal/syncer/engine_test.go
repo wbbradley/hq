@@ -41,9 +41,7 @@ func TestTwoInstallationsSyncThroughAuthenticatedRelayWithCatchUp(t *testing.T) 
 	ids := []string{"0198c7ec-73b0-7cc3-a5f7-e31c77140da1", "0198c7ec-73b0-7cc3-a5f7-e31c77140da2"}
 	for index, id := range ids {
 		message := model.Message{ID: id, SenderMailboxID: model.HumanMailboxID, Body: "relay message " + id, Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC().Add(time.Duration(index) * time.Second)}
-		if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-			t.Fatal(err)
-		}
+		createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	}
 	senderEngine := &Engine{State: sender, Codec: sender.WireCodec(nil, nil), PageSize: 1, AuthTimeout: time.Second}
 	if err := senderEngine.RunOnce(ctx); err != nil {
@@ -162,9 +160,7 @@ func TestPublishAuthenticatesAfterProtectedRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140e02", SenderMailboxID: model.HumanMailboxID, Body: "publish after challenge", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	engine := &Engine{State: sender, Codec: sender.WireCodec(nil, nil), AuthTimeout: time.Second}
 	if err := engine.RunOnce(ctx); err != nil {
 		t.Fatal(err)
@@ -303,9 +299,7 @@ func TestCatchUpDoesNotSkipEventsWithTheSameTimestamp(t *testing.T) {
 	}
 	for _, id := range ids {
 		message := model.Message{ID: id, SenderMailboxID: model.HumanMailboxID, Body: "same time " + id, Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-		if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-			t.Fatal(err)
-		}
+		createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	}
 	jobs, err := sender.PendingOutbox(ctx, len(ids))
 	if err != nil || len(jobs) != len(ids) {
@@ -344,9 +338,7 @@ func TestDuplicateRelayOKRecoversCrashAfterRelayReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140da3", SenderMailboxID: model.HumanMailboxID, Body: "duplicate accepted", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -384,9 +376,7 @@ func TestEventAtEOSELiveHandoffIsNotLost(t *testing.T) {
 	ids := []string{"0198c7ec-73b0-7cc3-a5f7-e31c77140da7", "0198c7ec-73b0-7cc3-a5f7-e31c77140da8"}
 	for _, id := range ids {
 		message := model.Message{ID: id, SenderMailboxID: model.HumanMailboxID, Body: "handoff " + id, Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-		if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-			t.Fatal(err)
-		}
+		createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	}
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
@@ -428,9 +418,7 @@ func TestContinuousEngineReceivesEventAfterEOSE(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140da9", SenderMailboxID: model.HumanMailboxID, Body: "late live event", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -488,9 +476,7 @@ func TestContinuousEngineWakePublishesNewOutbox(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140daa", SenderMailboxID: model.HumanMailboxID, Body: "wake publish", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	wake <- struct{}{}
 	deadline = time.Now().Add(2 * time.Second)
 	for relay.eventCount() != 1 {
@@ -540,9 +526,7 @@ func TestUnavailableRelayLeavesQueuedWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140da4", SenderMailboxID: model.HumanMailboxID, Body: "offline", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createAuthorizedPeerMessage(t, ctx, sender, receiver, unavailable, message, receiverID, model.HumanMailboxID)
 	engine := &Engine{State: sender, Codec: sender.WireCodec(nil, nil), AuthTimeout: 50 * time.Millisecond}
 	if err := engine.RunOnce(ctx); err == nil {
 		t.Fatal("unavailable relay sync succeeded")
@@ -564,9 +548,7 @@ func TestRelayRejectionKeepsRetryState(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140da5", SenderMailboxID: model.HumanMailboxID, Body: "retry rejection", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	engine := &Engine{State: sender, Codec: sender.WireCodec(nil, nil), AuthTimeout: time.Second}
 	if err := engine.RunOnce(ctx); err == nil || !strings.Contains(err.Error(), "rate-limited") {
 		t.Fatalf("rejection error = %v", err)
@@ -594,9 +576,7 @@ func TestDisconnectAfterRelayStoreRetriesSameWrapper(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140da6", SenderMailboxID: model.HumanMailboxID, Body: "disconnect retry", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createAuthorizedPeerMessage(t, ctx, sender, receiver, relay.url, message, receiverID, model.HumanMailboxID)
 	now := time.Now().UTC()
 	engine := &Engine{State: sender, Codec: sender.WireCodec(nil, nil), AuthTimeout: time.Second, Now: func() time.Time { return now }}
 	if err := engine.RunOnce(ctx); err == nil {
@@ -618,6 +598,60 @@ func TestDisconnectAfterRelayStoreRetriesSameWrapper(t *testing.T) {
 	attempts, err := sender.RelayAttempts(ctx, eventID)
 	if err != nil || len(attempts) != 1 || attempts[0].State != "accepted" || attempts[0].AttemptCount != 2 {
 		t.Fatalf("retry attempts = %#v, %v", attempts, err)
+	}
+}
+
+func createAuthorizedPeerMessage(t *testing.T, ctx context.Context, sender, receiver *store.SQLite, relayURL string, message model.Message, recipientInstallationID, recipientMailboxID string) {
+	t.Helper()
+	ensureTestPeer(t, ctx, sender, receiver, relayURL)
+	ensureTestPeer(t, ctx, receiver, sender, relayURL)
+	copyTestMailboxGrants(t, ctx, sender, receiver, relayURL)
+	copyTestMailboxGrants(t, ctx, receiver, sender, relayURL)
+	if err := sender.CreatePeerMessage(ctx, message, recipientInstallationID, recipientMailboxID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func ensureTestPeer(t *testing.T, ctx context.Context, local, peer *store.SQLite, relayURL string) {
+	t.Helper()
+	peerID, peerKey := peer.InstallationIdentity()
+	peers, err := local.ListPeers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, existing := range peers {
+		if existing.InstallationID == peerID && existing.SignerKeyID == peerKey && existing.Trusted {
+			return
+		}
+	}
+	if err := local.TrustPeer(ctx, store.Peer{InstallationID: peerID, SignerKeyID: peerKey, Relays: []string{relayURL}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func copyTestMailboxGrants(t *testing.T, ctx context.Context, issuer, grantee *store.SQLite, relayURL string) {
+	t.Helper()
+	granteeID, granteeKey := grantee.InstallationIdentity()
+	jobs, err := issuer.PendingOutbox(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range jobs {
+		inspection := event.Inspect(job.ExactCanonicalBytes)
+		if inspection.Status != event.StatusProjected || inspection.Event.Content.Type != event.TypeMailboxAccessGrant {
+			continue
+		}
+		var payload event.MailboxAccessPayload
+		if json.Unmarshal(inspection.Event.Content.Payload, &payload) != nil || payload.MailboxID != model.HumanMailboxID || payload.GranteeInstallationID != granteeID || payload.GranteeSignerKeyID != granteeKey {
+			continue
+		}
+		if err := grantee.AppendCanonical(ctx, []event.SignedEvent{inspection.Event}); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		if err := issuer.RecordPublish(ctx, job.EventID, granteeID, relayURL, true, false, "test capability exchange", now, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

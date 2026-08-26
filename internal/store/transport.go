@@ -75,7 +75,11 @@ func (s *SQLite) CreatePeerMessage(ctx context.Context, message model.Message, r
 	if message.SenderMailboxID != model.HumanMailboxID {
 		typeName = event.TypeQuestion
 	}
-	content := event.Content{Schema: event.MessageSchemaVersion, Type: typeName, Sender: s.localAddress(message.SenderMailboxID), Recipient: &event.MailboxAddress{InstallationID: recipientInstallationID, MailboxID: recipientMailboxID}, Scope: event.ScopePeerAddressed, Payload: payload}
+	authority, err := s.outboundMailboxAuthority(ctx, recipientInstallationID, recipientMailboxID)
+	if err != nil {
+		return err
+	}
+	content := event.Content{Schema: event.MessageSchemaVersion, Type: typeName, Sender: s.localAddress(message.SenderMailboxID), Recipient: &event.MailboxAddress{InstallationID: recipientInstallationID, MailboxID: recipientMailboxID}, Parents: []string{authority}, Authorities: []string{authority}, Scope: event.ScopePeerAddressed, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, []time.Time{message.CreatedAt}, nil)
 }
 

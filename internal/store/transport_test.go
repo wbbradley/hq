@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,7 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey, Name: "sender", Relays: []string{relayOne}}); err != nil {
 		t.Fatal(err)
 	}
+	exchangeHumanMailboxAccess(t, sender, receiver)
 	var senderCommits, receiverCommits []domain.Invalidation
 	sender.SetChangeObserver(func(commit domain.Invalidation) { senderCommits = append(senderCommits, commit) })
 	receiver.SetChangeObserver(func(commit domain.Invalidation) { receiverCommits = append(receiverCommits, commit) })
@@ -40,9 +42,7 @@ func TestTwoInstallationsExchangeWrappedMessageAndDeduplicate(t *testing.T) {
 		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.peer", Fields: []model.TechnicalField{{Key: "second", Label: "Second", Value: "2"}, {Key: "first", Value: "1"}}}},
 		Context:           model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC(),
 	}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createPeerMessageForTest(t, sender, message, receiverID, model.HumanMailboxID)
 	if prepared, err := sender.PrepareOutbound(ctx, 10); err != nil || prepared != 1 {
 		t.Fatalf("prepared = %d, %v", prepared, err)
 	}
@@ -97,15 +97,18 @@ func TestWrappedOutboxSurvivesRestartWithExactBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sender", "hq.db")
 	sender := openStore(t, path)
 	receiver := openStore(t, filepath.Join(t.TempDir(), "receiver", "hq.db"))
+	senderID, senderKey := sender.InstallationIdentity()
 	receiverID, receiverKey := receiver.InstallationIdentity()
 	const relay = "wss://relay.test"
 	if err := sender.TrustPeer(ctx, Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay}}); err != nil {
 		t.Fatal(err)
 	}
-	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d91", SenderMailboxID: model.HumanMailboxID, Body: "persist me", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
+	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey}); err != nil {
 		t.Fatal(err)
 	}
+	exchangeHumanMailboxAccess(t, sender, receiver)
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d91", SenderMailboxID: model.HumanMailboxID, Body: "persist me", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	createPeerMessageForTest(t, sender, message, receiverID, model.HumanMailboxID)
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -156,18 +159,21 @@ func TestConfiguredWriteRelayReceivesJobsWithoutPeerHint(t *testing.T) {
 	ctx := context.Background()
 	sender := openStore(t, filepath.Join(t.TempDir(), "sender", "hq.db"))
 	receiver := openStore(t, filepath.Join(t.TempDir(), "receiver", "hq.db"))
+	senderID, senderKey := sender.InstallationIdentity()
 	receiverID, receiverKey := receiver.InstallationIdentity()
 	const relay = "wss://relay.test"
 	if err := sender.TrustPeer(ctx, Peer{InstallationID: receiverID, SignerKeyID: receiverKey}); err != nil {
 		t.Fatal(err)
 	}
+	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey}); err != nil {
+		t.Fatal(err)
+	}
+	exchangeHumanMailboxAccess(t, sender, receiver)
 	if err := sender.AddRelay(ctx, RelayConfig{URL: relay, Write: true}); err != nil {
 		t.Fatal(err)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d96", SenderMailboxID: model.HumanMailboxID, Body: "configured route", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createPeerMessageForTest(t, sender, message, receiverID, model.HumanMailboxID)
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -181,15 +187,18 @@ func TestNetworkStatusReportsQueueRejectAndInboundFailures(t *testing.T) {
 	ctx := context.Background()
 	sender := openStore(t, filepath.Join(t.TempDir(), "sender", "hq.db"))
 	receiver := openStore(t, filepath.Join(t.TempDir(), "receiver", "hq.db"))
+	senderID, senderKey := sender.InstallationIdentity()
 	receiverID, receiverKey := receiver.InstallationIdentity()
 	const relay = "wss://relay.test"
 	if err := sender.TrustPeer(ctx, Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay}}); err != nil {
 		t.Fatal(err)
 	}
-	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d97", SenderMailboxID: model.HumanMailboxID, Body: "status", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
+	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey}); err != nil {
 		t.Fatal(err)
 	}
+	exchangeHumanMailboxAccess(t, sender, receiver)
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d97", SenderMailboxID: model.HumanMailboxID, Body: "status", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	createPeerMessageForTest(t, sender, message, receiverID, model.HumanMailboxID)
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -224,15 +233,18 @@ func TestNetworkStatusReportsRelayAcceptanceAndLastReceive(t *testing.T) {
 	ctx := context.Background()
 	sender := openStore(t, filepath.Join(t.TempDir(), "sender", "hq.db"))
 	receiver := openStore(t, filepath.Join(t.TempDir(), "receiver", "hq.db"))
+	senderID, senderKey := sender.InstallationIdentity()
 	receiverID, receiverKey := receiver.InstallationIdentity()
 	const relay = "wss://relay.test"
 	if err := sender.TrustPeer(ctx, Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay}}); err != nil {
 		t.Fatal(err)
 	}
-	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140e01", SenderMailboxID: model.HumanMailboxID, Body: "accepted", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
+	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey}); err != nil {
 		t.Fatal(err)
 	}
+	exchangeHumanMailboxAccess(t, sender, receiver)
+	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140e01", SenderMailboxID: model.HumanMailboxID, Body: "accepted", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
+	createPeerMessageForTest(t, sender, message, receiverID, model.HumanMailboxID)
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -262,10 +274,10 @@ func TestUnknownSenderGiftWrapIsQuarantined(t *testing.T) {
 	if err := sender.TrustPeer(ctx, Peer{InstallationID: receiverID, SignerKeyID: receiverKey, Relays: []string{relay}}); err != nil {
 		t.Fatal(err)
 	}
+	installUnilateralMailboxGrant(t, receiver, sender, model.HumanMailboxID)
+	discardMailboxAccessOutbox(t, sender)
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d92", SenderMailboxID: model.HumanMailboxID, Body: "unknown sender", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createPeerMessageForTest(t, sender, message, receiverID, model.HumanMailboxID)
 	_, _ = sender.PrepareOutbound(ctx, 10)
 	jobs, _ := sender.RelayJobs(ctx, relay, 10, time.Now())
 	if len(jobs) != 1 {
@@ -296,10 +308,9 @@ func TestDistinctWrappersDeduplicateLogicalEventAndRejectReusedKey(t *testing.T)
 	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey, Relays: []string{relay}}); err != nil {
 		t.Fatal(err)
 	}
+	exchangeHumanMailboxAccess(t, sender, receiver)
 	first := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d93", SenderMailboxID: model.HumanMailboxID, Body: "logical duplicate", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, first, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createPeerMessageForTest(t, sender, first, receiverID, model.HumanMailboxID)
 	jobs, err := sender.PendingOutbox(ctx, 10)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("pending jobs = %#v, %v", jobs, err)
@@ -326,9 +337,7 @@ func TestDistinctWrappersDeduplicateLogicalEventAndRejectReusedKey(t *testing.T)
 	}
 
 	second := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d94", SenderMailboxID: model.HumanMailboxID, Body: "reused key", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, second, receiverID, model.HumanMailboxID); err != nil {
-		t.Fatal(err)
-	}
+	createPeerMessageForTest(t, sender, second, receiverID, model.HumanMailboxID)
 	jobs, err = sender.PendingOutbox(ctx, 10)
 	if err != nil || len(jobs) != 2 {
 		t.Fatalf("pending jobs after second message = %#v, %v", jobs, err)
@@ -369,6 +378,7 @@ func TestDomainCreateRoutesExplicitRemoteRecipientAsPeerAddressed(t *testing.T) 
 	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey, Relays: []string{relay}}); err != nil {
 		t.Fatal(err)
 	}
+	exchangeHumanMailboxAccess(t, sender, receiver)
 	repository := model.RepositoryContext{Directory: "/repo"}
 	senderMailbox, err := sender.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "sender"}, repository)
 	if err != nil {
@@ -381,6 +391,7 @@ func TestDomainCreateRoutesExplicitRemoteRecipientAsPeerAddressed(t *testing.T) 
 	if err := receiver.SetMailboxShare(ctx, receiverMailbox.ID, senderID, true); err != nil {
 		t.Fatal(err)
 	}
+	copyMailboxAccessGrant(t, receiver, sender, receiverMailbox.ID)
 	message := model.Message{
 		ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d9f", SenderMailboxID: senderMailbox.ID,
 		RecipientInstallationID: receiverID, RecipientMailboxID: receiverMailbox.ID,
@@ -389,6 +400,7 @@ func TestDomainCreateRoutesExplicitRemoteRecipientAsPeerAddressed(t *testing.T) 
 	if err := sender.Create(ctx, message); err != nil {
 		t.Fatal(err)
 	}
+	discardMailboxAccessOutbox(t, sender)
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -417,6 +429,7 @@ func TestRevokedAgentMailboxShareRejectsInboundMessage(t *testing.T) {
 	if err := receiver.TrustPeer(ctx, Peer{InstallationID: senderID, SignerKeyID: senderKey, Relays: []string{relay}}); err != nil {
 		t.Fatal(err)
 	}
+	exchangeHumanMailboxAccess(t, sender, receiver)
 	agent, err := receiver.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "private-agent"}, model.RepositoryContext{Directory: "/repo"})
 	if err != nil {
 		t.Fatal(err)
@@ -424,13 +437,12 @@ func TestRevokedAgentMailboxShareRejectsInboundMessage(t *testing.T) {
 	if err := receiver.SetMailboxShare(ctx, agent.ID, senderID, true); err != nil {
 		t.Fatal(err)
 	}
+	copyMailboxAccessGrant(t, receiver, sender, agent.ID)
 	if err := receiver.SetMailboxShare(ctx, agent.ID, senderID, false); err != nil {
 		t.Fatal(err)
 	}
 	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d95", SenderMailboxID: model.HumanMailboxID, Body: "private agent", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := sender.CreatePeerMessage(ctx, message, receiverID, agent.ID); err != nil {
-		t.Fatal(err)
-	}
+	createPeerMessageForTest(t, sender, message, receiverID, agent.ID)
 	if _, err := sender.PrepareOutbound(ctx, 10); err != nil {
 		t.Fatal(err)
 	}
@@ -443,5 +455,89 @@ func TestRevokedAgentMailboxShareRejectsInboundMessage(t *testing.T) {
 	}
 	if _, err := receiver.Get(ctx, message.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("revoked-share message = %v", err)
+	}
+}
+
+func exchangeHumanMailboxAccess(t *testing.T, first, second *SQLite) {
+	t.Helper()
+	copyMailboxAccessGrant(t, first, second, model.HumanMailboxID)
+	copyMailboxAccessGrant(t, second, first, model.HumanMailboxID)
+	discardMailboxAccessOutbox(t, first)
+	discardMailboxAccessOutbox(t, second)
+}
+
+func createPeerMessageForTest(t *testing.T, sender *SQLite, message model.Message, recipientInstallationID, recipientMailboxID string) {
+	t.Helper()
+	if err := sender.CreatePeerMessage(context.Background(), message, recipientInstallationID, recipientMailboxID); err != nil {
+		t.Fatal(err)
+	}
+	discardMailboxAccessOutbox(t, sender)
+}
+
+func copyMailboxAccessGrant(t *testing.T, issuer, grantee *SQLite, mailboxID string) event.SignedEvent {
+	t.Helper()
+	granteeID, granteeKey := grantee.InstallationIdentity()
+	rows, err := issuer.db.Query(`SELECT raw FROM canonical_events WHERE event_type=? AND installation_id=?`, event.TypeMailboxAccessGrant, issuer.signer.InstallationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var grant event.SignedEvent
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		inspection := event.Inspect(raw)
+		var payload event.MailboxAccessPayload
+		if inspection.Status == event.StatusProjected && json.Unmarshal(inspection.Event.Content.Payload, &payload) == nil && payload.MailboxID == mailboxID && payload.GranteeInstallationID == granteeID && payload.GranteeSignerKeyID == granteeKey {
+			grant = inspection.Event
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(grant.Wire) == 0 {
+		t.Fatalf("mailbox grant for %s to %s not found", mailboxID, granteeID)
+	}
+	if err := grantee.AppendCanonical(context.Background(), []event.SignedEvent{grant}); err != nil {
+		t.Fatal(err)
+	}
+	discardMailboxAccessOutbox(t, issuer)
+	discardMailboxAccessOutbox(t, grantee)
+	return grant
+}
+
+func installUnilateralMailboxGrant(t *testing.T, issuer, grantee *SQLite, mailboxID string) event.SignedEvent {
+	t.Helper()
+	granteeID, granteeKey := grantee.InstallationIdentity()
+	payload, err := event.MarshalPayload(event.MailboxAccessPayload{MailboxID: mailboxID, GranteeInstallationID: granteeID, GranteeSignerKeyID: granteeKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := event.Content{
+		Type: event.TypeMailboxAccessGrant, InstallationID: issuer.signer.InstallationID,
+		Sender:    &event.MailboxAddress{InstallationID: issuer.signer.InstallationID, MailboxID: model.HumanMailboxID},
+		Recipient: &event.MailboxAddress{InstallationID: granteeID, MailboxID: model.HumanMailboxID},
+		Scope:     event.ScopePeerAddressed, Payload: payload,
+	}
+	grant, err := issuer.signer.Sign(context.Background(), content, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := grantee.AppendCanonical(context.Background(), []event.SignedEvent{grant}); err != nil {
+		t.Fatal(err)
+	}
+	return grant
+}
+
+func discardMailboxAccessOutbox(t *testing.T, store *SQLite) {
+	t.Helper()
+	if _, err := store.db.Exec(`DELETE FROM outbox WHERE event_id IN (SELECT event_id FROM canonical_events WHERE event_type IN (?, ?, ?))`, event.TypeMailboxAccessGrant, event.TypeMailboxAccessRevoke, event.TypeMailboxAccessObserve); err != nil {
+		t.Fatal(err)
 	}
 }

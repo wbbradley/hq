@@ -22,7 +22,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 32
+const schemaVersion = 33
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -158,11 +158,14 @@ CREATE TABLE peers (
     relays_json TEXT NOT NULL DEFAULT '[]',
     trusted INTEGER NOT NULL CHECK(trusted IN (0, 1))
 ) STRICT;
-CREATE TABLE mailbox_shares (
+CREATE TABLE mailbox_access (
+    grant_event_id TEXT PRIMARY KEY,
     mailbox_id TEXT NOT NULL,
-    peer_installation_id TEXT NOT NULL,
+    grantor_installation_id TEXT NOT NULL,
+    grantee_installation_id TEXT NOT NULL,
+    grantee_signer_key_id TEXT NOT NULL,
     active INTEGER NOT NULL CHECK(active IN (0, 1)),
-    PRIMARY KEY(mailbox_id, peer_installation_id)
+    FOREIGN KEY(grant_event_id) REFERENCES canonical_events(event_id)
 ) STRICT;
 CREATE TABLE human_accounts (
     account_id TEXT PRIMARY KEY,
@@ -556,7 +559,7 @@ CREATE TABLE harness_activities (
 ) STRICT;
 CREATE INDEX harness_activities_mailbox_time ON harness_activities(source_installation_id,mailbox_id,display_order,event_id);
 CREATE INDEX harness_activities_progress_retention ON harness_activities(source_installation_id,mailbox_id,harness,session_id,display_order,event_id) WHERE kind='progress';
-PRAGMA user_version = 32;
+PRAGMA user_version = 33;
 `
 
 const (
@@ -644,376 +647,18 @@ func (s *SQLite) configure(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	if version == 7 {
-		if _, err := s.db.ExecContext(ctx, `CREATE TABLE mutation_receipts (mutation_id TEXT PRIMARY KEY, method TEXT NOT NULL, request_digest TEXT NOT NULL, result BLOB NOT NULL, committed_at INTEGER NOT NULL) STRICT; PRAGMA user_version = 8`); err != nil {
-			return fmt.Errorf("migrate schema to version 8: %w", err)
-		}
-		version = 8
+	if version != 0 && version != schemaVersion {
+		return fmt.Errorf("unsupported HQ database schema %d; archive or remove the database, then reinitialize and pair this installation", version)
 	}
-	if version == 8 {
-		if _, err := s.db.ExecContext(ctx, `CREATE TABLE change_revision (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL) STRICT; INSERT INTO change_revision(id,revision) VALUES (1,0); PRAGMA user_version = 9`); err != nil {
-			return fmt.Errorf("migrate schema to version 9: %w", err)
+	if version == 0 {
+		var existingTables int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&existingTables); err != nil {
+			return fmt.Errorf("inspect unversioned database: %w", err)
 		}
-		version = 9
-	}
-	if version == 9 {
-		migration := `PRAGMA foreign_keys = OFF;
-CREATE TABLE harness_bindings_v10 (harness TEXT NOT NULL, external_session_id TEXT NOT NULL, mailbox_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(harness, external_session_id), FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE) STRICT;
-INSERT INTO harness_bindings_v10 SELECT harness,external_session_id,mailbox_id,created_at FROM harness_bindings;
-DROP TABLE harness_bindings;
-ALTER TABLE harness_bindings_v10 RENAME TO harness_bindings;
-CREATE TABLE IF NOT EXISTS named_agents (name TEXT PRIMARY KEY, mailbox_id TEXT NOT NULL UNIQUE, retired INTEGER NOT NULL CHECK(retired IN (0,1)), current_harness TEXT NOT NULL DEFAULT '', current_session_id TEXT NOT NULL DEFAULT '', last_active_at INTEGER, FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE) STRICT;
-CREATE TABLE IF NOT EXISTS agent_ownership (name TEXT PRIMARY KEY, owner_token TEXT NOT NULL, lease_expires_at INTEGER NOT NULL, FOREIGN KEY(name) REFERENCES named_agents(name) ON DELETE CASCADE) STRICT;
-PRAGMA user_version = 10;
-PRAGMA foreign_keys = ON;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 10: %w", err)
+		if existingTables != 0 {
+			return errors.New("unsupported unversioned HQ database; archive or remove the database, then reinitialize and pair this installation")
 		}
-		version = 10
-	}
-	if version == 10 {
-		migration := `CREATE TABLE IF NOT EXISTS agent_sessions (agent_name TEXT NOT NULL, mailbox_id TEXT NOT NULL, harness TEXT NOT NULL, external_session_id TEXT NOT NULL, directory TEXT NOT NULL, git_common_dir TEXT NOT NULL DEFAULT '', remote_identity TEXT NOT NULL DEFAULT '', worktree TEXT NOT NULL DEFAULT '', branch TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, last_selected_at INTEGER NOT NULL, PRIMARY KEY(harness, external_session_id), FOREIGN KEY(agent_name) REFERENCES named_agents(name) ON DELETE CASCADE, FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE) STRICT; UPDATE projection_checkpoint SET event_count=-1 WHERE id=1; PRAGMA user_version = 11;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 11: %w", err)
-		}
-		version = 11
-	}
-	if version == 11 {
-		var threadNameColumns int
-		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('agent_sessions') WHERE name='thread_name'`).Scan(&threadNameColumns); err != nil {
-			return fmt.Errorf("inspect schema version 11: %w", err)
-		}
-		if threadNameColumns == 0 {
-			if _, err := s.db.ExecContext(ctx, `ALTER TABLE agent_sessions ADD COLUMN thread_name TEXT NOT NULL DEFAULT ''`); err != nil {
-				return fmt.Errorf("add thread name column: %w", err)
-			}
-		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE projection_checkpoint SET event_count=-1 WHERE id=1; PRAGMA user_version = 12;`); err != nil {
-			return fmt.Errorf("migrate schema to version 12: %w", err)
-		}
-		version = 12
-	}
-	if version == 12 {
-		for _, column := range []string{"harness_provider", "harness_session_id", "harness_operation_id"} {
-			var count int
-			if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name=?`, column).Scan(&count); err != nil {
-				return fmt.Errorf("inspect schema version 12: %w", err)
-			}
-			if count == 0 {
-				if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`); err != nil {
-					return fmt.Errorf("add message correlation column %s: %w", column, err)
-				}
-			}
-		}
-		migration := `CREATE INDEX IF NOT EXISTS messages_harness_conversation ON messages(harness_provider, harness_session_id, created_at, id);
-CREATE INDEX IF NOT EXISTS messages_harness_operation ON messages(harness_provider, harness_session_id, harness_operation_id, created_at, id);
-UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
-PRAGMA user_version = 13;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 13: %w", err)
-		}
-		version = 13
-	}
-	if version == 13 {
-		migration := `PRAGMA foreign_keys = OFF;
-DROP TABLE IF EXISTS mailboxes_v14;
-CREATE TABLE mailboxes_v14 (id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('human','agent','project')), label TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL) STRICT;
-INSERT INTO mailboxes_v14 SELECT id,installation_id,kind,label,created_at FROM mailboxes;
-DROP TABLE mailboxes;
-ALTER TABLE mailboxes_v14 RENAME TO mailboxes;
-CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, home_installation_id TEXT NOT NULL, mailbox_id TEXT NOT NULL UNIQUE, predecessor_project_id TEXT, name TEXT NOT NULL, brief TEXT NOT NULL DEFAULT '', lifecycle TEXT NOT NULL CHECK(lifecycle IN ('preparing','open','closing','closed')), archived INTEGER NOT NULL CHECK(archived IN (0,1)), primary_resource_id TEXT, head_event_id TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, CHECK(archived = 0 OR lifecycle = 'closed'), FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id)) STRICT;
-CREATE TABLE IF NOT EXISTS project_events (event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64), project_id TEXT NOT NULL, previous_event_id TEXT NOT NULL, event_type TEXT NOT NULL, payload BLOB NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id)) STRICT;
-CREATE TABLE IF NOT EXISTS resources (id TEXT PRIMARY KEY, kind TEXT NOT NULL, home_installation_id TEXT NOT NULL, display_locator TEXT NOT NULL, canonical_locator TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(id,kind,home_installation_id,canonical_locator)) STRICT;
-CREATE TABLE IF NOT EXISTS project_resources (project_id TEXT NOT NULL, resource_id TEXT NOT NULL, added_event_id TEXT NOT NULL, removed_event_id TEXT, PRIMARY KEY(project_id,resource_id,added_event_id), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(resource_id) REFERENCES resources(id), FOREIGN KEY(added_event_id) REFERENCES project_events(event_id), FOREIGN KEY(removed_event_id) REFERENCES project_events(event_id)) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS project_resources_current ON project_resources(project_id,resource_id) WHERE removed_event_id IS NULL;
-CREATE TABLE IF NOT EXISTS resource_claim_epochs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, resource_id TEXT NOT NULL, acquired_event_id TEXT NOT NULL, released_event_id TEXT, acquired_at INTEGER NOT NULL, released_at INTEGER, FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(resource_id) REFERENCES resources(id), FOREIGN KEY(acquired_event_id) REFERENCES project_events(event_id), FOREIGN KEY(released_event_id) REFERENCES project_events(event_id)) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS resource_claim_active ON resource_claim_epochs(resource_id) WHERE released_event_id IS NULL;
-CREATE TABLE IF NOT EXISTS resource_health (resource_id TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('healthy','missing','inaccessible','malformed','unknown')), details_json TEXT NOT NULL DEFAULT '{}', last_checked_at INTEGER NOT NULL, FOREIGN KEY(resource_id) REFERENCES resources(id)) STRICT;
-CREATE TABLE IF NOT EXISTS project_assignment_epochs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_name TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('configuring','runnable','blocked','ended')), selected_thread_id TEXT, started_event_id TEXT NOT NULL, ended_event_id TEXT, started_at INTEGER NOT NULL, ended_at INTEGER, forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0,1)), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(agent_name) REFERENCES named_agents(name), FOREIGN KEY(started_event_id) REFERENCES project_events(event_id), FOREIGN KEY(ended_event_id) REFERENCES project_events(event_id)) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS project_assignment_current_project ON project_assignment_epochs(project_id) WHERE ended_event_id IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS project_assignment_current_agent ON project_assignment_epochs(agent_name) WHERE ended_event_id IS NULL;
-CREATE TABLE IF NOT EXISTS project_threads (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_name TEXT NOT NULL, harness TEXT NOT NULL, external_thread_id TEXT NOT NULL, launch_directory TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(harness,external_thread_id), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(agent_name) REFERENCES named_agents(name)) STRICT;
-PRAGMA user_version = 14;
-PRAGMA foreign_keys = ON;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 14: %w", err)
-		}
-		version = 14
-	}
-	if version == 14 {
-		migration := `CREATE TRIGGER IF NOT EXISTS project_identity_immutable BEFORE UPDATE OF home_installation_id,mailbox_id,predecessor_project_id ON projects BEGIN SELECT RAISE(ABORT,'project identity is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS resource_identity_immutable BEFORE UPDATE OF kind,home_installation_id,canonical_locator ON resources BEGIN SELECT RAISE(ABORT,'resource identity is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS project_thread_scope_immutable BEFORE UPDATE OF project_id,agent_name,harness,external_thread_id ON project_threads BEGIN SELECT RAISE(ABORT,'project thread scope is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS active_claim_requires_open BEFORE INSERT ON resource_claim_epochs WHEN NEW.released_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id)<>'open' BEGIN SELECT RAISE(ABORT,'active resource claim requires open project'); END;
-CREATE TRIGGER IF NOT EXISTS active_assignment_requires_open BEFORE INSERT ON project_assignment_epochs WHEN NEW.ended_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id)<>'open' BEGIN SELECT RAISE(ABORT,'active assignment requires open project'); END;
-CREATE TRIGGER IF NOT EXISTS closed_project_requires_release BEFORE UPDATE OF lifecycle ON projects WHEN NEW.lifecycle='closed' AND (EXISTS(SELECT 1 FROM resource_claim_epochs WHERE project_id=NEW.id AND released_event_id IS NULL) OR EXISTS(SELECT 1 FROM project_assignment_epochs WHERE project_id=NEW.id AND ended_event_id IS NULL)) BEGIN SELECT RAISE(ABORT,'closed project cannot retain claims or assignment'); END;
-PRAGMA user_version = 15;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 15: %w", err)
-		}
-		version = 15
-	}
-	if version == 15 {
-		migration := `CREATE TABLE IF NOT EXISTS project_message_acceptances (project_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0), message_id TEXT NOT NULL UNIQUE, message_event_id TEXT NOT NULL UNIQUE, acceptance_event_id TEXT NOT NULL UNIQUE, accepted_at INTEGER NOT NULL, PRIMARY KEY(project_id,sequence), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(message_id) REFERENCES messages(id), FOREIGN KEY(message_event_id) REFERENCES canonical_events(event_id), FOREIGN KEY(acceptance_event_id) REFERENCES project_events(event_id)) STRICT;
-CREATE TABLE IF NOT EXISTS project_dispatch_records (message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sequence INTEGER NOT NULL, assignment_id TEXT NOT NULL, agent_name TEXT NOT NULL, project_thread_id TEXT NOT NULL, external_thread_id TEXT NOT NULL, dispatch_event_id TEXT NOT NULL UNIQUE, dispatched_at INTEGER NOT NULL, UNIQUE(project_id,sequence), FOREIGN KEY(project_id,sequence) REFERENCES project_message_acceptances(project_id,sequence), FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id), FOREIGN KEY(project_thread_id) REFERENCES project_threads(id), FOREIGN KEY(dispatch_event_id) REFERENCES project_events(event_id)) STRICT;
-PRAGMA user_version = 16;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 16: %w", err)
-		}
-		version = 16
-	}
-	if version == 16 {
-		migration := `CREATE TABLE IF NOT EXISTS project_dispatch_attempts (message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sequence INTEGER NOT NULL, assignment_id TEXT NOT NULL, agent_name TEXT NOT NULL, project_thread_id TEXT NOT NULL, external_thread_id TEXT NOT NULL, owner_token TEXT, lease_until INTEGER, state TEXT NOT NULL CHECK(state IN ('pending','uncertain','accepted')), started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, CHECK((owner_token IS NULL)=(lease_until IS NULL)), FOREIGN KEY(project_id,sequence) REFERENCES project_message_acceptances(project_id,sequence), FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id), FOREIGN KEY(project_thread_id) REFERENCES project_threads(id)) STRICT;
-PRAGMA user_version = 17;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 17: %w", err)
-		}
-		version = 17
-	}
-	if version == 17 {
-		migration := `CREATE TABLE IF NOT EXISTS project_activation_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_name TEXT NOT NULL, prior_lifecycle TEXT NOT NULL CHECK(prior_lifecycle IN ('open','closed')), assignment_id TEXT, state TEXT NOT NULL CHECK(state IN ('preparing','configuring','runnable','failed')), last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(agent_name) REFERENCES named_agents(name), FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id)) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS project_activation_incomplete ON project_activation_operations(project_id) WHERE state IN ('preparing','configuring');
-PRAGMA user_version = 18;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 18: %w", err)
-		}
-		version = 18
-	}
-	if version == 18 {
-		migration := `CREATE TABLE IF NOT EXISTS project_output_provenance (message_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, assignment_id TEXT NOT NULL, agent_name TEXT NOT NULL, project_thread_id TEXT NOT NULL, external_thread_id TEXT NOT NULL, late INTEGER NOT NULL CHECK(late IN (0,1)), current_assignment_id TEXT NOT NULL DEFAULT '', current_agent_name TEXT NOT NULL DEFAULT '', current_project_thread_id TEXT NOT NULL DEFAULT '', runtime_owner_token TEXT NOT NULL DEFAULT '', observed_runtime_state TEXT NOT NULL DEFAULT '', forced_transition INTEGER NOT NULL CHECK(forced_transition IN (0,1)), recorded_at INTEGER NOT NULL, FOREIGN KEY(message_id) REFERENCES messages(id), FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(assignment_id) REFERENCES project_assignment_epochs(id), FOREIGN KEY(project_thread_id) REFERENCES project_threads(id)) STRICT;
-PRAGMA user_version = 19;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 19: %w", err)
-		}
-		version = 19
-	}
-	if version == 19 {
-		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS project_replicas (id TEXT PRIMARY KEY, home_installation_id TEXT NOT NULL, head_event_id TEXT NOT NULL, state_json BLOB NOT NULL, updated_at INTEGER NOT NULL) STRICT; PRAGMA user_version = 20`); err != nil {
-			return fmt.Errorf("migrate schema to version 20: %w", err)
-		}
-		version = 20
-	}
-	if version == 20 {
-		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS project_audit_log (id INTEGER PRIMARY KEY, operation TEXT NOT NULL, request_id TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL DEFAULT '', home_installation_id TEXT NOT NULL, expected_head_event_id TEXT NOT NULL DEFAULT '', current_head_event_id TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL, details_json TEXT NOT NULL, created_at INTEGER NOT NULL) STRICT; PRAGMA user_version = 21`); err != nil {
-			return fmt.Errorf("migrate schema to version 21: %w", err)
-		}
-		version = 21
-	}
-	if version == 21 {
-		migration := `CREATE TABLE IF NOT EXISTS project_runtime_operations (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('close','handoff')), project_id TEXT NOT NULL, expected_head_event_id TEXT NOT NULL, current_head_event_id TEXT NOT NULL, target_agent TEXT NOT NULL DEFAULT '', force INTEGER NOT NULL CHECK(force IN (0,1)), archive INTEGER NOT NULL CHECK(archive IN (0,1)), state TEXT NOT NULL CHECK(state IN ('started','closing','unassigned','activating','completed','blocked','failed')), last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id)) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS project_runtime_operation_incomplete ON project_runtime_operations(project_id) WHERE state IN ('started','closing','unassigned','activating');
-PRAGMA user_version = 22;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 22: %w", err)
-		}
-		version = 22
-	}
-	if version == 22 {
-		migration := `CREATE TABLE IF NOT EXISTS project_worktree_operations (id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE, request_json TEXT NOT NULL, canonical_repository TEXT NOT NULL, canonical_destination TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('reserved','worktree-created','completed','failed')), last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL) STRICT;
-CREATE INDEX IF NOT EXISTS project_worktree_reservations ON project_worktree_operations(canonical_destination) WHERE state IN ('reserved','worktree-created');
-PRAGMA user_version = 23;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 23: %w", err)
-		}
-		version = 23
-	}
-	if version == 23 {
-		migration := `CREATE TABLE IF NOT EXISTS agent_retirement_operations (id TEXT PRIMARY KEY, agent_name TEXT NOT NULL, project_id TEXT NOT NULL DEFAULT '', force INTEGER NOT NULL CHECK(force IN (0,1)), state TEXT NOT NULL CHECK(state IN ('started','quiesced','unassigned','completed','blocked','failed')), last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY(agent_name) REFERENCES named_agents(name)) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS agent_retirement_incomplete ON agent_retirement_operations(agent_name) WHERE state IN ('started','quiesced','unassigned');
-PRAGMA user_version = 24;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 24: %w", err)
-		}
-		version = 24
-	}
-	if version == 24 {
-		var purposeColumns int
-		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name='purpose'`).Scan(&purposeColumns); err != nil {
-			return fmt.Errorf("inspect schema version 24: %w", err)
-		}
-		if purposeColumns == 0 {
-			if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN purpose TEXT NOT NULL DEFAULT 'conversation'`); err != nil {
-				return fmt.Errorf("add message purpose column: %w", err)
-			}
-		}
-		migration := `
-UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
-PRAGMA user_version = 25;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 25: %w", err)
-		}
-		version = 25
-	}
-	if version == 25 {
-		migration := `DROP TRIGGER IF EXISTS active_claim_requires_open;
-DROP TRIGGER IF EXISTS active_assignment_requires_open;
-CREATE TRIGGER active_claim_requires_open BEFORE INSERT ON resource_claim_epochs WHEN NEW.released_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id) NOT IN ('open','closing') BEGIN SELECT RAISE(ABORT,'active resource claim requires open or closing project'); END;
-CREATE TRIGGER active_assignment_requires_open BEFORE INSERT ON project_assignment_epochs WHEN NEW.ended_event_id IS NULL AND (SELECT lifecycle FROM projects WHERE id=NEW.project_id) NOT IN ('open','closing') BEGIN SELECT RAISE(ABORT,'active assignment requires open or closing project'); END;
-UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
-PRAGMA user_version = 26;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 26: %w", err)
-		}
-		version = 26
-	}
-	if version == 26 {
-		migration := `CREATE TABLE IF NOT EXISTS harness_activities (
-    mailbox_id TEXT NOT NULL,
-    harness TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('operation-status','plan','diff','command','file-change','tool-call','progress')),
-    item_id TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT '' CHECK(status IN ('','running','completed','failed','interrupted')),
-    title TEXT NOT NULL DEFAULT '',
-    body TEXT NOT NULL DEFAULT '',
-    truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
-    occurred_at INTEGER NOT NULL,
-    PRIMARY KEY(harness,session_id,operation_id,kind,item_id)
-) STRICT;
-CREATE INDEX IF NOT EXISTS harness_activities_mailbox_time ON harness_activities(mailbox_id,occurred_at,harness,session_id,operation_id,kind,item_id);
-CREATE INDEX IF NOT EXISTS harness_activities_progress_retention ON harness_activities(harness,session_id,kind,occurred_at,item_id) WHERE kind='progress';
-PRAGMA user_version = 27;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 27: %w", err)
-		}
-		version = 27
-	}
-	if version == 27 {
-		for _, column := range []string{"harness_provider", "harness_session_id", "harness_operation_id"} {
-			var count int
-			if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name=?`, column).Scan(&count); err != nil {
-				return fmt.Errorf("inspect schema version 27: %w", err)
-			}
-			if count == 0 {
-				if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`); err != nil {
-					return fmt.Errorf("add generic message correlation column %s: %w", column, err)
-				}
-			}
-		}
-		var legacyColumns int
-		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name IN ('codex_thread_id','codex_turn_id')`).Scan(&legacyColumns); err != nil {
-			return fmt.Errorf("inspect legacy schema version 27 correlation: %w", err)
-		}
-		if legacyColumns == 2 {
-			if _, err := s.db.ExecContext(ctx, `UPDATE messages SET harness_provider='codex',harness_session_id=codex_thread_id,harness_operation_id=codex_turn_id WHERE harness_session_id='' AND harness_operation_id=''`); err != nil {
-				return fmt.Errorf("copy legacy message correlation: %w", err)
-			}
-		}
-		migration := `DROP INDEX IF EXISTS messages_codex_conversation;
-DROP INDEX IF EXISTS messages_codex_turn;
-CREATE INDEX IF NOT EXISTS messages_harness_conversation ON messages(harness_provider, harness_session_id, created_at, id);
-CREATE INDEX IF NOT EXISTS messages_harness_operation ON messages(harness_provider, harness_session_id, harness_operation_id, created_at, id);
-UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
-PRAGMA user_version = 28;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 28: %w", err)
-		}
-		version = 28
-	}
-	if version == 28 {
-		for _, column := range []string{"harness_provider", "harness_session_id", "harness_operation_id"} {
-			var count int
-			if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name=?`, column).Scan(&count); err != nil {
-				return fmt.Errorf("inspect schema version 28: %w", err)
-			}
-			if count == 0 {
-				if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`); err != nil {
-					return fmt.Errorf("add namespaced message correlation column %s: %w", column, err)
-				}
-			}
-		}
-		migration := `DROP INDEX IF EXISTS messages_harness_conversation;
-DROP INDEX IF EXISTS messages_harness_operation;
-CREATE INDEX messages_harness_conversation ON messages(harness_provider, harness_session_id, created_at, id);
-CREATE INDEX messages_harness_operation ON messages(harness_provider, harness_session_id, harness_operation_id, created_at, id);
-UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
-PRAGMA user_version = 29;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 29: %w", err)
-		}
-		version = 29
-	}
-	if version == 29 {
-		columns := []struct {
-			name       string
-			definition string
-		}{
-			{name: "presentation", definition: "TEXT NOT NULL DEFAULT ''"},
-			{name: "correlation_item_id", definition: "TEXT NOT NULL DEFAULT ''"},
-			{name: "correlation_request_id", definition: "TEXT NOT NULL DEFAULT ''"},
-			{name: "technical_sections_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
-		}
-		for _, column := range columns {
-			var count int
-			if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name=?`, column.name).Scan(&count); err != nil {
-				return fmt.Errorf("inspect schema version 29: %w", err)
-			}
-			if count == 0 {
-				if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN `+column.name+` `+column.definition); err != nil {
-					return fmt.Errorf("add message semantic column %s: %w", column.name, err)
-				}
-			}
-		}
-		migration := `UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
-PRAGMA user_version = 30;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 30: %w", err)
-		}
-		version = 30
-	}
-	if version == 30 {
-		migration := `DROP TABLE IF EXISTS harness_activities;
-CREATE TABLE harness_activities (
-    event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64),
-    source_installation_id TEXT NOT NULL,
-    mailbox_id TEXT NOT NULL,
-    audience_account_id TEXT NOT NULL DEFAULT '',
-    harness TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('operation-status','plan','diff','command','file-change','tool-call','progress')),
-    item_id TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT '' CHECK(status IN ('','running','completed','failed','interrupted')),
-    title TEXT NOT NULL DEFAULT '',
-    body TEXT NOT NULL DEFAULT '',
-    truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),
-    occurred_at INTEGER NOT NULL,
-    runtime_id TEXT NOT NULL,
-    source_sequence TEXT NOT NULL,
-    display_order INTEGER NOT NULL CHECK(display_order >= 0),
-    UNIQUE(source_installation_id,mailbox_id,harness,session_id,operation_id,kind,item_id),
-    FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
-) STRICT;
-CREATE INDEX harness_activities_mailbox_time ON harness_activities(source_installation_id,mailbox_id,display_order,event_id);
-CREATE INDEX harness_activities_progress_retention ON harness_activities(source_installation_id,mailbox_id,harness,session_id,display_order,event_id) WHERE kind='progress';
-UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
-PRAGMA user_version = 31;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 31: %w", err)
-		}
-		version = 31
-	}
-	if version == 31 {
-		var displayOrderColumns int
-		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name='display_order'`).Scan(&displayOrderColumns); err != nil {
-			return fmt.Errorf("inspect schema version 31: %w", err)
-		}
-		if displayOrderColumns == 0 {
-			if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0`); err != nil {
-				return fmt.Errorf("add message display order: %w", err)
-			}
-		}
-		migration := `CREATE INDEX IF NOT EXISTS messages_conversation_order ON messages(sender_mailbox_id,recipient_mailbox_id,harness_provider,harness_session_id,display_order,event_id);
-UPDATE projection_checkpoint SET event_count=-1 WHERE id=1;
-PRAGMA user_version = 32;`
-		if _, err := s.db.ExecContext(ctx, migration); err != nil {
-			return fmt.Errorf("migrate schema to version 32: %w", err)
-		}
-		version = 32
-	}
-	if version != schemaVersion {
-		if err := s.resetSchema(ctx); err != nil {
+		if err := s.createFreshSchema(ctx); err != nil {
 			return err
 		}
 	}
@@ -1038,34 +683,11 @@ PRAGMA user_version = 32;`
 	return s.Rebuild(ctx)
 }
 
-func (s *SQLite) resetSchema(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
-	if err != nil {
-		return err
-	}
-	var tables []string
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			rows.Close()
-			return err
-		}
-		tables = append(tables, table)
-	}
-	rows.Close()
-	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
-		return err
-	}
-	for _, table := range tables {
-		if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS "`+strings.ReplaceAll(table, `"`, `""`)+`"`); err != nil {
-			return fmt.Errorf("drop old %s table: %w", table, err)
-		}
-	}
+func (s *SQLite) createFreshSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
-	return err
+	return nil
 }
 
 func (s *SQLite) bootstrap(ctx context.Context) error {
@@ -1091,7 +713,7 @@ func (s *SQLite) bootstrap(ctx context.Context) error {
 		return err
 	}
 	selectionPayload, _ := event.MarshalPayload(event.HumanAccountSelectionPayload{AccountID: accountID.String()})
-	selection := event.Content{Type: event.TypeHumanAccountSelect, Parents: []string{signed[2].ID()}, Scope: event.ScopeInstallationPrivate, Payload: selectionPayload}
+	selection := event.Content{Type: event.TypeHumanAccountSelect, Parents: []string{signed[2].ID()}, Authorities: []string{signed[2].ID()}, Scope: event.ScopeInstallationPrivate, Payload: selectionPayload}
 	selected, err := s.signContents(ctx, []event.Content{selection}, []time.Time{now})
 	if err != nil {
 		return err
@@ -1110,7 +732,7 @@ func (s *SQLite) bootstrap(ctx context.Context) error {
 func (s *SQLite) Close() error { return s.db.Close() }
 
 func (s *SQLite) policy() event.Policy {
-	return event.Policy{InstallationID: s.signer.InstallationID, RootKeyID: s.signer.PublicKey(), HumanMailboxID: model.HumanMailboxID, SchemaVersions: []int{event.Schema1, event.Schema2}}
+	return event.Policy{InstallationID: s.signer.InstallationID, RootKeyID: s.signer.PublicKey(), HumanMailboxID: model.HumanMailboxID}
 }
 
 func (s *SQLite) CurrentRevision(ctx context.Context) (uint64, error) {
@@ -1306,10 +928,109 @@ func (s *SQLite) ingestCanonicalTx(ctx context.Context, tx *sql.Tx, additions []
 	if err != nil {
 		return commit, err
 	}
+	observations, err := s.signMailboxAccessObservationsTx(ctx, tx, additions)
+	if err != nil {
+		return commit, err
+	}
+	if len(observations) != 0 {
+		observed, observeErr := s.ingestCanonicalProjectionTx(ctx, tx, observations, true)
+		commit.EventIDs = append(commit.EventIDs, observed.EventIDs...)
+		if observeErr != nil {
+			return commit, observeErr
+		}
+	}
 	accepted, err := s.reconcileProjectInputsTx(ctx, tx)
 	commit.EventIDs = append(commit.EventIDs, accepted...)
 	commit.ProjectInputAcceptanceIDs = append(commit.ProjectInputAcceptanceIDs, accepted...)
 	return commit, err
+}
+
+func (s *SQLite) signMailboxAccessObservationsTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent) ([]event.SignedEvent, error) {
+	type storedObservation struct {
+		id      string
+		grantID string
+		message string
+		parents []string
+	}
+	var stored []storedObservation
+	rows, err := tx.QueryContext(ctx, `SELECT raw FROM canonical_events WHERE event_type=? AND installation_id=?`, event.TypeMailboxAccessObserve, s.signer.InstallationID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		inspection := event.Inspect(raw)
+		var payload event.MailboxAccessObservationPayload
+		if inspection.Status == event.StatusProjected && json.Unmarshal(inspection.Event.Content.Payload, &payload) == nil {
+			stored = append(stored, storedObservation{
+				id: inspection.Event.ID(), grantID: payload.GrantEventID,
+				message: payload.MessageEventID, parents: inspection.Event.Content.Parents,
+			})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	observedMessages := make(map[string]bool, len(stored))
+	frontiers := make(map[string]map[string]bool)
+	for _, observation := range stored {
+		observedMessages[observation.message] = true
+		if frontiers[observation.grantID] == nil {
+			frontiers[observation.grantID] = make(map[string]bool)
+		}
+		frontiers[observation.grantID][observation.id] = true
+	}
+	for _, observation := range stored {
+		for _, parent := range observation.parents {
+			for _, grantFrontier := range frontiers {
+				delete(grantFrontier, parent)
+			}
+		}
+	}
+
+	var observations []event.SignedEvent
+	for _, item := range additions {
+		content := item.Content
+		if content.Scope != event.ScopePeerAddressed || content.InstallationID == s.signer.InstallationID || content.Recipient == nil || content.Recipient.InstallationID != s.signer.InstallationID || len(content.Authorities) != 1 {
+			continue
+		}
+		if content.Type != event.TypeQuestion && content.Type != event.TypeAnswer && content.Type != event.TypeMessage {
+			continue
+		}
+		if observedMessages[item.ID()] {
+			continue
+		}
+		grantID := content.Authorities[0]
+		parents := []string{grantID, item.ID()}
+		for observationID := range frontiers[grantID] {
+			parents = append(parents, observationID)
+		}
+		parents = uniqueSorted(parents)
+		if len(parents) > event.MaxParents {
+			return nil, errors.New("mailbox access observation frontier exceeds the causal parent limit")
+		}
+		payload, err := event.MarshalPayload(event.MailboxAccessObservationPayload{GrantEventID: grantID, MessageEventID: item.ID()})
+		if err != nil {
+			return nil, err
+		}
+		signed, err := s.signContents(ctx, []event.Content{{
+			Type: event.TypeMailboxAccessObserve, Sender: s.localAddress(model.HumanMailboxID),
+			Recipient: &event.MailboxAddress{InstallationID: content.InstallationID, MailboxID: model.HumanMailboxID},
+			Parents:   parents, Authorities: []string{grantID}, Scope: event.ScopePeerAddressed, Payload: payload,
+		}}, nil)
+		if err != nil {
+			return nil, err
+		}
+		observation := signed[0]
+		observations = append(observations, observation)
+		observedMessages[item.ID()] = true
+		frontiers[grantID] = map[string]bool{observation.ID(): true}
+	}
+	return observations, nil
 }
 
 // ingestCanonicalProjectionTx projects canonical facts without invoking the
@@ -1444,7 +1165,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 			return err
 		}
 	}
-	for _, table := range []string{"causal_edges", "threads", "messages", "harness_activities", "mailbox_contexts", "harness_bindings", "agent_sessions", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_shares", "human_account_default", "human_account_devices", "human_accounts"} {
+	for _, table := range []string{"causal_edges", "threads", "messages", "harness_activities", "mailbox_contexts", "harness_bindings", "agent_sessions", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_access", "human_account_default", "human_account_devices", "human_accounts"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
 			return fmt.Errorf("clear %s projection: %w", table, err)
 		}
@@ -1581,8 +1302,11 @@ SELECT event_id FROM (
 			return err
 		}
 	}
-	for _, share := range state.Shares {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_shares(mailbox_id, peer_installation_id, active) VALUES (?, ?, ?)`, share.MailboxID, share.PeerInstallationID, boolInt(share.Active)); err != nil {
+	for _, access := range state.MailboxAccess {
+		if access.GrantorInstallationID != s.signer.InstallationID {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_access(grant_event_id,mailbox_id,grantor_installation_id,grantee_installation_id,grantee_signer_key_id,active) VALUES (?, ?, ?, ?, ?, ?)`, access.GrantEventID, access.MailboxID, access.GrantorInstallationID, access.GranteeInstallationID, access.GranteeSignerKeyID, boolInt(access.Active)); err != nil {
 			return err
 		}
 	}
@@ -1897,6 +1621,7 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 	var recipient = &event.MailboxAddress{InstallationID: recipientInstallationID, MailboxID: m.RecipientMailboxID}
 	var audience *event.Audience
 	var parents []string
+	var authorities []string
 	remoteRecipient := recipientInstallationID != s.signer.InstallationID
 	if remoteProjectID != "" && m.SenderMailboxID == model.HumanMailboxID {
 		account, membership, deviceLabel, err := s.localAccountAction(ctx, "")
@@ -1905,9 +1630,14 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 		}
 		actorLabel = deviceLabel
 		payload, _ = event.MarshalPayload(textPayloadForMessage(m, actorLabel))
-		audience, parents, scope = &event.Audience{HumanAccountID: account.ID}, membership, event.ScopeAccountAddressed
+		audience, parents, authorities, scope = &event.Audience{HumanAccountID: account.ID}, membership, uniqueSorted(membership), event.ScopeAccountAddressed
 	} else if remoteRecipient {
 		scope = event.ScopePeerAddressed
+		authority, err := s.outboundMailboxAuthority(ctx, recipientInstallationID, m.RecipientMailboxID)
+		if err != nil {
+			return err
+		}
+		parents, authorities = []string{authority}, []string{authority}
 		if m.SenderMailboxID != model.HumanMailboxID {
 			typeName = event.TypeQuestion
 		}
@@ -1917,7 +1647,7 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 		if err != nil {
 			return err
 		}
-		audience, parents, recipient, scope = &event.Audience{HumanAccountID: account.ID}, membership, nil, event.ScopeAccountAddressed
+		audience, parents, authorities, recipient, scope = &event.Audience{HumanAccountID: account.ID}, membership, uniqueSorted(membership), nil, event.ScopeAccountAddressed
 	} else if m.SenderMailboxID == model.HumanMailboxID && m.RecipientMailboxID != model.HumanMailboxID {
 		account, membership, deviceLabel, err := s.localAccountAction(ctx, "")
 		if err != nil {
@@ -1925,9 +1655,9 @@ func (s *SQLite) Create(ctx context.Context, m model.Message) error {
 		}
 		actorLabel = deviceLabel
 		payload, _ = event.MarshalPayload(textPayloadForMessage(m, actorLabel))
-		audience, parents, scope = &event.Audience{HumanAccountID: account.ID}, membership, event.ScopeAccountAddressed
+		audience, parents, authorities, scope = &event.Audience{HumanAccountID: account.ID}, membership, uniqueSorted(membership), event.ScopeAccountAddressed
 	}
-	content := event.Content{Schema: event.MessageSchemaVersion, Type: typeName, Sender: s.localAddress(m.SenderMailboxID), Recipient: recipient, Audience: audience, Parents: parents, Scope: scope, Payload: payload}
+	content := event.Content{Schema: event.MessageSchemaVersion, Type: typeName, Sender: s.localAddress(m.SenderMailboxID), Recipient: recipient, Audience: audience, Parents: parents, Authorities: authorities, Scope: scope, Payload: payload}
 	var projectID string
 	if recipientInstallationID == s.signer.InstallationID {
 		err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE mailbox_id=?`, m.RecipientMailboxID).Scan(&projectID)
@@ -1993,6 +1723,7 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 	scope := event.ScopeInstallationPrivate
 	parents := []string{original.eventID}
 	var audience *event.Audience
+	var authorities []string
 	actorLabel := "human"
 	if original.message.AudienceAccountID != "" {
 		account, membership, deviceLabel, err := s.localAccountAction(ctx, original.message.AudienceAccountID)
@@ -2000,12 +1731,23 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 			return err
 		}
 		parents = uniqueSorted(append(parents, membership...))
+		authorities = uniqueSorted(membership)
 		audience, scope, actorLabel = &event.Audience{HumanAccountID: account.ID}, event.ScopeAccountAddressed, deviceLabel
+	} else if original.message.SenderInstallationID != s.signer.InstallationID {
+		authority, err := s.outboundMailboxAuthority(ctx, original.message.SenderInstallationID, reply.RecipientMailboxID)
+		if err != nil {
+			return err
+		}
+		parents = uniqueSorted(append(parents, authority))
+		authorities, scope = []string{authority}, event.ScopePeerAddressed
 	}
 	payload, _ := event.MarshalPayload(textPayloadForMessage(reply, actorLabel))
-	answer := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeAnswer, Sender: s.localAddress(reply.SenderMailboxID), Recipient: &event.MailboxAddress{InstallationID: original.message.SenderInstallationID, MailboxID: reply.RecipientMailboxID}, Audience: audience, ThreadID: original.eventID, Parents: parents, Scope: scope, Payload: payload}
+	answer := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeAnswer, Sender: s.localAddress(reply.SenderMailboxID), Recipient: &event.MailboxAddress{InstallationID: original.message.SenderInstallationID, MailboxID: reply.RecipientMailboxID}, Audience: audience, ThreadID: original.eventID, Parents: parents, Authorities: authorities, Scope: scope, Payload: payload}
 	archivePayload, _ := event.MarshalPayload(event.TargetPayload{TargetEventID: original.eventID})
-	archive := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Scope: scope, Payload: archivePayload}
+	archive := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Authorities: authorities, Scope: scope, Payload: archivePayload}
+	if scope == event.ScopePeerAddressed {
+		archive.Audience, archive.Authorities, archive.Scope = nil, nil, event.ScopeInstallationPrivate
+	}
 	if original.message.SenderInstallationID == s.signer.InstallationID {
 		var projectID string
 		err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE mailbox_id=? AND home_installation_id=?`, original.message.SenderMailboxID, s.signer.InstallationID).Scan(&projectID)
@@ -2025,6 +1767,24 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 		}
 	}
 	return s.appendContents(ctx, []event.Content{answer, archive}, []time.Time{reply.CreatedAt, reply.CreatedAt}, nil)
+}
+
+func (s *SQLite) outboundMailboxAuthority(ctx context.Context, recipientInstallationID, recipientMailboxID string) (string, error) {
+	state, err := s.canonicalState(ctx)
+	if err != nil {
+		return "", err
+	}
+	var grants []string
+	for _, access := range state.MailboxAccess {
+		if access.Active && access.GrantorInstallationID == recipientInstallationID && access.GranteeInstallationID == s.signer.InstallationID && access.GranteeSignerKeyID == s.signer.PublicKey() && access.MailboxID == recipientMailboxID {
+			grants = append(grants, access.GrantEventID)
+		}
+	}
+	sort.Strings(grants)
+	if len(grants) == 0 {
+		return "", fmt.Errorf("peer %s has not granted access to mailbox %s", recipientInstallationID, recipientMailboxID)
+	}
+	return grants[0], nil
 }
 
 type messageWithEvent struct {
@@ -2417,15 +2177,17 @@ func (s *SQLite) Archive(ctx context.Context, id string) error {
 	parents := uniqueSorted(append([]string{record.eventID}, stateParents...))
 	scope := event.ScopeInstallationPrivate
 	var audience *event.Audience
+	var authorities []string
 	if record.message.AudienceAccountID != "" {
 		account, membership, _, err := s.localAccountAction(ctx, record.message.AudienceAccountID)
 		if err != nil {
 			return err
 		}
 		parents = uniqueSorted(append(parents, membership...))
+		authorities = uniqueSorted(membership)
 		audience, scope = &event.Audience{HumanAccountID: account.ID}, event.ScopeAccountAddressed
 	}
-	content := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Scope: scope, Payload: payload}
+	content := event.Content{Type: event.TypeMessageArchive, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Authorities: authorities, Scope: scope, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, nil, nil)
 }
 
@@ -2445,15 +2207,17 @@ func (s *SQLite) Restore(ctx context.Context, id string) error {
 	payload, _ := event.MarshalPayload(event.TargetPayload{TargetEventID: record.eventID})
 	scope := event.ScopeInstallationPrivate
 	var audience *event.Audience
+	var authorities []string
 	if record.message.AudienceAccountID != "" {
 		account, membership, _, err := s.localAccountAction(ctx, record.message.AudienceAccountID)
 		if err != nil {
 			return err
 		}
 		parents = uniqueSorted(append(parents, membership...))
+		authorities = uniqueSorted(membership)
 		audience, scope = &event.Audience{HumanAccountID: account.ID}, event.ScopeAccountAddressed
 	}
-	content := event.Content{Type: event.TypeMessageRestore, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Scope: scope, Payload: payload}
+	content := event.Content{Type: event.TypeMessageRestore, Sender: s.localAddress(model.HumanMailboxID), Audience: audience, Parents: parents, Authorities: authorities, Scope: scope, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, nil, nil)
 }
 
@@ -2699,16 +2463,42 @@ func (s *SQLite) TrustPeer(ctx context.Context, peer Peer) error {
 		return err
 	}
 	parents := s.peerParents(ctx, peer.InstallationID)
-	return s.appendContents(ctx, []event.Content{{Type: event.TypePeerTrust, Parents: parents, Scope: event.ScopeInstallationPrivate, Payload: payload}}, nil, nil)
+	contents := []event.Content{{Type: event.TypePeerBindingSet, Parents: parents, Scope: event.ScopeInstallationPrivate, Payload: payload}}
+	access, err := s.mailboxAccessContents(ctx, model.HumanMailboxID, peer.InstallationID, peer.SignerKeyID, true)
+	if err != nil {
+		return err
+	}
+	contents = append(contents, access...)
+	return s.appendContents(ctx, contents, nil, nil)
 }
 
 func (s *SQLite) DistrustPeer(ctx context.Context, installationID string) error {
+	state, err := s.canonicalState(ctx)
+	if err != nil {
+		return err
+	}
+	peer, ok := state.Peers[installationID]
+	if !ok {
+		return errors.New("peer binding not found")
+	}
+	var contents []event.Content
+	for _, access := range state.MailboxAccess {
+		if access.GrantorInstallationID != s.signer.InstallationID || access.GranteeInstallationID != installationID || !access.Active {
+			continue
+		}
+		revokes, revokeErr := s.mailboxAccessContents(ctx, access.MailboxID, installationID, peer.SignerKeyID, false)
+		if revokeErr != nil {
+			return revokeErr
+		}
+		contents = append(contents, revokes...)
+	}
 	payload, _ := event.MarshalPayload(event.PeerPayload{InstallationID: installationID})
-	return s.appendContents(ctx, []event.Content{{Type: event.TypePeerDistrust, Parents: s.peerParents(ctx, installationID), Scope: event.ScopeInstallationPrivate, Payload: payload}}, nil, nil)
+	contents = append(contents, event.Content{Type: event.TypePeerBindingBlock, Parents: s.peerParents(ctx, installationID), Scope: event.ScopeInstallationPrivate, Payload: payload})
+	return s.appendContents(ctx, contents, nil, nil)
 }
 
 func (s *SQLite) peerParents(ctx context.Context, installationID string) []string {
-	rows, err := s.db.QueryContext(ctx, `SELECT event_id,raw FROM canonical_events WHERE event_type IN ('peer.trust','peer.distrust')`)
+	rows, err := s.db.QueryContext(ctx, `SELECT event_id,raw FROM canonical_events WHERE event_type IN ('peer.binding.set','peer.binding.block')`)
 	if err != nil {
 		return nil
 	}
@@ -2752,29 +2542,63 @@ func (s *SQLite) SetMailboxShare(ctx context.Context, mailboxID, peerID string, 
 	if _, err := s.getMailbox(ctx, mailboxID); err != nil {
 		return err
 	}
-	payload, _ := event.MarshalPayload(event.MailboxSharePayload{MailboxID: mailboxID, PeerInstallationID: peerID})
-	typeName := event.TypeMailboxShare
-	if !active {
-		typeName = event.TypeMailboxShareRevoke
+	state, err := s.canonicalState(ctx)
+	if err != nil {
+		return err
 	}
-	rows, _ := s.db.QueryContext(ctx, `SELECT event_id,raw FROM canonical_events WHERE event_type IN ('mailbox.share','mailbox.share.revoke')`)
-	var parents []string
-	if rows != nil {
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			var raw []byte
-			if rows.Scan(&id, &raw) == nil {
-				inspected := event.Inspect(raw)
-				var p event.MailboxSharePayload
-				if json.Unmarshal(inspected.Event.Content.Payload, &p) == nil && p.MailboxID == mailboxID && p.PeerInstallationID == peerID {
-					parents = append(parents, id)
-				}
-			}
+	peer, ok := state.Peers[peerID]
+	if !ok || peer.SignerKeyID == "" {
+		return errors.New("peer binding not found")
+	}
+	contents, err := s.mailboxAccessContents(ctx, mailboxID, peerID, peer.SignerKeyID, active)
+	if err != nil {
+		return err
+	}
+	if len(contents) == 0 {
+		return nil
+	}
+	return s.appendContents(ctx, contents, nil, nil)
+}
+
+func (s *SQLite) mailboxAccessContents(ctx context.Context, mailboxID, peerID, peerSignerKeyID string, active bool) ([]event.Content, error) {
+	state, err := s.canonicalState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var matching []event.MailboxAccessProjection
+	for _, access := range state.MailboxAccess {
+		if access.GrantorInstallationID == s.signer.InstallationID && access.MailboxID == mailboxID && access.GranteeInstallationID == peerID && access.GranteeSignerKeyID == peerSignerKeyID && access.Active {
+			matching = append(matching, access)
 		}
 	}
-	sort.Strings(parents)
-	return s.appendContents(ctx, []event.Content{{Type: typeName, Parents: parents, Scope: event.ScopeInstallationPrivate, Payload: payload}}, nil, nil)
+	if active && len(matching) != 0 || !active && len(matching) == 0 {
+		return nil, nil
+	}
+	payload, err := event.MarshalPayload(event.MailboxAccessPayload{MailboxID: mailboxID, GranteeInstallationID: peerID, GranteeSignerKeyID: peerSignerKeyID})
+	if err != nil {
+		return nil, err
+	}
+	route := event.Content{
+		InstallationID: s.signer.InstallationID,
+		Sender:         s.localAddress(model.HumanMailboxID),
+		Recipient:      &event.MailboxAddress{InstallationID: peerID, MailboxID: model.HumanMailboxID},
+		Scope:          event.ScopePeerAddressed, Payload: payload,
+	}
+	if active {
+		route.Type = event.TypeMailboxAccessGrant
+		return []event.Content{route}, nil
+	}
+	for _, access := range matching {
+		route.Type = event.TypeMailboxAccessRevoke
+		route.Authorities = []string{access.GrantEventID}
+		route.Parents = append([]string{access.GrantEventID}, access.ObservationEventIDs...)
+		route.Parents = uniqueSorted(route.Parents)
+		if len(route.Parents) > event.MaxParents {
+			return nil, errors.New("mailbox access observation frontier exceeds the causal parent limit")
+		}
+		return []event.Content{route}, nil
+	}
+	return nil, nil
 }
 
 func (s *SQLite) Quarantine(ctx context.Context, raw []byte, relay, eventID, reason string, received time.Time) error {

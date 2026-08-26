@@ -23,7 +23,7 @@ import (
 func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state", "hq.db")
 	s := openStore(t, path)
-	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "32"}
+	checks := map[string]string{"PRAGMA journal_mode": "wal", "PRAGMA synchronous": "2", "PRAGMA foreign_keys": "1", "PRAGMA trusted_schema": "0", "PRAGMA integrity_check": "ok", "PRAGMA user_version": "33"}
 	for query, want := range checks {
 		var got string
 		if err := s.db.QueryRow(query).Scan(&got); err != nil {
@@ -33,7 +33,7 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 			t.Errorf("%s = %q, want %q", query, got, want)
 		}
 	}
-	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "named_agents", "agent_sessions", "agent_ownership", "mailbox_contexts", "messages", "threads", "peers", "mailbox_shares", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts", "change_revision", "projects", "project_events", "resources", "project_resources", "resource_claim_epochs", "resource_health", "project_assignment_epochs", "project_threads", "project_message_acceptances", "project_dispatch_records", "project_dispatch_attempts", "project_activation_operations", "project_runtime_operations", "project_worktree_operations", "agent_retirement_operations", "project_output_provenance", "project_replicas", "project_audit_log", "harness_activities"} {
+	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "named_agents", "agent_sessions", "agent_ownership", "mailbox_contexts", "messages", "threads", "peers", "mailbox_access", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts", "change_revision", "projects", "project_events", "resources", "project_resources", "resource_claim_epochs", "resource_health", "project_assignment_epochs", "project_threads", "project_message_acceptances", "project_dispatch_records", "project_dispatch_attempts", "project_activation_operations", "project_runtime_operations", "project_worktree_operations", "agent_retirement_operations", "project_output_provenance", "project_replicas", "project_audit_log", "harness_activities"} {
 		var strict int
 		if err := s.db.QueryRow(`SELECT strict FROM pragma_table_list WHERE name = ?`, table).Scan(&strict); err != nil {
 			t.Fatal(err)
@@ -441,49 +441,6 @@ func TestTypedReplyKeepsExplicitCorrelation(t *testing.T) {
 	}
 }
 
-func TestSchema1MessageRebuildUsesEventLegacyAdapter(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "hq.db")
-	s := openStore(t, database)
-	ctx := context.Background()
-	agent := resolveAgent(t, s, "codex", "legacy-rebuild", "/repo")
-	payload, err := event.MarshalPayload(event.TextPayload{
-		MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140da9", Body: "legacy output",
-		Details: "Visible explanation.\nKind: final-answer\nHarness provider: codex\nHarness session: legacy-session\nHarness operation: legacy-operation\nPhase: final_answer",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	signed, err := s.signContents(ctx, []event.Content{{
-		Schema: event.Schema1, Type: event.TypeMessage, Scope: event.ScopeInstallationPrivate,
-		Sender: s.localAddress(agent.ID), Recipient: s.localAddress(model.HumanMailboxID), Payload: payload,
-	}}, []time.Time{time.Now().UTC()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AppendCanonical(ctx, signed); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`UPDATE messages SET presentation='', harness_provider='', harness_session_id='', harness_operation_id='', technical_sections_json='[]'; UPDATE projection_checkpoint SET event_count=-1 WHERE id=1`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	stored, err := reopened.Get(ctx, payloadMessageID(t, payload))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantCorrelation := model.MessageCorrelation{Provider: "codex", SessionID: "legacy-session", OperationID: "legacy-operation"}
-	if stored.Presentation != model.PresentationFinalAnswer || stored.Correlation != wantCorrelation || stored.Details != "Visible explanation." || !technicalFieldEquals(stored.TechnicalSections, "hq.legacy.harness", "phase", "final_answer") {
-		t.Fatalf("rebuilt legacy message = %#v", stored)
-	}
-}
-
 func assertMessageSemantics(t *testing.T, got, want model.Message) {
 	t.Helper()
 	if got.Presentation != want.Presentation || got.Correlation != want.Correlation || got.Details != want.Details || got.Purpose != model.NormalizeMessagePurpose(want.Purpose) || got.Context != want.Context || !reflect.DeepEqual(got.TechnicalSections, want.TechnicalSections) {
@@ -662,173 +619,35 @@ func TestHarnessConversationsNamespaceProviderLocalSessionIDs(t *testing.T) {
 	}
 }
 
-func TestVersionTwelveMigrationBackfillsMessageCorrelation(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "hq.db")
-	s := openStore(t, database)
-	ctx := context.Background()
-	agent := resolveAgent(t, s, "codex", "correlation-migration", "/repo")
-	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db1", agent.ID, model.HumanMailboxID, "preserve correlation")
-	item.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "migrated-thread", OperationID: "migrated-turn"}
-	if err := s.Create(ctx, item); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := sql.Open("sqlite", database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`DROP INDEX messages_harness_conversation; DROP INDEX messages_harness_operation; DROP INDEX messages_conversation_order; ALTER TABLE messages DROP COLUMN harness_provider; ALTER TABLE messages DROP COLUMN harness_session_id; ALTER TABLE messages DROP COLUMN harness_operation_id; PRAGMA user_version = 12`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened, err := Open(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	got, err := reopened.Get(ctx, item.ID)
-	if err != nil || got.HarnessProvider != "codex" || got.HarnessSessionID != "migrated-thread" || got.HarnessOperationID != "migrated-turn" || got.Purpose != model.MessagePurposeConversation || got.Body != item.Body {
-		t.Fatalf("migrated message = %#v, %v", got, err)
-	}
-}
-
-func TestVersionTwentyEightMigrationAddsProviderNamespace(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "hq.db")
-	s := openStore(t, database)
-	ctx := context.Background()
-	agent := resolveAgent(t, s, "codex", "provider-migration", "/repo")
-	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db2", agent.ID, model.HumanMailboxID, "preserve provider")
-	item.Correlation = model.MessageCorrelation{Provider: "codex", SessionID: "migrated-thread", OperationID: "migrated-turn"}
-	if err := s.Create(ctx, item); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`DROP INDEX messages_harness_conversation; DROP INDEX messages_harness_operation; DROP INDEX messages_conversation_order; ALTER TABLE messages DROP COLUMN harness_provider; PRAGMA user_version = 28`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	got, err := reopened.Get(ctx, item.ID)
-	if err != nil || got.HarnessProvider != "codex" || got.HarnessSessionID != "migrated-thread" {
-		t.Fatalf("namespaced migrated message = %#v, %v", got, err)
-	}
-}
-
-func TestVersionTwoDataIsDestroyed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "hq.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`CREATE TABLE mailboxes(directory TEXT); CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES ('old'); PRAGMA user_version = 2`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s := openStore(t, path)
-	var count int
-	if err := s.db.QueryRow(`SELECT count(*) FROM messages`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("old messages left = %d", count)
-	}
-	var version int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != schemaVersion {
-		t.Fatalf("user_version = %d", version)
-	}
-}
-
-func TestVersionSevenMigratesWithoutLosingCanonicalState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "hq.db")
-	s := openStore(t, path)
-	ctx := context.Background()
-	agent, err := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "codex", ExternalSessionID: "migration"}, model.RepositoryContext{Directory: "/repo"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	message := model.Message{ID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d99", SenderMailboxID: agent.ID, RecipientMailboxID: model.HumanMailboxID, Body: "preserve me", Context: model.RepositoryContext{Directory: "/repo"}, CreatedAt: time.Now().UTC()}
-	if err := s.Create(ctx, message); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`DROP TABLE mutation_receipts; DROP TABLE change_revision; PRAGMA user_version = 7`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if got, err := reopened.Get(ctx, message.ID); err != nil || got.Body != message.Body {
-		t.Fatalf("migrated message = %#v, %v", got, err)
-	}
-	var version int
-	if err := reopened.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
-		t.Fatalf("migrated version = %d, %v", version, err)
-	}
-}
-
-func TestVersionNineMigrationPreservesStateAndAllowsNamedMailboxHistory(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "hq.db")
-	s := openStore(t, database)
-	agent := resolveAgent(t, s, "codex", "one", "/repo")
-	var canonical int
-	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&canonical); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`PRAGMA foreign_keys=OFF; DROP TABLE agent_ownership; DROP TABLE named_agents;
-ALTER TABLE harness_bindings RENAME TO harness_bindings_v10;
-CREATE TABLE harness_bindings (harness TEXT NOT NULL, external_session_id TEXT NOT NULL, mailbox_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, PRIMARY KEY(harness,external_session_id), FOREIGN KEY(mailbox_id) REFERENCES mailboxes(id) ON DELETE CASCADE) STRICT;
-INSERT INTO harness_bindings SELECT * FROM harness_bindings_v10; DROP TABLE harness_bindings_v10; PRAGMA user_version=9; PRAGMA foreign_keys=ON`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := Open(database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	var after int
-	if err := reopened.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&after); err != nil || after != canonical {
-		t.Fatalf("canonical events = %d, want %d: %v", after, canonical, err)
-	}
-	if _, err := reopened.db.Exec(`INSERT INTO harness_bindings(harness,external_session_id,mailbox_id,created_at) VALUES ('codex','two',?,?)`, agent.ID, time.Now().UnixMilli()); err != nil {
-		t.Fatalf("second historical binding: %v", err)
+func TestOpenRejectsOlderAndUnversionedDatabases(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		schema string
+		want   string
+	}{
+		{name: "older version", schema: `CREATE TABLE old_events(id TEXT); PRAGMA user_version=32`, want: "unsupported HQ database schema 32"},
+		{name: "unversioned", schema: `CREATE TABLE old_events(id TEXT)`, want: "unsupported unversioned HQ database"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "hq.db")
+			initialized := openStore(t, path)
+			if err := initialized.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`PRAGMA user_version=0; ` + test.schema); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("open error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -1004,7 +823,8 @@ func TestUnknownPeerCannotAppendCanonicalState(t *testing.T) {
 	peerSecret := event.MustSecretKeyFromHex("88")
 	peerInstallation := "0198c7ec-73b0-7cc3-a5f7-e31c77140d02"
 	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d78", Body: "forged", Context: &event.RepositoryContext{Directory: "/repo"}})
-	content := event.Content{Type: event.TypeMessage, InstallationID: peerInstallation, Sender: &event.MailboxAddress{InstallationID: peerInstallation, MailboxID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d12"}, Recipient: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: model.HumanMailboxID}, Scope: event.ScopePeerAddressed, Payload: payload}
+	missingAuthority := strings.Repeat("b", 64)
+	content := event.Content{Type: event.TypeMessage, InstallationID: peerInstallation, Sender: &event.MailboxAddress{InstallationID: peerInstallation, MailboxID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d12"}, Recipient: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: model.HumanMailboxID}, Parents: []string{missingAuthority}, Authorities: []string{missingAuthority}, Scope: event.ScopePeerAddressed, Payload: payload}
 	forged, err := event.Sign(content, time.Now().UTC(), peerSecret)
 	if err != nil {
 		t.Fatal(err)
@@ -1022,9 +842,24 @@ func TestPeerAddressedAppendDerivesExactOutboxAtomically(t *testing.T) {
 	ctx := context.Background()
 	peerInstallation := "0198c7ec-73b0-7cc3-a5f7-e31c77140d02"
 	peerMailbox := "0198c7ec-73b0-7cc3-a5f7-e31c77140d12"
+	peerSecret := event.MustSecretKeyFromHex("89")
+	if err := s.TrustPeer(ctx, Peer{InstallationID: peerInstallation, SignerKeyID: peerSecret.PublicKeyHex()}); err != nil {
+		t.Fatal(err)
+	}
+	grantPayload, _ := event.MarshalPayload(event.MailboxAccessPayload{MailboxID: peerMailbox, GranteeInstallationID: s.signer.InstallationID, GranteeSignerKeyID: s.signer.PublicKey()})
+	grant, err := event.Sign(event.Content{Type: event.TypeMailboxAccessGrant, InstallationID: peerInstallation, Sender: &event.MailboxAddress{InstallationID: peerInstallation, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: model.HumanMailboxID}, Scope: event.ScopePeerAddressed, Payload: grantPayload}, time.Now().UTC(), peerSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCanonical(ctx, []event.SignedEvent{grant}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM outbox`); err != nil {
+		t.Fatal(err)
+	}
 	makeEvent := func(messageID, body string) event.SignedEvent {
 		payload, _ := event.MarshalPayload(event.TextPayload{MessageID: messageID, Body: body, Context: &event.RepositoryContext{Directory: "/repo"}})
-		content := event.Content{Type: event.TypeMessage, Sender: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: peerInstallation, MailboxID: peerMailbox}, Scope: event.ScopePeerAddressed, Payload: payload}
+		content := event.Content{Type: event.TypeMessage, Sender: &event.MailboxAddress{InstallationID: s.signer.InstallationID, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: peerInstallation, MailboxID: peerMailbox}, Parents: []string{grant.ID()}, Authorities: []string{grant.ID()}, Scope: event.ScopePeerAddressed, Payload: payload}
 		item, err := s.signer.Sign(ctx, content, time.Now().UTC())
 		if err != nil {
 			t.Fatal(err)
@@ -1033,6 +868,9 @@ func TestPeerAddressedAppendDerivesExactOutboxAtomically(t *testing.T) {
 	}
 	first := makeEvent("0198c7ec-73b0-7cc3-a5f7-e31c77140d79", "remote one")
 	if err := s.AppendCanonical(ctx, []event.SignedEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM outbox WHERE event_id IN (SELECT event_id FROM canonical_events WHERE event_type IN (?, ?, ?))`, event.TypeMailboxAccessGrant, event.TypeMailboxAccessRevoke, event.TypeMailboxAccessObserve); err != nil {
 		t.Fatal(err)
 	}
 	jobs, err := s.PendingOutbox(ctx, 10)
@@ -1055,7 +893,7 @@ func TestPeerAddressedAppendDerivesExactOutboxAtomically(t *testing.T) {
 	}
 }
 
-func TestPeerTrustDistrustAndMailboxShareAreSigned(t *testing.T) {
+func TestPeerBindingAndMailboxAccessAreSigned(t *testing.T) {
 	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
 	ctx := context.Background()
 	agent := resolveAgent(t, s, "codex", "share", "/repo")
@@ -1068,7 +906,7 @@ func TestPeerTrustDistrustAndMailboxShareAreSigned(t *testing.T) {
 		t.Fatal(err)
 	}
 	var active int
-	if err := s.db.QueryRow(`SELECT active FROM mailbox_shares WHERE mailbox_id=? AND peer_installation_id=?`, agent.ID, peerID).Scan(&active); err != nil || active != 1 {
+	if err := s.db.QueryRow(`SELECT active FROM mailbox_access WHERE mailbox_id=? AND grantee_installation_id=?`, agent.ID, peerID).Scan(&active); err != nil || active != 1 {
 		t.Fatalf("active share = %d, %v", active, err)
 	}
 	if err := s.SetMailboxShare(ctx, agent.ID, peerID, false); err != nil {
@@ -1081,7 +919,7 @@ func TestPeerTrustDistrustAndMailboxShareAreSigned(t *testing.T) {
 	if err != nil || len(peers) != 1 || peers[0].Trusted {
 		t.Fatalf("peers = %#v, %v", peers, err)
 	}
-	if err := s.db.QueryRow(`SELECT active FROM mailbox_shares WHERE mailbox_id=? AND peer_installation_id=?`, agent.ID, peerID).Scan(&active); err != nil || active != 0 {
+	if err := s.db.QueryRow(`SELECT active FROM mailbox_access WHERE mailbox_id=? AND grantee_installation_id=?`, agent.ID, peerID).Scan(&active); err != nil || active != 0 {
 		t.Fatalf("revoked share = %d, %v", active, err)
 	}
 }

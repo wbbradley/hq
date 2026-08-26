@@ -14,19 +14,21 @@ import (
 )
 
 func TestReduceIsIdempotentAndInputOrderIndependent(t *testing.T) {
-	trust := localControl(t, TypePeerTrust, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Name: "peer"}, nil, 1)
+	trust := localControl(t, TypePeerBindingSet, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex(), Name: "peer"}, nil, 1)
+	outbound := mailboxGrant(t, installationB, secretB, installationA, secretA.PublicKeyHex(), mailboxHumanB, 2)
+	inbound := mailboxGrant(t, installationA, secretA, installationB, secretB.PublicKeyHex(), mailboxAgentA, 3)
 	question := signedText(t, TypeQuestion, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
-		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}, "question", "", nil, 2)
+		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}, "question", "", nil, outbound.ID(), 4)
 	answer := signedText(t, TypeAnswer, installationB, secretB,
 		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "answer", question.ID(), []string{question.ID()}, 1)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "answer", question.ID(), []string{question.ID()}, inbound.ID(), 1)
 	cancel := signedCancel(t, question.ID(), []string{question.ID()}, 8)
-	raw := [][]byte{trust.Wire, question.Wire, answer.Wire, cancel.Wire, append(append([]byte(nil), answer.Wire...), '\n')}
+	raw := [][]byte{trust.Wire, outbound.Wire, inbound.Wire, question.Wire, answer.Wire, cancel.Wire, append(append([]byte(nil), answer.Wire...), '\n')}
 	policy := localPolicy()
 	want := Reduce(raw, policy)
-	if len(want.Records) != 4 {
-		t.Fatalf("record count = %d, want 4", len(want.Records))
+	if len(want.Records) != 6 {
+		t.Fatalf("record count = %d, want 6", len(want.Records))
 	}
 	if len(want.DisplayOrder) != 2 || want.DisplayOrder[0] != question.ID() || want.DisplayOrder[1] != answer.ID() {
 		t.Fatalf("causal display order = %#v", want.DisplayOrder)
@@ -42,7 +44,7 @@ func TestReduceIsIdempotentAndInputOrderIndependent(t *testing.T) {
 }
 
 func TestHarnessActivityProjectionIsDeterministicAndMessageInert(t *testing.T) {
-	root := signedMessagePayload(t, Schema2, TextPayload{Body: "message"}, 10)
+	root := signedMessagePayload(t, Schema3, TextPayload{Body: "message"}, 10)
 	first := signedActivity(t, activityPayload(domain.HarnessActivityPlan, "", ""), []string{root.ID()}, 1)
 	secondPayload := activityPayload(domain.HarnessActivityPlan, "", "")
 	secondPayload.Body, secondPayload.Sequence = "new plan", 2
@@ -52,7 +54,7 @@ func TestHarnessActivityProjectionIsDeterministicAndMessageInert(t *testing.T) {
 	otherProviderPayload.Correlation.Provider = "other"
 	otherProvider := signedActivity(t, otherProviderPayload, []string{root.ID()}, 4)
 	otherMailbox := mustSign(t, Content{
-		Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA,
+		Schema: Schema3, Type: TypeHarnessActivity, InstallationID: installationA,
 		Sender:  &MailboxAddress{InstallationID: installationA, MailboxID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d13"},
 		Parents: []string{root.ID()}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, secondPayload),
 	}, time.Unix(5, 0), secretA)
@@ -104,30 +106,17 @@ func TestHarnessActivitySourceSequenceBreaksSameMillisecondTies(t *testing.T) {
 }
 
 func TestHarnessActivityUnsupportedAndAccountAuthorization(t *testing.T) {
-	local := signedActivity(t, activityPayload(domain.HarnessActivityOperation, "", domain.HarnessActivityRunning), nil, 1)
-	oldPolicy := localPolicy()
-	oldPolicy.SchemaVersions = []int{Schema1}
-	old := Reduce(wires(local), oldPolicy)
-	if old.Records[local.ID()].Status != StatusUnsupported || len(old.Records[local.ID()].Event.Wire) == 0 {
-		t.Fatalf("old reader activity = %#v", old.Records[local.ID()])
-	}
 	create, grant, accept := humanMembershipEvents(t)
 	payload := activityPayload(domain.HarnessActivityProgress, "progress", domain.HarnessActivityRunning)
 	accountActivity := mustSign(t, Content{
-		Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationB,
+		Schema: Schema3, Type: TypeHarnessActivity, InstallationID: installationB,
 		Sender:   &MailboxAddress{InstallationID: installationB, MailboxID: mailboxAgentA},
-		Audience: &Audience{HumanAccountID: accountA}, Parents: []string{accept.ID()}, Scope: ScopeAccountAddressed,
+		Audience: &Audience{HumanAccountID: accountA}, Parents: []string{accept.ID()}, Authorities: []string{accept.ID()}, Scope: ScopeAccountAddressed,
 		Payload: mustPayload(t, payload),
 	}, time.Unix(5, 0), secretB)
 	state := Reduce(wires(create, grant, accept, accountActivity), localPolicy())
 	if state.Records[accountActivity.ID()].Status != StatusProjected || len(state.HarnessActivities) != 1 {
 		t.Fatalf("active account activity = %#v %#v", state.Records[accountActivity.ID()], state.HarnessActivities)
-	}
-	oldAccountPolicy := localPolicy()
-	oldAccountPolicy.SchemaVersions = []int{Schema1}
-	oldAccount := Reduce(wires(create, grant, accept, accountActivity), oldAccountPolicy)
-	if oldAccount.Records[accountActivity.ID()].Status != StatusUnsupported || len(oldAccount.Records[accountActivity.ID()].Event.Wire) == 0 {
-		t.Fatalf("old account reader activity = %#v", oldAccount.Records[accountActivity.ID()])
 	}
 	wrong := accountActivity.Content
 	wrong.Audience = &Audience{HumanAccountID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d22"}
@@ -143,7 +132,7 @@ func TestHarnessActivityUnsupportedAndAccountAuthorization(t *testing.T) {
 		Type: TypeHumanDeviceRevoke, InstallationID: installationA,
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
-		Audience:  &Audience{HumanAccountID: accountA}, Parents: []string{accept.ID()}, Scope: ScopeAccountAddressed,
+		Audience:  &Audience{HumanAccountID: accountA}, Parents: uniqueSortedStrings([]string{grant.ID(), accept.ID()}), Authorities: []string{grant.ID()}, Scope: ScopeAccountAddressed,
 		Payload: mustPayload(t, humanDevicePayload()),
 	}, time.Unix(7, 0), secretA)
 	revokedContent := accountActivity.Content
@@ -161,30 +150,32 @@ func TestHarnessActivityUnsupportedAndAccountAuthorization(t *testing.T) {
 func signedActivity(t *testing.T, payload HarnessActivityPayload, parents []string, second int64) SignedEvent {
 	t.Helper()
 	return mustSign(t, Content{
-		Schema: Schema2, Type: TypeHarnessActivity, InstallationID: installationA,
+		Schema: Schema3, Type: TypeHarnessActivity, InstallationID: installationA,
 		Sender:  &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
 		Parents: parents, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, payload),
 	}, time.Unix(second, 0), secretA)
 }
 
 func TestMultipleAnswersAndCancellationRelationsUseCausality(t *testing.T) {
-	trust := localControl(t, TypePeerTrust, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
+	trust := localControl(t, TypePeerBindingSet, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
+	outbound := mailboxGrant(t, installationB, secretB, installationA, secretA.PublicKeyHex(), mailboxHumanB, 2)
+	inbound := mailboxGrant(t, installationA, secretA, installationB, secretB.PublicKeyHex(), mailboxAgentA, 3)
 	question := signedText(t, TypeQuestion, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
-		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}, "question", "", nil, 50)
+		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}, "question", "", nil, outbound.ID(), 50)
 	answerBefore := signedText(t, TypeAnswer, installationB, secretB,
 		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "before", question.ID(), []string{question.ID()}, 90)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "before", question.ID(), []string{question.ID()}, inbound.ID(), 90)
 	cancelAfter := signedCancel(t, question.ID(), []string{answerBefore.ID()}, 1)
 	cancelBefore := signedCancel(t, question.ID(), []string{question.ID()}, 100)
 	answerAfter := signedText(t, TypeAnswer, installationB, secretB,
 		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "after", question.ID(), []string{cancelBefore.ID()}, 2)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "after", question.ID(), []string{cancelBefore.ID()}, inbound.ID(), 2)
 	concurrentAnswer := signedText(t, TypeAnswer, installationB, secretB,
 		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "concurrent", question.ID(), []string{question.ID()}, 3)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "concurrent", question.ID(), []string{question.ID()}, inbound.ID(), 3)
 
-	state := Reduce(wires(trust, question, answerBefore, cancelAfter, cancelBefore, answerAfter, concurrentAnswer), localPolicy())
+	state := Reduce(wires(trust, outbound, inbound, question, answerBefore, cancelAfter, cancelBefore, answerAfter, concurrentAnswer), localPolicy())
 	thread := state.Threads[question.ID()]
 	if !thread.Answered || !thread.Cancelled || len(thread.AnswerIDs) != 3 || len(thread.CancellationIDs) != 2 {
 		t.Fatalf("thread facts = %#v", thread)
@@ -205,15 +196,16 @@ func TestMultipleAnswersAndCancellationRelationsUseCausality(t *testing.T) {
 }
 
 func TestMissingParentIsVisibleButDoesNotAnswerQuestion(t *testing.T) {
-	trust := localControl(t, TypePeerTrust, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
-	share := localControl(t, TypeMailboxShare, MailboxSharePayload{MailboxID: mailboxAgentA, PeerInstallationID: installationB}, nil, 2)
+	trust := localControl(t, TypePeerBindingSet, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
+	outbound := mailboxGrant(t, installationB, secretB, installationA, secretA.PublicKeyHex(), mailboxHumanB, 2)
+	inbound := mailboxGrant(t, installationA, secretA, installationB, secretB.PublicKeyHex(), mailboxAgentA, 3)
 	question := signedText(t, TypeQuestion, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
-		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}, "missing for now", "", nil, 3)
+		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}, "missing for now", "", nil, outbound.ID(), 4)
 	answer := signedText(t, TypeAnswer, installationB, secretB,
 		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "orphan", question.ID(), []string{question.ID()}, 4)
-	state := Reduce(wires(trust, share, answer), localPolicy())
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "orphan", question.ID(), []string{question.ID()}, inbound.ID(), 5)
+	state := Reduce(wires(trust, outbound, inbound, answer), localPolicy())
 	if got := state.Records[answer.ID()].Status; got != StatusUnresolved {
 		t.Fatalf("answer status = %q", got)
 	}
@@ -231,24 +223,26 @@ func TestMissingParentIsVisibleButDoesNotAnswerQuestion(t *testing.T) {
 	if _, exists := state.Threads[question.ID()]; exists {
 		t.Fatal("unseen question was projected as answered")
 	}
-	resolved := Reduce(wires(trust, share, question, answer), localPolicy())
+	resolved := Reduce(wires(trust, outbound, inbound, question, answer), localPolicy())
 	if resolved.Records[answer.ID()].Status != StatusProjected || !resolved.Threads[question.ID()].Answered {
 		t.Fatalf("resolved state = %#v, %#v", resolved.Records[answer.ID()], resolved.Threads[question.ID()])
 	}
 }
 
 func TestWaitRequiresQuestionOwnershipAndReturnsFirstDisplayedAnswer(t *testing.T) {
-	trust := localControl(t, TypePeerTrust, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
+	trust := localControl(t, TypePeerBindingSet, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
+	outbound := mailboxGrant(t, installationB, secretB, installationA, secretA.PublicKeyHex(), mailboxHumanB, 2)
+	inbound := mailboxGrant(t, installationA, secretA, installationB, secretB.PublicKeyHex(), mailboxAgentA, 3)
 	question := signedText(t, TypeQuestion, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
-		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}, "question", "", nil, 10)
+		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}, "question", "", nil, outbound.ID(), 10)
 	later := signedText(t, TypeAnswer, installationB, secretB,
 		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "later", question.ID(), []string{question.ID()}, 30)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "later", question.ID(), []string{question.ID()}, inbound.ID(), 30)
 	earlier := signedText(t, TypeAnswer, installationB, secretB,
 		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "earlier", question.ID(), []string{question.ID()}, 20)
-	state := Reduce(wires(later, trust, question, earlier), localPolicy())
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "earlier", question.ID(), []string{question.ID()}, inbound.ID(), 20)
+	state := Reduce(wires(later, trust, outbound, inbound, question, earlier), localPolicy())
 	got, err := state.Wait(question.ID(), MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA})
 	if err != nil || got.ID != earlier.ID() {
 		t.Fatalf("wait = %#v, %v", got, err)
@@ -261,53 +255,81 @@ func TestWaitRequiresQuestionOwnershipAndReturnsFirstDisplayedAnswer(t *testing.
 	}
 }
 
-func TestPeerTrustAndMailboxSharesFailClosed(t *testing.T) {
-	trust := localControl(t, TypePeerTrust, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
-	humanMessage := remoteMessage(t, mailboxHumanA, 2)
-	agentMessage := remoteMessage(t, mailboxAgentA, 3)
-	withoutShare := Reduce(wires(trust, humanMessage, agentMessage), localPolicy())
-	if withoutShare.Records[humanMessage.ID()].Status != StatusProjected {
-		t.Fatalf("human message = %#v", withoutShare.Records[humanMessage.ID()])
-	}
-	if withoutShare.Records[agentMessage.ID()].Status != StatusUnauthorized {
-		t.Fatalf("agent message = %#v", withoutShare.Records[agentMessage.ID()])
+func TestMailboxCapabilitiesAreDirectionalAndRevocationIsRemoveWins(t *testing.T) {
+	binding := localControl(t, TypePeerBindingSet, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
+	grant := mailboxGrant(t, installationA, secretA, installationB, secretB.PublicKeyHex(), mailboxAgentA, 2)
+	authorized := remoteMessage(t, mailboxAgentA, grant.ID(), 3)
+	wrongMailbox := remoteMessage(t, mailboxHumanA, grant.ID(), 4)
+
+	state := Reduce(wires(binding, grant, authorized, wrongMailbox), localPolicy())
+	if state.Records[authorized.ID()].Status != StatusProjected || state.Records[wrongMailbox.ID()].Status != StatusUnauthorized {
+		t.Fatalf("directional access = %#v, %#v", state.Records[authorized.ID()], state.Records[wrongMailbox.ID()])
 	}
 
-	share := localControl(t, TypeMailboxShare, MailboxSharePayload{MailboxID: mailboxAgentA, PeerInstallationID: installationB}, nil, 4)
-	withShare := Reduce(wires(trust, share, agentMessage), localPolicy())
-	if withShare.Records[agentMessage.ID()].Status != StatusProjected {
-		t.Fatalf("shared message = %#v", withShare.Records[agentMessage.ID()])
-	}
-	revoke := localControl(t, TypeMailboxShareRevoke, MailboxSharePayload{MailboxID: mailboxAgentA, PeerInstallationID: installationB}, []string{share.ID()}, 5)
-	afterRevoke := Reduce(wires(trust, share, revoke, agentMessage), localPolicy())
-	if afterRevoke.Records[agentMessage.ID()].Status != StatusUnauthorized {
-		t.Fatalf("revoked message = %#v", afterRevoke.Records[agentMessage.ID()])
+	payload := MailboxAccessPayload{MailboxID: mailboxAgentA, GranteeInstallationID: installationB, GranteeSignerKeyID: secretB.PublicKeyHex()}
+	revokeConcurrent := mustSign(t, Content{
+		Type: TypeMailboxAccessRevoke, InstallationID: installationA,
+		Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA}, Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Parents: []string{grant.ID()}, Authorities: []string{grant.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+	}, time.Unix(5, 0), secretA)
+	concurrent := Reduce(wires(binding, grant, authorized, revokeConcurrent), localPolicy())
+	if concurrent.Records[authorized.ID()].Status != StatusUnauthorized {
+		t.Fatalf("concurrent revoke did not win: %#v", concurrent.Records[authorized.ID()])
 	}
 
-	distrust := localControl(t, TypePeerDistrust, PeerPayload{InstallationID: installationB}, []string{trust.ID()}, 6)
-	afterDistrust := Reduce(wires(trust, distrust, humanMessage), localPolicy())
-	if afterDistrust.Peers[installationB].Trusted || afterDistrust.Records[humanMessage.ID()].Status != StatusUnauthorized {
-		t.Fatalf("distrusted state = %#v, %#v", afterDistrust.Peers[installationB], afterDistrust.Records[humanMessage.ID()])
-	}
-	retrust := localControl(t, TypePeerTrust, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, []string{distrust.ID()}, 7)
-	afterRetrust := Reduce(wires(trust, distrust, retrust, humanMessage), localPolicy())
-	if !afterRetrust.Peers[installationB].Trusted || afterRetrust.Records[humanMessage.ID()].Status != StatusProjected {
-		t.Fatalf("retrusted state = %#v, %#v", afterRetrust.Peers[installationB], afterRetrust.Records[humanMessage.ID()])
+	observation := mustSign(t, Content{
+		Type: TypeMailboxAccessObserve, InstallationID: installationA,
+		Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA}, Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Parents: uniqueSortedStrings([]string{grant.ID(), authorized.ID()}), Authorities: []string{grant.ID()}, Scope: ScopePeerAddressed,
+		Payload: mustPayload(t, MailboxAccessObservationPayload{GrantEventID: grant.ID(), MessageEventID: authorized.ID()}),
+	}, time.Unix(6, 0), secretA)
+	revokeAfter := mustSign(t, Content{
+		Type: TypeMailboxAccessRevoke, InstallationID: installationA,
+		Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA}, Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+		Parents: uniqueSortedStrings([]string{grant.ID(), observation.ID()}), Authorities: []string{grant.ID()}, Scope: ScopePeerAddressed, Payload: mustPayload(t, payload),
+	}, time.Unix(7, 0), secretA)
+	blocked := localControl(t, TypePeerBindingBlock, PeerPayload{InstallationID: installationB}, []string{binding.ID()}, 8)
+	historical := Reduce(wires(binding, grant, authorized, observation, revokeAfter, blocked), localPolicy())
+	if historical.Peers[installationB].Trusted || historical.Records[authorized.ID()].Status != StatusProjected {
+		t.Fatalf("historical authorization changed after revoke/block: %#v, %#v", historical.Peers[installationB], historical.Records[authorized.ID()])
 	}
 }
 
-func TestConcurrentTrustAndDistrustFailsClosed(t *testing.T) {
-	trust := localControl(t, TypePeerTrust, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
-	distrust := localControl(t, TypePeerDistrust, PeerPayload{InstallationID: installationB}, nil, 2)
+func TestConcurrentPeerBindingAndBlockFailsClosed(t *testing.T) {
+	trust := localControl(t, TypePeerBindingSet, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
+	distrust := localControl(t, TypePeerBindingBlock, PeerPayload{InstallationID: installationB}, nil, 2)
 	state := Reduce(wires(trust, distrust), localPolicy())
 	if state.Peers[installationB].Trusted {
-		t.Fatal("concurrent trust and distrust left peer trusted")
+		t.Fatal("concurrent binding and block left peer routable")
+	}
+}
+
+func TestMailboxObservationProjectionKeepsOnlyTheCausalFrontier(t *testing.T) {
+	binding := localControl(t, TypePeerBindingSet, PeerPayload{InstallationID: installationB, SignerKeyID: secretB.PublicKeyHex()}, nil, 1)
+	grant := mailboxGrant(t, installationA, secretA, installationB, secretB.PublicKeyHex(), mailboxAgentA, 2)
+	events := []SignedEvent{binding, grant}
+	var priorObservation string
+	for index := int64(0); index < 70; index++ {
+		message := remoteMessage(t, mailboxAgentA, grant.ID(), 10+index)
+		parents := uniqueSortedStrings([]string{grant.ID(), message.ID(), priorObservation})
+		observation := mustSign(t, Content{
+			Type: TypeMailboxAccessObserve, InstallationID: installationA,
+			Sender: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA}, Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
+			Parents: parents, Authorities: []string{grant.ID()}, Scope: ScopePeerAddressed,
+			Payload: mustPayload(t, MailboxAccessObservationPayload{GrantEventID: grant.ID(), MessageEventID: message.ID()}),
+		}, time.Unix(100+index, 0), secretA)
+		events = append(events, message, observation)
+		priorObservation = observation.ID()
+	}
+	state := Reduce(wires(events...), localPolicy())
+	if got := state.MailboxAccess[grant.ID()].ObservationEventIDs; !reflect.DeepEqual(got, []string{priorObservation}) {
+		t.Fatalf("observation frontier = %#v", got)
 	}
 }
 
 func TestHumanAccountDeviceMembershipConvergesAcrossInputOrder(t *testing.T) {
 	create, grant, accept := humanMembershipEvents(t)
-	selectAccount := localControl(t, TypeHumanAccountSelect, HumanAccountSelectionPayload{AccountID: accountA}, []string{accept.ID()}, 4)
+	selectAccount := localControl(t, TypeHumanAccountSelect, HumanAccountSelectionPayload{AccountID: accountA}, []string{create.ID()}, 4)
 	raw := wires(create, grant, accept, selectAccount)
 	want := Reduce(raw, localPolicy())
 	device := want.Accounts[accountA].Devices[installationB]
@@ -320,6 +342,15 @@ func TestHumanAccountDeviceMembershipConvergesAcrossInputOrder(t *testing.T) {
 		if got := Reduce(shuffled, localPolicy()); !reflect.DeepEqual(got, want) {
 			t.Fatalf("account reduction changed after shuffle\nwant: %#v\ngot: %#v", want, got)
 		}
+	}
+}
+
+func TestHumanAccountSelectionDoesNotInferAuthorityFromArbitraryDescendant(t *testing.T) {
+	create, grant, accept := humanMembershipEvents(t)
+	selection := localControl(t, TypeHumanAccountSelect, HumanAccountSelectionPayload{AccountID: accountA}, []string{accept.ID()}, 4)
+	state := Reduce(wires(create, grant, accept, selection), localPolicy())
+	if state.DefaultAccountID != "" {
+		t.Fatalf("selection inferred creator authority from device acceptance: %q", state.DefaultAccountID)
 	}
 }
 
@@ -338,7 +369,7 @@ func TestHumanAccountRequiresGrantAndInvitedKey(t *testing.T) {
 		Sender:      &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
 		Recipient:   &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Audience:    &Audience{HumanAccountID: accountA},
-		Parents:     []string{create.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, forgedPayload),
+		Parents:     []string{create.ID()}, Authorities: []string{create.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, forgedPayload),
 	}, secretB, 5)
 	state := Reduce(append(wires(create), forgedRaw), localPolicy())
 	if len(state.Invalid) != 1 || state.Invalid[0].Status != StatusInvalid {
@@ -354,7 +385,7 @@ func TestHumanAccountRequiresGrantAndInvitedKey(t *testing.T) {
 		Sender:    &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Audience:  &Audience{HumanAccountID: accountA},
-		Parents:   []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, changed),
+		Parents:   []string{grant.ID()}, Authorities: []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, changed),
 	}, time.Unix(6, 0), secretB)
 	changedState := Reduce(wires(create, grant, changedAcceptance), localPolicy())
 	if changedState.Records[changedAcceptance.ID()].Status != StatusUnresolved || changedState.Accounts[accountA].Devices[installationB].Active {
@@ -382,7 +413,7 @@ func TestHumanDeviceRevokeAndConcurrentAcceptFailClosed(t *testing.T) {
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
 		Audience:  &Audience{HumanAccountID: accountA},
-		Parents:   []string{accept.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
+		Parents:   uniqueSortedStrings([]string{grant.ID(), accept.ID()}), Authorities: []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
 	}, time.Unix(5, 0), secretA)
 	after := Reduce(wires(create, grant, accept, revokeAfter), localPolicy())
 	if after.Accounts[accountA].Devices[installationB].Active {
@@ -394,7 +425,7 @@ func TestHumanDeviceRevokeAndConcurrentAcceptFailClosed(t *testing.T) {
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
 		Audience:  &Audience{HumanAccountID: accountA},
-		Parents:   []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
+		Parents:   []string{grant.ID()}, Authorities: []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
 	}, time.Unix(6, 0), secretA)
 	concurrent := Reduce(wires(create, grant, accept, concurrentRevoke), localPolicy())
 	if concurrent.Accounts[accountA].Devices[installationB].Active {
@@ -407,7 +438,7 @@ func TestAccountQuestionAnswerAndCancellationConverge(t *testing.T) {
 	question := mustSign(t, Content{
 		Type: TypeQuestion, InstallationID: installationB,
 		Sender:   &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		Audience: &Audience{HumanAccountID: accountA}, Parents: []string{accept.ID()}, Scope: ScopeAccountAddressed,
+		Audience: &Audience{HumanAccountID: accountA}, Parents: []string{accept.ID()}, Authorities: []string{accept.ID()}, Scope: ScopeAccountAddressed,
 		Payload: mustPayload(t, TextPayload{Body: "account question", ActorLabel: "desktop agent"}),
 	}, time.Unix(4, 0), secretB)
 	answerParents := []string{create.ID(), question.ID()}
@@ -416,7 +447,7 @@ func TestAccountQuestionAnswerAndCancellationConverge(t *testing.T) {
 		Type: TypeAnswer, InstallationID: installationA,
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		Audience:  &Audience{HumanAccountID: accountA}, ThreadID: question.ID(), Parents: answerParents, Scope: ScopeAccountAddressed,
+		Audience:  &Audience{HumanAccountID: accountA}, ThreadID: question.ID(), Parents: answerParents, Authorities: []string{create.ID()}, Scope: ScopeAccountAddressed,
 		Payload: mustPayload(t, TextPayload{Body: "account answer", ActorLabel: "laptop"}),
 	}, time.Unix(5, 0), secretA)
 	cancelParents := []string{accept.ID(), question.ID()}
@@ -424,13 +455,13 @@ func TestAccountQuestionAnswerAndCancellationConverge(t *testing.T) {
 	cancel := mustSign(t, Content{
 		Type: TypeThreadCancel, InstallationID: installationB,
 		Sender:   &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		Audience: &Audience{HumanAccountID: accountA}, ThreadID: question.ID(), Parents: cancelParents, Scope: ScopeAccountAddressed,
+		Audience: &Audience{HumanAccountID: accountA}, ThreadID: question.ID(), Parents: cancelParents, Authorities: []string{accept.ID()}, Scope: ScopeAccountAddressed,
 		Payload: mustPayload(t, TargetPayload{Reason: "no longer needed"}),
 	}, time.Unix(6, 0), secretB)
 	reject := mustSign(t, Content{
 		Type: TypeMessageReject, InstallationID: installationA,
 		Sender:   &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		Audience: &Audience{HumanAccountID: accountA}, Parents: answerParents, Scope: ScopeAccountAddressed,
+		Audience: &Audience{HumanAccountID: accountA}, Parents: answerParents, Authorities: []string{create.ID()}, Scope: ScopeAccountAddressed,
 		Payload: mustPayload(t, TargetPayload{TargetEventID: question.ID(), Reason: "not for this account"}),
 	}, time.Unix(7, 0), secretA)
 	want := Reduce(wires(create, grant, accept, question, answer, cancel, reject), localPolicy())
@@ -459,7 +490,7 @@ func TestAccountTrafficNeedsMembershipInTheNamedAccount(t *testing.T) {
 	question := mustSign(t, Content{
 		Type: TypeQuestion, InstallationID: installationB,
 		Sender:   &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		Audience: &Audience{HumanAccountID: otherAccount}, Parents: []string{accept.ID()}, Scope: ScopeAccountAddressed,
+		Audience: &Audience{HumanAccountID: otherAccount}, Parents: []string{accept.ID()}, Authorities: []string{accept.ID()}, Scope: ScopeAccountAddressed,
 		Payload: mustPayload(t, TextPayload{Body: "wrong account"}),
 	}, time.Unix(4, 0), secretB)
 	state := Reduce(wires(create, grant, accept, question), localPolicy())
@@ -480,14 +511,14 @@ func humanMembershipEvents(t *testing.T) (SignedEvent, SignedEvent, SignedEvent)
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
 		Audience:  &Audience{HumanAccountID: accountA},
-		Parents:   []string{create.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
+		Parents:   []string{create.ID()}, Authorities: []string{create.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
 	}, time.Unix(2, 0), secretA)
 	accept := mustSign(t, Content{
 		Type: TypeHumanDeviceAccept, InstallationID: installationB,
 		Sender:    &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanA},
 		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
 		Audience:  &Audience{HumanAccountID: accountA},
-		Parents:   []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
+		Parents:   []string{grant.ID()}, Authorities: []string{grant.ID()}, Scope: ScopeAccountAddressed, Payload: mustPayload(t, payload),
 	}, time.Unix(3, 0), secretB)
 	return create, grant, accept
 }
@@ -499,7 +530,7 @@ func humanDevicePayload() HumanDevicePayload {
 func TestArchiveAndRejectRetainCanonicalMessage(t *testing.T) {
 	message := signedText(t, TypeMessage, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "message", "", nil, 1)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "message", "", nil, "", 1)
 	archive := localMessageState(t, TypeMessageArchive, message.ID(), []string{message.ID()}, 2)
 	reject := localMessageState(t, TypeMessageReject, message.ID(), []string{archive.ID()}, 3)
 	state := Reduce(wires(message, archive, reject), localPolicy())
@@ -517,7 +548,7 @@ func TestArchiveAndRejectRetainCanonicalMessage(t *testing.T) {
 func TestRestoreSupersedesArchiveAndCanBeArchivedAgain(t *testing.T) {
 	message := signedText(t, TypeMessage, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "message", "", nil, 1)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "message", "", nil, "", 1)
 	archive := localMessageState(t, TypeMessageArchive, message.ID(), []string{message.ID()}, 2)
 	restore := localMessageState(t, TypeMessageRestore, message.ID(), []string{message.ID(), archive.ID()}, 3)
 	state := Reduce(wires(message, archive, restore), localPolicy())
@@ -534,10 +565,10 @@ func TestRestoreSupersedesArchiveAndCanBeArchivedAgain(t *testing.T) {
 func TestMessageStateTargetMustBeItsCausalAncestor(t *testing.T) {
 	first := signedText(t, TypeMessage, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "first", "", nil, 1)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "first", "", nil, "", 1)
 	second := signedText(t, TypeMessage, installationA, secretA,
 		MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "second", "", nil, 2)
+		MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA}, "second", "", nil, "", 2)
 	badArchive := localMessageState(t, TypeMessageArchive, first.ID(), []string{second.ID()}, 3)
 	state := Reduce(wires(first, second, badArchive), localPolicy())
 	if state.Records[badArchive.ID()].Status != StatusInvalid || state.Messages[first.ID()].Archived {
@@ -545,116 +576,21 @@ func TestMessageStateTargetMustBeItsCausalAncestor(t *testing.T) {
 	}
 }
 
-func TestUnsupportedEventSurvivesAndReducesAfterSchemaRegistration(t *testing.T) {
-	content := Content{
-		Schema: 2, Type: TypeQuestion, InstallationID: installationA, SignerKeyID: secretA.PublicKeyHex(),
-		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
-		Recipient: &MailboxAddress{InstallationID: installationA, MailboxID: mailboxHumanA},
-		Parents:   []string{}, Scope: ScopeInstallationPrivate, Payload: mustPayload(t, TextPayload{Body: "future"}),
-	}
-	future := mustSignSchema(t, content, secretA, 1)
-	oldPolicy := localPolicy()
-	oldPolicy.SchemaVersions = []int{Schema1}
-	oldState := Reduce([][]byte{future}, oldPolicy)
-	var id string
-	for eventID := range oldState.Records {
-		id = eventID
-	}
-	if oldState.Records[id].Status != StatusUnsupported || len(oldState.Records[id].Event.Wire) == 0 {
-		t.Fatalf("old state = %#v", oldState.Records[id])
-	}
-	policy := localPolicy()
-	policy.SchemaVersions = []int{Schema1, Schema2}
-	newState := Reduce([][]byte{future}, policy)
-	if newState.Records[id].Status != StatusProjected || newState.Messages[id].Body != "future" {
-		t.Fatalf("new state = %#v, %#v", newState.Records[id], newState.Messages[id])
-	}
-}
-
-func TestSchema2MessageProjectsTypedSemanticsWithoutParsingDetails(t *testing.T) {
+func TestSchema3MessageProjectsTypedSemanticsWithoutParsingDetails(t *testing.T) {
 	payload := TextPayload{
 		Body: "typed output", Details: "Kind: notice\nHarness session: user-authored",
 		Presentation:      model.PresentationUpdate,
 		Correlation:       model.MessageCorrelation{Provider: "home-built", SessionID: "session", OperationID: "operation", ItemID: "item"},
 		TechnicalSections: []model.TechnicalSection{{Namespace: "vendor.experimental", Fields: []model.TechnicalField{{Key: "opaque", Label: "Opaque", Value: "value"}}}},
 	}
-	signed := signedMessagePayload(t, Schema2, payload, 1)
+	signed := signedMessagePayload(t, Schema3, payload, 1)
 	state := Reduce(wires(signed, signed), localPolicy())
 	projected := state.Messages[signed.ID()]
 	if projected.Presentation != payload.Presentation || projected.Correlation != payload.Correlation || projected.Details != payload.Details || !reflect.DeepEqual(projected.TechnicalSections, payload.TechnicalSections) {
-		t.Fatalf("schema 2 projection = %#v", projected)
+		t.Fatalf("schema 3 projection = %#v", projected)
 	}
 	if !reflect.DeepEqual(state.Records[signed.ID()].Event.Wire, signed.Wire) {
-		t.Fatal("schema 2 canonical bytes changed during reduction")
-	}
-}
-
-func TestSchema1LegacyAdapterProjectsHarnessSemantics(t *testing.T) {
-	payload := TextPayload{
-		Body:    "legacy output",
-		Details: "Human explanation.\nKind: final-answer\nHarness provider: home-built\nHarness session: session-1\nHarness operation: operation-1\nHarness item: item-1\nHarness request: request-1\nHQ message: duplicate-id\nPhase: final_answer",
-	}
-	signed := signedMessagePayload(t, Schema1, payload, 1)
-	state := Reduce(wires(signed), localPolicy())
-	projected := state.Messages[signed.ID()]
-	wantCorrelation := model.MessageCorrelation{Provider: "home-built", SessionID: "session-1", OperationID: "operation-1", ItemID: "item-1", RequestID: "request-1"}
-	if projected.Presentation != model.PresentationFinalAnswer || projected.Correlation != wantCorrelation || projected.Details != "Human explanation." {
-		t.Fatalf("legacy harness projection = %#v", projected)
-	}
-	if len(projected.TechnicalSections) != 1 || projected.TechnicalSections[0].Namespace != "hq.legacy.harness" || projected.TechnicalSections[0].Fields[0].Key != "phase" {
-		t.Fatalf("legacy harness technical sections = %#v", projected.TechnicalSections)
-	}
-	if !reflect.DeepEqual(state.Records[signed.ID()].Event.Wire, signed.Wire) {
-		t.Fatal("schema 1 canonical bytes changed during reduction")
-	}
-}
-
-func TestSchema1LegacyAdapterSupportsCodexAliases(t *testing.T) {
-	signed := signedMessagePayload(t, Schema1, TextPayload{Body: "legacy", Details: "Codex thread: thread-old\nCodex turn: turn-old\nKind: update"}, 1)
-	projected := Reduce(wires(signed), localPolicy()).Messages[signed.ID()]
-	want := model.MessageCorrelation{Provider: "codex", SessionID: "thread-old", OperationID: "turn-old"}
-	if projected.Correlation != want || projected.Presentation != model.PresentationUpdate || projected.Details != "" {
-		t.Fatalf("legacy Codex projection = %#v", projected)
-	}
-}
-
-func TestSchema1ProjectProvenanceRequiresKnownPurposeAndShape(t *testing.T) {
-	const provenance = "Project: project-1\nProject assignment: assignment-1\nProject thread: thread-1"
-	projectOutput := signedMessagePayload(t, Schema1, TextPayload{Body: "output", Details: "Visible explanation.\n" + provenance, Purpose: model.MessagePurposeProjectOutput}, 1)
-	userDetails := signedMessagePayload(t, Schema1, TextPayload{Body: "ordinary", Details: provenance, Purpose: model.MessagePurposeConversation}, 2)
-	lookalike := signedMessagePayload(t, Schema1, TextPayload{Body: "ordinary", Details: "Project: project-1\nProject assignment: assignment-1", Purpose: model.MessagePurposeProjectOutput}, 3)
-	state := Reduce(wires(projectOutput, userDetails, lookalike), localPolicy())
-	projected := state.Messages[projectOutput.ID()]
-	if projected.Details != "Visible explanation." || len(projected.TechnicalSections) != 1 || projected.TechnicalSections[0].Namespace != "hq.legacy.project_output_provenance" {
-		t.Fatalf("project output projection = %#v", projected)
-	}
-	if got := state.Messages[userDetails.ID()]; got.Details != provenance || len(got.TechnicalSections) != 0 {
-		t.Fatalf("ordinary user details were reclassified = %#v", got)
-	}
-	if got := state.Messages[lookalike.ID()]; got.Details != "Project: project-1\nProject assignment: assignment-1" || len(got.TechnicalSections) != 0 {
-		t.Fatalf("incomplete project shape was reclassified = %#v", got)
-	}
-}
-
-func TestSchema1StructuralLookalikesWithoutProducerShapeRemainHumanDetails(t *testing.T) {
-	const details = "Kind: update\nPhase: final_answer\nHarness session: a sentence, not an identity"
-	signed := signedMessagePayload(t, Schema1, TextPayload{Body: "ordinary", Details: details}, 1)
-	projected := Reduce(wires(signed), localPolicy()).Messages[signed.ID()]
-	if projected.Details != details || projected.Presentation != "" || !projected.Correlation.Empty() || len(projected.TechnicalSections) != 0 {
-		t.Fatalf("schema 1 lookalike details = %#v", projected)
-	}
-}
-
-func TestSchemaMessageProjectionIsOrderAndDuplicateIndependent(t *testing.T) {
-	legacy := signedMessagePayload(t, Schema1, TextPayload{Body: "legacy", Details: "Kind: update\nHarness provider: one\nHarness session: same\nHarness operation: operation"}, 1)
-	typed := signedMessagePayload(t, Schema2, TextPayload{Body: "typed", Presentation: model.PresentationFinalAnswer, Correlation: model.MessageCorrelation{Provider: "two", SessionID: "same", OperationID: "operation"}}, 2)
-	want := Reduce(wires(legacy, typed), localPolicy())
-	for range 50 {
-		raw := wires(legacy, typed, legacy, typed)
-		rand.Shuffle(len(raw), func(i, j int) { raw[i], raw[j] = raw[j], raw[i] })
-		if got := Reduce(raw, localPolicy()); !reflect.DeepEqual(got, want) {
-			t.Fatalf("typed projection changed after reorder/duplicate\nwant: %#v\ngot: %#v", want.Messages, got.Messages)
-		}
+		t.Fatal("schema 3 canonical bytes changed during reduction")
 	}
 }
 
@@ -668,7 +604,7 @@ func signedMessagePayload(t *testing.T, schema int, payload TextPayload, second 
 	}, time.Unix(second, 0), secretA)
 }
 
-func TestMalformedKnownEventAndUntrustedUnsupportedEventDoNotProject(t *testing.T) {
+func TestMalformedKnownEventAndUnsupportedSchemaDoNotProject(t *testing.T) {
 	malformed := Content{
 		Schema: SchemaVersion, Type: TypeQuestion, InstallationID: installationA, SignerKeyID: secretA.PublicKeyHex(),
 		Sender:    &MailboxAddress{InstallationID: installationA, MailboxID: mailboxAgentA},
@@ -677,7 +613,7 @@ func TestMalformedKnownEventAndUntrustedUnsupportedEventDoNotProject(t *testing.
 	}
 	badWire := mustSignSchema(t, malformed, secretA, 1)
 	unknown := malformed
-	unknown.Schema = 3
+	unknown.Schema = 4
 	unknown.InstallationID = installationB
 	unknown.SignerKeyID = secretB.PublicKeyHex()
 	unknown.Sender = &MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB}
@@ -690,8 +626,8 @@ func TestMalformedKnownEventAndUntrustedUnsupportedEventDoNotProject(t *testing.
 		t.Fatalf("invalid projection = %#v, messages = %#v", state.Invalid, state.Messages)
 	}
 	inspection := Inspect(unknownWire)
-	if state.Records[inspection.Event.ID()].Status != StatusUnauthorized {
-		t.Fatalf("untrusted unsupported event = %#v", state.Records[inspection.Event.ID()])
+	if state.Records[inspection.Event.ID()].Status != StatusUnsupported {
+		t.Fatalf("unsupported schema event = %#v", state.Records[inspection.Event.ID()])
 	}
 }
 
@@ -703,18 +639,26 @@ func localControl(t *testing.T, kind Type, payload any, parents []string, second
 	t.Helper()
 	content := control(kind, mustPayload(t, payload))
 	content.Parents = append([]string(nil), parents...)
+	if kind == TypeHumanAccountSelect {
+		content.Authorities = append([]string(nil), parents...)
+	}
 	return mustSign(t, content, time.Unix(second, 0), secretA)
 }
 
-func signedText(t *testing.T, kind Type, installation string, secret SecretKey, sender, recipient MailboxAddress, body, thread string, parents []string, second int64) SignedEvent {
+func signedText(t *testing.T, kind Type, installation string, secret SecretKey, sender, recipient MailboxAddress, body, thread string, parents []string, authority string, second int64) SignedEvent {
 	t.Helper()
 	scope := ScopeInstallationPrivate
 	if sender.InstallationID != recipient.InstallationID {
 		scope = ScopePeerAddressed
 	}
+	authorities := []string(nil)
+	if authority != "" {
+		authorities = []string{authority}
+		parents = append(parents, authority)
+	}
 	return mustSign(t, Content{
 		Type: kind, InstallationID: installation, Sender: &sender, Recipient: &recipient,
-		ThreadID: thread, Parents: append([]string(nil), parents...), Scope: scope,
+		ThreadID: thread, Parents: uniqueSortedStrings(parents), Authorities: authorities, Scope: scope,
 		Payload: mustPayload(t, TextPayload{Body: body}),
 	}, time.Unix(second, 0), secret)
 }
@@ -738,11 +682,37 @@ func localMessageState(t *testing.T, kind Type, target string, parents []string,
 	}, time.Unix(second, 0), secretA)
 }
 
-func remoteMessage(t *testing.T, recipientMailbox string, second int64) SignedEvent {
+func remoteMessage(t *testing.T, recipientMailbox, grantID string, second int64) SignedEvent {
 	t.Helper()
 	return signedText(t, TypeMessage, installationB, secretB,
 		MailboxAddress{InstallationID: installationB, MailboxID: mailboxHumanB},
-		MailboxAddress{InstallationID: installationA, MailboxID: recipientMailbox}, "hello", "", nil, second)
+		MailboxAddress{InstallationID: installationA, MailboxID: recipientMailbox}, "hello", "", nil, grantID, second)
+}
+
+func mailboxGrant(t *testing.T, grantorInstallation string, grantorSecret SecretKey, granteeInstallation, granteeSignerKeyID, mailboxID string, second int64) SignedEvent {
+	t.Helper()
+	return mustSign(t, Content{
+		Type: TypeMailboxAccessGrant, InstallationID: grantorInstallation,
+		Sender:    &MailboxAddress{InstallationID: grantorInstallation, MailboxID: mailboxHumanA},
+		Recipient: &MailboxAddress{InstallationID: granteeInstallation, MailboxID: mailboxHumanA},
+		Scope:     ScopePeerAddressed,
+		Payload: mustPayload(t, MailboxAccessPayload{
+			MailboxID: mailboxID, GranteeInstallationID: granteeInstallation, GranteeSignerKeyID: granteeSignerKeyID,
+		}),
+	}, time.Unix(second, 0), grantorSecret)
+}
+
+func uniqueSortedStrings(values []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 func mustSignSchema(t *testing.T, content Content, secret SecretKey, second int64) []byte {

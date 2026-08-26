@@ -5,7 +5,9 @@ source of application state. Local CLI, TUI, and Codex clients use versioned dom
 signs and stores canonical events, then its continuous network engine moves exact encrypted wrappers
 through retained relays.
 
-This release uses canonical schema 1 and SQLite schema 24. The implementation pins
+This release uses canonical schema 3, local domain wire 7, and SQLite schema 33. A non-empty older
+database fails startup and must be manually archived or removed before reinitialization and
+re-pairing; there is no migration or event-translation path. The implementation pins
 `fiatjaf.com/nostr` at revision `5fe6a7499d07` behind `internal/nostrwire`; HQ owns the canonical
 schema, wrapper validation, durable outbox, relay interface, and retry rules.
 
@@ -15,10 +17,12 @@ A remote mailbox address is `(installation root public key, installation UUID, m
 root key signs canonical events, opens NIP-44 envelopes, and authenticates to NIP-42 relays. The
 installation UUID is stable application identity. A bare mailbox UUID grants no authority.
 
-One-way peer trust binds a remote installation UUID to one public key and up to three relay hints.
-The receiver must trust the origin before peer traffic can project. A peer may address the reserved
-human mailbox; an agent mailbox also needs an active signed share. Human-account traffic uses signed
-device grants and account authority rather than mailbox sharing.
+A one-way local peer binding associates a remote installation UUID with one public key and up to
+three relay hints. It is routing and signer metadata, not mailbox authority. Before sending a
+peer-addressed action, an installation must receive a mailbox-owner-signed
+`mailbox.access.grant` for the exact target mailbox and cite that grant as a causal authority.
+Receiver-signed observations make already-seen actions survive a later revoke; concurrent or later
+actions fail closed. Human-account traffic cites explicit signed account authorities instead.
 
 ## Exact wire layers
 
@@ -80,8 +84,9 @@ The node validates in this order:
 4. Decrypt the unsigned kind-7282 rumor and verify its author and local recipient tag.
 5. Parse the strict HQ envelope and verify exact canonical ID/signature bytes.
 6. Require seal signer, envelope origin, canonical signer, and installation UUID to agree.
-7. Require a direct local route or active membership in the named human account.
-8. Apply peer/account authority, signer binding, mailbox rights, schema, size, and causal rules.
+7. Verify the origin's local signer binding without treating it as mailbox authority.
+8. Apply the cited mailbox capability or account authorities, revocation history, schema, size, and
+   causal rules.
 9. In one SQLite transaction, insert wrapper audit data, append the canonical event, reduce,
    project, derive any new outbox work, increment the revision, and commit.
 10. Publish a lightweight local invalidation after commit.

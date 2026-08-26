@@ -41,7 +41,7 @@ func (f projectConformanceFixture) signedInput(t *testing.T, messageID string, p
 	}
 	contents := []event.Content{{
 		Type: event.TypeMessage, Sender: f.store.localAddress(model.HumanMailboxID), Recipient: f.store.localAddress(f.project.MailboxID),
-		Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload,
+		Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: uniqueSorted(parents), Scope: event.ScopeAccountAddressed, Payload: payload,
 	}}
 	signed, err := f.store.signContents(f.ctx, contents, []time.Time{time.Now().UTC()})
 	if err != nil {

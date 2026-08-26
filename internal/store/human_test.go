@@ -29,13 +29,13 @@ func TestPairingBundleFixtureAndMalformedInputs(t *testing.T) {
 	}
 	device := event.HumanDevicePayload{AccountID: accountID, CreatorInstallationID: creatorID, CreatorSignerKeyID: creatorKey.PublicKeyHex(), InstallationID: targetID, SignerKeyID: targetKey.PublicKeyHex(), Label: "desktop", Relays: []string{"wss://relay.example"}, CreatorRelays: []string{"wss://relay.example"}}
 	devicePayload, _ := event.MarshalPayload(device)
-	granted, err := event.Sign(event.Content{Type: event.TypeHumanDeviceGrant, InstallationID: creatorID, Sender: &event.MailboxAddress{InstallationID: creatorID, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: targetID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: accountID}, Parents: []string{created.ID()}, Scope: event.ScopeAccountAddressed, Payload: devicePayload}, time.Unix(1_700_000_001, 0), creatorKey)
+	granted, err := event.Sign(event.Content{Type: event.TypeHumanDeviceGrant, InstallationID: creatorID, Sender: &event.MailboxAddress{InstallationID: creatorID, MailboxID: model.HumanMailboxID}, Recipient: &event.MailboxAddress{InstallationID: targetID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: accountID}, Parents: []string{created.ID()}, Authorities: []string{created.ID()}, Scope: event.ScopeAccountAddressed, Payload: devicePayload}, time.Unix(1_700_000_001, 0), creatorKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bundle := PairingBundle{Version: 2, AccountID: accountID, AccountLabel: "laptop", CreatorInstallationID: creatorID, CreatorSignerKeyID: creatorKey.PublicKeyHex(), CreatorRelays: []string{"wss://relay.example"}, TargetInstallationID: targetID, TargetSignerKeyID: targetKey.PublicKeyHex(), TargetLabel: "desktop", TargetRelays: []string{"wss://relay.example"}, AccountCreationEvent: created.Wire, DeviceGrantEvent: granted.Wire, AccountAuthorityEvents: [][]byte{created.Wire, granted.Wire}}
 	raw, _ := json.Marshal(bundle)
-	const wantDigest = "4362fec2f871d282b8a415ea68f50c74bdf7df42055669245e529aefe681c6dd"
+	const wantDigest = "a8667c4fe93412361d901200c8af77bce6385f1b0afd6ccc9b487a38b253eb6b"
 	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != wantDigest {
 		t.Fatalf("bundle fixture digest = %s\nraw = %s", got, raw)
 	}
@@ -249,6 +249,7 @@ func TestHumanDeviceRevocationIsIdempotentAndProjectsRemotely(t *testing.T) {
 		t.Fatalf("revoke counts before=%d after=%d", before, after)
 	}
 	revocation := canonicalEventByType(t, creator, event.TypeHumanDeviceRevoke)
+	acceptance := canonicalEventByTypeAndInstallation(t, invited, event.TypeHumanDeviceAccept, invitedID)
 	if err := invited.AppendCanonical(ctx, []event.SignedEvent{revocation}); err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +265,7 @@ func TestHumanDeviceRevocationIsIdempotentAndProjectsRemotely(t *testing.T) {
 		t.Fatal(err)
 	}
 	text, _ := event.MarshalPayload(event.TextPayload{MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140df2", Body: "late revoked message"})
-	late, err := invited.signer.Sign(ctx, event.Content{Type: event.TypeQuestion, Sender: invited.localAddress(agent.ID), Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: []string{revocation.ID()}, Scope: event.ScopeAccountAddressed, Payload: text}, time.Now().UTC())
+	late, err := invited.signer.Sign(ctx, event.Content{Type: event.TypeQuestion, Sender: invited.localAddress(agent.ID), Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: uniqueSorted([]string{acceptance.ID(), revocation.ID()}), Authorities: []string{acceptance.ID()}, Scope: event.ScopeAccountAddressed, Payload: text}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

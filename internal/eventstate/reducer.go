@@ -1,15 +1,14 @@
 package eventstate
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	. "github.com/wbbradley/hq/internal/eventwire"
 	"slices"
 	"sort"
 	"time"
 
 	"github.com/wbbradley/hq/internal/domain"
+	. "github.com/wbbradley/hq/internal/eventwire"
 	"github.com/wbbradley/hq/internal/model"
 	"github.com/wbbradley/hq/internal/reduction"
 )
@@ -24,7 +23,6 @@ type Policy struct {
 	InstallationID string
 	RootKeyID      string
 	HumanMailboxID string
-	SchemaVersions []int
 }
 
 type Record struct {
@@ -73,10 +71,15 @@ type PeerProjection struct {
 	Trusted        bool
 }
 
-type MailboxShareProjection struct {
-	MailboxID          string
-	PeerInstallationID string
-	Active             bool
+type MailboxAccessProjection struct {
+	GrantEventID          string
+	MailboxID             string
+	GrantorInstallationID string
+	GranteeInstallationID string
+	GranteeSignerKeyID    string
+	RevokeEventIDs        []string
+	ObservationEventIDs   []string
+	Active                bool
 }
 
 type HumanAccountProjection struct {
@@ -166,7 +169,7 @@ type State struct {
 	Mailboxes            map[string]MailboxProjection
 	NamedAgents          map[string]NamedAgentProjection
 	Peers                map[string]PeerProjection
-	Shares               map[string]MailboxShareProjection
+	MailboxAccess        map[string]MailboxAccessProjection
 	Accounts             map[string]HumanAccountProjection
 	DefaultAccountID     string
 	Messages             map[string]MessageProjection
@@ -186,18 +189,14 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 		Mailboxes:         make(map[string]MailboxProjection),
 		NamedAgents:       make(map[string]NamedAgentProjection),
 		Peers:             make(map[string]PeerProjection),
-		Shares:            make(map[string]MailboxShareProjection),
+		MailboxAccess:     make(map[string]MailboxAccessProjection),
 		Accounts:          make(map[string]HumanAccountProjection),
 		Messages:          make(map[string]MessageProjection),
 		Threads:           make(map[string]ThreadProjection),
 		HarnessActivities: make(map[string]HarnessActivityProjection),
 	}
 	for _, raw := range rawEvents {
-		schemas := policy.SchemaVersions
-		if len(schemas) == 0 {
-			schemas = []int{Schema1, Schema2}
-		}
-		inspection := InspectWithSchemas(raw, schemas)
+		inspection := Inspect(raw)
 		record := Record{Event: inspection.Event, Status: inspection.Status}
 		if inspection.Err != nil {
 			record.Reason = inspection.Err.Error()
@@ -214,12 +213,12 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 
 	state.classifyLocalControls()
 	state.reducePeers()
+	state.classifyMailboxAccessEvents()
+	state.projectMailboxAccess()
 	state.classifyAccountEvents()
 	state.projectAccounts()
 	state.classifyAccountSelections()
 	state.projectDefaultAccount()
-	state.classifyUnsupported()
-	state.reduceShares()
 	state.classifyDomainEvents()
 	state.projectMailboxes()
 	state.classifyNamedAgents()
@@ -256,20 +255,20 @@ func (s *State) classifyAccountEvents() {
 		case TypeHumanDeviceGrant:
 			var payload HumanDevicePayload
 			_ = decodePayload(record.Event.Content.Payload, &payload)
-			if reason == "" && !s.accountCreatorMatches(payload.AccountID, payload.CreatorInstallationID, payload.CreatorSignerKeyID, record.Event.Content.Parents) {
-				reason = "device grant has no matching account creation parent"
+			if reason == "" && !s.accountCreatorMatches(payload.AccountID, payload.CreatorInstallationID, payload.CreatorSignerKeyID, record.Event.Content.Authorities) {
+				reason = "device grant has no matching account creation authority"
 			}
 		case TypeHumanDeviceAccept:
 			var payload HumanDevicePayload
 			_ = decodePayload(record.Event.Content.Payload, &payload)
-			if reason == "" && !s.hasMatchingGrant(payload, record.Event.Content.Parents) {
-				reason = "device acceptance has no matching grant parent"
+			if reason == "" && !s.hasMatchingGrant(payload, record.Event.Content.Authorities) {
+				reason = "device acceptance has no matching grant authority"
 			}
 		case TypeHumanDeviceRevoke:
 			var payload HumanDevicePayload
 			_ = decodePayload(record.Event.Content.Payload, &payload)
-			if reason == "" && !s.hasMatchingGrant(payload, record.Event.Content.Parents) {
-				reason = "device revocation has no matching grant ancestor"
+			if reason == "" && !s.hasMatchingGrant(payload, record.Event.Content.Authorities) {
+				reason = "device revocation has no matching grant authority"
 			}
 		}
 		if reason != "" {
@@ -302,33 +301,31 @@ func (s *State) accountCreationConflicts(currentID string, current HumanAccountP
 	return false
 }
 
-func (s *State) accountCreatorMatches(accountID, installationID, signerKeyID string, parents []string) bool {
-	for _, id := range parents {
-		for candidateID, record := range s.Records {
-			if record.Status != StatusProjected || record.Event.Content.Type != TypeHumanAccountCreate || !s.ancestor(candidateID, id) {
-				continue
-			}
-			var payload HumanAccountPayload
-			_ = decodePayload(record.Event.Content.Payload, &payload)
-			if payload.AccountID == accountID && payload.CreatorInstallationID == installationID && payload.CreatorSignerKeyID == signerKeyID {
-				return true
-			}
+func (s *State) accountCreatorMatches(accountID, installationID, signerKeyID string, authorities []string) bool {
+	for _, id := range authorities {
+		record, ok := s.projectedRecord(id, TypeHumanAccountCreate)
+		if !ok {
+			continue
+		}
+		var payload HumanAccountPayload
+		_ = decodePayload(record.Event.Content.Payload, &payload)
+		if payload.AccountID == accountID && payload.CreatorInstallationID == installationID && payload.CreatorSignerKeyID == signerKeyID {
+			return true
 		}
 	}
 	return false
 }
 
-func (s *State) hasMatchingGrant(payload HumanDevicePayload, parents []string) bool {
-	for _, parent := range parents {
-		for id, record := range s.Records {
-			if record.Status != StatusProjected || record.Event.Content.Type != TypeHumanDeviceGrant || !s.ancestor(id, parent) {
-				continue
-			}
-			var grant HumanDevicePayload
-			_ = decodePayload(record.Event.Content.Payload, &grant)
-			if sameHumanDevice(grant, payload) {
-				return true
-			}
+func (s *State) hasMatchingGrant(payload HumanDevicePayload, authorities []string) bool {
+	for _, authority := range authorities {
+		record, ok := s.projectedRecord(authority, TypeHumanDeviceGrant)
+		if !ok {
+			continue
+		}
+		var grant HumanDevicePayload
+		_ = decodePayload(record.Event.Content.Payload, &grant)
+		if sameHumanDevice(grant, payload) {
+			return true
 		}
 	}
 	return false
@@ -450,12 +447,7 @@ func (s *State) selectionHasMembershipParent(selection SignedEvent, account Huma
 	if s.Policy.InstallationID != account.CreatorInstallationID {
 		target = device.AcceptEventID
 	}
-	for _, parent := range selection.Content.Parents {
-		if target != "" && s.ancestor(target, parent) {
-			return true
-		}
-	}
-	return false
+	return target != "" && slices.Contains(selection.Content.Authorities, target)
 }
 
 func (s *State) projectDefaultAccount() {
@@ -484,39 +476,6 @@ func sortedRecordIDs(records map[string]Record) []string {
 	}
 	sort.Strings(ids)
 	return ids
-}
-
-func (s *State) classifyUnsupported() {
-	for id, record := range s.Records {
-		if record.Status != StatusUnsupported {
-			continue
-		}
-		keyID := record.Event.Nostr.PubKey
-		if record.Event.Content.Type == "" {
-			var content Content
-			if err := json.Unmarshal([]byte(record.Event.Nostr.Content), &content); err == nil {
-				record.Event.Content = content
-				s.Records[id] = record
-			}
-		}
-		authorized := keyID == s.Policy.RootKeyID
-		if !authorized {
-			for _, peer := range s.Peers {
-				if peer.Trusted && peer.SignerKeyID == keyID {
-					authorized = true
-					break
-				}
-			}
-		}
-		if !authorized && record.Event.Content.Scope == ScopeAccountAddressed && record.Event.Content.Audience != nil {
-			authorized = s.accountMembershipAt(record.Event.Content.Audience.HumanAccountID, record.Event.Content.InstallationID, keyID, id)
-		}
-		if !authorized {
-			record.Status = StatusUnauthorized
-			record.Reason = "unsupported event signer is not trusted"
-			s.Records[id] = record
-		}
-	}
 }
 
 func (s *State) classifyLocalControls() {
@@ -548,7 +507,7 @@ func (s *State) classifyLocalControls() {
 func (s *State) reducePeers() {
 	groups := make(map[string][]Record)
 	for _, record := range s.Records {
-		if record.Status != StatusProjected || (record.Event.Content.Type != TypePeerTrust && record.Event.Content.Type != TypePeerDistrust) {
+		if record.Status != StatusProjected || (record.Event.Content.Type != TypePeerBindingSet && record.Event.Content.Type != TypePeerBindingBlock) {
 			continue
 		}
 		var payload PeerPayload
@@ -560,8 +519,22 @@ func (s *State) reducePeers() {
 	for installationID, records := range groups {
 		maxima := s.maximal(records)
 		peer := PeerProjection{InstallationID: installationID, Trusted: len(maxima) > 0}
+		// Retain the latest known route even when a block wins. Revocation facts
+		// authored before the block must still be deliverable on that route.
+		var bindings []Record
+		for _, record := range records {
+			if record.Event.Content.Type == TypePeerBindingSet {
+				bindings = append(bindings, record)
+			}
+		}
+		if len(bindings) != 0 {
+			binding := s.maximal(bindings)[0]
+			var payload PeerPayload
+			_ = decodePayload(binding.Event.Content.Payload, &payload)
+			peer.SignerKeyID, peer.Name, peer.Relays = payload.SignerKeyID, payload.Name, append([]string(nil), payload.Relays...)
+		}
 		for index, record := range maxima {
-			if record.Event.Content.Type != TypePeerTrust {
+			if record.Event.Content.Type != TypePeerBindingSet {
 				peer.Trusted = false
 				continue
 			}
@@ -577,36 +550,96 @@ func (s *State) reducePeers() {
 	}
 }
 
-func (s *State) reduceShares() {
-	groups := make(map[string][]Record)
-	for _, record := range s.Records {
-		if record.Status != StatusProjected || (record.Event.Content.Type != TypeMailboxShare && record.Event.Content.Type != TypeMailboxShareRevoke) {
+func (s *State) classifyMailboxAccessEvents() {
+	for _, id := range sortedRecordIDs(s.Records) {
+		record := s.Records[id]
+		if record.Status != StatusProjected || !isMailboxAccessType(record.Event.Content.Type) {
 			continue
 		}
-		var payload MailboxSharePayload
-		if decodePayload(record.Event.Content.Payload, &payload) != nil {
+		content := record.Event.Content
+		if !s.installationSignerMatches(content.InstallationID, record.Event.Nostr.PubKey) {
+			record.Status, record.Reason = StatusUnauthorized, "mailbox access fact signer is not bound to its installation"
+			s.Records[id] = record
 			continue
 		}
-		key := shareKey(payload.MailboxID, payload.PeerInstallationID)
-		groups[key] = append(groups[key], record)
-	}
-	for key, records := range groups {
-		maxima := s.maximal(records)
-		var payload MailboxSharePayload
-		_ = decodePayload(maxima[0].Event.Content.Payload, &payload)
-		share := MailboxShareProjection{MailboxID: payload.MailboxID, PeerInstallationID: payload.PeerInstallationID, Active: true}
-		for _, record := range maxima {
-			if record.Event.Content.Type != TypeMailboxShare {
-				share.Active = false
+		if !s.parentsUsable(record.Event, make(map[string]bool)) {
+			record.Status, record.Reason = StatusUnresolved, "mailbox access fact has a missing or unusable causal parent"
+			s.Records[id] = record
+			continue
+		}
+		switch content.Type {
+		case TypeMailboxAccessRevoke:
+			var payload MailboxAccessPayload
+			_ = decodePayload(content.Payload, &payload)
+			if !s.authoritiesAreMatchingGrants(record.Event, payload) {
+				record.Status, record.Reason = StatusUnauthorized, "mailbox access revocation lacks a matching grant authority"
+				s.Records[id] = record
+			}
+		case TypeMailboxAccessObserve:
+			var payload MailboxAccessObservationPayload
+			_ = decodePayload(content.Payload, &payload)
+			grant, grantOK := s.projectedRecord(payload.GrantEventID, TypeMailboxAccessGrant)
+			message, messageOK := s.Records[payload.MessageEventID]
+			if !grantOK || !messageOK || message.Status != StatusProjected || !s.mailboxGrantAuthorizes(grant.Event, message.Event) || content.InstallationID != grant.Event.Content.InstallationID {
+				record.Status, record.Reason = StatusUnauthorized, "mailbox access observation does not match its grant and message"
+				s.Records[id] = record
 			}
 		}
-		s.Shares[key] = share
+	}
+}
+
+func (s *State) projectMailboxAccess() {
+	for _, id := range sortedRecordIDs(s.Records) {
+		record := s.Records[id]
+		if record.Status != StatusProjected || record.Event.Content.Type != TypeMailboxAccessGrant {
+			continue
+		}
+		var payload MailboxAccessPayload
+		_ = decodePayload(record.Event.Content.Payload, &payload)
+		projection := MailboxAccessProjection{
+			GrantEventID: id, MailboxID: payload.MailboxID,
+			GrantorInstallationID: record.Event.Content.InstallationID,
+			GranteeInstallationID: payload.GranteeInstallationID,
+			GranteeSignerKeyID:    payload.GranteeSignerKeyID, Active: true,
+		}
+		var observations []Record
+		for _, candidateID := range sortedRecordIDs(s.Records) {
+			candidate := s.Records[candidateID]
+			if candidate.Status != StatusProjected {
+				continue
+			}
+			switch candidate.Event.Content.Type {
+			case TypeMailboxAccessRevoke:
+				if slices.Contains(candidate.Event.Content.Authorities, id) {
+					projection.RevokeEventIDs = append(projection.RevokeEventIDs, candidateID)
+					projection.Active = false
+				}
+			case TypeMailboxAccessObserve:
+				var observed MailboxAccessObservationPayload
+				_ = decodePayload(candidate.Event.Content.Payload, &observed)
+				if observed.GrantEventID == id {
+					observations = append(observations, candidate)
+				}
+			}
+		}
+		for _, observation := range s.maximal(observations) {
+			projection.ObservationEventIDs = append(projection.ObservationEventIDs, observation.Event.ID())
+		}
+		s.MailboxAccess[id] = projection
 	}
 }
 
 func (s *State) classifyDomainEvents() {
+	memo := make(map[string]bool)
 	for id, record := range s.Records {
-		if record.Status != StatusProjected || isControlType(record.Event.Content.Type) || isAccountAuthorityType(record.Event.Content.Type) {
+		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) && !isAccountAuthorityType(record.Event.Content.Type) && !isMailboxAccessType(record.Event.Content.Type) && !s.parentsUsable(record.Event, memo) {
+			record.Status = StatusUnresolved
+			record.Reason = "event has a missing or unusable causal parent"
+			s.Records[id] = record
+		}
+	}
+	for id, record := range s.Records {
+		if record.Status != StatusProjected || isControlType(record.Event.Content.Type) || isAccountAuthorityType(record.Event.Content.Type) || isMailboxAccessType(record.Event.Content.Type) {
 			continue
 		}
 		if !s.authorized(record.Event) {
@@ -615,21 +648,8 @@ func (s *State) classifyDomainEvents() {
 			s.Records[id] = record
 		}
 	}
-	memo := make(map[string]bool)
-	var unresolved []string
 	for id, record := range s.Records {
-		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) && !isAccountAuthorityType(record.Event.Content.Type) && !s.parentsUsable(record.Event, memo) {
-			unresolved = append(unresolved, id)
-		}
-	}
-	for _, id := range unresolved {
-		record := s.Records[id]
-		record.Status = StatusUnresolved
-		record.Reason = "event has a missing or unusable causal parent"
-		s.Records[id] = record
-	}
-	for id, record := range s.Records {
-		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) && !isAccountAuthorityType(record.Event.Content.Type) {
+		if record.Status == StatusProjected && !isControlType(record.Event.Content.Type) && !isAccountAuthorityType(record.Event.Content.Type) && !isMailboxAccessType(record.Event.Content.Type) {
 			if record.Event.Content.Type == TypeMessageArchive || record.Event.Content.Type == TypeMessageRestore || record.Event.Content.Type == TypeMessageReject {
 				var payload TargetPayload
 				_ = decodePayload(record.Event.Content.Payload, &payload)
@@ -660,42 +680,127 @@ func (s *State) authorized(event SignedEvent) bool {
 	if event.Content.Scope == ScopeAccountAddressed {
 		return s.authorizedAccountEvent(event)
 	}
-	if s.signedByLocalRoot(event) {
-		return true
+	if event.Content.Scope == ScopeInstallationPrivate {
+		return s.signedByLocalRoot(event)
 	}
-	content := event.Content
-	peer, ok := s.Peers[content.InstallationID]
-	if !ok || !peer.Trusted || peer.SignerKeyID != event.Nostr.PubKey {
+	if event.Content.Scope != ScopePeerAddressed {
 		return false
 	}
-	if content.Type == TypeThreadCancel {
-		root, ok := s.Records[content.ThreadID]
-		return ok && root.Status == StatusProjected && root.Event.Content.Sender != nil &&
-			root.Event.Content.Sender.InstallationID == content.InstallationID && *root.Event.Content.Sender == *content.Sender
-	}
-	if content.Type != TypeQuestion && content.Type != TypeAnswer && content.Type != TypeMessage {
+	if len(event.Content.Authorities) != 1 {
 		return false
 	}
-	if content.Sender == nil || content.Recipient == nil || content.Sender.InstallationID != content.InstallationID || content.Recipient.InstallationID != s.Policy.InstallationID {
+	grant, ok := s.projectedRecord(event.Content.Authorities[0], TypeMailboxAccessGrant)
+	if !ok || !s.mailboxGrantAuthorizes(grant.Event, event) {
 		return false
 	}
-	if content.Recipient.MailboxID == s.Policy.HumanMailboxID {
-		return true
+	projection, ok := s.MailboxAccess[grant.Event.ID()]
+	if !ok {
+		return false
 	}
-	if content.Type == TypeAnswer {
-		root, ok := s.Records[content.ThreadID]
-		if ok && root.Status == StatusProjected && root.Event.Content.Type == TypeQuestion && root.Event.Content.Sender != nil && root.Event.Content.Recipient != nil &&
-			*root.Event.Content.Sender == *content.Recipient && *root.Event.Content.Recipient == *content.Sender {
-			return true
+	for _, revokeID := range projection.RevokeEventIDs {
+		// A receiver-authored observation makes the message an ancestor of a
+		// later revoke. Earlier traffic remains visible; later or concurrent
+		// traffic fails closed.
+		if !s.ancestor(event.ID(), revokeID) {
+			return false
 		}
 	}
-	share, ok := s.Shares[shareKey(content.Recipient.MailboxID, content.InstallationID)]
-	return ok && share.Active
+	return true
+}
+
+func (s *State) mailboxGrantAuthorizes(grant, action SignedEvent) bool {
+	if grant.Content.Type != TypeMailboxAccessGrant || action.Content.Sender == nil || action.Content.Recipient == nil {
+		return false
+	}
+	var payload MailboxAccessPayload
+	if decodePayload(grant.Content.Payload, &payload) != nil {
+		return false
+	}
+	return action.Content.Scope == ScopePeerAddressed &&
+		action.Content.InstallationID == payload.GranteeInstallationID &&
+		action.Nostr.PubKey == payload.GranteeSignerKeyID &&
+		action.Content.Sender.InstallationID == payload.GranteeInstallationID &&
+		action.Content.Recipient.InstallationID == grant.Content.InstallationID &&
+		action.Content.Recipient.MailboxID == payload.MailboxID
+}
+
+func (s *State) installationSignerMatches(installationID, signerKeyID string) bool {
+	if installationID == s.Policy.InstallationID {
+		return signerKeyID == s.Policy.RootKeyID
+	}
+	peer, ok := s.Peers[installationID]
+	return ok && peer.SignerKeyID == signerKeyID
+}
+
+func (s *State) projectedRecord(id string, kind Type) (Record, bool) {
+	record, ok := s.Records[id]
+	return record, ok && record.Status == StatusProjected && record.Event.Content.Type == kind
+}
+
+func (s *State) authoritiesAreMatchingGrants(item SignedEvent, payload MailboxAccessPayload) bool {
+	if len(item.Content.Authorities) == 0 {
+		return false
+	}
+	for _, authority := range item.Content.Authorities {
+		grant, ok := s.projectedRecord(authority, TypeMailboxAccessGrant)
+		if !ok || grant.Event.Content.InstallationID != item.Content.InstallationID {
+			return false
+		}
+		var granted MailboxAccessPayload
+		if decodePayload(grant.Event.Content.Payload, &granted) != nil || granted != payload {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *State) accountAuthorityMatches(item SignedEvent) bool {
+	content := item.Content
+	if content.Audience == nil || len(content.Authorities) == 0 {
+		return false
+	}
+	accountID := content.Audience.HumanAccountID
+	for _, authority := range content.Authorities {
+		record, ok := s.Records[authority]
+		if !ok || record.Status != StatusProjected {
+			return false
+		}
+		if record.Event.Content.Type == TypeHumanAccountCreate {
+			var payload HumanAccountPayload
+			_ = decodePayload(record.Event.Content.Payload, &payload)
+			if payload.AccountID != accountID || payload.CreatorInstallationID != content.InstallationID || payload.CreatorSignerKeyID != item.Nostr.PubKey {
+				return false
+			}
+			continue
+		}
+		if record.Event.Content.Type != TypeHumanDeviceAccept {
+			return false
+		}
+		var payload HumanDevicePayload
+		_ = decodePayload(record.Event.Content.Payload, &payload)
+		if payload.AccountID != accountID || payload.InstallationID != content.InstallationID || payload.SignerKeyID != item.Nostr.PubKey {
+			return false
+		}
+		for _, candidate := range s.Records {
+			if candidate.Status != StatusProjected || candidate.Event.Content.Type != TypeHumanDeviceRevoke {
+				continue
+			}
+			var revoked HumanDevicePayload
+			_ = decodePayload(candidate.Event.Content.Payload, &revoked)
+			if !sameHumanDevice(revoked, payload) {
+				continue
+			}
+			if !s.ancestor(item.ID(), candidate.Event.ID()) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *State) authorizedAccountEvent(item SignedEvent) bool {
 	content := item.Content
-	if content.Audience == nil || !s.accountMembershipAt(content.Audience.HumanAccountID, content.InstallationID, item.Nostr.PubKey, item.ID()) {
+	if !s.accountAuthorityMatches(item) {
 		return false
 	}
 	humanMailbox := s.Policy.HumanMailboxID
@@ -730,41 +835,6 @@ func (s *State) authorizedAccountEvent(item SignedEvent) bool {
 	default:
 		return false
 	}
-}
-
-func (s *State) accountMembershipAt(accountID, installationID, signerKeyID, eventID string) bool {
-	account, ok := s.Accounts[accountID]
-	if !ok {
-		return false
-	}
-	if installationID == account.CreatorInstallationID {
-		return signerKeyID == account.CreatorSignerKeyID && s.ancestor(account.CreationEventID, eventID)
-	}
-	device, ok := account.Devices[installationID]
-	if !ok || device.SignerKeyID != signerKeyID {
-		return false
-	}
-	var facts []Record
-	for _, record := range s.Records {
-		if record.Status != StatusProjected || !isHumanDeviceType(record.Event.Content.Type) || !s.ancestor(record.Event.ID(), eventID) {
-			continue
-		}
-		var payload HumanDevicePayload
-		_ = decodePayload(record.Event.Content.Payload, &payload)
-		if payload.AccountID == accountID && payload.InstallationID == installationID && payload.SignerKeyID == signerKeyID {
-			facts = append(facts, record)
-		}
-	}
-	maxima := s.maximal(facts)
-	if len(maxima) == 0 {
-		return false
-	}
-	for _, record := range maxima {
-		if record.Event.Content.Type != TypeHumanDeviceAccept {
-			return false
-		}
-	}
-	return true
 }
 
 func (s *State) parentsUsable(event SignedEvent, memo map[string]bool) bool {
@@ -1018,12 +1088,9 @@ func (s *State) projectMessages() {
 		if content.Type != TypeQuestion && content.Type != TypeAnswer && content.Type != TypeMessage {
 			continue
 		}
-		payload, err := decodeTextPayload(content.Payload, content.Schema)
+		payload, err := decodeTextPayload(content.Payload)
 		if err != nil {
 			continue
-		}
-		if content.Schema == Schema1 {
-			payload = projectLegacySchema1Message(payload)
 		}
 		threadID := content.ThreadID
 		if threadID == "" {
@@ -1381,7 +1448,7 @@ func (s State) Wait(questionID string, mailbox MailboxAddress) (MessageProjectio
 
 func isControlType(kind Type) bool {
 	switch kind {
-	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeAgentSessionRename, TypePeerTrust, TypePeerDistrust, TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountSelect:
+	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeAgentSessionRename, TypePeerBindingSet, TypePeerBindingBlock, TypeHumanAccountSelect:
 		return true
 	default:
 		return false
@@ -1396,6 +1463,18 @@ func isHumanDeviceType(kind Type) bool {
 	return kind == TypeHumanDeviceGrant || kind == TypeHumanDeviceAccept || kind == TypeHumanDeviceRevoke
 }
 
-func shareKey(mailboxID, peerInstallationID string) string {
-	return fmt.Sprintf("%s:%s", peerInstallationID, mailboxID)
+func isMailboxAccessType(kind Type) bool {
+	return kind == TypeMailboxAccessGrant || kind == TypeMailboxAccessRevoke || kind == TypeMailboxAccessObserve
+}
+
+func cloneTechnicalSections(sections []model.TechnicalSection) []model.TechnicalSection {
+	if sections == nil {
+		return nil
+	}
+	cloned := make([]model.TechnicalSection, len(sections))
+	for index, section := range sections {
+		cloned[index] = section
+		cloned[index].Fields = append([]model.TechnicalField(nil), section.Fields...)
+	}
+	return cloned
 }

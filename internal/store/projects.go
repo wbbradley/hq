@@ -110,7 +110,7 @@ func (s *SQLite) signProjectEvent(ctx context.Context, projectID, previous strin
 	}
 	sort.Strings(parents)
 	parents = slices.Compact(parents)
-	content := event.Content{Type: event.TypeProjectEvent, Parents: parents, Scope: event.ScopeAccountAddressed, Audience: &event.Audience{HumanAccountID: accountID}, Payload: projectPayload}
+	content := event.Content{Type: event.TypeProjectEvent, Parents: parents, Authorities: uniqueSorted(membershipParents), Scope: event.ScopeAccountAddressed, Audience: &event.Audience{HumanAccountID: accountID}, Payload: projectPayload}
 	signed, err := s.signContents(ctx, []event.Content{content}, []time.Time{createdAt})
 	if err != nil {
 		return event.SignedEvent{}, nil, err
@@ -836,7 +836,7 @@ func (s *SQLite) CheckProjectResource(ctx context.Context, projectID, resourceID
 				Presentation:      model.PresentationNotice,
 				TechnicalSections: []model.TechnicalSection{{Namespace: "hq.project.resource_health", Fields: technicalFields}},
 			})
-			content := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+			content := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: uniqueSorted(parents), Scope: event.ScopeAccountAddressed, Payload: payload}
 			signed, signErr := s.signContents(ctx, []event.Content{content}, []time.Time{now})
 			if signErr != nil {
 				return nil, signErr

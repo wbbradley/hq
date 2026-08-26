@@ -125,7 +125,7 @@ Unknown additive notifications are non-fatal and are ignored by handlers that do
 
 ### Canonical message semantics
 
-Every new harness-authored mailbox message uses canonical text schema 2. The neutral correlation is
+Every new harness-authored mailbox message uses canonical text schema 3. The neutral correlation is
 the provider ID and session ID plus, when available, operation, item, and interactive-request IDs.
 These values stay opaque outside the adapter: generic code neither assumes Codex vocabulary nor
 reconstructs identity from message prose. Replies copy the typed correlation of the message they
@@ -148,7 +148,7 @@ collide with different content.
 ### Canonical activity stream
 
 Normalized operation status, plan, diff, completed command, completed file change, completed tool
-call, and progress records are schema-2 `harness.activity` events. They use the same signing,
+call, and progress records are schema-3 `harness.activity` events. They use the same signing,
 canonical log, active-human-account audience, membership parents, per-device encrypted outbox,
 inbound authorization, replay, and rebuild path as account messages. They remain a separate
 non-message stream: an activity is not a mutation receipt, inbox row, unread unit, delivery claim,

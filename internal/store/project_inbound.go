@@ -100,6 +100,7 @@ func (s *SQLite) appendProjectPendingNoticeTx(ctx context.Context, tx *sql.Tx, p
 	if err != nil {
 		return err
 	}
+	authorities := append([]string(nil), parents...)
 	parents = append(parents, parent)
 	sort.Strings(parents)
 	noticeID, err := uuid.NewV7()
@@ -116,7 +117,7 @@ func (s *SQLite) appendProjectPendingNoticeTx(ctx context.Context, tx *sql.Tx, p
 			{Key: "archived", Label: "Archived", Value: fmt.Sprintf("%t", archived)},
 		}}},
 	})
-	content := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: accountID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	content := event.Content{Schema: event.MessageSchemaVersion, Type: event.TypeQuestion, Sender: s.localAddress(mailboxID), Audience: &event.Audience{HumanAccountID: accountID}, Parents: parents, Authorities: uniqueSorted(authorities), Scope: event.ScopeAccountAddressed, Payload: payload}
 	signed, err := s.signContents(ctx, []event.Content{content}, []time.Time{created})
 	if err != nil {
 		return err

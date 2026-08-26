@@ -81,7 +81,7 @@ func TestOpenObservesChangedSymlinkIdentityWithoutRewritingResource(t *testing.T
 	if err != nil || strings.Join(technicalFieldKeys(notice.TechnicalSections, "hq.project.resource_health"), ",") != "project_id,resource_id,previous_health,current_health,health_details" {
 		t.Fatalf("resource notice = %#v, %v", notice, err)
 	}
-	assertCanonicalMessageSchema(t, s, noticeID, event.Schema2)
+	assertCanonicalMessageSchema(t, s, noticeID, event.Schema3)
 }
 
 func TestOpenChecksExpectedHeadBeforeLifecycle(t *testing.T) {
@@ -154,10 +154,11 @@ func TestUnknownCanonicalProjectCommandIsRejectedWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authorities := uniqueSorted(parents)
 	parents = uniqueSorted(append(parents, project.HeadEventID))
 	commandID := "019c0000-0000-7000-8000-000000000091"
 	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: commandID, ProjectID: project.ID, ExpectedHead: project.HeadEventID, Operation: "project.future", Body: json.RawMessage(`{}`)})
-	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(model.HumanMailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(model.HumanMailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: authorities, Scope: event.ScopeAccountAddressed, Payload: payload}
 	signed, err := s.signContents(ctx, []event.Content{content}, []time.Time{time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
@@ -1063,7 +1064,7 @@ func TestProjectOutputRetainsAssignmentProvenanceAndMarksLateRuntime(t *testing.
 	if len(current.TechnicalSections) != 2 || current.TechnicalSections[0].Namespace != "vendor.output" || current.TechnicalSections[1].Namespace != "hq.project.output_provenance" || strings.Join(technicalFieldKeys(current.TechnicalSections, "hq.project.output_provenance"), ",") != "project_id,assignment_id,project_thread_id" {
 		t.Fatalf("current technical order = %#v", current.TechnicalSections)
 	}
-	assertCanonicalMessageSchema(t, s, currentID, event.Schema2)
+	assertCanonicalMessageSchema(t, s, currentID, event.Schema3)
 	project, err = s.UnassignProject(ctx, project.ID, project.HeadEventID, true, "forced takeover")
 	if err != nil {
 		t.Fatal(err)
@@ -1234,7 +1235,7 @@ func TestGenericCanonicalAppendAcceptsLocalProjectReplyAndRestartIsIdempotent(t 
 	}
 	replyID := "019c0000-0000-7000-8000-000000000372"
 	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: replyID, Body: "stranded follow-up", ActorLabel: deviceLabel})
-	content := event.Content{Type: event.TypeAnswer, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(project.MailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, ThreadID: original.eventID, Parents: uniqueSorted(append(parents, original.eventID)), Scope: event.ScopeAccountAddressed, Payload: payload}
+	content := event.Content{Type: event.TypeAnswer, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(project.MailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, ThreadID: original.eventID, Parents: uniqueSorted(append(parents, original.eventID)), Authorities: uniqueSorted(parents), Scope: event.ScopeAccountAddressed, Payload: payload}
 	if err := s.appendContents(ctx, []event.Content{content}, []time.Time{time.Now().UTC()}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1269,7 +1270,7 @@ func TestRebuildReconcilesProjectInputMissingFromLegacyHistory(t *testing.T) {
 	}
 	messageID := "019c0000-0000-7000-8000-000000000373"
 	payload, _ := event.MarshalPayload(event.TextPayload{MessageID: messageID, Body: "legacy unaccepted input", Purpose: model.MessagePurposeProjectInput, ActorLabel: deviceLabel})
-	content := event.Content{Type: event.TypeMessage, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(project.MailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	content := event.Content{Type: event.TypeMessage, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(project.MailboxID), Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: uniqueSorted(parents), Scope: event.ScopeAccountAddressed, Payload: payload}
 	signed, err := s.signContents(ctx, []event.Content{content}, []time.Time{time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)

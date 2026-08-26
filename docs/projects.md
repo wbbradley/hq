@@ -101,7 +101,7 @@ Within that distinction:
   content.
 - A **runtime delivery** is the dispatch of one project message to one selected execution thread.
 
-All newly created project mailbox messages use canonical text schema 2. Human instructions and
+All newly created project mailbox messages use canonical text schema 3. Human instructions and
 supplementary explanations remain in `body` and `details`; presentation and harness correlation
 use typed fields. Project code must not recover structure from either text field.
 

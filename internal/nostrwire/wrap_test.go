@@ -91,7 +91,7 @@ func TestGiftWrapRoundTripForAccountAudience(t *testing.T) {
 		Type: event.TypeQuestion, InstallationID: wireInstallationA,
 		Sender:   &event.MailboxAddress{InstallationID: wireInstallationA, MailboxID: wireMailboxA},
 		Audience: &event.Audience{HumanAccountID: "0198c7ec-73b0-7cc3-a5f7-e31c77140d21"},
-		Parents:  []string{strings.Repeat("a", 64)}, Scope: event.ScopeAccountAddressed, Payload: payload,
+		Parents:  []string{strings.Repeat("a", 64)}, Authorities: []string{strings.Repeat("a", 64)}, Scope: event.ScopeAccountAddressed, Payload: payload,
 	}, time.Unix(1_800_000_000, 0), senderSecret)
 	if err != nil {
 		t.Fatal(err)
@@ -114,11 +114,11 @@ func TestGiftWrapProtocolFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const wantID = "23ed163a939f1e224c32db406445eae4012aab4f8efb92921bdc68f1290eaec5"
+	const wantID = "1d9a00e761b462219e9b0209a06c1b6ed307de2e5238677eb49119a74d810cc7"
 	if wrapped.EventID != wantID {
 		t.Fatalf("fixture ID = %s\nephemeral = %s", wrapped.EventID, wrapped.EphemeralKey)
 	}
-	const wantWireSHA256 = "a3f5384d36770275b6890409f62390984dcb8e14784e574d6601124c90e7b86d"
+	const wantWireSHA256 = "c0459be01545a33dc6bdb8d81614cf2592e29a27d643e7dfe5b770036463abc1"
 	if got := fmt.Sprintf("%x", sha256.Sum256(wrapped.ExactWire)); got != wantWireSHA256 {
 		t.Fatalf("fixture wire SHA-256 = %s", got)
 	}
@@ -203,7 +203,8 @@ func peerCanonical(t *testing.T, secret event.SecretKey) event.SignedEvent {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := event.Content{Type: event.TypeMessage, InstallationID: wireInstallationA, Sender: &event.MailboxAddress{InstallationID: wireInstallationA, MailboxID: wireMailboxA}, Recipient: &event.MailboxAddress{InstallationID: wireInstallationB, MailboxID: wireMailboxB}, Scope: event.ScopePeerAddressed, Payload: payload}
+	authority := strings.Repeat("a", 64)
+	content := event.Content{Type: event.TypeMessage, InstallationID: wireInstallationA, Sender: &event.MailboxAddress{InstallationID: wireInstallationA, MailboxID: wireMailboxA}, Recipient: &event.MailboxAddress{InstallationID: wireInstallationB, MailboxID: wireMailboxB}, Parents: []string{authority}, Authorities: []string{authority}, Scope: event.ScopePeerAddressed, Payload: payload}
 	signed, err := event.Sign(content, time.Unix(1_800_000_000, 0), secret)
 	if err != nil {
 		t.Fatal(err)

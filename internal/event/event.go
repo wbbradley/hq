@@ -14,8 +14,7 @@ import (
 
 const (
 	Kind                           = eventwire.Kind
-	Schema1                        = eventwire.Schema1
-	Schema2                        = eventwire.Schema2
+	Schema3                        = eventwire.Schema3
 	SchemaVersion                  = eventwire.SchemaVersion
 	MessageSchemaVersion           = eventwire.MessageSchemaVersion
 	MaxWireBytes                   = eventwire.MaxWireBytes
@@ -36,34 +35,35 @@ const (
 	MaxHarnessActivityBodyBytes    = eventwire.MaxHarnessActivityBodyBytes
 	MaxHarnessActivityRuntimeBytes = eventwire.MaxHarnessActivityRuntimeBytes
 
-	TypeInstallationCreate = eventwire.TypeInstallationCreate
-	TypeMailboxCreate      = eventwire.TypeMailboxCreate
-	TypeMailboxBind        = eventwire.TypeMailboxBind
-	TypeMailboxContext     = eventwire.TypeMailboxContext
-	TypeAgentNameClaim     = eventwire.TypeAgentNameClaim
-	TypeAgentRetire        = eventwire.TypeAgentRetire
-	TypeAgentSessionSelect = eventwire.TypeAgentSessionSelect
-	TypeAgentSessionRename = eventwire.TypeAgentSessionRename
-	TypeQuestion           = eventwire.TypeQuestion
-	TypeAnswer             = eventwire.TypeAnswer
-	TypeMessage            = eventwire.TypeMessage
-	TypeThreadCancel       = eventwire.TypeThreadCancel
-	TypeMessageArchive     = eventwire.TypeMessageArchive
-	TypeMessageRestore     = eventwire.TypeMessageRestore
-	TypeMessageReject      = eventwire.TypeMessageReject
-	TypePeerTrust          = eventwire.TypePeerTrust
-	TypePeerDistrust       = eventwire.TypePeerDistrust
-	TypeMailboxShare       = eventwire.TypeMailboxShare
-	TypeMailboxShareRevoke = eventwire.TypeMailboxShareRevoke
-	TypeHumanAccountCreate = eventwire.TypeHumanAccountCreate
-	TypeHumanAccountSelect = eventwire.TypeHumanAccountSelect
-	TypeHumanDeviceGrant   = eventwire.TypeHumanDeviceGrant
-	TypeHumanDeviceAccept  = eventwire.TypeHumanDeviceAccept
-	TypeHumanDeviceRevoke  = eventwire.TypeHumanDeviceRevoke
-	TypeProjectEvent       = eventwire.TypeProjectEvent
-	TypeProjectCommand     = eventwire.TypeProjectCommand
-	TypeProjectResult      = eventwire.TypeProjectResult
-	TypeHarnessActivity    = eventwire.TypeHarnessActivity
+	TypeInstallationCreate   = eventwire.TypeInstallationCreate
+	TypeMailboxCreate        = eventwire.TypeMailboxCreate
+	TypeMailboxBind          = eventwire.TypeMailboxBind
+	TypeMailboxContext       = eventwire.TypeMailboxContext
+	TypeAgentNameClaim       = eventwire.TypeAgentNameClaim
+	TypeAgentRetire          = eventwire.TypeAgentRetire
+	TypeAgentSessionSelect   = eventwire.TypeAgentSessionSelect
+	TypeAgentSessionRename   = eventwire.TypeAgentSessionRename
+	TypeQuestion             = eventwire.TypeQuestion
+	TypeAnswer               = eventwire.TypeAnswer
+	TypeMessage              = eventwire.TypeMessage
+	TypeThreadCancel         = eventwire.TypeThreadCancel
+	TypeMessageArchive       = eventwire.TypeMessageArchive
+	TypeMessageRestore       = eventwire.TypeMessageRestore
+	TypeMessageReject        = eventwire.TypeMessageReject
+	TypePeerBindingSet       = eventwire.TypePeerBindingSet
+	TypePeerBindingBlock     = eventwire.TypePeerBindingBlock
+	TypeMailboxAccessGrant   = eventwire.TypeMailboxAccessGrant
+	TypeMailboxAccessRevoke  = eventwire.TypeMailboxAccessRevoke
+	TypeMailboxAccessObserve = eventwire.TypeMailboxAccessObserve
+	TypeHumanAccountCreate   = eventwire.TypeHumanAccountCreate
+	TypeHumanAccountSelect   = eventwire.TypeHumanAccountSelect
+	TypeHumanDeviceGrant     = eventwire.TypeHumanDeviceGrant
+	TypeHumanDeviceAccept    = eventwire.TypeHumanDeviceAccept
+	TypeHumanDeviceRevoke    = eventwire.TypeHumanDeviceRevoke
+	TypeProjectEvent         = eventwire.TypeProjectEvent
+	TypeProjectCommand       = eventwire.TypeProjectCommand
+	TypeProjectResult        = eventwire.TypeProjectResult
+	TypeHarnessActivity      = eventwire.TypeHarnessActivity
 
 	ScopeInstallationPrivate = eventwire.ScopeInstallationPrivate
 	ScopePeerAddressed       = eventwire.ScopePeerAddressed
@@ -100,7 +100,8 @@ type AgentSessionPayload = eventwire.AgentSessionPayload
 type AgentSessionRenamePayload = eventwire.AgentSessionRenamePayload
 type TargetPayload = eventwire.TargetPayload
 type PeerPayload = eventwire.PeerPayload
-type MailboxSharePayload = eventwire.MailboxSharePayload
+type MailboxAccessPayload = eventwire.MailboxAccessPayload
+type MailboxAccessObservationPayload = eventwire.MailboxAccessObservationPayload
 type HumanAccountPayload = eventwire.HumanAccountPayload
 type HumanAccountSelectionPayload = eventwire.HumanAccountSelectionPayload
 type HumanDevicePayload = eventwire.HumanDevicePayload
@@ -118,7 +119,7 @@ type MailboxProjection = eventstate.MailboxProjection
 type NamedAgentProjection = eventstate.NamedAgentProjection
 type AgentSessionProjection = eventstate.AgentSessionProjection
 type PeerProjection = eventstate.PeerProjection
-type MailboxShareProjection = eventstate.MailboxShareProjection
+type MailboxAccessProjection = eventstate.MailboxAccessProjection
 type HumanAccountProjection = eventstate.HumanAccountProjection
 type HumanDeviceProjection = eventstate.HumanDeviceProjection
 type MessageProjection = eventstate.MessageProjection
@@ -139,10 +140,7 @@ func MarshalPayload(value any) (json.RawMessage, error) { return eventwire.Marsh
 func Sign(content Content, createdAt time.Time, secret SecretKey) (SignedEvent, error) {
 	return eventwire.Sign(content, createdAt, secret)
 }
-func Inspect(raw []byte) Inspection { return eventwire.Inspect(raw) }
-func InspectWithSchemas(raw []byte, schemas []int) Inspection {
-	return eventwire.InspectWithSchemas(raw, schemas)
-}
+func Inspect(raw []byte) Inspection                  { return eventwire.Inspect(raw) }
 func Reduce(rawEvents [][]byte, policy Policy) State { return eventstate.Reduce(rawEvents, policy) }
 
 // decodePayload remains private compatibility for package tests. Production

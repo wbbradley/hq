@@ -19,14 +19,11 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 	if content.Schema != schema {
 		return StatusUnsupported, fmt.Errorf("unsupported HQ schema %d", content.Schema)
 	}
-	if schema != Schema1 && schema != Schema2 {
+	if schema != Schema3 {
 		return StatusUnsupported, fmt.Errorf("unsupported HQ schema %d", schema)
 	}
 	if !knownType(content.Type) {
 		return StatusUnsupported, fmt.Errorf("unsupported HQ event type %q", content.Type)
-	}
-	if schema == Schema2 && content.Type != TypeQuestion && content.Type != TypeAnswer && content.Type != TypeMessage && content.Type != TypeHarnessActivity {
-		return StatusUnsupported, fmt.Errorf("HQ schema 2 does not define event type %q", content.Type)
 	}
 	if err := validUUID("installation ID", content.InstallationID); err != nil {
 		return StatusInvalid, err
@@ -69,6 +66,22 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 	if !slices.IsSorted(content.Parents) {
 		return StatusInvalid, errors.New("parent event IDs must use lexical order")
 	}
+	seenAuthorities := make(map[string]struct{}, len(content.Authorities))
+	for _, authority := range content.Authorities {
+		if err := validEventID("authority event ID", authority); err != nil {
+			return StatusInvalid, err
+		}
+		if _, ok := seenAuthorities[authority]; ok {
+			return StatusInvalid, fmt.Errorf("duplicate authority event ID %s", authority)
+		}
+		if _, ok := seenParents[authority]; !ok {
+			return StatusInvalid, fmt.Errorf("authority event ID %s is not a causal parent", authority)
+		}
+		seenAuthorities[authority] = struct{}{}
+	}
+	if !slices.IsSorted(content.Authorities) {
+		return StatusInvalid, errors.New("authority event IDs must use lexical order")
+	}
 	if content.ThreadID != "" {
 		if err := validEventID("thread ID", content.ThreadID); err != nil {
 			return StatusInvalid, err
@@ -82,12 +95,12 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 			return StatusInvalid, err
 		}
 	}
+	if content.Scope == ScopeAccountAddressed && len(content.Authorities) == 0 {
+		return StatusInvalid, errors.New("account-addressed event needs explicit account authorities")
+	}
 
 	switch content.Type {
 	case TypeHarnessActivity:
-		if schema != Schema2 {
-			return StatusUnsupported, errors.New("harness activity is defined only in HQ schema 2")
-		}
 		if content.Scope != ScopeInstallationPrivate && content.Scope != ScopeAccountAddressed {
 			return StatusInvalid, errors.New("harness activity must be installation-private or account-addressed")
 		}
@@ -110,13 +123,19 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 			return StatusInvalid, err
 		}
 	case TypeQuestion, TypeMessage:
-		if content.ThreadID != "" || (content.Scope != ScopeAccountAddressed && len(content.Parents) != 0) || (content.Scope == ScopeAccountAddressed && len(content.Parents) == 0) {
-			return StatusInvalid, errors.New("root question and message events must omit thread_id and account-addressed roots need membership parents")
+		if content.ThreadID != "" {
+			return StatusInvalid, errors.New("root question and message events must omit thread_id")
+		}
+		if content.Scope == ScopeInstallationPrivate && (len(content.Parents) != 0 || len(content.Authorities) != 0) {
+			return StatusInvalid, errors.New("installation-private root messages must omit parents and authorities")
+		}
+		if content.Scope != ScopeInstallationPrivate && (len(content.Parents) == 0 || len(content.Authorities) == 0) {
+			return StatusInvalid, errors.New("addressed root messages need causal authority parents")
 		}
 		if err := validateMessageAddresses(content, content.Type == TypeQuestion && content.Scope == ScopeAccountAddressed); err != nil {
 			return StatusInvalid, err
 		}
-		if err := validateTextPayload(content.Payload, schema); err != nil {
+		if err := validateTextPayload(content.Payload); err != nil {
 			return StatusInvalid, err
 		}
 	case TypeAnswer:
@@ -126,7 +145,10 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if err := validateMessageAddresses(content, false); err != nil {
 			return StatusInvalid, err
 		}
-		if err := validateTextPayload(content.Payload, schema); err != nil {
+		if content.Scope != ScopeInstallationPrivate && len(content.Authorities) == 0 {
+			return StatusInvalid, errors.New("addressed answer needs causal authority parents")
+		}
+		if err := validateTextPayload(content.Payload); err != nil {
 			return StatusInvalid, err
 		}
 	case TypeThreadCancel:
@@ -348,7 +370,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 				return StatusInvalid, err
 			}
 		}
-	case TypePeerTrust, TypePeerDistrust:
+	case TypePeerBindingSet, TypePeerBindingBlock:
 		if err := validateControl(content); err != nil {
 			return StatusInvalid, err
 		}
@@ -359,7 +381,7 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if err := validUUID("peer installation ID", payload.InstallationID); err != nil {
 			return StatusInvalid, err
 		}
-		if content.Type == TypePeerTrust {
+		if content.Type == TypePeerBindingSet {
 			if err := validHex("peer signer key ID", payload.SignerKeyID, 32); err != nil {
 				return StatusInvalid, err
 			}
@@ -370,19 +392,44 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 				}
 			}
 		}
-	case TypeMailboxShare, TypeMailboxShareRevoke:
-		if err := validateControl(content); err != nil {
+	case TypeMailboxAccessGrant, TypeMailboxAccessRevoke:
+		if err := validateMailboxAccessEnvelope(content); err != nil {
 			return StatusInvalid, err
 		}
-		var payload MailboxSharePayload
+		var payload MailboxAccessPayload
 		if err := decodePayload(content.Payload, &payload); err != nil {
 			return StatusInvalid, err
 		}
-		if err := validUUID("mailbox ID", payload.MailboxID); err != nil {
+		if err := validateMailboxAccessPayload(content, payload); err != nil {
 			return StatusInvalid, err
 		}
-		if err := validUUID("peer installation ID", payload.PeerInstallationID); err != nil {
+		if content.Type == TypeMailboxAccessGrant && len(content.Authorities) != 0 {
+			return StatusInvalid, errors.New("mailbox access grant must be an authority root")
+		}
+		if content.Type == TypeMailboxAccessRevoke && len(content.Authorities) == 0 {
+			return StatusInvalid, errors.New("mailbox access revocation needs explicit grant authorities")
+		}
+	case TypeMailboxAccessObserve:
+		if err := validateMailboxAccessEnvelope(content); err != nil {
 			return StatusInvalid, err
+		}
+		var payload MailboxAccessObservationPayload
+		if err := decodePayload(content.Payload, &payload); err != nil {
+			return StatusInvalid, err
+		}
+		if payload.GrantEventID == payload.MessageEventID {
+			return StatusInvalid, errors.New("mailbox access observation needs distinct grant and message events")
+		}
+		if !slices.Equal(content.Authorities, []string{payload.GrantEventID}) {
+			return StatusInvalid, errors.New("mailbox access observation must name its grant as authority")
+		}
+		for name, id := range map[string]string{"grant event ID": payload.GrantEventID, "message event ID": payload.MessageEventID} {
+			if err := validEventID(name, id); err != nil {
+				return StatusInvalid, err
+			}
+			if !slices.Contains(content.Parents, id) {
+				return StatusInvalid, fmt.Errorf("mailbox access observation parents omit %s", name)
+			}
 		}
 	case TypeHumanAccountCreate:
 		if err := validateControl(content); err != nil {
@@ -405,8 +452,8 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 		if err := validateControl(content); err != nil {
 			return StatusInvalid, err
 		}
-		if len(content.Parents) == 0 {
-			return StatusInvalid, errors.New("human account selection needs a membership parent")
+		if len(content.Authorities) == 0 {
+			return StatusInvalid, errors.New("human account selection needs an explicit membership authority")
 		}
 		var payload HumanAccountSelectionPayload
 		if err := decodePayload(content.Payload, &payload); err != nil {
@@ -449,8 +496,9 @@ func validateContent(content Content, publicKey string, schema int) (ProjectionS
 func knownType(kind Type) bool {
 	switch kind {
 	case TypeInstallationCreate, TypeMailboxCreate, TypeMailboxBind, TypeMailboxContext, TypeAgentNameClaim, TypeAgentRetire, TypeAgentSessionSelect, TypeAgentSessionRename, TypeQuestion, TypeAnswer, TypeMessage, TypeHarnessActivity,
-		TypeThreadCancel, TypeMessageArchive, TypeMessageRestore, TypeMessageReject, TypePeerTrust, TypePeerDistrust,
-		TypeMailboxShare, TypeMailboxShareRevoke, TypeHumanAccountCreate, TypeHumanAccountSelect,
+		TypeThreadCancel, TypeMessageArchive, TypeMessageRestore, TypeMessageReject, TypePeerBindingSet, TypePeerBindingBlock,
+		TypeMailboxAccessGrant, TypeMailboxAccessRevoke,
+		TypeMailboxAccessObserve, TypeHumanAccountCreate, TypeHumanAccountSelect,
 		TypeHumanDeviceGrant, TypeHumanDeviceAccept, TypeHumanDeviceRevoke, TypeProjectEvent, TypeProjectCommand, TypeProjectResult:
 		return true
 	default:
@@ -620,6 +668,32 @@ func validateMessageAddresses(content Content, accountQuestion bool) error {
 	return nil
 }
 
+func validateMailboxAccessEnvelope(content Content) error {
+	if content.Scope != ScopePeerAddressed || content.Sender == nil || content.Recipient == nil || content.Audience != nil || content.ThreadID != "" {
+		return errors.New("mailbox access facts must be peer-addressed controls without audience or thread")
+	}
+	if content.Sender.InstallationID != content.InstallationID || content.Sender.MailboxID != model.HumanMailboxID || content.Recipient.MailboxID != model.HumanMailboxID || content.Recipient.InstallationID == content.InstallationID {
+		return errors.New("mailbox access facts must travel between distinct installation human mailboxes")
+	}
+	return nil
+}
+
+func validateMailboxAccessPayload(content Content, payload MailboxAccessPayload) error {
+	if err := validUUID("mailbox access target", payload.MailboxID); err != nil {
+		return err
+	}
+	if err := validUUID("mailbox access grantee installation", payload.GranteeInstallationID); err != nil {
+		return err
+	}
+	if err := validHex("mailbox access grantee signer", payload.GranteeSignerKeyID, 32); err != nil {
+		return err
+	}
+	if content.Recipient == nil || payload.GranteeInstallationID != content.Recipient.InstallationID {
+		return errors.New("mailbox access grantee does not match recipient installation")
+	}
+	return nil
+}
+
 func validateControl(content Content) error {
 	if content.Scope != ScopeInstallationPrivate {
 		return errors.New("control event must be installation-private")
@@ -630,8 +704,8 @@ func validateControl(content Content) error {
 	return nil
 }
 
-func validateTextPayload(raw json.RawMessage, schema int) error {
-	payload, err := decodeTextPayload(raw, schema)
+func validateTextPayload(raw json.RawMessage) error {
+	payload, err := decodeTextPayload(raw)
 	if err != nil {
 		return err
 	}
@@ -658,39 +732,24 @@ func validateTextPayload(raw json.RawMessage, schema int) error {
 	if len(payload.Details) > MaxDetailBytes {
 		return fmt.Errorf("message details are %d bytes; limit is %d", len(payload.Details), MaxDetailBytes)
 	}
-	if schema == Schema2 {
-		if err := validateMessageSemantics(payload); err != nil {
-			return err
-		}
+	if err := validateMessageSemantics(payload); err != nil {
+		return err
 	}
 	return nil
 }
 
-func decodeTextPayload(raw json.RawMessage, schema int) (TextPayload, error) {
-	if schema == Schema1 {
-		var legacy textPayloadSchema1
-		if err := decodePayload(raw, &legacy); err != nil {
-			return TextPayload{}, err
-		}
-		return TextPayload{
-			MessageID: legacy.MessageID, Body: legacy.Body, Details: legacy.Details,
-			Purpose: legacy.Purpose, Context: legacy.Context, ActorLabel: legacy.ActorLabel,
-		}, nil
+func decodeTextPayload(raw json.RawMessage) (TextPayload, error) {
+	var payload TextPayload
+	if err := decodePayload(raw, &payload); err != nil {
+		return TextPayload{}, err
 	}
-	if schema == Schema2 {
-		var payload TextPayload
-		if err := decodePayload(raw, &payload); err != nil {
-			return TextPayload{}, err
-		}
-		return payload, nil
-	}
-	return TextPayload{}, fmt.Errorf("unsupported HQ schema %d", schema)
+	return payload, nil
 }
 
-// DecodeTextPayload applies the schema-specific strict text decoder for the
-// pure projection layer.
-func DecodeTextPayload(raw json.RawMessage, schema int) (TextPayload, error) {
-	return decodeTextPayload(raw, schema)
+// DecodeTextPayload applies the strict schema-3 text decoder for the pure
+// projection layer.
+func DecodeTextPayload(raw json.RawMessage) (TextPayload, error) {
+	return decodeTextPayload(raw)
 }
 
 func validateMessageSemantics(payload TextPayload) error {

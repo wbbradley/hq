@@ -332,7 +332,14 @@ The local node is required and normally auto-starts on the first client connecti
 
 ## Message and delivery rules
 
-Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, external session ID)` binding. Each installation has a reserved human mailbox projection, while the human account is the shared audience. Signed message and mailbox-context events carry directory and Git data; those fields aid display and abandoned-mailbox search but do not grant mailbox access. Replying adds signed answer and archive events in one SQLite transaction and fans both facts to active account devices.
+Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, external session ID)`
+binding. Each installation has a reserved human mailbox projection, while the human account is the
+shared audience. Signed message and mailbox-context events carry directory and Git data; those
+fields aid display and abandoned-mailbox search but do not grant mailbox access. Peer delivery is
+directional: the mailbox owner issues a signed capability to one installation/key, and every
+peer-addressed action cites that grant as a causal authority. Revocation fails closed for concurrent
+or later actions while retaining receiver-observed history. Replying adds signed answer and archive
+events in one SQLite transaction and fans both facts to active account devices.
 
 `ask` and `wait` read a reply only when the current mailbox sent the first message. `poll` reads every ready message addressed to the current harness mailbox, including unsolicited human messages, without a directory filter. `get` keeps direct-ID access as an explicit path for cooperative cross-mailbox inspection. Delivery leases each row, writes stdout once, and then sets `completed_at` and `archived_at`. A crash after stdout but before the database update can cause one later retry, so consumers can use the message ID as an idempotency key.
 
@@ -340,15 +347,16 @@ Each mailbox has one opaque ID. An agent mailbox has a unique `(harness, externa
 
 The TUI subscribes before its initial snapshot and reloads immediately after local or remote commits. A five-minute repair refresh remains; active text, focus, and selection survive every reload. Sent rows show `sending`, `sent`, `peer received`, or `rejected`. Press `v` for relay health, last receive time, account members, pending account fanout, relay-accepted sends, invalid or revoked-device traffic, and event queue counts.
 
-SQLite schema 32 includes typed message presentation/correlation, ordered technical sections,
+SQLite schema 33 stores canonical schema-3 causal authorities, mailbox capabilities, typed message
+presentation/correlation, ordered technical sections,
 canonical display order, and projected canonical harness activity alongside durable named-agent
 session history, project/resource/assignment history, runtime, retirement, and
 worktree-provisioning workflows, remote project replicas and command state, mutation receipts, and
 monotonic change revisions. Canonical activity survives projection rebuild; only coalesced winners
-and the newest 200 progress records remain in the disposable activity view. Schema 7 migrates
-forward through every supported intermediate version; schema 31 intentionally discarded legacy
-unsigned activity rows rather than manufacturing signed history. Unsupported older layouts may
-still reset during pre-1.0 development.
+and the newest 200 progress records remain in the disposable activity view. Schema 33 is a clean
+break: a non-empty older or unversioned database fails startup. Archive or remove it, initialize a
+fresh database, and re-pair installations; HQ does not migrate, reset, export, or translate old
+canonical state.
 
 See [docs/design.md](docs/design.md) for the storage contract, [docs/events.md](docs/events.md) for
 signed causal state, [docs/harnesses.md](docs/harnesses.md) for persistence and shutdown behavior,

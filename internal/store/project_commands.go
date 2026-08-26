@@ -56,7 +56,7 @@ func (s *SQLite) queueRemoteProjectCreation(ctx context.Context, request domain.
 	}
 	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: commandID, ProjectID: request.ID, Operation: string(operation), Body: body})
 	created := s.now().UTC()
-	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: uniqueSorted(parents), Scope: event.ScopeAccountAddressed, Payload: payload}
 	command := domain.ProjectCommand{ID: commandID, ProjectID: request.ID, HomeInstallation: request.HomeInstallation, Operation: operation, Body: body, Stage: domain.ProjectCommandQueued, CreatedAt: created, UpdatedAt: created}
 	placeholder := domain.Project{ID: request.ID, HomeInstallation: request.HomeInstallation, Name: request.Name, Brief: request.Brief, Lifecycle: domain.ProjectPreparing, ReadOnlyReplica: true, PendingCommand: &command, LatestCommand: &command, CreatedAt: created, UpdatedAt: created}
 	value, err := s.appendContentsResult(ctx, []event.Content{content}, []time.Time{created}, func(*sql.Tx) (any, error) { return placeholder, nil })
@@ -98,7 +98,7 @@ func (s *SQLite) QueueProjectWorktreeProvision(ctx context.Context, request doma
 	}
 	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: request.RequestID, ProjectID: request.ProjectID, Operation: string(operation), Body: body})
 	created := s.now().UTC()
-	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: uniqueSorted(parents), Scope: event.ScopeAccountAddressed, Payload: payload}
 	command := domain.ProjectCommand{ID: request.RequestID, ProjectID: request.ProjectID, HomeInstallation: request.HomeInstallation, Operation: operation, Body: body, Stage: domain.ProjectCommandQueued, CreatedAt: created, UpdatedAt: created}
 	placeholder := domain.Project{ID: request.ProjectID, HomeInstallation: request.HomeInstallation, Name: request.Name, Brief: request.Brief, Lifecycle: domain.ProjectPreparing, ReadOnlyReplica: true, PendingCommand: &command, LatestCommand: &command, CreatedAt: created, UpdatedAt: created}
 	value, err := s.appendContentsResult(ctx, []event.Content{content}, []time.Time{created}, func(*sql.Tx) (any, error) { return placeholder, nil })
@@ -142,7 +142,7 @@ func (s *SQLite) QueueProjectCommand(ctx context.Context, command domain.Project
 	sort.Strings(parents)
 	payload, _ := event.MarshalPayload(event.ProjectCommandPayload{CommandID: command.ID, ProjectID: project.ID, ExpectedHead: command.ExpectedHead, Operation: string(command.Operation), Body: command.Body})
 	created := s.now().UTC()
-	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: project.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	content := event.Content{Type: event.TypeProjectCommand, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: project.HomeInstallation, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: uniqueSorted(membership), Scope: event.ScopeAccountAddressed, Payload: payload}
 	value, err := s.appendContentsResult(ctx, []event.Content{content}, []time.Time{created}, func(tx *sql.Tx) (any, error) {
 		current, err := getProjectReplica(ctx, tx, project.ID)
 		if err != nil {
@@ -438,6 +438,6 @@ func (s *SQLite) publishProjectCommandResult(ctx context.Context, pending pendin
 	parents = slices.Compact(parents)
 	body, _ := json.Marshal(project)
 	payload, _ := event.MarshalPayload(event.ProjectCommandResultPayload{CommandID: pending.command.ID, ProjectID: pending.command.ProjectID, Stage: string(stage), Committed: stage == domain.ProjectCommandCommitted, CurrentHead: project.HeadEventID, Diagnostic: diagnostic, Body: body})
-	content := event.Content{Type: event.TypeProjectResult, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: pending.issuer, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: payload}
+	content := event.Content{Type: event.TypeProjectResult, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: pending.issuer, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: uniqueSorted(membership), Scope: event.ScopeAccountAddressed, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, []time.Time{s.now().UTC()}, nil)
 }

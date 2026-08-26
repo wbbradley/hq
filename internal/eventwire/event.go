@@ -23,10 +23,9 @@ const (
 	// Kind is HQ's provisional regular Nostr event kind.
 	Kind uint16 = 7281
 
-	Schema1              = 1
-	Schema2              = 2
-	SchemaVersion        = Schema1 // Default for canonical event types not explicitly upgraded.
-	MessageSchemaVersion = Schema2
+	Schema3              = 3
+	SchemaVersion        = Schema3
+	MessageSchemaVersion = Schema3
 	MaxWireBytes         = 64 << 10
 	MaxBodyBytes         = 32 << 10
 	MaxDetailBytes       = 16 << 10
@@ -51,34 +50,35 @@ const (
 type Type string
 
 const (
-	TypeInstallationCreate Type = "installation.create"
-	TypeMailboxCreate      Type = "mailbox.create"
-	TypeMailboxBind        Type = "mailbox.bind"
-	TypeMailboxContext     Type = "mailbox.context"
-	TypeAgentNameClaim     Type = "agent.name.claim"
-	TypeAgentRetire        Type = "agent.retire"
-	TypeAgentSessionSelect Type = "agent.session.select"
-	TypeAgentSessionRename Type = "agent.session.rename"
-	TypeQuestion           Type = "question"
-	TypeAnswer             Type = "answer"
-	TypeMessage            Type = "message"
-	TypeThreadCancel       Type = "thread.cancel"
-	TypeMessageArchive     Type = "message.archive"
-	TypeMessageRestore     Type = "message.restore"
-	TypeMessageReject      Type = "message.reject"
-	TypePeerTrust          Type = "peer.trust"
-	TypePeerDistrust       Type = "peer.distrust"
-	TypeMailboxShare       Type = "mailbox.share"
-	TypeMailboxShareRevoke Type = "mailbox.share.revoke"
-	TypeHumanAccountCreate Type = "human.account.create"
-	TypeHumanAccountSelect Type = "human.account.select"
-	TypeHumanDeviceGrant   Type = "human.device.grant"
-	TypeHumanDeviceAccept  Type = "human.device.accept"
-	TypeHumanDeviceRevoke  Type = "human.device.revoke"
-	TypeProjectEvent       Type = "project.event"
-	TypeProjectCommand     Type = "project.command"
-	TypeProjectResult      Type = "project.command.result"
-	TypeHarnessActivity    Type = "harness.activity"
+	TypeInstallationCreate   Type = "installation.create"
+	TypeMailboxCreate        Type = "mailbox.create"
+	TypeMailboxBind          Type = "mailbox.bind"
+	TypeMailboxContext       Type = "mailbox.context"
+	TypeAgentNameClaim       Type = "agent.name.claim"
+	TypeAgentRetire          Type = "agent.retire"
+	TypeAgentSessionSelect   Type = "agent.session.select"
+	TypeAgentSessionRename   Type = "agent.session.rename"
+	TypeQuestion             Type = "question"
+	TypeAnswer               Type = "answer"
+	TypeMessage              Type = "message"
+	TypeThreadCancel         Type = "thread.cancel"
+	TypeMessageArchive       Type = "message.archive"
+	TypeMessageRestore       Type = "message.restore"
+	TypeMessageReject        Type = "message.reject"
+	TypePeerBindingSet       Type = "peer.binding.set"
+	TypePeerBindingBlock     Type = "peer.binding.block"
+	TypeMailboxAccessGrant   Type = "mailbox.access.grant"
+	TypeMailboxAccessRevoke  Type = "mailbox.access.revoke"
+	TypeMailboxAccessObserve Type = "mailbox.access.observe"
+	TypeHumanAccountCreate   Type = "human.account.create"
+	TypeHumanAccountSelect   Type = "human.account.select"
+	TypeHumanDeviceGrant     Type = "human.device.grant"
+	TypeHumanDeviceAccept    Type = "human.device.accept"
+	TypeHumanDeviceRevoke    Type = "human.device.revoke"
+	TypeProjectEvent         Type = "project.event"
+	TypeProjectCommand       Type = "project.command"
+	TypeProjectResult        Type = "project.command.result"
+	TypeHarnessActivity      Type = "harness.activity"
 )
 
 type Scope string
@@ -125,6 +125,7 @@ type Content struct {
 	Audience       *Audience       `json:"audience,omitempty"`
 	ThreadID       string          `json:"thread_id,omitempty"`
 	Parents        []string        `json:"parents"`
+	Authorities    []string        `json:"authorities,omitempty"`
 	Scope          Scope           `json:"scope"`
 	Origin         *Origin         `json:"origin,omitempty"`
 	Payload        json.RawMessage `json:"payload"`
@@ -152,18 +153,6 @@ type HarnessActivityPayload struct {
 	OccurredAt  int64                        `json:"occurred_at"`
 	RuntimeID   string                       `json:"runtime_id"`
 	Sequence    uint64                       `json:"sequence"`
-}
-
-// textPayloadSchema1 is the exact historical message payload. Keep this type
-// private so new writers cannot accidentally use schema 1 as a structural
-// extension channel.
-type textPayloadSchema1 struct {
-	MessageID  string               `json:"message_id,omitempty"`
-	Body       string               `json:"body"`
-	Details    string               `json:"details,omitempty"`
-	Purpose    model.MessagePurpose `json:"purpose,omitempty"`
-	Context    *RepositoryContext   `json:"context,omitempty"`
-	ActorLabel string               `json:"actor_label,omitempty"`
 }
 
 type RepositoryContext struct {
@@ -228,9 +217,15 @@ type PeerPayload struct {
 	Relays         []string `json:"relays,omitempty"`
 }
 
-type MailboxSharePayload struct {
-	MailboxID          string `json:"mailbox_id"`
-	PeerInstallationID string `json:"peer_installation_id"`
+type MailboxAccessPayload struct {
+	MailboxID             string `json:"mailbox_id"`
+	GranteeInstallationID string `json:"grantee_installation_id"`
+	GranteeSignerKeyID    string `json:"grantee_signer_key_id"`
+}
+
+type MailboxAccessObservationPayload struct {
+	GrantEventID   string `json:"grant_event_id"`
+	MessageEventID string `json:"message_event_id"`
 }
 
 // HumanAccountPayload defines one logical human account and its creator.
@@ -465,12 +460,6 @@ func Sign(content Content, createdAt time.Time, secret SecretKey) (SignedEvent, 
 
 // Inspect verifies the Nostr event before decoding or validating HQ content.
 func Inspect(raw []byte) Inspection {
-	return InspectWithSchemas(raw, []int{Schema1, Schema2})
-}
-
-// InspectWithSchemas permits a reducer upgraded with a compatible schema
-// decoder to re-evaluate events retained by an older HQ release.
-func InspectWithSchemas(raw []byte, schemas []int) Inspection {
 	result := Inspection{Status: StatusInvalid}
 	if len(raw) == 0 {
 		result.Err = errors.New("event is empty")
@@ -514,7 +503,7 @@ func InspectWithSchemas(raw []byte, schemas []int) Inspection {
 		result.Err = fmt.Errorf("decode event header: %w", err)
 		return result
 	}
-	if !containsSchema(schemas, header.Schema) {
+	if header.Schema != Schema3 {
 		result.Status = StatusUnsupported
 		result.Err = fmt.Errorf("unsupported HQ schema %d", header.Schema)
 		return result
@@ -528,15 +517,6 @@ func InspectWithSchemas(raw []byte, schemas []int) Inspection {
 	status, err := validateContent(content, nostrEvent.PubKey, header.Schema)
 	result.Status, result.Err = status, err
 	return result
-}
-
-func containsSchema(schemas []int, schema int) bool {
-	for _, candidate := range schemas {
-		if candidate == schema {
-			return true
-		}
-	}
-	return false
 }
 
 func decodeStrict(raw []byte, target any) error {

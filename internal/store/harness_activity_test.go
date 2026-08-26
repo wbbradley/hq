@@ -176,8 +176,8 @@ func TestHarnessActivityReadCapsAtNewestThousandProjectedRows(t *testing.T) {
 			t.Fatal(marshalErr)
 		}
 		contents = append(contents, event.Content{
-			Schema: event.Schema2, Type: event.TypeHarnessActivity, Sender: s.localAddress(mailbox.ID),
-			Audience: &event.Audience{HumanAccountID: account.ID}, Parents: append([]string(nil), parents...),
+			Schema: event.Schema3, Type: event.TypeHarnessActivity, Sender: s.localAddress(mailbox.ID),
+			Audience: &event.Audience{HumanAccountID: account.ID}, Parents: append([]string(nil), parents...), Authorities: append([]string(nil), parents...),
 			Scope: event.ScopeAccountAddressed, Payload: payload,
 		})
 		times = append(times, occurredAt)
@@ -423,7 +423,8 @@ func TestRevokedDeviceHarnessActivityGiftWrapFailsClosed(t *testing.T) {
 	if err := revoked.JoinHumanInvite(ctx, rawBundle); err != nil {
 		t.Fatal(err)
 	}
-	if err := creator.AppendCanonical(ctx, []event.SignedEvent{canonicalEventByTypeAndInstallation(t, revoked, event.TypeHumanDeviceAccept, revokedID)}); err != nil {
+	acceptance := canonicalEventByTypeAndInstallation(t, revoked, event.TypeHumanDeviceAccept, revokedID)
+	if err := creator.AppendCanonical(ctx, []event.SignedEvent{acceptance}); err != nil {
 		t.Fatal(err)
 	}
 	mailbox := harnessActivityMailbox(t, revoked, "revoked-session")
@@ -443,8 +444,8 @@ func TestRevokedDeviceHarnessActivityGiftWrapFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	late, err := revoked.signer.Sign(ctx, event.Content{
-		Schema: event.Schema2, Type: event.TypeHarnessActivity, Sender: revoked.localAddress(mailbox.ID),
-		Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: []string{revocation.ID()},
+		Schema: event.Schema3, Type: event.TypeHarnessActivity, Sender: revoked.localAddress(mailbox.ID),
+		Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: uniqueSorted([]string{acceptance.ID(), revocation.ID()}), Authorities: []string{acceptance.ID()},
 		Scope: event.ScopeAccountAddressed, Payload: payload,
 	}, time.Unix(100, 0))
 	if err != nil {
@@ -504,36 +505,6 @@ func TestHarnessActivitySurvivesRestartAndProjectionRebuild(t *testing.T) {
 	activities, err := s.ListHarnessActivities(context.Background(), domain.HarnessActivityFilter{MailboxID: activity.MailboxID})
 	if err != nil || len(activities) != 1 || activities[0].Status != domain.HarnessActivityFailed || activities[0].EventID == "" || activities[0].InstallationID == "" || activities[0].RuntimeID != activity.RuntimeID || activities[0].Sequence != activity.Sequence || activities[0].Correlation != activity.Correlation {
 		t.Fatalf("activities after restart/rebuild = %#v, %v", activities, err)
-	}
-}
-
-func TestSchemaVersionThirtyDiscardsUnsignedActivityProjection(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "hq.db")
-	s := openStore(t, path)
-	canonical := tableCount(t, s, "canonical_events")
-	if _, err := s.db.Exec(`DROP TABLE harness_activities;
-CREATE TABLE harness_activities (mailbox_id TEXT NOT NULL,harness TEXT NOT NULL,session_id TEXT NOT NULL,operation_id TEXT NOT NULL,kind TEXT NOT NULL,item_id TEXT NOT NULL,status TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,truncated INTEGER NOT NULL,occurred_at INTEGER NOT NULL,PRIMARY KEY(harness,session_id,operation_id,kind,item_id)) STRICT;
-INSERT INTO harness_activities VALUES ('legacy','fake','session','operation','operation-status','','running','','',0,1);
-PRAGMA user_version = 30`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	s = openStore(t, path)
-	if canonical != tableCount(t, s, "canonical_events") {
-		t.Fatal("activity migration rebuilt or changed canonical state")
-	}
-	if tableCount(t, s, "harness_activities") != 0 {
-		t.Fatal("unsigned activity survived migration")
-	}
-	mailbox := harnessActivityMailbox(t, s, "session")
-	activity := canonicalHarnessActivity(domain.HarnessActivity{
-		MailboxID: mailbox.ID, Harness: "fake", SessionID: "session", OperationID: "operation",
-		Kind: domain.HarnessActivityOperation, Status: domain.HarnessActivityRunning, OccurredAt: time.Unix(1, 0),
-	})
-	if err := s.UpsertHarnessActivity(context.Background(), activity); err != nil {
-		t.Fatal(err)
 	}
 }
 

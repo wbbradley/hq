@@ -152,8 +152,8 @@ func (s *SQLite) CreateHumanInvite(ctx context.Context, request HumanInviteReque
 	peerPayload, _ := event.MarshalPayload(event.PeerPayload{InstallationID: request.InstallationID, SignerKeyID: request.SignerKeyID, Name: request.Name, Relays: request.Relays})
 	grantPayload, _ := event.MarshalPayload(device)
 	contents := []event.Content{
-		{Type: event.TypePeerTrust, Parents: s.peerParents(ctx, request.InstallationID), Scope: event.ScopeInstallationPrivate, Payload: peerPayload},
-		{Type: event.TypeHumanDeviceGrant, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.InstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Scope: event.ScopeAccountAddressed, Payload: grantPayload},
+		{Type: event.TypePeerBindingSet, Parents: s.peerParents(ctx, request.InstallationID), Scope: event.ScopeInstallationPrivate, Payload: peerPayload},
+		{Type: event.TypeHumanDeviceGrant, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: request.InstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: []string{creationID}, Scope: event.ScopeAccountAddressed, Payload: grantPayload},
 	}
 	signed, err := s.signContents(ctx, contents, nil)
 	if err != nil {
@@ -278,8 +278,8 @@ func (s *SQLite) JoinHumanInvite(ctx context.Context, raw []byte) error {
 	acceptPayload, _ := event.MarshalPayload(payload)
 	now := time.Now().UTC()
 	local, err := s.signContents(ctx, []event.Content{
-		{Type: event.TypePeerTrust, Parents: s.peerParents(ctx, bundle.CreatorInstallationID), Scope: event.ScopeInstallationPrivate, Payload: peerPayload},
-		{Type: event.TypeHumanDeviceAccept, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: bundle.CreatorInstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: []string{grant.ID()}, Scope: event.ScopeAccountAddressed, Payload: acceptPayload},
+		{Type: event.TypePeerBindingSet, Parents: s.peerParents(ctx, bundle.CreatorInstallationID), Scope: event.ScopeInstallationPrivate, Payload: peerPayload},
+		{Type: event.TypeHumanDeviceAccept, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: bundle.CreatorInstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: bundle.AccountID}, Parents: []string{grant.ID()}, Authorities: []string{grant.ID()}, Scope: event.ScopeAccountAddressed, Payload: acceptPayload},
 	}, []time.Time{now, now})
 	if err != nil {
 		return err
@@ -287,7 +287,7 @@ func (s *SQLite) JoinHumanInvite(ctx context.Context, raw []byte) error {
 	selectionPayload, _ := event.MarshalPayload(event.HumanAccountSelectionPayload{AccountID: bundle.AccountID})
 	selectionParents := append(s.eventTypeIDs(ctx, event.TypeHumanAccountSelect), local[1].ID())
 	selectionParents = uniqueSorted(selectionParents)
-	selection, err := s.signContents(ctx, []event.Content{{Type: event.TypeHumanAccountSelect, Parents: selectionParents, Scope: event.ScopeInstallationPrivate, Payload: selectionPayload}}, []time.Time{now})
+	selection, err := s.signContents(ctx, []event.Content{{Type: event.TypeHumanAccountSelect, Parents: selectionParents, Authorities: []string{local[1].ID()}, Scope: event.ScopeInstallationPrivate, Payload: selectionPayload}}, []time.Time{now})
 	if err != nil {
 		return err
 	}
@@ -355,7 +355,8 @@ func (s *SQLite) RevokeHumanDevice(ctx context.Context, installationID string) e
 		return errors.New("stored human device grant is invalid")
 	}
 	payload, _ := event.MarshalPayload(exact)
-	content := event.Content{Type: event.TypeHumanDeviceRevoke, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: device.InstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: s.deviceEventIDs(ctx, account.ID, device.InstallationID), Scope: event.ScopeAccountAddressed, Payload: payload}
+	parents := s.deviceEventIDs(ctx, account.ID, device.InstallationID)
+	content := event.Content{Type: event.TypeHumanDeviceRevoke, Sender: s.localAddress(model.HumanMailboxID), Recipient: &event.MailboxAddress{InstallationID: device.InstallationID, MailboxID: model.HumanMailboxID}, Audience: &event.Audience{HumanAccountID: account.ID}, Parents: parents, Authorities: []string{grant.Event.ID()}, Scope: event.ScopeAccountAddressed, Payload: payload}
 	return s.appendContents(ctx, []event.Content{content}, nil, nil)
 }
 

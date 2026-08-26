@@ -44,8 +44,8 @@ func (s *SQLite) fitHarnessActivityContent(ctx context.Context, activity domain.
 			return event.Content{}, err
 		}
 		return event.Content{
-			Schema: event.Schema2, Type: event.TypeHarnessActivity, Sender: s.localAddress(activity.MailboxID),
-			Audience: &event.Audience{HumanAccountID: accountID}, Parents: uniqueSorted(parents),
+			Schema: event.Schema3, Type: event.TypeHarnessActivity, Sender: s.localAddress(activity.MailboxID),
+			Audience: &event.Audience{HumanAccountID: accountID}, Parents: uniqueSorted(parents), Authorities: uniqueSorted(parents),
 			Scope: event.ScopeAccountAddressed, Payload: payload,
 		}, nil
 	}

@@ -15,6 +15,6 @@ func validateMessageCorrelation(correlation model.MessageCorrelation) error {
 	return eventwire.ValidateMessageCorrelation(correlation)
 }
 
-func decodeTextPayload(raw json.RawMessage, schema int) (eventwire.TextPayload, error) {
-	return eventwire.DecodeTextPayload(raw, schema)
+func decodeTextPayload(raw json.RawMessage) (eventwire.TextPayload, error) {
+	return eventwire.DecodeTextPayload(raw)
 }

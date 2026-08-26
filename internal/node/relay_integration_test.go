@@ -138,6 +138,30 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 	if err := receiver.SetMailboxShare(ctx, receiverMailbox.ID, senderIdentity.InstallationID, true); err != nil {
 		t.Fatal(err)
 	}
+	for _, client := range []*hqclient.Client{sender, receiver} {
+		if err := client.AddRelay(ctx, domain.RelayConfig{URL: relay.url, Read: true, RequireAuth: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Exchange receiver-issued mailbox capabilities before authoring the
+	// message that cites one. The third pass lets the sender consume both of
+	// the receiver's grants after each side has durably published its own.
+	if err := sender.Synchronize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiver.Synchronize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.Synchronize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var setupStatus domain.NetworkStatus
+	waitUntil(t, 3*time.Second, func() bool {
+		var statusErr error
+		setupStatus, statusErr = sender.NetworkStatus(ctx)
+		return statusErr == nil && setupStatus.Queued == 0 && relay.eventCount() >= 3
+	}, "mailbox capabilities were not exchanged")
+	setupAccepted, setupRelayEvents := setupStatus.RelayAccepted, relay.eventCount()
 
 	senderSubscription, err := sender.Subscribe(ctx, domain.TopicMessages)
 	if err != nil {
@@ -158,12 +182,15 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 		RecipientInstallationID: receiverIdentity.InstallationID, RecipientMailboxID: receiverMailbox.ID,
 		Body: "local RPC through retained Nostr", Context: repository, CreatedAt: time.Now().UTC(),
 	}
-	if err := sender.Create(ctx, message); err != nil {
-		t.Fatal(err)
-	}
+	var createErr error
+	waitUntil(t, 3*time.Second, func() bool {
+		_ = sender.Synchronize(ctx)
+		createErr = sender.Create(ctx, message)
+		return createErr == nil
+	}, "sender did not consume the receiver-issued mailbox capability")
 	assertMessageInvalidation(t, senderSubscription.Changes(), "sender local commit")
 	status, err := sender.NetworkStatus(ctx)
-	if err != nil || status.Queued != 1 || status.RelayAccepted != 0 || relay.eventCount() != 0 {
+	if err != nil || status.Queued != 1 || status.RelayAccepted != setupAccepted || relay.eventCount() != setupRelayEvents {
 		t.Fatalf("durable pre-publish state = %#v, relay events=%d, err=%v", status, relay.eventCount(), err)
 	}
 	if err := sender.Synchronize(ctx); err != nil {
@@ -171,21 +198,23 @@ func TestLocalRPCPublishesAndRetainedInboundInvalidates(t *testing.T) {
 	}
 	waitUntil(t, 3*time.Second, func() bool {
 		status, statusErr := sender.NetworkStatus(ctx)
-		return statusErr == nil && status.Queued == 0 && status.RelayAccepted == 1 && relay.eventCount() == 1
+		return statusErr == nil && status.Queued == 0 && status.RelayAccepted == setupAccepted+1 && relay.eventCount() == setupRelayEvents+1
 	}, "sender outbox was not published exactly once")
 
-	if err := receiver.AddRelay(ctx, domain.RelayConfig{URL: relay.url, Read: true, RequireAuth: true}); err != nil {
-		t.Fatal(err)
-	}
 	if err := receiver.Synchronize(ctx); err != nil {
 		t.Fatal(err)
 	}
 	assertMessageInvalidation(t, receiverSubscription.Changes(), "receiver retained catch-up")
-	got, err := receiver.Get(ctx, messageID)
-	if err != nil || got.Body != message.Body || got.SenderInstallationID != senderIdentity.InstallationID {
-		t.Fatalf("receiver message = %#v, %v", got, err)
+	var got model.Message
+	var getErr error
+	waitUntil(t, 3*time.Second, func() bool {
+		got, getErr = receiver.Get(ctx, messageID)
+		return getErr == nil
+	}, "receiver did not project the retained message")
+	if got.Body != message.Body || got.SenderInstallationID != senderIdentity.InstallationID {
+		t.Fatalf("receiver message = %#v, %v", got, getErr)
 	}
-	if relay.eventCount() != 1 {
+	if relay.eventCount() != setupRelayEvents+1 {
 		t.Fatalf("relay event count = %d", relay.eventCount())
 	}
 
