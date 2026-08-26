@@ -1,15 +1,17 @@
-package event
+package eventstate
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	. "github.com/wbbradley/hq/internal/eventwire"
 	"slices"
 	"sort"
 	"time"
 
 	"github.com/wbbradley/hq/internal/domain"
 	"github.com/wbbradley/hq/internal/model"
+	"github.com/wbbradley/hq/internal/reduction"
 )
 
 var (
@@ -799,46 +801,35 @@ func (s *State) causalEventUsable(id string, memo, visiting map[string]bool) boo
 }
 
 func (s *State) maximal(records []Record) []Record {
-	result := make([]Record, 0, len(records))
-	for _, candidate := range records {
-		maximal := true
-		for _, other := range records {
-			if candidate.Event.ID() != other.Event.ID() && s.ancestor(candidate.Event.ID(), other.Event.ID()) {
-				maximal = false
-				break
-			}
-		}
-		if maximal {
-			result = append(result, candidate)
-		}
+	byID := make(map[string]Record, len(records))
+	ids := reduction.NewSet[string]()
+	for _, record := range records {
+		id := record.Event.ID()
+		byID[id] = record
+		ids = ids.Add(id)
+	}
+	maxima := reduction.Maxima(stateCausalGraph{s.Records}, ids)
+	result := make([]Record, 0, maxima.Len())
+	for _, id := range maxima.Values(func(a, b string) bool { return a < b }) {
+		result = append(result, byID[id])
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Event.ID() < result[j].Event.ID() })
 	return result
 }
 
 func (s *State) ancestor(ancestorID, eventID string) bool {
-	seen := make(map[string]bool)
-	var visit func(string) bool
-	visit = func(id string) bool {
-		if id == ancestorID {
-			return true
-		}
-		if seen[id] {
-			return false
-		}
-		seen[id] = true
-		record, ok := s.Records[id]
-		if !ok {
-			return false
-		}
-		for _, parent := range record.Event.Content.Parents {
-			if visit(parent) {
-				return true
-			}
-		}
-		return false
+	relation := reduction.Relate(stateCausalGraph{s.Records}, ancestorID, eventID)
+	return relation == reduction.Before || relation == reduction.Equal
+}
+
+type stateCausalGraph struct{ records map[string]Record }
+
+func (g stateCausalGraph) Parents(id string) []string {
+	record, ok := g.records[id]
+	if !ok {
+		return nil
 	}
-	return visit(eventID)
+	return slices.Clone(record.Event.Content.Parents)
 }
 
 func (s *State) projectMailboxes() {

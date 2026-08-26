@@ -1,4 +1,4 @@
-package event
+package eventwire
 
 import (
 	"encoding/hex"
@@ -516,6 +516,10 @@ func validateHarnessActivityPayload(raw json.RawMessage) error {
 	return nil
 }
 
+func ValidateHarnessActivityPayload(raw json.RawMessage) error {
+	return validateHarnessActivityPayload(raw)
+}
+
 func terminalHarnessActivityStatus(status domain.HarnessActivityStatus) bool {
 	return status == domain.HarnessActivityCompleted || status == domain.HarnessActivityFailed || status == domain.HarnessActivityInterrupted
 }
@@ -683,6 +687,12 @@ func decodeTextPayload(raw json.RawMessage, schema int) (TextPayload, error) {
 	return TextPayload{}, fmt.Errorf("unsupported HQ schema %d", schema)
 }
 
+// DecodeTextPayload applies the schema-specific strict text decoder for the
+// pure projection layer.
+func DecodeTextPayload(raw json.RawMessage, schema int) (TextPayload, error) {
+	return decodeTextPayload(raw, schema)
+}
+
 func validateMessageSemantics(payload TextPayload) error {
 	if !payload.Presentation.Valid() {
 		return fmt.Errorf("unsupported message presentation %q", payload.Presentation)
@@ -772,6 +782,10 @@ func validateTechnicalSections(sections []model.TechnicalSection) error {
 	return nil
 }
 
+func ValidateTechnicalSections(sections []model.TechnicalSection) error {
+	return validateTechnicalSections(sections)
+}
+
 func validOpaqueIdentity(name, value string, limit int) error {
 	if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
 		return fmt.Errorf("%s must be non-empty without surrounding whitespace", name)
@@ -833,6 +847,16 @@ func decodePayload(raw json.RawMessage, target any) error {
 		return fmt.Errorf("decode %T payload: %w", target, err)
 	}
 	return nil
+}
+
+// DecodePayload exposes the wire package's strict payload decoder to the pure
+// reducer without duplicating schema validation rules.
+func DecodePayload(raw json.RawMessage, target any) error { return decodePayload(raw, target) }
+
+// ValidateMessageCorrelation exposes the canonical correlation invariant to
+// compatibility projection code in the pure reducer.
+func ValidateMessageCorrelation(correlation model.MessageCorrelation) error {
+	return validateMessageCorrelation(correlation)
 }
 
 func validateAddress(name string, address MailboxAddress) error {

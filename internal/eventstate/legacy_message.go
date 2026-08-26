@@ -1,6 +1,7 @@
-package event
+package eventstate
 
 import (
+	. "github.com/wbbradley/hq/internal/eventwire"
 	"strings"
 
 	"github.com/wbbradley/hq/internal/model"
