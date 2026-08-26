@@ -26,8 +26,9 @@ import (
 )
 
 const (
-	repairInterval = 5 * time.Minute
-	mouseWheelStep = 3
+	repairInterval     = 5 * time.Minute
+	mouseWheelStep     = 3
+	inboxPaneExtraRows = 4
 )
 
 var (
@@ -3278,7 +3279,7 @@ func (m app) paneLayout() paneLayout {
 	if m.hasInboxDiagnostics() {
 		return layout
 	}
-	inboxHeight := min(layout.inboxHeight, len(m.visibleGroups())+2)
+	inboxHeight := min(layout.inboxHeight, len(m.visibleGroups())+inboxPaneExtraRows)
 	layout.messageHeight += layout.inboxHeight - inboxHeight
 	layout.inboxHeight = inboxHeight
 	return layout

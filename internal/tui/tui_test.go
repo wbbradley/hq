@@ -979,7 +979,7 @@ func TestInboxPaneHeightIsCappedByVisibleRows(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m := app{messages: mouseScrollMessages(test.messages, 1), width: width, height: height}
-			wantInboxHeight := min(base.inboxHeight, test.messages+2)
+			wantInboxHeight := min(base.inboxHeight, test.messages+4)
 			lines := strings.Split(m.View().Content, "\n")
 			if !strings.Contains(lines[wantInboxHeight], "╭") {
 				t.Fatalf("message pane did not begin at row %d: %q", wantInboxHeight, lines[wantInboxHeight])
