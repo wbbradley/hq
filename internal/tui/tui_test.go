@@ -954,7 +954,7 @@ func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 	}
 	view := m.View().Content
 	lines := strings.Split(view, "\n")
-	viewLayout := responsivePaneLayout(m.width, m.height, true)
+	viewLayout := m.paneLayout()
 	if !strings.Contains(lines[viewLayout.inboxHeight+viewLayout.messageHeight], "[Replying to ") {
 		t.Fatalf("reply pane was not rendered below message pane: %q", view)
 	}
@@ -962,6 +962,36 @@ func TestListHeightAndVerticalReplyLayout(t *testing.T) {
 		if strings.Count(line, "╭") > 1 {
 			t.Fatalf("panes rendered side by side: %q", line)
 		}
+	}
+}
+
+func TestInboxPaneHeightIsCappedByVisibleRows(t *testing.T) {
+	const width, height = 120, 40
+	base := responsivePaneLayout(width, height, false)
+	for _, test := range []struct {
+		name     string
+		messages int
+	}{
+		{name: "empty", messages: 0},
+		{name: "one row", messages: 1},
+		{name: "three rows", messages: 3},
+		{name: "responsive cap", messages: 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := app{messages: mouseScrollMessages(test.messages, 1), width: width, height: height}
+			wantInboxHeight := min(base.inboxHeight, test.messages+2)
+			lines := strings.Split(m.View().Content, "\n")
+			if !strings.Contains(lines[wantInboxHeight], "╭") {
+				t.Fatalf("message pane did not begin at row %d: %q", wantInboxHeight, lines[wantInboxHeight])
+			}
+			wantReplyStart := base.inboxHeight + base.messageHeight
+			if !strings.Contains(lines[wantReplyStart], "[reply]") {
+				t.Fatalf("reply pane moved from row %d: %q", wantReplyStart, lines[wantReplyStart])
+			}
+			if got := lipgloss.Height(m.View().Content); got != height {
+				t.Fatalf("view height = %d; want %d", got, height)
+			}
+		})
 	}
 }
 
@@ -974,7 +1004,7 @@ func TestInboxAndMessagePanesShowScrollbarsOnlyWhenScrollable(t *testing.T) {
 		messages = append(messages, item)
 	}
 	m := app{messages: messages, width: 80, height: 40, paneFocus: focusInbox}
-	inbox := m.renderInboxPane(m.width, responsivePaneLayout(m.width, m.height, false).inboxHeight)
+	inbox := m.renderInboxPane(m.width, m.paneLayout().inboxHeight)
 	if !strings.Contains(inbox, "█") || !strings.Contains(inbox, "░") {
 		t.Fatalf("scrollable inbox omitted scrollbar: %q", inbox)
 	}
@@ -982,7 +1012,7 @@ func TestInboxAndMessagePanesShowScrollbarsOnlyWhenScrollable(t *testing.T) {
 	long := message("long-scroll-message", testAgentID, model.HumanMailboxID, strings.Repeat("message line\n", 30))
 	m = app{messages: []model.Message{long}, width: 80, height: 24, paneFocus: focusMessage}
 	view := m.View().Content
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 	messagePane := strings.Join(strings.Split(view, "\n")[layout.inboxHeight:layout.inboxHeight+layout.messageHeight], "\n")
 	if !strings.Contains(messagePane, "█") || !strings.Contains(messagePane, "░") {
 		t.Fatalf("scrollable message pane omitted scrollbar: %q", messagePane)
@@ -1015,7 +1045,7 @@ func TestResponsiveViewFitsTerminalWithVerticalPanes(t *testing.T) {
 				t.Fatalf("%d-column view line %d width = %d: %q", width, lineNumber+1, got, line)
 			}
 		}
-		layout := responsivePaneLayout(width, m.height, true)
+		layout := m.paneLayout()
 		lines := strings.Split(view, "\n")
 		if lipgloss.Width(lines[0]) != width || !strings.Contains(lines[0], "[HQ · Inbox") || !strings.Contains(lines[layout.inboxHeight], "[an update from") {
 			t.Fatalf("%d-column fixture boundaries: %q", width, view)
@@ -1034,15 +1064,15 @@ func TestMessagePanePageScrollingStaysInsideFixture(t *testing.T) {
 	item := message("message", testAgentID, model.HumanMailboxID, strings.TrimSpace(body.String()))
 	m := app{messages: []model.Message{item}, width: 80, height: 24, paneFocus: focusMessage}
 	topView := m.View().Content
-	topLines := strings.Split(topView, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:]
+	topLines := strings.Split(topView, "\n")[m.paneLayout().inboxHeight:]
 	if top := strings.Join(topLines, "\n"); !strings.Contains(top, "line-01") || strings.Contains(top, "line-20") {
 		t.Fatalf("message pane did not anchor at oldest open content: %q", top)
 	}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	m = updated.(app)
 	lowerView := m.View().Content
-	lowerLines := strings.Split(lowerView, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:]
-	if lower := strings.Join(lowerLines, "\n"); !strings.Contains(lower, "line-08") || strings.Contains(lower, "line-01") {
+	lowerLines := strings.Split(lowerView, "\n")[m.paneLayout().inboxHeight:]
+	if lower := strings.Join(lowerLines, "\n"); !strings.Contains(lower, "line-11") || strings.Contains(lower, "line-01") {
 		t.Fatalf("page-down did not scroll within message fixture: %q", lower)
 	}
 	if lipgloss.Height(lowerView) != m.height {
@@ -1083,7 +1113,7 @@ func TestMessagePaneKeepsOldestOpenActionVisibleAfterArchivedHistory(t *testing.
 	setMessageSemantics(&open, "Harness provider: codex\nHarness session: anchor-thread\nHarness operation: open-turn")
 	m := app{messages: []model.Message{archived, open}, width: 80, height: 24}
 	view := m.View().Content
-	messageView := strings.Join(strings.Split(view, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:], "\n")
+	messageView := strings.Join(strings.Split(view, "\n")[m.paneLayout().inboxHeight:], "\n")
 	if !strings.Contains(messageView, "oldest open action") {
 		t.Fatalf("message pane did not keep open action visible: %q", messageView)
 	}
@@ -1111,7 +1141,7 @@ func TestMessagePaneAnchorsNewReplyAfterArchivedMessagesInSameTurn(t *testing.T)
 	if !found {
 		t.Fatal("message group not found")
 	}
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	want := messagePaneMaxStart(rendered.panel, layout.messageHeight)
 	for _, span := range rendered.spans {
@@ -1159,7 +1189,7 @@ func TestMessagePaneClearsStaleAnchorWhenOnlyConversationReappears(t *testing.T)
 	if !found {
 		t.Fatal("automatically selected conversation not found")
 	}
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	want := messagePaneMaxStart(rendered.panel, layout.messageHeight)
 	for _, span := range rendered.spans {
@@ -1206,7 +1236,7 @@ func TestMessagePaneAdvancesToNewLiveMessagePastEarlierOpenMessages(t *testing.T
 	if m.messageLiveAnchorID != latest.ID || m.messageScroll <= initial || m.messageScrollManual {
 		t.Fatalf("live anchor = %q at %d (manual=%t); want %q after %d", m.messageLiveAnchorID, m.messageScroll, m.messageScrollManual, latest.ID, initial)
 	}
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 	messageView := strings.Join(strings.Split(m.View().Content, "\n")[layout.inboxHeight:], "\n")
 	if !strings.Contains(messageView, "Latest update") || strings.Count(messageView, "previous update") >= 18 {
 		t.Fatalf("message pane did not advance to latest update: %q", messageView)
@@ -1233,7 +1263,7 @@ func TestMessagePaneRestoresUnreadBoundaryAfterRestartAndMultipleReplies(t *test
 	if !found {
 		t.Fatal("message group not found")
 	}
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	want := messagePaneMaxStart(rendered.panel, layout.messageHeight)
 	for _, span := range rendered.spans {
@@ -1259,7 +1289,7 @@ func TestMessagePaneUsesNewestContentWhenConversationHasNoOpenWork(t *testing.T)
 	first.ArchivedAt, second.ArchivedAt = &archivedAt, &archivedAt
 	m := app{messages: []model.Message{first, second}, width: 80, height: 24}
 	view := m.View().Content
-	messageView := strings.Join(strings.Split(view, "\n")[responsivePaneLayout(m.width, m.height, false).inboxHeight:], "\n")
+	messageView := strings.Join(strings.Split(view, "\n")[m.paneLayout().inboxHeight:], "\n")
 	if !strings.Contains(messageView, "newest archived content") || strings.Contains(messageView, "old history") {
 		t.Fatalf("archived-only conversation did not open at newest content: %q", messageView)
 	}
@@ -1297,8 +1327,8 @@ func TestManualMessageAnchorSurvivesResizeReflow(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 28})
 	m = updated.(app)
 	group, _ := m.detailGroup()
-	rendered := m.renderGroupPanelLayout(group, responsivePaneLayout(m.width, m.height, m.answering).messageWidth)
-	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	layout := m.paneLayout()
+	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	maximum := messagePaneMaxStart(rendered.panel, layout.messageHeight)
 	expectedScroll := maximum
 	for _, span := range rendered.spans {
@@ -1364,7 +1394,7 @@ func TestMessageScrollingRemainsBoundedInSmallTerminal(t *testing.T) {
 		m = updated.(app)
 	}
 	group, _ := m.detailGroup()
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	maximum := messagePaneMaxStart(rendered.panel, layout.messageHeight)
 	if m.messageScroll < 0 || m.messageScroll > maximum || lipgloss.Height(m.View().Content) != m.height {
@@ -1384,7 +1414,7 @@ func TestMessagePaneStopsAtLastFullViewport(t *testing.T) {
 		m = updated.(app)
 	}
 	group, _ := m.detailGroup()
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	maximum := messagePaneMaxStart(rendered.panel, layout.messageHeight)
 	if m.messageScroll != maximum {
@@ -1649,7 +1679,7 @@ func TestMouseWheelScrollsHoveredInboxWithoutChangingFocus(t *testing.T) {
 		width: 80, height: 24, paneFocus: focusMessage, cursor: 1,
 		messageScroll: 5, messageScrollManual: true, messageViewportKey: "old", messageAnchorID: "old",
 	}
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 
 	updated, cmd := m.Update(mouseWheel(0, layout.inboxHeight-1, tea.MouseWheelDown))
 	m = updated.(app)
@@ -1688,7 +1718,7 @@ func TestMouseWheelScrollsHoveredMessagePaneAndPreservesFocus(t *testing.T) {
 	messages := mouseScrollMessages(1, 50)
 	m := app{messages: messages, width: 80, height: 24, paneFocus: focusInbox}
 	m.reconcileMessageViewport(false)
-	layout := responsivePaneLayout(m.width, m.height, false)
+	layout := m.paneLayout()
 	initialScroll := m.messageScroll
 
 	updated, _ := m.Update(mouseWheel(0, layout.inboxHeight, tea.MouseWheelUp))
@@ -1723,10 +1753,9 @@ func TestMouseWheelScrollsHoveredMessagePaneAndPreservesFocus(t *testing.T) {
 }
 
 func TestMouseWheelUsesExactPaneBoundaries(t *testing.T) {
-	layout := responsivePaneLayout(80, 24, false)
-
 	inbox := app{messages: mouseScrollMessages(8, 2), width: 80, height: 24, cursor: 1, paneFocus: focusReply}
-	updated, _ := inbox.Update(mouseWheel(0, layout.inboxHeight-1, tea.MouseWheelDown))
+	inboxLayout := inbox.paneLayout()
+	updated, _ := inbox.Update(mouseWheel(0, inboxLayout.inboxHeight-1, tea.MouseWheelDown))
 	inbox = updated.(app)
 	if inbox.cursor != 4 || inbox.paneFocus != focusReply {
 		t.Fatalf("last inbox row routed incorrectly: cursor=%d focus=%v", inbox.cursor, inbox.paneFocus)
@@ -1734,14 +1763,15 @@ func TestMouseWheelUsesExactPaneBoundaries(t *testing.T) {
 
 	messagePane := app{messages: mouseScrollMessages(1, 50), width: 80, height: 24, cursor: 0, paneFocus: focusReply}
 	messagePane.reconcileMessageViewport(false)
+	messageLayout := messagePane.paneLayout()
 	messageStart := messagePane.messageScroll
-	updated, _ = messagePane.Update(mouseWheel(0, layout.inboxHeight, tea.MouseWheelDown))
+	updated, _ = messagePane.Update(mouseWheel(0, messageLayout.inboxHeight, tea.MouseWheelDown))
 	messagePane = updated.(app)
 	if messagePane.messageScroll != messageStart+3 || messagePane.paneFocus != focusReply {
 		t.Fatalf("first message row routed incorrectly: scroll=%d focus=%v", messagePane.messageScroll, messagePane.paneFocus)
 	}
 	before := messagePane.messageScroll
-	updated, _ = messagePane.Update(mouseWheel(0, layout.inboxHeight+layout.messageHeight, tea.MouseWheelDown))
+	updated, _ = messagePane.Update(mouseWheel(0, messageLayout.inboxHeight+messageLayout.messageHeight, tea.MouseWheelDown))
 	messagePane = updated.(app)
 	if messagePane.messageScroll != before {
 		t.Fatalf("first reply row changed message scroll: %d -> %d", before, messagePane.messageScroll)
@@ -1759,7 +1789,7 @@ func TestMouseWheelPreservesActiveComposerBinding(t *testing.T) {
 	m.activeDraftKey = answer.key
 	m.editor.SetValue("draft remains bound")
 	m.messageScroll, m.messageScrollManual, m.messageViewportKey = 2, true, answer.key
-	layout := responsivePaneLayout(m.width, m.height, true)
+	layout := m.paneLayout()
 
 	updated, cmd := m.Update(mouseWheel(0, layout.inboxHeight-1, tea.MouseWheelDown))
 	m = updated.(app)
@@ -1777,7 +1807,7 @@ func TestMouseWheelIsInertOutsideScrollablePanesAndDuringModals(t *testing.T) {
 		m.reconcileMessageViewport(false)
 		return m
 	}
-	layout := responsivePaneLayout(80, 24, false)
+	layout := base().paneLayout()
 	tests := []struct {
 		name   string
 		mutate func(*app)

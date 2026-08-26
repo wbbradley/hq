@@ -762,7 +762,7 @@ func (m app) updateMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	if m.connection.Blocking || m.pickingRecipient || m.projectSetup != nil || m.managingAgents {
 		return m, nil
 	}
-	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	layout := m.paneLayout()
 	if msg.X < 0 || msg.X >= layout.width || msg.Y < 0 || msg.Y >= layout.height {
 		return m, nil
 	}
@@ -801,7 +801,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		layout := responsivePaneLayout(msg.Width, msg.Height, m.answering)
+		layout := m.paneLayout()
 		m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
 		m.editor.SetHeight(max(1, layout.replyHeight-4))
 		m.reconcileMessageViewport(true)
@@ -1148,7 +1148,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch pageKey {
 		case "pgup":
-			layout := responsivePaneLayout(m.width, m.height, m.answering)
+			layout := m.paneLayout()
 			switch m.paneFocus {
 			case focusInbox:
 				m.cursor = max(0, m.cursor-max(1, layout.inboxHeight-3))
@@ -1166,7 +1166,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "pgdown":
-			layout := responsivePaneLayout(m.width, m.height, m.answering)
+			layout := m.paneLayout()
 			switch m.paneFocus {
 			case focusInbox:
 				m.cursor = min(max(0, len(m.visibleGroups())-1), m.cursor+max(1, layout.inboxHeight-3))
@@ -2370,7 +2370,7 @@ func (m app) finishProjectSetup(action domain.HarnessSessionAction, sessionID, d
 }
 
 func (m *app) resizeEditor() {
-	layout := responsivePaneLayout(m.width, m.height, true)
+	layout := m.paneLayout()
 	m.editor.SetWidth(max(1, layout.replyWidth-panel.GetHorizontalFrameSize()))
 	m.editor.SetHeight(max(1, layout.replyHeight-4))
 }
@@ -2851,7 +2851,7 @@ func (m *app) reconcileMessageViewport(preserveManual bool) {
 		m.messageAnchorID = ""
 		m.messageAnchorOffset = 0
 	}
-	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	layout := m.paneLayout()
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	m.messageScroll = m.resolvedMessageStart(group, rendered, layout.messageHeight)
 	m.messageViewportKey = group.key
@@ -2874,7 +2874,7 @@ func (m *app) scrollMessagePane(delta int) {
 	if !found {
 		return
 	}
-	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	layout := m.paneLayout()
 	rendered := m.renderGroupPanelLayout(group, layout.messageWidth)
 	current := m.resolvedMessageStart(group, rendered, layout.messageHeight)
 	next := min(messagePaneMaxStart(rendered.panel, layout.messageHeight), max(0, current+delta))
@@ -3191,7 +3191,7 @@ func (m app) View() tea.View {
 	if m.managingAgents {
 		return newAppView(m.renderAgentManager())
 	}
-	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	layout := m.paneLayout()
 	inboxPane := m.renderInboxPane(layout.width, layout.inboxHeight)
 	detailGroup, hasDetail := m.detailGroup()
 	messageFocused := m.paneFocused(focusMessage)
@@ -3273,22 +3273,36 @@ func responsivePaneLayout(width, height int, _ bool) paneLayout {
 	return result
 }
 
+func (m app) paneLayout() paneLayout {
+	layout := responsivePaneLayout(m.width, m.height, m.answering)
+	if m.hasInboxDiagnostics() {
+		return layout
+	}
+	inboxHeight := min(layout.inboxHeight, len(m.visibleGroups())+2)
+	layout.messageHeight += layout.inboxHeight - inboxHeight
+	layout.inboxHeight = inboxHeight
+	return layout
+}
+
+func (m app) hasInboxDiagnostics() bool {
+	return m.connection.Diagnostic != "" || m.connection.Blocking || m.err != nil || m.syncErr != nil || m.showStatus
+}
+
 func (m app) renderInboxPane(width, height int) string {
 	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
 	innerHeight := max(0, height-2)
 	var lines []string
-	navigation := "Inbox"
+	title := "[HQ · Inbox]"
 	if m.showSent {
-		navigation += "  Sent:on"
+		title += " · Sent:on"
 	} else {
-		navigation += "  Sent:off"
+		title += " · Sent:off"
 	}
 	if m.showArchived {
-		navigation += "  Archived:on"
+		title += " · Archived:on"
 	} else {
-		navigation += "  Archived:off"
+		title += " · Archived:off"
 	}
-	lines = append(lines, titleStyle.Render(truncateDisplay(navigation, innerWidth)))
 	appendDiagnostic := func(value string, style lipgloss.Style) {
 		if value != "" && len(lines) < innerHeight {
 			lines = append(lines, style.Render(truncateDisplay(singleLine(value), innerWidth)))
@@ -3361,7 +3375,7 @@ func (m app) renderInboxPane(width, height int) string {
 		}
 	}
 	focused := m.paneFocused(focusInbox)
-	rendered := renderMessagePanel(strings.Join(lines, "\n"), width, "[HQ · Inbox]", "", focused)
+	rendered := renderMessagePanel(strings.Join(lines, "\n"), width, title, "", focused)
 	rendered = fitRenderedPane(rendered, width, height, 0, focused)
 	return renderPaneScrollbar(rendered, listStart, listVisible, len(groups), listOffset, listRows, focused)
 }
