@@ -18,6 +18,7 @@ type RuntimePaths struct {
 	Socket                   string
 	PID                      string
 	InstanceMetadata         string
+	StartupLog               string
 	Log                      string
 	ConfigDirectory          string
 	RuntimeDirectory         string
@@ -69,7 +70,7 @@ func ResolveRuntimePaths(databasePath string) (RuntimePaths, error) {
 	return RuntimePaths{
 		Database: database, IdentityKey: key,
 		OwnershipLock: database + ".sync.lock", Socket: socket,
-		PID: database + ".node.pid", InstanceMetadata: database + ".node.json",
+		PID: database + ".node.pid", InstanceMetadata: database + ".node.json", StartupLog: database + ".node.log",
 		Log: filepath.Join(home, "logs", "hq.log"), ConfigDirectory: configDirectory,
 		RuntimeDirectory: runtimeDirectory, protectDatabaseDirectory: database == defaultDatabase,
 	}, nil

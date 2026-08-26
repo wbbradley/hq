@@ -27,7 +27,7 @@ func startDetachedNode(paths RuntimePaths) error {
 		Executable: executable,
 		Arguments:  []string{"--db", paths.Database, "daemon", "run"},
 		Directory:  filepath.Dir(paths.Database),
-		LogPath:    paths.Log,
+		LogPath:    paths.StartupLog,
 	})
 }
 

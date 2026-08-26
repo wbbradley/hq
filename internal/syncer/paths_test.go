@@ -21,7 +21,7 @@ func TestRuntimePathsResolveDefaultsAndExplicitDatabases(t *testing.T) {
 	if defaults.Database != wantDatabase || defaults.IdentityKey != filepath.Join(root, "state", "hq", "hq.key") {
 		t.Fatalf("default paths = %#v", defaults)
 	}
-	if defaults.OwnershipLock != wantDatabase+".sync.lock" || defaults.PID != wantDatabase+".node.pid" || defaults.InstanceMetadata != wantDatabase+".node.json" || defaults.Socket == "" || len(defaults.Socket) > maxUnixSocketPath {
+	if defaults.OwnershipLock != wantDatabase+".sync.lock" || defaults.PID != wantDatabase+".node.pid" || defaults.InstanceMetadata != wantDatabase+".node.json" || defaults.StartupLog != wantDatabase+".node.log" || defaults.Socket == "" || len(defaults.Socket) > maxUnixSocketPath {
 		t.Fatalf("default runtime paths = %#v", defaults)
 	}
 	if defaults.ConfigDirectory != filepath.Join(root, "config", "hq") {

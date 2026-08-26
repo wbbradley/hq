@@ -1,9 +1,13 @@
 package syncer
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -27,6 +31,7 @@ func (l NodeLauncher) Ensure(ctx context.Context, databasePath string) error {
 	if err := paths.EnsureDirectories(); err != nil {
 		return err
 	}
+	startupLogOffset := startupLogSize(paths.StartupLog)
 	if _, err := DaemonStatus(paths.Database); err == nil {
 		return nil
 	} else if !isNodeAbsent(err) {
@@ -70,10 +75,41 @@ func (l NodeLauncher) Ensure(ctx context.Context, databasePath string) error {
 		} else {
 			lastErr = err
 		}
+		if diagnostic, found := startupErrorSince(paths.StartupLog, startupLogOffset); found {
+			return fmt.Errorf("local HQ node failed during startup: %s", diagnostic)
+		}
 		select {
 		case <-readyContext.Done():
 			return fmt.Errorf("local HQ node did not become ready within %s: %w", l.ReadyTimeout, errors.Join(readyContext.Err(), lastErr))
 		case <-ticker.C:
 		}
 	}
+}
+
+func startupLogSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+func startupErrorSince(path string, offset int64) (string, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return "", false
+	}
+	var diagnostic string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if value, found := strings.CutPrefix(line, "hq: "); found && value != "" {
+			diagnostic = value
+		}
+	}
+	return diagnostic, diagnostic != ""
 }

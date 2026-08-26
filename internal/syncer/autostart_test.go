@@ -103,6 +103,54 @@ func TestEnsureNodeReadinessTimeoutIsBounded(t *testing.T) {
 	}
 }
 
+func TestEnsureNodeSurfacesDetachedStartupError(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	database := filepath.Join(root, "hq.db")
+	launcher := NodeLauncher{
+		Start: func(paths RuntimePaths) error {
+			return os.WriteFile(paths.StartupLog, []byte("hq: unsupported HQ database schema 32; archive or remove the database\n"), 0o600)
+		},
+		ReadyTimeout: time.Second, PollInterval: 5 * time.Millisecond,
+	}
+	started := time.Now()
+	err := launcher.Ensure(context.Background(), database)
+	if err == nil || err.Error() != "local HQ node failed during startup: unsupported HQ database schema 32; archive or remove the database" {
+		t.Fatalf("startup error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("startup error took %s to surface", elapsed)
+	}
+}
+
+func TestEnsureNodeIgnoresStaleStartupErrors(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	database := filepath.Join(root, "hq.db")
+	paths, err := ResolveRuntimePaths(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := paths.EnsureDirectories(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.StartupLog, []byte("hq: stale startup failure\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher := NodeLauncher{
+		Start:        func(RuntimePaths) error { return nil },
+		ReadyTimeout: 30 * time.Millisecond, PollInterval: 5 * time.Millisecond,
+	}
+	err = launcher.Ensure(context.Background(), database)
+	if err == nil || strings.Contains(err.Error(), "stale startup failure") || !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("readiness error = %v", err)
+	}
+}
+
 func TestLiveSocketIsNeverRemovedAndStaleSocketIsReplaced(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
