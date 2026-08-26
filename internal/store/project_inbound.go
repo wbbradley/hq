@@ -22,7 +22,7 @@ func (s *SQLite) reconcileProjectInputs(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	accepted, err := s.reconcileProjectInputsTx(ctx, tx)
+	accepted, err := s.reconcileProjectInputsTx(ctx, tx, false)
 	if err != nil {
 		return err
 	}
@@ -43,8 +43,12 @@ func (s *SQLite) reconcileProjectInputs(ctx context.Context) error {
 // reconcileProjectInputsTx is the single commit boundary for accepting human
 // conversation into authoritative project history. It is intentionally
 // source-agnostic: local create/reply, remote append, and replay converge here.
-func (s *SQLite) reconcileProjectInputsTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT p.id,m.id,m.event_id FROM messages m JOIN projects p ON p.mailbox_id=m.recipient_mailbox_id LEFT JOIN project_message_acceptances a ON a.message_id=m.id WHERE a.message_id IS NULL AND m.sender_mailbox_id=? AND m.purpose IN (?,?) ORDER BY p.id,m.created_at,m.event_id`, model.HumanMailboxID, model.MessagePurposeProjectInput, model.MessagePurposeConversation)
+func (s *SQLite) reconcileProjectInputsTx(ctx context.Context, tx *sql.Tx, incremental bool) ([]string, error) {
+	where := ""
+	if incremental {
+		where = ` AND (EXISTS(SELECT 1 FROM impacted_canonical_events i WHERE i.event_id=m.event_id) OR EXISTS(SELECT 1 FROM impacted_canonical_events i JOIN event_resources r ON r.event_id=i.event_id WHERE r.resource_kind='project' AND r.resource_id=p.id))`
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT p.id,m.id,m.event_id FROM messages m JOIN projects p ON p.mailbox_id=m.recipient_mailbox_id LEFT JOIN project_message_acceptances a ON a.message_id=m.id WHERE a.message_id IS NULL AND m.sender_mailbox_id=? AND m.purpose IN (?,?)`+where+` ORDER BY p.id,m.created_at,m.event_id`, model.HumanMailboxID, model.MessagePurposeProjectInput, model.MessagePurposeConversation)
 	if err != nil {
 		return nil, err
 	}

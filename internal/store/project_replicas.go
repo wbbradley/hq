@@ -28,22 +28,29 @@ func (s *SQLite) rebuildProjectReplicasTx(ctx context.Context, tx *sql.Tx, state
 		}
 	}
 	groups := make(map[string][]replicaProjectEvent)
+	affectedProjects := make(map[string]bool)
 	for id, record := range state.Records {
-		if record.Status != event.StatusProjected || record.Event.Content.Type != event.TypeProjectEvent {
+		if record.Event.Content.Type != event.TypeProjectEvent {
 			continue
 		}
 		var payload event.ProjectEventPayload
 		if json.Unmarshal(record.Event.Content.Payload, &payload) != nil {
 			continue
 		}
+		affectedProjects[payload.ProjectID] = true
+		if record.Status != event.StatusProjected {
+			continue
+		}
 		groups[payload.ProjectID] = append(groups[payload.ProjectID], replicaProjectEvent{id: id, home: record.Event.Content.InstallationID, created: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(), payload: payload})
 	}
-	for projectID, events := range groups {
-		if !repair {
+	if !repair {
+		for projectID := range affectedProjects {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM project_replicas WHERE id=?`, projectID); err != nil {
 				return err
 			}
 		}
+	}
+	for projectID, events := range groups {
 		project, ok, diagnostic := reduceReplicaProject(projectID, events)
 		if project.HomeInstallation == s.signer.InstallationID {
 			continue

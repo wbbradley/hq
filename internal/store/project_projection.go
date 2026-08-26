@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/wbbradley/hq/internal/event"
@@ -26,30 +27,35 @@ type authoritativeProjectProjection struct {
 }
 
 func (s *SQLite) rebuildAuthoritativeProjectsTx(ctx context.Context, tx *sql.Tx, state event.State, repair bool) error {
-	legacyThreads, err := loadLegacyProjectThreads(ctx, tx)
-	if err != nil {
-		return err
-	}
-	legacyResources, err := loadLegacyProjectResources(ctx, tx)
-	if err != nil {
-		return err
-	}
 	groups := make(map[string][]replicaProjectEvent)
+	affectedProjects := make(map[string]bool)
 	for id, record := range state.Records {
-		if record.Status != event.StatusProjected || record.Event.Content.Type != event.TypeProjectEvent || record.Event.Content.InstallationID != s.signer.InstallationID {
+		if record.Event.Content.Type != event.TypeProjectEvent || record.Event.Content.InstallationID != s.signer.InstallationID {
 			continue
 		}
 		var payload event.ProjectEventPayload
 		if err := json.Unmarshal(record.Event.Content.Payload, &payload); err != nil {
 			continue
 		}
+		affectedProjects[payload.ProjectID] = true
+		if record.Status != event.StatusProjected {
+			continue
+		}
 		groups[payload.ProjectID] = append(groups[payload.ProjectID], replicaProjectEvent{id: id, home: record.Event.Content.InstallationID, created: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(), payload: payload})
 	}
-	projectIDs := make([]string, 0, len(groups))
-	for projectID := range groups {
+	projectIDs := make([]string, 0, len(affectedProjects))
+	for projectID := range affectedProjects {
 		projectIDs = append(projectIDs, projectID)
 	}
 	sort.Strings(projectIDs)
+	legacyThreads, err := loadProjectThreads(ctx, tx, projectIDs)
+	if err != nil {
+		return err
+	}
+	legacyResources, err := loadProjectResources(ctx, tx, projectIDs)
+	if err != nil {
+		return err
+	}
 	projections := make([]authoritativeProjectProjection, 0, len(projectIDs))
 	for _, projectID := range projectIDs {
 		projection := reduceAuthoritativeProject(projectID, groups[projectID], legacyThreads, legacyResources[projectID])
@@ -92,26 +98,44 @@ func (s *SQLite) rebuildAuthoritativeProjectsTx(ctx context.Context, tx *sql.Tx,
 			}
 		}
 	}
-	for _, statement := range []string{
-		`DELETE FROM project_dispatch_attempts WHERE NOT EXISTS (SELECT 1 FROM project_message_acceptances a WHERE a.message_id=project_dispatch_attempts.message_id) OR NOT EXISTS (SELECT 1 FROM project_assignment_epochs e WHERE e.id=project_dispatch_attempts.assignment_id) OR NOT EXISTS (SELECT 1 FROM project_threads t WHERE t.id=project_dispatch_attempts.project_thread_id)`,
-		`DELETE FROM project_output_provenance WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.id=project_output_provenance.project_id) OR NOT EXISTS (SELECT 1 FROM project_assignment_epochs e WHERE e.id=project_output_provenance.assignment_id) OR NOT EXISTS (SELECT 1 FROM project_threads t WHERE t.id=project_output_provenance.project_thread_id)`,
-		`DELETE FROM project_activation_operations WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.id=project_activation_operations.project_id) OR (assignment_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM project_assignment_epochs e WHERE e.id=project_activation_operations.assignment_id))`,
-		`DELETE FROM project_runtime_operations WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.id=project_runtime_operations.project_id)`,
-	} {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return err
+	cleanup := []string{
+		`DELETE FROM project_dispatch_attempts WHERE %s (NOT EXISTS (SELECT 1 FROM project_message_acceptances a WHERE a.message_id=project_dispatch_attempts.message_id) OR NOT EXISTS (SELECT 1 FROM project_assignment_epochs e WHERE e.id=project_dispatch_attempts.assignment_id) OR NOT EXISTS (SELECT 1 FROM project_threads t WHERE t.id=project_dispatch_attempts.project_thread_id))`,
+		`DELETE FROM project_output_provenance WHERE %s (NOT EXISTS (SELECT 1 FROM projects p WHERE p.id=project_output_provenance.project_id) OR NOT EXISTS (SELECT 1 FROM project_assignment_epochs e WHERE e.id=project_output_provenance.assignment_id) OR NOT EXISTS (SELECT 1 FROM project_threads t WHERE t.id=project_output_provenance.project_thread_id))`,
+		`DELETE FROM project_activation_operations WHERE %s (NOT EXISTS (SELECT 1 FROM projects p WHERE p.id=project_activation_operations.project_id) OR (assignment_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM project_assignment_epochs e WHERE e.id=project_activation_operations.assignment_id)))`,
+		`DELETE FROM project_runtime_operations WHERE %s NOT EXISTS (SELECT 1 FROM projects p WHERE p.id=project_runtime_operations.project_id)`,
+	}
+	if repair {
+		for _, template := range cleanup {
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(template, "")); err != nil {
+				return err
+			}
+		}
+	} else {
+		for _, projectID := range projectIDs {
+			for _, template := range cleanup {
+				if _, err := tx.ExecContext(ctx, fmt.Sprintf(template, "project_id=? AND"), projectID); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
 }
 
-func loadLegacyProjectResources(ctx context.Context, tx *sql.Tx) (map[string]map[string]projectstate.CreatedResource, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT pr.project_id,r.id,r.kind,r.display_locator,r.canonical_locator,h.state,h.details_json,h.last_checked_at FROM project_resources pr JOIN resources r ON r.id=pr.resource_id JOIN resource_health h ON h.resource_id=r.id`)
+func loadProjectResources(ctx context.Context, tx *sql.Tx, projectIDs []string) (map[string]map[string]projectstate.CreatedResource, error) {
+	result := make(map[string]map[string]projectstate.CreatedResource)
+	if len(projectIDs) == 0 {
+		return result, nil
+	}
+	args := make([]any, len(projectIDs))
+	for index, projectID := range projectIDs {
+		args[index] = projectID
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT pr.project_id,r.id,r.kind,r.display_locator,r.canonical_locator,h.state,h.details_json,h.last_checked_at FROM project_resources pr JOIN resources r ON r.id=pr.resource_id JOIN resource_health h ON h.resource_id=r.id WHERE pr.project_id IN (`+strings.TrimRight(strings.Repeat("?,", len(args)), ",")+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	result := make(map[string]map[string]projectstate.CreatedResource)
 	for rows.Next() {
 		var projectID string
 		var resource projectstate.CreatedResource
@@ -132,13 +156,20 @@ func loadLegacyProjectResources(ctx context.Context, tx *sql.Tx) (map[string]map
 	return result, rows.Err()
 }
 
-func loadLegacyProjectThreads(ctx context.Context, tx *sql.Tx) (map[string]projectstate.ThreadProjection, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,project_id,agent_name,harness,external_thread_id,launch_directory,created_at FROM project_threads`)
+func loadProjectThreads(ctx context.Context, tx *sql.Tx, projectIDs []string) (map[string]projectstate.ThreadProjection, error) {
+	result := make(map[string]projectstate.ThreadProjection)
+	if len(projectIDs) == 0 {
+		return result, nil
+	}
+	args := make([]any, len(projectIDs))
+	for index, projectID := range projectIDs {
+		args[index] = projectID
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,project_id,agent_name,harness,external_thread_id,launch_directory,created_at FROM project_threads WHERE project_id IN (`+strings.TrimRight(strings.Repeat("?,", len(args)), ",")+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	result := make(map[string]projectstate.ThreadProjection)
 	for rows.Next() {
 		var thread projectstate.ThreadProjection
 		var created int64

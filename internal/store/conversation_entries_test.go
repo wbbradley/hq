@@ -85,10 +85,10 @@ func TestConversationEntriesPageMixedCanonicalOrderAndRebuild(t *testing.T) {
 	}
 	for _, malformed := range []string{
 		`{"event_id":"` + strings.Repeat("a", 64) + `"}`,
-		`{"display_order":0,"event_id":"` + strings.Repeat("A", 64) + `"}`,
-		`{"display_order":0,"event_id":"` + strings.Repeat("z", 64) + `"}`,
-		`{"display_order":0,"event_id":"` + strings.Repeat("a", 64) + `","extra":true}`,
-		`{"display_order":0,"event_id":"` + strings.Repeat("a", 64) + `"} {}`,
+		`{"after_event_id":"` + strings.Repeat("A", 64) + `"}`,
+		`{"after_event_id":"` + strings.Repeat("z", 64) + `"}`,
+		`{"after_event_id":"` + strings.Repeat("a", 64) + `","extra":true}`,
+		`{"after_event_id":"` + strings.Repeat("a", 64) + `"} {}`,
 	} {
 		cursor := base64.RawURLEncoding.EncodeToString([]byte(malformed))
 		if _, err := s.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: key, Cursor: cursor}); err == nil {
@@ -141,5 +141,30 @@ func TestConversationEntriesIsolateProviderAndThreadFallback(t *testing.T) {
 	threadEntries, err := s.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: threadKey})
 	if err != nil || len(threadEntries.Entries) != 1 || threadEntries.Entries[0].Kind != domain.ConversationEntryMessage {
 		t.Fatalf("thread-fallback entries = %#v, %v", threadEntries, err)
+	}
+}
+
+func TestConversationEntriesOrderParentsBeforeEarlierDatedChildren(t *testing.T) {
+	s := openStore(t, t.TempDir()+"/hq.db")
+	ctx := context.Background()
+	mailbox, err := s.ResolveMailbox(ctx, model.SessionIdentity{Harness: "provider", ExternalSessionID: "causal-order"}, model.RepositoryContext{Directory: "/work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	correlation := model.MessageCorrelation{Provider: "provider", SessionID: "causal-order", OperationID: "turn"}
+	parent := model.Message{ID: "019c0000-0000-7000-8000-000000000821", SenderMailboxID: mailbox.ID, RecipientMailboxID: model.HumanMailboxID, Body: "parent", Correlation: correlation, CreatedAt: time.Unix(200, 0)}
+	if err := s.Create(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	child := model.Message{ID: "019c0000-0000-7000-8000-000000000822", SenderMailboxID: model.HumanMailboxID, RecipientMailboxID: mailbox.ID, Body: "child with earlier clock", Correlation: correlation, CreatedAt: time.Unix(100, 0)}
+	if err := s.Reply(ctx, parent.ID, child); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListConversationEntries(ctx, model.ConversationHistoryFilter{Key: model.ConversationKey{CounterpartyMailboxID: mailbox.ID, HarnessProvider: "provider", HarnessSessionID: "causal-order"}, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 2 || page.Entries[0].Message.ID != parent.ID || page.Entries[1].Message.ID != child.ID || page.Entries[0].DisplayOrder != 0 || page.Entries[1].DisplayOrder != 1 {
+		t.Fatalf("causal conversation order = %#v", page.Entries)
 	}
 }

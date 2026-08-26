@@ -193,7 +193,6 @@ CREATE TABLE messages (
 	correlation_request_id TEXT NOT NULL DEFAULT '',
 	technical_sections_json TEXT NOT NULL DEFAULT '[]',
     reply_to TEXT,
-	display_order INTEGER NOT NULL CHECK(display_order >= 0),
     created_at INTEGER NOT NULL,
     archived_at INTEGER,
     incomplete INTEGER NOT NULL CHECK(incomplete IN (0, 1)),
@@ -590,7 +589,7 @@ CREATE INDEX messages_sent ON messages(sender_mailbox_id, created_at DESC, id DE
 CREATE INDEX messages_reply ON messages(reply_to, recipient_mailbox_id, created_at, id);
 CREATE INDEX messages_harness_conversation ON messages(harness_provider, harness_session_id, created_at, id);
 CREATE INDEX messages_harness_operation ON messages(harness_provider, harness_session_id, harness_operation_id, created_at, id);
-CREATE INDEX messages_conversation_order ON messages(sender_mailbox_id,recipient_mailbox_id,harness_provider,harness_session_id,display_order,event_id);
+CREATE INDEX messages_conversation_order ON messages(sender_mailbox_id,recipient_mailbox_id,harness_provider,harness_session_id,created_at,event_id);
 CREATE INDEX mailbox_context_search ON mailbox_contexts(directory, git_common_dir, remote_identity, worktree, branch);
 CREATE TABLE harness_activities (
 	 event_id TEXT PRIMARY KEY CHECK(length(event_id) = 64),
@@ -609,12 +608,11 @@ CREATE TABLE harness_activities (
     occurred_at INTEGER NOT NULL,
 	 runtime_id TEXT NOT NULL,
 	 source_sequence TEXT NOT NULL,
-	 display_order INTEGER NOT NULL CHECK(display_order >= 0),
 	 UNIQUE(source_installation_id,mailbox_id,harness,session_id,operation_id,kind,item_id),
 	 FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
 ) STRICT;
-CREATE INDEX harness_activities_mailbox_time ON harness_activities(source_installation_id,mailbox_id,display_order,event_id);
-CREATE INDEX harness_activities_progress_retention ON harness_activities(source_installation_id,mailbox_id,harness,session_id,display_order,event_id) WHERE kind='progress';
+CREATE INDEX harness_activities_mailbox_time ON harness_activities(source_installation_id,mailbox_id,occurred_at,event_id);
+CREATE INDEX harness_activities_progress_retention ON harness_activities(source_installation_id,mailbox_id,harness,session_id,occurred_at,event_id) WHERE kind='progress';
 PRAGMA user_version = 33;
 `
 
@@ -997,7 +995,7 @@ func (s *SQLite) ingestCanonicalTx(ctx context.Context, tx *sql.Tx, additions []
 			return commit, observeErr
 		}
 	}
-	accepted, err := s.reconcileProjectInputsTx(ctx, tx)
+	accepted, err := s.reconcileProjectInputsTx(ctx, tx, true)
 	commit.EventIDs = append(commit.EventIDs, accepted...)
 	commit.ProjectInputAcceptanceIDs = append(commit.ProjectInputAcceptanceIDs, accepted...)
 	return commit, err
@@ -1320,10 +1318,6 @@ func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.Sta
 		}
 		messageIDs[eventID] = id
 	}
-	conversationDisplay := make(map[string]int, len(state.ConversationOrder))
-	for order, eventID := range state.ConversationOrder {
-		conversationDisplay[eventID] = order
-	}
 	for _, eventID := range state.DisplayOrder {
 		message, ok := state.Messages[eventID]
 		if !ok {
@@ -1347,8 +1341,8 @@ func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.Sta
 		if len(message.TechnicalSections) == 0 {
 			technicalJSON = []byte("[]")
 		}
-		_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO messages(id, event_id, thread_event_id, event_type, purpose, presentation, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, technical_sections_json, harness_provider, harness_session_id, harness_operation_id, correlation_item_id, correlation_request_id, reply_to, display_order, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, eventID, message.ThreadID, message.Type, model.NormalizeMessagePurpose(message.Purpose), message.Presentation, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, string(technicalJSON), correlation.Provider, correlation.SessionID, correlation.OperationID, correlation.ItemID, correlation.RequestID, replyTo, conversationDisplay[eventID], message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
+		_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO messages(id, event_id, thread_event_id, event_type, purpose, presentation, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, technical_sections_json, harness_provider, harness_session_id, harness_operation_id, correlation_item_id, correlation_request_id, reply_to, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, eventID, message.ThreadID, message.Type, model.NormalizeMessagePurpose(message.Purpose), message.Presentation, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, string(technicalJSON), correlation.Provider, correlation.SessionID, correlation.OperationID, correlation.ItemID, correlation.RequestID, replyTo, message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
 		if err != nil {
 			return fmt.Errorf("project message: %w", err)
 		}
@@ -1359,11 +1353,11 @@ func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.Sta
 	for _, key := range state.HarnessActivityOrder {
 		activity := state.HarnessActivities[key]
 		correlation := activity.Correlation
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO harness_activities(event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence,display_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO harness_activities(event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			activity.EventID, activity.Sender.InstallationID, activity.Sender.MailboxID, activity.AudienceAccountID,
 			correlation.Provider, correlation.SessionID, correlation.OperationID, activity.Kind, correlation.ItemID,
 			activity.Status, activity.Title, activity.Body, boolInt(activity.Truncated), activity.OccurredAt.UnixMilli(),
-			activity.RuntimeID, fmt.Sprintf("%d", activity.Sequence), activity.DisplayOrder); err != nil {
+			activity.RuntimeID, fmt.Sprintf("%d", activity.Sequence)); err != nil {
 			return fmt.Errorf("project harness activity: %w", err)
 		}
 	}
@@ -1371,7 +1365,7 @@ func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.Sta
 SELECT event_id FROM (
   SELECT event_id,row_number() OVER (
     PARTITION BY source_installation_id,mailbox_id,harness,session_id
-    ORDER BY display_order DESC,event_id DESC
+    ORDER BY occurred_at DESC,event_id DESC
   ) AS retention_rank
   FROM harness_activities WHERE kind='progress'
 ) WHERE retention_rank > ?
@@ -2540,7 +2534,7 @@ func (s *SQLite) rebuildOnce(ctx context.Context) error {
 	if err := s.rebuildTx(ctx, tx, event.Reduce(raw, s.policy())); err != nil {
 		return err
 	}
-	if _, err := s.reconcileProjectInputsTx(ctx, tx); err != nil {
+	if _, err := s.reconcileProjectInputsTx(ctx, tx, false); err != nil {
 		return err
 	}
 	return tx.Commit()

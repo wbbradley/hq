@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wbbradley/hq/internal/event"
+	"github.com/wbbradley/hq/internal/projectstate"
 )
 
 type canonicalResource struct {
@@ -131,6 +132,41 @@ func resourcesForEvent(item event.SignedEvent) []canonicalResource {
 		var payload event.ProjectEventPayload
 		if json.Unmarshal(content.Payload, &payload) == nil {
 			add("project", payload.ProjectID)
+			if data, err := projectstate.DecodeAudit(payload.Operation, payload.Body); err == nil {
+				switch value := data.(type) {
+				case *projectstate.Created:
+					for _, resource := range value.Resources {
+						add("project-resource", resource.ID)
+					}
+					for _, resourceID := range value.ResourceIDs {
+						add("project-resource", resourceID)
+					}
+				case *projectstate.ResourceAdded:
+					add("project-resource", value.ResourceID)
+				case *projectstate.ResourceRemoved:
+					add("project-resource", value.ResourceID)
+				case *projectstate.ResourceReplaced:
+					add("project-resource", value.OldResourceID)
+					add("project-resource", value.NewResourceID)
+				case *projectstate.PrimaryResourceChanged:
+					add("project-resource", value.ResourceID)
+				case *projectstate.ResourceHealth:
+					add("project-resource", value.ResourceID)
+				case *projectstate.AssignmentConfiguring:
+					add("project-agent", value.Agent)
+				case *projectstate.AssignmentRunnable:
+					add("project-agent", value.Agent)
+				case *projectstate.AssignmentBlocked:
+					add("project-agent", value.Agent)
+				case *projectstate.AssignmentEnded:
+					add("project-agent", value.Agent)
+				case *projectstate.MessageAccepted:
+					add("message", value.MessageEventID)
+				case *projectstate.MessageDispatched:
+					add("project-agent", value.Agent)
+					add("message", value.MessageID)
+				}
+			}
 		}
 	case event.TypeProjectCommand:
 		var payload event.ProjectCommandPayload

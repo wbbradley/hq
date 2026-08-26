@@ -116,11 +116,11 @@ func (s *SQLite) ListHarnessActivities(ctx context.Context, filter domain.Harnes
 		limit = harnessActivityQueryLimit
 	}
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence,display_order FROM (
-SELECT event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence,display_order
+	rows, err := s.db.QueryContext(ctx, `SELECT event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence FROM (
+SELECT event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence
 FROM harness_activities WHERE `+strings.Join(where, " AND ")+`
-ORDER BY display_order DESC,event_id DESC LIMIT ?
-) ORDER BY display_order,event_id`, args...)
+ORDER BY occurred_at DESC,event_id DESC LIMIT ?
+) ORDER BY occurred_at,event_id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list harness activities: %w", err)
 	}
@@ -131,6 +131,7 @@ ORDER BY display_order DESC,event_id DESC LIMIT ?
 		if scanErr != nil {
 			return nil, scanErr
 		}
+		activity.DisplayOrder = len(activities)
 		activities = append(activities, activity)
 	}
 	return activities, rows.Err()
@@ -144,7 +145,7 @@ func scanHarnessActivity(scanner harnessActivityScanner) (domain.HarnessActivity
 	var activity domain.HarnessActivity
 	var occurredAt int64
 	var sequence string
-	if err := scanner.Scan(&activity.EventID, &activity.InstallationID, &activity.MailboxID, &activity.AudienceAccountID, &activity.Harness, &activity.SessionID, &activity.OperationID, &activity.Kind, &activity.ItemID, &activity.Status, &activity.Title, &activity.Body, &activity.Truncated, &occurredAt, &activity.RuntimeID, &sequence, &activity.DisplayOrder); err != nil {
+	if err := scanner.Scan(&activity.EventID, &activity.InstallationID, &activity.MailboxID, &activity.AudienceAccountID, &activity.Harness, &activity.SessionID, &activity.OperationID, &activity.Kind, &activity.ItemID, &activity.Status, &activity.Title, &activity.Body, &activity.Truncated, &occurredAt, &activity.RuntimeID, &sequence); err != nil {
 		return domain.HarnessActivity{}, err
 	}
 	var err error
@@ -158,7 +159,7 @@ func scanHarnessActivity(scanner harnessActivityScanner) (domain.HarnessActivity
 }
 
 func (s *SQLite) harnessActivityByEventID(ctx context.Context, eventID string) (domain.HarnessActivity, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence,display_order FROM harness_activities WHERE event_id=?`, eventID)
+	row := s.db.QueryRowContext(ctx, `SELECT event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence FROM harness_activities WHERE event_id=?`, eventID)
 	activity, err := scanHarnessActivity(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.HarnessActivity{}, domain.ErrNotFound

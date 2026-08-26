@@ -56,6 +56,15 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	if version != reducerVersion || indexed != canonical || reduced != canonical {
 		t.Fatalf("projection metadata = version %d, events %d, reductions %d; want %d, %d, %d", version, indexed, reduced, reducerVersion, canonical, canonical)
 	}
+	for _, table := range []string{"messages", "harness_activities"} {
+		var denseColumns int
+		if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_xinfo(?) WHERE name='display_order'`, table).Scan(&denseColumns); err != nil {
+			t.Fatal(err)
+		}
+		if denseColumns != 0 {
+			t.Fatalf("%s retained global display_order", table)
+		}
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
