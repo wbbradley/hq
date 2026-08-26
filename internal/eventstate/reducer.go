@@ -186,13 +186,6 @@ func Reduce(rawEvents [][]byte, policy Policy) State {
 	return reduceFacts(rawEvents, policy)
 }
 
-// ReduceAffected folds one dependency-closed set selected by the incremental
-// causal index. It deliberately shares the lawful reducers with the offline
-// batch oracle while keeping normal ingestion independent of the complete log.
-func ReduceAffected(rawEvents [][]byte, policy Policy) State {
-	return reduceFacts(rawEvents, policy)
-}
-
 func reduceFacts(rawEvents [][]byte, policy Policy) State {
 	state := State{
 		Policy:            policy,
@@ -222,24 +215,7 @@ func reduceFacts(rawEvents [][]byte, policy Policy) State {
 		}
 	}
 
-	state.classifyLocalControls()
-	state.reducePeers()
-	state.classifyMailboxAccessEvents()
-	state.projectMailboxAccess()
-	state.classifyAccountEvents()
-	state.projectAccounts()
-	state.classifyAccountSelections()
-	state.projectDefaultAccount()
-	state.classifyDomainEvents()
-	state.projectMailboxes()
-	state.classifyNamedAgents()
-	state.projectNamedAgents()
-	state.projectMessages()
-	state.applyMessageState()
-	state.projectThreads()
-	state.DisplayOrder = state.orderMessages()
-	state.ConversationOrder = state.orderConversationEvents()
-	state.projectHarnessActivities()
+	canonicalReductionPipeline.apply(&state)
 	return state
 }
 

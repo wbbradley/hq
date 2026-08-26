@@ -31,8 +31,10 @@ recipient. Account-addressed events have one canonical event and one durable out
 active device.
 
 1. Exact signed kind-7281 bytes contain the canonical HQ event.
-2. An unsigned kind-7282 rumor contains schema-1 `hq.canonical` JSON with origin installation UUID,
-   canonical ID, and the exact canonical event. Its `p` tag names the recipient root key.
+2. An unsigned kind-7282 rumor contains the transport wrapper's schema-1 `hq.canonical` JSON with
+   origin installation UUID, canonical ID, and the exact embedded schema-3 canonical event. Its `p`
+   tag names the recipient root key. The wrapper schema and canonical application schema are
+   independent version spaces.
 3. A sender-signed kind-13 seal contains the NIP-44 v2 encrypted rumor and has no tags.
 4. A kind-1059 gift wrap contains the encrypted seal, a fresh one-use key, and one recipient `p`
    tag.

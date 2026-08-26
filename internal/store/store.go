@@ -16,12 +16,6 @@ type EventLog interface {
 	AppendCanonical(context.Context, []event.SignedEvent) error
 	Rebuild(context.Context) error
 }
-type Reducer interface {
-	Reduce([][]byte, event.Policy) event.State
-}
-type ReducerFunc func([][]byte, event.Policy) event.State
-
-func (f ReducerFunc) Reduce(raw [][]byte, policy event.Policy) event.State { return f(raw, policy) }
 
 type OutboundJob struct {
 	EventID                 string

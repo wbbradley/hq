@@ -197,6 +197,73 @@ func TestTUIPresentationDoesNotRecognizeStructuralDetailsPrefixes(t *testing.T) 
 	}
 }
 
+func TestCanonicalReductionHasOnePureEntryPoint(t *testing.T) {
+	repository := repositoryRoot(t)
+	files, err := productionGoFiles(filepath.Join(repository, "internal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowedCalls := map[string]string{
+		"internal/store/causal_index.go": "affectedReductionTx",
+		"internal/store/sqlite.go":       "rebuildOnce",
+	}
+	for _, path := range files {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		relative := relativePath(repository, path)
+		if strings.Contains(string(raw), "ReduceAffected") {
+			t.Errorf("%s retains transitional ReduceAffected API", relative)
+		}
+		if relative == "internal/store/store.go" && (strings.Contains(string(raw), "type Reducer interface") || strings.Contains(string(raw), "type ReducerFunc")) {
+			t.Errorf("%s retains unused store reducer abstraction", relative)
+		}
+		file := parseFile(t, path)
+		eventNames := map[string]bool{}
+		for _, spec := range file.Imports {
+			importPath, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if importPath == "github.com/wbbradley/hq/internal/eventstate" && relative != "internal/event/event.go" {
+				t.Errorf("%s bypasses the internal/event pure-state facade", relative)
+			}
+			if importPath == "github.com/wbbradley/hq/internal/event" {
+				name := "event"
+				if spec.Name != nil {
+					name = spec.Name.Name
+				}
+				eventNames[name] = true
+			}
+		}
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "Reduce" {
+					return true
+				}
+				identifier, ok := selector.X.(*ast.Ident)
+				if !ok || !eventNames[identifier.Name] {
+					return true
+				}
+				if allowedCalls[relative] != function.Name.Name {
+					t.Errorf("%s:%s calls the full pure reducer outside an affected closure or explicit repair", relative, function.Name.Name)
+				}
+				return true
+			})
+		}
+	}
+}
+
 func isTextPayloadType(expression ast.Expr) bool {
 	switch value := expression.(type) {
 	case *ast.Ident:

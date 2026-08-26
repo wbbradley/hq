@@ -913,7 +913,7 @@ func decodePayload(raw json.RawMessage, target any) error {
 func DecodePayload(raw json.RawMessage, target any) error { return decodePayload(raw, target) }
 
 // ValidateMessageCorrelation exposes the canonical correlation invariant to
-// compatibility projection code in the pure reducer.
+// the pure reducer without duplicating wire validation rules.
 func ValidateMessageCorrelation(correlation model.MessageCorrelation) error {
 	return validateMessageCorrelation(correlation)
 }

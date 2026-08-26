@@ -244,7 +244,7 @@ source/runtime identity, provider sequence, and event ID as stable tie-breakers.
 SQLite row order are never inputs. This order is presentation order, not causal authority.
 
 Messages and activity share this reducer order but remain separate semantic streams. The typed
-`conversation/entries` read pages projected messages and activity by `(display_order,event_id)`.
+`conversation/entries` read derives and slices the causal order, using event IDs as stable identity.
 Its message values retain typed schema-3 presentation, correlation, and technical sections. The
 legacy `conversation/history` shape remains message-only. Conversation summaries, open/unread
 counts, delivery, reply/archive targets, drafts, and final-answer selection are also message-only.
@@ -279,16 +279,15 @@ full rebuild deterministically reapplies that cap. The legacy activity-list read
 newest 1,000 projected rows in chronological order; unified conversation pages use the normal
 200-entry page cap and expose the same disposable projection, not every superseded canonical event.
 
-Schema 31 deliberately discarded legacy unsigned `harness_activities` rows and rebuilt the table
-only from canonical `harness.activity` events. It did not manufacture signatures or synchronized
-history for old best-effort rows. Schema 32 adds reducer display order to message rows so mixed
-conversation history can rebuild and paginate by one canonical order.
+Schema 33 keeps no dense display-order column. Mixed conversation history rebuilds one canonical
+order from signed times, causal parents, typed activity correlation, and stable event-ID
+tie-breakers.
 
 These node facts are not canonical events and remain unsigned:
 
 - Relay attempts and error text.
 - Subscription cursors and relay acceptance records.
-- Projection checkpoints.
+- Projection generation metadata and dependency indexes.
 - Delivery leases, sync locks, and retry timers.
 - UI focus, drafts, and cache data.
 - Codex worker processes, caller environments, paths under validation, request receipts, runtime phases, presence, and ownership leases.

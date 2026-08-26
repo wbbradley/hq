@@ -32,9 +32,8 @@ absent and always protects the log with mode `0600`. Daemon, supervisor, bridge,
 correlation attributes rather than embedding context in prose.
 
 `identity reset --yes` stops being safe once a node is using that identity: stop the node first. It
-deletes the key, database, and SQLite side files. HQ remains pre-1.0 and unsupported schema versions
-may be reset rather than migrated; schema 7 migrates through every supported intermediate version
-to schema 32.
+deletes the key, database, and SQLite side files. HQ remains pre-1.0; a non-empty database whose
+schema is not 33 must be archived or removed rather than migrated in place.
 
 ## The local node
 
@@ -66,8 +65,8 @@ Every durable canonical write follows one transaction path:
 
 1. Validate a typed domain request and its stable mutation UUID.
 2. Build typed event content and sign canonical bytes in the node.
-3. Insert the exact signed bytes and causal edges in one SQLite transaction.
-4. Reduce the full canonical event set and rebuild projections.
+3. Insert the exact signed bytes and dependency indexes in one SQLite transaction.
+4. Compute the dependency-closed affected facts with the pure reducer and patch their projections.
 5. Derive durable per-recipient outbox rows.
 6. Store the successful mutation result receipt and increment the change revision.
 7. Commit, then publish a lightweight topic/revision invalidation.
@@ -111,10 +110,11 @@ correlation and one reducer conversation order; neither reconstructs identity or
 body or `Details`.
 
 The `conversation/entries` domain read is a discriminated message/activity union. Every entry has a
-canonical event ID and reducer display order, and exactly one full typed message or activity. It
-pages by `(display_order,event_id)`. Messages hydrate their public UUID and typed semantics for
-actions; activity has no action ID. The legacy `conversation/history` API remains message-only and
-conversation summaries continue to derive only from messages.
+canonical event ID and a position in the reducer's causal conversation order, and exactly one full
+typed message or activity. Pages are sliced from that derived order with the event ID as stable
+identity; no dense global rank is persisted. Messages hydrate their public UUID and typed semantics
+for actions; activity has no action ID. The legacy `conversation/history` API remains message-only
+and conversation summaries continue to derive only from messages.
 
 Canonical source identity and correlation are different axes. Activity is associated with its full
 originating installation/mailbox address. Provider/session/operation/item IDs are opaque adapter
@@ -142,13 +142,18 @@ fallback. TUI drafts, focus, and selection survive reloads.
 ## SQLite data
 
 `canonical_events` retains exact signed bytes, identity fields, event type, scope, and reduction
-status. `causal_edges` indexes parents and `projection_checkpoint` records rebuild progress.
+status. Schema 33 indexes causal and authority dependencies, unresolved waiters, event resources,
+aggregate frontiers, projection support, layered reduction decisions, and reducer generation
+metadata. Those indexes select a dependency-closed affected set for ordinary ingestion; an explicit
+repair reduces the complete log as the offline oracle.
+
 `mailboxes`, historical bindings, named agents, selected sessions, contexts, messages, harness
-activity, threads, peers, shares, human accounts, and devices are rebuildable projections. The
-schema-32 `messages` projection stores presentation/correlation, ordered technical-section JSON,
-and reducer display order. `harness_activities` stores canonical source/audience identity, typed
-correlation, runtime/sequence, truncation, and the same reducer order. These columns are indexes,
-never alternate sources of canonical truth.
+activity, threads, peers, mailbox capabilities, human accounts, and devices are rebuildable
+projections. `messages` stores typed presentation/correlation and ordered technical-section JSON.
+`harness_activities` stores canonical source/audience identity, typed correlation,
+runtime/sequence, and truncation. Conversation order is derived causally by the reducer and is not
+stored as a dense table column. Projection rows and dependency indexes are caches, never alternate
+sources of canonical truth.
 
 `outbox` contains one row per canonical event and recipient installation, including exact canonical
 bytes, recipient key and relay hints, and the exact signed gift wrap before first publish.
@@ -254,6 +259,6 @@ receive failures enter staging.
 Canonical retention is broader than presentation retention. Exact activity events—including
 superseded snapshots and progress that later falls out—remain in `canonical_events`. The disposable
 activity projection coalesces logical keys and keeps only the newest 200 progress rows per source
-mailbox/provider session; rebuild deterministically reapplies those rules. Legacy unsigned activity
-from schema 30 was discarded during migration to schema 31 rather than assigned manufactured
-signatures. Schema 32 adds message display order for stable mixed-history rebuild and pagination.
+mailbox/provider session; rebuild deterministically reapplies those rules. Schema 33 accepts only
+fresh or already-current databases and derives mixed conversation order from canonical causality;
+it does not retain a global display-order column.

@@ -232,7 +232,7 @@ func (s *SQLite) reduceCanonicalResourcesTx(ctx context.Context, tx *sql.Tx, req
 		}
 	}
 	if len(seeds) == 0 {
-		return event.ReduceAffected(nil, s.policy()), nil
+		return affectedReductionTx(ctx, tx, nil, s.policy())
 	}
 	return affectedReductionTx(ctx, tx, uniqueSorted(seeds), s.policy())
 }
@@ -448,7 +448,7 @@ func affectedReductionTx(ctx context.Context, tx *sql.Tx, seeds []string, policy
 	if err := rows.Err(); err != nil {
 		return event.State{}, err
 	}
-	return event.ReduceAffected(raw, policy), nil
+	return event.Reduce(raw, policy), nil
 }
 
 func patchCausalIndexesTx(ctx context.Context, tx *sql.Tx, state event.State, generation int64) error {
