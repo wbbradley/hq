@@ -1950,11 +1950,8 @@ func (m app) filteredRecipients() []recipientChoice {
 func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	choices := m.filteredRecipients()
 	switch msg.String() {
-	case "ctrl+c", "esc":
-		m.pickingRecipient = false
-		m.pickerQuery = ""
-		m.pickerCursor = 0
-		m.paneFocus = focusInbox
+	case "ctrl+c", "esc", "tab", "shift+tab":
+		m.dismissRecipientPicker()
 		return m, nil
 	case "j", "down":
 		if m.pickerCursor+1 < len(choices) {
@@ -2015,6 +2012,13 @@ func (m app) updateRecipientPicker(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.pickerCursor = 0
 	}
 	return m, nil
+}
+
+func (m *app) dismissRecipientPicker() {
+	m.pickingRecipient = false
+	m.pickerQuery = ""
+	m.pickerCursor = 0
+	m.paneFocus = focusInbox
 }
 
 func (m app) beginProjectSetup(project domain.Project) (tea.Model, tea.Cmd) {

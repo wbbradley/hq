@@ -1490,6 +1490,38 @@ func TestTabIntoReplyWithoutSelectionOpensRecipientPicker(t *testing.T) {
 	}
 }
 
+func TestTabAndShiftTabDismissRecipientPickerLikeEscape(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{name: "tab", key: tea.KeyPressMsg{Code: tea.KeyTab}},
+		{name: "shift-tab", key: tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := app{
+				pickingRecipient: true,
+				pickerQuery:      "alice",
+				pickerCursor:     2,
+				paneFocus:        focusReply,
+				cursor:           4,
+				messageScroll:    3,
+				showSent:         true,
+				editor:           textarea.New(),
+			}
+
+			updated, _ := m.Update(test.key)
+			m = updated.(app)
+			if m.pickingRecipient || m.pickerQuery != "" || m.pickerCursor != 0 || m.paneFocus != focusInbox {
+				t.Fatalf("picker was not dismissed like escape: %#v", m)
+			}
+			if m.cursor != 4 || m.messageScroll != 3 || !m.showSent {
+				t.Fatalf("dismiss changed inbox state: %#v", m)
+			}
+		})
+	}
+}
+
 func TestReplyHintsDescribeContextualComposeKeys(t *testing.T) {
 	withoutSelection := (app{editor: textarea.New(), width: 100, height: 24}).View().Content
 	if !strings.Contains(withoutSelection, "Press Tab or n to choose a recipient for a new message.") || strings.Contains(withoutSelection, "Enter to reply") {
