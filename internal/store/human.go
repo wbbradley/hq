@@ -65,7 +65,7 @@ func (s *SQLite) localAccountAction(ctx context.Context, accountID string) (Huma
 	if accountID != "" && account.ID != accountID {
 		return HumanAccount{}, nil, "", errors.New("message belongs to another human account")
 	}
-	state, err := s.canonicalState(ctx)
+	state, err := s.reduceCanonicalResources(ctx, canonicalResource{kind: "account", id: account.ID})
 	if err != nil {
 		return HumanAccount{}, nil, "", err
 	}
@@ -78,26 +78,6 @@ func (s *SQLite) localAccountAction(ctx context.Context, accountID string) (Huma
 		return HumanAccount{}, nil, "", err
 	}
 	return account, parents, label, nil
-}
-
-func (s *SQLite) canonicalState(ctx context.Context) (event.State, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT raw FROM canonical_events ORDER BY event_id`)
-	if err != nil {
-		return event.State{}, err
-	}
-	defer rows.Close()
-	var raw [][]byte
-	for rows.Next() {
-		var item []byte
-		if err := rows.Scan(&item); err != nil {
-			return event.State{}, err
-		}
-		raw = append(raw, item)
-	}
-	if err := rows.Err(); err != nil {
-		return event.State{}, err
-	}
-	return event.Reduce(raw, s.policy()), nil
 }
 
 func (s *SQLite) CreateHumanInvite(ctx context.Context, request HumanInviteRequest) (PairingBundle, error) {

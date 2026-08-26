@@ -22,7 +22,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 33
+const (
+	schemaVersion  = 33
+	reducerVersion = 1
+)
 
 const schema = `
 CREATE TABLE canonical_events (
@@ -42,10 +45,63 @@ CREATE TABLE causal_edges (
     PRIMARY KEY(child_event_id, parent_event_id),
     FOREIGN KEY(child_event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
 ) STRICT;
-CREATE TABLE projection_checkpoint (
+CREATE INDEX causal_edges_by_parent ON causal_edges(parent_event_id,child_event_id);
+CREATE TABLE authority_dependencies (
+    event_id TEXT NOT NULL,
+    authority_event_id TEXT NOT NULL,
+    PRIMARY KEY(event_id, authority_event_id),
+    FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX authority_dependencies_by_authority ON authority_dependencies(authority_event_id,event_id);
+CREATE TABLE unresolved_waiters (
+    missing_event_id TEXT NOT NULL,
+    waiting_event_id TEXT NOT NULL,
+    PRIMARY KEY(missing_event_id, waiting_event_id),
+    FOREIGN KEY(waiting_event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX unresolved_waiters_by_waiting ON unresolved_waiters(waiting_event_id,missing_event_id);
+CREATE TABLE event_resources (
+    event_id TEXT NOT NULL,
+    resource_kind TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    PRIMARY KEY(event_id,resource_kind,resource_id),
+    FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX event_resources_by_resource ON event_resources(resource_kind,resource_id,event_id);
+CREATE TABLE aggregate_frontiers (
+    resource_kind TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    PRIMARY KEY(resource_kind,resource_id,event_id),
+    FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE projection_support (
+    projection_kind TEXT NOT NULL,
+    projection_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    PRIMARY KEY(projection_kind,projection_id,event_id),
+    FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX projection_support_by_event ON projection_support(event_id,projection_kind,projection_id);
+CREATE TABLE event_reduction (
+    event_id TEXT PRIMARY KEY,
+    validation_status TEXT NOT NULL,
+    readiness_status TEXT NOT NULL,
+    authorization_status TEXT NOT NULL,
+    projection_status TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    generation INTEGER NOT NULL,
+    FOREIGN KEY(event_id) REFERENCES canonical_events(event_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX event_reduction_by_projection ON event_reduction(projection_status,event_id);
+CREATE TABLE projection_metadata (
     id INTEGER PRIMARY KEY CHECK(id = 1),
+    reducer_version INTEGER NOT NULL,
     event_count INTEGER NOT NULL,
-    rebuilt_at INTEGER NOT NULL
+    generation INTEGER NOT NULL,
+    repaired_at INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE mailboxes (
     id TEXT PRIMARY KEY,
@@ -676,8 +732,10 @@ func (s *SQLite) configure(ctx context.Context) error {
 	if installationID != s.signer.InstallationID || signerKeyID != s.signer.PublicKey() {
 		return errors.New("database identity does not match hq.key")
 	}
-	var projectedCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT event_count FROM projection_checkpoint WHERE id=1`).Scan(&projectedCount); err == nil && projectedCount == count {
+	var projectedVersion, projectedCount, reducedCount int
+	metadataErr := s.db.QueryRowContext(ctx, `SELECT reducer_version,event_count FROM projection_metadata WHERE id=1`).Scan(&projectedVersion, &projectedCount)
+	reductionErr := s.db.QueryRowContext(ctx, `SELECT count(*) FROM event_reduction`).Scan(&reducedCount)
+	if metadataErr == nil && reductionErr == nil && projectedVersion == reducerVersion && projectedCount == count && reducedCount == count {
 		return nil
 	}
 	return s.Rebuild(ctx)
@@ -1038,29 +1096,39 @@ func (s *SQLite) signMailboxAccessObservationsTx(ctx context.Context, tx *sql.Tx
 // while appending acceptance events and their idempotent pending notices.
 func (s *SQLite) ingestCanonicalProjectionTx(ctx context.Context, tx *sql.Tx, additions []event.SignedEvent, requireProjected bool) (canonicalIngest, error) {
 	var commit canonicalIngest
-	rows, err := tx.QueryContext(ctx, `SELECT event_id,raw FROM canonical_events ORDER BY event_id`)
+	existing := make(map[string]bool, len(additions))
+	var seeds []string
+	for _, item := range additions {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM canonical_events WHERE event_id=?)`, item.ID()).Scan(&exists); err != nil {
+			return commit, err
+		}
+		if exists != 0 {
+			existing[item.ID()] = true
+			continue
+		}
+		inspection := event.Inspect(item.Wire)
+		reason := ""
+		if inspection.Err != nil {
+			reason = inspection.Err.Error()
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO canonical_events(event_id, raw, created_at, event_type, installation_id, signer_key_id, scope, reduction_status, reduction_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.ID(), item.Wire, item.Nostr.CreatedAt, item.Content.Type, item.Content.InstallationID, item.Content.SignerKeyID, item.Content.Scope, inspection.Status, reason)
+		if err != nil {
+			return commit, fmt.Errorf("append canonical event: %w", err)
+		}
+		if err := indexCanonicalEventTx(ctx, tx, item); err != nil {
+			return commit, err
+		}
+		seeds = append(seeds, item.ID())
+	}
+	if len(seeds) == 0 {
+		return commit, nil
+	}
+	state, err := affectedReductionTx(ctx, tx, seeds, s.policy())
 	if err != nil {
 		return commit, err
 	}
-	var raw [][]byte
-	existing := make(map[string]bool)
-	for rows.Next() {
-		var id string
-		var item []byte
-		if err := rows.Scan(&id, &item); err != nil {
-			rows.Close()
-			return commit, err
-		}
-		raw = append(raw, item)
-		existing[id] = true
-	}
-	rows.Close()
-	for _, item := range additions {
-		if !existing[item.ID()] {
-			raw = append(raw, item.Wire)
-		}
-	}
-	state := event.Reduce(raw, s.policy())
 	for _, item := range additions {
 		if existing[item.ID()] {
 			continue
@@ -1073,14 +1141,17 @@ func (s *SQLite) ingestCanonicalProjectionTx(ctx context.Context, tx *sql.Tx, ad
 			}
 			return commit, fmt.Errorf("new event %s was rejected", item.ID())
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO canonical_events(event_id, raw, created_at, event_type, installation_id, signer_key_id, scope, reduction_status, reduction_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			item.ID(), item.Wire, item.Nostr.CreatedAt, item.Content.Type, item.Content.InstallationID, item.Content.SignerKeyID, item.Content.Scope, record.Status, record.Reason)
-		if err != nil {
-			return commit, fmt.Errorf("append canonical event: %w", err)
-		}
 		commit.EventIDs = append(commit.EventIDs, item.ID())
 	}
-	return commit, s.rebuildTx(ctx, tx, state)
+	var generation int64
+	if err := tx.QueryRowContext(ctx, `SELECT generation FROM projection_metadata WHERE id=1`).Scan(&generation); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return commit, err
+	}
+	generation++
+	if err := patchCausalIndexesTx(ctx, tx, state, generation); err != nil {
+		return commit, err
+	}
+	return commit, s.projectStateTx(ctx, tx, state, false)
 }
 
 func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEvent) error {
@@ -1114,11 +1185,38 @@ func (s *SQLite) AppendCanonical(ctx context.Context, additions []event.SignedEv
 }
 
 func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) error {
+	return s.projectStateTx(ctx, tx, state, true)
+}
+
+// projectStateTx applies a pure reduction. Repair mode is the only path that
+// clears rebuildable state; ordinary ingestion upserts its affected result.
+func (s *SQLite) projectStateTx(ctx context.Context, tx *sql.Tx, state event.State, repair bool) error {
 	// Project and assignment tables reference rebuildable projections. Their
 	// canonical rows are recreated before commit, so defer those foreign-key
 	// checks across the projection rebuild transaction.
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
 		return err
+	}
+	var generation int64
+	metadataErr := tx.QueryRowContext(ctx, `SELECT generation FROM projection_metadata WHERE id=1`).Scan(&generation)
+	if metadataErr != nil && !errors.Is(metadataErr, sql.ErrNoRows) {
+		return metadataErr
+	}
+	repair = repair || errors.Is(metadataErr, sql.ErrNoRows)
+	accountAffected, projectAffected := repair, repair
+	if !repair {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM impacted_canonical_events i JOIN canonical_events c ON c.event_id=i.event_id WHERE c.event_type IN (?,?,?,?,?))`, event.TypeHumanAccountCreate, event.TypeHumanAccountSelect, event.TypeHumanDeviceGrant, event.TypeHumanDeviceAccept, event.TypeHumanDeviceRevoke).Scan(&accountAffected); err != nil {
+			return err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM impacted_canonical_events i JOIN canonical_events c ON c.event_id=i.event_id WHERE c.event_type IN (?,?,?))`, event.TypeProjectEvent, event.TypeProjectCommand, event.TypeProjectResult).Scan(&projectAffected); err != nil {
+			return err
+		}
+	}
+	generation++
+	if repair {
+		if err := rebuildCausalIndexesTx(ctx, tx, state, generation); err != nil {
+			return err
+		}
 	}
 	activity := make(map[string]int64)
 	agentActivity := make(map[string]int64)
@@ -1161,42 +1259,31 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		ownershipRows.Close()
 	}
 	for id, record := range state.Records {
-		if _, err := tx.ExecContext(ctx, `UPDATE canonical_events SET reduction_status = ?, reduction_reason = ? WHERE event_id = ?`, record.Status, record.Reason, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE canonical_events SET reduction_status=?,reduction_reason=? WHERE event_id=? AND (reduction_status<>? OR reduction_reason<>?)`, record.Status, record.Reason, id, record.Status, record.Reason); err != nil {
 			return err
 		}
 	}
-	for _, table := range []string{"causal_edges", "threads", "messages", "harness_activities", "mailbox_contexts", "harness_bindings", "agent_sessions", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_access", "human_account_default", "human_account_devices", "human_accounts"} {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
-			return fmt.Errorf("clear %s projection: %w", table, err)
-		}
-	}
-	ids := make([]string, 0, len(state.Records))
-	for id := range state.Records {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		record := state.Records[id]
-		for _, parent := range record.Event.Content.Parents {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO causal_edges(child_event_id, parent_event_id) VALUES (?, ?)`, id, parent); err != nil {
-				return err
+	if repair {
+		for _, table := range []string{"threads", "messages", "harness_activities", "mailbox_contexts", "harness_bindings", "agent_sessions", "agent_ownership", "named_agents", "mailbox_activity", "mailboxes", "peers", "mailbox_access", "human_account_default", "human_account_devices", "human_accounts"} {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
+				return fmt.Errorf("clear %s projection: %w", table, err)
 			}
 		}
 	}
 	for _, mailbox := range state.Mailboxes {
 		created := firstMailboxTime(state, mailbox.ID)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO mailboxes(id, installation_id, kind, label, created_at) VALUES (?, ?, ?, ?, ?)`, mailbox.ID, s.signer.InstallationID, mailbox.Kind, mailbox.Label, created); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO mailboxes(id, installation_id, kind, label, created_at) VALUES (?, ?, ?, ?, ?)`, mailbox.ID, s.signer.InstallationID, mailbox.Kind, mailbox.Label, created); err != nil {
 			return fmt.Errorf("project mailbox: %w", err)
 		}
 		seen := created
 		if activity[mailbox.ID] > seen {
 			seen = activity[mailbox.ID]
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_activity(mailbox_id, last_seen_at) VALUES (?, ?)`, mailbox.ID, seen); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO mailbox_activity(mailbox_id, last_seen_at) VALUES (?, ?)`, mailbox.ID, seen); err != nil {
 			return err
 		}
 		for _, binding := range mailbox.Bindings {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO harness_bindings(harness, external_session_id, mailbox_id, created_at) VALUES (?, ?, ?, ?)`, binding.Harness, binding.ExternalSessionID, mailbox.ID, created); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO harness_bindings(harness, external_session_id, mailbox_id, created_at) VALUES (?, ?, ?, ?)`, binding.Harness, binding.ExternalSessionID, mailbox.ID, created); err != nil {
 				return fmt.Errorf("project harness binding: %w", err)
 			}
 		}
@@ -1211,16 +1298,16 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if seen := agentActivity[agent.Name]; seen != 0 {
 			lastActive = seen
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO named_agents(name,mailbox_id,retired,current_harness,current_session_id,last_active_at) VALUES (?,?,?,?,?,?)`, agent.Name, agent.MailboxID, boolInt(agent.Retired), agent.Harness, agent.ExternalSessionID, lastActive); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO named_agents(name,mailbox_id,retired,current_harness,current_session_id,last_active_at) VALUES (?,?,?,?,?,?)`, agent.Name, agent.MailboxID, boolInt(agent.Retired), agent.Harness, agent.ExternalSessionID, lastActive); err != nil {
 			return fmt.Errorf("project named agent: %w", err)
 		}
 		if lease, exists := ownership[agent.Name]; exists && !agent.Retired {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_ownership(name,owner_token,lease_expires_at) VALUES (?,?,?)`, agent.Name, lease.token, lease.expiry); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO agent_ownership(name,owner_token,lease_expires_at) VALUES (?,?,?)`, agent.Name, lease.token, lease.expiry); err != nil {
 				return fmt.Errorf("restore agent ownership: %w", err)
 			}
 		}
 		for _, session := range agent.Sessions {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO agent_sessions(agent_name,mailbox_id,harness,external_session_id,thread_name,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, agent.Name, agent.MailboxID, session.Harness, session.ExternalSessionID, session.ThreadName, session.Context.Directory, session.Context.GitCommonDir, session.Context.RemoteIdentity, session.Context.Worktree, session.Context.Branch, time.Unix(session.CreatedAt, 0).UTC().UnixMilli(), time.Unix(session.LastSelectedAt, 0).UTC().UnixMilli()); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO agent_sessions(agent_name,mailbox_id,harness,external_session_id,thread_name,directory,git_common_dir,remote_identity,worktree,branch,created_at,last_selected_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, agent.Name, agent.MailboxID, session.Harness, session.ExternalSessionID, session.ThreadName, session.Context.Directory, session.Context.GitCommonDir, session.Context.RemoteIdentity, session.Context.Worktree, session.Context.Branch, time.Unix(session.CreatedAt, 0).UTC().UnixMilli(), time.Unix(session.LastSelectedAt, 0).UTC().UnixMilli()); err != nil {
 				return fmt.Errorf("project named agent session: %w", err)
 			}
 		}
@@ -1260,7 +1347,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 		if len(message.TechnicalSections) == 0 {
 			technicalJSON = []byte("[]")
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO messages(id, event_id, thread_event_id, event_type, purpose, presentation, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, technical_sections_json, harness_provider, harness_session_id, harness_operation_id, correlation_item_id, correlation_request_id, reply_to, display_order, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO messages(id, event_id, thread_event_id, event_type, purpose, presentation, audience_account_id, directory, git_common_dir, remote_identity, worktree, branch, sender_installation_id, recipient_installation_id, sender_mailbox_id, recipient_mailbox_id, actor_label, body, details, technical_sections_json, harness_provider, harness_session_id, harness_operation_id, correlation_item_id, correlation_request_id, reply_to, display_order, created_at, archived_at, incomplete, peer_received, rejected) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, eventID, message.ThreadID, message.Type, model.NormalizeMessagePurpose(message.Purpose), message.Presentation, message.AudienceAccountID, repo.Directory, repo.GitCommonDir, repo.RemoteIdentity, repo.Worktree, repo.Branch, message.Sender.InstallationID, message.Recipient.InstallationID, message.Sender.MailboxID, message.Recipient.MailboxID, message.ActorLabel, message.Body, message.Details, string(technicalJSON), correlation.Provider, correlation.SessionID, correlation.OperationID, correlation.ItemID, correlation.RequestID, replyTo, conversationDisplay[eventID], message.CreatedAt.UnixMilli(), archived, boolInt(message.Incomplete), boolInt(message.PeerReceived), boolInt(message.Rejected))
 		if err != nil {
 			return fmt.Errorf("project message: %w", err)
@@ -1272,7 +1359,7 @@ func (s *SQLite) rebuildTx(ctx context.Context, tx *sql.Tx, state event.State) e
 	for _, key := range state.HarnessActivityOrder {
 		activity := state.HarnessActivities[key]
 		correlation := activity.Correlation
-		if _, err := tx.ExecContext(ctx, `INSERT INTO harness_activities(event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence,display_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO harness_activities(event_id,source_installation_id,mailbox_id,audience_account_id,harness,session_id,operation_id,kind,item_id,status,title,body,truncated,occurred_at,runtime_id,source_sequence,display_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			activity.EventID, activity.Sender.InstallationID, activity.Sender.MailboxID, activity.AudienceAccountID,
 			correlation.Provider, correlation.SessionID, correlation.OperationID, activity.Kind, correlation.ItemID,
 			activity.Status, activity.Title, activity.Body, boolInt(activity.Truncated), activity.OccurredAt.UnixMilli(),
@@ -1292,13 +1379,13 @@ SELECT event_id FROM (
 		return fmt.Errorf("prune projected harness activity progress: %w", err)
 	}
 	for id, thread := range state.Threads {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO threads(event_id, answered, cancelled) VALUES (?, ?, ?)`, id, boolInt(thread.Answered), boolInt(thread.Cancelled)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO threads(event_id, answered, cancelled) VALUES (?, ?, ?)`, id, boolInt(thread.Answered), boolInt(thread.Cancelled)); err != nil {
 			return err
 		}
 	}
 	for _, peer := range state.Peers {
 		relays, _ := json.Marshal(peer.Relays)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO peers(installation_id, signer_key_id, name, relays_json, trusted) VALUES (?, ?, ?, ?, ?)`, peer.InstallationID, peer.SignerKeyID, peer.Name, string(relays), boolInt(peer.Trusted)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO peers(installation_id, signer_key_id, name, relays_json, trusted) VALUES (?, ?, ?, ?, ?)`, peer.InstallationID, peer.SignerKeyID, peer.Name, string(relays), boolInt(peer.Trusted)); err != nil {
 			return err
 		}
 	}
@@ -1306,12 +1393,12 @@ SELECT event_id FROM (
 		if access.GrantorInstallationID != s.signer.InstallationID {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_access(grant_event_id,mailbox_id,grantor_installation_id,grantee_installation_id,grantee_signer_key_id,active) VALUES (?, ?, ?, ?, ?, ?)`, access.GrantEventID, access.MailboxID, access.GrantorInstallationID, access.GranteeInstallationID, access.GranteeSignerKeyID, boolInt(access.Active)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO mailbox_access(grant_event_id,mailbox_id,grantor_installation_id,grantee_installation_id,grantee_signer_key_id,active) VALUES (?, ?, ?, ?, ?, ?)`, access.GrantEventID, access.MailboxID, access.GrantorInstallationID, access.GranteeInstallationID, access.GranteeSignerKeyID, boolInt(access.Active)); err != nil {
 			return err
 		}
 	}
 	for _, account := range state.Accounts {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO human_accounts(account_id,creator_installation_id,creator_signer_key_id,label,creation_event_id) VALUES (?,?,?,?,?)`, account.ID, account.CreatorInstallationID, account.CreatorSignerKeyID, account.Label, account.CreationEventID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO human_accounts(account_id,creator_installation_id,creator_signer_key_id,label,creation_event_id) VALUES (?,?,?,?,?)`, account.ID, account.CreatorInstallationID, account.CreatorSignerKeyID, account.Label, account.CreationEventID); err != nil {
 			return err
 		}
 		for _, device := range account.Devices {
@@ -1321,13 +1408,18 @@ SELECT event_id FROM (
 			}
 			relays, _ := json.Marshal(device.Relays)
 			revokes, _ := json.Marshal(device.RevokeEventIDs)
-			if _, err := tx.ExecContext(ctx, `INSERT INTO human_account_devices(account_id,installation_id,signer_key_id,label,relays_json,state,grant_event_id,accept_event_id,revoke_event_ids_json) VALUES (?,?,?,?,?,?,?,?,?)`, account.ID, device.InstallationID, device.SignerKeyID, device.Label, string(relays), deviceState, device.GrantEventID, device.AcceptEventID, string(revokes)); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO human_account_devices(account_id,installation_id,signer_key_id,label,relays_json,state,grant_event_id,accept_event_id,revoke_event_ids_json) VALUES (?,?,?,?,?,?,?,?,?)`, account.ID, device.InstallationID, device.SignerKeyID, device.Label, string(relays), deviceState, device.GrantEventID, device.AcceptEventID, string(revokes)); err != nil {
 				return err
 			}
 		}
 	}
+	if !repair && accountAffected {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM human_account_default WHERE id=1 AND account_id<>?`, state.DefaultAccountID); err != nil {
+			return err
+		}
+	}
 	if state.DefaultAccountID != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO human_account_default(id,account_id) VALUES (1,?)`, state.DefaultAccountID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO human_account_default(id,account_id) VALUES (1,?)`, state.DefaultAccountID); err != nil {
 			return err
 		}
 	}
@@ -1372,34 +1464,46 @@ SELECT event_id FROM (
 			}
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT o.event_id,o.recipient_installation_id FROM outbox o JOIN canonical_events c ON c.event_id=o.event_id WHERE c.scope=?`, event.ScopeAccountAddressed)
-	if err != nil {
-		return err
-	}
-	var revokeDeliveries [][2]string
-	for rows.Next() {
-		var eventID, recipient string
-		if err := rows.Scan(&eventID, &recipient); err != nil {
-			rows.Close()
+	if accountAffected {
+		rows, err := tx.QueryContext(ctx, `SELECT o.event_id,o.recipient_installation_id FROM outbox o JOIN canonical_events c ON c.event_id=o.event_id WHERE c.scope=?`, event.ScopeAccountAddressed)
+		if err != nil {
 			return err
 		}
-		if !desiredAccountDeliveries[eventID+":"+recipient] {
-			revokeDeliveries = append(revokeDeliveries, [2]string{eventID, recipient})
+		var revokeDeliveries [][2]string
+		for rows.Next() {
+			var eventID, recipient string
+			if err := rows.Scan(&eventID, &recipient); err != nil {
+				rows.Close()
+				return err
+			}
+			if !desiredAccountDeliveries[eventID+":"+recipient] {
+				revokeDeliveries = append(revokeDeliveries, [2]string{eventID, recipient})
+			}
+		}
+		rows.Close()
+		for _, delivery := range revokeDeliveries {
+			if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='revoked' WHERE event_id=? AND recipient_installation_id=? AND state<>'relay-accepted'`, delivery[0], delivery[1]); err != nil {
+				return err
+			}
 		}
 	}
-	rows.Close()
-	for _, delivery := range revokeDeliveries {
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state='revoked' WHERE event_id=? AND recipient_installation_id=? AND state<>'relay-accepted'`, delivery[0], delivery[1]); err != nil {
+	if projectAffected {
+		if err := s.rebuildAuthoritativeProjectsTx(ctx, tx, state, repair); err != nil {
+			return err
+		}
+		if err := s.rebuildProjectReplicasTx(ctx, tx, state, repair); err != nil {
 			return err
 		}
 	}
-	if err := s.rebuildAuthoritativeProjectsTx(ctx, tx, state); err != nil {
-		return err
+	if repair {
+		_, err = tx.ExecContext(ctx, `INSERT INTO projection_metadata(id,reducer_version,event_count,generation,repaired_at) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET reducer_version=excluded.reducer_version,event_count=excluded.event_count,generation=excluded.generation,repaired_at=excluded.repaired_at`, reducerVersion, len(state.Records), generation, time.Now().UTC().UnixMilli())
+	} else {
+		var eventCount int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM canonical_events`).Scan(&eventCount); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO projection_metadata(id,reducer_version,event_count,generation,repaired_at) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET reducer_version=excluded.reducer_version,event_count=excluded.event_count,generation=excluded.generation`, reducerVersion, eventCount, generation, time.Now().UTC().UnixMilli())
 	}
-	if err := s.rebuildProjectReplicasTx(ctx, tx, state); err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO projection_checkpoint(id, event_count, rebuilt_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET event_count = excluded.event_count, rebuilt_at = excluded.rebuilt_at`, len(state.Records), time.Now().UTC().UnixMilli())
 	return err
 }
 
@@ -1770,7 +1874,7 @@ func (s *SQLite) Reply(ctx context.Context, originalID string, reply model.Messa
 }
 
 func (s *SQLite) outboundMailboxAuthority(ctx context.Context, recipientInstallationID, recipientMailboxID string) (string, error) {
-	state, err := s.canonicalState(ctx)
+	state, err := s.reduceCanonicalResources(ctx, canonicalResource{kind: "mailbox-access-route", id: recipientInstallationID + ":" + recipientMailboxID + ":" + s.signer.InstallationID})
 	if err != nil {
 		return "", err
 	}
@@ -2473,7 +2577,7 @@ func (s *SQLite) TrustPeer(ctx context.Context, peer Peer) error {
 }
 
 func (s *SQLite) DistrustPeer(ctx context.Context, installationID string) error {
-	state, err := s.canonicalState(ctx)
+	state, err := s.reduceCanonicalResources(ctx, canonicalResource{kind: "installation", id: installationID})
 	if err != nil {
 		return err
 	}
@@ -2542,15 +2646,11 @@ func (s *SQLite) SetMailboxShare(ctx context.Context, mailboxID, peerID string, 
 	if _, err := s.getMailbox(ctx, mailboxID); err != nil {
 		return err
 	}
-	state, err := s.canonicalState(ctx)
-	if err != nil {
-		return err
-	}
-	peer, ok := state.Peers[peerID]
-	if !ok || peer.SignerKeyID == "" {
+	var peerSignerKeyID string
+	if err := s.db.QueryRowContext(ctx, `SELECT signer_key_id FROM peers WHERE installation_id=?`, peerID).Scan(&peerSignerKeyID); err != nil || peerSignerKeyID == "" {
 		return errors.New("peer binding not found")
 	}
-	contents, err := s.mailboxAccessContents(ctx, mailboxID, peerID, peer.SignerKeyID, active)
+	contents, err := s.mailboxAccessContents(ctx, mailboxID, peerID, peerSignerKeyID, active)
 	if err != nil {
 		return err
 	}
@@ -2561,7 +2661,7 @@ func (s *SQLite) SetMailboxShare(ctx context.Context, mailboxID, peerID string, 
 }
 
 func (s *SQLite) mailboxAccessContents(ctx context.Context, mailboxID, peerID, peerSignerKeyID string, active bool) ([]event.Content, error) {
-	state, err := s.canonicalState(ctx)
+	state, err := s.reduceCanonicalResources(ctx, canonicalResource{kind: "mailbox-access-route", id: s.signer.InstallationID + ":" + mailboxID + ":" + peerID})
 	if err != nil {
 		return nil, err
 	}

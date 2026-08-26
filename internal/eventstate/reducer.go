@@ -183,6 +183,17 @@ type State struct {
 // Reduce verifies and reduces a complete event set. Callers may pass the events
 // in any order and may pass the same event more than once.
 func Reduce(rawEvents [][]byte, policy Policy) State {
+	return reduceFacts(rawEvents, policy)
+}
+
+// ReduceAffected folds one dependency-closed set selected by the incremental
+// causal index. It deliberately shares the lawful reducers with the offline
+// batch oracle while keeping normal ingestion independent of the complete log.
+func ReduceAffected(rawEvents [][]byte, policy Policy) State {
+	return reduceFacts(rawEvents, policy)
+}
+
+func reduceFacts(rawEvents [][]byte, policy Policy) State {
 	state := State{
 		Policy:            policy,
 		Records:           make(map[string]Record),

@@ -21,9 +21,11 @@ type replicaProjectEvent struct {
 	payload event.ProjectEventPayload
 }
 
-func (s *SQLite) rebuildProjectReplicasTx(ctx context.Context, tx *sql.Tx, state event.State) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM project_replicas`); err != nil {
-		return err
+func (s *SQLite) rebuildProjectReplicasTx(ctx context.Context, tx *sql.Tx, state event.State, repair bool) error {
+	if repair {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM project_replicas`); err != nil {
+			return err
+		}
 	}
 	groups := make(map[string][]replicaProjectEvent)
 	for id, record := range state.Records {
@@ -37,6 +39,11 @@ func (s *SQLite) rebuildProjectReplicasTx(ctx context.Context, tx *sql.Tx, state
 		groups[payload.ProjectID] = append(groups[payload.ProjectID], replicaProjectEvent{id: id, home: record.Event.Content.InstallationID, created: time.Unix(record.Event.Nostr.CreatedAt, 0).UTC(), payload: payload})
 	}
 	for projectID, events := range groups {
+		if !repair {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM project_replicas WHERE id=?`, projectID); err != nil {
+				return err
+			}
+		}
 		project, ok, diagnostic := reduceReplicaProject(projectID, events)
 		if project.HomeInstallation == s.signer.InstallationID {
 			continue

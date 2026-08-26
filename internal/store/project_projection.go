@@ -25,7 +25,7 @@ type authoritativeProjectProjection struct {
 	diagnostic string
 }
 
-func (s *SQLite) rebuildAuthoritativeProjectsTx(ctx context.Context, tx *sql.Tx, state event.State) error {
+func (s *SQLite) rebuildAuthoritativeProjectsTx(ctx context.Context, tx *sql.Tx, state event.State, repair bool) error {
 	legacyThreads, err := loadLegacyProjectThreads(ctx, tx)
 	if err != nil {
 		return err
@@ -57,9 +57,28 @@ func (s *SQLite) rebuildAuthoritativeProjectsTx(ctx context.Context, tx *sql.Tx,
 			projections = append(projections, projection)
 		}
 	}
-	for _, table := range []string{"project_dispatch_records", "project_message_acceptances", "resource_claim_epochs", "project_resources", "resource_health", "resources", "project_assignment_epochs", "project_threads", "project_events", "projects"} {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
-			return fmt.Errorf("clear %s projection: %w", table, err)
+	if repair {
+		for _, table := range []string{"project_dispatch_records", "project_message_acceptances", "resource_claim_epochs", "project_resources", "resource_health", "resources", "project_assignment_epochs", "project_threads", "project_events", "projects"} {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
+				return fmt.Errorf("clear %s projection: %w", table, err)
+			}
+		}
+	} else {
+		for _, projectID := range projectIDs {
+			for _, statement := range []string{
+				`DELETE FROM project_dispatch_records WHERE project_id=?`,
+				`DELETE FROM project_message_acceptances WHERE project_id=?`,
+				`DELETE FROM resource_claim_epochs WHERE project_id=?`,
+				`DELETE FROM project_resources WHERE project_id=?`,
+				`DELETE FROM project_assignment_epochs WHERE project_id=?`,
+				`DELETE FROM project_threads WHERE project_id=?`,
+				`DELETE FROM project_events WHERE project_id=?`,
+				`DELETE FROM projects WHERE id=?`,
+			} {
+				if _, err := tx.ExecContext(ctx, statement, projectID); err != nil {
+					return fmt.Errorf("clear project %s projection: %w", projectID, err)
+				}
+			}
 		}
 	}
 	for _, projection := range projections {
@@ -217,7 +236,7 @@ func insertAuthoritativeProjectProjection(ctx context.Context, tx *sql.Tx, proje
 	}
 	for _, item := range projection.snapshot.Resources {
 		resource := item.Resource
-		if _, err := tx.ExecContext(ctx, `INSERT INTO resources(id,kind,home_installation_id,display_locator,canonical_locator,created_at) VALUES (?,?,?,?,?,?)`, resource.ID, resource.Kind, project.HomeInstallation, resource.DisplayLocator, resource.CanonicalLocator, item.CreatedAt.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO resources(id,kind,home_installation_id,display_locator,canonical_locator,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_locator=excluded.display_locator`, resource.ID, resource.Kind, project.HomeInstallation, resource.DisplayLocator, resource.CanonicalLocator, item.CreatedAt.UnixMilli()); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO project_resources(project_id,resource_id,added_event_id,removed_event_id) VALUES (?,?,?,?)`, project.ID, resource.ID, item.AddedEventID, nullString(item.RemovedEventID)); err != nil {
@@ -228,7 +247,7 @@ func insertAuthoritativeProjectProjection(ctx context.Context, tx *sql.Tx, proje
 		if resource.LastCheckedAt != nil {
 			checked = *resource.LastCheckedAt
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO resource_health(resource_id,state,details_json,last_checked_at) VALUES (?,?,?,?)`, resource.ID, resource.Health, string(details), checked.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO resource_health(resource_id,state,details_json,last_checked_at) VALUES (?,?,?,?) ON CONFLICT(resource_id) DO UPDATE SET state=excluded.state,details_json=excluded.details_json,last_checked_at=excluded.last_checked_at`, resource.ID, resource.Health, string(details), checked.UnixMilli()); err != nil {
 			return err
 		}
 	}

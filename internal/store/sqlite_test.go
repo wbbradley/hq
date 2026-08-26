@@ -33,7 +33,7 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 			t.Errorf("%s = %q, want %q", query, got, want)
 		}
 	}
-	for _, table := range []string{"canonical_events", "causal_edges", "projection_checkpoint", "mailboxes", "harness_bindings", "named_agents", "agent_sessions", "agent_ownership", "mailbox_contexts", "messages", "threads", "peers", "mailbox_access", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts", "change_revision", "projects", "project_events", "resources", "project_resources", "resource_claim_epochs", "resource_health", "project_assignment_epochs", "project_threads", "project_message_acceptances", "project_dispatch_records", "project_dispatch_attempts", "project_activation_operations", "project_runtime_operations", "project_worktree_operations", "agent_retirement_operations", "project_output_provenance", "project_replicas", "project_audit_log", "harness_activities"} {
+	for _, table := range []string{"canonical_events", "causal_edges", "authority_dependencies", "unresolved_waiters", "event_resources", "aggregate_frontiers", "projection_support", "event_reduction", "projection_metadata", "mailboxes", "harness_bindings", "named_agents", "agent_sessions", "agent_ownership", "mailbox_contexts", "messages", "threads", "peers", "mailbox_access", "human_accounts", "human_account_devices", "human_account_default", "outbox", "relays", "outbound_relay_attempts", "inbound_wrappers", "relay_sync_state", "inbound_staging", "quarantine", "mutation_receipts", "change_revision", "projects", "project_events", "resources", "project_resources", "resource_claim_epochs", "project_assignment_epochs", "project_threads", "project_message_acceptances", "project_dispatch_records", "project_dispatch_attempts", "project_activation_operations", "project_runtime_operations", "project_worktree_operations", "agent_retirement_operations", "project_output_provenance", "project_replicas", "project_audit_log", "harness_activities"} {
 		var strict int
 		if err := s.db.QueryRow(`SELECT strict FROM pragma_table_list WHERE name = ?`, table).Scan(&strict); err != nil {
 			t.Fatal(err)
@@ -45,6 +45,16 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 	var canonical int
 	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&canonical); err != nil || canonical != 4 {
 		t.Fatalf("bootstrap event count = %d, %v", canonical, err)
+	}
+	var version, indexed, reduced int
+	if err := s.db.QueryRow(`SELECT reducer_version,event_count FROM projection_metadata WHERE id=1`).Scan(&version, &indexed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM event_reduction`).Scan(&reduced); err != nil {
+		t.Fatal(err)
+	}
+	if version != reducerVersion || indexed != canonical || reduced != canonical {
+		t.Fatalf("projection metadata = version %d, events %d, reductions %d; want %d, %d, %d", version, indexed, reduced, reducerVersion, canonical, canonical)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -58,7 +68,7 @@ func TestSQLiteConfigurationAndSchema(t *testing.T) {
 func TestOpenSkipsRebuildWhenProjectionIsCurrent(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "hq.db")
 	s := openStore(t, database)
-	if _, err := s.db.Exec(`UPDATE projection_checkpoint SET rebuilt_at=7 WHERE id=1`); err != nil {
+	if _, err := s.db.Exec(`UPDATE projection_metadata SET repaired_at=7 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -70,9 +80,164 @@ func TestOpenSkipsRebuildWhenProjectionIsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	var rebuiltAt int64
-	if err := reopened.db.QueryRow(`SELECT rebuilt_at FROM projection_checkpoint WHERE id=1`).Scan(&rebuiltAt); err != nil || rebuiltAt != 7 {
-		t.Fatalf("current projection was rebuilt: rebuilt_at=%d, err=%v", rebuiltAt, err)
+	var repairedAt int64
+	if err := reopened.db.QueryRow(`SELECT repaired_at FROM projection_metadata WHERE id=1`).Scan(&repairedAt); err != nil || repairedAt != 7 {
+		t.Fatalf("current projection was rebuilt: repaired_at=%d, err=%v", repairedAt, err)
+	}
+}
+
+func TestOpenRepairsReducerVersionMismatch(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "hq.db")
+	s := openStore(t, database)
+	if _, err := s.db.Exec(`UPDATE projection_metadata SET reducer_version=-1,repaired_at=7 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	var version int
+	var repairedAt int64
+	if err := reopened.db.QueryRow(`SELECT reducer_version,repaired_at FROM projection_metadata WHERE id=1`).Scan(&version, &repairedAt); err != nil {
+		t.Fatal(err)
+	}
+	if version != reducerVersion || repairedAt == 7 {
+		t.Fatalf("repair metadata = version %d, repaired_at %d", version, repairedAt)
+	}
+}
+
+func TestCanonicalIngestionDoesNotClearCoreProjections(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	if _, err := s.db.Exec(`CREATE TEMP TABLE ingest_mode(incremental_ingest INTEGER NOT NULL); INSERT INTO ingest_mode VALUES (0)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"mailboxes", "messages", "threads", "peers", "mailbox_access", "human_accounts", "harness_activities"} {
+		statement := fmt.Sprintf(`CREATE TEMP TRIGGER reject_%s_clear BEFORE DELETE ON %s WHEN (SELECT incremental_ingest FROM ingest_mode)=1 BEGIN SELECT RAISE(ABORT, 'normal ingestion cleared %s'); END`, table, table, table)
+		if _, err := s.db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "incremental-no-clear", "/repo")
+	if _, err := s.db.Exec(`UPDATE ingest_mode SET incremental_ingest=1`); err != nil {
+		t.Fatal(err)
+	}
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db1", agent.ID, model.HumanMailboxID, "incremental")
+	if err := s.Create(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, item.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIncrementalIndexesRemainCurrent(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "incremental-index", "/repo")
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db2", agent.ID, model.HumanMailboxID, "indexed")
+	if err := s.Create(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	var canonical, reduced, indexed, generation int
+	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&canonical); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM event_reduction`).Scan(&reduced); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT event_count,generation FROM projection_metadata WHERE id=1`).Scan(&indexed, &generation); err != nil {
+		t.Fatal(err)
+	}
+	if canonical != reduced || canonical != indexed || generation < 2 {
+		t.Fatalf("incremental metadata = canonical %d, reduced %d, indexed %d, generation %d", canonical, reduced, indexed, generation)
+	}
+	var resources, support, frontiers int
+	for query, target := range map[string]*int{
+		`SELECT count(*) FROM event_resources WHERE event_id=(SELECT event_id FROM messages WHERE id='0198c7ec-73b0-7cc3-a5f7-e31c77140db2')`:     &resources,
+		`SELECT count(*) FROM projection_support WHERE event_id=(SELECT event_id FROM messages WHERE id='0198c7ec-73b0-7cc3-a5f7-e31c77140db2')`:  &support,
+		`SELECT count(*) FROM aggregate_frontiers WHERE event_id=(SELECT event_id FROM messages WHERE id='0198c7ec-73b0-7cc3-a5f7-e31c77140db2')`: &frontiers,
+	} {
+		if err := s.db.QueryRow(query).Scan(target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if resources == 0 || support == 0 || frontiers == 0 {
+		t.Fatalf("event indexes = resources %d, support %d, frontiers %d", resources, support, frontiers)
+	}
+}
+
+func TestIncrementalProjectionFailureRollsBackCanonicalFact(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "incremental-fault", "/repo")
+	var before int
+	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TEMP TRIGGER fail_incremental_reduction BEFORE INSERT ON event_reduction BEGIN SELECT RAISE(ABORT, 'injected reduction failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	item := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db3", agent.ID, model.HumanMailboxID, "rollback")
+	if err := s.Create(ctx, item); err == nil || !strings.Contains(err.Error(), "injected reduction failure") {
+		t.Fatalf("injected failure = %v", err)
+	}
+	var after int
+	if err := s.db.QueryRow(`SELECT count(*) FROM canonical_events`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("canonical event count after rollback = %d, want %d", after, before)
+	}
+	if _, err := s.Get(ctx, item.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rolled-back message lookup = %v", err)
+	}
+}
+
+func TestUnrelatedAppendDoesNotRewriteEventReduction(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	firstAgent := resolveAgent(t, s, "codex", "closure-first", "/repo")
+	secondAgent := resolveAgent(t, s, "codex", "closure-second", "/repo")
+	first := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db4", firstAgent.ID, model.HumanMailboxID, "first")
+	second := message("0198c7ec-73b0-7cc3-a5f7-e31c77140db5", secondAgent.ID, model.HumanMailboxID, "second")
+	if err := s.Create(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	var firstEvent, secondEvent string
+	if err := s.db.QueryRow(`SELECT event_id FROM messages WHERE id=?`, first.ID).Scan(&firstEvent); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT event_id FROM messages WHERE id=?`, second.ID).Scan(&secondEvent); err != nil {
+		t.Fatal(err)
+	}
+	var firstBefore, secondBefore int
+	if err := s.db.QueryRow(`SELECT generation FROM event_reduction WHERE event_id=?`, firstEvent).Scan(&firstBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT generation FROM event_reduction WHERE event_id=?`, secondEvent).Scan(&secondBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Archive(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	var firstAfter, secondAfter int
+	if err := s.db.QueryRow(`SELECT generation FROM event_reduction WHERE event_id=?`, firstEvent).Scan(&firstAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT generation FROM event_reduction WHERE event_id=?`, secondEvent).Scan(&secondAfter); err != nil {
+		t.Fatal(err)
+	}
+	if firstAfter <= firstBefore || secondAfter != secondBefore {
+		t.Fatalf("reduction generations = first %d→%d, unrelated %d→%d", firstBefore, firstAfter, secondBefore, secondAfter)
 	}
 }
 
@@ -399,7 +564,7 @@ func TestTypedMessageSemanticsSurviveCreateReplyRestartAndRebuild(t *testing.T) 
 		t.Fatalf("inherited reply correlation = %#v, want %#v", storedReply.Correlation, original.Correlation)
 	}
 
-	if _, err := s.db.Exec(`UPDATE projection_checkpoint SET event_count=-1 WHERE id=1`); err != nil {
+	if _, err := s.db.Exec(`UPDATE projection_metadata SET event_count=-1 WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -815,6 +980,43 @@ func TestCanonicalAppendDeduplicatesAndRetainsMissingParent(t *testing.T) {
 	got, err := s.Get(ctx, "0198c7ec-73b0-7cc3-a5f7-e31c77140d77")
 	if err != nil || !got.Incomplete || got.EventID != orphan.ID() {
 		t.Fatalf("orphan projection = %#v, %v", got, err)
+	}
+}
+
+func TestLateParentReclassifiesOnlyWaitingClosure(t *testing.T) {
+	s := openStore(t, filepath.Join(t.TempDir(), "hq.db"))
+	ctx := context.Background()
+	agent := resolveAgent(t, s, "codex", "late-parent", "/repo")
+	questionPayload, _ := event.MarshalPayload(event.TextPayload{MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140dc1", Body: "arrives late", Context: &event.RepositoryContext{Directory: "/repo"}})
+	question, err := s.signer.Sign(ctx, event.Content{Type: event.TypeQuestion, Sender: s.localAddress(agent.ID), Recipient: s.localAddress(model.HumanMailboxID), Scope: event.ScopeInstallationPrivate, Payload: questionPayload}, time.Now().UTC().Add(-time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	answerPayload, _ := event.MarshalPayload(event.TextPayload{MessageID: "0198c7ec-73b0-7cc3-a5f7-e31c77140dc2", Body: "waits", Context: &event.RepositoryContext{Directory: "/repo"}})
+	answer, err := s.signer.Sign(ctx, event.Content{Type: event.TypeAnswer, Sender: s.localAddress(model.HumanMailboxID), Recipient: s.localAddress(agent.ID), ThreadID: question.ID(), Parents: []string{question.ID()}, Scope: event.ScopeInstallationPrivate, Payload: answerPayload}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendCanonical(ctx, []event.SignedEvent{answer}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.Get(ctx, "0198c7ec-73b0-7cc3-a5f7-e31c77140dc2")
+	if err != nil || !before.Incomplete {
+		t.Fatalf("waiting answer = %#v, %v", before, err)
+	}
+	var waiters int
+	if err := s.db.QueryRow(`SELECT count(*) FROM unresolved_waiters WHERE missing_event_id=? AND waiting_event_id=?`, question.ID(), answer.ID()).Scan(&waiters); err != nil || waiters != 1 {
+		t.Fatalf("waiters = %d, %v", waiters, err)
+	}
+	if err := s.AppendCanonical(ctx, []event.SignedEvent{question}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.Get(ctx, "0198c7ec-73b0-7cc3-a5f7-e31c77140dc2")
+	if err != nil || after.Incomplete {
+		t.Fatalf("resolved answer = %#v, %v", after, err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM unresolved_waiters WHERE missing_event_id=?`, question.ID()).Scan(&waiters); err != nil || waiters != 0 {
+		t.Fatalf("remaining waiters = %d, %v", waiters, err)
 	}
 }
 

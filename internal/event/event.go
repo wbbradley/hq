@@ -142,6 +142,9 @@ func Sign(content Content, createdAt time.Time, secret SecretKey) (SignedEvent, 
 }
 func Inspect(raw []byte) Inspection                  { return eventwire.Inspect(raw) }
 func Reduce(rawEvents [][]byte, policy Policy) State { return eventstate.Reduce(rawEvents, policy) }
+func ReduceAffected(rawEvents [][]byte, policy Policy) State {
+	return eventstate.ReduceAffected(rawEvents, policy)
+}
 
 // decodePayload remains private compatibility for package tests. Production
 // payload decoding is owned by the wire validator and pure reducer.
