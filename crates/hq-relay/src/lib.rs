@@ -1,8 +1,11 @@
 //! Encrypted Nostr relay transport boundary.
 
 pub mod envelope;
+mod envelope_port;
+mod manager;
 mod nip44;
 mod ports;
+mod session;
 mod url;
 
 use std::{error::Error, fmt};
@@ -12,13 +15,22 @@ pub use envelope::{
     PreparedEnvelope, PreparedEnvelopeMetadata, RandomSource, SystemRandom,
     check_one_use_key_claim,
 };
+pub use manager::{RelayManager, RelayManagerConfig, RelayManagerReport};
 pub use ports::{
-    AttemptDisposition, CanonicalIngest, CatchupCursor, DesiredRelayPolicy, InboundClaim,
-    LogicalEnvelopeId, MAX_QUARANTINE_BYTES, MAX_QUARANTINE_ITEMS, MAX_STAGING_BYTES,
-    MAX_STAGING_ITEMS, MAX_STATE_QUERY_ITEMS, OutboundIntent, OutboxKey, PreparedOutbound,
-    QuarantineEvidence, RelayAttempt, RelayClock, RelayConnection, RelayConnector, RelayFrame,
-    RelayPolicy, RelayPolicyChange, RelayPortError, RelaySleeper, RelayStateMutation,
-    RelayStatePort, RelayStateSnapshot, ResolvedRoute, RouteResolver, StagedInput,
+    AttemptCursor, AttemptDisposition, CanonicalIngest, CatchupCursor, DesiredRelayPolicy,
+    InboundClaim, LogicalEnvelopeId, MAX_QUARANTINE_BYTES, MAX_QUARANTINE_ITEMS,
+    MAX_RELAY_STATUS_BYTES, MAX_STAGING_BYTES, MAX_STAGING_ITEMS, MAX_STATE_QUERY_ITEMS,
+    OpenedRelayEnvelope, OutboundCursor, OutboundIntent, OutboxKey, PreparedOutbound,
+    PreparedRelayAuthentication, QuarantineEvidence, RejectedRelayEnvelope, RelayAttempt,
+    RelayAttemptFailure, RelayClock, RelayConnection, RelayConnector, RelayEnvelopePort,
+    RelayFrame, RelayOpenOutcome, RelayPagePosition, RelayPolicy, RelayPolicyChange,
+    RelayPortError, RelayReceive, RelaySleeper, RelayStateMutation, RelayStatePage, RelayStatePort,
+    RelayStateQuery, RelayStateSnapshot, ResolvedRoute, RouteResolver, StagedInput,
+    TimedDigestCursor,
+};
+pub use session::{
+    RelayJitter, RelaySession, RelaySessionConfig, RelaySessionDependencies, RelaySessionProgress,
+    StableRelayJitter,
 };
 pub use url::{MAX_RELAY_URL_BYTES, RelayUrl, RelayUrlError};
 

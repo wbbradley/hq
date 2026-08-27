@@ -2,7 +2,7 @@
 
 Status: normative persistence specification
 
-HQ storage v10 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v11 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
 version `10`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
@@ -23,7 +23,7 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v10 ownership | Rebuildable |
+| Class | Storage v11 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
@@ -198,9 +198,9 @@ shape at its transaction boundary; only the node maps these records to `hq-relay
 public envelope metadata. Wrapper IDs and one-use public keys are independently unique. The
 lineage, exact bytes, and both uniqueness claims commit before first publish in one transaction;
 equal replay is a no-op and any unequal reuse fails closed. `relay_attempts` retains positive
-per-URL attempt counts, deadlines, and uncertain/rejected/accepted disposition. Count/time cannot
-regress, a lost response may move the same uncertain attempt to its answer, and accepted is
-absorbing.
+per-URL attempt counts, deadlines, uncertain/rejected/accepted disposition, and a closed optional
+negative class; free-form relay text is never stored. Count/time cannot regress, a lost response may
+move the same uncertain attempt to its answer, and accepted is absorbing.
 
 `relay_cursors` stores one generation-qualified inclusive backward boundary per URL. Within a
 generation it can only move toward older `(created_at, wrapper ID)` pairs and exhaustion cannot
@@ -217,10 +217,12 @@ receive time, complete byte length, and at most a 4 KiB raw outer prefix. It evi
 `(receive time, digest)` rows until both its 1,024-row and 4 MiB sample bounds hold. Neither table
 contains opened canonical plaintext or secrets.
 
-Every collection in a deterministic relay-state page is capped at 1,024 records. Strict decoding recomputes
-wrapper/staging digests and rejects malformed fixed-width values, closed codes, impossible
-optionality, or invalid monotonic generations. Explicit projection repair never deletes, rewrites,
-or derives any receipt, revision, outbox, or relay operational row.
+Every collection in a deterministic relay-state page is capped at 1,024 records. Independent typed
+keyset positions continue each collection after its stable ordering key or mark it done, so bounded
+queries can reach the complete state without restarting exhausted collections. Strict decoding
+recomputes wrapper/staging digests and rejects malformed fixed-width values, closed codes,
+impossible optionality, or invalid monotonic generations. Explicit projection repair never deletes,
+rewrites, or derives any receipt, revision, outbox, or relay operational row.
 
 ## Authority projections
 

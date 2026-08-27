@@ -47,7 +47,9 @@ fn wrong_version_or_schema_marker_is_incompatible() {
     for mutation in [
         "PRAGMA user_version = 7",
         "PRAGMA user_version = 9",
+        "PRAGMA user_version = 10",
         "UPDATE storage_metadata SET schema_marker = 'hq-store-v9-incremental-queries-2026-08-27'",
+        "UPDATE storage_metadata SET schema_marker = 'hq-store-v10-durable-relay-sync-2026-08-27'",
         "CREATE TABLE unexpected_table(value INTEGER)",
     ] {
         let directory = TestDirectory::new();
@@ -73,7 +75,7 @@ fn relative_database_paths_are_rejected() {
 }
 
 #[test]
-fn an_unclaimed_empty_sqlite_file_is_initialized_as_storage_v10() {
+fn an_unclaimed_empty_sqlite_file_is_initialized_as_storage_v11() {
     let directory = TestDirectory::new();
     let database = directory.database_path();
     fs::create_dir_all(database.parent().expect("database parent exists"))

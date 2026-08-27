@@ -6135,3 +6135,101 @@ behavior/specification verifiers, four supported portable targets including `hq-
   2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
+## 2026-08-27 — Owned relay sessions and deterministic synchronization
+
+Added deterministic per-relay session ownership and a coalescing manager over consumer-owned ports, with live-before-retained catch-up, bounded buffering, NIP-42 authentication, byte-identical durable publishing, closed acknowledgement classes, staged recovery, quarantine, generation refresh, and joined drain. Relay state now uses independent typed keyset pagination and storage schema v11 so work beyond the first bounded page remains reachable. Scripted contracts cover response/send loss, restart, equal-time catch-up stalls, transient and permanent input failures, auth challenge replacement, route exclusion, healthy-socket preservation, overflow, policy refresh, wake coalescing, and shutdown; all workspace, target, fuzz, dependency, shell, and unchanged-Go gates pass.
+
+### Original plan entry
+
+- **[transport/high] Implement owned relay sessions and deterministic synchronization** — Implement
+  one state-machine owner per configured relay over the durable ports: connection/authentication,
+  live subscription before retained backward pagination with overlap, live-edge buffering,
+  outbound exact wrapper preparation and byte-identical retry, positive/duplicate/negative `OK`,
+  disconnect and response-loss recovery, bounded exponential backoff, configuration refresh,
+  coalesced work wakes, staging retry, quarantine, and graceful drain. Use a deterministic scripted
+  relay for EOSE, duplicates, auth, rejection, missed wake, reconnect, restart, and shutdown. Complete
+  this package when healthy sessions survive ordinary wakes and every scripted failure converges to
+  the documented durable state without relay metadata reaching canonical reduction.
+
+  **Implementation plan**
+
+  - Add keyset continuation records to the relay-state query port and storage adapter before session
+    work. The previous bounded snapshot has no way to reach work after the first 1,024 durable rows;
+    page every independently ordered collection without exposing SQLite records to `hq-relay`.
+    Extend attempt records with a closed redacted rejection class so durable negative `OK` state
+    matches the normative protocol rather than retaining relay prose.
+  - Refine the connection and envelope seams for an exclusively owned blocking session: bounded
+    receive polling distinguishes timeout from closure, and an injected envelope capability prepares
+    immutable outbound wrappers, opens inbound wrappers, identifies the local recipient, and signs
+    connection-local NIP-42 challenges. Keep passive request/result fields public and secrets plus
+    exact retry lineages opaque.
+  - Implement the relay session as a deterministic state machine over one policy generation. Open
+    the live subscription before retained catch-up, buffer the live edge within explicit count/byte
+    bounds, page retained input backward with inclusive overlap, advance only on strictly older
+    `(created_at, wrapper ID)` boundaries, and never claim exhaustion from a repeated full page.
+    Process all input through open, common canonical ingest, atomic dual claim, staging, or bounded
+    quarantine transitions without passing relay metadata to the ingest port.
+  - Implement outbound work from durable state only: resolve signed routes immediately before first
+    preparation, commit exact preparation before sending, publish only to an eligible writable
+    policy, persist uncertainty before every write, correlate `OK` by wrapper ID, treat positive and
+    duplicate acknowledgements as accepted, retain closed negative classifications, authenticate and
+    retry `auth-required`, and use capped exponential retry with injected time and deterministic
+    jitter. Never regenerate prepared bytes.
+  - Add one manager owner with a bounded coalescing wake, periodic missed-wake repair, exactly one
+    worker per enabled URL, generation-aware refresh, and ordered graceful drain. Ordinary work wakes
+    keep healthy connections and subscriptions; relevant policy changes replace only that owner.
+    Shutdown closes intake, relies on pre-send durable uncertainty, closes named subscriptions and
+    connections, joins every worker, and reports bounded stable causes without relay prose.
+  - Build a deterministic scripted connector/store/clock/envelope harness. Cover live-before-catch-up,
+    overlap and equal-time stalls, live buffering and staging overflow, duplicates, EOSE, auth
+    challenge replacement and `auth-required`, positive/duplicate/negative `OK`, send and response
+    loss, exact retry after restart, route exclusion, capped backoff, missed/coalesced wakes, policy
+    refresh, staging recovery, quarantine, disabled/read-only/write-only policies, and complete drain.
+    Update the relay specification and storage/architecture documentation, then run every locked
+    workspace, supported-target, fuzz, dependency, whitespace, and unchanged-Go gate.
+
+  **Risks and decisions**
+
+  - NIP-01 has no portable event-ID range filter. An inclusive full page that makes no strictly older
+    progress must remain unexhausted and retry rather than skipping an unbounded same-second tie; the
+    controlled interoperability package will measure this fail-safe behavior against real relays.
+  - The relay connection seam must permit bounded receive polling so work wakes, policy refresh, and
+    shutdown cannot be held hostage by a silent socket. The future WebSocket adapter owns timeout
+    mechanics; the session owns the deadline and interpretation.
+  - A negative relay response is transport-local. Store only a closed redacted class and retry
+    deadline; never persist free-form relay text or translate rejection into canonical authority.
+  - Exact inbound ingest and its deduplication claim are separate idempotent transactions. A crash
+    between them may leave a verified canonical fact without a claim, but exact replay re-verifies
+    idempotently and completes the dual claim without changing domain meaning.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.

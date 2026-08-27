@@ -3,16 +3,20 @@
 use std::num::NonZeroU64;
 
 use hq_relay::{
-    AttemptDisposition, CatchupCursor, DesiredRelayPolicy, DurableEnvelope, FailureClass,
-    OutboundIntent, OutboxKey, PreparedEnvelope, PreparedEnvelopeMetadata, PreparedOutbound,
-    QuarantineEvidence, RelayAttempt, RelayPolicy, RelayPortError, RelayStateMutation,
-    RelayStatePort, RelayStateSnapshot, RelayUrl, StagedInput,
+    AttemptCursor, AttemptDisposition, CatchupCursor, DesiredRelayPolicy, DurableEnvelope,
+    FailureClass, OutboundCursor, OutboundIntent, OutboxKey, PreparedEnvelope,
+    PreparedEnvelopeMetadata, PreparedOutbound, QuarantineEvidence, RelayAttempt,
+    RelayAttemptFailure, RelayPagePosition, RelayPolicy, RelayPortError, RelayStateMutation,
+    RelayStatePage, RelayStatePort, RelayStateQuery, RelayStateSnapshot, RelayUrl, StagedInput,
+    TimedDigestCursor,
 };
 use hq_store::{
-    RelayStateHandle, Store, StoreError, StoreErrorClass, StoredAttemptDisposition,
-    StoredCatchupCursor, StoredDesiredRelayPolicy, StoredInboundClaim, StoredPreparedOutbound,
-    StoredQuarantineEvidence, StoredRelayAttempt, StoredRelayPolicy, StoredRelayPolicyChange,
-    StoredRelayStateMutation, StoredRelayStateSnapshot, StoredStagedInput,
+    RelayStateHandle, Store, StoreError, StoreErrorClass, StoredAttemptCursor,
+    StoredAttemptDisposition, StoredCatchupCursor, StoredDesiredRelayPolicy, StoredInboundClaim,
+    StoredLineageCursor, StoredOutboundCursor, StoredPreparedOutbound, StoredQuarantineEvidence,
+    StoredRelayAttempt, StoredRelayAttemptFailure, StoredRelayPagePosition, StoredRelayPolicy,
+    StoredRelayPolicyChange, StoredRelayStateMutation, StoredRelayStatePage, StoredRelayStateQuery,
+    StoredRelayStateSnapshot, StoredStagedInput, StoredTimedDigestCursor,
 };
 
 /// Relay durable-state capability backed by the sole store actor.
@@ -31,17 +35,144 @@ impl RelayStoreAdapter {
 }
 
 impl RelayStatePort for RelayStoreAdapter {
-    fn load_state(&self, limit: usize) -> Result<RelayStateSnapshot, RelayPortError> {
+    fn load_page(&self, query: RelayStateQuery) -> Result<RelayStatePage, RelayPortError> {
         self.store
-            .load(limit)
+            .load_page(store_query(query))
             .map_err(map_store_error)
-            .and_then(map_snapshot)
+            .and_then(map_page)
+    }
+
+    fn prepared(&self, key: OutboxKey) -> Result<Option<PreparedOutbound>, RelayPortError> {
+        self.store
+            .prepared(key.fact_id, key.recipient)
+            .map_err(map_store_error)?
+            .map(map_prepared)
+            .transpose()
+    }
+
+    fn attempt(
+        &self,
+        url: &RelayUrl,
+        wrapper_id: [u8; 32],
+    ) -> Result<Option<RelayAttempt>, RelayPortError> {
+        self.store
+            .attempt(url.as_str().to_owned(), wrapper_id)
+            .map_err(map_store_error)?
+            .map(map_attempt)
+            .transpose()
+    }
+
+    fn cursor(&self, url: &RelayUrl) -> Result<Option<CatchupCursor>, RelayPortError> {
+        self.store
+            .cursor(url.as_str().to_owned())
+            .map_err(map_store_error)?
+            .map(map_cursor)
+            .transpose()
     }
 
     fn apply(&self, mutation: RelayStateMutation) -> Result<(), RelayPortError> {
         self.store
             .apply(map_mutation(mutation))
             .map_err(map_store_error)
+    }
+}
+
+fn store_query(query: RelayStateQuery) -> StoredRelayStateQuery {
+    StoredRelayStateQuery {
+        limit: query.limit,
+        policies: store_position(query.policies, RelayUrl::into_string),
+        outbound: store_position(query.outbound, |cursor| StoredOutboundCursor {
+            revision: cursor.revision,
+            fact_id: cursor.key.fact_id,
+            recipient: cursor.key.recipient,
+        }),
+        prepared: store_position(query.prepared, |key| StoredLineageCursor {
+            fact_id: key.fact_id,
+            recipient: key.recipient,
+        }),
+        attempts: store_position(query.attempts, |cursor| StoredAttemptCursor {
+            url: cursor.url.into_string(),
+            wrapper_id: cursor.wrapper_id,
+        }),
+        cursors: store_position(query.cursors, RelayUrl::into_string),
+        staged: store_position(query.staged, |cursor| StoredTimedDigestCursor {
+            millis: cursor.millis,
+            digest: cursor.digest,
+        }),
+        quarantine: store_position(query.quarantine, |cursor| StoredTimedDigestCursor {
+            millis: cursor.millis,
+            digest: cursor.digest,
+        }),
+    }
+}
+
+fn map_page(stored: StoredRelayStatePage) -> Result<RelayStatePage, RelayPortError> {
+    Ok(RelayStatePage {
+        state: map_snapshot(stored.state)?,
+        next: stored.next.map(map_query).transpose()?,
+    })
+}
+
+fn map_query(stored: StoredRelayStateQuery) -> Result<RelayStateQuery, RelayPortError> {
+    Ok(RelayStateQuery {
+        limit: stored.limit,
+        policies: map_position(stored.policies, relay_url)?,
+        outbound: map_position(stored.outbound, |cursor| {
+            Ok(OutboundCursor {
+                revision: cursor.revision,
+                key: OutboxKey {
+                    fact_id: cursor.fact_id,
+                    recipient: cursor.recipient,
+                },
+            })
+        })?,
+        prepared: map_position(stored.prepared, |cursor| {
+            Ok(OutboxKey {
+                fact_id: cursor.fact_id,
+                recipient: cursor.recipient,
+            })
+        })?,
+        attempts: map_position(stored.attempts, |cursor| {
+            Ok(AttemptCursor {
+                url: relay_url(cursor.url)?,
+                wrapper_id: cursor.wrapper_id,
+            })
+        })?,
+        cursors: map_position(stored.cursors, relay_url)?,
+        staged: map_position(stored.staged, |cursor| {
+            Ok(TimedDigestCursor {
+                millis: cursor.millis,
+                digest: cursor.digest,
+            })
+        })?,
+        quarantine: map_position(stored.quarantine, |cursor| {
+            Ok(TimedDigestCursor {
+                millis: cursor.millis,
+                digest: cursor.digest,
+            })
+        })?,
+    })
+}
+
+fn store_position<T, U>(
+    position: RelayPagePosition<T>,
+    map: impl FnOnce(T) -> U,
+) -> StoredRelayPagePosition<U> {
+    match position {
+        RelayPagePosition::Start => StoredRelayPagePosition::Start,
+        RelayPagePosition::After(value) => StoredRelayPagePosition::After(map(value)),
+        RelayPagePosition::Done => StoredRelayPagePosition::Done,
+    }
+}
+
+fn map_position<T, U>(
+    position: StoredRelayPagePosition<T>,
+    map: impl FnOnce(T) -> Result<U, RelayPortError>,
+) -> Result<RelayPagePosition<U>, RelayPortError> {
+    match position {
+        StoredRelayPagePosition::Start => Ok(RelayPagePosition::Start),
+        StoredRelayPagePosition::After(value) => map(value).map(RelayPagePosition::After),
+        StoredRelayPagePosition::Done => Ok(RelayPagePosition::Done),
     }
 }
 
@@ -76,6 +207,7 @@ fn map_mutation(mutation: RelayStateMutation) -> StoredRelayStateMutation {
                 wrapper_id: attempt.wrapper_id,
                 attempts: attempt.attempts,
                 disposition: store_disposition(attempt.disposition),
+                failure: attempt.failure.map(store_attempt_failure),
                 last_attempt_millis: attempt.last_attempt_millis,
                 retry_at_millis: attempt.retry_at_millis,
             })
@@ -219,6 +351,7 @@ fn map_attempt(stored: StoredRelayAttempt) -> Result<RelayAttempt, RelayPortErro
         wrapper_id: stored.wrapper_id,
         attempts: stored.attempts,
         disposition: map_disposition(stored.disposition),
+        failure: stored.failure.map(map_attempt_failure),
         last_attempt_millis: stored.last_attempt_millis,
         retry_at_millis: stored.retry_at_millis,
     })
@@ -268,6 +401,26 @@ const fn map_disposition(value: StoredAttemptDisposition) -> AttemptDisposition 
         StoredAttemptDisposition::Uncertain => AttemptDisposition::Uncertain,
         StoredAttemptDisposition::Rejected => AttemptDisposition::Rejected,
         StoredAttemptDisposition::Accepted => AttemptDisposition::Accepted,
+    }
+}
+
+const fn store_attempt_failure(value: RelayAttemptFailure) -> StoredRelayAttemptFailure {
+    match value {
+        RelayAttemptFailure::AuthenticationRequired => {
+            StoredRelayAttemptFailure::AuthenticationRequired
+        }
+        RelayAttemptFailure::RateLimited => StoredRelayAttemptFailure::RateLimited,
+        RelayAttemptFailure::Permanent => StoredRelayAttemptFailure::Permanent,
+    }
+}
+
+const fn map_attempt_failure(value: StoredRelayAttemptFailure) -> RelayAttemptFailure {
+    match value {
+        StoredRelayAttemptFailure::AuthenticationRequired => {
+            RelayAttemptFailure::AuthenticationRequired
+        }
+        StoredRelayAttemptFailure::RateLimited => RelayAttemptFailure::RateLimited,
+        StoredRelayAttemptFailure::Permanent => RelayAttemptFailure::Permanent,
     }
 }
 

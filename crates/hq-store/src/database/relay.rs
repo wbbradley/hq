@@ -1,17 +1,19 @@
 //! Durable relay-state codecs and atomic transitions.
 
 use hq_application::{RelayAccess, RelayAuthentication};
-use hq_domain::{CommandDigest, FactId, InstallationId};
+use hq_domain::{CommandDigest, FactId, InstallationId, Revision};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
 use crate::{
     MAX_RELAY_QUARANTINE_BYTES, MAX_RELAY_QUARANTINE_ITEMS, MAX_RELAY_QUARANTINE_SAMPLE_BYTES,
     MAX_RELAY_STAGING_BYTES, MAX_RELAY_STAGING_ITEMS, MAX_RELAY_STATE_QUERY_ITEMS,
-    MAX_RELAY_WRAPPER_BYTES, StoreError, StoreErrorClass, StoredAttemptDisposition,
-    StoredCatchupCursor, StoredDesiredRelayPolicy, StoredInboundClaim, StoredPreparedOutbound,
-    StoredQuarantineEvidence, StoredRelayAttempt, StoredRelayPolicy, StoredRelayPolicyChange,
-    StoredRelayStateMutation, StoredRelayStateSnapshot, StoredStagedInput,
+    MAX_RELAY_WRAPPER_BYTES, OutboxIntent, StoreError, StoreErrorClass, StoredAttemptCursor,
+    StoredAttemptDisposition, StoredCatchupCursor, StoredDesiredRelayPolicy, StoredInboundClaim,
+    StoredLineageCursor, StoredOutboundCursor, StoredPreparedOutbound, StoredQuarantineEvidence,
+    StoredRelayAttempt, StoredRelayAttemptFailure, StoredRelayPagePosition, StoredRelayPolicy,
+    StoredRelayPolicyChange, StoredRelayStateMutation, StoredRelayStatePage, StoredRelayStateQuery,
+    StoredRelayStateSnapshot, StoredStagedInput, StoredTimedDigestCursor,
 };
 
 const MAX_RELAY_URL_BYTES: usize = 2_048;
@@ -67,18 +69,177 @@ fn remove_staging(
 
 pub(super) fn load(
     connection: &Connection,
+    query: &StoredRelayStateQuery,
+) -> Result<StoredRelayStatePage, StoreError> {
+    let sql_limit = bounded_limit(query.limit)?;
+    let state = StoredRelayStateSnapshot {
+        policies: load_policies(connection, sql_limit, &query.policies)?,
+        outbound: load_outbound(connection, sql_limit, &query.outbound)?,
+        prepared: load_prepared(connection, sql_limit, &query.prepared)?,
+        attempts: load_attempts(connection, sql_limit, &query.attempts)?,
+        cursors: load_cursors(connection, sql_limit, &query.cursors)?,
+        staged: load_staged(connection, sql_limit, &query.staged)?,
+        quarantine: load_quarantine(connection, sql_limit, &query.quarantine)?,
+    };
+    let next = next_query(query, &state);
+    Ok(StoredRelayStatePage { state, next })
+}
+
+fn next_query(
+    query: &StoredRelayStateQuery,
+    state: &StoredRelayStateSnapshot,
+) -> Option<StoredRelayStateQuery> {
+    let next = StoredRelayStateQuery {
+        limit: query.limit,
+        policies: advance(
+            &query.policies,
+            state.policies.len(),
+            query.limit,
+            state.policies.last().map(|policy| policy.url.clone()),
+        ),
+        outbound: advance(
+            &query.outbound,
+            state.outbound.len(),
+            query.limit,
+            state.outbound.last().map(|intent| StoredOutboundCursor {
+                revision: intent.revision(),
+                fact_id: intent.fact_id(),
+                recipient: intent.recipient(),
+            }),
+        ),
+        prepared: advance(
+            &query.prepared,
+            state.prepared.len(),
+            query.limit,
+            state.prepared.last().map(|prepared| StoredLineageCursor {
+                fact_id: prepared.fact_id,
+                recipient: prepared.recipient,
+            }),
+        ),
+        attempts: advance(
+            &query.attempts,
+            state.attempts.len(),
+            query.limit,
+            state.attempts.last().map(|attempt| StoredAttemptCursor {
+                url: attempt.url.clone(),
+                wrapper_id: attempt.wrapper_id,
+            }),
+        ),
+        cursors: advance(
+            &query.cursors,
+            state.cursors.len(),
+            query.limit,
+            state.cursors.last().map(|cursor| cursor.url.clone()),
+        ),
+        staged: advance(
+            &query.staged,
+            state.staged.len(),
+            query.limit,
+            state.staged.last().map(|input| StoredTimedDigestCursor {
+                millis: input.first_received_millis,
+                digest: input.wrapper_sha256,
+            }),
+        ),
+        quarantine: advance(
+            &query.quarantine,
+            state.quarantine.len(),
+            query.limit,
+            state
+                .quarantine
+                .last()
+                .map(|evidence| StoredTimedDigestCursor {
+                    millis: evidence.received_at_millis,
+                    digest: evidence.wrapper_sha256,
+                }),
+        ),
+    };
+    if positions_done(&next) {
+        None
+    } else {
+        Some(next)
+    }
+}
+
+fn advance<T>(
+    current: &StoredRelayPagePosition<T>,
+    returned: usize,
     limit: usize,
-) -> Result<StoredRelayStateSnapshot, StoreError> {
-    let sql_limit = bounded_limit(limit)?;
-    Ok(StoredRelayStateSnapshot {
-        policies: load_policies(connection, sql_limit)?,
-        outbound: super::operational::load_outbox_intents(connection, limit)?,
-        prepared: load_prepared(connection, sql_limit)?,
-        attempts: load_attempts(connection, sql_limit)?,
-        cursors: load_cursors(connection, sql_limit)?,
-        staged: load_staged(connection, sql_limit)?,
-        quarantine: load_quarantine(connection, sql_limit)?,
-    })
+    last: Option<T>,
+) -> StoredRelayPagePosition<T> {
+    if matches!(current, StoredRelayPagePosition::Done) || returned < limit {
+        StoredRelayPagePosition::Done
+    } else if let Some(last) = last {
+        StoredRelayPagePosition::After(last)
+    } else {
+        StoredRelayPagePosition::Done
+    }
+}
+
+fn positions_done(query: &StoredRelayStateQuery) -> bool {
+    matches!(query.policies, StoredRelayPagePosition::Done)
+        && matches!(query.outbound, StoredRelayPagePosition::Done)
+        && matches!(query.prepared, StoredRelayPagePosition::Done)
+        && matches!(query.attempts, StoredRelayPagePosition::Done)
+        && matches!(query.cursors, StoredRelayPagePosition::Done)
+        && matches!(query.staged, StoredRelayPagePosition::Done)
+        && matches!(query.quarantine, StoredRelayPagePosition::Done)
+}
+
+type OutboundRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
+fn load_outbound(
+    connection: &Connection,
+    limit: i64,
+    position: &StoredRelayPagePosition<StoredOutboundCursor>,
+) -> Result<Vec<OutboxIntent>, StoreError> {
+    let sql = match position {
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+        StoredRelayPagePosition::Start => {
+            "SELECT fact_id, recipient_installation, exact_canonical_bytes, revision \
+             FROM outbox_intents ORDER BY revision, fact_id, recipient_installation LIMIT ?1"
+        }
+        StoredRelayPagePosition::After(_) => {
+            "SELECT fact_id, recipient_installation, exact_canonical_bytes, revision \
+             FROM outbox_intents WHERE revision > ?1 OR \
+                (revision = ?1 AND (fact_id > ?2 OR \
+                    (fact_id = ?2 AND recipient_installation > ?3))) \
+             ORDER BY revision, fact_id, recipient_installation LIMIT ?4"
+        }
+    };
+    let mut statement = connection.prepare(sql).map_err(database)?;
+    let rows = match position {
+        StoredRelayPagePosition::Start => statement
+            .query_map([limit], outbound_row)
+            .map_err(database)?,
+        StoredRelayPagePosition::After(cursor) => statement
+            .query_map(
+                params![
+                    cursor.revision.value().to_be_bytes().as_slice(),
+                    cursor.fact_id.as_bytes().as_slice(),
+                    cursor.recipient.as_bytes().as_slice(),
+                    limit,
+                ],
+                outbound_row,
+            )
+            .map_err(database)?,
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+    };
+    rows.map(|row| decode_outbound(row.map_err(database)?))
+        .collect()
+}
+
+fn outbound_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboundRow> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn decode_outbound(row: OutboundRow) -> Result<OutboxIntent, StoreError> {
+    OutboxIntent::new(
+        FactId::from_bytes(fixed(row.0)?),
+        InstallationId::from_bytes(fixed(row.1)?),
+        row.2,
+        Revision::new(decode_u64(row.3)?),
+    )
+    .map_err(|_| corrupt())
 }
 
 fn configure(
@@ -250,6 +411,7 @@ fn put_attempt(
 ) -> Result<(), StoreError> {
     validate_url(&attempt.url)?;
     if attempt.attempts == 0
+        || (attempt.disposition == StoredAttemptDisposition::Rejected) != attempt.failure.is_some()
         || (attempt.disposition == StoredAttemptDisposition::Accepted
             && attempt.retry_at_millis.is_some())
     {
@@ -272,14 +434,15 @@ fn put_attempt(
         }
         transaction
             .execute(
-                "UPDATE relay_attempts SET attempts = ?3, disposition = ?4, \
-                    last_attempt_millis = ?5, retry_at_millis = ?6 \
+                "UPDATE relay_attempts SET attempts = ?3, disposition = ?4, failure_code = ?5, \
+                    last_attempt_millis = ?6, retry_at_millis = ?7 \
                  WHERE url = ?1 AND wrapper_id = ?2",
                 params![
                     attempt.url,
                     attempt.wrapper_id.as_slice(),
                     i64::from(attempt.attempts),
                     encode_disposition(attempt.disposition),
+                    attempt.failure.map(encode_attempt_failure),
                     attempt.last_attempt_millis.to_be_bytes().as_slice(),
                     attempt.retry_at_millis.map(u64::to_be_bytes),
                 ],
@@ -290,13 +453,15 @@ fn put_attempt(
     transaction
         .execute(
             "INSERT INTO relay_attempts(\
-                url, wrapper_id, attempts, disposition, last_attempt_millis, retry_at_millis\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                url, wrapper_id, attempts, disposition, failure_code, last_attempt_millis, \
+                retry_at_millis\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 attempt.url,
                 attempt.wrapper_id.as_slice(),
                 i64::from(attempt.attempts),
                 encode_disposition(attempt.disposition),
+                attempt.failure.map(encode_attempt_failure),
                 attempt.last_attempt_millis.to_be_bytes().as_slice(),
                 attempt.retry_at_millis.map(u64::to_be_bytes),
             ],
@@ -397,7 +562,12 @@ fn claim_inbound(
     let mut found = false;
     for row in rows {
         found = true;
-        if decode_claim(row.map_err(database)?)? != *claim {
+        let stored = decode_claim(row.map_err(database)?)?;
+        if stored.wrapper_id != claim.wrapper_id
+            || stored.origin_installation_id != claim.origin_installation_id
+            || stored.canonical_event_id != claim.canonical_event_id
+            || stored.canonical_sha256 != claim.canonical_sha256
+        {
             return Err(identity_collision());
         }
     }
@@ -554,26 +724,41 @@ fn put_quarantine(
 fn load_policies(
     connection: &Connection,
     limit: i64,
+    position: &StoredRelayPagePosition<String>,
 ) -> Result<Vec<StoredRelayPolicy>, StoreError> {
-    let mut statement = connection
-        .prepare(
+    let sql = match position {
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+        StoredRelayPagePosition::Start => {
             "SELECT url, access, authentication, enabled, generation FROM relay_policies \
-             ORDER BY url LIMIT ?1",
-        )
-        .map_err(database)?;
-    let rows = statement
-        .query_map([limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-            ))
-        })
-        .map_err(database)?;
+             ORDER BY url LIMIT ?1"
+        }
+        StoredRelayPagePosition::After(_) => {
+            "SELECT url, access, authentication, enabled, generation FROM relay_policies \
+             WHERE url > ?1 ORDER BY url LIMIT ?2"
+        }
+    };
+    let mut statement = connection.prepare(sql).map_err(database)?;
+    let rows = match position {
+        StoredRelayPagePosition::Start => {
+            statement.query_map([limit], policy_row).map_err(database)?
+        }
+        StoredRelayPagePosition::After(url) => statement
+            .query_map(params![url, limit], policy_row)
+            .map_err(database)?,
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+    };
     rows.map(|row| decode_policy(row.map_err(database)?))
         .collect()
+}
+
+fn policy_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, i64, i64, i64, Vec<u8>)> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 fn load_policy(
@@ -614,8 +799,17 @@ type PreparedRow = (
     Vec<u8>,
     Vec<u8>,
 );
-type AttemptRow = (String, Vec<u8>, i64, i64, Vec<u8>, Option<Vec<u8>>);
+type AttemptRow = (
+    String,
+    Vec<u8>,
+    i64,
+    i64,
+    Option<i64>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+);
 type CursorRow = (String, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, i64);
+type StagedRow = (Vec<u8>, Vec<u8>, Vec<u8>, i64, Vec<u8>);
 type QuarantineRow = (Vec<u8>, Option<Vec<u8>>, i64, Vec<u8>, i64, Vec<u8>);
 type ClaimRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 
@@ -639,7 +833,7 @@ fn prepared_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PreparedRow> {
     ))
 }
 
-fn load_prepared_lineage(
+pub(super) fn load_prepared_lineage(
     connection: &Connection,
     fact_id: FactId,
     recipient: InstallationId,
@@ -665,16 +859,37 @@ fn load_prepared_lineage(
 fn load_prepared(
     connection: &Connection,
     limit: i64,
+    position: &StoredRelayPagePosition<StoredLineageCursor>,
 ) -> Result<Vec<StoredPreparedOutbound>, StoreError> {
-    let mut statement = connection
-        .prepare(&format!(
+    let sql = match position {
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+        StoredRelayPagePosition::Start => format!(
             "SELECT {PREPARED_COLUMNS} FROM prepared_relay_outbox \
              ORDER BY fact_id, recipient_installation LIMIT ?1"
-        ))
-        .map_err(database)?;
-    let rows = statement
-        .query_map([limit], prepared_row)
-        .map_err(database)?;
+        ),
+        StoredRelayPagePosition::After(_) => format!(
+            "SELECT {PREPARED_COLUMNS} FROM prepared_relay_outbox \
+             WHERE fact_id > ?1 OR (fact_id = ?1 AND recipient_installation > ?2) \
+             ORDER BY fact_id, recipient_installation LIMIT ?3"
+        ),
+    };
+    let mut statement = connection.prepare(&sql).map_err(database)?;
+    let rows = match position {
+        StoredRelayPagePosition::Start => statement
+            .query_map([limit], prepared_row)
+            .map_err(database)?,
+        StoredRelayPagePosition::After(cursor) => statement
+            .query_map(
+                params![
+                    cursor.fact_id.as_bytes().as_slice(),
+                    cursor.recipient.as_bytes().as_slice(),
+                    limit,
+                ],
+                prepared_row,
+            )
+            .map_err(database)?,
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+    };
     rows.map(|row| decode_prepared(row.map_err(database)?))
         .collect()
 }
@@ -703,26 +918,18 @@ fn decode_prepared(row: PreparedRow) -> Result<StoredPreparedOutbound, StoreErro
     Ok(prepared)
 }
 
-fn load_attempt(
+pub(super) fn load_attempt(
     connection: &Connection,
     url: &str,
     wrapper_id: [u8; 32],
 ) -> Result<Option<StoredRelayAttempt>, StoreError> {
     connection
         .query_row(
-            "SELECT url, wrapper_id, attempts, disposition, last_attempt_millis, retry_at_millis \
+            "SELECT url, wrapper_id, attempts, disposition, failure_code, last_attempt_millis, \
+                    retry_at_millis \
              FROM relay_attempts WHERE url = ?1 AND wrapper_id = ?2",
             params![url, wrapper_id.as_slice()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, Option<Vec<u8>>>(5)?,
-                ))
-            },
+            attempt_row,
         )
         .optional()
         .map_err(database)?
@@ -733,27 +940,49 @@ fn load_attempt(
 fn load_attempts(
     connection: &Connection,
     limit: i64,
+    position: &StoredRelayPagePosition<StoredAttemptCursor>,
 ) -> Result<Vec<StoredRelayAttempt>, StoreError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT url, wrapper_id, attempts, disposition, last_attempt_millis, retry_at_millis \
-             FROM relay_attempts ORDER BY url, wrapper_id LIMIT ?1",
-        )
-        .map_err(database)?;
-    let rows = statement
-        .query_map([limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-                row.get::<_, Option<Vec<u8>>>(5)?,
-            ))
-        })
-        .map_err(database)?;
+    let sql = match position {
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+        StoredRelayPagePosition::Start => {
+            "SELECT url, wrapper_id, attempts, disposition, failure_code, last_attempt_millis, \
+                    retry_at_millis \
+             FROM relay_attempts ORDER BY url, wrapper_id LIMIT ?1"
+        }
+        StoredRelayPagePosition::After(_) => {
+            "SELECT url, wrapper_id, attempts, disposition, failure_code, last_attempt_millis, \
+                    retry_at_millis \
+             FROM relay_attempts WHERE url > ?1 OR (url = ?1 AND wrapper_id > ?2) \
+             ORDER BY url, wrapper_id LIMIT ?3"
+        }
+    };
+    let mut statement = connection.prepare(sql).map_err(database)?;
+    let rows = match position {
+        StoredRelayPagePosition::Start => statement
+            .query_map([limit], attempt_row)
+            .map_err(database)?,
+        StoredRelayPagePosition::After(cursor) => statement
+            .query_map(
+                params![cursor.url, cursor.wrapper_id.as_slice(), limit],
+                attempt_row,
+            )
+            .map_err(database)?,
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+    };
     rows.map(|row| decode_attempt(row.map_err(database)?))
         .collect()
+}
+
+fn attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttemptRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
 }
 
 fn decode_attempt(row: AttemptRow) -> Result<StoredRelayAttempt, StoreError> {
@@ -763,8 +992,11 @@ fn decode_attempt(row: AttemptRow) -> Result<StoredRelayAttempt, StoreError> {
         return Err(corrupt());
     }
     let disposition = decode_disposition(row.3)?;
-    let retry_at_millis = row.5.map(decode_u64).transpose()?;
-    if disposition == StoredAttemptDisposition::Accepted && retry_at_millis.is_some() {
+    let failure = row.4.map(decode_attempt_failure).transpose()?;
+    let retry_at_millis = row.6.map(decode_u64).transpose()?;
+    if (disposition == StoredAttemptDisposition::Rejected) != failure.is_some()
+        || disposition == StoredAttemptDisposition::Accepted && retry_at_millis.is_some()
+    {
         return Err(corrupt());
     }
     Ok(StoredRelayAttempt {
@@ -772,12 +1004,13 @@ fn decode_attempt(row: AttemptRow) -> Result<StoredRelayAttempt, StoreError> {
         wrapper_id: fixed(row.1)?,
         attempts,
         disposition,
-        last_attempt_millis: decode_u64(row.4)?,
+        failure,
+        last_attempt_millis: decode_u64(row.5)?,
         retry_at_millis,
     })
 }
 
-fn load_cursor(
+pub(super) fn load_cursor(
     connection: &Connection,
     url: &str,
 ) -> Result<Option<StoredCatchupCursor>, StoreError> {
@@ -805,26 +1038,41 @@ fn load_cursor(
 fn load_cursors(
     connection: &Connection,
     limit: i64,
+    position: &StoredRelayPagePosition<String>,
 ) -> Result<Vec<StoredCatchupCursor>, StoreError> {
-    let mut statement = connection
-        .prepare(
+    let sql = match position {
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+        StoredRelayPagePosition::Start => {
             "SELECT url, generation, oldest_created_at, oldest_wrapper_id, exhausted \
-             FROM relay_cursors ORDER BY url LIMIT ?1",
-        )
-        .map_err(database)?;
-    let rows = statement
-        .query_map([limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-                row.get::<_, Option<Vec<u8>>>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })
-        .map_err(database)?;
+             FROM relay_cursors ORDER BY url LIMIT ?1"
+        }
+        StoredRelayPagePosition::After(_) => {
+            "SELECT url, generation, oldest_created_at, oldest_wrapper_id, exhausted \
+             FROM relay_cursors WHERE url > ?1 ORDER BY url LIMIT ?2"
+        }
+    };
+    let mut statement = connection.prepare(sql).map_err(database)?;
+    let rows = match position {
+        StoredRelayPagePosition::Start => {
+            statement.query_map([limit], cursor_row).map_err(database)?
+        }
+        StoredRelayPagePosition::After(url) => statement
+            .query_map(params![url, limit], cursor_row)
+            .map_err(database)?,
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+    };
     rows.map(|row| decode_cursor(row.map_err(database)?))
         .collect()
+}
+
+fn cursor_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CursorRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
 }
 
 fn decode_cursor(row: CursorRow) -> Result<StoredCatchupCursor, StoreError> {
@@ -868,31 +1116,56 @@ fn load_staged_one(
         .transpose()
 }
 
-fn load_staged(connection: &Connection, limit: i64) -> Result<Vec<StoredStagedInput>, StoreError> {
-    let mut statement = connection
-        .prepare(
+fn load_staged(
+    connection: &Connection,
+    limit: i64,
+    position: &StoredRelayPagePosition<StoredTimedDigestCursor>,
+) -> Result<Vec<StoredStagedInput>, StoreError> {
+    let sql = match position {
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+        StoredRelayPagePosition::Start => {
             "SELECT wrapper_sha256, exact_outer, first_received_millis, attempts, retry_at_millis \
-             FROM relay_staging ORDER BY first_received_millis, wrapper_sha256 LIMIT ?1",
-        )
-        .map_err(database)?;
-    let rows = statement
-        .query_map([limit], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-            ))
-        })
-        .map_err(database)?;
+             FROM relay_staging ORDER BY first_received_millis, wrapper_sha256 LIMIT ?1"
+        }
+        StoredRelayPagePosition::After(_) => {
+            "SELECT wrapper_sha256, exact_outer, first_received_millis, attempts, retry_at_millis \
+             FROM relay_staging WHERE first_received_millis > ?1 OR \
+                (first_received_millis = ?1 AND wrapper_sha256 > ?2) \
+             ORDER BY first_received_millis, wrapper_sha256 LIMIT ?3"
+        }
+    };
+    let mut statement = connection.prepare(sql).map_err(database)?;
+    let rows = match position {
+        StoredRelayPagePosition::Start => {
+            statement.query_map([limit], staged_row).map_err(database)?
+        }
+        StoredRelayPagePosition::After(cursor) => statement
+            .query_map(
+                params![
+                    cursor.millis.to_be_bytes().as_slice(),
+                    cursor.digest.as_slice(),
+                    limit,
+                ],
+                staged_row,
+            )
+            .map_err(database)?,
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+    };
     rows.map(|row| decode_staged(row.map_err(database)?))
         .collect()
 }
 
-fn decode_staged(
-    row: (Vec<u8>, Vec<u8>, Vec<u8>, i64, Vec<u8>),
-) -> Result<StoredStagedInput, StoreError> {
+fn staged_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StagedRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+fn decode_staged(row: StagedRow) -> Result<StoredStagedInput, StoreError> {
     let digest = fixed(row.0)?;
     if row.1.is_empty()
         || row.1.len() > MAX_RELAY_WRAPPER_BYTES
@@ -939,28 +1212,53 @@ fn load_quarantine_one(
 fn load_quarantine(
     connection: &Connection,
     limit: i64,
+    position: &StoredRelayPagePosition<StoredTimedDigestCursor>,
 ) -> Result<Vec<StoredQuarantineEvidence>, StoreError> {
-    let mut statement = connection
-        .prepare(
+    let sql = match position {
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+        StoredRelayPagePosition::Start => {
             "SELECT wrapper_sha256, wrapper_id, failure_code, received_at_millis, \
                     byte_len, raw_sample \
-             FROM relay_quarantine ORDER BY received_at_millis, wrapper_sha256 LIMIT ?1",
-        )
-        .map_err(database)?;
-    let rows = statement
-        .query_map([limit], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Option<Vec<u8>>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, Vec<u8>>(5)?,
-            ))
-        })
-        .map_err(database)?;
+             FROM relay_quarantine ORDER BY received_at_millis, wrapper_sha256 LIMIT ?1"
+        }
+        StoredRelayPagePosition::After(_) => {
+            "SELECT wrapper_sha256, wrapper_id, failure_code, received_at_millis, \
+                    byte_len, raw_sample FROM relay_quarantine \
+             WHERE received_at_millis > ?1 OR \
+                (received_at_millis = ?1 AND wrapper_sha256 > ?2) \
+             ORDER BY received_at_millis, wrapper_sha256 LIMIT ?3"
+        }
+    };
+    let mut statement = connection.prepare(sql).map_err(database)?;
+    let rows = match position {
+        StoredRelayPagePosition::Start => statement
+            .query_map([limit], quarantine_row)
+            .map_err(database)?,
+        StoredRelayPagePosition::After(cursor) => statement
+            .query_map(
+                params![
+                    cursor.millis.to_be_bytes().as_slice(),
+                    cursor.digest.as_slice(),
+                    limit,
+                ],
+                quarantine_row,
+            )
+            .map_err(database)?,
+        StoredRelayPagePosition::Done => return Ok(Vec::new()),
+    };
     rows.map(|row| decode_quarantine(row.map_err(database)?))
         .collect()
+}
+
+fn quarantine_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuarantineRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
 }
 
 fn decode_quarantine(row: QuarantineRow) -> Result<StoredQuarantineEvidence, StoreError> {
@@ -1107,6 +1405,23 @@ fn decode_disposition(value: i64) -> Result<StoredAttemptDisposition, StoreError
     }
 }
 
+const fn encode_attempt_failure(value: StoredRelayAttemptFailure) -> i64 {
+    match value {
+        StoredRelayAttemptFailure::AuthenticationRequired => 1,
+        StoredRelayAttemptFailure::RateLimited => 2,
+        StoredRelayAttemptFailure::Permanent => 3,
+    }
+}
+
+fn decode_attempt_failure(value: i64) -> Result<StoredRelayAttemptFailure, StoreError> {
+    match value {
+        1 => Ok(StoredRelayAttemptFailure::AuthenticationRequired),
+        2 => Ok(StoredRelayAttemptFailure::RateLimited),
+        3 => Ok(StoredRelayAttemptFailure::Permanent),
+        _ => Err(corrupt()),
+    }
+}
+
 const fn encode_bool(value: bool) -> i64 {
     if value { 1 } else { 0 }
 }
@@ -1230,7 +1545,10 @@ mod tests {
             })
             .expect("prepared count loads");
         assert_eq!(rows, 1);
-        assert_eq!(load_prepared(&connection, 8), Ok(vec![first]));
+        assert_eq!(
+            load_prepared(&connection, 8, &StoredRelayPagePosition::Start),
+            Ok(vec![first])
+        );
     }
 
     fn prepared_fixture(fact: u8, wrapper: u8, one_use: u8) -> StoredPreparedOutbound {

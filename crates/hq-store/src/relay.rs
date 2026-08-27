@@ -4,7 +4,7 @@
 //! boundary maps them to the consumer-owned relay port vocabulary.
 
 use hq_application::{RelayAccess, RelayAuthentication};
-use hq_domain::{CommandDigest, FactId, InstallationId, OperationId};
+use hq_domain::{CommandDigest, FactId, InstallationId, OperationId, Revision};
 
 /// Maximum records returned for each collection in one relay-state query.
 pub const MAX_RELAY_STATE_QUERY_ITEMS: usize = 1_024;
@@ -20,6 +20,93 @@ pub const MAX_RELAY_QUARANTINE_ITEMS: usize = 1_024;
 pub const MAX_RELAY_QUARANTINE_BYTES: usize = 4 * 1_024 * 1_024;
 /// Maximum retained sample bytes for one quarantined wrapper.
 pub const MAX_RELAY_QUARANTINE_SAMPLE_BYTES: usize = 4 * 1_024;
+
+/// Keyset position for one independently ordered relay-state collection.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum StoredRelayPagePosition<T> {
+    /// Begin at the first row.
+    #[default]
+    Start,
+    /// Continue strictly after this stable key.
+    After(T),
+    /// Skip a collection that is already exhausted.
+    Done,
+}
+
+/// Stable outbox page key including its primary ordering revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredOutboundCursor {
+    /// Durable revision that created the intent.
+    pub revision: Revision,
+    /// Canonical fact identity.
+    pub fact_id: FactId,
+    /// Recipient installation identity.
+    pub recipient: InstallationId,
+}
+
+/// Stable prepared-lineage page key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredLineageCursor {
+    /// Canonical fact identity.
+    pub fact_id: FactId,
+    /// Recipient installation identity.
+    pub recipient: InstallationId,
+}
+
+/// Stable relay-attempt page key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredAttemptCursor {
+    /// Exact relay URL spelling.
+    pub url: String,
+    /// Prepared wrapper identity.
+    pub wrapper_id: [u8; 32],
+}
+
+/// Stable FIFO page key used by staged and quarantine rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredTimedDigestCursor {
+    /// Collection-specific durable wall-clock time.
+    pub millis: u64,
+    /// Stable exact-input digest.
+    pub digest: [u8; 32],
+}
+
+/// Independent keyset positions for one bounded relay-state query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredRelayStateQuery {
+    /// Maximum rows returned for each active collection.
+    pub limit: usize,
+    /// Policy collection position.
+    pub policies: StoredRelayPagePosition<String>,
+    /// Canonical outbox collection position.
+    pub outbound: StoredRelayPagePosition<StoredOutboundCursor>,
+    /// Prepared lineage collection position.
+    pub prepared: StoredRelayPagePosition<StoredLineageCursor>,
+    /// Relay attempt collection position.
+    pub attempts: StoredRelayPagePosition<StoredAttemptCursor>,
+    /// Catch-up cursor collection position.
+    pub cursors: StoredRelayPagePosition<String>,
+    /// Staging collection position.
+    pub staged: StoredRelayPagePosition<StoredTimedDigestCursor>,
+    /// Quarantine collection position.
+    pub quarantine: StoredRelayPagePosition<StoredTimedDigestCursor>,
+}
+
+impl StoredRelayStateQuery {
+    /// Starts every collection at its first row with the supplied bound.
+    pub fn first(limit: usize) -> Self {
+        Self {
+            limit,
+            policies: StoredRelayPagePosition::Start,
+            outbound: StoredRelayPagePosition::Start,
+            prepared: StoredRelayPagePosition::Start,
+            attempts: StoredRelayPagePosition::Start,
+            cursors: StoredRelayPagePosition::Start,
+            staged: StoredRelayPagePosition::Start,
+            quarantine: StoredRelayPagePosition::Start,
+        }
+    }
+}
 
 /// Desired relay policy before durable generation allocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,6 +185,17 @@ pub enum StoredAttemptDisposition {
     Accepted,
 }
 
+/// Closed redacted cause retained for a negative relay acknowledgement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoredRelayAttemptFailure {
+    /// Relay requires successful connection authentication before retry.
+    AuthenticationRequired,
+    /// Relay requested bounded retry after rate limiting.
+    RateLimited,
+    /// Relay permanently rejected this wrapper for another reason.
+    Permanent,
+}
+
 /// Durable relay-local attempt state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredRelayAttempt {
@@ -109,6 +207,8 @@ pub struct StoredRelayAttempt {
     pub attempts: u32,
     /// Current relay-local disposition.
     pub disposition: StoredAttemptDisposition,
+    /// Redacted negative acknowledgement class, only for rejected state.
+    pub failure: Option<StoredRelayAttemptFailure>,
     /// Last attempt wall-clock time.
     pub last_attempt_millis: u64,
     /// Earliest retry time, when eligible.
@@ -223,4 +323,13 @@ pub struct StoredRelayStateSnapshot {
     pub staged: Vec<StoredStagedInput>,
     /// Bounded permanent diagnostics.
     pub quarantine: Vec<StoredQuarantineEvidence>,
+}
+
+/// One bounded relay-state page plus its independent collection continuations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredRelayStatePage {
+    /// Durable rows returned by this query.
+    pub state: StoredRelayStateSnapshot,
+    /// Next keyset query, or `None` after every collection is exhausted.
+    pub next: Option<StoredRelayStateQuery>,
 }

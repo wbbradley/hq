@@ -169,6 +169,6 @@ fn fresh_schema_has_the_exact_storage_identity_and_wal_mode() {
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .expect("journal mode reads");
     assert_eq!(application_id, 0x4851_5253);
-    assert_eq!(user_version, 10);
+    assert_eq!(user_version, 11);
     assert_eq!(journal_mode, "wal");
 }

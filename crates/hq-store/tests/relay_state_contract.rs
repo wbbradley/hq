@@ -9,7 +9,8 @@ use hq_store::{
     MAX_RELAY_STAGING_ITEMS, MAX_RELAY_STATE_QUERY_ITEMS, MAX_RELAY_WRAPPER_BYTES, Store,
     StoreErrorClass, StoredAttemptDisposition, StoredCatchupCursor, StoredDesiredRelayPolicy,
     StoredInboundClaim, StoredPreparedOutbound, StoredQuarantineEvidence, StoredRelayAttempt,
-    StoredRelayPolicyChange, StoredRelayStateMutation, StoredStagedInput,
+    StoredRelayAttemptFailure, StoredRelayPolicyChange, StoredRelayStateMutation,
+    StoredRelayStateQuery, StoredStagedInput,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -22,6 +23,49 @@ use support::{
 };
 
 const RELAY: &str = "wss://relay.example";
+
+#[test]
+fn relay_state_keyset_pages_reach_rows_after_the_first_bound() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    for (index, relay) in ["wss://a.example", "wss://b.example", "wss://c.example"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut change = policy_change(
+            u8::try_from(index + 1).expect("small operation index"),
+            u8::try_from(index + 1).expect("small digest index"),
+            true,
+            RelayAccess::Read,
+        );
+        change.desired.url = relay.to_owned();
+        store
+            .apply_relay_state(StoredRelayStateMutation::Configure(change))
+            .expect("policy commits");
+    }
+
+    let mut query = StoredRelayStateQuery::first(1);
+    let mut urls = Vec::new();
+    loop {
+        let page = store
+            .load_relay_state_page(query)
+            .expect("bounded page loads");
+        urls.extend(page.state.policies.into_iter().map(|policy| policy.url));
+        let Some(next) = page.next else {
+            break;
+        };
+        assert!(page.state.outbound.is_empty());
+        query = next;
+    }
+    assert_eq!(
+        urls,
+        vec![
+            "wss://a.example".to_owned(),
+            "wss://b.example".to_owned(),
+            "wss://c.example".to_owned(),
+        ]
+    );
+}
 
 #[test]
 fn policy_operations_allocate_generations_and_replay_exactly_across_restart() {
@@ -169,12 +213,23 @@ fn prepared_lineage_attempt_and_cursor_transitions_are_atomic_and_monotonic() {
         wrapper_id: prepared.wrapper_id,
         attempts: 1,
         disposition: StoredAttemptDisposition::Uncertain,
+        failure: None,
         last_attempt_millis: 10,
         retry_at_millis: Some(20),
     };
     store
         .apply_relay_state(StoredRelayStateMutation::Attempt(uncertain.clone()))
         .expect("uncertain attempt commits before response");
+    assert_eq!(
+        store
+            .apply_relay_state(StoredRelayStateMutation::Attempt(StoredRelayAttempt {
+                failure: Some(StoredRelayAttemptFailure::Permanent),
+                ..uncertain.clone()
+            }))
+            .expect_err("non-rejected attempt cannot retain a rejection class")
+            .class(),
+        StoreErrorClass::InvalidOperationalRequest
+    );
     let accepted = StoredRelayAttempt {
         disposition: StoredAttemptDisposition::Accepted,
         retry_at_millis: None,
@@ -186,6 +241,7 @@ fn prepared_lineage_attempt_and_cursor_transitions_are_atomic_and_monotonic() {
     let regression = StoredRelayAttempt {
         attempts: 2,
         disposition: StoredAttemptDisposition::Rejected,
+        failure: Some(StoredRelayAttemptFailure::Permanent),
         last_attempt_millis: 11,
         retry_at_millis: Some(30),
         ..accepted.clone()
@@ -198,6 +254,15 @@ fn prepared_lineage_attempt_and_cursor_transitions_are_atomic_and_monotonic() {
         StoreErrorClass::RelayStateConflict
     );
 
+    assert_cursor_transitions_are_monotonic(&store);
+
+    let state = store.load_relay_state(16).expect("relay state loads");
+    assert_eq!(state.prepared, vec![prepared]);
+    assert_eq!(state.attempts, vec![accepted]);
+    assert!(state.cursors[0].exhausted);
+}
+
+fn assert_cursor_transitions_are_monotonic(store: &Store) {
     let cursor = StoredCatchupCursor {
         url: RELAY.to_owned(),
         generation: 1,
@@ -211,7 +276,7 @@ fn prepared_lineage_attempt_and_cursor_transitions_are_atomic_and_monotonic() {
     let older = StoredCatchupCursor {
         oldest_created_at: Some(90),
         oldest_wrapper_id: Some([3; 32]),
-        ..cursor.clone()
+        ..cursor
     };
     store
         .apply_relay_state(StoredRelayStateMutation::Cursor(older.clone()))
@@ -233,11 +298,60 @@ fn prepared_lineage_attempt_and_cursor_transitions_are_atomic_and_monotonic() {
             ..older
         }))
         .expect("same boundary may become exhausted");
+}
 
-    let state = store.load_relay_state(16).expect("relay state loads");
-    assert_eq!(state.prepared, vec![prepared]);
-    assert_eq!(state.attempts, vec![accepted]);
-    assert!(state.cursors[0].exhausted);
+#[test]
+fn rejection_classes_and_independent_attempt_pages_round_trip() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let prepared = create_outbox_and_prepared(&store, b"page-wrapper".to_vec());
+    for (operation, url) in [(1, RELAY), (2, "wss://z.example")] {
+        let mut policy = policy_change(operation, operation, true, RelayAccess::Write);
+        policy.desired.url = url.to_owned();
+        store
+            .apply_relay_state(StoredRelayStateMutation::Configure(policy))
+            .expect("relay policy commits");
+    }
+    store
+        .apply_relay_state(StoredRelayStateMutation::Prepare(prepared.clone()))
+        .expect("prepared lineage commits");
+    let uncertain = StoredRelayAttempt {
+        url: RELAY.to_owned(),
+        wrapper_id: prepared.wrapper_id,
+        attempts: 1,
+        disposition: StoredAttemptDisposition::Uncertain,
+        failure: None,
+        last_attempt_millis: 10,
+        retry_at_millis: Some(20),
+    };
+    let rejected = StoredRelayAttempt {
+        url: "wss://z.example".to_owned(),
+        wrapper_id: prepared.wrapper_id,
+        attempts: 1,
+        disposition: StoredAttemptDisposition::Rejected,
+        failure: Some(StoredRelayAttemptFailure::RateLimited),
+        last_attempt_millis: 12,
+        retry_at_millis: Some(24),
+    };
+    for attempt in [uncertain.clone(), rejected.clone()] {
+        store
+            .apply_relay_state(StoredRelayStateMutation::Attempt(attempt))
+            .expect("attempt commits");
+    }
+
+    let mut query = StoredRelayStateQuery::first(1);
+    let mut paged_attempts = Vec::new();
+    loop {
+        let page = store
+            .load_relay_state_page(query)
+            .expect("independent keyset page loads");
+        paged_attempts.extend(page.state.attempts);
+        let Some(next) = page.next else {
+            break;
+        };
+        query = next;
+    }
+    assert_eq!(paged_attempts, vec![uncertain, rejected]);
 }
 
 #[test]
@@ -257,6 +371,15 @@ fn inbound_claims_and_fifo_staging_transition_atomically() {
             remove_staged: None,
         })
         .expect("dual identity claim commits");
+    store
+        .apply_relay_state(StoredRelayStateMutation::ClaimInbound {
+            claim: StoredInboundClaim {
+                received_at_millis: 99,
+                ..claim.clone()
+            },
+            remove_staged: None,
+        })
+        .expect("equal transport identity ignores later observation time");
     store
         .apply_relay_state(StoredRelayStateMutation::ClaimInbound {
             claim: claim.clone(),

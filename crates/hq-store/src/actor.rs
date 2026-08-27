@@ -12,7 +12,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use hq_domain::{CommandId, Page, PageCursor, Revision};
+use hq_domain::{CommandId, FactId, InstallationId, Page, PageCursor, Revision};
 use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 
@@ -20,7 +20,8 @@ use crate::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
     ConversationEntry, ConversationProjectionSnapshot, LocalMutationRequest, MutationReceipt,
     OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
-    StoredRelayStateMutation, StoredRelayStateSnapshot, database::Database,
+    StoredRelayStateMutation, StoredRelayStatePage, StoredRelayStateQuery,
+    StoredRelayStateSnapshot, database::Database,
 };
 
 /// Result of atomically ingesting immutable verified evidence.
@@ -252,16 +253,34 @@ enum Request {
         limit: usize,
         reply: SyncSender<Result<Vec<OutboxIntent>, StoreError>>,
     },
-    ApplyRelayState {
+    Relay(Box<RelayRequest>),
+    Close {
+        reply: SyncSender<()>,
+    },
+}
+
+enum RelayRequest {
+    Apply {
         mutation: StoredRelayStateMutation,
         reply: SyncSender<Result<(), StoreError>>,
     },
-    LoadRelayState {
-        limit: usize,
-        reply: SyncSender<Result<StoredRelayStateSnapshot, StoreError>>,
+    LoadPage {
+        query: StoredRelayStateQuery,
+        reply: SyncSender<Result<StoredRelayStatePage, StoreError>>,
     },
-    Close {
-        reply: SyncSender<()>,
+    LoadPrepared {
+        fact_id: FactId,
+        recipient: InstallationId,
+        reply: SyncSender<Result<Option<crate::StoredPreparedOutbound>, StoreError>>,
+    },
+    LoadAttempt {
+        url: String,
+        wrapper_id: [u8; 32],
+        reply: SyncSender<Result<Option<crate::StoredRelayAttempt>, StoreError>>,
+    },
+    LoadCursor {
+        url: String,
+        reply: SyncSender<Result<Option<crate::StoredCatchupCursor>, StoreError>>,
     },
 }
 
@@ -285,18 +304,85 @@ impl RelayStateHandle {
     pub fn apply(&self, mutation: StoredRelayStateMutation) -> Result<(), StoreError> {
         let (reply, response) = mpsc::sync_channel(1);
         self.requests
-            .send(Request::ApplyRelayState { mutation, reply })
+            .send(Request::Relay(Box::new(RelayRequest::Apply {
+                mutation,
+                reply,
+            })))
             .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
         response
             .recv()
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
-    /// Loads one deterministic bounded page of durable relay synchronization state.
-    pub fn load(&self, limit: usize) -> Result<StoredRelayStateSnapshot, StoreError> {
+    /// Loads one deterministic bounded keyset page of durable relay state.
+    pub fn load_page(
+        &self,
+        query: StoredRelayStateQuery,
+    ) -> Result<StoredRelayStatePage, StoreError> {
         let (reply, response) = mpsc::sync_channel(1);
         self.requests
-            .send(Request::LoadRelayState { limit, reply })
+            .send(Request::Relay(Box::new(RelayRequest::LoadPage {
+                query,
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads the first deterministic bounded relay-state page.
+    pub fn load(&self, limit: usize) -> Result<StoredRelayStateSnapshot, StoreError> {
+        self.load_page(StoredRelayStateQuery::first(limit))
+            .map(|page| page.state)
+    }
+
+    /// Loads one prepared lineage by stable outbox identity.
+    pub fn prepared(
+        &self,
+        fact_id: FactId,
+        recipient: InstallationId,
+    ) -> Result<Option<crate::StoredPreparedOutbound>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Relay(Box::new(RelayRequest::LoadPrepared {
+                fact_id,
+                recipient,
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one relay-local attempt by exact correlation identity.
+    pub fn attempt(
+        &self,
+        url: String,
+        wrapper_id: [u8; 32],
+    ) -> Result<Option<crate::StoredRelayAttempt>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Relay(Box::new(RelayRequest::LoadAttempt {
+                url,
+                wrapper_id,
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one retained cursor by exact relay identity.
+    pub fn cursor(&self, url: String) -> Result<Option<crate::StoredCatchupCursor>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Relay(Box::new(RelayRequest::LoadCursor {
+                url,
+                reply,
+            })))
             .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
         response
             .recv()
@@ -567,6 +653,14 @@ impl Store {
         self.relay_state_handle().load(limit)
     }
 
+    /// Loads one deterministic bounded keyset page of durable relay state.
+    pub fn load_relay_state_page(
+        &self,
+        query: StoredRelayStateQuery,
+    ) -> Result<StoredRelayStatePage, StoreError> {
+        self.relay_state_handle().load_page(query)
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -687,16 +781,39 @@ fn run(
             Request::LoadOutboxIntents { limit, reply } => {
                 let _ = reply.send(database.load_outbox_intents(limit));
             }
-            Request::ApplyRelayState { mutation, reply } => {
-                let _ = reply.send(database.apply_relay_state(mutation));
-            }
-            Request::LoadRelayState { limit, reply } => {
-                let _ = reply.send(database.load_relay_state(limit));
-            }
+            Request::Relay(request) => handle_relay_request(&mut database, *request),
             Request::Close { reply } => {
                 let _ = reply.send(());
                 break;
             }
+        }
+    }
+}
+
+fn handle_relay_request(database: &mut Database, request: RelayRequest) {
+    match request {
+        RelayRequest::Apply { mutation, reply } => {
+            let _ = reply.send(database.apply_relay_state(mutation));
+        }
+        RelayRequest::LoadPage { query, reply } => {
+            let _ = reply.send(database.load_relay_state(&query));
+        }
+        RelayRequest::LoadPrepared {
+            fact_id,
+            recipient,
+            reply,
+        } => {
+            let _ = reply.send(database.load_prepared_relay_lineage(fact_id, recipient));
+        }
+        RelayRequest::LoadAttempt {
+            url,
+            wrapper_id,
+            reply,
+        } => {
+            let _ = reply.send(database.load_relay_attempt(&url, wrapper_id));
+        }
+        RelayRequest::LoadCursor { url, reply } => {
+            let _ = reply.send(database.load_relay_cursor(&url));
         }
     }
 }

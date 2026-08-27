@@ -49,10 +49,12 @@ pub use operational::{
 pub use relay::{
     MAX_RELAY_QUARANTINE_BYTES, MAX_RELAY_QUARANTINE_ITEMS, MAX_RELAY_QUARANTINE_SAMPLE_BYTES,
     MAX_RELAY_STAGING_BYTES, MAX_RELAY_STAGING_ITEMS, MAX_RELAY_STATE_QUERY_ITEMS,
-    MAX_RELAY_WRAPPER_BYTES, StoredAttemptDisposition, StoredCatchupCursor,
-    StoredDesiredRelayPolicy, StoredInboundClaim, StoredPreparedOutbound, StoredQuarantineEvidence,
-    StoredRelayAttempt, StoredRelayPolicy, StoredRelayPolicyChange, StoredRelayStateMutation,
-    StoredRelayStateSnapshot, StoredStagedInput,
+    MAX_RELAY_WRAPPER_BYTES, StoredAttemptCursor, StoredAttemptDisposition, StoredCatchupCursor,
+    StoredDesiredRelayPolicy, StoredInboundClaim, StoredLineageCursor, StoredOutboundCursor,
+    StoredPreparedOutbound, StoredQuarantineEvidence, StoredRelayAttempt,
+    StoredRelayAttemptFailure, StoredRelayPagePosition, StoredRelayPolicy, StoredRelayPolicyChange,
+    StoredRelayStateMutation, StoredRelayStatePage, StoredRelayStateQuery,
+    StoredRelayStateSnapshot, StoredStagedInput, StoredTimedDigestCursor,
 };
 pub use snapshot::{
     CompleteSnapshot, IndexedConflict, IndexedDecision, ReductionDomain, ReductionIndexSnapshot,

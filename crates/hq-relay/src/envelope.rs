@@ -111,12 +111,16 @@ pub struct DurableEnvelope {
 pub struct OpenedEnvelopeMetadata {
     /// Verified outer wrapper ID.
     pub wrapper_id: [u8; 32],
+    /// Verified outer wrapper timestamp used only for retained traversal.
+    pub wrapper_created_at: u64,
     /// Verified one-use outer public key.
     pub one_use_public_key: [u8; 32],
     /// Verified sender root public key.
     pub sender_public_key: [u8; 32],
     /// Origin installation ID copied from the verified canonical DTO.
     pub origin_installation_id: [u8; 32],
+    /// Verified canonical event ID copied from the embedded event.
+    pub canonical_event_id: [u8; 32],
 }
 
 /// Successfully opened transport input, still carrying no domain authority.
@@ -320,9 +324,11 @@ impl EnvelopeCodec {
             canonical_event: canonical_event.into_boxed_slice(),
             metadata: OpenedEnvelopeMetadata {
                 wrapper_id: decode_hex(&outer.id)?,
+                wrapper_created_at: outer.created_at,
                 one_use_public_key: outer_public,
                 sender_public_key: sender,
                 origin_installation_id: origin,
+                canonical_event_id: canonical_id,
             },
         })
     }

@@ -17,6 +17,84 @@ pub const MAX_STAGING_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_QUARANTINE_ITEMS: usize = 1_024;
 /// Maximum total quarantine sample bytes.
 pub const MAX_QUARANTINE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum relay-supplied acknowledgement, notice, or challenge text.
+pub const MAX_RELAY_STATUS_BYTES: usize = 1_024;
+
+/// Keyset position for one independently ordered relay-state collection.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum RelayPagePosition<T> {
+    /// Begin at the first row.
+    #[default]
+    Start,
+    /// Continue strictly after this stable key.
+    After(T),
+    /// Skip a collection that is already exhausted.
+    Done,
+}
+
+/// Stable outbox page key including its primary ordering revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutboundCursor {
+    /// Durable revision that created the intent.
+    pub revision: Revision,
+    /// Stable canonical/recipient identity.
+    pub key: OutboxKey,
+}
+
+/// Stable relay-attempt page key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptCursor {
+    /// Exact relay identity.
+    pub url: RelayUrl,
+    /// Prepared outer wrapper ID.
+    pub wrapper_id: [u8; 32],
+}
+
+/// Stable FIFO page key used by staged and quarantine rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimedDigestCursor {
+    /// Collection-specific durable wall-clock time.
+    pub millis: u64,
+    /// Stable exact-input digest.
+    pub digest: [u8; 32],
+}
+
+/// Independent keyset positions for one bounded relay-state query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayStateQuery {
+    /// Maximum rows returned for each active collection.
+    pub limit: usize,
+    /// Policy collection position.
+    pub policies: RelayPagePosition<RelayUrl>,
+    /// Canonical outbox collection position.
+    pub outbound: RelayPagePosition<OutboundCursor>,
+    /// Prepared lineage collection position.
+    pub prepared: RelayPagePosition<OutboxKey>,
+    /// Relay attempt collection position.
+    pub attempts: RelayPagePosition<AttemptCursor>,
+    /// Catch-up cursor collection position.
+    pub cursors: RelayPagePosition<RelayUrl>,
+    /// Staging collection position.
+    pub staged: RelayPagePosition<TimedDigestCursor>,
+    /// Quarantine collection position.
+    pub quarantine: RelayPagePosition<TimedDigestCursor>,
+}
+
+impl RelayStateQuery {
+    /// Starts every collection at its first row with the supplied bound.
+    pub fn first(limit: usize) -> Self {
+        Self {
+            limit,
+            policies: RelayPagePosition::Start,
+            outbound: RelayPagePosition::Start,
+            prepared: RelayPagePosition::Start,
+            attempts: RelayPagePosition::Start,
+            cursors: RelayPagePosition::Start,
+            staged: RelayPagePosition::Start,
+            quarantine: RelayPagePosition::Start,
+        }
+    }
+}
 
 /// Stable relay-port failure without external prose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -29,6 +107,8 @@ pub enum RelayPortError {
     Corrupt,
     /// A local dependency is temporarily unavailable.
     Unavailable,
+    /// The owned relay connection failed or closed.
+    Connection,
     /// Bounded staging cannot accept another exact wrapper.
     Backpressure,
 }
@@ -40,6 +120,7 @@ impl fmt::Display for RelayPortError {
             Self::Conflict => "relay state identity conflicts",
             Self::Corrupt => "relay durable state is corrupt",
             Self::Unavailable => "relay dependency is unavailable",
+            Self::Connection => "relay connection is unavailable",
             Self::Backpressure => "relay staging is full",
         })
     }
@@ -135,6 +216,17 @@ pub enum AttemptDisposition {
     Accepted,
 }
 
+/// Closed redacted cause retained for a negative relay acknowledgement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelayAttemptFailure {
+    /// Relay requires successful connection authentication before retry.
+    AuthenticationRequired,
+    /// Relay requested bounded retry after rate limiting.
+    RateLimited,
+    /// Relay permanently rejected this wrapper for another reason.
+    Permanent,
+}
+
 /// Durable relay-local outbound attempt state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayAttempt {
@@ -146,6 +238,8 @@ pub struct RelayAttempt {
     pub attempts: u32,
     /// Current relay-local disposition.
     pub disposition: AttemptDisposition,
+    /// Redacted negative acknowledgement class, only for rejected state.
+    pub failure: Option<RelayAttemptFailure>,
     /// Last monotonic scheduling time represented as Unix milliseconds for persistence.
     pub last_attempt_millis: u64,
     /// Earliest retry time, when retry remains eligible.
@@ -269,10 +363,34 @@ pub struct RelayStateSnapshot {
     pub quarantine: Vec<QuarantineEvidence>,
 }
 
+/// One bounded relay-state page plus independent collection continuations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayStatePage {
+    /// Durable rows returned by this query.
+    pub state: RelayStateSnapshot,
+    /// Next keyset query, or `None` after every collection is exhausted.
+    pub next: Option<RelayStateQuery>,
+}
+
 /// Durable relay state capability implemented by the node's store adapter.
 pub trait RelayStatePort: Send + Sync {
+    /// Loads one deterministic bounded keyset page.
+    fn load_page(&self, query: RelayStateQuery) -> Result<RelayStatePage, RelayPortError>;
     /// Loads a deterministic state page with each collection bounded by `limit`.
-    fn load_state(&self, limit: usize) -> Result<RelayStateSnapshot, RelayPortError>;
+    fn load_state(&self, limit: usize) -> Result<RelayStateSnapshot, RelayPortError> {
+        self.load_page(RelayStateQuery::first(limit))
+            .map(|page| page.state)
+    }
+    /// Loads one prepared lineage by its stable outbox identity.
+    fn prepared(&self, key: OutboxKey) -> Result<Option<PreparedOutbound>, RelayPortError>;
+    /// Loads one relay-local attempt by its exact correlation identity.
+    fn attempt(
+        &self,
+        url: &RelayUrl,
+        wrapper_id: [u8; 32],
+    ) -> Result<Option<RelayAttempt>, RelayPortError>;
+    /// Loads one retained cursor by exact relay identity.
+    fn cursor(&self, url: &RelayUrl) -> Result<Option<CatchupCursor>, RelayPortError>;
     /// Applies one atomic durable transition.
     fn apply(&self, mutation: RelayStateMutation) -> Result<(), RelayPortError>;
 }
@@ -301,6 +419,81 @@ pub trait RelayClock: Send + Sync {
 pub trait RelaySleeper: Send + Sync {
     /// Waits for a deterministic duration or cancellation owned by the caller.
     fn sleep(&self, duration: Duration) -> Result<(), RelayPortError>;
+}
+
+/// Successfully opened non-authoritative transport envelope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenedRelayEnvelope {
+    /// Exact raw canonical bytes for the common ingest path.
+    pub exact_canonical_bytes: Vec<u8>,
+    /// Verified outer wrapper identity.
+    pub wrapper_id: [u8; 32],
+    /// Verified outer wrapper timestamp used only for catch-up traversal.
+    pub wrapper_created_at: u64,
+    /// Opened logical deduplication identity.
+    pub logical_id: LogicalEnvelopeId,
+    /// Digest of exact canonical evidence.
+    pub canonical_sha256: [u8; 32],
+}
+
+/// Permanent result of opening one untrusted outer wrapper.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RejectedRelayEnvelope {
+    /// Redacted envelope failure class.
+    pub failure: FailureClass,
+    /// Verified outer identity when validation reached it.
+    pub wrapper_id: Option<[u8; 32]>,
+}
+
+/// Open result separates permanent bad input from transient local dependency failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RelayOpenOutcome {
+    /// Wrapper opened and reverified successfully.
+    Opened(OpenedRelayEnvelope),
+    /// Wrapper is permanently invalid and may be quarantined.
+    Rejected(RejectedRelayEnvelope),
+}
+
+/// Exact signed connection-authentication event and its correlation identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedRelayAuthentication {
+    /// Signed kind-22242 event identity.
+    pub event_id: [u8; 32],
+    /// Exact signed event bytes sent on this connection only.
+    pub exact_event: Vec<u8>,
+}
+
+/// Installation-root envelope operations injected into session ownership.
+pub trait RelayEnvelopePort: Send + Sync {
+    /// Returns the local root public key used by the `p` subscription filter.
+    fn local_public_key(&self) -> [u8; 32];
+    /// Creates one exact immutable lineage from verified queued canonical bytes.
+    fn prepare(
+        &self,
+        intent: &OutboundIntent,
+        recipient_public_key: [u8; 32],
+        now_seconds: u64,
+    ) -> Result<PreparedOutbound, RelayPortError>;
+    /// Opens one exact outer wrapper without granting canonical authority.
+    fn open(&self, exact_outer: &[u8]) -> Result<RelayOpenOutcome, RelayPortError>;
+    /// Signs one connection-local NIP-42 challenge.
+    fn authenticate(
+        &self,
+        url: &RelayUrl,
+        challenge: &str,
+        now_seconds: u64,
+    ) -> Result<PreparedRelayAuthentication, RelayPortError>;
+}
+
+/// Bounded receive result from one exclusively owned relay connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RelayReceive {
+    /// One complete typed relay frame arrived.
+    Frame(RelayFrame),
+    /// No complete frame arrived within the caller's wait bound.
+    TimedOut,
+    /// The peer closed the connection cleanly.
+    Closed,
 }
 
 /// Minimal owned relay frame vocabulary used by real and scripted connections.
@@ -352,8 +545,8 @@ pub enum RelayFrame {
 pub trait RelayConnection: Send {
     /// Sends one typed frame.
     fn send(&mut self, frame: RelayFrame) -> Result<(), RelayPortError>;
-    /// Receives the next frame, returning `None` only after clean closure.
-    fn receive(&mut self) -> Result<Option<RelayFrame>, RelayPortError>;
+    /// Receives one frame without blocking beyond the caller's wait bound.
+    fn receive(&mut self, wait: Duration) -> Result<RelayReceive, RelayPortError>;
     /// Idempotently closes the connection.
     fn close(&mut self) -> Result<(), RelayPortError>;
 }

@@ -42,8 +42,8 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 10;
-const SCHEMA_MARKER: &str = "hq-store-v10-durable-relay-sync-2026-08-27";
+const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_MARKER: &str = "hq-store-v11-relay-session-state-2026-08-27";
 const SCHEMA_TABLES: [&str; 110] = [
     "storage_metadata",
     "canonical_facts",
@@ -1128,11 +1128,14 @@ CREATE TABLE relay_attempts (
     wrapper_id BLOB NOT NULL REFERENCES prepared_relay_outbox(wrapper_id) ON DELETE RESTRICT,
     attempts INTEGER NOT NULL CHECK(attempts BETWEEN 1 AND 4294967295),
     disposition INTEGER NOT NULL CHECK(disposition BETWEEN 1 AND 3),
+    failure_code INTEGER CHECK(failure_code IS NULL OR failure_code BETWEEN 1 AND 3),
     last_attempt_millis BLOB NOT NULL
         CHECK(typeof(last_attempt_millis) = 'blob' AND length(last_attempt_millis) = 8),
     retry_at_millis BLOB
         CHECK(retry_at_millis IS NULL OR
               (typeof(retry_at_millis) = 'blob' AND length(retry_at_millis) = 8)),
+    CHECK((disposition = 2) = (failure_code IS NOT NULL)),
+    CHECK(disposition != 3 OR retry_at_millis IS NULL),
     PRIMARY KEY (url, wrapper_id)
 ) STRICT, WITHOUT ROWID;
 
@@ -1449,9 +1452,32 @@ impl Database {
 
     pub(super) fn load_relay_state(
         &self,
-        limit: usize,
-    ) -> Result<crate::StoredRelayStateSnapshot, StoreError> {
-        relay::load(&self.connection, limit)
+        query: &crate::StoredRelayStateQuery,
+    ) -> Result<crate::StoredRelayStatePage, StoreError> {
+        relay::load(&self.connection, query)
+    }
+
+    pub(super) fn load_prepared_relay_lineage(
+        &self,
+        fact_id: hq_domain::FactId,
+        recipient: hq_domain::InstallationId,
+    ) -> Result<Option<crate::StoredPreparedOutbound>, StoreError> {
+        relay::load_prepared_lineage(&self.connection, fact_id, recipient)
+    }
+
+    pub(super) fn load_relay_attempt(
+        &self,
+        url: &str,
+        wrapper_id: [u8; 32],
+    ) -> Result<Option<crate::StoredRelayAttempt>, StoreError> {
+        relay::load_attempt(&self.connection, url, wrapper_id)
+    }
+
+    pub(super) fn load_relay_cursor(
+        &self,
+        url: &str,
+    ) -> Result<Option<crate::StoredCatchupCursor>, StoreError> {
+        relay::load_cursor(&self.connection, url)
     }
 }
 

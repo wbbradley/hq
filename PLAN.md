@@ -54,16 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[transport/high] Implement owned relay sessions and deterministic synchronization** — Implement
-  one state-machine owner per configured relay over the durable ports: connection/authentication,
-  live subscription before retained backward pagination with overlap, live-edge buffering,
-  outbound exact wrapper preparation and byte-identical retry, positive/duplicate/negative `OK`,
-  disconnect and response-loss recovery, bounded exponential backoff, configuration refresh,
-  coalesced work wakes, staging retry, quarantine, and graceful drain. Use a deterministic scripted
-  relay for EOSE, duplicates, auth, rejection, missed wake, reconnect, restart, and shutdown. Complete
-  this package when healthy sessions survive ordinary wakes and every scripted failure converges to
-  the documented durable state without relay metadata reaching canonical reduction.
-
 - **[transport/high] Prove two-replica convergence and controlled relay interoperability** — Compose
   the real node relay manager, storage adapter, route resolution, root envelope identity, and common
   canonical ingest path. Prove two distinct Rust installations converge across arbitrary delivery

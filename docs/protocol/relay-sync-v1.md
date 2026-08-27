@@ -20,6 +20,12 @@ One session exclusively owns its connection, latest NIP-42 challenge, subscripti
 and in-flight writes. A capacity-one wake is a work notification, not work itself. Durable state is
 always re-read after a wake, periodic repair tick, reconnect, or restart.
 
+Every independently ordered durable collection uses a typed keyset position: start, strictly after
+one stable key, or done. A page marks an exhausted collection done while other collections continue,
+so work after the first 1,024 rows remains reachable without restarting completed scans. Only the
+lexicographically first enabled session owner retries global staging; inbound delivery on every
+session still uses the same atomic claim and quarantine transitions.
+
 ## Relay URLs and policies
 
 A relay URL is at most 2,048 ASCII bytes, begins with lowercase `ws://` or `wss://`, has a non-empty
@@ -54,6 +60,11 @@ For one `(canonical event ID, recipient installation)` lineage:
 5. `relay-rejected`: one relay returned negative `OK`; its redacted reason class and retry state are
    durable. Rejection by one relay does not reject the canonical fact or other relays.
 
+Relay `OK` text is never durable. Prefixes are reduced immediately to the closed
+`authentication-required`, `rate-limited`, or `permanent` classes. Positive `OK`, including a
+duplicate acknowledgement, is absorbing. Rate-limited and authenticated retry always reuse the
+already prepared exact bytes.
+
 Prepared wrapper ID and one-use public key are globally unique. Equal insertion is idempotent;
 unequal reuse is corruption/conflict. Preparation plus the uniqueness claim is one transaction. A
 crash exposes either queued work or the entire prepared lineage. No retry re-encrypts, re-signs, or
@@ -75,6 +86,11 @@ seen, and the policy generation. Resume repeats the boundary page. Outer-ID and 
 deduplication make overlap, relay duplicates, disconnect, and restart harmless. A policy generation
 change may restart catch-up but never erases deduplication evidence.
 
+Portable NIP-01 filters have no event-ID range operator. If an inclusive full page does not produce
+a strictly older `(created_at, outer ID)` boundary, HQ closes that page, retains it as unexhausted,
+and retries the same inclusive boundary with capped backoff. It never skips a possibly unbounded
+same-second tie or falsely declares exhaustion. A short page is the only exhaustion transition.
+
 `EOSE` closes only the named retained page or live catch-up phase. It does not certify completeness,
 authorize data, or advance domain state. Catch-up reaches exhaustion only through the documented
 bounded backward-page rule.
@@ -90,7 +106,8 @@ port re-verifies those bytes and returns one of:
 - transient local failure: store exact outer bytes in staging with bounded attempts and retry time;
 - permanent transport/canonical failure: store only bounded quarantine evidence.
 
-Outer and logical claims are one transaction. Equal duplicates are no-ops. One outer ID mapping to
+Outer and logical claims are one transaction. Equal duplicates are no-ops even when a later relay
+observation has a different receive time; the first receive time is retained. One outer ID mapping to
 different logical data, or one logical identity mapping to unequal canonical evidence, fails closed.
 Relay URL/order/time/acceptance is audit input only and is not passed to reduction.
 
@@ -99,6 +116,7 @@ Relay URL/order/time/acceptance is audit input only and is not passed to reducti
 - Each collection in an outbox/cursor/state query page: 1 through 1,024 records.
 - Exact prepared or staged outer wrapper: 1 through 262,144 bytes.
 - Quarantine raw sample: at most 4,096 bytes.
+- Relay acknowledgement, notice, or authentication challenge: at most 1,024 bytes.
 - Staging collection: at most 1,024 rows and 64 MiB exact outer bytes.
 - Quarantine collection: at most 1,024 rows and 4 MiB samples.
 - Attempt count: unsigned 32-bit; exhaustion remains permanently staged with a redacted class until
