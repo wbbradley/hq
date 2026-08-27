@@ -54,13 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[protocol/high] Convert verified v1 DTOs into semantic facts** — Implement typed scope and
-  causal-reference conversion, all family-specific intrinsic agreement checks, and the lossless
-  transition from every verified canonical/control v1 DTO to its `SemanticFact` family. Add
-  exhaustive bidirectional semantic fixtures, authority/scope/reference adversarial matrices, and
-  conversion fuzz/property coverage. Complete this split package when all 48 semantic mappings are
-  executable and no invalid or unsupported record can reach reduction as a falsely verified fact.
-
 - **[identity/high] Implement installation identity and local configuration persistence** —
   Implement the new Rust state-directory layout, stable installation identity, root-key generation
   and loading, signer access, secure atomic file creation and permissions, public identity display,

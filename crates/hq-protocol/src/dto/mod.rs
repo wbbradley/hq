@@ -2,11 +2,14 @@
 
 mod decode;
 pub(crate) mod model;
+mod semantic;
 
 use std::fmt;
 
 use decode::decode_content;
 use model::ContentDto;
+
+pub use semantic::VerifiedSemanticFact;
 
 use crate::{
     CryptographicallyVerifiedEvent, FailureClass, MAX_CONTENT_BYTES, ProtocolError,
@@ -44,6 +47,30 @@ impl VerifiedSupportedRecord {
     pub fn encode_content(&self) -> Result<String, ProtocolError> {
         let bytes = encode_dto(&self.dto)?;
         String::from_utf8(bytes).map_err(|_| ProtocolError::new(FailureClass::ContentMalformed))
+    }
+
+    /// Converts the complete verified DTO into its exhaustive semantic-domain representation.
+    ///
+    /// Prefix-only and verified-unsupported trust states deliberately cannot perform this
+    /// transition:
+    ///
+    /// ```compile_fail
+    /// use hq_protocol::SupportedContentBytes;
+    ///
+    /// fn bypass(prefix: SupportedContentBytes) {
+    ///     let _ = prefix.into_semantic_fact();
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use hq_protocol::VerifiedUnsupportedRecord;
+    ///
+    /// fn bypass(unsupported: VerifiedUnsupportedRecord) {
+    ///     let _ = unsupported.into_semantic_fact();
+    /// }
+    /// ```
+    pub fn into_semantic_fact(self) -> Result<VerifiedSemanticFact, ProtocolError> {
+        semantic::convert(self)
     }
 }
 

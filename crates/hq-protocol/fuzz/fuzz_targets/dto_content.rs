@@ -24,7 +24,9 @@ fuzz_target!(|bytes: &[u8]| {
     let Ok(DispatchOutcome::Supported(prefix)) = verified.dispatch() else {
         return;
     };
-    let _ = prefix.decode_v1();
+    if let Ok(record) = prefix.decode_v1() {
+        let _ = record.into_semantic_fact();
+    }
 });
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

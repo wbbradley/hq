@@ -51,6 +51,14 @@ pub enum FailureClass {
     NamespaceConfusion,
     /// Frozen Go schema was presented at the Rust protocol boundary.
     LegacySchema,
+    /// A syntactically valid DTO could not form a bounded domain value.
+    DomainValueInvalid,
+    /// A payload contradicted an intrinsic invariant of its fact family.
+    PayloadInvariant,
+    /// The signed scope contradicted the semantic payload subject.
+    ScopePayloadMismatch,
+    /// The verified author contradicted an embedded semantic subject.
+    AuthorSubjectMismatch,
     /// Signing key bytes did not represent a valid nonzero scalar.
     InvalidSecretKey,
     /// Signing or self-verification failed.
@@ -102,6 +110,10 @@ impl fmt::Display for ProtocolError {
             FailureClass::DuplicateAuthorityRole => "authority role occurs more than once",
             FailureClass::NamespaceConfusion => "protocol namespace and family disagree",
             FailureClass::LegacySchema => "legacy Go schema is not accepted",
+            FailureClass::DomainValueInvalid => "DTO value is invalid in the semantic domain",
+            FailureClass::PayloadInvariant => "payload violates its semantic family invariant",
+            FailureClass::ScopePayloadMismatch => "scope and semantic payload disagree",
+            FailureClass::AuthorSubjectMismatch => "author and semantic subject disagree",
             FailureClass::InvalidSecretKey => "signing key is invalid",
             FailureClass::SigningFailed => "event signing failed",
         };

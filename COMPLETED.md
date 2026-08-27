@@ -3819,3 +3819,94 @@ whitespace, and unchanged Go build/vet/fresh regressions pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so DTO code, tests, fuzz assets, and plan bookkeeping form one
      reviewable change.
+
+## 2026-08-27 — Verified DTO semantic conversion
+
+Implemented the sole reducer-ready transition from a complete `VerifiedSupportedRecord` into
+`VerifiedSemanticFact`, retaining exact signed content and event evidence alongside the domain
+fact. Exhaustive conversion covers all 48 canonical/control families, every nested semantic type,
+typed scopes and authority roles, bounded domain values, namespace-safe causal references, and
+intrinsic author/scope/body/routing agreement without moving historical authorization into the
+protocol layer. Added shared exact fixtures, both published-vector transitions, deep nested-value
+checks, adversarial subject/scope/domain-bound/reference-alias cases, compile-fail trust-state
+proofs, and semantic fuzz seeds. Format, architecture/behavior/causal/protocol verifiers, workspace
+check/build/test/doctests, strict Clippy, dependency policy, four protocol targets, fuzz smoke,
+whitespace, and unchanged Go build/vet/fresh full regression gates pass.
+
+### Original plan entry
+
+- **[protocol/high] Convert verified v1 DTOs into semantic facts** — Implement typed scope and
+  causal-reference conversion, all family-specific intrinsic agreement checks, and the lossless
+  transition from every verified canonical/control v1 DTO to its `SemanticFact` family. Add
+  exhaustive bidirectional semantic fixtures, authority/scope/reference adversarial matrices, and
+  conversion fuzz/property coverage. Complete this split package when all 48 semantic mappings are
+  executable and no invalid or unsupported record can reach reduction as a falsely verified fact.
+
+  **Implementation plan**
+
+  - Add failing public API tests first that drive the two published vectors and one valid DTO for
+    every family through `VerifiedSupportedRecord` into a new reducer-ready owner. Assert exact
+    `FactKind`, event-ID identity, author key/address, authored milliseconds, scope, causal parents,
+    typed authority roles, representative nested fields, and retained event/content evidence.
+  - Introduce `VerifiedSemanticFact` as the sole successful conversion result. It owns the validated
+    domain `SemanticFact` together with its prior verified DTO/event evidence, exposes immutable
+    audit bytes and a fact borrow, and has no constructor from raw, parsed, prefix-supported, failed,
+    or verified-unsupported values.
+  - Implement small total primitive converters from fixed DTO types into every opaque domain ID/key,
+    nonempty bounded text, provider/session, operation correlation, locator scheme/value, mailbox
+    and installation address, timestamp, positive sequence, context, message, resource, binding,
+    activity/runtime status, initial state, and remote result. Map validation failures to closed
+    redacted semantic-conversion classes without carrying attacker text.
+  - Convert signed scope and references before payload construction. Require exact protocol/scope
+    isolation and common author agreement; erase canonical/control reference namespaces only after
+    DTO direction checks, reject decoded-ID collisions, construct bounded sorted parent sets, map
+    every closed authority role, require exact authority-parent linkage, and retain no wire string
+    or generic JSON representation in domain state.
+  - Implement one exhaustive numeric/body match producing all 48 `SemanticPayload` variants with no
+    fallback or string inference. Preserve all optional values, ordered relay/resource arrays,
+    correlations, project bindings, message provenance, runtime uncertainty, and remote command
+    results exactly while applying the domain's narrower bounds such as error-code length.
+  - Enforce family-specific intrinsic agreement at conversion: installation/creator/device/project
+    roots versus verified author/key, family message purpose and output identity/project, local/peer/
+    account/control audience and sender/source relations, peer-self exclusion, project primary
+    membership/home, request target-home scope, receipt/outcome home signer, and every catalog
+    body/envelope equality that requires no historical parent lookup. Leave ancestry, referenced
+    family/subject, active authority, and reducer-state sufficiency to reduction.
+  - Reuse a single shared integration fixture catalog so every exact DTO body is converted and its
+    resulting payload kind is bidirectionally checked against `FactKind::ALL`; add deep equality
+    checks for published family 1/46 mappings and focused representatives of every nested type.
+    Add adversarial scope/author/body/route/reference/domain-bound cases and compile-fail trust-state
+    examples proving unsupported and prefix-only types cannot expose a semantic fact.
+  - Extend the structure-aware DTO fuzz target through semantic conversion and seed intrinsic-edge
+    inputs. Run the pinned fuzz smoke plus format, all spec/architecture verifiers, workspace check/
+    build/test/doctests, strict Clippy, root/fuzz dependency policy, four-target protocol checks,
+    whitespace, and unchanged Go build/vet/fresh regression suite before recording.
+
+  **Risks and mitigations**
+
+  - Erasing a control/canonical namespace too early can alias causal references; validate direction
+    first and reject any decoded-ID collision before constructing the domain's namespace-free parent
+    set or authority map.
+  - Wire short text is sometimes wider than its semantic destination, especially `ErrorCode`; run
+    every domain constructor and return a stable `domain-value-invalid` class instead of truncating,
+    normalizing, or retaining an invalid DTO as a fact.
+  - Intrinsic checks can accidentally duplicate historical authorization policy; restrict protocol
+    conversion to equalities available in the current signed envelope/body and leave parent family,
+    subject, ancestry, frontier, active-membership, and aggregate decisions to pure reducers.
+  - Forty-eight large match arms can silently swap same-width IDs; centralize primitive converters,
+    name every body field explicitly, and pair the exhaustive kind table with exact deep checks for
+    nested/address/provenance-heavy families.
+  - Dropping wire evidence after semantic conversion would weaken replay/audit guarantees; retain
+    the verified DTO owner inside `VerifiedSemanticFact` and expose exact event/content bytes without
+    serializing domain structs back into the protocol.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including all 48 mappings, intrinsic and
+     domain-bound adversarial matrices, fuzz smoke, and every repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so conversion code, tests, fuzz assets, and plan bookkeeping form one
+     reviewable change.
