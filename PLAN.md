@@ -54,17 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[design/high] Establish the Rust behavior ledger and product boundary** — Record the frozen Go
-  baseline without changing it, then classify every externally meaningful capability from the
-  authoritative sources as **retain**, **redesign**, or **drop** in a tracked Rust-era behavior
-  ledger. Resolve the first-release feature/deferred boundary, supported operating-system surface,
-  identity backup scope, CLI/TUI workflow inventory, and other product-level choices. For choices
-  not fixed by the rewrite design, select a conservative first-principles default and record it in
-  a focused ADR. Preserve the four former Go-plan findings as Rust requirements: causal-maximal
-  regrant authority, one canonical conversation comparator, indexed pagination, and non-disruptive
-  relay wakes. Complete this work when no Go-facing compatibility assumption or retained user
-  workflow remains uncategorized and later tasks can rely on a stable product boundary.
-
 - **[design/high] Specify the causal fact algebra and semantic fact catalog** — Create tracked,
   implementation-independent specifications for the add-only fact set, graph terminology,
   reachability, usability, deferred dependencies, causal maxima, explicit historical authority,
@@ -83,9 +72,10 @@ Use these sources in order when they disagree:
   boundaries, initially combining crates only where that improves clarity without weakening
   dependency direction. Configure rustfmt, strict Clippy policy, tests, CI, dependency auditing, and
   architecture checks that keep Tokio, SQLite, Nostr, Ratatui, filesystem, process, and provider
-  dependencies out of the pure core. Add a minimal in-memory walking skeleton proving that a domain
-  fact can cross the intended boundaries. Complete this work with a clean build/test/lint run and
-  automated forbidden-dependency enforcement.
+  dependencies out of the pure core. Establish the ADR-0001 Linux/macOS target matrix while keeping
+  core crates portable without claiming Windows product support. Add a minimal in-memory walking
+  skeleton proving that a domain fact can cross the intended boundaries. Complete this work with a
+  clean build/test/lint run and automated forbidden-dependency enforcement.
 
 - **[domain/high] Implement validated domain values and deterministic test support** — Implement
   newtyped IDs, keys, addresses, causal references, bounded text and collections, timestamps,
@@ -165,11 +155,13 @@ Use these sources in order when they disagree:
   and loading, signer access, secure atomic file creation and permissions, public identity display,
   and the identity export/import/backup behavior retained by the behavior ledger. Keep secret keys
   out of SQLite, logs, diagnostics, RPC results, and canonical facts, and reject unsafe overwrite or
-  concurrent-use conditions. Implement typed local configuration for relay and provider defaults
-  without turning configuration into signed domain state. Test fresh initialization, partial-write
-  recovery, permission failures, redaction, backup round trips where retained, duplicate identity
-  protection, and path derivation. Complete this work when the node and store can consume one
-  explicit secure identity/configuration boundary without reading Go state or formats.
+  concurrent-use conditions. Use the ADR-0002 Rust-era encrypted package with NIP-49 secret
+  protection, keep database/history migration outside it, and omit a routine recursive reset
+  command. Implement typed local configuration for relay and provider defaults without turning
+  configuration into signed domain state. Test fresh initialization, partial-write recovery,
+  permission failures, redaction, backup round trips, duplicate identity protection, and path
+  derivation. Complete this work when the node and store can consume one explicit secure
+  identity/configuration boundary without reading Go state or formats.
 
 - **[storage/high] Build the SQLite owner, schema, and complete rebuild path** — Design a fresh
   SQLite schema by data class: immutable canonical knowledge, deterministic indexes, rebuildable
@@ -225,9 +217,10 @@ Use these sources in order when they disagree:
   relay manager, harness supervisor, project workflow manager, root cancellation tree, bounded
   mailboxes, and tracked tasks. Implement state/runtime path policy, secure permissions, structured
   diagnostics and redaction, coordinated auto-start/readiness, status, stop, restart, and ordered
-  drain semantics. Test concurrent starts, failed readiness with actionable causes, restart with
-  connected clients, mutation during shutdown, task/process leak detection, and exact owner release.
-  Complete this work when fake external adapters support a reliable local multi-client node.
+  drain semantics behind the single installed `hq` executable selected by ADR 0001. Test concurrent
+  starts, failed readiness with actionable causes, restart with connected clients, mutation during
+  shutdown, task/process leak detection, and exact owner release. Complete this work when fake
+  external adapters support a reliable local multi-client node.
 
 - **[transport/high] Specify and implement the encrypted Nostr envelope** — Write Nostr envelope v1
   independently from canonical v1, then implement recipient binding, NIP-44 encryption, NIP-59
@@ -329,13 +322,14 @@ Use these sources in order when they disagree:
   security/redaction, and end-to-end suites across the assembled node, clients, relay, harness, and
   project workflows. Establish and meet explicit budgets for cold readiness, full rebuild,
   late-parent/high-fanout ingestion, long-conversation paging, invalidation-to-redraw, bounded queue
-  behavior, memory, release build time, and graceful shutdown. Audit every acceptance-matrix row
-  against direct evidence and add missing work to the queue rather than waiving it. Complete this
-  work only when unexplained failures, invariants without tests, and algorithmic regressions are
-  absent.
+  behavior, memory, release build time, and graceful shutdown. Run platform evidence on the
+  ADR-0001 Linux/macOS matrix. Audit every acceptance-matrix row against direct evidence and add
+  missing work to the queue rather than waiving it. Complete this work only when unexplained
+  failures, invariants without tests, and algorithmic regressions are absent.
 
-- **[release/high] Produce and rehearse the cutover-ready Rust release candidate** — Build release
-  artifacts, complete operator and recovery documentation, verify identity backup behavior in
+- **[release/high] Produce and rehearse the cutover-ready Rust release candidate** — Build the
+  single-executable Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon release artifacts, complete
+  operator and recovery documentation, verify identity backup behavior in
   first-release scope, and dogfood only with new identities and new state directories on controlled
   relays. Rehearse installation, startup, offline catch-up, relay loss, provider crash, database
   repair, backup/restore where supported, node replacement, clean shutdown, and rollback to an

@@ -2658,3 +2658,91 @@ the focused, full, vet, repository-wide, and TUI race suites pass.
 
 - When the message pane is scrolled to the bottom and a new message arrives, we should tail it
   (scroll with it). In other words, if the scrollbar is at the bottom, we should keep it there.
+
+## 2026-08-27 — Rust behavior ledger and product boundary
+
+Recorded the immutable final Go commit/tree and classified 191 externally meaningful compatibility,
+algebra, identity, messaging, relay, harness, project, client, security, operations, and regression
+behaviors as retain, redesign, or drop with required/deferred/excluded release disposition and a
+downstream owner. Added source and command/TUI coverage indexes, retained all four former Go-plan
+regressions, and accepted focused ADRs for Linux/macOS plus single-executable packaging, encrypted
+identity backup and Go-state isolation, and first-release client/provider workflows. Added a
+portable verifier for baseline identity, source markers, unique/valid classifications, regressions,
+ADR acceptance, and unresolved markers; it failed first on absent artifacts and now passes with
+Bash syntax and ShellCheck. Updated downstream roadmap packages to carry the platform, packaging,
+and backup decisions. The unchanged Go baseline passes build, vet, cached tests, and a fresh full
+`go test -count=1 ./...` run.
+
+### Original plan entry
+
+- **[design/high] Establish the Rust behavior ledger and product boundary** — Record the frozen Go
+  baseline without changing it, then classify every externally meaningful capability from the
+  authoritative sources as **retain**, **redesign**, or **drop** in a tracked Rust-era behavior
+  ledger. Resolve the first-release feature/deferred boundary, supported operating-system surface,
+  identity backup scope, CLI/TUI workflow inventory, and other product-level choices. For choices
+  not fixed by the rewrite design, select a conservative first-principles default and record it in
+  a focused ADR. Preserve the four former Go-plan findings as Rust requirements: causal-maximal
+  regrant authority, one canonical conversation comparator, indexed pagination, and non-disruptive
+  relay wakes. Complete this work when no Go-facing compatibility assumption or retained user
+  workflow remains uncategorized and later tasks can rely on a stable product boundary.
+
+  Implementation plan:
+
+  - Create `docs/rust/behavior-ledger.md` as the traceable source of truth for the frozen Go
+    baseline, source inventory, compatibility boundaries, retained capabilities, deferred scope,
+    and the four inherited regression requirements. Give every behavior a durable capability name,
+    a `retain`/`redesign`/`drop` classification, an explicit first-release/deferred/excluded
+    disposition, and a downstream specification or work-package owner.
+  - Add focused accepted ADRs under `docs/adr/` for the Unix first-release platform and single
+    executable packaging boundary; encrypted identity backup with complete Go-state isolation; and
+    the supported CLI, Ratatui, and managed-provider workflow boundary. Keep protocol field values,
+    provider version selection, and quantitative budgets owned by their later specification tasks.
+  - Add `scripts/verify-rust-behavior-ledger.sh` first and demonstrate that it fails while the
+    ledger/ADRs are absent. Make it check the frozen commit/tree, unique behavior IDs, allowed
+    classification/disposition values, source coverage markers, inherited regression IDs, and ADR
+    references so uncategorized additions fail visibly.
+  - Verify the frozen Go revision with its existing full test suite, run the ledger verifier, and
+    run the repository's normal test/vet/build gates. Review the final ledger directly against
+    `rust-rewrite-design.md`, `rust-port.md`, the algebra note, `README.md`, `docs/`, CLI dispatch,
+    embedded agent help, and project/harness specifications before archiving this plan entry.
+
+  Risks and decisions:
+
+  - A ledger can appear exhaustive while combining distinct authority or recovery rules. Keep
+    security, algebra, transport, runtime, client, and project behaviors in separate rows and use a
+    source-coverage index rather than relying on prose claims of completeness.
+  - `redesign` means the capability remains desired but its Rust semantics are specified afresh; it
+    does not imply Go wire, schema, command, UI, timing, or diagnostic compatibility.
+  - The recorded Go baseline is the final pre-roadmap commit and tree, not the current branch that
+    contains Rust planning documents. No Go source, fixture, schema, or deployment file is changed.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
