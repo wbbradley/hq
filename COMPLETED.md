@@ -6258,3 +6258,28 @@ run because the installed Docker daemon was unavailable, which remains explicitl
   smoke covering NIP-42 and catch-up without making external availability a unit gate. Complete this
   package when direct state/reducer evidence proves relay order and observations cannot influence
   the converged result.
+
+## 2026-08-27 — Provider-neutral harness contract and reusable conformance
+
+Defined the synchronous object-safe managed-runtime boundary with passive public capability,
+request, result, output, activity, and shutdown records; typed stable failures; exact durable-session
+readiness; identity-and-digest submission reconciliation; structured non-secret interaction; and
+explicit cancellation and teardown. Added a provider registry that rejects duplicate or unsafe
+recovery declarations and cleans up mismatched resumes. A reusable 14-scenario conformance driver
+and deterministic scripted adapter now prove new/resumed/missing sessions, response loss,
+lookup-before-retry, active-operation races, collisions, request handling, output order, crash
+isolation, and teardown. Normative specifications, architecture enforcement, and the four-target CI
+matrix keep provider vocabulary and runtime/process/serialization concerns outside the neutral
+crate. Locked workspace, strict Clippy, documentation, architecture/spec/dependency, four portable
+target, both 512-run fuzz, shell, whitespace, and unchanged-Go gates pass.
+
+### Original plan entry
+
+- **[harness/high] Define the provider-neutral harness contract and conformance suite** — Specify
+  logical instances, durable sessions, capabilities, start/resume readiness, stable submission IDs,
+  accepted/rejected/uncertain outcomes, lookup/reconciliation requirements, interactive requests,
+  normalized output/activity, cancellation, and shutdown. Implement neutral traits and a scripted
+  fake provider; registration must reject adapters lacking safe idempotency or reconciliation.
+  Ensure neutral crates contain no Codex vocabulary. Complete this work when the fake passes a
+  reusable conformance suite covering new/resumed sessions, response loss, active-operation races,
+  interactive requests, output, crash isolation, and teardown.

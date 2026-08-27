@@ -64,7 +64,7 @@ allowed_internal_dependency() {
       hq-store:hq-application | \
       hq-local-api:hq-domain | hq-local-api:hq-protocol | hq-local-api:hq-application | \
       hq-relay:hq-domain | hq-relay:hq-protocol | hq-relay:hq-application | \
-      hq-harness:hq-domain | hq-harness:hq-application | \
+      hq-harness:hq-domain | \
       hq-codex:hq-domain | hq-codex:hq-application | hq-codex:hq-harness | \
       hq-tui:hq-domain | hq-tui:hq-application | \
       hq-node:hq-domain | hq-node:hq-reducer | hq-node:hq-protocol | \
@@ -72,7 +72,7 @@ allowed_internal_dependency() {
       hq-node:hq-relay | hq-node:hq-harness | hq-node:hq-codex | \
       hq-node:hq-tui | hq-node:hq-testkit | \
       hq-testkit:hq-domain | hq-testkit:hq-reducer | hq-testkit:hq-protocol | \
-      hq-testkit:hq-application)
+      hq-testkit:hq-application | hq-testkit:hq-harness)
       return 0
       ;;
     *)
@@ -103,10 +103,29 @@ done
 grep -Eq '^hq-harness(\.workspace)?[[:space:]]*=' "$repository_root/crates/hq-codex/Cargo.toml" ||
   fail "hq-codex must depend on the neutral hq-harness contract"
 
-if grep -ERiq --include='Cargo.toml' --include='*.rs' '(^|[^a-z])(codex)([^a-z]|$)' \
+if grep -ERiq --include='Cargo.toml' --include='*.rs' \
+  '(^|[^a-z])(codex|claude|anthropic|openai)([^a-z]|$)' \
   "$repository_root/crates/hq-harness"; then
-  fail "hq-harness contains Codex-specific vocabulary"
+  fail "hq-harness contains provider-specific vocabulary"
 fi
+
+if grep -Eiq '^[[:space:]]*(serde|serde_json|tokio)(\.workspace)?[[:space:]]*=' \
+  "$repository_root/crates/hq-harness/Cargo.toml"; then
+  fail "hq-harness may not depend on serialization or asynchronous runtime crates"
+fi
+
+if grep -ERq --include='*.rs' \
+  '(serde(::|_)|tokio::|std::fs|std::process|derive\([^)]*(Serialize|Deserialize))' \
+  "$repository_root/crates/hq-harness/src"; then
+  fail "hq-harness contains serialization, runtime, filesystem, or process API use"
+fi
+
+[[ -f "$repository_root/docs/harness-contract-v1.md" ]] ||
+  fail "missing provider-neutral harness contract"
+[[ -f "$repository_root/docs/testing/conformance-v1.md" ]] ||
+  fail "missing reusable harness conformance contract"
+grep -Fq 'pub const ALL: [Self; 14]' "$repository_root/crates/hq-testkit/src/harness.rs" ||
+  fail "harness conformance suite must expose its complete deterministic scenario inventory"
 
 for crate in "${expected_crates[@]}"; do
   if [[ "$crate" != hq-store ]] && grep -Eq '^rusqlite(\.workspace)?[[:space:]]*=' \

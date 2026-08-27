@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 hq-domain.workspace = true
+hq-harness.workspace = true
 
 [dev-dependencies]
 hq-reducer.workspace = true

@@ -21,19 +21,26 @@ making the skeleton a supported replacement for the Go executable.
 | `hq-store` | Durable state and commit adapter | Domain, reducer, protocol, application |
 | `hq-local-api` | Local client protocol and sessions | Domain, protocol, application |
 | `hq-relay` | Encrypted relay transport | Domain, protocol, application |
-| `hq-harness` | Provider-neutral runtime contract | Domain, application |
+| `hq-harness` | Provider-neutral runtime contract and registry | Domain |
 | `hq-codex` | Private Codex adapter | Domain, application, `hq-harness` |
 | `hq-tui` | Pure UI state plus terminal adapter | Domain, application |
 | `hq-node` | Composition, runtime ownership, single binary | Any inward crate |
-| `hq-testkit` | Deterministic builders and scripted adapters | Pure and application crates |
+| `hq-testkit` | Deterministic builders, reusable conformance, and scripted adapters | Domain, harness; reducer in tests |
 
 An allowlist in `scripts/verify-rust-architecture.sh` enforces direct internal dependencies. The
 same verifier rejects Tokio, SQLite, Nostr, Ratatui, filesystem, process, and provider-specific
-concerns in `hq-domain`, `hq-reducer`, and `hq-application`; rejects Codex vocabulary in
-`hq-harness`; and requires the
+concerns in `hq-domain`, `hq-reducer`, and `hq-application`; rejects provider-specific vocabulary and
+serialization/runtime/process/filesystem dependencies in `hq-harness`; and requires the
 provider dependency to point from `hq-codex` to the neutral harness contract. Provider-neutral
 identities remain valid domain vocabulary. This source scan complements
 Cargo's cycle checks: dependency acyclicity alone does not prove that a core crate is pure.
+
+`hq-harness` implements the synchronous object-safe boundary in
+`docs/harness-contract-v1.md`: passive capability and event records have public fields, while the
+registry owns namespace and safe-recovery invariants and mutable traits represent actual runtime
+capabilities. `hq-testkit` owns the reusable scenario driver and deterministic scripted adapter in
+`docs/testing/conformance-v1.md`. Production adapters depend inward on the neutral contract; the
+neutral contract never imports a provider adapter or its wire vocabulary.
 
 The in-memory composition path remains intentionally non-normative at the protocol boundary: it
 validates a small frame in `hq-protocol`, constructs an `hq-domain` fact, and submits it through
@@ -100,9 +107,9 @@ ADR 0001 defines four first-release targets:
 | macOS | Apple Silicon | `aarch64-apple-darwin` |
 
 CI runs the complete Rust workspace natively on Linux and macOS, cross-checks the pure core,
-application contracts, and pure-Rust protocol boundary for all four triples, and runs a pinned
-signed-event fuzz smoke gate on Linux. A cross-target check is compilation evidence, not an adapter
-or lifecycle test.
+application, protocol, neutral harness, and reusable conformance boundaries for all four triples,
+and runs a pinned signed-event fuzz smoke gate on Linux. A cross-target check is compilation
+evidence, not an adapter or lifecycle test.
 Windows is deliberately absent: inexpensive core portability is welcome, but product support
 requires the separate local-transport, ownership, lifecycle, path-policy, and acceptance work in
 ADR 0001.

@@ -367,6 +367,9 @@ version = "0.1.0"
 [[package]]
 name = "hq-harness"
 version = "0.1.0"
+dependencies = [
+ "hq-domain",
+]
 
 [[package]]
 name = "hq-local-api"
@@ -457,6 +460,7 @@ name = "hq-testkit"
 version = "0.1.0"
 dependencies = [
  "hq-domain",
+ "hq-harness",
  "hq-reducer",
 ]
 

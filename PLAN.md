@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[harness/high] Define the provider-neutral harness contract and conformance suite** — Specify
-  logical instances, durable sessions, capabilities, start/resume readiness, stable submission IDs,
-  accepted/rejected/uncertain outcomes, lookup/reconciliation requirements, interactive requests,
-  normalized output/activity, cancellation, and shutdown. Implement neutral traits and a scripted
-  fake provider; registration must reject adapters lacking safe idempotency or reconciliation.
-  Ensure neutral crates contain no Codex vocabulary. Complete this work when the fake passes a
-  reusable conformance suite covering new/resumed sessions, response loss, active-operation races,
-  interactive requests, output, crash isolation, and teardown.
-
 - **[harness/high] Implement supervisor ownership, delivery recovery, and bounded persistence** —
   Implement one logical worker owner per named agent, durable ownership and delivery ledgers,
   pending/uncertain/accepted reconciliation, automatic wake from durable pending work, bounded FIFO
