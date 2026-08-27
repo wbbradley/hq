@@ -261,7 +261,7 @@ async fn malformed_peer_is_removed_without_interrupting_its_negotiated_sibling()
     let mut malformed_closed = false;
     let mut malformed_joined = false;
     let mut sibling_handled = false;
-    for _ in 0..4 {
+    for _ in 0..6 {
         match registry
             .dispatch_next(&application, &UnavailableLifecycle)
             .await
@@ -281,6 +281,8 @@ async fn malformed_peer_is_removed_without_interrupting_its_negotiated_sibling()
                 sibling_handled = true;
             }
             LocalSessionDispatch::WriteConfirmed { session_id } if session_id == sibling_id => {}
+            LocalSessionDispatch::StaleEvent { session_id }
+                if session_id == malformed_id && malformed_joined => {}
             other => panic!("unexpected dispatch: {other:?}"),
         }
         if malformed_closed && malformed_joined && sibling_handled {

@@ -8,7 +8,7 @@ use hq_store::{Store, StoreErrorClass};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::{
     AcceptedLocalStream, ReadinessRecord, RuntimeArtifactError,
-    local_transport::LocalTransportOwner,
+    local_transport::{BoundLocalListener, LocalTransportOwner},
 };
 use crate::{
     IdentityErrorClass, InstallationIdentity, LocalConfiguration, NodeAdmission, NodeLifecycle,
@@ -209,6 +209,13 @@ impl NodeFoundation {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn accept_local(&self) -> Result<AcceptedLocalStream, RuntimeArtifactError> {
         self.local_transport.accept()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn take_local_listener(
+        &mut self,
+    ) -> Result<BoundLocalListener, RuntimeArtifactError> {
+        self.local_transport.take_listener()
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

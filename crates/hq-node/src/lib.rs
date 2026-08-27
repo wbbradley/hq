@@ -11,6 +11,8 @@ mod runtime;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_io;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod session_pump;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_registry;
 
 pub use foundation::{
@@ -37,6 +39,11 @@ pub use runtime::{
 pub use session_io::{
     LocalSessionClose, LocalSessionEvent, LocalSessionHandle, LocalSessionSendError,
     LocalSessionStartError, prepare_local_session_io,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use session_pump::{
+    LocalSessionPump, LocalSessionPumpConfig, LocalSessionPumpEvent,
+    LocalSessionPumpShutdownReport, LocalSessionPumpStartError,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use session_registry::{

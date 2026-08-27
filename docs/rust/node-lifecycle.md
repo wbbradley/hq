@@ -180,3 +180,25 @@ closes that slow connection and cancels its registrations; reconnect performs a 
 refresh, so no retry queue is retained. Drain closes intake, signals every descriptor independently
 of queue capacity, consumes terminal events while shared event capacity is saturated, joins every
 task, cancels pending and active subscriptions, and reports zero retained sessions and tasks.
+
+## Owned listener and session pump
+
+After binding, the foundation can transfer its listener descriptor exactly once into a Tokio
+`AsyncFd`. The opaque transferred listener retains a shared live-descriptor lease, while the
+foundation retains the socket pathname and device/inode cleanup identity. Foundation cleanup never
+unlinks the socket while that lease is live. Normal pump drain drops the readiness owner first, so
+the subsequent foundation cleanup can remove only its exact now-closed socket.
+
+The sole pump selects between listener readiness and registry progress without a polling or accept
+task. When both are ready, it alternates preference so sustained connection pressure cannot starve
+session dispatch and a busy session cannot starve accept. Readiness is cleared through Tokio's
+`try_io` contract only after a nonblocking accept reports `WouldBlock`. Every accepted descriptor is
+kernel-validated before the pump derives its connection identity or attempts registry admission.
+
+Connection IDs combine the fresh nonzero boot nonce with a checked nonzero monotonic counter. They
+are unique only within that process generation and grant no authority. A full or closed registry
+drops the validated descriptor without spawning; closing-session entries continue occupying their
+bounded slots until their exact tasks join. Each session progress event also performs one bounded
+coalesced-invalidation pass. Explicit pump intake closure drops the listener and closes registry
+admission while retaining existing sessions; pump shutdown then joins them all and returns a plain
+report before foundation cleanup.

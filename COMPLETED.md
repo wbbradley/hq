@@ -5709,3 +5709,74 @@ both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh te
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before listener/signal
      coordination.
+
+## 2026-08-27 — Owned listener and bounded local session pump
+
+Added a one-time opaque transfer from the foundation-owned nonblocking Unix listener into Tokio
+readiness while retaining device/inode pathname cleanup authority in the foundation. A shared
+descriptor lease prevents cleanup from unlinking a still-live transferred socket. The central pump
+fairly alternates ready listener and registry work without polling or a detached accept task,
+kernel-validates every peer, derives checked boot-local connection IDs, rejects excess descriptors
+before spawning, and retains closing capacity until exact task join.
+
+Pump events and shutdown reports are plain public data. Application and lifecycle capabilities are
+borrowed only during dispatch; methods remain for actual listener/session ownership operations.
+Explicit intake closure drops listener readiness without disturbing live sessions, explicit
+invalidation flush supports external revision wakes, and shutdown joins every session before
+foundation cleanup. Real Unix-stream contracts cover once-only transfer, invalid nonce handling,
+several clients, distinct IDs, accept pressure and fairness, full-capacity rejection, disconnect
+reaping/re-admission, explicit close, zero retained tasks/sessions, cleanup, and immediate rebind.
+Full locked workspace format/check/build/tests/doctests/Clippy,
+architecture/dependency/behavior/specification verifiers, four supported core and node targets,
+both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[node/high] Drive the owned listener and bounded local session pump** — Transfer the already
+  bound foundation listener into one Tokio readiness owner and compose it with the bounded session
+  registry under a sole call-scoped event pump. Generate collision-free boot-local connection IDs,
+  accept and validate peers only when the descriptor is readable, reject excess sessions without
+  spawning, route decoded work through borrowed capabilities, and surface bounded invalidation and
+  session progress without a polling loop or detached accept task. Test multiple real clients,
+  accept saturation, peer disconnect/re-admission, dispatch fairness, explicit intake closure, and
+  complete listener/session drain on Linux and macOS.
+
+  **Implementation plan**
+
+  - Add a one-time foundation-private listener transfer that retains the socket artifact identity
+    for conditional cleanup. The transferred capability remains opaque, performs kernel same-user
+    validation on every accept, and is registered exactly once with Tokio readiness.
+  - Define a pump configuration from the existing plain registry capacities plus a nonzero boot
+    nonce. Derive unique nonzero connection IDs from that nonce and a checked monotonic counter;
+    exhaustion closes intake rather than reusing an identity.
+  - Select fairly between listener readiness and registry progress. Clear readiness on `WouldBlock`,
+    admit only validated streams, and return plain progress events for accepted/rejected peers,
+    decoded/write/task dispatch, and bounded invalidation delivery. Keep application and lifecycle
+    capabilities borrowed only for the dispatch call.
+  - Reject full/closed/colliding admission by dropping that accepted descriptor before any task is
+    spawned. A closing entry retains its capacity until its sole task is joined, after which a new
+    peer can be admitted without restarting the listener.
+  - Close intake by dropping the transferred listener and closing registry admission. Drain consumes
+    the pump, joins every session task, and returns plain listener/session diagnostics while the
+    foundation continues to retain pathname cleanup ownership.
+  - Add deterministic real Unix-stream contracts for several clients, full-capacity rejection,
+    malformed/closed peer isolation, task reaping and re-admission, fair dispatch under listener
+    pressure, explicit close, and zero retained session/task state.
+
+  **Risks and decisions**
+
+  - Repeated nonblocking polling would waste CPU and make signal fairness timing-dependent. Register
+    the already nonblocking descriptor with Tokio readiness and retry only inside `try_io`.
+  - Moving the descriptor must not move pathname cleanup authority. The foundation retains the
+    device/inode identity and removes the socket only after the pump has dropped its listener.
+  - Random per-accept identity generation introduces an unnecessary entropy failure path. One fresh
+    nonzero boot nonce plus a checked counter is unique for the process generation and remains
+    diagnostic, never authoritative.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing listener transfer, saturation, fairness, re-admission, and drain contracts first.
+  2. Implement the Tokio listener capability and central pump over the existing registry.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before lifecycle and
+     signal coordination.

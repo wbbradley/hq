@@ -54,13 +54,13 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[node/high] Coordinate the owned listener and graceful node runtime** — Drive the nonblocking
-  foundation-owned listener from the sole node event loop, cap live sessions, reject excess peers,
-  and route lifecycle requests plus Unix stop/restart signals through ordered component drain.
-  Preserve response acknowledgements already accepted before drain, notify and close connected
-  clients, join every I/O task, and clean runtime artifacts without leaks. Test accept saturation,
-  signals, repeated stop/restart, lost lifecycle acknowledgements, connected-client shutdown, and
-  immediate restart/rebind on Linux and macOS.
+- **[node/high] Coordinate lifecycle requests, Unix signals, and graceful node drain** — Compose the
+  local session pump with the sole `NodeOwner`, implement typed status/readiness/stop/restart control,
+  and route `SIGINT`/`SIGTERM` plus protocol lifecycle intent through one ordered asynchronous drain.
+  Preserve already-accepted lifecycle acknowledgements before closing clients, then join all local
+  I/O, drain components/tasks, clean readiness/socket artifacts, and return explicit stop versus
+  restart intent. Test signals, repeated stop/restart, lost lifecycle acknowledgements, connected
+  client shutdown, cleanup failures, and immediate restart/rebind on Linux and macOS.
 
 - **[node/high] Implement convergent autostart and lifecycle CLI roles** — Add one client coordinator
   that probes the owned socket, starts the foreground-node child only when absent, waits on typed

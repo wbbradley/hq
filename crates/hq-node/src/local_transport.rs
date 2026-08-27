@@ -5,12 +5,13 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, RawFd},
     os::unix::{
         fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::Path,
+    sync::Arc,
 };
 
 use hq_domain::InstallationId;
@@ -280,8 +281,33 @@ impl ArtifactIdentity {
 
 #[derive(Debug)]
 struct OwnedListener {
-    listener: UnixListener,
+    listener: Option<UnixListener>,
     identity: ArtifactIdentity,
+    lease: Arc<()>,
+}
+
+/// Opaque transferred descriptor whose pathname identity remains foundation-owned.
+pub(crate) struct BoundLocalListener {
+    listener: UnixListener,
+    _lease: Arc<()>,
+}
+
+impl BoundLocalListener {
+    pub(crate) fn accept(&self) -> Result<AcceptedLocalStream, RuntimeArtifactError> {
+        accept_validated(&self.listener)
+    }
+}
+
+impl AsRawFd for BoundLocalListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.listener.as_raw_fd()
+    }
+}
+
+impl fmt::Debug for BoundLocalListener {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BoundLocalListener(..)")
+    }
 }
 
 /// Foundation-private owner of socket and readiness artifacts.
@@ -320,8 +346,9 @@ impl LocalTransportOwner {
                         ));
                     }
                     let owned = OwnedListener {
-                        listener,
+                        listener: Some(listener),
                         identity: ArtifactIdentity::from_metadata(&metadata),
+                        lease: Arc::new(()),
                     };
                     let configured = (|| {
                         let directory = open_runtime_directory(self.paths.root())?;
@@ -340,6 +367,12 @@ impl LocalTransportOwner {
                         .map_err(operating_system)?;
                         owned
                             .listener
+                            .as_ref()
+                            .ok_or_else(|| {
+                                RuntimeArtifactError::new(
+                                    RuntimeArtifactErrorClass::OperatingSystem,
+                                )
+                            })?
                             .set_nonblocking(true)
                             .map_err(operating_system)?;
                         let configured =
@@ -376,17 +409,24 @@ impl LocalTransportOwner {
         let listener = self
             .listener
             .as_ref()
+            .and_then(|owned| owned.listener.as_ref())
             .ok_or_else(|| RuntimeArtifactError::new(RuntimeArtifactErrorClass::NotBound))?;
-        let (stream, _) = listener.listener.accept().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                RuntimeArtifactError::new(RuntimeArtifactErrorClass::WouldBlock)
-            } else {
-                operating_system(error)
-            }
-        })?;
-        validate_same_user(system_effective_user_id(), system_peer_user_id(&stream))?;
-        stream.set_nonblocking(true).map_err(operating_system)?;
-        Ok(AcceptedLocalStream(stream))
+        accept_validated(listener)
+    }
+
+    pub(crate) fn take_listener(&mut self) -> Result<BoundLocalListener, RuntimeArtifactError> {
+        let owned = self
+            .listener
+            .as_mut()
+            .ok_or_else(|| RuntimeArtifactError::new(RuntimeArtifactErrorClass::NotBound))?;
+        let listener = owned
+            .listener
+            .take()
+            .ok_or_else(|| RuntimeArtifactError::new(RuntimeArtifactErrorClass::NotBound))?;
+        Ok(BoundLocalListener {
+            listener,
+            _lease: owned.lease.clone(),
+        })
     }
 
     pub(crate) fn publish(&mut self, record: &ReadinessRecord) -> Result<(), RuntimeArtifactError> {
@@ -440,10 +480,20 @@ impl LocalTransportOwner {
 
     pub(crate) fn cleanup(&mut self) -> Result<(), RuntimeArtifactError> {
         let listener = self.listener.take();
-        let listener_identity = listener.as_ref().map(|owned| owned.identity);
+        let listener_identity = listener.as_ref().and_then(|owned| {
+            if Arc::strong_count(&owned.lease) == 1 {
+                Some(owned.identity)
+            } else {
+                None
+            }
+        });
+        let listener_transferred = listener
+            .as_ref()
+            .is_some_and(|owned| Arc::strong_count(&owned.lease) > 1);
         drop(listener);
 
-        let mut first_error = None;
+        let mut first_error = listener_transferred
+            .then(|| RuntimeArtifactError::new(RuntimeArtifactErrorClass::ArtifactChanged));
         if let Some(identity) = listener_identity
             && let Err(error) =
                 remove_owned(self.paths.socket_file(), identity, ArtifactKind::Socket)
@@ -532,6 +582,19 @@ impl LocalTransportOwner {
             Err(error) => Err(operating_system(error)),
         }
     }
+}
+
+fn accept_validated(listener: &UnixListener) -> Result<AcceptedLocalStream, RuntimeArtifactError> {
+    let (stream, _) = listener.accept().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            RuntimeArtifactError::new(RuntimeArtifactErrorClass::WouldBlock)
+        } else {
+            operating_system(error)
+        }
+    })?;
+    validate_same_user(system_effective_user_id(), system_peer_user_id(&stream))?;
+    stream.set_nonblocking(true).map_err(operating_system)?;
+    Ok(AcceptedLocalStream(stream))
 }
 
 fn validate_same_user(
