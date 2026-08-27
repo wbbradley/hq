@@ -21,7 +21,7 @@ making the skeleton a supported replacement for the Go executable.
 | `hq-store` | Durable state and commit adapter | Domain, reducer, protocol, application |
 | `hq-local-api` | Local client protocol and sessions | Domain, protocol, application |
 | `hq-relay` | Encrypted relay transport | Domain, protocol, application |
-| `hq-harness` | Provider-neutral runtime contract and registry | Domain |
+| `hq-harness` | Provider-neutral runtime contract, registry, buffer, and supervisor | Domain |
 | `hq-codex` | Private Codex adapter | Domain, application, `hq-harness` |
 | `hq-tui` | Pure UI state plus terminal adapter | Domain, application |
 | `hq-node` | Composition, runtime ownership, single binary | Any inward crate |
@@ -38,7 +38,9 @@ Cargo's cycle checks: dependency acyclicity alone does not prove that a core cra
 `hq-harness` implements the synchronous object-safe boundary in
 `docs/harness-contract-v1.md`: passive capability and event records have public fields, while the
 registry owns namespace and safe-recovery invariants and mutable traits represent actual runtime
-capabilities. `hq-testkit` owns the reusable scenario driver and deterministic scripted adapter in
+capabilities. Its operational ownership and recovery contract is
+`docs/harness-supervisor-v1.md`; passive supervisor records also expose fields directly, while exact
+owner tokens and copied secret environments remain opaque. `hq-testkit` owns the reusable scenario driver and deterministic scripted adapter in
 `docs/testing/conformance-v1.md`. Production adapters depend inward on the neutral contract; the
 neutral contract never imports a provider adapter or its wire vocabulary.
 
@@ -94,6 +96,11 @@ Tokio-owned bounded session I/O future. The future incrementally decodes into a 
 channel, writes from a fixed encoded-frame queue, emits response tickets only after complete frame
 writes, and joins its read/write halves into one exact terminal event. Listener multiplexing and
 lifecycle coordination remain in the immediately following node package.
+
+The node also owns `HarnessStoreAdapter`, the only mapping between neutral supervisor records and
+storage-owned records, plus `HarnessNodeComponent`, which composes the registry, restricted store
+handle, canonical persistence capability, injected clock/token sources, and ordered lifecycle.
+Application harness control cannot obtain a provider session or SQLite handle directly.
 
 ## Supported target matrix
 

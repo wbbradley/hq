@@ -9,6 +9,8 @@ mod foreground;
 mod foundation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod graceful_runtime;
+mod harness_component;
+mod harness_store;
 mod identity;
 mod lifecycle;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -41,6 +43,8 @@ pub use graceful_runtime::{
     LocalNodeRuntime, LocalNodeRuntimeConfig, LocalNodeRuntimeError, LocalNodeRuntimeReport,
     LocalNodeRuntimeStartError, UnixShutdownSignals, UnixSignalRegistrationError,
 };
+pub use harness_component::HarnessNodeComponent;
+pub use harness_store::HarnessStoreAdapter;
 pub use identity::{
     BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity, LocalConfiguration,
     PublicIdentity, RelayEndpoint, StateDirectoryOwner, StatePaths,

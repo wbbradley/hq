@@ -6283,3 +6283,31 @@ target, both 512-run fuzz, shell, whitespace, and unchanged-Go gates pass.
   Ensure neutral crates contain no Codex vocabulary. Complete this work when the fake passes a
   reusable conformance suite covering new/resumed sessions, response loss, active-operation races,
   interactive requests, output, crash isolation, and teardown.
+
+## 2026-08-27 — Harness supervisor ownership and durable recovery
+
+Implemented a synchronous provider-neutral supervisor with exact-token expiring ownership per
+named agent, automatic resume repair, exact delivery replay, terminal accepted/rejected state,
+lookup-before-retry reconciliation, structured cancellation, bounded FIFO/tail coalescing,
+output-before-activity checkpointing, stable persistence collision detection, copied/redacted
+memory-only environments, and ordered bounded shutdown. Storage schema v13 now durably owns leases,
+ready sessions, exact deliveries, and partial event checkpoints through a restricted handle; the
+node owns the record mapping and concrete lifecycle/application component. Deterministic tests cover
+restart after accepted-response loss, live lease competition and expiry, terminal replay, bounded
+runnable scans, concurrent agents, saturation/coalescing, partial persistence, collision, secret
+exclusion, intake closure, drain escalation, forced termination, exact release, repair survival, and
+reopen recovery. Passive records expose public fields; only invariant-bearing owner tokens and
+secret environment values remain opaque. Locked workspace, strict Clippy, documentation,
+architecture/spec/dependency, four portable-target, both 512-run fuzz, whitespace, and unchanged-Go
+gates pass.
+
+### Original plan entry
+
+- **[harness/high] Implement supervisor ownership, delivery recovery, and bounded persistence** —
+  Implement one logical worker owner per named agent, durable ownership and delivery ledgers,
+  pending/uncertain/accepted reconciliation, automatic wake from durable pending work, bounded FIFO
+  plus keyed coalescing, output-before-activity persistence, stable output collision checks,
+  environment-copy/redaction policy, and stop-intake/drain/escalate shutdown. Test daemon restart,
+  lease races, response loss, buffer saturation, coalescing order, partial output/activity commits,
+  concurrent agents, secret exclusion, drain timeout, and forced process termination with the fake
+  adapter. Complete this work when accepted work is never silently lost or duplicated.

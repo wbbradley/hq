@@ -406,6 +406,7 @@ const fn store_cause(class: StoreErrorClass) -> StartupCause {
         | StoreErrorClass::MutationConflict
         | StoreErrorClass::InvalidOperationalRequest
         | StoreErrorClass::RelayStateConflict
+        | StoreErrorClass::HarnessStateConflict
         | StoreErrorClass::RevisionExhausted
         | StoreErrorClass::OperationalStateCorrupt
         | StoreErrorClass::ReductionFailed

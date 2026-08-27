@@ -12,14 +12,15 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use hq_domain::{CommandId, FactId, InstallationId, Page, PageCursor, Revision};
+use hq_domain::{AgentId, CommandId, FactId, InstallationId, Page, PageCursor, Revision};
 use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 
 use crate::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
-    ConversationEntry, ConversationProjectionSnapshot, LocalMutationRequest, MutationReceipt,
-    OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
+    ConversationEntry, ConversationProjectionSnapshot, HarnessLeaseOutcome, LocalMutationRequest,
+    MutationReceipt, OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError,
+    StoreErrorClass, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
     StoredRelayStateMutation, StoredRelayStatePage, StoredRelayStateQuery,
     StoredRelayStateSnapshot, database::Database,
 };
@@ -254,6 +255,7 @@ enum Request {
         reply: SyncSender<Result<Vec<OutboxIntent>, StoreError>>,
     },
     Relay(Box<RelayRequest>),
+    Harness(Box<HarnessRequest>),
     Close {
         reply: SyncSender<()>,
     },
@@ -284,6 +286,27 @@ enum RelayRequest {
     },
 }
 
+enum HarnessRequest {
+    Apply {
+        mutation: Box<StoredHarnessStateMutation>,
+        reply: SyncSender<Result<HarnessLeaseOutcome, StoreError>>,
+    },
+    Load {
+        limit: usize,
+        reply: SyncSender<Result<StoredHarnessStateSnapshot, StoreError>>,
+    },
+    Delivery {
+        agent_id: AgentId,
+        submission_id: hq_domain::MessageId,
+        reply: SyncSender<Result<Option<crate::StoredHarnessDelivery>, StoreError>>,
+    },
+    RunnableDeliveries {
+        agent_id: AgentId,
+        limit: usize,
+        reply: SyncSender<Result<Vec<crate::StoredHarnessDelivery>, StoreError>>,
+    },
+}
+
 /// Sole owner of one bounded SQLite worker and its request intake.
 ///
 /// The value is intentionally not `Clone`; owned tasks clone only narrow request capabilities,
@@ -296,6 +319,12 @@ pub struct Store {
 /// Cloneable relay-state request capability without store-worker ownership.
 #[derive(Clone)]
 pub struct RelayStateHandle {
+    requests: SyncSender<Request>,
+}
+
+/// Cloneable harness-state request capability without store-worker ownership.
+#[derive(Clone)]
+pub struct HarnessStateHandle {
     requests: SyncSender<Request>,
 }
 
@@ -444,6 +473,87 @@ impl fmt::Debug for RelayStateHandle {
     }
 }
 
+impl HarnessStateHandle {
+    /// Applies one atomic durable managed-runtime coordination transition.
+    pub fn apply(
+        &self,
+        mutation: StoredHarnessStateMutation,
+    ) -> Result<HarnessLeaseOutcome, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Harness(Box::new(HarnessRequest::Apply {
+                mutation: Box::new(mutation),
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one bounded deterministic snapshot of durable harness coordination state.
+    pub fn load(&self, limit: usize) -> Result<StoredHarnessStateSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Harness(Box::new(HarnessRequest::Load {
+                limit,
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one exact durable managed-runtime delivery.
+    pub fn delivery(
+        &self,
+        agent_id: AgentId,
+        submission_id: hq_domain::MessageId,
+    ) -> Result<Option<crate::StoredHarnessDelivery>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Harness(Box::new(HarnessRequest::Delivery {
+                agent_id,
+                submission_id,
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one bounded runnable delivery prefix for one exact agent.
+    pub fn runnable_deliveries(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> Result<Vec<crate::StoredHarnessDelivery>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Harness(Box::new(
+                HarnessRequest::RunnableDeliveries {
+                    agent_id,
+                    limit,
+                    reply,
+                },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+}
+
+impl fmt::Debug for HarnessStateHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HarnessStateHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl Store {
     /// Opens a fresh or compatible database on a dedicated synchronous worker thread.
     pub fn open(path: impl AsRef<Path>, capacity: NonZeroUsize) -> Result<Self, StoreError> {
@@ -493,6 +603,13 @@ impl Store {
     /// Creates a relay-only request capability for owned synchronization tasks.
     pub fn relay_state_handle(&self) -> RelayStateHandle {
         RelayStateHandle {
+            requests: self.requests.clone(),
+        }
+    }
+
+    /// Creates a harness-state request capability for owned supervisor tasks.
+    pub fn harness_state_handle(&self) -> HarnessStateHandle {
+        HarnessStateHandle {
             requests: self.requests.clone(),
         }
     }
@@ -698,6 +815,22 @@ impl Store {
         self.relay_state_handle().load_page(query)
     }
 
+    /// Applies one atomic durable harness supervision transition.
+    pub fn apply_harness_state(
+        &self,
+        mutation: StoredHarnessStateMutation,
+    ) -> Result<HarnessLeaseOutcome, StoreError> {
+        self.harness_state_handle().apply(mutation)
+    }
+
+    /// Loads one bounded deterministic harness supervision snapshot.
+    pub fn load_harness_state(
+        &self,
+        limit: usize,
+    ) -> Result<StoredHarnessStateSnapshot, StoreError> {
+        self.harness_state_handle().load(limit)
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -819,10 +952,36 @@ fn run(
                 let _ = reply.send(database.load_outbox_intents(limit));
             }
             Request::Relay(request) => handle_relay_request(&mut database, *request),
+            Request::Harness(request) => handle_harness_request(&mut database, *request),
             Request::Close { reply } => {
                 let _ = reply.send(());
                 break;
             }
+        }
+    }
+}
+
+fn handle_harness_request(database: &mut Database, request: HarnessRequest) {
+    match request {
+        HarnessRequest::Apply { mutation, reply } => {
+            let _ = reply.send(database.apply_harness_state(*mutation));
+        }
+        HarnessRequest::Load { limit, reply } => {
+            let _ = reply.send(database.load_harness_state(limit));
+        }
+        HarnessRequest::Delivery {
+            agent_id,
+            submission_id,
+            reply,
+        } => {
+            let _ = reply.send(database.load_harness_delivery(agent_id, submission_id));
+        }
+        HarnessRequest::RunnableDeliveries {
+            agent_id,
+            limit,
+            reply,
+        } => {
+            let _ = reply.send(database.load_runnable_harness_deliveries(agent_id, limit));
         }
     }
 }

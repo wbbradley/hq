@@ -27,6 +27,8 @@ pub enum StoreErrorClass {
     InvalidOperationalRequest,
     /// A durable relay transition regressed or reused a stable identity unequally.
     RelayStateConflict,
+    /// A durable harness transition regressed or reused a stable identity unequally.
+    HarnessStateConflict,
     /// Bounded relay staging cannot accept another exact wrapper.
     RelayStagingFull,
     /// The monotonic durable revision reached its maximum representable value.
@@ -80,6 +82,7 @@ impl fmt::Display for StoreError {
             }
             StoreErrorClass::InvalidOperationalRequest => "operational store request is invalid",
             StoreErrorClass::RelayStateConflict => "relay state transition conflicts",
+            StoreErrorClass::HarnessStateConflict => "harness state transition conflicts",
             StoreErrorClass::RelayStagingFull => "relay staging is full",
             StoreErrorClass::RevisionExhausted => "change revision is exhausted",
             StoreErrorClass::OperationalStateCorrupt => "durable operational state is corrupt",

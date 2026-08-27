@@ -78,6 +78,7 @@ fn resume_requires_exact_ready_identity_and_force_stops_a_mismatch() {
             HarnessInstanceRequest {
                 agent_id: AgentId::from_bytes([7; 32]),
                 project_id: None,
+                environment: hq_harness::HarnessEnvironment::default(),
             },
             HarnessSessionRequest::Resume {
                 session_id: requested,
@@ -113,6 +114,7 @@ fn registration_exposes_passive_capabilities_and_gates_unsupported_session_modes
             HarnessInstanceRequest {
                 agent_id: AgentId::from_bytes([8; 32]),
                 project_id: None,
+                environment: hq_harness::HarnessEnvironment::default(),
             },
             HarnessSessionRequest::Start,
         )

@@ -122,6 +122,8 @@ fi
 
 [[ -f "$repository_root/docs/harness-contract-v1.md" ]] ||
   fail "missing provider-neutral harness contract"
+[[ -f "$repository_root/docs/harness-supervisor-v1.md" ]] ||
+  fail "missing provider-neutral harness supervisor contract"
 [[ -f "$repository_root/docs/testing/conformance-v1.md" ]] ||
   fail "missing reusable harness conformance contract"
 grep -Fq 'pub const ALL: [Self; 14]' "$repository_root/crates/hq-testkit/src/harness.rs" ||
@@ -164,9 +166,16 @@ grep -Fq 'impl RelayStatePort for RelayStoreAdapter' \
   "$repository_root/crates/hq-node/src/relay_store.rs" ||
   fail "hq-node must own the relay/store record mapping"
 
+grep -Fq 'impl HarnessStatePort for HarnessStoreAdapter' \
+  "$repository_root/crates/hq-node/src/harness_store.rs" ||
+  fail "hq-node must own the harness/store record mapping"
+
 grep -Fq 'impl NodeComponent for RelayNodeComponent' \
   "$repository_root/crates/hq-node/src/relay_component.rs" ||
   fail "hq-node must own the concrete relay component lifecycle"
+grep -Fq 'impl NodeComponent for HarnessNodeComponent' \
+  "$repository_root/crates/hq-node/src/harness_component.rs" ||
+  fail "hq-node must own the concrete harness component lifecycle"
 grep -Fq 'foundation.compose_relay(' "$repository_root/crates/hq-node/src/foreground.rs" ||
   fail "foreground composition must construct the concrete relay through foundation ownership"
 

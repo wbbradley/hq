@@ -7,6 +7,8 @@ use hq_domain::{
     OperationId, ProjectId, ProviderSessionId, ShortText,
 };
 
+use crate::HarnessEnvironment;
+
 /// Maximum choices carried by one structured interactive request.
 pub const MAX_INTERACTIVE_CHOICES: usize = 64;
 
@@ -65,6 +67,12 @@ pub enum HarnessErrorClass {
     Unavailable,
     /// A mismatched or failed owner could not be force-stopped cleanly.
     CleanupFailed,
+    /// Another exact live worker token owns the named agent.
+    OwnershipConflict,
+    /// A bounded neutral queue cannot accept another distinct item.
+    Backpressure,
+    /// A stable normalized persistence identity was reused unequally.
+    PersistenceCollision,
 }
 
 /// One typed neutral harness failure.
@@ -90,12 +98,24 @@ impl fmt::Display for HarnessError {
 impl Error for HarnessError {}
 
 /// Passive identity and optional project binding for one logical runtime owner.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HarnessInstanceRequest {
     /// Durable named-agent identity owning the runtime.
     pub agent_id: AgentId,
     /// Optional project binding; absence denotes a direct named-agent worker.
     pub project_id: Option<ProjectId>,
+    /// Memory-only copied launch environment; values are redacted and never durable.
+    pub environment: HarnessEnvironment,
+}
+
+impl fmt::Debug for HarnessInstanceRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HarnessInstanceRequest")
+            .field("agent_id", &self.agent_id)
+            .field("project_id", &self.project_id)
+            .field("environment", &self.environment)
+            .finish()
+    }
 }
 
 /// Exact new or resumed durable-session request.

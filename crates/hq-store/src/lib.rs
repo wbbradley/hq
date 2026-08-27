@@ -25,17 +25,23 @@ mod actor;
 mod database;
 mod error;
 mod gateway;
+mod harness;
 mod operational;
 mod paths;
 mod relay;
 mod snapshot;
 
 pub use actor::{
-    IngestOutcome, RelayStateHandle, RepairOutcome, ReplicationHandle, RevisionInvalidations,
-    Store, VerifiedFactCorpus,
+    HarnessStateHandle, IngestOutcome, RelayStateHandle, RepairOutcome, ReplicationHandle,
+    RevisionInvalidations, Store, VerifiedFactCorpus,
 };
 pub use error::{StoreError, StoreErrorClass};
 pub use gateway::StoreGateway;
+pub use harness::{
+    HarnessLeaseOutcome, MAX_HARNESS_STATE_QUERY_ITEMS, StoredHarnessDelivery,
+    StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessLease,
+    StoredHarnessReadySession, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
+};
 pub use hq_application::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, ConversationEntry,
     ConversationProjectionSnapshot, DomainSnapshot, ProjectProjectionSnapshot,

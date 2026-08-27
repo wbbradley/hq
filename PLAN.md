@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[harness/high] Implement supervisor ownership, delivery recovery, and bounded persistence** —
-  Implement one logical worker owner per named agent, durable ownership and delivery ledgers,
-  pending/uncertain/accepted reconciliation, automatic wake from durable pending work, bounded FIFO
-  plus keyed coalescing, output-before-activity persistence, stable output collision checks,
-  environment-copy/redaction policy, and stop-intake/drain/escalate shutdown. Test daemon restart,
-  lease races, response loss, buffer saturation, coalescing order, partial output/activity commits,
-  concurrent agents, secret exclusion, drain timeout, and forced process termination with the fake
-  adapter. Complete this work when accepted work is never silently lost or duplicated.
-
 - **[codex/high] Implement and pin the Codex provider adapter** — Select a current supported Codex
   app-server baseline using official schema/documentation and installed-binary evidence, pin its
   generated fixtures, and privately implement process startup, bounded JSONL/JSON-RPC transport,

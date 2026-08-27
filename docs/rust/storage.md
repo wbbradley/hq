@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v12 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v13 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `12`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `13`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,13 +23,13 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v12 ownership | Rebuildable |
+| Class | Storage v13 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
 | Deterministic reduction indexes | Reverse and affected dependencies, decisions, diagnostics, conflicts, global reducer order, and conversation-local order | Yes, through atomic ingest or explicit repair |
 | Materialized projections | Complete authority, conversation/activity, named-agent, and project frontiers, typed values, ordered children, and support | Yes, through atomic ingest or explicit repair |
-| Durable operational state | Mutation receipts, canonical commit revisions, change revision, canonical outbox intents, relay policies, prepared wrappers, attempts, cursors, deduplication, staging, and quarantine; later saga checkpoints remain reserved | No |
+| Durable operational state | Mutation receipts, canonical commit revisions, change revision, canonical outbox intents, relay policies, prepared wrappers, attempts, cursors, deduplication, staging, quarantine, and harness ownership/delivery/persistence checkpoints; later saga checkpoints remain reserved | No |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
 
@@ -227,6 +227,25 @@ queries can reach the complete state without restarting exhausted collections. S
 recomputes wrapper/staging digests and rejects malformed fixed-width values, closed codes,
 impossible optionality, or invalid monotonic generations. Explicit projection repair never deletes,
 rewrites, or derives any receipt, revision, outbox, or relay operational row.
+
+Schema v13 adds harness operational state. `harness_worker_leases` binds one named agent to an
+opaque exact owner token and full-width injected expiry. Claim permits absent, same-token renewal,
+or expired takeover; release and every external-effect mutation require the exact live token.
+`harness_ready_sessions` retains only acknowledged provider/session identity. It contains no launch
+environment or credential material.
+
+`harness_deliveries` retains the exact bounded neutral submission fields needed for restart repair.
+Immutable identity replay is idempotent even after its state advances. Changed provider, session,
+digest, operation, or body under the same agent/submission identity is a conflict. Pending advances
+to uncertain before I/O; accepted and rejected are distinct absorbing terminal states.
+`harness_event_checkpoints` binds one event identity to its digest and monotonic output/activity
+completion bits. Digest changes and completion regression fail closed, which permits exact output
+replay after a partial output-before-activity commit without duplicate canonical effects.
+
+Harness state snapshots and exact-delivery reads use typed records and bounded limits. Strict row
+decoding rejects malformed identities, text, booleans, state codes, tokens, and full-width times.
+Projection repair excludes every harness operational table. Close/reopen preserves leases, ready
+sessions, deliveries, and partial event checkpoints without ever persisting environment values.
 
 Account-addressed fanout normally uses the projected creator and active devices after the atomic
 reduction. `HumanDeviceGranted` and `HumanDeviceRevoked` additionally name their subject device

@@ -57,8 +57,8 @@ indeterminate lookup fails closed. A change in the provider's active-operation p
 recovery does not prove acceptance or absence and MUST NOT bypass reconciliation. If only stable
 provider idempotency is available, a retry still uses the exact identity and digest.
 
-Durable pending/uncertain/accepted ledgers, retry scheduling, and crash recovery are supervisor
-responsibilities specified by the following harness package.
+Durable pending/uncertain/accepted/rejected ledgers, retry scheduling, and crash recovery are
+supervisor responsibilities specified by `docs/harness-supervisor-v1.md`.
 
 ## Events and interactive requests
 
@@ -106,6 +106,7 @@ actions; canonical HQ authority and application policy remain outside it.
 
 ## Deliberate exclusions
 
-This version does not define worker leases, durable delivery/output ledgers, bounded FIFO or keyed
-coalescing buffers, environment copying/redaction, process spawning, transport framing, or kill
-escalation. Those mechanisms consume this contract but do not leak into it.
+Worker leases, durable delivery/output ledgers, bounded FIFO and keyed coalescing, environment
+copying/redaction, and node shutdown composition are defined by
+`docs/harness-supervisor-v1.md`. Process spawning, transport framing, and operating-system kill
+escalation remain private adapter mechanisms and do not leak into either neutral contract.

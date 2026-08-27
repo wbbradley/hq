@@ -89,6 +89,13 @@ routes only from a singular verified authority frontier, revalidates every relay
 opened canonical bytes through the shared parse/signature/dispatch/semantic/store-ingest path.
 Stop-intake rejects new application relay effects, while drain joins every session owner.
 
+The harness slot is likewise concrete. `HarnessNodeComponent` owns the neutral supervisor and
+implements application harness control without exposing provider sessions or storage. It composes
+the provider registry, record-only `HarnessStoreAdapter`, normalized persistence capability, and
+injected clock/token sources. Exact resume immediately reconciles durable pending/uncertain work.
+Stop-intake rejects new launch/control effects; drain flushes accepted events, bounds adapter wait,
+records escalation, force-stops runtime ownership, and releases exact worker leases.
+
 The node owns a hierarchical cancellation root. A child observes cancellation by itself or any
 ancestor, but cancelling it cannot affect its parent or siblings. The node also owns a
 fixed-capacity task tracker: spawn intake is explicit, every accepted native thread handle remains

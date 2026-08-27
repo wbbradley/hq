@@ -3,6 +3,7 @@
 mod agent;
 mod authority;
 mod conversation;
+mod harness;
 mod operational;
 mod project;
 mod relay;
@@ -42,9 +43,9 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 12;
-const SCHEMA_MARKER: &str = "hq-store-v12-relay-catchup-coverage-2026-08-27";
-const SCHEMA_TABLES: [&str; 110] = [
+const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_MARKER: &str = "hq-store-v13-harness-supervision-2026-08-27";
+const SCHEMA_TABLES: [&str; 114] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -155,8 +156,12 @@ const SCHEMA_TABLES: [&str; 110] = [
     "inbound_relay_claims",
     "relay_staging",
     "relay_quarantine",
+    "harness_worker_leases",
+    "harness_ready_sessions",
+    "harness_deliveries",
+    "harness_event_checkpoints",
 ];
-const OPERATIONAL_TABLE_COUNT: usize = 12;
+const OPERATIONAL_TABLE_COUNT: usize = 16;
 const SCHEMA_INDEXES: [&str; 2] = [
     "conversation_messages_by_fact_id",
     "conversation_activities_by_fact_id",
@@ -1196,6 +1201,52 @@ CREATE TABLE relay_quarantine (
     raw_sample BLOB NOT NULL
         CHECK(typeof(raw_sample) = 'blob' AND length(raw_sample) <= 4096 AND length(raw_sample) <= byte_len)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE harness_worker_leases (
+    agent_id BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    owner_token BLOB NOT NULL
+        CHECK(typeof(owner_token) = 'blob' AND length(owner_token) = 32),
+    expires_at_millis BLOB NOT NULL
+        CHECK(typeof(expires_at_millis) = 'blob' AND length(expires_at_millis) = 8)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE harness_ready_sessions (
+    agent_id BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    provider_id TEXT NOT NULL
+        CHECK(typeof(provider_id) = 'text' AND length(CAST(provider_id AS BLOB)) BETWEEN 1 AND 64),
+    session_id TEXT NOT NULL
+        CHECK(typeof(session_id) = 'text' AND length(CAST(session_id AS BLOB)) BETWEEN 1 AND 256)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE harness_deliveries (
+    agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    submission_id BLOB NOT NULL
+        CHECK(typeof(submission_id) = 'blob' AND length(submission_id) = 32),
+    provider_id TEXT NOT NULL
+        CHECK(typeof(provider_id) = 'text' AND length(CAST(provider_id AS BLOB)) BETWEEN 1 AND 64),
+    session_id TEXT NOT NULL
+        CHECK(typeof(session_id) = 'text' AND length(CAST(session_id AS BLOB)) BETWEEN 1 AND 256),
+    digest BLOB NOT NULL CHECK(typeof(digest) = 'blob' AND length(digest) = 32),
+    operation_id BLOB NOT NULL
+        CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    body TEXT NOT NULL
+        CHECK(typeof(body) = 'text' AND length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),
+    queued_at_millis BLOB NOT NULL
+        CHECK(typeof(queued_at_millis) = 'blob' AND length(queued_at_millis) = 8),
+    delivery_state INTEGER NOT NULL CHECK(delivery_state BETWEEN 1 AND 4),
+    PRIMARY KEY (agent_id, submission_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE harness_event_checkpoints (
+    agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    event_id BLOB NOT NULL CHECK(typeof(event_id) = 'blob' AND length(event_id) = 32),
+    digest BLOB NOT NULL CHECK(typeof(digest) = 'blob' AND length(digest) = 32),
+    output_committed INTEGER NOT NULL CHECK(output_committed IN (0, 1)),
+    activity_committed INTEGER NOT NULL CHECK(activity_committed IN (0, 1)),
+    PRIMARY KEY (agent_id, event_id)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -1484,6 +1535,36 @@ impl Database {
         url: &str,
     ) -> Result<Option<crate::StoredCatchupCursor>, StoreError> {
         relay::load_cursor(&self.connection, url)
+    }
+
+    pub(super) fn apply_harness_state(
+        &mut self,
+        mutation: crate::StoredHarnessStateMutation,
+    ) -> Result<crate::HarnessLeaseOutcome, StoreError> {
+        harness::apply(&mut self.connection, mutation)
+    }
+
+    pub(super) fn load_harness_state(
+        &self,
+        limit: usize,
+    ) -> Result<crate::StoredHarnessStateSnapshot, StoreError> {
+        harness::load(&self.connection, limit)
+    }
+
+    pub(super) fn load_harness_delivery(
+        &self,
+        agent_id: hq_domain::AgentId,
+        submission_id: hq_domain::MessageId,
+    ) -> Result<Option<crate::StoredHarnessDelivery>, StoreError> {
+        harness::load_delivery(&self.connection, agent_id, submission_id)
+    }
+
+    pub(super) fn load_runnable_harness_deliveries(
+        &self,
+        agent_id: hq_domain::AgentId,
+        limit: usize,
+    ) -> Result<Vec<crate::StoredHarnessDelivery>, StoreError> {
+        harness::load_runnable_deliveries(&self.connection, agent_id, limit)
     }
 }
 
