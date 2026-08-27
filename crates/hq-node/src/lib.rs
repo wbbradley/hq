@@ -1,14 +1,22 @@
 //! Composition root and runtime ownership boundary.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod cli;
 mod components;
 mod coordination;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod foreground;
 mod foundation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod graceful_runtime;
 mod identity;
 mod lifecycle;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod lifecycle_client;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod local_transport;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod node_coordinator;
 mod runtime;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_io;
@@ -17,6 +25,12 @@ mod session_pump;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_registry;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use cli::{NodeCliCommand, NodeCliError, parse_node_cli, run_node_cli};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use foreground::{
+    ForegroundNodeConfig, ForegroundNodeError, run_foreground, run_foreground_generation_until,
+};
 pub use foundation::{
     NodeFoundation, NodeFoundationConfig, NodeReadinessError, NodeShutdownError, NodeStartupError,
 };
@@ -34,9 +48,19 @@ pub use lifecycle::{
     OperatorAction, ShutdownIntent, StartupCause, StartupComponent, StartupDiagnostic,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use lifecycle_client::{
+    LifecycleClient, LifecycleClientConfig, LifecycleClientError, LifecycleObservation,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local_transport::{
     AcceptedLocalStream, MAX_READINESS_BYTES, ReadinessRecord, RuntimeArtifactError,
     RuntimeArtifactErrorClass,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use node_coordinator::{
+    LifecycleProbe, NodeChildExit, NodeClientCoordinator, NodeCoordinatorConfig,
+    NodeCoordinatorError, NodeLaunchError, NodeLauncher, NodeReady, NodeStopped,
+    ProcessNodeLauncher,
 };
 pub use runtime::{
     PORTABLE_UNIX_SOCKET_PATH_BYTES, RuntimeDirectoryOwner, RuntimePathError,

@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[node/high] Implement convergent autostart and lifecycle CLI roles** — Add one client coordinator
-  that probes the owned socket, starts the foreground-node child only when absent, waits on typed
-  readiness, and converges concurrent launchers on one owner without PID-file authority. Wire
-  explicit foreground run, status, readiness, stop, and restart roles through the single `hq`
-  executable with actionable phase/path/cause/action diagnostics. Test absent/stale/live nodes,
-  concurrent starters, child failure, readiness timeout, lost lifecycle acknowledgements,
-  connected-client reconnect after restart, and runtime artifact cleanup on Linux and macOS.
-
 - **[transport/high] Specify and implement the encrypted Nostr envelope** — Write Nostr envelope v1
   independently from canonical v1, then implement recipient binding, NIP-44 encryption, NIP-59
   wrapping, NIP-42 authentication inputs, identity agreement, randomized transport timestamps,

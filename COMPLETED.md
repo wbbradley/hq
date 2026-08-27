@@ -5863,3 +5863,99 @@ checks, both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/
   2. Implement response-intake closure and the sole runtime coordinator over `NodeOwner` and pump.
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before autostart/CLI.
+
+## 2026-08-27 — Convergent node autostart and lifecycle CLI
+
+Added a bounded one-shot lifecycle client that opens a fresh private Unix connection, negotiates
+local API v1, issues exactly one typed lifecycle request, and strictly decodes its correlated
+response. It distinguishes absent, incompatible, protocol, transport, response-loss, and readiness
+failures. Readiness metadata is read only after a successful protocol handshake and remains a
+diagnostic generation record rather than liveness or ownership authority.
+
+Implemented one protocol-first client coordinator over injected probe and child-launch seams.
+Already-ready owners return without spawning; absent owners start one candidate; concurrent callers
+may race children but converge on the exclusive state-lock winner. Candidate exit is retained until
+the fixed readiness deadline so a losing child cannot mask another winner. Stop converges
+idempotently to absence, while restart tolerates acknowledgement loss and returns only after a
+distinct boot nonce negotiates `Ready`. The real launcher passes arguments without a shell, closes
+standard streams, and assigns children to an explicit waiter.
+
+The single Rust `hq` executable now supports explicit `node run`, `status`, `readiness`, `stop`, and
+`restart` roles with optional absolute state roots. The foreground process composes the available
+foundation and dormant future-component owners, uses a fresh boot nonce per generation, drains via
+signals or protocol, and reacquires every owner for same-process restart. Configs, observations,
+outcomes, and diagnostics use public fields; methods are limited to protocol, launch, ownership, and
+convergence operations.
+
+Scripted tests cover live/absent/incompatible peers, losing child exit, deadline failure, lost stop
+and restart acknowledgements, and distinct-generation convergence. Real process tests cover bounded
+probe/stop, concurrent autostart callers, state-lock selection, machine-stable status/readiness,
+foreground restart, old connected-socket closure, fresh reconnect, stop, process exit, and complete
+artifact cleanup. Full locked workspace format/check/build/tests/doctests/Clippy,
+architecture/dependency/behavior/specification verifiers, four supported core and node target
+checks, both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[node/high] Implement convergent autostart and lifecycle CLI roles** — Add one client coordinator
+  that probes the owned socket, starts the foreground-node child only when absent, waits on typed
+  readiness, and converges concurrent launchers on one owner without PID-file authority. Wire
+  explicit foreground run, status, readiness, stop, and restart roles through the single `hq`
+  executable with actionable phase/path/cause/action diagnostics. Test absent/stale/live nodes,
+  concurrent starters, child failure, readiness timeout, lost lifecycle acknowledgements,
+  connected-client reconnect after restart, and runtime artifact cleanup on Linux and macOS.
+
+  **Implementation plan**
+
+  - Define a state-root-qualified client configuration with the existing runtime paths, build
+    metadata, positive connect/readiness timeouts, and bounded retry cadence. Runtime discovery must
+    not load the root signer: the first Rust CLI uses the private state-local runtime directory, and
+    readiness/PID fields remain diagnostics after a successful same-user protocol connection.
+  - Add one blocking, bounded lifecycle probe over the private Unix socket. Perform the v1 hello,
+    send exactly one status/readiness/stop/restart request, strictly decode one complete bounded
+    response, and return plain typed outcomes for absent, incompatible, lost, or successful peers.
+    Never infer liveness from the readiness file or process ID.
+  - Build a coordinator over an injected child launcher, monotonic deadline, and sleeper. Probe
+    first; spawn `hq node run --state-root ...` only when no protocol owner responds; then wait for
+    any compatible owner. Concurrent callers may both spawn, but the state lock selects one child
+    and every caller converges on its protocol readiness. Child failure wins only if no peer owner
+    appears before the deadline.
+  - Implement stop as an idempotent terminal convergence and restart as generation convergence.
+    Retain the previous readiness boot nonce only as a diagnostic generation marker, tolerate a lost
+    lifecycle response, and require the old socket generation to disappear plus a newly negotiated
+    `Ready` generation before reporting restart success.
+  - Add a foreground generation coordinator using minimal dormant component owners for capabilities
+    not implemented by later packages. Open the foundation, create the graceful local runtime with a
+    fresh nonzero boot nonce, run through Unix signals, and on `Restart` reacquire every owner and
+    start a fresh generation in the same foreground child; `Stop` exits only after complete cleanup.
+  - Parse only explicit `hq node run|status|readiness|stop|restart` roles plus optional absolute
+    `--state-root`. Keep stdout machine-stable and diagnostics redacted/actionable. The binary main
+    maps typed path, identity, startup, child, timeout, protocol, and cleanup failures to one bounded
+    human message and a nonzero exit status.
+  - Add deterministic fakes plus real child-process contracts for live/absent/stale probes,
+    concurrent launchers, loser-child convergence, early child failure, deadline expiry, lifecycle
+    response loss, stop idempotency, restart generation change, a connected client's reconnect,
+    foreground signal/stop cleanup, state-lock release, and immediate socket rebind on Linux/macOS.
+
+  **Risks and decisions**
+
+  - Reading private identity bytes merely to derive an XDG socket path would violate the client
+    trust boundary. Keep this first CLI runtime namespace under the explicit state root; later path
+    migration must be a versioned public locator, not secret-file inspection.
+  - A spawn mutex or PID file would create a second authority. Multiple children may race; only the
+    existing exclusive state lock grants ownership, and clients accept only a negotiated same-user
+    socket peer.
+  - A child can fail because another launcher won. Do not surface that exit while a compatible peer
+    becomes ready; retain it only as a diagnostic if the bounded readiness deadline expires.
+  - Restart acknowledgement loss is uncertain, not automatic failure. Observe protocol generation
+    convergence: old ownership must release and a fresh boot nonce must negotiate `Ready`.
+  - Detached child ownership must not leak zombies. The real launcher uses null standard streams and
+    a bounded reaper thread; tests inject child handles and never signal unrelated processes.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing one-shot probe, fake-launch convergence, foreground restart, and CLI parsing tests.
+  2. Implement the client coordinator, real child launcher, dormant components, foreground loop,
+     and single-binary roles.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before relay transport.
