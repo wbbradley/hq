@@ -65,6 +65,15 @@ reports lost ordinary requests without replaying them, derives a fresh subscript
 per server session, and treats revision notices only as wakes for complete authoritative refreshes.
 All retained mutation and completed-identity state is explicitly bounded.
 
+`hq-node` owns the secure lifecycle foundation specified in `docs/rust/node-lifecycle.md`. It
+derives or accepts a private runtime namespace, enforces the portable Unix socket pathname ceiling,
+and composes the state lock, identity/configuration, runtime directory, and bounded store actor in
+one RAII owner. Its pure lifecycle closes mutation and launch admission at drain entry, retains
+explicit stop/restart intent, and publishes readiness only with a serialized store revision.
+Startup failures carry closed component/cause/action values and selected paths without retaining
+secret, SQLite, or operating-system diagnostics. Listener, component-manager, and task ownership
+remain in the immediately following node packages.
+
 ## Supported target matrix
 
 ADR 0001 defines four first-release targets:

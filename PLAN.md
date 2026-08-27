@@ -54,15 +54,24 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[node/high] Compose node ownership, startup, and graceful lifecycle** — Build the sole composition
-  root owning the installation lock and identity handle, store thread, local listener, subscriptions,
-  relay manager, harness supervisor, project workflow manager, root cancellation tree, bounded
-  mailboxes, and tracked tasks. Implement state/runtime path policy, secure permissions, structured
-  diagnostics and redaction, coordinated auto-start/readiness, status, stop, restart, and ordered
-  drain semantics behind the single installed `hq` executable selected by ADR 0001. Test concurrent
-  starts, failed readiness with actionable causes, restart with connected clients, mutation during
-  shutdown, task/process leak detection, and exact owner release. Complete this work when fake
-  external adapters support a reliable local multi-client node.
+- **[node/high] Compose bounded component ownership and ordered graceful drain** — Build the sole
+  node owner over the foundation, store gateway, revision hub, local-session registry, relay-manager
+  port, harness-supervisor port, project-workflow port, hierarchical cancellation, bounded
+  mailboxes, and tracked tasks. Start and acknowledge required components in dependency order;
+  drain intake, clients, relay ingress, providers, workflows, store producers, tasks, store, and
+  ownership in the normative order. Test startup rollback at every component, saturated mailboxes,
+  mutation/drain races, task failure, provider escalation, restart, and leak-free exact-once close
+  with deterministic fake adapters.
+
+- **[node/high] Implement Unix local listener, coordinated autostart, and lifecycle commands** —
+  Bind the private Unix socket only while holding node ownership, validate peer/path security,
+  drive bounded server sessions and write confirmations, publish readiness atomically, and remove
+  only owned runtime artifacts on shutdown. Add one-client coordinator for probe/start/wait with
+  concurrent-start convergence and actionable phase/path/cause/action failures. Wire explicit
+  foreground run, status, readiness, stop, and restart roles through the single `hq` executable.
+  Test partial frames, slow/nonreading clients, stale sockets, lost acknowledgements, concurrent
+  launchers, connected-client restart/reconnect, signals, and runtime artifact cleanup on Linux and
+  macOS.
 
 - **[transport/high] Specify and implement the encrypted Nostr envelope** — Write Nostr envelope v1
   independently from canonical v1, then implement recipient binding, NIP-44 encryption, NIP-59

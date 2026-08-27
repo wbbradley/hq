@@ -5247,3 +5247,81 @@ targets, both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build
   3. Commit the implementation and documentation with one Conventional Commit.
   4. Remove this exact entry from **Next Up**, append it verbatim with completion evidence to
      `COMPLETED.md`, and amend the same commit before advancing to node composition.
+
+## 2026-08-27 — Secure node runtime paths and lifecycle ownership foundation
+
+Implemented the node's first RAII composition owner over the process-lifetime state lock,
+non-cloneable identity, unsigned local configuration, validated private runtime namespace, and
+bounded store actor. Startup follows dependency order and ordinary ownership drops unwind every
+partial failure. Checked shutdown closes and joins the store before runtime, identity, and state
+ownership release; best-effort drop provides idempotent containment.
+
+Added installation-qualified XDG runtime derivation with a state-local fallback, exact `0700`
+validation, reserved socket/readiness paths, symbolic-link rejection, and a 103-byte portable Unix
+socket pathname ceiling. Runtime preparation deliberately preserves unowned stale artifacts. The
+pure lifecycle covers starting, store-revision readiness, draining, failure, stopped
+acknowledgement, read/query/mutation/launch admission, and retained stop versus clean-restart
+intent. Structured startup errors carry closed component/cause/action values and selected paths
+without adapter or secret prose.
+
+Contracts cover unsafe and linked runtime paths, portable length, stale-artifact preservation,
+out-of-order lifecycle events, mutation rejection during drain, concurrent owners, missing
+identity, store-open and runtime failure rollback, checked close, redacted diagnostics, and
+immediate lock/store reacquisition. Full locked workspace format/check/build/tests/doctests/Clippy,
+architecture/dependency/specification verifiers, four supported core targets, both 512-run fuzz
+smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[node/high] Define secure runtime paths and lifecycle ownership foundations** — Add the
+  first-release Unix runtime namespace, typed node phases and redacted startup diagnostics, and one
+  RAII composition owner that acquires the installation lock, loads identity/configuration, opens
+  the bounded store actor, and releases partial or complete ownership exactly once. Make readiness,
+  mutation admission, drain, failure, and stop transitions explicit and deterministic. Test unsafe
+  paths, symlinks, overlong socket paths, concurrent ownership, startup failure cleanup, mutation
+  during drain, and exact store/lock release. Complete this work when later listener and component
+  owners can depend on one executable lifecycle contract rather than infer process state.
+
+  **Implementation plan**
+
+  - Specify a separate private runtime root derived from an explicit absolute root, otherwise
+    `$XDG_RUNTIME_DIR/hq`, with a private state-root fallback for macOS/service environments. Own
+    stable socket and readiness-metadata paths, reject symbolic links and modes other than `0700`,
+    and enforce the portable Unix socket pathname byte limit before binding.
+  - Define closed `Starting`, `Ready`, `Draining`, `Failed`, and `Stopped` phases plus typed startup
+    component, cause, and operator-action values. Keep filesystem and adapter prose out of stable
+    errors; diagnostics may name only the explicitly selected state/runtime paths and safe public
+    build/identity metadata.
+  - Implement a pure lifecycle machine with explicit readiness revision, intake admission, orderly
+    drain, terminal failure, and stop acknowledgement transitions. Reject new mutations and
+    launches as soon as draining begins, make repeated stop/drain calls idempotent, and fail closed
+    on out-of-order readiness or restart events.
+  - Compose an RAII node foundation in dependency order: state-directory lock, identity,
+    configuration, prepared runtime directory, and bounded store thread. Roll back through ordinary
+    ownership drops on every startup failure and close the store before releasing runtime and state
+    ownership on explicit shutdown.
+  - Add deterministic pure and filesystem contracts for every transition and failure category,
+    two concurrent owners, unsafe or stale artifacts, store-open failure, retry after failure,
+    mutation admission during shutdown, redacted debug/display surfaces, and immediate reacquisition
+    after clean close.
+
+  **Risks and decisions**
+
+  - A socket path accepted on Linux may exceed macOS `sockaddr_un`; enforce a documented portable
+    byte limit at path construction instead of discovering it during bind.
+  - Runtime cleanup before installation ownership could delete another process's socket. Path
+    preparation validates only directories; stale socket/readiness cleanup is reserved for the
+    later listener after the state lock is held.
+  - A destructor cannot report store-close failure. Provide explicit checked shutdown for normal
+    operation and retain idempotent best-effort drop solely as panic/early-return containment.
+  - Readiness is not equivalent to lock acquisition or socket existence. Only the lifecycle owner
+    may publish `Ready` after identity, configuration, store, and required component startup have
+    all acknowledged success.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing lifecycle, path-security, concurrent-owner, and cleanup contracts first.
+  2. Implement the pure machine and RAII foundation, then update node/workspace/acceptance docs.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before component
+     composition.

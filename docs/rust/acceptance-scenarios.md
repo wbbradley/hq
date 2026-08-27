@@ -253,6 +253,21 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   returned revision is behind, resubscription after acknowledgement loss, and two independent
   clients racing without sharing registration state.
 
+## Node lifecycle foundation gates
+
+- Runtime paths are explicit or derive to an installation-qualified XDG namespace with a private
+  state-local fallback. Relative/empty roots, symlinks, modes other than `0700`, and socket paths
+  beyond the portable 103-byte limit fail before bind work; path preparation never deletes an
+  unowned stale socket or readiness artifact.
+- Lifecycle contracts cover startup, store-revision readiness, read/query/mutation/launch admission,
+  mutation and launch rejection at drain entry, idempotent stop, explicit clean-restart intent,
+  out-of-order events, retained failures, and terminal stop acknowledgement without ambient time or
+  process state.
+- Foundation contracts cover two concurrent state owners, missing identity, unsafe runtime,
+  store-open failure, reverse-order startup rollback, checked store close, redacted structured
+  component/cause/action diagnostics, and immediate state-lock/store reacquisition after clean or
+  failed startup.
+
 ## Scenario maintenance rule
 
 Every new semantic catalog row adds at least one valid scenario and one missing-parent,

@@ -12,10 +12,7 @@ impl TestDirectory {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "hq-rust-identity-test-{}-{unique}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("hq-{}-{unique}", std::process::id()));
         fs::create_dir(&path).expect("test directory creates");
         Self(path)
     }

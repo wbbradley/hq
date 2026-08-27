@@ -1,10 +1,24 @@
 //! Composition root and runtime ownership boundary.
 
+mod foundation;
 mod identity;
+mod lifecycle;
+mod runtime;
 
+pub use foundation::{
+    NodeFoundation, NodeFoundationConfig, NodeReadinessError, NodeShutdownError, NodeStartupError,
+};
 pub use identity::{
     BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity, LocalConfiguration,
     PublicIdentity, RelayEndpoint, StateDirectoryOwner, StatePaths,
+};
+pub use lifecycle::{
+    NodeAdmission, NodeLifecycle, NodeLifecycleError, NodePhase, NodeTransitionOutcome,
+    OperatorAction, ShutdownIntent, StartupCause, StartupComponent, StartupDiagnostic,
+};
+pub use runtime::{
+    PORTABLE_UNIX_SOCKET_PATH_BYTES, RuntimeDirectoryOwner, RuntimePathError,
+    RuntimePathErrorClass, RuntimePaths,
 };
 
 use hq_application::InMemoryApplication;

@@ -318,6 +318,7 @@ dependencies = [
  "hq-domain",
  "hq-protocol",
  "hq-reducer",
+ "hq-store",
  "scrypt",
  "serde",
  "serde_json",

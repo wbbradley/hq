@@ -1,0 +1,316 @@
+//! RAII ownership of the state lock, identity, runtime namespace, and bounded store.
+
+use std::{error::Error, fmt, num::NonZeroUsize};
+
+use hq_store::{Store, StoreErrorClass};
+
+use crate::{
+    IdentityErrorClass, InstallationIdentity, LocalConfiguration, NodeAdmission, NodeLifecycle,
+    NodeLifecycleError, NodeTransitionOutcome, RuntimeDirectoryOwner, RuntimePathErrorClass,
+    RuntimePaths, StartupCause, StartupComponent, StartupDiagnostic, StateDirectoryOwner,
+    StatePaths,
+};
+
+/// Explicit inputs for opening the node foundation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NodeFoundationConfig {
+    state: StatePaths,
+    runtime: RuntimePaths,
+    store_capacity: NonZeroUsize,
+}
+
+impl NodeFoundationConfig {
+    /// Constructs one explicit, deterministic foundation configuration.
+    pub const fn new(
+        state: StatePaths,
+        runtime: RuntimePaths,
+        store_capacity: NonZeroUsize,
+    ) -> Self {
+        Self {
+            state,
+            runtime,
+            store_capacity,
+        }
+    }
+}
+
+/// Redacted node startup failure with actionable structured context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NodeStartupError {
+    diagnostic: StartupDiagnostic,
+}
+
+impl NodeStartupError {
+    /// Returns the stable structured diagnostic.
+    pub const fn diagnostic(&self) -> &StartupDiagnostic {
+        &self.diagnostic
+    }
+}
+
+impl fmt::Display for NodeStartupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "node startup failed in {:?}: {:?}; action: {:?}",
+            self.diagnostic.component(),
+            self.diagnostic.cause(),
+            self.diagnostic.action()
+        )
+    }
+}
+
+impl Error for NodeStartupError {}
+
+/// Checked shutdown failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NodeShutdownError {
+    /// The lifecycle was already in an invalid transition state.
+    Lifecycle,
+    /// The store worker did not acknowledge and join cleanly.
+    Store,
+}
+
+impl fmt::Display for NodeShutdownError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Lifecycle => "node shutdown lifecycle is invalid",
+            Self::Store => "node store did not shut down cleanly",
+        })
+    }
+}
+
+impl Error for NodeShutdownError {}
+
+/// Readiness failure separated from startup ownership and lifecycle-order failures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NodeReadinessError {
+    /// The store could not provide its authoritative serialized revision.
+    Store(NodeStartupError),
+    /// Readiness was acknowledged outside the `Starting` phase.
+    Lifecycle(NodeLifecycleError),
+}
+
+impl fmt::Display for NodeReadinessError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(formatter),
+            Self::Lifecycle(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for NodeReadinessError {}
+
+/// Sole owner of node foundations required before component startup.
+pub struct NodeFoundation {
+    lifecycle: NodeLifecycle,
+    store: Option<Store>,
+    runtime: RuntimeDirectoryOwner,
+    configuration: LocalConfiguration,
+    identity: InstallationIdentity,
+    state: StateDirectoryOwner,
+}
+
+impl NodeFoundation {
+    /// Opens every foundation in dependency order and unwinds automatically on any failure.
+    pub fn open(config: NodeFoundationConfig) -> Result<Self, NodeStartupError> {
+        let state_root = config.state.root().to_path_buf();
+        let runtime_root = config.runtime.root().to_path_buf();
+        let diagnostic = |component, cause| NodeStartupError {
+            diagnostic: StartupDiagnostic::new(
+                component,
+                cause,
+                state_root.clone(),
+                runtime_root.clone(),
+            ),
+        };
+
+        let state = StateDirectoryOwner::acquire(config.state.clone()).map_err(|error| {
+            diagnostic(
+                StartupComponent::StateOwnership,
+                identity_cause(error.class()),
+            )
+        })?;
+        let identity = state.load_identity().map_err(|error| {
+            diagnostic(StartupComponent::Identity, identity_cause(error.class()))
+        })?;
+        let configuration = state.load_configuration().map_err(|error| {
+            diagnostic(
+                StartupComponent::Configuration,
+                identity_cause(error.class()),
+            )
+        })?;
+        let runtime = RuntimeDirectoryOwner::prepare(config.runtime)
+            .map_err(|error| diagnostic(StartupComponent::Runtime, runtime_cause(error.class())))?;
+        let store = Store::open(state.paths().database_file(), config.store_capacity)
+            .map_err(|error| diagnostic(StartupComponent::Store, store_cause(error.class())))?;
+
+        Ok(Self {
+            lifecycle: NodeLifecycle::new(),
+            store: Some(store),
+            runtime,
+            configuration,
+            identity,
+            state,
+        })
+    }
+
+    /// Returns the pure lifecycle owner.
+    pub const fn lifecycle(&self) -> &NodeLifecycle {
+        &self.lifecycle
+    }
+
+    /// Returns safe identity metadata without exposing signer secret bytes.
+    pub fn public_identity(&self) -> crate::PublicIdentity {
+        self.identity.public_identity()
+    }
+
+    /// Returns installation-local unsigned defaults.
+    pub const fn configuration(&self) -> &LocalConfiguration {
+        &self.configuration
+    }
+
+    /// Returns the validated runtime layout.
+    pub const fn runtime_paths(&self) -> &RuntimePaths {
+        self.runtime.paths()
+    }
+
+    /// Borrows the sole bounded store owner for later composition.
+    pub const fn store(&self) -> Option<&Store> {
+        self.store.as_ref()
+    }
+
+    /// Acknowledges store-backed readiness at the serialized current revision.
+    pub fn mark_ready(&mut self) -> Result<NodeTransitionOutcome, NodeReadinessError> {
+        let Some(store) = self.store() else {
+            return Err(NodeReadinessError::Store(self.lifecycle_error()));
+        };
+        let revision = store.current_revision().map_err(|error| {
+            NodeReadinessError::Store(NodeStartupError {
+                diagnostic: StartupDiagnostic::new(
+                    StartupComponent::Store,
+                    store_cause(error.class()),
+                    self.state.paths().root().to_path_buf(),
+                    self.runtime_paths().root().to_path_buf(),
+                ),
+            })
+        })?;
+        self.lifecycle
+            .mark_ready(revision.value())
+            .map_err(NodeReadinessError::Lifecycle)
+    }
+
+    /// Evaluates whether current lifecycle policy accepts one operation family.
+    pub fn admits(&self, admission: NodeAdmission) -> bool {
+        self.lifecycle.admits(admission)
+    }
+
+    /// Closes side-effecting intake before ordered component drain.
+    pub fn begin_drain(&mut self) -> Result<NodeTransitionOutcome, NodeLifecycleError> {
+        self.lifecycle.begin_drain()
+    }
+
+    /// Closes the store before releasing runtime, identity, and state ownership.
+    pub fn shutdown(mut self) -> Result<(), NodeShutdownError> {
+        self.lifecycle
+            .begin_drain()
+            .map_err(|_| NodeShutdownError::Lifecycle)?;
+        self.close_store()?;
+        self.lifecycle
+            .acknowledge_stopped()
+            .map_err(|_| NodeShutdownError::Lifecycle)?;
+        Ok(())
+    }
+
+    fn close_store(&mut self) -> Result<(), NodeShutdownError> {
+        if let Some(store) = self.store.take() {
+            store.close().map_err(|_| NodeShutdownError::Store)?;
+        }
+        Ok(())
+    }
+
+    fn lifecycle_error(&self) -> NodeStartupError {
+        NodeStartupError {
+            diagnostic: StartupDiagnostic::new(
+                StartupComponent::Store,
+                StartupCause::Unavailable,
+                self.state.paths().root().to_path_buf(),
+                self.runtime_paths().root().to_path_buf(),
+            ),
+        }
+    }
+}
+
+impl Drop for NodeFoundation {
+    fn drop(&mut self) {
+        let _ = self.lifecycle.begin_drain();
+        let _ = self.close_store();
+        let _ = self.lifecycle.acknowledge_stopped();
+    }
+}
+
+impl fmt::Debug for NodeFoundation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NodeFoundation")
+            .field("phase", &self.lifecycle.phase())
+            .field("public_identity", &self.public_identity())
+            .finish_non_exhaustive()
+    }
+}
+
+const fn identity_cause(class: IdentityErrorClass) -> StartupCause {
+    match class {
+        IdentityErrorClass::PathUnavailable | IdentityErrorClass::InvalidPath => {
+            StartupCause::InvalidPath
+        }
+        IdentityErrorClass::UnsafePermissions => StartupCause::UnsafePermissions,
+        IdentityErrorClass::SymbolicLink => StartupCause::SymbolicLink,
+        IdentityErrorClass::AlreadyOwned => StartupCause::AlreadyOwned,
+        IdentityErrorClass::IdentityMissing => StartupCause::Missing,
+        IdentityErrorClass::IdentityMalformed
+        | IdentityErrorClass::ConfigurationMalformed
+        | IdentityErrorClass::ConfigurationInvalid
+        | IdentityErrorClass::IdentityExists
+        | IdentityErrorClass::BackupMalformed
+        | IdentityErrorClass::BackupAuthenticationFailed => StartupCause::Malformed,
+        IdentityErrorClass::FileSystem
+        | IdentityErrorClass::EntropyUnavailable
+        | IdentityErrorClass::PasswordInvalid
+        | IdentityErrorClass::BackupExists => StartupCause::Unavailable,
+    }
+}
+
+const fn runtime_cause(class: RuntimePathErrorClass) -> StartupCause {
+    match class {
+        RuntimePathErrorClass::InvalidPath | RuntimePathErrorClass::SocketPathTooLong => {
+            StartupCause::InvalidPath
+        }
+        RuntimePathErrorClass::SymbolicLink => StartupCause::SymbolicLink,
+        RuntimePathErrorClass::UnsafePermissions => StartupCause::UnsafePermissions,
+        RuntimePathErrorClass::FileSystem => StartupCause::Unavailable,
+    }
+}
+
+const fn store_cause(class: StoreErrorClass) -> StartupCause {
+    match class {
+        StoreErrorClass::InvalidPath => StartupCause::InvalidPath,
+        StoreErrorClass::SymbolicLink => StartupCause::SymbolicLink,
+        StoreErrorClass::UnsafePermissions => StartupCause::UnsafePermissions,
+        StoreErrorClass::IncompatibleSchema => StartupCause::Incompatible,
+        StoreErrorClass::CorruptDatabase
+        | StoreErrorClass::InvalidEvidence
+        | StoreErrorClass::IdentityCollision
+        | StoreErrorClass::MutationConflict
+        | StoreErrorClass::InvalidOperationalRequest
+        | StoreErrorClass::RevisionExhausted
+        | StoreErrorClass::OperationalStateCorrupt
+        | StoreErrorClass::ReductionFailed
+        | StoreErrorClass::NotRepaired
+        | StoreErrorClass::RebuildableStateCorrupt => StartupCause::Malformed,
+        StoreErrorClass::FileSystem
+        | StoreErrorClass::ActorClosed
+        | StoreErrorClass::WorkerStopped
+        | StoreErrorClass::DatabaseUnavailable => StartupCause::Unavailable,
+    }
+}
