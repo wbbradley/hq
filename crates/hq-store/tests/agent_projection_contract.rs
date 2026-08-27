@@ -10,7 +10,7 @@ use rusqlite::Connection;
 mod support;
 
 use support::{
-    TestDirectory, authority_policy, open_store, verified_child, verified_fact,
+    TestDirectory, TestStoreExt, authority_policy, open_store, verified_child, verified_fact,
     verified_session_binding,
 };
 
@@ -21,12 +21,15 @@ fn repair_persists_the_exact_typed_agent_report_and_reopens() {
     let store = open_store(&database);
     append_session_fixture(&store);
 
+    let ingested = store
+        .load_agent_snapshot()
+        .expect("ingest materializes agent rows");
     assert_eq!(
+        ingested,
         store
-            .load_agent_snapshot()
-            .expect_err("fresh agent rows are absent")
-            .class(),
-        StoreErrorClass::NotRepaired
+            .complete_snapshot(authority_policy())
+            .expect("complete oracle succeeds")
+            .agent_projection_snapshot()
     );
     let repaired = store.repair(authority_policy()).expect("repair succeeds");
     assert_eq!(
@@ -61,7 +64,7 @@ fn repair_persists_the_exact_typed_agent_report_and_reopens() {
 }
 
 #[test]
-fn agent_snapshot_changes_only_after_explicit_repair() {
+fn agent_snapshot_changes_atomically_on_ingest_and_repair_is_equal() {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
     let root = verified_fact();
@@ -70,29 +73,24 @@ fn agent_snapshot_changes_only_after_explicit_repair() {
     let mailbox_id = mailbox.verified_event().event_id();
     store.append_verified(root).expect("root appends");
     store.append_verified(mailbox).expect("mailbox appends");
-    let before = store
-        .repair(authority_policy())
-        .expect("initial repair succeeds")
-        .agent()
-        .clone();
+    let before = store.load_agent_snapshot().expect("initial snapshot loads");
     assert!(before.projections().is_empty());
     store
         .append_verified(verified_session_binding(root_id, mailbox_id))
         .expect("binding appends");
 
-    assert_eq!(
-        store
-            .load_agent_snapshot()
-            .expect("old agent snapshot remains explicit"),
-        before
-    );
     let after = store
-        .repair(authority_policy())
-        .expect("explicit reconsideration succeeds")
-        .agent()
-        .clone();
+        .load_agent_snapshot()
+        .expect("ingest updates agent snapshot");
     assert_ne!(after, before);
     assert_eq!(after.projections().len(), 2);
+    assert_eq!(
+        store
+            .repair(authority_policy())
+            .expect("repair succeeds")
+            .agent(),
+        &after
+    );
 }
 
 #[test]

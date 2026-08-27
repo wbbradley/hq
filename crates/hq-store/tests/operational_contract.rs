@@ -8,7 +8,7 @@ use rusqlite::{Connection, params};
 
 mod support;
 
-use support::{TestDirectory, authority_policy, open_store, verified_fact};
+use support::{TestDirectory, TestStoreExt, authority_policy, open_store, verified_fact};
 
 #[test]
 fn receipts_revisions_and_exact_outbox_bytes_survive_repair_and_reopen() {

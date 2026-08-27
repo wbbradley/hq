@@ -10,7 +10,7 @@ use rusqlite::Connection;
 mod support;
 
 use support::{
-    TestDirectory, authority_policy, open_store, verified_child, verified_fact,
+    TestDirectory, TestStoreExt, authority_policy, open_store, verified_child, verified_fact,
     verified_fact_with_label,
 };
 
@@ -26,12 +26,15 @@ fn repair_persists_the_exact_typed_authority_report_and_reopens() {
         .append_verified(verified_child(root_id))
         .expect("mailbox appends");
 
+    let ingested = store
+        .load_authority_snapshot()
+        .expect("ingest materializes authority rows");
     assert_eq!(
+        ingested,
         store
-            .load_authority_snapshot()
-            .expect_err("fresh authority rows are absent")
-            .class(),
-        StoreErrorClass::NotRepaired
+            .complete_snapshot(authority_policy())
+            .expect("complete oracle succeeds")
+            .authority_projection_snapshot()
     );
     let repaired = store.repair(authority_policy()).expect("repair succeeds");
     assert_eq!(
@@ -81,34 +84,31 @@ fn repair_persists_the_exact_typed_authority_report_and_reopens() {
 }
 
 #[test]
-fn authority_snapshot_changes_only_after_explicit_repair() {
+fn authority_snapshot_changes_atomically_on_ingest_and_repair_is_equal() {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
     store
         .append_verified(verified_fact_with_label("alpha", [7; 32]))
         .expect("first root appends");
     let before = store
-        .repair(authority_policy())
-        .expect("initial repair succeeds")
-        .authority()
-        .clone();
+        .load_authority_snapshot()
+        .expect("initial authority loads");
     store
         .append_verified(verified_fact_with_label("beta", [8; 32]))
         .expect("conflicting root appends");
 
-    assert_eq!(
-        store
-            .load_authority_snapshot()
-            .expect("old authority snapshot remains explicit"),
-        before
-    );
     let after = store
-        .repair(authority_policy())
-        .expect("explicit reconsideration succeeds")
-        .authority()
-        .clone();
+        .load_authority_snapshot()
+        .expect("ingest updates authority snapshot");
     assert_ne!(after, before);
     assert!(after.projections().is_empty());
+    assert_eq!(
+        store
+            .repair(authority_policy())
+            .expect("repair succeeds")
+            .authority(),
+        &after
+    );
 }
 
 #[test]

@@ -17,7 +17,7 @@
 //! use hq_store::Store;
 //!
 //! fn bypass(store: &Store, raw: RawEventBytes) {
-//!     store.append_verified(raw).unwrap();
+//!     store.ingest_verified(raw, todo!()).unwrap();
 //! }
 //! ```
 
@@ -32,7 +32,7 @@ mod paths;
 mod project_snapshot;
 mod snapshot;
 
-pub use actor::{AppendOutcome, RepairOutcome, Store, VerifiedFactCorpus};
+pub use actor::{IngestOutcome, RepairOutcome, RevisionInvalidations, Store, VerifiedFactCorpus};
 pub use agent_snapshot::AgentProjectionSnapshot;
 pub use authority_snapshot::AuthorityProjectionSnapshot;
 pub use conversation_snapshot::ConversationProjectionSnapshot;

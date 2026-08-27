@@ -10,8 +10,8 @@ use rusqlite::Connection;
 mod support;
 
 use support::{
-    TestDirectory, authority_policy, open_store, verified_account, verified_fact, verified_project,
-    verified_question,
+    TestDirectory, TestStoreExt, authority_policy, open_store, verified_account, verified_fact,
+    verified_project, verified_question,
 };
 
 #[test]
@@ -21,12 +21,15 @@ fn repair_persists_every_report_exactly_and_project_rows_reopen() {
     let store = open_store(&database);
     append_project_fixture(&store, true);
 
+    let ingested = store
+        .load_project_snapshot()
+        .expect("ingest materializes project rows");
     assert_eq!(
+        ingested,
         store
-            .load_project_snapshot()
-            .expect_err("fresh project rows are absent")
-            .class(),
-        StoreErrorClass::NotRepaired
+            .complete_snapshot(authority_policy())
+            .expect("complete oracle succeeds")
+            .project_projection_snapshot()
     );
     let repaired = store.repair(authority_policy()).expect("repair succeeds");
     assert_eq!(
@@ -73,7 +76,7 @@ fn repair_persists_every_report_exactly_and_project_rows_reopen() {
 }
 
 #[test]
-fn project_snapshot_changes_only_after_explicit_repair() {
+fn project_snapshot_changes_atomically_on_ingest_and_repair_is_equal() {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
     let root = verified_fact();
@@ -83,28 +86,25 @@ fn project_snapshot_changes_only_after_explicit_repair() {
     store.append_verified(root).expect("root appends");
     store.append_verified(account).expect("account appends");
     let before = store
-        .repair(authority_policy())
-        .expect("initial repair succeeds")
-        .project()
-        .clone();
+        .load_project_snapshot()
+        .expect("initial project snapshot loads");
     assert!(before.projections().is_empty());
     store
         .append_verified(verified_project(root_id, account_id))
         .expect("project appends");
 
-    assert_eq!(
-        store
-            .load_project_snapshot()
-            .expect("old project snapshot remains explicit"),
-        before
-    );
     let after = store
-        .repair(authority_policy())
-        .expect("explicit reconsideration succeeds")
-        .project()
-        .clone();
+        .load_project_snapshot()
+        .expect("ingest updates project snapshot");
     assert_ne!(after, before);
     assert!(after.projection(&project_key()).is_some());
+    assert_eq!(
+        store
+            .repair(authority_policy())
+            .expect("repair succeeds")
+            .project(),
+        &after
+    );
 }
 
 #[test]

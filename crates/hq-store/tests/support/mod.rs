@@ -10,6 +10,22 @@ use std::{
 use hq_protocol::{Bip340Signer, DispatchOutcome, VerifiedSemanticFact};
 use hq_store::Store;
 
+pub trait TestStoreExt {
+    fn append_verified(
+        &self,
+        fact: VerifiedSemanticFact,
+    ) -> Result<hq_store::IngestOutcome, hq_store::StoreError>;
+}
+
+impl TestStoreExt for Store {
+    fn append_verified(
+        &self,
+        fact: VerifiedSemanticFact,
+    ) -> Result<hq_store::IngestOutcome, hq_store::StoreError> {
+        self.ingest_verified(fact, authority_policy())
+    }
+}
+
 pub const CANONICAL_CONTENT: &str = r#"{"p":"hq/canonical","v":1,"f":1,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":0,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[],"auth":[],"body":{"installation":"1111111111111111111111111111111111111111111111111111111111111111","signing":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","encryption":"2222222222222222222222222222222222222222222222222222222222222222","label":"alpha"}}"#;
 
 pub struct TestDirectory(PathBuf);
@@ -92,6 +108,45 @@ fn signed_fact(
         .expect("fixture DTO verifies")
         .into_semantic_fact()
         .expect("fixture converts")
+}
+
+pub fn verified_device_grant(account_fact_id: [u8; 32]) -> VerifiedSemanticFact {
+    let account = hex(&account_fact_id);
+    let device_signing = hex(&signer(2).public_key());
+    let content = format!(
+        r#"{{"p":"hq/canonical","v":1,"f":12,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":5000,"scope":["account","5555555555555555555555555555555555555555555555555555555555555555"],"parents":[["c","{account}"]],"auth":[["account-creator","c","{account}"]],"body":{{"account":"5555555555555555555555555555555555555555555555555555555555555555","grant":"8888888888888888888888888888888888888888888888888888888888888888","device":{{"installation":"2222222222222222222222222222222222222222222222222222222222222222","signing":"{device_signing}"}},"label":"device-two","relays":[]}}}}"#
+    );
+    signed_fact(5, content.as_bytes(), [14; 32])
+}
+
+pub fn verified_device_acceptance(grant_fact_id: [u8; 32]) -> VerifiedSemanticFact {
+    let grant = hex(&grant_fact_id);
+    let device = signer(2);
+    let device_signing = hex(&device.public_key());
+    let content = format!(
+        r#"{{"p":"hq/canonical","v":1,"f":13,"author":"2222222222222222222222222222222222222222222222222222222222222222","time":6000,"scope":["account","5555555555555555555555555555555555555555555555555555555555555555"],"parents":[["c","{grant}"]],"auth":[["device-grant","c","{grant}"]],"body":{{"account":"5555555555555555555555555555555555555555555555555555555555555555","grant":"8888888888888888888888888888888888888888888888888888888888888888","device":{{"installation":"2222222222222222222222222222222222222222222222222222222222222222","signing":"{device_signing}"}}}}}}"#
+    );
+    let event = device
+        .sign(6, content.as_bytes(), [15; 32])
+        .expect("device acceptance signs");
+    let DispatchOutcome::Supported(supported) = event.dispatch().expect("acceptance dispatches")
+    else {
+        panic!("acceptance protocol is supported");
+    };
+    supported
+        .decode_v1()
+        .expect("acceptance DTO verifies")
+        .into_semantic_fact()
+        .expect("acceptance converts")
+}
+
+fn signer(secret_value: u8) -> Bip340Signer {
+    Bip340Signer::from_secret_bytes({
+        let mut secret = [0_u8; 32];
+        secret[31] = secret_value;
+        secret
+    })
+    .expect("fixture secret is valid")
 }
 
 pub fn verified_child(parent_id: [u8; 32]) -> VerifiedSemanticFact {

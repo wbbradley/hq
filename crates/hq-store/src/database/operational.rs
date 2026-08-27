@@ -26,6 +26,46 @@ pub(crate) fn current_revision(connection: &Connection) -> Result<Revision, Stor
     decode_revision(bytes)
 }
 
+pub(crate) fn canonical_commit_revision(
+    connection: &Connection,
+    fact_id: FactId,
+) -> Result<Option<Revision>, StoreError> {
+    connection
+        .query_row(
+            "SELECT revision FROM canonical_commits WHERE fact_id = ?1",
+            [fact_id.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(database)?
+        .map(decode_revision)
+        .transpose()
+}
+
+pub(crate) fn put_canonical_commit(
+    transaction: &Transaction<'_>,
+    fact_id: FactId,
+    revision: Revision,
+) -> Result<PutOutcome, StoreError> {
+    if let Some(stored) = canonical_commit_revision(transaction, fact_id)? {
+        return if stored == revision {
+            Ok(PutOutcome::AlreadyPresent)
+        } else {
+            Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt))
+        };
+    }
+    transaction
+        .execute(
+            "INSERT INTO canonical_commits(fact_id, revision) VALUES (?1, ?2)",
+            params![
+                fact_id.as_bytes().as_slice(),
+                revision.value().to_be_bytes().as_slice()
+            ],
+        )
+        .map_err(database)?;
+    Ok(PutOutcome::Inserted)
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn allocate_revision(transaction: &Transaction<'_>) -> Result<Revision, StoreError> {
     let current = current_revision(transaction)?.value();

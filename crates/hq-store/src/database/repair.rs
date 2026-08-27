@@ -118,47 +118,135 @@ fn replace_at(
     StoreError,
 > {
     let transaction = connection.transaction().map_err(database)?;
-    clear_rebuildable(&transaction)?;
-    super::authority::clear(&transaction)?;
-    super::conversation::clear(&transaction)?;
-    super::agent::clear(&transaction)?;
-    super::project::clear(&transaction)?;
+    let persisted = replace_transaction_at(
+        &transaction,
+        expected,
+        expected_authority,
+        expected_conversation,
+        expected_agent,
+        expected_project,
+        failpoint,
+    )?;
+    transaction.commit().map_err(database)?;
+    Ok(persisted)
+}
+
+pub(crate) fn replace_in_transaction(
+    transaction: &Transaction<'_>,
+    expected: &ReductionIndexSnapshot,
+    expected_authority: &AuthorityProjectionSnapshot,
+    expected_conversation: &ConversationProjectionSnapshot,
+    expected_agent: &AgentProjectionSnapshot,
+    expected_project: &ProjectProjectionSnapshot,
+) -> Result<
+    (
+        ReductionIndexSnapshot,
+        AuthorityProjectionSnapshot,
+        ConversationProjectionSnapshot,
+        AgentProjectionSnapshot,
+        ProjectProjectionSnapshot,
+    ),
+    StoreError,
+> {
+    replace_transaction_at(
+        transaction,
+        expected,
+        expected_authority,
+        expected_conversation,
+        expected_agent,
+        expected_project,
+        RepairFailpoint::Never,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn replace_in_transaction_with_failpoint(
+    transaction: &Transaction<'_>,
+    expected: &ReductionIndexSnapshot,
+    expected_authority: &AuthorityProjectionSnapshot,
+    expected_conversation: &ConversationProjectionSnapshot,
+    expected_agent: &AgentProjectionSnapshot,
+    expected_project: &ProjectProjectionSnapshot,
+    failpoint: RepairFailpoint,
+) -> Result<
+    (
+        ReductionIndexSnapshot,
+        AuthorityProjectionSnapshot,
+        ConversationProjectionSnapshot,
+        AgentProjectionSnapshot,
+        ProjectProjectionSnapshot,
+    ),
+    StoreError,
+> {
+    replace_transaction_at(
+        transaction,
+        expected,
+        expected_authority,
+        expected_conversation,
+        expected_agent,
+        expected_project,
+        failpoint,
+    )
+}
+
+fn replace_transaction_at(
+    transaction: &Transaction<'_>,
+    expected: &ReductionIndexSnapshot,
+    expected_authority: &AuthorityProjectionSnapshot,
+    expected_conversation: &ConversationProjectionSnapshot,
+    expected_agent: &AgentProjectionSnapshot,
+    expected_project: &ProjectProjectionSnapshot,
+    failpoint: RepairFailpoint,
+) -> Result<
+    (
+        ReductionIndexSnapshot,
+        AuthorityProjectionSnapshot,
+        ConversationProjectionSnapshot,
+        AgentProjectionSnapshot,
+        ProjectProjectionSnapshot,
+    ),
+    StoreError,
+> {
+    clear_rebuildable(transaction)?;
+    super::authority::clear(transaction)?;
+    super::conversation::clear(transaction)?;
+    super::agent::clear(transaction)?;
+    super::project::clear(transaction)?;
     fail_at(failpoint, RepairFailpoint::AfterClear)?;
-    insert_index(&transaction, expected, failpoint)?;
-    super::authority::insert(&transaction, expected_authority)?;
+    insert_index(transaction, expected, failpoint)?;
+    super::authority::insert(transaction, expected_authority)?;
     fail_at(failpoint, RepairFailpoint::AfterAuthorityInsert)?;
-    super::conversation::insert(&transaction, expected_conversation)?;
+    super::conversation::insert(transaction, expected_conversation)?;
     fail_at(failpoint, RepairFailpoint::AfterConversationInsert)?;
-    super::agent::insert(&transaction, expected_agent)?;
+    super::agent::insert(transaction, expected_agent)?;
     fail_at(failpoint, RepairFailpoint::AfterAgentInsert)?;
-    super::project::insert(&transaction, expected_project)?;
+    super::project::insert(transaction, expected_project)?;
     fail_at(failpoint, RepairFailpoint::AfterProjectInsert)?;
-    let persisted = load_from_connection(&transaction)?;
+    let persisted = load_from_connection(transaction)?;
     if persisted != *expected {
         return Err(corrupt());
     }
-    let persisted_authority = super::authority::load(&transaction)?;
+    let persisted_authority = super::authority::load(transaction)?;
     if persisted_authority != *expected_authority {
         return Err(corrupt());
     }
     fail_at(failpoint, RepairFailpoint::AfterAuthorityVerification)?;
-    let persisted_conversation = super::conversation::load(&transaction)?;
+    let persisted_conversation = super::conversation::load(transaction)?;
     if persisted_conversation != *expected_conversation {
         return Err(corrupt());
     }
     fail_at(failpoint, RepairFailpoint::AfterConversationVerification)?;
-    let persisted_agent = super::agent::load(&transaction)?;
+    let persisted_agent = super::agent::load(transaction)?;
     if persisted_agent != *expected_agent {
         return Err(corrupt());
     }
     fail_at(failpoint, RepairFailpoint::AfterAgentVerification)?;
-    let persisted_project = super::project::load(&transaction)?;
+    let persisted_project = super::project::load(transaction)?;
     if persisted_project != *expected_project {
         return Err(corrupt());
     }
     fail_at(failpoint, RepairFailpoint::AfterProjectVerification)?;
     fail_at(failpoint, RepairFailpoint::AfterVerification)?;
-    transaction.commit().map_err(database)?;
     Ok((
         persisted,
         persisted_authority,

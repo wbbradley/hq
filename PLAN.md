@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[storage/high] Implement the common atomic canonical-ingest transaction** — Replace the
-  append-only remote path with one transaction that deduplicates a verified semantic fact, appends
-  canonical evidence and dependency rows, performs complete reduction as the initial correctness
-  oracle, replaces every projection package, derives durable per-recipient outbox intent, allocates
-  a change revision, commits, and then emits a non-blocking revision invalidation. Add write- and
-  commit-boundary failpoints, duplicate-ingest and local/remote common-path equality fixtures, and
-  reopen assertions proving every interruption leaves the old valid state or the new valid state,
-  never a hybrid. Keep repair from altering receipts, revisions, or outbox state.
-
 - **[storage/high] Implement transaction-consistent local fact-backed mutations** — Add a bounded
   typed store request that first looks up a stable mutation receipt and rejects a reused command ID
   with a different request digest, otherwise decides against the snapshot held by the same SQLite

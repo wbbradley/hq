@@ -12,7 +12,9 @@ use rusqlite::Connection;
 
 mod support;
 
-use support::{TestDirectory, authority_policy, open_store, verified_fact, verified_question};
+use support::{
+    TestDirectory, TestStoreExt, authority_policy, open_store, verified_fact, verified_question,
+};
 
 #[test]
 fn repair_persists_the_exact_typed_conversation_report_and_reopens() {
@@ -26,12 +28,15 @@ fn repair_persists_the_exact_typed_conversation_report_and_reopens() {
     store.append_verified(root).expect("root appends");
     store.append_verified(question).expect("question appends");
 
+    let ingested = store
+        .load_conversation_snapshot()
+        .expect("ingest materializes conversation rows");
     assert_eq!(
+        ingested,
         store
-            .load_conversation_snapshot()
-            .expect_err("fresh conversation rows are absent")
-            .class(),
-        StoreErrorClass::NotRepaired
+            .complete_snapshot(authority_policy())
+            .expect("complete oracle succeeds")
+            .conversation_projection_snapshot()
     );
     let repaired = store.repair(authority_policy()).expect("repair succeeds");
     assert_eq!(
@@ -78,17 +83,15 @@ fn repair_persists_the_exact_typed_conversation_report_and_reopens() {
 }
 
 #[test]
-fn conversation_snapshot_changes_only_after_explicit_repair() {
+fn conversation_snapshot_changes_atomically_on_ingest_and_repair_is_equal() {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
     let root = verified_fact();
     let root_id = root.verified_event().event_id();
     store.append_verified(root).expect("root appends");
     let before = store
-        .repair(authority_policy())
-        .expect("initial repair succeeds")
-        .conversation()
-        .clone();
+        .load_conversation_snapshot()
+        .expect("initial conversation loads");
     assert!(before.frontiers().is_empty());
     assert!(before.projections().is_empty());
     assert!(before.support().is_empty());
@@ -96,19 +99,18 @@ fn conversation_snapshot_changes_only_after_explicit_repair() {
         .append_verified(verified_question(root_id))
         .expect("question appends");
 
-    assert_eq!(
-        store
-            .load_conversation_snapshot()
-            .expect("old conversation snapshot remains explicit"),
-        before
-    );
     let after = store
-        .repair(authority_policy())
-        .expect("explicit reconsideration succeeds")
-        .conversation()
-        .clone();
+        .load_conversation_snapshot()
+        .expect("ingest updates conversation snapshot");
     assert_ne!(after, before);
     assert_eq!(after.projections().len(), 3);
+    assert_eq!(
+        store
+            .repair(authority_policy())
+            .expect("repair succeeds")
+            .conversation(),
+        &after
+    );
 }
 
 #[test]

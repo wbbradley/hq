@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v7 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v8 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `7`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `8`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,13 +23,13 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v7 ownership | Rebuildable |
+| Class | Storage v8 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
-| Deterministic reduction indexes | Reverse dependencies, decisions, diagnostics, conflicts, and reducer order | Yes, only through an explicit repair operation |
-| Materialized projections | Complete authority, conversation/activity, named-agent, and project frontiers, typed values, ordered children, and support | Yes, only through explicit repair |
-| Durable operational state | Mutation receipts, change revision, and canonical outbox intents; delivery, cursors, and saga checkpoints remain reserved | No |
+| Deterministic reduction indexes | Reverse dependencies, decisions, diagnostics, conflicts, and reducer order | Yes, through atomic ingest or explicit repair |
+| Materialized projections | Complete authority, conversation/activity, named-agent, and project frontiers, typed values, ordered children, and support | Yes, through atomic ingest or explicit repair |
+| Durable operational state | Mutation receipts, canonical commit revisions, change revision, and canonical outbox intents; delivery, cursors, and saga checkpoints remain reserved | No |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
 
@@ -39,10 +39,10 @@ the reducer decides whether the dependent fact is usable.
 
 ## Immutable corpus rules
 
-Append accepts only `VerifiedSemanticFact`, after raw bounds, strict outer parsing, event identity,
+Ingest accepts only `VerifiedSemanticFact`, after raw bounds, strict outer parsing, event identity,
 BIP-340 signature, supported-prefix dispatch, canonical DTO, and intrinsic semantic validation have
 all succeeded. A new fact transaction inserts its exact signed event and normalized causal indexes.
-An equal replay is idempotent. Reusing one fact ID with different event bytes, namespace, family,
+An equal replay returns its original commit revision without another write. Reusing one fact ID with different event bytes, namespace, family,
 parents, or authorities is an immutable identity collision and fails closed.
 
 Load orders by fact ID and does not deserialize domain structs from database rows. It reruns the
@@ -51,6 +51,28 @@ namespace, family, parents, and authority edges with stored values. Invalid sign
 content, malformed evidence, partial indexes, and mismatches fail the load. A later explicit repair
 operation may replace rebuildable rows after deriving them from this reverified corpus; normal load
 never silently edits evidence or indexes.
+
+## Atomic canonical ingest
+
+`ingest_verified(fact, policy)` is the only production entry for verified canonical facts. One
+immediate SQLite transaction checks durable canonical-commit lineage, appends exact evidence and
+causal indexes, reverifies the transaction-visible corpus, runs the complete four-domain reducer
+oracle, replaces and reads back every rebuildable package, allocates a full-width change revision,
+derives authorized per-recipient outbox intents, stores fact-to-revision lineage, and commits. An
+error at any pre-commit boundary drops the transaction and leaves the preceding complete state.
+
+Outbox derivation requires an admitted decision. Installation-private facts never leave the local
+installation. Peer-addressed facts target the peer installation. Account and control facts derive
+the creator and every active membership from the post-reduction authority snapshot; control facts
+also include the target home. The verified author and policy-local installation are removed and the
+resulting installation set is deduplicated.
+
+`canonical_commits` binds every ingested fact to its original revision and is outside repair. An
+exact duplicate verifies immutable equality and returns that revision before reduction, projection,
+outbox, revision, or invalidation work. After a successful new commit, the worker updates an atomic
+latest-revision value and attempts a capacity-one wake without blocking. Multiple pending changes
+coalesce; a disconnected or backpressured observer cannot fail or delay the durable commit. A lost
+response is recovered by exact replay through the same canonical lineage.
 
 ## Complete-batch oracle
 
@@ -79,9 +101,8 @@ outside the repair allowlist. Dropping or failing the transaction at any replace
 checkpoint leaves the preceding complete structural/authority/conversation/agent/project set intact, and
 repeating a successful repair is idempotent.
 
-`load_reduction_index()` is read-only and returns the last successful repair even when newer
-canonical facts have since arrived; callers request an explicit repair when they need those facts
-reconsidered. A database with no completed reduction index returns `NotRepaired`. Partial,
+`load_reduction_index()` is read-only and returns the last successful ingest or explicit repair. A
+database with no completed reduction index returns `NotRepaired`. Partial,
 out-of-vocabulary, oversized, cross-domain, noncontiguous, or digest-inconsistent rebuildable rows
 return `RebuildableStateCorrupt`. Neither case triggers implicit repair. This makes the authoritative
 batch/rebuild boundary visible to later projection and incremental-reduction packages.
@@ -112,9 +133,8 @@ complete authority report. It owns ordered typed maps for every `AuthorityAggreg
 every `AuthorityProjectionKey` and value, and every transitive support set. Callers can inspect
 installations, installation-qualified mailboxes, directional peer-route histories, mailbox
 capabilities, account roots, device memberships, and the policy-local account-selection register
-without SQL access or another reducer run. `load_authority_snapshot()` is read-only, verifies that
-the structural half of the same repair is intact, and retains the explicit stale-until-repair
-semantics of `load_reduction_index()`.
+without SQL access or another reducer run. `load_authority_snapshot()` is read-only and verifies
+that the structural half of the same atomic ingest or repair is intact.
 
 Authority values are not serialized Rust structs. Dedicated strict tables and normalized child rows
 store each projection variant: route candidates, blocks, relay locators and frontiers; capability
@@ -133,9 +153,8 @@ the only recovery path.
 conversation/activity report. It owns typed ordered maps for all `ConversationAggregateKey`
 frontiers, all six `ConversationProjectionKey` variants and values, and every transitive support
 set. `load_conversation_snapshot()` first validates the structural and authority packages from the
-same repair, then returns the last explicitly repaired conversation view without rerunning a
-reducer. A later append therefore leaves the prior snapshot readable and intentionally stale until
-the caller repairs.
+same commit, then returns the last atomically ingested or explicitly repaired conversation view
+without rerunning a reducer.
 
 Storage uses explicit master rows for all aggregate and projection key variants. Composite activity
 and retention namespaces retain source installation/mailbox, provider, session, operation, optional
@@ -162,8 +181,7 @@ constraint-valid changed rows return `RebuildableStateCorrupt` until explicit re
 named-agent report. It owns ordered typed maps for every `AgentAggregateKey` frontier, all seven
 `AgentProjectionKey` variants and values, and every transitive support set.
 `load_agent_snapshot()` first validates the structural, authority, and conversation packages from
-the same repair, then returns the last explicitly repaired named-agent view. A later append remains
-invisible to this query until the caller explicitly repairs.
+the same commit, then returns the last atomically ingested or explicitly repaired named-agent view.
 
 Dedicated tables retain permanent name claims; normalized agent lifecycle, mailbox and retirement
 sets; immutable provider-session binding histories; grow-only repository-context histories and
@@ -186,8 +204,8 @@ agent row. Unknown, partial, orphaned, oversized, cross-key, or constraint-valid
 reducers. It owns ordered maps for every `ProjectAggregateKey` frontier, all five
 `ProjectProjectionKey` variants and values, and every transitive support set.
 `load_project_snapshot()` validates the structural, authority, conversation, and agent packages
-from the same transaction before returning the last explicitly repaired project view. Appends leave
-that view intentionally stale until explicit repair, and one successful repair proves every
+from the same transaction before returning the last atomically ingested or repaired project view.
+One successful repair proves every
 persisted projection report exactly equals the fresh complete-batch oracle.
 
 Explicit tables retain project roots, heads and fork participants; desired resources, typed health,

@@ -12,7 +12,7 @@ use rusqlite::Connection;
 mod support;
 
 use support::{
-    TestDirectory, authority_policy, open_store, verified_child, verified_fact,
+    TestDirectory, TestStoreExt, authority_policy, open_store, verified_child, verified_fact,
     verified_fact_with_label,
 };
 
@@ -182,7 +182,7 @@ fn repair_is_explicit_idempotent_and_survives_reopen() {
 }
 
 #[test]
-fn late_parent_changes_only_after_explicit_repair() {
+fn late_parent_reduces_atomically_and_matches_explicit_repair() {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
     let root = verified_fact();
@@ -206,11 +206,11 @@ fn late_parent_changes_only_after_explicit_repair() {
     assert_eq!(
         store
             .load_reduction_index()
-            .expect("old index remains explicit")
+            .expect("ingest updates index")
             .decision(ReductionDomain::Authority, child_id)
-            .expect("old child decision exists")
+            .expect("child decision exists")
             .status(),
-        DecisionStatus::Unresolved
+        DecisionStatus::Projected
     );
 
     let after = store

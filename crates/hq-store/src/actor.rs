@@ -4,7 +4,11 @@ use std::{
     fmt,
     num::NonZeroUsize,
     path::Path,
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError},
+    },
     thread::{self, JoinHandle},
 };
 
@@ -18,13 +22,55 @@ use crate::{
     ReductionIndexSnapshot, StoreError, StoreErrorClass, database::Database,
 };
 
-/// Result of appending immutable verified evidence.
+/// Result of atomically ingesting immutable verified evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AppendOutcome {
-    /// A previously unknown fact was durably inserted.
-    Inserted,
-    /// The exact fact evidence and normalized indexes were already present.
-    AlreadyPresent,
+pub enum IngestOutcome {
+    /// A previously unknown fact and all derived state committed at this revision.
+    Inserted(Revision),
+    /// The exact fact had already committed at this original revision.
+    AlreadyPresent(Revision),
+}
+
+impl IngestOutcome {
+    /// Returns the stable revision of the fact's canonical commit.
+    pub const fn revision(self) -> Revision {
+        match self {
+            Self::Inserted(revision) | Self::AlreadyPresent(revision) => revision,
+        }
+    }
+
+    /// Reports whether this call performed the canonical commit.
+    pub const fn is_inserted(self) -> bool {
+        matches!(self, Self::Inserted(_))
+    }
+}
+
+/// Capacity-one coalesced post-commit revision observer.
+pub struct RevisionInvalidations {
+    wakes: Receiver<()>,
+    latest: Arc<AtomicU64>,
+}
+
+impl RevisionInvalidations {
+    /// Returns the latest committed revision when one or more wakes are pending.
+    pub fn try_revision(&self) -> Option<Revision> {
+        match self.wakes.try_recv() {
+            Ok(()) => Some(Revision::new(self.latest.load(Ordering::Acquire))),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        }
+    }
+}
+
+struct InvalidationEmitter {
+    wakes: SyncSender<()>,
+    latest: Arc<AtomicU64>,
+}
+
+impl InvalidationEmitter {
+    fn publish(&self, revision: Revision) {
+        self.latest.store(revision.value(), Ordering::Release);
+        let _ = self.wakes.try_send(());
+    }
 }
 
 /// Complete reducer-ready facts reconstructed from the immutable corpus.
@@ -150,9 +196,10 @@ impl RepairOutcome {
 }
 
 enum Request {
-    Append {
+    Ingest {
         fact: Box<VerifiedSemanticFact>,
-        reply: SyncSender<Result<AppendOutcome, StoreError>>,
+        policy: AuthorityPolicy,
+        reply: SyncSender<Result<IngestOutcome, StoreError>>,
     },
     Load {
         reply: SyncSender<Result<VerifiedFactCorpus, StoreError>>,
@@ -208,18 +255,38 @@ pub struct Store {
 impl Store {
     /// Opens a fresh or compatible database on a dedicated synchronous worker thread.
     pub fn open(path: impl AsRef<Path>, capacity: NonZeroUsize) -> Result<Self, StoreError> {
+        Self::open_with_invalidations(path, capacity).map(|(store, _)| store)
+    }
+
+    /// Opens storage and returns its capacity-one coalesced post-commit observer.
+    pub fn open_with_invalidations(
+        path: impl AsRef<Path>,
+        capacity: NonZeroUsize,
+    ) -> Result<(Self, RevisionInvalidations), StoreError> {
         let path = path.as_ref().to_path_buf();
         let (requests, receiver) = mpsc::sync_channel(capacity.get());
         let (started, startup) = mpsc::sync_channel(1);
+        let (wakes, wake_receiver) = mpsc::sync_channel(1);
+        let latest = Arc::new(AtomicU64::new(0));
+        let emitter = InvalidationEmitter {
+            wakes,
+            latest: Arc::clone(&latest),
+        };
         let worker = thread::Builder::new()
             .name("hq-store".to_owned())
-            .spawn(move || run(&path, &receiver, &started))
+            .spawn(move || run(&path, &receiver, &started, &emitter))
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?;
         match startup.recv() {
-            Ok(Ok(())) => Ok(Self {
-                requests,
-                worker: Some(worker),
-            }),
+            Ok(Ok(())) => Ok((
+                Self {
+                    requests,
+                    worker: Some(worker),
+                },
+                RevisionInvalidations {
+                    wakes: wake_receiver,
+                    latest,
+                },
+            )),
             Ok(Err(error)) => {
                 let _ = worker.join();
                 Err(error)
@@ -231,12 +298,17 @@ impl Store {
         }
     }
 
-    /// Durably appends one complete verified semantic fact.
-    pub fn append_verified(&self, fact: VerifiedSemanticFact) -> Result<AppendOutcome, StoreError> {
+    /// Atomically ingests one verified fact and every derived durable state package.
+    pub fn ingest_verified(
+        &self,
+        fact: VerifiedSemanticFact,
+        policy: AuthorityPolicy,
+    ) -> Result<IngestOutcome, StoreError> {
         let (reply, response) = mpsc::sync_channel(1);
         self.requests
-            .send(Request::Append {
+            .send(Request::Ingest {
                 fact: Box::new(fact),
+                policy,
                 reply,
             })
             .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
@@ -405,7 +477,12 @@ impl fmt::Debug for Store {
     }
 }
 
-fn run(path: &Path, receiver: &Receiver<Request>, started: &SyncSender<Result<(), StoreError>>) {
+fn run(
+    path: &Path,
+    receiver: &Receiver<Request>,
+    started: &SyncSender<Result<(), StoreError>>,
+    invalidations: &InvalidationEmitter,
+) {
     let database = Database::open(path);
     let Ok(mut database) = database else {
         let _ = started.send(database.map(|_| ()));
@@ -416,8 +493,18 @@ fn run(path: &Path, receiver: &Receiver<Request>, started: &SyncSender<Result<()
     }
     while let Ok(request) = receiver.recv() {
         match request {
-            Request::Append { fact, reply } => {
-                let _ = reply.send(database.append(&fact));
+            Request::Ingest {
+                fact,
+                policy,
+                reply,
+            } => {
+                let result = database.ingest(&fact, policy);
+                if let Ok(outcome) = result
+                    && outcome.is_inserted()
+                {
+                    invalidations.publish(outcome.revision());
+                }
+                let _ = reply.send(result);
             }
             Request::Load { reply } => {
                 let _ = reply.send(database.load().map(VerifiedFactCorpus::new));
@@ -551,11 +638,25 @@ mod tests {
             .requests
             .send(Request::LoadOutboxIntents { limit: 1, reply })
             .expect("outbox request is accepted");
-        assert!(
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::Ingest {
+                fact: Box::new(crate::database::tests::fixture()),
+                policy: hq_reducer::AuthorityPolicy::new(
+                    hq_domain::InstallationId::from_bytes([0x11; 32]),
+                    hq_domain::MailboxId::from_bytes([0x33; 32]),
+                ),
+                reply,
+            })
+            .expect("ingest request is accepted");
+        assert_eq!(
             store
                 .load_corpus()
                 .expect("actor survives dropped reply")
-                .is_empty()
+                .len(),
+            1
         );
         store.close().expect("store closes");
         fs::remove_dir_all(root).expect("test state cleans up");

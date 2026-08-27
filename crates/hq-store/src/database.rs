@@ -7,30 +7,34 @@ mod operational;
 mod project;
 mod repair;
 
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
-use hq_domain::{AuthorityRole, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS};
+use hq_domain::{
+    AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
+};
 use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
 };
-use hq_reducer::AuthorityPolicy;
+use hq_reducer::{
+    AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, DecisionStatus, MembershipState,
+};
 use rusqlite::{
     Connection, Error as SqlError, ErrorCode, OpenFlags, OptionalExtension, Transaction,
     TransactionBehavior, config::DbConfig, params,
 };
 
 use crate::{
-    AgentProjectionSnapshot, AppendOutcome, AuthorityProjectionSnapshot, CompleteSnapshot,
-    ConversationProjectionSnapshot, ProjectProjectionSnapshot, ReductionIndexSnapshot,
-    RepairOutcome, StoreError, StoreErrorClass,
+    AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
+    ConversationProjectionSnapshot, IngestOutcome, OutboxIntent, ProjectProjectionSnapshot,
+    ReductionIndexSnapshot, RepairOutcome, StoreError, StoreErrorClass,
     paths::{prepare_database_path, validate_database_path},
     snapshot::build_complete_snapshot,
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 7;
-const SCHEMA_MARKER: &str = "hq-store-v7-operational-primitives-2026-08-27";
-const SCHEMA_TABLES: [&str; 98] = [
+const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_MARKER: &str = "hq-store-v8-atomic-ingest-2026-08-27";
+const SCHEMA_TABLES: [&str; 99] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -129,6 +133,7 @@ const SCHEMA_TABLES: [&str; 98] = [
     "mutation_receipts",
     "change_revision",
     "outbox_intents",
+    "canonical_commits",
 ];
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
@@ -1007,6 +1012,11 @@ CREATE TABLE outbox_intents (
     revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8),
     PRIMARY KEY (fact_id, recipient_installation)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE canonical_commits (
+    fact_id BLOB PRIMARY KEY NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -1046,76 +1056,19 @@ impl Database {
         Ok(Self { connection })
     }
 
-    pub(super) fn append(
-        &mut self,
-        fact: &VerifiedSemanticFact,
-    ) -> Result<AppendOutcome, StoreError> {
-        append_with_failpoint(&mut self.connection, fact, Failpoint::Never)
-    }
-
     pub(super) fn load(&mut self) -> Result<Vec<VerifiedSemanticFact>, StoreError> {
         let transaction = self.connection.transaction().map_err(sql_error)?;
-        let count: i64 = transaction
-            .query_row("SELECT count(*) FROM canonical_facts", [], |row| row.get(0))
-            .map_err(sql_error)?;
-        if !(0..=MAXIMUM_CORPUS_FACTS).contains(&count) {
-            return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
-        }
-        let capacity = usize::try_from(count)
-            .map_err(|_| StoreError::new(StoreErrorClass::InvalidEvidence))?;
-        let mut statement = transaction
-            .prepare(
-                "SELECT fact_id, length(event_bytes), namespace, family \
-                 FROM canonical_facts ORDER BY fact_id",
-            )
-            .map_err(sql_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok(StoredFact {
-                    fact_id: row.get(0)?,
-                    event_length: row.get(1)?,
-                    namespace: row.get(2)?,
-                    family: row.get(3)?,
-                })
-            })
-            .map_err(sql_error)?;
-        let stored = rows
-            .map(|row| row.map_err(sql_error))
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        let mut facts = Vec::with_capacity(capacity);
-        for stored in stored {
-            let fact_id = validate_stored_fact_shape(&stored)?;
-            let event_bytes = transaction
-                .query_row(
-                    "SELECT event_bytes FROM canonical_facts WHERE fact_id = ?1",
-                    [fact_id.as_slice()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .map_err(sql_error)?;
-            if event_bytes.len()
-                != usize::try_from(stored.event_length)
-                    .map_err(|_| StoreError::new(StoreErrorClass::InvalidEvidence))?
-            {
-                return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
-            }
-            let verified = verify_event(event_bytes)?;
-            let index = index_for(&verified);
-            if fact_id != index.fact_id
-                || stored.namespace != index.namespace
-                || stored.family != index.family
-            {
-                return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
-            }
-            let stored_parents = load_parents(&transaction, &index.fact_id)?;
-            let stored_authorities = load_authorities(&transaction, &index.fact_id)?;
-            if stored_parents != index.parents || stored_authorities != index.authorities {
-                return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
-            }
-            facts.push(verified);
-        }
+        let facts = load_facts(&transaction)?;
         transaction.commit().map_err(sql_error)?;
         Ok(facts)
+    }
+
+    pub(super) fn ingest(
+        &mut self,
+        fact: &VerifiedSemanticFact,
+        policy: AuthorityPolicy,
+    ) -> Result<IngestOutcome, StoreError> {
+        ingest_with_failpoint(&mut self.connection, fact, policy, IngestFailpoint::Never)
     }
 
     pub(super) fn complete_snapshot(
@@ -1202,6 +1155,247 @@ impl Database {
     ) -> Result<Vec<crate::OutboxIntent>, StoreError> {
         operational::load_outbox_intents(&self.connection, limit)
     }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum IngestFailpoint {
+    Never,
+    Canonical(Failpoint),
+    AfterReduction,
+    Repair(repair::RepairFailpoint),
+    AfterProjectionReplacement,
+    AfterRevision,
+    AfterOutbox,
+    AfterCanonicalCommit,
+    BeforeCommit,
+    AfterCommit,
+}
+
+fn ingest_with_failpoint(
+    connection: &mut Connection,
+    fact: &VerifiedSemanticFact,
+    policy: AuthorityPolicy,
+    failpoint: IngestFailpoint,
+) -> Result<IngestOutcome, StoreError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let fact_id = fact.fact().id();
+    if let Some(revision) = operational::canonical_commit_revision(&transaction, fact_id)? {
+        if append_in_transaction(&transaction, fact, Failpoint::Never)?
+            != CanonicalAppendOutcome::AlreadyPresent
+        {
+            return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+        }
+        transaction.commit().map_err(sql_error)?;
+        return Ok(IngestOutcome::AlreadyPresent(revision));
+    }
+
+    let canonical_failpoint = match failpoint {
+        IngestFailpoint::Canonical(value) => value,
+        _ => Failpoint::Never,
+    };
+    if append_in_transaction(&transaction, fact, canonical_failpoint)?
+        != CanonicalAppendOutcome::Inserted
+    {
+        return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+    }
+    let facts = load_facts(&transaction)?;
+    let complete = build_complete_snapshot(&facts, policy)?;
+    fail_ingest_at(failpoint, IngestFailpoint::AfterReduction)?;
+    let index = complete.normalized_index();
+    let authority = complete.authority_projection_snapshot();
+    let conversation = complete.conversation_projection_snapshot();
+    let agent = complete.agent_projection_snapshot();
+    let project = complete.project_projection_snapshot();
+    #[cfg(test)]
+    if let IngestFailpoint::Repair(repair_failpoint) = failpoint {
+        repair::replace_in_transaction_with_failpoint(
+            &transaction,
+            &index,
+            &authority,
+            &conversation,
+            &agent,
+            &project,
+            repair_failpoint,
+        )?;
+    } else {
+        repair::replace_in_transaction(
+            &transaction,
+            &index,
+            &authority,
+            &conversation,
+            &agent,
+            &project,
+        )?;
+    }
+    #[cfg(not(test))]
+    repair::replace_in_transaction(
+        &transaction,
+        &index,
+        &authority,
+        &conversation,
+        &agent,
+        &project,
+    )?;
+    fail_ingest_at(failpoint, IngestFailpoint::AfterProjectionReplacement)?;
+    let revision = operational::allocate_revision(&transaction)?;
+    fail_ingest_at(failpoint, IngestFailpoint::AfterRevision)?;
+    if fact_is_admitted(&index, fact_id) {
+        for recipient in outbox_recipients(fact, policy, &authority) {
+            let intent = OutboxIntent::new(
+                fact_id,
+                recipient,
+                fact.verified_event().exact_event_bytes().to_vec(),
+                revision,
+            )
+            .map_err(|_| StoreError::new(StoreErrorClass::InvalidEvidence))?;
+            operational::put_outbox_intent(&transaction, &intent)?;
+        }
+    }
+    fail_ingest_at(failpoint, IngestFailpoint::AfterOutbox)?;
+    operational::put_canonical_commit(&transaction, fact_id, revision)?;
+    fail_ingest_at(failpoint, IngestFailpoint::AfterCanonicalCommit)?;
+    fail_ingest_at(failpoint, IngestFailpoint::BeforeCommit)?;
+    transaction.commit().map_err(sql_error)?;
+    fail_ingest_at(failpoint, IngestFailpoint::AfterCommit)?;
+    Ok(IngestOutcome::Inserted(revision))
+}
+
+fn fact_is_admitted(index: &ReductionIndexSnapshot, fact_id: FactId) -> bool {
+    crate::ReductionDomain::ALL.into_iter().any(|domain| {
+        index
+            .decision(domain, fact_id)
+            .is_some_and(|decision| decision.status() == DecisionStatus::Projected)
+    })
+}
+
+fn outbox_recipients(
+    fact: &VerifiedSemanticFact,
+    policy: AuthorityPolicy,
+    authority: &AuthorityProjectionSnapshot,
+) -> BTreeSet<InstallationId> {
+    let mut recipients = BTreeSet::new();
+    match fact.fact().scope() {
+        FactScope::InstallationPrivate(_) => {}
+        FactScope::PeerAddressed(mailbox) => {
+            recipients.insert(mailbox.installation_id());
+        }
+        FactScope::AccountAddressed(account) => {
+            add_account_recipients(&mut recipients, *account, authority);
+        }
+        FactScope::RemoteControl {
+            account_id,
+            target_home,
+        } => {
+            add_account_recipients(&mut recipients, *account_id, authority);
+            recipients.insert(*target_home);
+        }
+    }
+    recipients.remove(&fact.fact().author().installation_id());
+    recipients.remove(&policy.local_installation());
+    recipients
+}
+
+fn add_account_recipients(
+    recipients: &mut BTreeSet<InstallationId>,
+    account: hq_domain::AccountId,
+    authority: &AuthorityProjectionSnapshot,
+) {
+    if let Some(AuthorityProjection::Account { creator, .. }) =
+        authority.projection(AuthorityProjectionKey::Account(account))
+    {
+        recipients.insert(creator.installation_id());
+    }
+    for (key, projection) in authority.projections() {
+        if let (
+            AuthorityProjectionKey::Membership {
+                account: candidate,
+                device,
+            },
+            AuthorityProjection::Membership(view),
+        ) = (key, projection)
+            && *candidate == account
+            && view.state() == MembershipState::Active
+        {
+            recipients.insert(*device);
+        }
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn fail_ingest_at(actual: IngestFailpoint, expected: IngestFailpoint) -> Result<(), StoreError> {
+    #[cfg(test)]
+    if std::mem::discriminant(&actual) == std::mem::discriminant(&expected) {
+        return Err(StoreError::new(StoreErrorClass::DatabaseUnavailable));
+    }
+    #[cfg(not(test))]
+    let _ = (actual, expected);
+    Ok(())
+}
+
+fn load_facts(connection: &Connection) -> Result<Vec<VerifiedSemanticFact>, StoreError> {
+    let count: i64 = connection
+        .query_row("SELECT count(*) FROM canonical_facts", [], |row| row.get(0))
+        .map_err(sql_error)?;
+    if !(0..=MAXIMUM_CORPUS_FACTS).contains(&count) {
+        return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
+    }
+    let capacity =
+        usize::try_from(count).map_err(|_| StoreError::new(StoreErrorClass::InvalidEvidence))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT fact_id, length(event_bytes), namespace, family \
+             FROM canonical_facts ORDER BY fact_id",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(StoredFact {
+                fact_id: row.get(0)?,
+                event_length: row.get(1)?,
+                namespace: row.get(2)?,
+                family: row.get(3)?,
+            })
+        })
+        .map_err(sql_error)?;
+    let stored = rows
+        .map(|row| row.map_err(sql_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut facts = Vec::with_capacity(capacity);
+    for stored in stored {
+        let fact_id = validate_stored_fact_shape(&stored)?;
+        let event_bytes = connection
+            .query_row(
+                "SELECT event_bytes FROM canonical_facts WHERE fact_id = ?1",
+                [fact_id.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(sql_error)?;
+        if event_bytes.len()
+            != usize::try_from(stored.event_length)
+                .map_err(|_| StoreError::new(StoreErrorClass::InvalidEvidence))?
+        {
+            return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
+        }
+        let verified = verify_event(event_bytes)?;
+        let index = index_for(&verified);
+        if fact_id != index.fact_id
+            || stored.namespace != index.namespace
+            || stored.family != index.family
+        {
+            return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
+        }
+        let stored_parents = load_parents(connection, &index.fact_id)?;
+        let stored_authorities = load_authorities(connection, &index.fact_id)?;
+        if stored_parents != index.parents || stored_authorities != index.authorities {
+            return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
+        }
+        facts.push(verified);
+    }
+    Ok(facts)
 }
 
 fn inspect_existing(connection: &Connection) -> Result<bool, StoreError> {
@@ -1360,24 +1554,45 @@ enum Failpoint {
     #[cfg(test)]
     AfterParents,
     #[cfg(test)]
+    AfterAuthorities,
+    #[cfg(test)]
     BeforeCommit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalAppendOutcome {
+    Inserted,
+    AlreadyPresent,
+}
+
+#[cfg(test)]
 fn append_with_failpoint(
     connection: &mut Connection,
     fact: &VerifiedSemanticFact,
     failpoint: Failpoint,
-) -> Result<AppendOutcome, StoreError> {
+) -> Result<CanonicalAppendOutcome, StoreError> {
+    let transaction = connection.transaction().map_err(sql_error)?;
+    let outcome = append_in_transaction(&transaction, fact, failpoint)?;
+    #[cfg(test)]
+    if matches!(failpoint, Failpoint::BeforeCommit) {
+        return Err(StoreError::new(StoreErrorClass::DatabaseUnavailable));
+    }
+    transaction.commit().map_err(sql_error)?;
+    Ok(outcome)
+}
+
+fn append_in_transaction(
+    transaction: &Transaction<'_>,
+    fact: &VerifiedSemanticFact,
+    failpoint: Failpoint,
+) -> Result<CanonicalAppendOutcome, StoreError> {
     #[cfg(not(test))]
     let _ = failpoint;
     let index = index_for(fact);
     let event_bytes = fact.verified_event().exact_event_bytes();
-    let transaction = connection.transaction().map_err(sql_error)?;
-    if immutable_row_exists(&transaction, &index.fact_id)? {
-        let equal = immutable_row_equal(&transaction, &index, event_bytes)?;
-        return if equal {
-            transaction.commit().map_err(sql_error)?;
-            Ok(AppendOutcome::AlreadyPresent)
+    if immutable_row_exists(transaction, &index.fact_id)? {
+        return if immutable_row_equal(transaction, &index, event_bytes)? {
+            Ok(CanonicalAppendOutcome::AlreadyPresent)
         } else {
             Err(StoreError::new(StoreErrorClass::IdentityCollision))
         };
@@ -1420,11 +1635,10 @@ fn append_with_failpoint(
             .map_err(sql_error)?;
     }
     #[cfg(test)]
-    if matches!(failpoint, Failpoint::BeforeCommit) {
+    if matches!(failpoint, Failpoint::AfterAuthorities) {
         return Err(StoreError::new(StoreErrorClass::DatabaseUnavailable));
     }
-    transaction.commit().map_err(sql_error)?;
-    Ok(AppendOutcome::Inserted)
+    Ok(CanonicalAppendOutcome::Inserted)
 }
 
 fn immutable_row_exists(
@@ -1639,7 +1853,7 @@ fn sql_error(error: SqlError) -> StoreError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
@@ -1679,6 +1893,7 @@ mod tests {
         for failpoint in [
             Failpoint::AfterFact,
             Failpoint::AfterParents,
+            Failpoint::AfterAuthorities,
             Failpoint::BeforeCommit,
         ] {
             let mut connection = Connection::open_in_memory().expect("memory database opens");
@@ -1700,6 +1915,149 @@ mod tests {
                 .expect("authority count reads");
             assert_eq!((parent_count, authority_count), (0, 0));
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn atomic_ingest_failpoints_reopen_to_the_complete_old_or_new_state() {
+        use super::repair::RepairFailpoint;
+        use std::{
+            fs,
+            sync::atomic::{AtomicU64, Ordering},
+        };
+
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let repair_failpoints = [
+            RepairFailpoint::AfterClear,
+            RepairFailpoint::AfterVertices,
+            RepairFailpoint::AfterReverseDependencies,
+            RepairFailpoint::AfterDecisions,
+            RepairFailpoint::AfterDependencyOrder,
+            RepairFailpoint::AfterPresentationOrder,
+            RepairFailpoint::AfterConflicts,
+            RepairFailpoint::AfterState,
+            RepairFailpoint::AfterAuthorityInsert,
+            RepairFailpoint::AfterAuthorityVerification,
+            RepairFailpoint::AfterConversationInsert,
+            RepairFailpoint::AfterConversationVerification,
+            RepairFailpoint::AfterAgentInsert,
+            RepairFailpoint::AfterAgentVerification,
+            RepairFailpoint::AfterProjectInsert,
+            RepairFailpoint::AfterProjectVerification,
+            RepairFailpoint::AfterVerification,
+        ];
+        let failpoints = [
+            IngestFailpoint::Canonical(Failpoint::AfterFact),
+            IngestFailpoint::Canonical(Failpoint::AfterParents),
+            IngestFailpoint::Canonical(Failpoint::AfterAuthorities),
+            IngestFailpoint::AfterReduction,
+            IngestFailpoint::AfterProjectionReplacement,
+            IngestFailpoint::AfterRevision,
+            IngestFailpoint::AfterOutbox,
+            IngestFailpoint::AfterCanonicalCommit,
+            IngestFailpoint::BeforeCommit,
+        ]
+        .into_iter()
+        .chain(repair_failpoints.into_iter().map(IngestFailpoint::Repair));
+        let policy = AuthorityPolicy::new(
+            hq_domain::InstallationId::from_bytes([0x11; 32]),
+            hq_domain::MailboxId::from_bytes([0x44; 32]),
+        );
+
+        for failpoint in failpoints {
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "hq-rust-atomic-ingest-test-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("test root creates");
+            let path = root.join("state").join("hq.sqlite3");
+            let mut database = Database::open(&path).expect("database opens");
+            assert_eq!(
+                database
+                    .ingest(&root_fixture(), policy)
+                    .expect("root ingests"),
+                IngestOutcome::Inserted(hq_domain::Revision::new(1))
+            );
+            let old_index = database.load_reduction_index().expect("old index loads");
+            let old_authority = database
+                .load_authority_snapshot()
+                .expect("old authority loads");
+            let old_conversation = database
+                .load_conversation_snapshot()
+                .expect("old conversation loads");
+            let old_agent = database.load_agent_snapshot().expect("old agent loads");
+            let old_project = database.load_project_snapshot().expect("old project loads");
+            let error =
+                ingest_with_failpoint(&mut database.connection, &fixture(), policy, failpoint)
+                    .expect_err("failpoint interrupts ingest");
+            assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+            drop(database);
+
+            let mut reopened = Database::open(&path).expect("database reopens");
+            assert_eq!(reopened.load().expect("old corpus loads").len(), 1);
+            assert_eq!(
+                reopened.current_revision().expect("old revision loads"),
+                hq_domain::Revision::new(1)
+            );
+            assert_eq!(
+                reopened.load_reduction_index().expect("old index remains"),
+                old_index
+            );
+            assert_eq!(
+                reopened
+                    .load_authority_snapshot()
+                    .expect("old authority remains"),
+                old_authority
+            );
+            assert_eq!(
+                reopened
+                    .load_conversation_snapshot()
+                    .expect("old conversation remains"),
+                old_conversation
+            );
+            assert_eq!(
+                reopened.load_agent_snapshot().expect("old agent remains"),
+                old_agent
+            );
+            assert_eq!(
+                reopened
+                    .load_project_snapshot()
+                    .expect("old project remains"),
+                old_project
+            );
+            assert_eq!(
+                reopened.ingest(&fixture(), policy).expect("retry succeeds"),
+                IngestOutcome::Inserted(hq_domain::Revision::new(2))
+            );
+            drop(reopened);
+            fs::remove_dir_all(root).expect("test state cleans up");
+        }
+    }
+
+    #[test]
+    fn response_loss_after_commit_replays_the_original_revision_without_changes() {
+        let mut connection = Connection::open_in_memory().expect("database opens");
+        connection.execute_batch(SCHEMA).expect("schema creates");
+        let policy = AuthorityPolicy::new(
+            hq_domain::InstallationId::from_bytes([0x11; 32]),
+            hq_domain::MailboxId::from_bytes([0x44; 32]),
+        );
+        let fact = root_fixture();
+        let error =
+            ingest_with_failpoint(&mut connection, &fact, policy, IngestFailpoint::AfterCommit)
+                .expect_err("response loss is simulated after commit");
+        assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+        assert_eq!(
+            ingest_with_failpoint(&mut connection, &fact, policy, IngestFailpoint::Never)
+                .expect("retry finds canonical commit"),
+            IngestOutcome::AlreadyPresent(hq_domain::Revision::new(1))
+        );
+        assert_eq!(
+            operational::current_revision(&connection).expect("revision stays stable"),
+            hq_domain::Revision::new(1)
+        );
+        assert_eq!(load_facts(&connection).expect("corpus loads").len(), 1);
     }
 
     #[test]
@@ -1818,7 +2176,7 @@ mod tests {
         }
     }
 
-    pub(super) fn fixture() -> VerifiedSemanticFact {
+    pub(crate) fn fixture() -> VerifiedSemanticFact {
         let signer = Bip340Signer::from_secret_bytes({
             let mut secret = [0_u8; 32];
             secret[31] = 1;
@@ -1837,5 +2195,27 @@ mod tests {
             .expect("fixture DTO verifies")
             .into_semantic_fact()
             .expect("fixture converts")
+    }
+
+    fn root_fixture() -> VerifiedSemanticFact {
+        const ROOT: &str = r#"{"p":"hq/canonical","v":1,"f":1,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":0,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[],"auth":[],"body":{"installation":"1111111111111111111111111111111111111111111111111111111111111111","signing":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","encryption":"2222222222222222222222222222222222222222222222222222222222222222","label":"alpha"}}"#;
+        let signer = Bip340Signer::from_secret_bytes({
+            let mut secret = [0_u8; 32];
+            secret[31] = 1;
+            secret
+        })
+        .expect("fixture secret is valid");
+        let event = signer
+            .sign(0, ROOT.as_bytes(), [6; 32])
+            .expect("root fixture signs");
+        let DispatchOutcome::Supported(supported) = event.dispatch().expect("root dispatches")
+        else {
+            panic!("root fixture is supported");
+        };
+        supported
+            .decode_v1()
+            .expect("root DTO verifies")
+            .into_semantic_fact()
+            .expect("root converts")
     }
 }

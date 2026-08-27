@@ -4636,3 +4636,79 @@ and the unchanged Go vet/build/fresh test suite pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so schema, operational types, actor queries, tests, specification,
      and bookkeeping form one reviewable change.
+
+## 2026-08-27 — Common atomic canonical ingest
+
+Replaced the production append-only path with one actor-owned atomic ingest operation. A single
+immediate SQLite transaction now deduplicates exact verified evidence, persists causal indexes,
+reverifies the transaction-visible corpus, runs the complete four-domain correctness oracle,
+replaces and verifies every rebuildable projection package, allocates a full-width revision,
+derives admitted-scope per-recipient outbox intents, records stable canonical commit lineage, and
+commits. Exact replay returns the original revision before any derived or operational write.
+
+Capacity-one revision invalidations publish only after a new commit and coalesce without blocking
+durability. File-backed failpoint coverage reopens every pre-commit boundary to the exact old state,
+then proves retry reaches the complete new state; post-commit response loss replays the original
+answer without churn. Public contracts cover immediate materialization, batch/repair equality,
+fanout filtering and exact bytes, duplicate/reopen behavior, and observer coalescing. Storage v8 and
+the normative persistence specification describe the new common engine and lineage.
+
+Architecture, behavior, causal, protocol, and dependency verifiers; locked workspace format/check/
+build/tests/doctests/Clippy; all four required targets; both 512-run protocol fuzz smokes; whitespace
+checks; and the unchanged Go vet/build/fresh test suite pass.
+
+### Original plan entry
+
+- **[storage/high] Implement the common atomic canonical-ingest transaction** — Replace the
+  append-only remote path with one transaction that deduplicates a verified semantic fact, appends
+  canonical evidence and dependency rows, performs complete reduction as the initial correctness
+  oracle, replaces every projection package, derives durable per-recipient outbox intent, allocates
+  a change revision, commits, and then emits a non-blocking revision invalidation. Add write- and
+  commit-boundary failpoints, duplicate-ingest and local/remote common-path equality fixtures, and
+  reopen assertions proving every interruption leaves the old valid state or the new valid state,
+  never a hybrid. Keep repair from altering receipts, revisions, or outbox state.
+
+  **Implementation plan**
+
+  - Add failing public contracts for one-call ingest, duplicate replay with the original revision,
+    complete projection visibility without repair, exact repair equality, admitted-scope fanout,
+    bounded coalesced invalidation, and reopen. Remove the production append-only actor operation.
+  - Advance the unreleased schema with a durable fact-to-commit-revision record so duplicate ingest
+    is an exact no-op with a stable answer. Keep this operational lineage outside repair.
+  - Refactor corpus reverification and complete repair replacement to operate inside a caller-owned
+    SQLite transaction. Reuse those private primitives from both explicit repair and common ingest
+    without nesting transactions or exposing row-shaped operations.
+  - In one immediate transaction, append/deduplicate exact evidence and causal indexes, run the full
+    four-domain reducer oracle, replace and verify all rebuildable packages, allocate a revision,
+    derive admitted peer/account/control recipients from the post-reduction authority view, persist
+    exact outbox intents and canonical commit lineage, and commit.
+  - Publish a capacity-one coalesced wake only after commit. The wake carries no projection data and
+    observer backpressure or disconnection must never delay or fail a durable transaction.
+  - Add failpoints after every canonical, index, projection, revision, outbox, lineage, and commit
+    boundary. Reopen after each interruption and prove equality with either the complete old state
+    or complete new state; simulate response loss after commit and prove replay is unchanged.
+  - Update projection/repair contracts and the normative storage specification, then run every Rust
+    and unchanged Go repository gate before recording completion.
+
+  **Risks and mitigations**
+
+  - Calling repair helpers from ingest can accidentally nest SQLite transactions; split replacement
+    into a transaction-owned core and keep transaction creation only at coarse public boundaries.
+  - Forwarding rejected or unresolved facts leaks or amplifies unusable input; create outbox intents
+    only when the fact has an admitted reducer decision and derive recipients from authorized views.
+  - Duplicate delivery can create revision churn and invalidation storms; retain the original fact
+    revision and return before every rebuildable or operational write on exact replay.
+  - A post-commit response or observer failure is not a rollback opportunity; persist lineage before
+    commit, make notifications non-blocking, and prove lost-response replay returns the same result.
+  - Full-batch reduction is deliberately expensive at this stage; document it as the correctness
+    oracle and leave affected-closure optimization to the immediately following incremental task.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** atomicity, replay, fanout, invalidation, repair equality, reopen, and all gates.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so engine, schema, tests, specification, and bookkeeping form one
+     reviewable change.

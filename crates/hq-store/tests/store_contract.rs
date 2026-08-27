@@ -2,14 +2,15 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use hq_domain::FactKind;
-use hq_store::{AppendOutcome, StoreErrorClass};
+use hq_domain::{FactKind, Revision};
+use hq_store::{IngestOutcome, StoreErrorClass};
 use rusqlite::Connection;
 
 mod support;
 
 use support::{
-    TestDirectory, mode, open_store, verified_child, verified_fact, verified_fact_with_auxiliary,
+    TestDirectory, TestStoreExt, mode, open_store, verified_child, verified_fact,
+    verified_fact_with_auxiliary,
 };
 
 #[test]
@@ -27,7 +28,10 @@ fn verified_facts_survive_close_and_reopen_with_exact_evidence() {
     let expected_event = expected.verified_event().exact_event_bytes().to_vec();
 
     let store = open_store(&database);
-    assert_eq!(store.append_verified(expected), Ok(AppendOutcome::Inserted));
+    assert_eq!(
+        store.append_verified(expected),
+        Ok(IngestOutcome::Inserted(Revision::new(1)))
+    );
     assert_eq!(store.close(), Ok(()));
 
     let reopened = open_store(&database);
@@ -42,17 +46,17 @@ fn verified_facts_survive_close_and_reopen_with_exact_evidence() {
 }
 
 #[test]
-fn equal_duplicate_append_is_idempotent() {
+fn equal_duplicate_ingest_is_idempotent() {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
 
     assert_eq!(
         store.append_verified(verified_fact()),
-        Ok(AppendOutcome::Inserted)
+        Ok(IngestOutcome::Inserted(Revision::new(1)))
     );
     assert_eq!(
         store.append_verified(verified_fact()),
-        Ok(AppendOutcome::AlreadyPresent)
+        Ok(IngestOutcome::AlreadyPresent(Revision::new(1)))
     );
     assert_eq!(store.load_corpus().expect("corpus loads").len(), 1);
 }
@@ -72,7 +76,10 @@ fn same_event_identity_with_a_different_valid_signature_fails_closed() {
         unequal.verified_event().exact_event_bytes()
     );
 
-    assert_eq!(store.append_verified(first), Ok(AppendOutcome::Inserted));
+    assert_eq!(
+        store.append_verified(first),
+        Ok(IngestOutcome::Inserted(Revision::new(1)))
+    );
     let error = store
         .append_verified(unequal)
         .expect_err("unequal immutable evidence rejects");
@@ -162,6 +169,6 @@ fn fresh_schema_has_the_exact_storage_identity_and_wal_mode() {
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .expect("journal mode reads");
     assert_eq!(application_id, 0x4851_5253);
-    assert_eq!(user_version, 7);
+    assert_eq!(user_version, 8);
     assert_eq!(journal_mode, "wal");
 }
