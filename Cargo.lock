@@ -343,6 +343,7 @@ version = "0.1.0"
 name = "hq-store"
 version = "0.1.0"
 dependencies = [
+ "hq-application",
  "hq-domain",
  "hq-protocol",
  "hq-reducer",

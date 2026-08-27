@@ -82,21 +82,21 @@ pub(super) fn insert(
     transaction: &Transaction<'_>,
     snapshot: &AgentProjectionSnapshot,
 ) -> Result<(), StoreError> {
-    if snapshot.projections.keys().ne(snapshot.support.keys()) {
+    if snapshot.projections().keys().ne(snapshot.support().keys()) {
         return Err(corrupt());
     }
-    for (key, facts) in &snapshot.frontiers {
+    for (key, facts) in snapshot.frontiers() {
         let digest = insert_key(transaction, KeyTable::Aggregate, &aggregate_parts(key))?;
         insert_facts(transaction, "agent_frontiers", digest, facts)?;
     }
-    for (key, projection) in &snapshot.projections {
+    for (key, projection) in snapshot.projections() {
         let digest = insert_key(transaction, KeyTable::Projection, &projection_parts(key))?;
         insert_projection(transaction, digest, key, projection)?;
         insert_facts(
             transaction,
             "agent_support",
             digest,
-            snapshot.support.get(key).ok_or_else(corrupt)?,
+            snapshot.support().get(key).ok_or_else(corrupt)?,
         )?;
     }
     let counts = Counts::read(transaction)?;
@@ -148,11 +148,7 @@ pub(super) fn load(connection: &Connection) -> Result<AgentProjectionSnapshot, S
             return Err(corrupt());
         }
     }
-    let snapshot = AgentProjectionSnapshot {
-        frontiers,
-        projections,
-        support,
-    };
+    let snapshot = AgentProjectionSnapshot::new(frontiers, projections, support);
     validate_counts(&snapshot, state.counts)?;
     Ok(snapshot)
 }
@@ -1962,12 +1958,12 @@ fn put_value(digest: &mut Sha256, value: rusqlite::types::ValueRef<'_>) {
 
 fn validate_counts(snapshot: &AgentProjectionSnapshot, counts: Counts) -> Result<(), StoreError> {
     counts.validate()?;
-    if snapshot.projections.keys().ne(snapshot.support.keys())
-        || counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers.len()))?
-        || counts.frontier_count != length(snapshot.frontiers.values().map(BTreeSet::len))?
-        || counts.projection_key_count != length(std::iter::once(snapshot.projections.len()))?
-        || counts.projection_count != length(std::iter::once(snapshot.projections.len()))?
-        || counts.support_count != length(snapshot.support.values().map(BTreeSet::len))?
+    if snapshot.projections().keys().ne(snapshot.support().keys())
+        || counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers().len()))?
+        || counts.frontier_count != length(snapshot.frontiers().values().map(BTreeSet::len))?
+        || counts.projection_key_count != length(std::iter::once(snapshot.projections().len()))?
+        || counts.projection_count != length(std::iter::once(snapshot.projections().len()))?
+        || counts.support_count != length(snapshot.support().values().map(BTreeSet::len))?
     {
         return Err(corrupt());
     }
@@ -2282,11 +2278,7 @@ mod tests {
                 )
             })
             .collect();
-        AgentProjectionSnapshot {
-            frontiers,
-            projections,
-            support,
-        }
+        AgentProjectionSnapshot::new(frontiers, projections, support)
     }
 
     fn session(provider: &str, value: &str) -> SessionIdentity {

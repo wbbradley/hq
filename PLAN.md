@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[application/high] Implement transport-independent application services and ports** — Implement
-  identity/account, mailbox/conversation, peer/relay configuration, synchronization, agent/session,
-  project, query, mutation, and subscription use cases over consumer-owned ports rather than SQL- or
-  transport-shaped interfaces. Keep command decisions pure and represent external side effects as
-  explicit requests/results with stable identities and rejected/committed/uncertain outcomes. Add
-  focused fakes and use-case tests for authorization, mutation replay, error classification, and
-  authoritative snapshot semantics. Complete this work when no supported use case requires local
-  RPC, SQLite, Nostr, terminal, filesystem, or provider-specific knowledge.
-
 - **[local-api/high] Specify and implement the reconnecting local client protocol** — Define local
   API v1 framing, strict bounds, version negotiation, build metadata, lifecycle operations, typed
   domain requests/results/errors, stable mutation retry, and revision invalidations. Implement the

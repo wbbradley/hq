@@ -1,7 +1,34 @@
 //! Application use cases and inward-facing ports.
 
+mod error;
+mod mutation;
+mod ports;
+mod service;
+mod snapshot;
+
 use hq_domain::Fact;
 use hq_reducer::{GraphOnlyReducer, GraphReductionReport, ReduceError, reduce_complete};
+
+pub use error::{
+    ApplicationError, ApplicationErrorClass, ApplicationErrorCode, ApplicationValueError,
+};
+pub use mutation::{
+    FactMutation, FactPlan, MAX_ENCODED_MUTATION_RESULT_BYTES, MutationAttempt, MutationDecision,
+    MutationDecisionCallback, MutationDomain, MutationOutcome, MutationReceipt,
+    decode_mutation_outcome, encode_mutation_outcome,
+};
+pub use ports::{
+    AgentSessionRequest, AgentSessionResult, ApplicationPorts, CommitFacts, ConfigureRelays,
+    ControlHarness, EffectOutcome, EffectRequest, InspectResource, MAX_SUBSCRIPTION_TOPICS,
+    ObserveRevisions, PublishWake, QueryDomain, RelayAccess, RelayAuthentication,
+    RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult, SessionControl,
+    SubscriptionRequest, SubscriptionTopic, SynchronizationRequest, WakeDisposition,
+};
+pub use service::{Application, MutationCompletion, PreparedSubscription};
+pub use snapshot::{
+    AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, ConversationEntry,
+    ConversationProjectionSnapshot, DomainSnapshot, ProjectProjectionSnapshot, ProjectionSnapshot,
+};
 
 /// Minimal in-memory use-case host for the workspace walking skeleton.
 #[derive(Clone, Debug, Default)]

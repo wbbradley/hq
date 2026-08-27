@@ -73,28 +73,28 @@ pub(super) fn insert(
     transaction: &Transaction<'_>,
     snapshot: &ConversationProjectionSnapshot,
 ) -> Result<(), StoreError> {
-    if snapshot.projections.keys().ne(snapshot.support.keys()) {
+    if snapshot.projections().keys().ne(snapshot.support().keys()) {
         return Err(corrupt());
     }
-    for (key, facts) in &snapshot.frontiers {
+    for (key, facts) in snapshot.frontiers() {
         let parts = aggregate_parts(key);
         let digest = insert_key(transaction, KeyTable::Aggregate, &parts)?;
         insert_facts(transaction, "conversation_frontiers", digest, facts)?;
     }
-    for (key, projection) in &snapshot.projections {
+    for (key, projection) in snapshot.projections() {
         let parts = projection_parts(key);
         let digest = insert_key(transaction, KeyTable::Projection, &parts)?;
         insert_projection(transaction, digest, key, projection)?;
-        let support = snapshot.support.get(key).ok_or_else(corrupt)?;
+        let support = snapshot.support().get(key).ok_or_else(corrupt)?;
         insert_facts(transaction, "conversation_support", digest, support)?;
     }
     let counts = Counts::read(transaction)?;
     counts.validate()?;
-    if counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers.len()))?
-        || counts.frontier_count != length(snapshot.frontiers.values().map(BTreeSet::len))?
-        || counts.projection_key_count != length(std::iter::once(snapshot.projections.len()))?
-        || counts.projection_count != length(std::iter::once(snapshot.projections.len()))?
-        || counts.support_count != length(snapshot.support.values().map(BTreeSet::len))?
+    if counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers().len()))?
+        || counts.frontier_count != length(snapshot.frontiers().values().map(BTreeSet::len))?
+        || counts.projection_key_count != length(std::iter::once(snapshot.projections().len()))?
+        || counts.projection_count != length(std::iter::once(snapshot.projections().len()))?
+        || counts.support_count != length(snapshot.support().values().map(BTreeSet::len))?
     {
         return Err(corrupt());
     }
@@ -143,11 +143,7 @@ pub(super) fn load(connection: &Connection) -> Result<ConversationProjectionSnap
         let facts = load_facts(connection, "conversation_support", digest)?;
         support.insert(key, facts);
     }
-    let snapshot = ConversationProjectionSnapshot {
-        frontiers,
-        projections,
-        support,
-    };
+    let snapshot = ConversationProjectionSnapshot::new(frontiers, projections, support);
     validate_snapshot(&snapshot, state.counts)?;
     Ok(snapshot)
 }
@@ -1666,12 +1662,12 @@ fn validate_snapshot(
     snapshot: &ConversationProjectionSnapshot,
     counts: Counts,
 ) -> Result<(), StoreError> {
-    if snapshot.projections.keys().ne(snapshot.support.keys())
-        || counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers.len()))?
-        || counts.frontier_count != length(snapshot.frontiers.values().map(BTreeSet::len))?
-        || counts.projection_key_count != length(std::iter::once(snapshot.projections.len()))?
-        || counts.projection_count != length(std::iter::once(snapshot.projections.len()))?
-        || counts.support_count != length(snapshot.support.values().map(BTreeSet::len))?
+    if snapshot.projections().keys().ne(snapshot.support().keys())
+        || counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers().len()))?
+        || counts.frontier_count != length(snapshot.frontiers().values().map(BTreeSet::len))?
+        || counts.projection_key_count != length(std::iter::once(snapshot.projections().len()))?
+        || counts.projection_count != length(std::iter::once(snapshot.projections().len()))?
+        || counts.support_count != length(snapshot.support().values().map(BTreeSet::len))?
     {
         return Err(corrupt());
     }
@@ -1933,11 +1929,7 @@ mod tests {
                 )
             })
             .collect();
-        ConversationProjectionSnapshot {
-            frontiers,
-            projections,
-            support,
-        }
+        ConversationProjectionSnapshot::new(frontiers, projections, support)
     }
 
     fn operation(provider: &str, session: &str, id_byte: u8) -> OperationCorrelation {

@@ -70,16 +70,16 @@ pub(super) fn insert(
     transaction: &Transaction<'_>,
     snapshot: &ProjectProjectionSnapshot,
 ) -> Result<(), StoreError> {
-    if snapshot.projections.keys().ne(snapshot.support.keys()) {
+    if snapshot.projections().keys().ne(snapshot.support().keys()) {
         return Err(corrupt());
     }
-    for (key, facts) in &snapshot.frontiers {
+    for (key, facts) in snapshot.frontiers() {
         let parts = aggregate_parts(key);
         let digest = key_digest(&parts);
         insert_aggregate_key(transaction, digest, &parts)?;
         insert_facts(transaction, "project_frontiers", digest, facts)?;
     }
-    for (key, projection) in &snapshot.projections {
+    for (key, projection) in snapshot.projections() {
         let (kind, id) = projection_parts(key);
         let digest = projection_digest(kind, id);
         transaction
@@ -94,7 +94,7 @@ pub(super) fn insert(
             transaction,
             "project_support",
             digest,
-            snapshot.support.get(key).ok_or_else(corrupt)?,
+            snapshot.support().get(key).ok_or_else(corrupt)?,
         )?;
     }
     let counts = Counts::read(transaction)?;
@@ -168,11 +168,7 @@ pub(super) fn load(connection: &Connection) -> Result<ProjectProjectionSnapshot,
             return Err(corrupt());
         }
     }
-    let snapshot = ProjectProjectionSnapshot {
-        frontiers,
-        projections,
-        support,
-    };
+    let snapshot = ProjectProjectionSnapshot::new(frontiers, projections, support);
     validate_counts(&snapshot, state.counts)?;
     Ok(snapshot)
 }
@@ -1888,12 +1884,12 @@ fn put_value(digest: &mut Sha256, value: rusqlite::types::ValueRef<'_>) {
 
 fn validate_counts(snapshot: &ProjectProjectionSnapshot, counts: Counts) -> Result<(), StoreError> {
     counts.validate()?;
-    if snapshot.projections.keys().ne(snapshot.support.keys())
-        || counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers.len()))?
-        || counts.frontier_count != length(snapshot.frontiers.values().map(BTreeSet::len))?
-        || counts.projection_key_count != length(std::iter::once(snapshot.projections.len()))?
-        || counts.projection_count != length(std::iter::once(snapshot.projections.len()))?
-        || counts.support_count != length(snapshot.support.values().map(BTreeSet::len))?
+    if snapshot.projections().keys().ne(snapshot.support().keys())
+        || counts.aggregate_key_count != length(std::iter::once(snapshot.frontiers().len()))?
+        || counts.frontier_count != length(snapshot.frontiers().values().map(BTreeSet::len))?
+        || counts.projection_key_count != length(std::iter::once(snapshot.projections().len()))?
+        || counts.projection_count != length(std::iter::once(snapshot.projections().len()))?
+        || counts.support_count != length(snapshot.support().values().map(BTreeSet::len))?
     {
         return Err(corrupt());
     }
@@ -2269,11 +2265,7 @@ mod tests {
                 set([id(8)]),
             ),
         ]);
-        ProjectProjectionSnapshot {
-            frontiers,
-            projections,
-            support,
-        }
+        ProjectProjectionSnapshot::new(frontiers, projections, support)
     }
 
     fn fixture_connection(snapshot: &ProjectProjectionSnapshot) -> Connection {

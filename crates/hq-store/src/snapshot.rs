@@ -281,7 +281,11 @@ impl CompleteSnapshot {
 
     /// Clones the complete authority projection/frontier/support oracle.
     pub fn authority_projection_snapshot(&self) -> AuthorityProjectionSnapshot {
-        AuthorityProjectionSnapshot::from_report(&self.authority)
+        AuthorityProjectionSnapshot::new(
+            self.authority.frontiers().clone(),
+            self.authority.projections().clone(),
+            self.authority.support().clone(),
+        )
     }
 
     /// Returns the conversation and activity report.
@@ -291,7 +295,11 @@ impl CompleteSnapshot {
 
     /// Clones the complete conversation projection/frontier/support oracle.
     pub fn conversation_projection_snapshot(&self) -> ConversationProjectionSnapshot {
-        ConversationProjectionSnapshot::from_report(&self.conversation)
+        ConversationProjectionSnapshot::new(
+            self.conversation.frontiers().clone(),
+            self.conversation.projections().clone(),
+            self.conversation.support().clone(),
+        )
     }
 
     /// Returns the named-agent report.
@@ -301,7 +309,11 @@ impl CompleteSnapshot {
 
     /// Clones the complete named-agent projection/frontier/support oracle.
     pub fn agent_projection_snapshot(&self) -> AgentProjectionSnapshot {
-        AgentProjectionSnapshot::from_report(&self.agent)
+        AgentProjectionSnapshot::new(
+            self.agent.frontiers().clone(),
+            self.agent.projections().clone(),
+            self.agent.support().clone(),
+        )
     }
 
     /// Returns the project report.
@@ -311,7 +323,11 @@ impl CompleteSnapshot {
 
     /// Clones the complete project projection/frontier/support oracle.
     pub fn project_projection_snapshot(&self) -> ProjectProjectionSnapshot {
-        ProjectProjectionSnapshot::from_report(&self.project)
+        ProjectProjectionSnapshot::new(
+            self.project.frontiers().clone(),
+            self.project.projections().clone(),
+            self.project.support().clone(),
+        )
     }
 
     /// Normalizes structural report data into the representation persisted by repair.

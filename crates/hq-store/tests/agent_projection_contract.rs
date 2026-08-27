@@ -37,11 +37,11 @@ fn repair_persists_the_exact_typed_agent_report_and_reopens() {
         *repaired.agent()
     );
     assert!(matches!(
-        repaired.agent().projection(&session_key()),
+        repaired.agent().projection(session_key()),
         Some(AgentProjection::Session(_))
     ));
     assert!(matches!(
-        repaired.agent().projection(&direct_session_key()),
+        repaired.agent().projection(direct_session_key()),
         Some(AgentProjection::DirectSession(_))
     ));
     let expected = repaired.agent().clone();

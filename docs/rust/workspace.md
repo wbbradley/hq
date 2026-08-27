@@ -27,7 +27,8 @@ making the skeleton a supported replacement for the Go executable.
 
 An allowlist in `scripts/verify-rust-architecture.sh` enforces direct internal dependencies. The
 same verifier rejects Tokio, SQLite, Nostr, Ratatui, filesystem, process, and provider-specific
-concerns in `hq-domain` and `hq-reducer`; rejects Codex vocabulary in `hq-harness`; and requires the
+concerns in `hq-domain`, `hq-reducer`, and `hq-application`; rejects Codex vocabulary in
+`hq-harness`; and requires the
 provider dependency to point from `hq-codex` to the neutral harness contract. Provider-neutral
 identities remain valid domain vocabulary. This source scan complements
 Cargo's cycle checks: dependency acyclicity alone does not prove that a core crate is pure.
@@ -37,6 +38,11 @@ validates a small frame in `hq-protocol`, constructs an `hq-domain` fact, and su
 `hq-application`. Reduction now uses the normative pure complete-batch causal kernel in
 `hq-reducer`; later domain packages plug authorization, aggregate, and projection policy into that
 kernel without moving graph logic into application or adapter crates.
+
+`hq-application` owns normalized projection snapshots, strict retry outcomes, effect requests, and
+the consumer-side capability traits documented in `docs/rust/application-services.md`. Storage,
+local sessions, relays, managed runtimes, resource observers, and the node implement or compose
+those ports; application services never import their concrete types.
 
 ## Supported target matrix
 
@@ -49,9 +55,10 @@ ADR 0001 defines four first-release targets:
 | macOS | x86-64 | `x86_64-apple-darwin` |
 | macOS | Apple Silicon | `aarch64-apple-darwin` |
 
-CI runs the complete Rust workspace natively on Linux and macOS, cross-checks the pure core and
-pure-Rust protocol boundary for all four triples, and runs a pinned signed-event fuzz smoke gate on
-Linux. A cross-target check is compilation evidence, not an adapter or lifecycle test.
+CI runs the complete Rust workspace natively on Linux and macOS, cross-checks the pure core,
+application contracts, and pure-Rust protocol boundary for all four triples, and runs a pinned
+signed-event fuzz smoke gate on Linux. A cross-target check is compilation evidence, not an adapter
+or lifecycle test.
 Windows is deliberately absent: inexpensive core portability is welcome, but product support
 requires the separate local-transport, ownership, lifecycle, path-policy, and acceptance work in
 ADR 0001.

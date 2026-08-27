@@ -203,6 +203,22 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Incremental write tests protect unrelated projection rows with aborting update/delete triggers;
   a semantically unrelated append must commit without firing them, then equal batch and repair.
 
+## Application service gates
+
+- Exact fact-mutation replay returns the retained typed receipt without invoking the pure decision
+  again; the same command ID with a changed digest conflicts before decision.
+- A committed receipt remains committed when its post-commit publish wake is coalesced or fails.
+  Rejected and uncertain attempts schedule no publish work.
+- Relay, synchronization, neutral session, and resource operations carry stable operation IDs and
+  exact digests and expose accepted, rejected, or reconcilable uncertain outcomes.
+- Subscription preparation traces `register -> authoritative query`; activation is a separate call
+  after acknowledgement, while query failure traces `register -> query -> cancel`.
+- The store gateway returns revision plus all four application-owned projection packages from one
+  actor request, translates pure fact plans through the ordinary atomic mutation engine, and
+  strictly validates retained application result bytes and result-kind agreement.
+- Architecture verification rejects runtime, persistence, transport, terminal, filesystem,
+  process, and provider-specific implementation concerns in `hq-application`.
+
 ## Scenario maintenance rule
 
 Every new semantic catalog row adds at least one valid scenario and one missing-parent,

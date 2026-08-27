@@ -49,7 +49,7 @@ fn repair_persists_every_report_exactly_and_project_rows_reopen() {
         *repaired.agent()
     );
     assert!(matches!(
-        repaired.project().projection(&project_key()),
+        repaired.project().projection(project_key()),
         Some(ProjectProjection::Project(_))
     ));
     assert!(
@@ -97,7 +97,7 @@ fn project_snapshot_changes_atomically_on_ingest_and_repair_is_equal() {
         .load_project_snapshot()
         .expect("ingest updates project snapshot");
     assert_ne!(after, before);
-    assert!(after.projection(&project_key()).is_some());
+    assert!(after.projection(project_key()).is_some());
     assert_eq!(
         store
             .repair(authority_policy())

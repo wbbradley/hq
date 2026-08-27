@@ -113,7 +113,7 @@ while IFS= read -r rust_source; do
   fi
 done < <(find "$repository_root"/crates/hq-*/src -type f -name '*.rs' | sort)
 
-for core_crate in hq-domain hq-reducer; do
+for core_crate in hq-domain hq-reducer hq-application; do
   if grep -ERiq --include='Cargo.toml' --include='*.rs' \
     '(tokio|rusqlite|sqlite|nostr|ratatui|std::fs|std::process|codex|claude|anthropic|openai)' \
     "$repository_root/crates/$core_crate"; then

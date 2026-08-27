@@ -30,10 +30,10 @@ use rusqlite::{
 };
 
 use crate::{
-    AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot, ConversationEntry,
-    ConversationProjectionSnapshot, IngestOutcome, LocalMutationRequest, MutationReceipt,
-    MutationResultKind, OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot,
-    RepairOutcome, StoreError, StoreErrorClass,
+    AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
+    ConversationEntry, ConversationProjectionSnapshot, DomainSnapshot, IngestOutcome,
+    LocalMutationRequest, MutationReceipt, MutationResultKind, OutboxIntent,
+    ProjectProjectionSnapshot, ReductionIndexSnapshot, RepairOutcome, StoreError, StoreErrorClass,
     operational::LocalMutationDecisionParts,
     paths::{prepare_database_path, validate_database_path},
     snapshot::build_complete_snapshot,
@@ -1286,6 +1286,19 @@ impl Database {
         project::load(&self.connection)
     }
 
+    pub(super) fn load_authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, StoreError> {
+        repair::load(&self.connection)?;
+        let authority = authority::load(&self.connection)?;
+        let conversation = conversation::load(&self.connection)?;
+        let agent = agent::load(&self.connection)?;
+        let project = project::load(&self.connection)?;
+        let revision = operational::current_revision(&self.connection)?;
+        Ok(AuthoritativeSnapshot::new(
+            revision,
+            DomainSnapshot::new(authority, conversation, agent, project),
+        ))
+    }
+
     pub(super) fn current_revision(&self) -> Result<hq_domain::Revision, StoreError> {
         operational::current_revision(&self.connection)
     }
@@ -1574,39 +1587,39 @@ fn validate_incremental_change(
         .all(|(_, fact_id)| affected.contains(&fact_id));
     if !decisions_are_covered
         || !projection_changes_are_covered(
-            &previous.authority.frontiers,
-            &authority.frontiers,
-            &previous.authority.projections,
-            &authority.projections,
-            &previous.authority.support,
-            &authority.support,
+            previous.authority.frontiers(),
+            authority.frontiers(),
+            previous.authority.projections(),
+            authority.projections(),
+            previous.authority.support(),
+            authority.support(),
             &affected,
         )
         || !projection_changes_are_covered(
-            &previous.conversation.frontiers,
-            &conversation.frontiers,
-            &previous.conversation.projections,
-            &conversation.projections,
-            &previous.conversation.support,
-            &conversation.support,
+            previous.conversation.frontiers(),
+            conversation.frontiers(),
+            previous.conversation.projections(),
+            conversation.projections(),
+            previous.conversation.support(),
+            conversation.support(),
             &affected,
         )
         || !projection_changes_are_covered(
-            &previous.agent.frontiers,
-            &agent.frontiers,
-            &previous.agent.projections,
-            &agent.projections,
-            &previous.agent.support,
-            &agent.support,
+            previous.agent.frontiers(),
+            agent.frontiers(),
+            previous.agent.projections(),
+            agent.projections(),
+            previous.agent.support(),
+            agent.support(),
             &affected,
         )
         || !projection_changes_are_covered(
-            &previous.project.frontiers,
-            &project.frontiers,
-            &previous.project.projections,
-            &project.projections,
-            &previous.project.support,
-            &project.support,
+            previous.project.frontiers(),
+            project.frontiers(),
+            previous.project.projections(),
+            project.projections(),
+            previous.project.support(),
+            project.support(),
             &affected,
         )
     {

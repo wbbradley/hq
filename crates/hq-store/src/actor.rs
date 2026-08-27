@@ -17,9 +17,9 @@ use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 
 use crate::{
-    AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot, ConversationEntry,
-    ConversationProjectionSnapshot, LocalMutationRequest, MutationReceipt, OutboxIntent,
-    ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
+    AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
+    ConversationEntry, ConversationProjectionSnapshot, LocalMutationRequest, MutationReceipt,
+    OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
     database::Database,
 };
 
@@ -238,6 +238,9 @@ enum Request {
     LoadProjectSnapshot {
         reply: SyncSender<Result<ProjectProjectionSnapshot, StoreError>>,
     },
+    AuthoritativeSnapshot {
+        reply: SyncSender<Result<AuthoritativeSnapshot, StoreError>>,
+    },
     CurrentRevision {
         reply: SyncSender<Result<Revision, StoreError>>,
     },
@@ -454,6 +457,17 @@ impl Store {
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
+    /// Loads revision and every application projection package from one serialized store point.
+    pub fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::AuthoritativeSnapshot { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Returns the monotonic revision of the last committed relevant change.
     pub fn current_revision(&self) -> Result<Revision, StoreError> {
         let (reply, response) = mpsc::sync_channel(1);
@@ -597,6 +611,9 @@ fn run(
             }
             Request::LoadProjectSnapshot { reply } => {
                 let _ = reply.send(database.load_project_snapshot());
+            }
+            Request::AuthoritativeSnapshot { reply } => {
+                let _ = reply.send(database.load_authoritative_snapshot());
             }
             Request::CurrentRevision { reply } => {
                 let _ = reply.send(database.current_revision());

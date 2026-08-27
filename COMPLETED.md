@@ -4899,3 +4899,101 @@ passed 10 isolated repetitions after one transient full-suite failure.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so reducer indexes, storage patching, queries, tests, specifications,
      and bookkeeping form one reviewable change.
+
+## 2026-08-27 — Transport-independent application services and ports
+
+Moved normalized authority, conversation, agent, project, and unified conversation-page values to
+the application consumer boundary and added one revisioned authoritative snapshot. Added closed
+application errors, strict versioned mutation-result encoding, pure transaction-snapshot fact
+decisions, typed completed/rejected/uncertain attempts, stable external-effect envelopes, and narrow
+query, commit, wake, relay, harness, resource, and revision-observation capabilities. The stateless
+service keeps post-commit scheduling separate from durable success and enforces pending registration,
+snapshot read, explicit acknowledgement activation, and failure cancellation ordering.
+
+Storage now depends inward on application and provides a signer/policy-configured gateway. One store
+actor request reads revision plus all four projection packages, fact plans enter the existing atomic
+local mutation engine, and retained application receipt bytes are strictly decoded with result-kind
+agreement. Contracts cover exact replay, changed digests, pure commit/rejection, corrupted retained
+results, committed wake failure, accepted/rejected/uncertain external effects, subscription traces,
+and gateway equality. Architecture and four-target CI now include the pure application crate.
+
+Architecture, behavior, causal, protocol, and dependency verifiers; locked workspace format/check/
+build/tests/doctests/Clippy; all four required targets including application; both 512-run protocol
+fuzz smokes; whitespace checks; and the unchanged Go vet/build/fresh test suite pass.
+
+### Original plan entry
+
+- **[application/high] Implement transport-independent application services and ports** — Implement
+  identity/account, mailbox/conversation, peer/relay configuration, synchronization, agent/session,
+  project, query, mutation, and subscription use cases over consumer-owned ports rather than SQL- or
+  transport-shaped interfaces. Keep command decisions pure and represent external side effects as
+  explicit requests/results with stable identities and rejected/committed/uncertain outcomes. Add
+  focused fakes and use-case tests for authorization, mutation replay, error classification, and
+  authoritative snapshot semantics. Complete this work when no supported use case requires local
+  RPC, SQLite, Nostr, terminal, filesystem, or provider-specific knowledge.
+
+  **Implementation plan**
+
+  - Make `hq-application` own representation-independent authority, conversation, agent, and project
+    projection snapshots, the unified conversation entry, and one revisioned authoritative snapshot.
+    Move these client-facing values out of `hq-store`; keep reducer values as the shared semantic
+    vocabulary and keep complete reduction/index diagnostics private to persistence and repair.
+  - Define closed application error classes and stable codes, retryable fact-mutation requests with
+    explicit command ID, digest, authored inputs, and signing randomness, a pure one-shot decision
+    against an application snapshot, and typed committed/rejected/uncertain attempts. Own a strict
+    versioned receipt-result codec in the application crate so durable replay never serializes Rust
+    structs, transport DTOs, diagnostics, or prose.
+  - Declare narrow consumer-owned capabilities for `QueryDomain`, `CommitFacts`, `PublishWake`,
+    `ConfigureRelays`, `ControlHarness`, `InspectResource`, and `ObserveRevisions`. Give external
+    relay, synchronization, runtime, and resource operations stable operation identity and digest,
+    and represent accepted, rejected, and reconcilable uncertain outcomes without provider,
+    filesystem, network, SQL, or runtime vocabulary.
+  - Implement one stateless application service over a capability bundle. Expose authoritative
+    refresh, indexed conversation pages, fact-backed identity/account/mailbox/conversation/agent/
+    project mutations, relay configuration, explicit synchronization, neutral session control,
+    resource inspection, and two-phase subscriptions. A committed mutation schedules relay work but
+    remains committed if that post-commit wake is coalesced or unavailable.
+  - Close the subscription revision race at the service boundary: register a pending observer before
+    loading its acknowledged authoritative snapshot, cancel it if the query fails, return it still
+    pending for the transport to acknowledge, and activate only through a separate call after the
+    acknowledgement has been written.
+  - Add an `hq-store` application gateway configured with explicit local authority and signer
+    capabilities. Atomically load revision plus all four persisted projection packages on the store
+    actor, translate application fact plans only at the protocol-owning adapter edge, execute the
+    existing transaction-consistent mutation path, strictly decode retained application receipts,
+    and classify store failures without leaking storage types.
+  - Add scripted capability fakes and contracts for pure authorization decisions, exact replay and
+    changed-digest conflict, post-commit wake independence, committed/rejected/uncertain external
+    effects, error classification, register/query/ack ordering, query-failure cancellation, store
+    gateway equality, and compile-time dependency direction. Update the application/workspace/
+    acceptance specifications and run every Rust and unchanged Go repository gate.
+
+  **Risks and mitigations**
+
+  - Returning store-owned snapshots would make every client depend on persistence; move only the
+    semantic projection owners to application and let storage re-export them for compatibility while
+    keeping SQL codecs private.
+  - A generic external-effect trait would hide materially different retry and reconciliation rules;
+    keep relay configuration, wake, harness control, and resource inspection as separate capability
+    traits over shared stable operation envelopes.
+  - Reporting a wake or observer failure as a mutation failure could cause duplicate local commands;
+    make the durable receipt authoritative and report post-commit scheduling separately.
+  - Reading revision and projections through separate actor calls admits a torn authoritative view;
+    add one actor-owned aggregate query and test that its revision and packages come from the same
+    serialized store point.
+  - Persisting arbitrary result bytes would defer corruption to retry time; use one bounded explicit
+    application codec and require the stored result kind and decoded outcome to agree.
+  - Activating a subscription before the client sees its snapshot can lose an invalidation between
+    acknowledgement and observation; model pending registration and activation as distinct calls and
+    prove their ordering with a trace fake.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** ports, decisions, replay, uncertainty, authoritative snapshots, subscriptions, the
+     store gateway, and all repository gates.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so application contracts, storage adaptation, tests, specifications,
+     and bookkeeping form one reviewable change.

@@ -46,13 +46,13 @@ fn repair_persists_the_exact_typed_conversation_report_and_reopens() {
     assert!(matches!(
         repaired
             .conversation()
-            .projection(&ConversationProjectionKey::Thread(thread)),
+            .projection(ConversationProjectionKey::Thread(thread)),
         Some(ConversationProjection::Thread(_))
     ));
     assert!(matches!(
         repaired
             .conversation()
-            .projection(&ConversationProjectionKey::Message(MessageId::from_bytes(
+            .projection(ConversationProjectionKey::Message(MessageId::from_bytes(
                 [0x55; 32]
             ))),
         Some(ConversationProjection::Message(_))
@@ -60,7 +60,7 @@ fn repair_persists_the_exact_typed_conversation_report_and_reopens() {
     assert!(matches!(
         repaired
             .conversation()
-            .projection(&ConversationProjectionKey::ActionGroup(operation())),
+            .projection(ConversationProjectionKey::ActionGroup(operation())),
         Some(ConversationProjection::ActionGroup(_))
     ));
     let expected = repaired.conversation().clone();

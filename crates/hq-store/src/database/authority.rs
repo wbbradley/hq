@@ -50,15 +50,15 @@ pub(super) fn insert(
 ) -> Result<(), StoreError> {
     insert_frontiers(transaction, snapshot)?;
     insert_support(transaction, snapshot)?;
-    for (key, projection) in &snapshot.projections {
+    for (key, projection) in snapshot.projections() {
         insert_projection(transaction, *key, projection)?;
     }
     let counts = Counts::read(transaction)?;
     counts.validate()?;
-    if counts.frontier_count != length(snapshot.frontiers.values().map(BTreeSet::len))?
+    if counts.frontier_count != length(snapshot.frontiers().values().map(BTreeSet::len))?
         || counts.projection_count
-            != i64::try_from(snapshot.projections.len()).map_err(|_| corrupt())?
-        || counts.support_count != length(snapshot.support.values().map(BTreeSet::len))?
+            != i64::try_from(snapshot.projections().len()).map_err(|_| corrupt())?
+        || counts.support_count != length(snapshot.support().values().map(BTreeSet::len))?
     {
         return Err(corrupt());
     }
@@ -91,11 +91,11 @@ pub(super) fn load(connection: &Connection) -> Result<AuthorityProjectionSnapsho
     if Counts::read(connection)? != expected.counts || row_digest(connection)? != expected.digest {
         return Err(corrupt());
     }
-    let snapshot = AuthorityProjectionSnapshot {
-        frontiers: load_keyed_facts(connection, "authority_frontiers", decode_aggregate_key)?,
-        projections: load_projections(connection)?,
-        support: load_keyed_facts(connection, "authority_support", decode_projection_key)?,
-    };
+    let snapshot = AuthorityProjectionSnapshot::new(
+        load_keyed_facts(connection, "authority_frontiers", decode_aggregate_key)?,
+        load_projections(connection)?,
+        load_keyed_facts(connection, "authority_support", decode_projection_key)?,
+    );
     validate_snapshot(&snapshot, expected.counts)?;
     Ok(snapshot)
 }
@@ -104,7 +104,7 @@ fn insert_frontiers(
     transaction: &Transaction<'_>,
     snapshot: &AuthorityProjectionSnapshot,
 ) -> Result<(), StoreError> {
-    for (key, facts) in &snapshot.frontiers {
+    for (key, facts) in snapshot.frontiers() {
         let key = aggregate_key_parts(*key);
         for fact in facts {
             insert_keyed_fact(transaction, "authority_frontiers", key, *fact)?;
@@ -117,7 +117,7 @@ fn insert_support(
     transaction: &Transaction<'_>,
     snapshot: &AuthorityProjectionSnapshot,
 ) -> Result<(), StoreError> {
-    for (key, facts) in &snapshot.support {
+    for (key, facts) in snapshot.support() {
         let key = projection_key_parts(*key);
         for fact in facts {
             insert_keyed_fact(transaction, "authority_support", key, *fact)?;
@@ -1247,18 +1247,18 @@ fn validate_snapshot(
     snapshot: &AuthorityProjectionSnapshot,
     counts: Counts,
 ) -> Result<(), StoreError> {
-    if counts.frontier_count != length(snapshot.frontiers.values().map(BTreeSet::len))?
+    if counts.frontier_count != length(snapshot.frontiers().values().map(BTreeSet::len))?
         || counts.projection_count
-            != i64::try_from(snapshot.projections.len()).map_err(|_| corrupt())?
-        || counts.support_count != length(snapshot.support.values().map(BTreeSet::len))?
+            != i64::try_from(snapshot.projections().len()).map_err(|_| corrupt())?
+        || counts.support_count != length(snapshot.support().values().map(BTreeSet::len))?
         || snapshot
-            .support
+            .support()
             .keys()
-            .any(|key| !snapshot.projections.contains_key(key))
+            .any(|key| !snapshot.projections().contains_key(key))
         || snapshot
-            .projections
+            .projections()
             .keys()
-            .any(|key| !snapshot.support.contains_key(key))
+            .any(|key| !snapshot.support().contains_key(key))
     {
         Err(corrupt())
     } else {
@@ -1626,11 +1626,7 @@ mod tests {
                 )
             })
             .collect();
-        AuthorityProjectionSnapshot {
-            frontiers,
-            projections,
-            support,
-        }
+        AuthorityProjectionSnapshot::new(frontiers, projections, support)
     }
 
     fn relays(scheme: ResourceScheme, value: &str) -> RelayHints {

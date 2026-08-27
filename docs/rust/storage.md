@@ -173,8 +173,10 @@ incremental patch path.
 
 `mutation_receipts` binds one 32-byte command identity to its 32-byte exact-request digest, a
 closed committed/rejected result kind, bounded exact result bytes, and the transaction's revision.
-An equal insertion is idempotent; any unequal reuse is a mutation conflict. These bytes are an
-application-owned exact result encoding, not serialized Rust domain structs or diagnostic prose.
+An equal insertion is idempotent; any unequal reuse is a mutation conflict. These bytes use the
+strict application-owned v1 outcome encoding documented in `docs/rust/application-services.md`,
+not serialized Rust domain structs or diagnostic prose. The application gateway requires the
+decoded committed/rejected outcome to agree with the separately stored closed result kind.
 
 `change_revision` stores the full unsigned 64-bit revision as fixed-width big-endian bytes, so it
 does not silently lose the upper half of the domain in SQLite's signed integer representation.
@@ -190,13 +192,18 @@ deletes, rewrites, or derives any receipt, revision, or outbox row.
 
 ## Authority projections
 
-`AuthorityProjectionSnapshot` is the representation-independent persisted query boundary for the
-complete authority report. It owns ordered typed maps for every `AuthorityAggregateKey` frontier,
+`AuthorityProjectionSnapshot` is the application-owned representation-independent query boundary
+for the complete authority report. It owns ordered typed maps for every `AuthorityAggregateKey` frontier,
 every `AuthorityProjectionKey` and value, and every transitive support set. Callers can inspect
 installations, installation-qualified mailboxes, directional peer-route histories, mailbox
 capabilities, account roots, device memberships, and the policy-local account-selection register
 without SQL access or another reducer run. `load_authority_snapshot()` is read-only and verifies
 that the structural half of the same atomic ingest or repair is intact.
+
+`Store::authoritative_snapshot()` is one actor request that reads the current revision and all four
+application projection packages at one serialized store point. `StoreGateway` implements the
+application query and fact-commit ports with explicit authority policy and signer capabilities;
+other application capabilities remain outside persistence ownership.
 
 Authority values are not serialized Rust structs. Dedicated strict tables and normalized child rows
 store each projection variant: route candidates, blocks, relay locators and frontiers; capability

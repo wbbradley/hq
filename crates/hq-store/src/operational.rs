@@ -177,6 +177,10 @@ impl MutationResultBytes {
         Ok(Self(bytes))
     }
 
+    pub(crate) fn from_application_encoding(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
     /// Borrows the exact encoded result.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
