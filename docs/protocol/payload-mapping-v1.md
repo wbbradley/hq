@@ -46,7 +46,10 @@ state. Protocol DTOs may resemble semantic fields but are separate types and val
   `{"id":hex,"sender":mailbox-address,"recipient":optional-mailbox-address,"body":content,"purpose":purpose,"presentation":presentation,"correlation":optional-operation,"project":optional-hex}`.
   Purpose strings are `question`, `asynchronous`, and `project-output`; presentation strings are
   `message`, `final-answer`, and `status`.
-- `resource` is exactly `{"id":hex,"locator":locator,"health":health}`. Health is `unknown`,
+- `resource` is exactly
+  `{"id":hex,"display":locator,"canonical":locator,"health":health}`. The two locator schemes
+  must agree; `display` preserves normalized human spelling while `canonical` is immutable
+  conflict identity. Health is `unknown`,
   `healthy`, `degraded`, or `unavailable`.
 - `binding` is exactly
   `{"assignment":hex,"agent":hex,"provider":provider-text,"session":session-text}`.

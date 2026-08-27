@@ -21,6 +21,7 @@ making the skeleton a supported replacement for the Go executable.
 | `hq-store` | Durable state and commit adapter | Domain, reducer, protocol, application |
 | `hq-local-api` | Local client protocol and sessions | Domain, protocol, application |
 | `hq-relay` | Encrypted relay transport | Domain, protocol, application |
+| `hq-resources` | Path identity plus bounded filesystem and Git observation | Domain |
 | `hq-harness` | Provider-neutral runtime contract, registry, buffer, and supervisor | Domain |
 | `hq-codex` | Private Codex adapter | Domain, `hq-harness` |
 | `hq-tui` | Pure UI state plus terminal adapter | Domain, application |
@@ -49,6 +50,12 @@ factory configuration use public fields; child ownership, RPC identities, recove
 interactive requests, and mutable session state remain opaque capabilities. Its private synchronous
 JSONL/process implementation adds no async runtime and no Codex DTO or method name crosses into a
 neutral crate.
+
+`hq-resources` implements `docs/path-resources-v1.md`. Passive requests and reports expose public
+fields. The adapter itself remains an opaque capability because it owns injected filesystem and Git
+effects. It preserves normalized human spelling separately from immutable canonical identity,
+keeps home qualification explicit, and returns closed health/release evidence without retaining
+file names, contents, stderr, environment, or operating-system diagnostics.
 
 The in-memory composition path remains intentionally non-normative at the protocol boundary: it
 validates a small frame in `hq-protocol`, constructs an `hq-domain` fact, and submits it through
@@ -121,7 +128,7 @@ ADR 0001 defines four first-release targets:
 
 CI runs the complete Rust workspace natively on Linux and macOS, cross-checks the pure core,
 application, protocol, neutral harness, reusable conformance boundary, and standard-library Codex
-adapter for all four triples, and runs pinned protocol fuzz smoke gates on Linux. A cross-target
+and path-resource adapters for all four triples, and runs pinned protocol fuzz smoke gates on Linux. A cross-target
 check is compilation evidence, not an installed-provider or lifecycle test.
 Windows is deliberately absent: inexpensive core portability is welcome, but product support
 requires the separate local-transport, ownership, lifecycle, path-policy, and acceptance work in

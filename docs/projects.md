@@ -57,10 +57,11 @@ Future resource kinds might represent Docker containers, exclusive client connec
 coordinated capabilities. Each kind owns its canonicalization, conflict, health-check, and display
 semantics.
 
-A resource UUID, kind, home, and canonical locator are immutable. Moving or renaming a path is an
-atomic replacement operation: acquire the new resource, update the project's primary resource if
-needed, and release the old claim. External unobserved moves leave the old resource degraded until
-the human reconciles it.
+A resource UUID, kind, home, normalized human-selected display spelling, and canonical locator are
+immutable. Claim/conflict policy uses only the canonical locator; clients retain both so every
+decision remains explainable. Moving or renaming a path is an atomic replacement operation: acquire
+the new resource, update the project's primary resource if needed, and release the old claim.
+External unobserved moves leave the old resource degraded until the human reconciles it.
 
 ### Project mailbox
 

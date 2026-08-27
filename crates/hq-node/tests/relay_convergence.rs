@@ -574,7 +574,11 @@ fn project_fact(
     let resource_id = hq_domain::ResourceId::from_bytes([identity.wrapping_add(2); 32]);
     let resource = hq_domain::ProjectResource {
         resource_id,
-        locator: ResourceLocator::new(
+        display_locator: ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new(format!("/workspace/{identity}")).expect("path validates"),
+        ),
+        canonical_locator: ResourceLocator::new(
             ResourceScheme::WorkingTree,
             BoundedText::new(format!("/workspace/{identity}")).expect("path validates"),
         ),

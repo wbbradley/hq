@@ -6327,3 +6327,29 @@ gates pass.
   lease races, response loss, buffer saturation, coalescing order, partial output/activity commits,
   concurrent agents, secret exclusion, drain timeout, and forced process termination with the fake
   adapter. Complete this work when accepted work is never silently lost or duplicated.
+
+## 2026-08-27 — Path-resource identity, health, conflict, and release assessment
+
+Added the outward `hq-resources` adapter with home-qualified display/canonical path identity,
+nearest-existing-ancestor reservation, symlink revalidation, closed health conditions,
+component-aware conflict reports, deterministic primary and launch policy, and bounded Git release
+assessment. Passive requests and results expose public fields while filesystem/Git capabilities
+remain opaque. Canonical facts, reducer aggregates, v13 clean-sheet storage, application snapshots,
+and local API DTOs now retain both display and canonical locators; atomic replacement and advisory
+claim recovery remain one canonical transition. Deterministic fake and real filesystem/Git tests
+cover missing/inaccessible/malformed paths, retargeted links, linked worktrees, every dirty class,
+unknown and forced release, malformed output, and hard subprocess deadlines. Locked workspace,
+strict Clippy, architecture, dependency, four-target, fuzz, whitespace, and unchanged-Go gates pass
+without bumping the unshipped storage version.
+
+### Original plan entry
+
+- **[resources/high] Implement path-resource identity, conflict, health, and release assessment** —
+  Implement home-qualified absolute path locators, human spelling versus canonical identity,
+  nearest-existing-ancestor handling for missing paths, symlink revalidation, equal/ancestor/
+  descendant conflict detection, project-local overlap, resource health, Git cleanliness, primary
+  path selection, launch-directory validation, and advisory claim persistence. Keep filesystem/Git
+  observations outside pure project policy and never silently relocate or delete resources. Test
+  missing/inaccessible paths, symlinks, worktrees sharing a Git directory, dirty/unknown release,
+  atomic replacement, and explicit force behavior. Complete this work when every path decision is
+  deterministic, explainable, and auditable.

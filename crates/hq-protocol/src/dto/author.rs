@@ -770,7 +770,8 @@ fn message_dto(value: &domain::MessageContent) -> model::MessageDto {
 fn resource(value: &domain::ProjectResource) -> model::ResourceDto {
     model::ResourceDto {
         id: id(&value.resource_id),
-        locator: locator(&value.locator),
+        display: locator(&value.display_locator),
+        canonical: locator(&value.canonical_locator),
         health: resource_health(value.health),
     }
 }

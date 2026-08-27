@@ -54,16 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[resources/high] Implement path-resource identity, conflict, health, and release assessment** —
-  Implement home-qualified absolute path locators, human spelling versus canonical identity,
-  nearest-existing-ancestor handling for missing paths, symlink revalidation, equal/ancestor/
-  descendant conflict detection, project-local overlap, resource health, Git cleanliness, primary
-  path selection, launch-directory validation, and advisory claim persistence. Keep filesystem/Git
-  observations outside pure project policy and never silently relocate or delete resources. Test
-  missing/inaccessible paths, symlinks, worktrees sharing a Git directory, dirty/unknown release,
-  atomic replacement, and explicit force behavior. Complete this work when every path decision is
-  deterministic, explainable, and auditable.
-
 - **[projects/high] Implement project command, activation, dispatch, and provisioning sagas** —
   Implement home-authoritative project commands/results, durable remote routing, expected-head
   serialization, resource acquisition/release, assignment/configuration/runnable transitions,

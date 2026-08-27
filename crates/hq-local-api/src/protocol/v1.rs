@@ -623,19 +623,10 @@ pub struct ResourceInspectionRequestDto {
     pub project_id: Id32,
     /// Stable resource identity.
     pub resource_id: Id32,
-    /// Typed resource locator.
-    pub locator: ResourceLocatorDto,
-}
-
-impl ResourceInspectionRequestDto {
-    /// Constructs a typed resource inspection body.
-    pub const fn new(project_id: Id32, resource_id: Id32, locator: ResourceLocatorDto) -> Self {
-        Self {
-            project_id,
-            resource_id,
-            locator,
-        }
-    }
+    /// Normalized human-selected spelling to re-resolve.
+    pub display_locator: ResourceLocatorDto,
+    /// Immutable canonical identity expected after re-resolution.
+    pub canonical_locator: ResourceLocatorDto,
 }
 
 /// Closed local API v1 request families.
@@ -891,6 +882,25 @@ pub enum SnapshotItem {
         /// Last accepted contiguous input sequence.
         input_sequence: u64,
     },
+    /// One desired project path and its advisory claim state.
+    ProjectResource {
+        /// Owning project identity.
+        project_id: Id32,
+        /// Stable resource identity.
+        resource_id: Id32,
+        /// Normalized human-selected spelling.
+        display_locator: ResourceLocatorDto,
+        /// Home-local canonical claim identity.
+        canonical_locator: ResourceLocatorDto,
+        /// Latest typed health observation.
+        health: ResourceHealthDto,
+        /// Whether this resource is the explicit project primary.
+        primary: bool,
+        /// Whether this resource currently has a conflict-free active advisory claim.
+        active_claim: bool,
+        /// Sorted projects with overlapping claims.
+        conflicting_projects: Vec<Id32>,
+    },
     /// Immutable accepted project input attribution.
     ProjectInput {
         /// Project identity.
@@ -1114,6 +1124,8 @@ pub enum ResourceHealthDto {
 pub struct ResourceInspectionResultDto {
     /// Typed resource health.
     pub health: ResourceHealthDto,
+    /// Current canonical identity when it could be observed.
+    pub observed_canonical: Option<ResourceLocatorDto>,
     /// Optional bounded inert observation detail.
     pub details: Option<String>,
     /// Explicit observation time.
@@ -1124,6 +1136,7 @@ impl ResourceInspectionResultDto {
     /// Constructs a bounded inert resource observation.
     pub fn new(
         health: ResourceHealthDto,
+        observed_canonical: Option<ResourceLocatorDto>,
         details: Option<String>,
         checked_at_unix_millis: i64,
     ) -> Result<Self, ValueError> {
@@ -1132,6 +1145,7 @@ impl ResourceInspectionResultDto {
         }
         Ok(Self {
             health,
+            observed_canonical,
             details,
             checked_at_unix_millis,
         })
@@ -1403,7 +1417,15 @@ impl WireMessage {
                     }
                     Ok(())
                 }
-                Request::InspectResource(request) => validate_locator(&request.body.locator),
+                Request::InspectResource(request) => {
+                    validate_locator(&request.body.display_locator)?;
+                    validate_locator(&request.body.canonical_locator)?;
+                    if request.body.display_locator.scheme != request.body.canonical_locator.scheme
+                    {
+                        return Err(ValueError::InvalidValueCombination);
+                    }
+                    Ok(())
+                }
                 Request::Lifecycle(_)
                 | Request::AuthoritativeSnapshot
                 | Request::CancelSubscription { .. } => Ok(()),
@@ -1461,6 +1483,9 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         Response::Success(ResponseResult::Empty) => Ok(()),
         Response::Success(ResponseResult::ResourceInspection(outcome)) => match outcome {
             EffectOutcomeDto::Accepted(result) => {
+                if let Some(observed) = &result.observed_canonical {
+                    validate_locator(observed)?;
+                }
                 if let Some(details) = &result.details {
                     validate_text(details, CONTENT_MAX_BYTES)?;
                 }
@@ -1610,6 +1635,19 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
             } => {
                 validate_text(name, SHORT_TEXT_MAX_BYTES)?;
                 validate_text(lifecycle, SHORT_TEXT_MAX_BYTES)?;
+            }
+            SnapshotItem::ProjectResource {
+                display_locator,
+                canonical_locator,
+                conflicting_projects,
+                ..
+            } => {
+                validate_locator(display_locator)?;
+                validate_locator(canonical_locator)?;
+                if display_locator.scheme != canonical_locator.scheme {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                validate_id_set(conflicting_projects, MAX_SNAPSHOT_ITEMS)?;
             }
             SnapshotItem::ProjectOutput {
                 status, content, ..

@@ -22,6 +22,7 @@ expected_crates=(
   hq-protocol
   hq-reducer
   hq-relay
+  hq-resources
   hq-store
   hq-testkit
   hq-tui
@@ -64,6 +65,7 @@ allowed_internal_dependency() {
       hq-store:hq-application | \
       hq-local-api:hq-domain | hq-local-api:hq-protocol | hq-local-api:hq-application | \
       hq-relay:hq-domain | hq-relay:hq-protocol | hq-relay:hq-application | \
+      hq-resources:hq-domain | \
       hq-harness:hq-domain | \
       hq-codex:hq-domain | hq-codex:hq-harness | hq-codex:hq-testkit | \
       hq-tui:hq-domain | hq-tui:hq-application | \
@@ -177,6 +179,12 @@ grep -Fq 'impl RelayStatePort for RelayStoreAdapter' \
 grep -Fq 'impl HarnessStatePort for HarnessStoreAdapter' \
   "$repository_root/crates/hq-node/src/harness_store.rs" ||
   fail "hq-node must own the harness/store record mapping"
+
+grep -Eq '^hq-domain(\.workspace)?[[:space:]]*=' \
+  "$repository_root/crates/hq-resources/Cargo.toml" ||
+  fail "hq-resources must depend inward on hq-domain"
+[[ -f "$repository_root/docs/path-resources-v1.md" ]] ||
+  fail "missing path-resource identity and observation contract"
 
 grep -Fq 'impl NodeComponent for RelayNodeComponent' \
   "$repository_root/crates/hq-node/src/relay_component.rs" ||

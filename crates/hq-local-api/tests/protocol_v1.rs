@@ -237,11 +237,12 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             )
             .expect("agent request"),
         )),
-        Request::InspectResource(effect(ResourceInspectionRequestDto::new(
-            Id32::new([5; 32]),
-            Id32::new([6; 32]),
-            locator(),
-        ))),
+        Request::InspectResource(effect(ResourceInspectionRequestDto {
+            project_id: Id32::new([5; 32]),
+            resource_id: Id32::new([6; 32]),
+            display_locator: locator(),
+            canonical_locator: locator(),
+        })),
         Request::Subscribe(
             SubscriptionRequestDto::new(
                 Id32::new([7; 32]),
@@ -303,6 +304,7 @@ fn every_success_and_error_response_family_interoperates() {
         ResponseResult::ResourceInspection(EffectOutcomeDto::Accepted(
             ResourceInspectionResultDto::new(
                 ResourceHealthDto::Healthy,
+                Some(locator()),
                 Some("clean".to_owned()),
                 1_700_000_000_000,
             )
@@ -533,6 +535,24 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             claimable: true,
             head: id(15),
             input_sequence: 1,
+        },
+        SnapshotItem::ProjectResource {
+            project_id: id(14),
+            resource_id: id(23),
+            display_locator: ResourceLocatorDto::new(
+                ResourceSchemeDto::WorkingTree,
+                "/selected/rewrite".to_owned(),
+            )
+            .expect("display locator validates"),
+            canonical_locator: ResourceLocatorDto::new(
+                ResourceSchemeDto::WorkingTree,
+                "/workspace/rewrite".to_owned(),
+            )
+            .expect("canonical locator validates"),
+            health: ResourceHealthDto::Healthy,
+            primary: true,
+            active_claim: true,
+            conflicting_projects: vec![id(24)],
         },
         SnapshotItem::ProjectInput {
             project_id: id(14),

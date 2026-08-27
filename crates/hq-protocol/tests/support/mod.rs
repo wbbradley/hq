@@ -17,7 +17,8 @@ pub fn valid_bodies() -> [(u64, String); 48] {
     let binding = format!(
         r#"{{"assignment":"{B}","agent":"{C}","provider":"provider","session":"session"}}"#
     );
-    let resource = format!(r#"{{"id":"{B}","locator":{locator},"health":"unknown"}}"#);
+    let resource =
+        format!(r#"{{"id":"{B}","display":{locator},"canonical":{locator},"health":"unknown"}}"#);
     let message = |purpose: &str, project: &str, id: &str| {
         format!(
             r#"{{"id":"{id}","sender":{mailbox},"recipient":{mailbox},"body":"body","purpose":"{purpose}","presentation":"message","correlation":null,"project":{project}}}"#

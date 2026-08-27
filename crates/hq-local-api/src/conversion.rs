@@ -224,6 +224,28 @@ pub fn snapshot_to_v1(
                 head: id32(head.as_bytes()),
                 input_sequence,
             },
+            ClientProjection::ProjectResource {
+                project_id,
+                resource_id,
+                display_locator,
+                canonical_locator,
+                health,
+                primary,
+                active_claim,
+                conflicting_projects,
+            } => SnapshotItem::ProjectResource {
+                project_id: id32(project_id.as_bytes()),
+                resource_id: id32(resource_id.as_bytes()),
+                display_locator: locator_to_v1(&display_locator),
+                canonical_locator: locator_to_v1(&canonical_locator),
+                health: resource_health_to_v1(health),
+                primary,
+                active_claim,
+                conflicting_projects: conflicting_projects
+                    .iter()
+                    .map(|project| id32(project.as_bytes()))
+                    .collect(),
+            },
             ClientProjection::ProjectInput {
                 project_id,
                 message_id,
@@ -439,11 +461,12 @@ pub(crate) fn agent_effect_from_v1(
 pub(crate) fn resource_effect_from_v1(
     request: &EffectRequestDto<ResourceInspectionRequestDto>,
 ) -> Result<EffectRequest<ResourceInspectionRequest>, ValueError> {
-    let body = ResourceInspectionRequest::new(
-        ProjectId::from_bytes(request.body.project_id.bytes()),
-        ResourceId::from_bytes(request.body.resource_id.bytes()),
-        locator_from_v1(request.body.locator.clone())?,
-    );
+    let body = ResourceInspectionRequest {
+        project_id: ProjectId::from_bytes(request.body.project_id.bytes()),
+        resource_id: ResourceId::from_bytes(request.body.resource_id.bytes()),
+        display_locator: locator_from_v1(request.body.display_locator.clone())?,
+        canonical_locator: locator_from_v1(request.body.canonical_locator.clone())?,
+    };
     Ok(effect_from_v1(request, body))
 }
 
@@ -466,9 +489,13 @@ pub(crate) fn resource_effect_to_v1(
     outcome: &EffectOutcome<ResourceInspectionResult>,
 ) -> EffectOutcomeDto<ResourceInspectionResultDto> {
     effect_to_v1(outcome, |result| ResourceInspectionResultDto {
-        health: resource_health_to_v1(result.health()),
-        details: result.details().map(|details| details.as_str().to_owned()),
-        checked_at_unix_millis: result.checked_at().as_unix_millis(),
+        health: resource_health_to_v1(result.health),
+        observed_canonical: result.observed_canonical.as_ref().map(locator_to_v1),
+        details: result
+            .details
+            .as_ref()
+            .map(|details| details.as_str().to_owned()),
+        checked_at_unix_millis: result.checked_at.as_unix_millis(),
     })
 }
 
@@ -593,6 +620,18 @@ fn locator_from_v1(locator: ResourceLocatorDto) -> Result<ResourceLocator, Value
         },
         value,
     ))
+}
+
+fn locator_to_v1(locator: &ResourceLocator) -> ResourceLocatorDto {
+    ResourceLocatorDto {
+        scheme: match locator.scheme() {
+            ResourceScheme::GitRepository => ResourceSchemeDto::GitRepository,
+            ResourceScheme::WorkingTree => ResourceSchemeDto::WorkingTree,
+            ResourceScheme::Container => ResourceSchemeDto::Container,
+            ResourceScheme::Opaque => ResourceSchemeDto::Opaque,
+        },
+        value: locator.value().to_owned(),
+    }
 }
 
 fn domain_error_to_v1(error: &hq_domain::DomainError) -> DomainErrorDto {

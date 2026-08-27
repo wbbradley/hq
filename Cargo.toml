@@ -10,6 +10,7 @@ members = [
   "crates/hq-protocol",
   "crates/hq-reducer",
   "crates/hq-relay",
+  "crates/hq-resources",
   "crates/hq-store",
   "crates/hq-testkit",
   "crates/hq-tui",
@@ -38,6 +39,7 @@ hq-local-api = { version = "0.1.0", path = "crates/hq-local-api" }
 hq-protocol = { version = "0.1.0", path = "crates/hq-protocol" }
 hq-reducer = { version = "0.1.0", path = "crates/hq-reducer" }
 hq-relay = { version = "0.1.0", path = "crates/hq-relay" }
+hq-resources = { version = "0.1.0", path = "crates/hq-resources" }
 hq-store = { version = "0.1.0", path = "crates/hq-store" }
 hq-testkit = { version = "0.1.0", path = "crates/hq-testkit" }
 hq-tui = { version = "0.1.0", path = "crates/hq-tui" }

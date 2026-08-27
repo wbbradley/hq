@@ -525,13 +525,16 @@ fn insert_project(
         transaction
             .execute(
                 "INSERT INTO project_resources( \
-                     key_digest, resource_id, locator_scheme, locator_value, health \
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                     key_digest, resource_id, display_scheme, display_value, \
+                     canonical_scheme, canonical_value, health \
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     digest.as_slice(),
                     resource_id.as_bytes().as_slice(),
-                    encode_scheme(resource.locator.scheme()),
-                    resource.locator.value(),
+                    encode_scheme(resource.display_locator.scheme()),
+                    resource.display_locator.value(),
+                    encode_scheme(resource.canonical_locator.scheme()),
+                    resource.canonical_locator.value(),
                     encode_health(resource.health),
                 ],
             )
@@ -720,7 +723,8 @@ fn load_resources(
 ) -> Result<BTreeMap<ResourceId, ProjectResource>, StoreError> {
     let mut statement = connection
         .prepare(
-            "SELECT resource_id, locator_scheme, locator_value, health FROM project_resources \
+            "SELECT resource_id, display_scheme, display_value, canonical_scheme, \
+                    canonical_value, health FROM project_resources \
              WHERE key_digest = ?1 ORDER BY resource_id",
         )
         .map_err(database)?;
@@ -731,19 +735,23 @@ fn load_resources(
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })
         .map_err(database)?;
     let mut resources = BTreeMap::new();
     for row in rows {
-        let (id, scheme, value, health) = row.map_err(database)?;
+        let (id, display_scheme, display_value, canonical_scheme, canonical_value, health) =
+            row.map_err(database)?;
         let id = ResourceId::from_bytes(fixed(id)?);
         if resources
             .insert(
                 id,
                 ProjectResource {
                     resource_id: id,
-                    locator: decode_locator(scheme, value)?,
+                    display_locator: decode_locator(display_scheme, display_value)?,
+                    canonical_locator: decode_locator(canonical_scheme, canonical_value)?,
                     health: decode_health(health).ok_or_else(corrupt)?,
                 },
             )
@@ -1966,7 +1974,7 @@ mod tests {
             "UPDATE project_support SET fact_id = zeroblob(32) WHERE (key_digest, fact_id) = (SELECT key_digest, fact_id FROM project_support LIMIT 1)",
             "UPDATE project_projects SET archived = CASE archived WHEN 1 THEN 0 ELSE 1 END",
             "UPDATE project_fork_participants SET fact_id = zeroblob(32) WHERE fact_id = (SELECT fact_id FROM project_fork_participants LIMIT 1)",
-            "UPDATE project_resources SET locator_value = locator_value || '-changed'",
+            "UPDATE project_resources SET canonical_value = canonical_value || '-changed'",
             "UPDATE project_active_claims SET resource_id = zeroblob(32) WHERE (key_digest, resource_id) = (SELECT key_digest, resource_id FROM project_active_claims LIMIT 1)",
             "UPDATE project_claim_conflicts SET project_id = zeroblob(32)",
             "UPDATE project_assignments SET runnable = CASE runnable WHEN 1 THEN 0 ELSE 1 END",
@@ -1999,9 +2007,10 @@ mod tests {
         let project_two = ProjectId::from_bytes([0x32; 32]);
         let project_three = ProjectId::from_bytes([0x33; 32]);
         let project_four = ProjectId::from_bytes([0x34; 32]);
-        let resource_one = resource(
+        let resource_one = resource_with_locators(
             0x41,
             ResourceScheme::WorkingTree,
+            "/selected/one",
             "/workspace/one",
             ResourceHealth::Healthy,
         );
@@ -2243,7 +2252,7 @@ mod tests {
             (
                 ProjectAggregateKey::Resource {
                     home,
-                    locator: resource_one.locator.clone(),
+                    locator: resource_one.canonical_locator.clone(),
                 },
                 set([id(3)]),
             ),
@@ -2320,7 +2329,23 @@ mod tests {
     ) -> ProjectResource {
         ProjectResource {
             resource_id: ResourceId::from_bytes([id; 32]),
-            locator: locator(scheme, value),
+            display_locator: locator(scheme, value),
+            canonical_locator: locator(scheme, value),
+            health,
+        }
+    }
+
+    fn resource_with_locators(
+        id: u8,
+        scheme: ResourceScheme,
+        display: &str,
+        canonical: &str,
+        health: ResourceHealth,
+    ) -> ProjectResource {
+        ProjectResource {
+            resource_id: ResourceId::from_bytes([id; 32]),
+            display_locator: locator(scheme, display),
+            canonical_locator: locator(scheme, canonical),
             health,
         }
     }

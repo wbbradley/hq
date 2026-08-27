@@ -8,7 +8,8 @@ use std::{
 use hq_domain::{
     AccountId, AgentId, CommandDigest, CommandId, ContentText, DispatchId, EncryptionPublicKey,
     FactId, GrantId, InstallationId, MailboxAddress, MailboxKind, MessageId, ProjectId, ProviderId,
-    ProviderSessionId, Revision, ShortText, SigningPublicKey,
+    ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, Revision, ShortText,
+    SigningPublicKey,
 };
 use hq_reducer::{
     ActivityView, AgentAggregateKey, AgentLifecycle, AgentProjection, AgentProjectionKey,
@@ -325,7 +326,7 @@ impl DomainSnapshot {
         for (key, projection) in self.project.projections() {
             let item = match (key, projection) {
                 (ProjectProjectionKey::Project(project_id), ProjectProjection::Project(view)) => {
-                    ClientProjection::Project {
+                    items.push(ClientProjection::Project {
                         project_id: *project_id,
                         home: view.home,
                         name: view.name.clone(),
@@ -338,7 +339,24 @@ impl DomainSnapshot {
                         claimable: view.claimable,
                         head: view.head,
                         input_sequence: view.input_sequence,
+                    });
+                    for (resource_id, resource) in &view.resources {
+                        items.push(ClientProjection::ProjectResource {
+                            project_id: *project_id,
+                            resource_id: *resource_id,
+                            display_locator: resource.display_locator.clone(),
+                            canonical_locator: resource.canonical_locator.clone(),
+                            health: resource.health,
+                            primary: view.primary == Some(*resource_id),
+                            active_claim: view.active_claims.contains(resource_id),
+                            conflicting_projects: view
+                                .claim_conflicts
+                                .get(resource_id)
+                                .cloned()
+                                .unwrap_or_default(),
+                        });
                     }
+                    continue;
                 }
                 (ProjectProjectionKey::Input(_), ProjectProjection::Input(view)) => {
                     ClientProjection::ProjectInput {
@@ -530,6 +548,16 @@ pub enum ClientProjection {
         claimable: bool,
         head: FactId,
         input_sequence: u64,
+    },
+    ProjectResource {
+        project_id: ProjectId,
+        resource_id: ResourceId,
+        display_locator: ResourceLocator,
+        canonical_locator: ResourceLocator,
+        health: ResourceHealth,
+        primary: bool,
+        active_claim: bool,
+        conflicting_projects: BTreeSet<ProjectId>,
     },
     ProjectInput {
         project_id: ProjectId,

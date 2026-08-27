@@ -50,9 +50,72 @@ fn path(value: &str) -> Result<ResourceLocator, Box<dyn Error>> {
 fn resource(id: u8, value: &str) -> Result<ProjectResource, Box<dyn Error>> {
     Ok(ProjectResource {
         resource_id: ResourceId::from_bytes([id; 32]),
-        locator: path(value)?,
+        display_locator: path(value)?,
+        canonical_locator: path(value)?,
         health: ResourceHealth::Unknown,
     })
+}
+
+fn assert_atomic_replacement(
+    report: &hq_reducer::ProjectReport,
+    project_id: ProjectId,
+    replaced: FactId,
+    old: ResourceId,
+    replacement: ResourceId,
+) -> Result<(), Box<dyn Error>> {
+    let Some(ProjectProjection::Project(view)) = report
+        .projections()
+        .get(&ProjectProjectionKey::Project(project_id))
+    else {
+        return Err("missing replaced project".into());
+    };
+    assert_eq!(view.head, replaced);
+    assert_eq!(view.primary, Some(replacement));
+    assert_eq!(
+        view.active_claims,
+        std::collections::BTreeSet::from([replacement])
+    );
+    assert!(view.resources.contains_key(&replacement));
+    assert!(!view.resources.contains_key(&old));
+    Ok(())
+}
+
+fn reduce_replacement_prefix(
+    world: &ProjectWorld,
+    create: &Fact,
+    health: &Fact,
+    replaced: &Fact,
+) -> Result<hq_reducer::ProjectReport, Box<dyn Error>> {
+    Ok(reduce_complete(
+        world
+            .base()
+            .into_iter()
+            .chain([create.clone(), health.clone(), replaced.clone()]),
+        &world.reducer(),
+    )?)
+}
+
+fn assert_restored_project(
+    report: &hq_reducer::ProjectReport,
+    project_id: ProjectId,
+    restored: FactId,
+    old: ResourceId,
+    replacement: ResourceId,
+) -> Result<(), Box<dyn Error>> {
+    let Some(ProjectProjection::Project(view)) = report
+        .projections()
+        .get(&ProjectProjectionKey::Project(project_id))
+    else {
+        return Err("missing restored project".into());
+    };
+    assert_eq!(view.head, restored);
+    assert_eq!(view.lifecycle, ProjectLifecycle::Closed);
+    assert!(!view.archived);
+    assert!(view.active_claims.is_empty());
+    assert_eq!(view.primary, Some(replacement));
+    assert!(view.resources.contains_key(&replacement));
+    assert!(!view.resources.contains_key(&old));
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -547,6 +610,14 @@ fn lifecycle_resource_health_replacement_close_archive_and_restore_follow_explic
             new_resource: replacement.clone(),
         },
     )?;
+    let replacement_report = reduce_replacement_prefix(&world, &create, &health, &replaced)?;
+    assert_atomic_replacement(
+        &replacement_report,
+        project_id,
+        replaced.id(),
+        old.resource_id,
+        replacement.resource_id,
+    )?;
     let closing = project_transition(
         &mut values,
         &world,
@@ -589,20 +660,13 @@ fn lifecycle_resource_health_replacement_close_archive_and_restore_follow_explic
         ]),
         &world.reducer(),
     )?;
-    let Some(ProjectProjection::Project(view)) = report
-        .projections()
-        .get(&ProjectProjectionKey::Project(project_id))
-    else {
-        return Err("missing restored project".into());
-    };
-    assert_eq!(view.head, restored.id());
-    assert_eq!(view.lifecycle, ProjectLifecycle::Closed);
-    assert!(!view.archived);
-    assert!(view.active_claims.is_empty());
-    assert_eq!(view.primary, Some(replacement.resource_id));
-    assert!(view.resources.contains_key(&replacement.resource_id));
-    assert!(!view.resources.contains_key(&old.resource_id));
-    Ok(())
+    assert_restored_project(
+        &report,
+        project_id,
+        restored.id(),
+        old.resource_id,
+        replacement.resource_id,
+    )
 }
 
 #[test]

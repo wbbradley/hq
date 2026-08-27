@@ -114,7 +114,9 @@ An authoritative snapshot carries one serialized local revision and a bounded li
 client projection DTOs. The closed projection union covers installation/mailbox/account authority,
 peer routes, mailbox capabilities, device membership, account selection, conversation discovery,
 named-agent lifecycle and provider-session registers, projects, accepted input, dispatch, output,
-and remote-command progress. It is a client query representation, not the reducer's Rust layout or
+and remote-command progress. Project resources are separate projection items carrying display and
+canonical locators, health, primary/active-claim flags, and bounded conflicting-project IDs. It is
+a client query representation, not the reducer's Rust layout or
 the store's normalized row schema.
 
 Conversation bodies and activity are loaded through the bounded page method using a typed thread or

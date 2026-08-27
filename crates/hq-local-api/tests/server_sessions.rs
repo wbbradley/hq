@@ -115,11 +115,12 @@ impl InspectResource for Ports {
         _request: &EffectRequest<ResourceInspectionRequest>,
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
         self.trace.borrow_mut().push("resource");
-        Ok(EffectOutcome::Accepted(ResourceInspectionResult::new(
-            ResourceHealth::Healthy,
-            None,
-            Timestamp::from_unix_millis(8),
-        )))
+        Ok(EffectOutcome::Accepted(ResourceInspectionResult {
+            health: ResourceHealth::Healthy,
+            observed_canonical: None,
+            details: None,
+            checked_at: Timestamp::from_unix_millis(8),
+        }))
     }
 }
 
@@ -384,11 +385,12 @@ fn every_typed_request_family_routes_without_storage_types() {
             )
             .expect("agent request"),
         )),
-        Request::InspectResource(effect(ResourceInspectionRequestDto::new(
-            Id32::new([14; 32]),
-            Id32::new([15; 32]),
-            locator(),
-        ))),
+        Request::InspectResource(effect(ResourceInspectionRequestDto {
+            project_id: Id32::new([14; 32]),
+            resource_id: Id32::new([15; 32]),
+            display_locator: locator(),
+            canonical_locator: locator(),
+        })),
     ];
 
     for (index, request_body) in requests.into_iter().enumerate() {

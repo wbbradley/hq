@@ -80,8 +80,10 @@ evidence that external work happened.
 Relay configuration contains only a typed endpoint locator, read/write policy, and authentication
 policy. It contains no credentials or client-library values. Session control names a durable agent,
 neutral provider namespace, and start/exact-resume/stop action. Resource inspection names the
-project, resource, and typed locator and returns only bounded inert details, typed health, and an
-explicit observation time. Later workflow owners turn accepted observations into canonical facts.
+project, resource, display locator, and recorded canonical locator. It returns only bounded inert
+details, typed health, an optional newly observed canonical locator, and an explicit observation
+time. These passive request/result values expose fields directly. Later workflow owners turn
+accepted observations into canonical facts.
 
 ## Subscription revision race
 

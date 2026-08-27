@@ -596,7 +596,8 @@ fn operation(value: &model::OperationDto) -> Result<domain::OperationCorrelation
 fn resource(value: &model::ResourceDto) -> Result<domain::ProjectResource, ProtocolError> {
     Ok(domain::ProjectResource {
         resource_id: domain::ResourceId::from_bytes(value.id.0),
-        locator: locator(&value.locator)?,
+        display_locator: locator(&value.display)?,
+        canonical_locator: locator(&value.canonical)?,
         health: resource_health(value.health),
     })
 }

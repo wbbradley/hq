@@ -5,8 +5,8 @@ Status: normative persistence specification
 HQ storage v13 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
 version `13`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
-release has shipped yet, schema evolution advances the fresh-database identity rather than adding
-an in-place migration path.
+release or standing installation exists yet, the clean-sheet v13 definition may change in place;
+ordinary pre-release schema work needs neither a migration nor a storage-version bump.
 
 ## Ownership and durability
 
@@ -228,7 +228,8 @@ recomputes wrapper/staging digests and rejects malformed fixed-width values, clo
 impossible optionality, or invalid monotonic generations. Explicit projection repair never deletes,
 rewrites, or derives any receipt, revision, outbox, or relay operational row.
 
-Schema v13 adds harness operational state. `harness_worker_leases` binds one named agent to an
+The current clean-sheet v13 schema includes harness operational state. `harness_worker_leases`
+binds one named agent to an
 opaque exact owner token and full-width injected expiry. Claim permits absent, same-token renewal,
 or expired takeover; release and every external-effect mutation require the exact live token.
 `harness_ready_sessions` retains only acknowledged provider/session identity. It contains no launch
@@ -339,13 +340,15 @@ from the same transaction before returning the last atomically ingested or repai
 One successful repair proves every
 persisted projection report exactly equals the fresh complete-batch oracle.
 
-Explicit tables retain project roots, heads and fork participants; desired resources, typed health,
-primary choice, active claims and cross-project conflicts; assignment bindings, configuring/
+Explicit tables retain project roots, heads and fork participants; desired resources with separate
+display and canonical locator columns, typed health, primary choice, active claims and
+cross-project conflicts; assignment bindings, configuring/
 runnable/blocked phases and support; accepted inputs and full-width sequences; immutable dispatch
 attribution; output binding, typed message content and collision status; remote-command queued,
-received, terminal and conflicted stages; aggregate frontiers; and projection support. Composite
-resource and assignment namespaces keep their components in validated columns behind recomputed
-private digests.
+received, terminal and conflicted stages; aggregate frontiers; and projection support. Canonical
+resource identity, rather than display spelling, keys home-qualified aggregate and claim-conflict
+state. Composite resource and assignment namespaces keep their components in validated columns
+behind recomputed private digests.
 
 Private exhaustive codecs validate fixed identities, bounded text, resource schemes and health,
 project lifecycle, assignment phase, message purpose/presentation, output status, command result,

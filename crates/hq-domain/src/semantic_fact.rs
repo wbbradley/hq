@@ -157,8 +157,10 @@ pub enum RuntimeObservation {
 pub struct ProjectResource {
     /// Stable resource identity.
     pub resource_id: ResourceId,
-    /// Home-qualified canonical locator.
-    pub locator: ResourceLocator,
+    /// Normalized absolute spelling selected by the human.
+    pub display_locator: ResourceLocator,
+    /// Home-qualified canonical locator used for advisory claims.
+    pub canonical_locator: ResourceLocator,
     /// Latest health observation.
     pub health: ResourceHealth,
 }

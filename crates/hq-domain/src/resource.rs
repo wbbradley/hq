@@ -18,7 +18,11 @@ pub enum ResourceScheme {
     Opaque,
 }
 
-/// Validated, scheme-tagged locator that performs no external observation.
+/// Validated, scheme-tagged locator spelling that performs no external observation.
+///
+/// Whether the value is human-selected or canonical is determined by the containing semantic
+/// record. Keeping that distinction explicit prevents an adapter observation from silently
+/// replacing durable resource identity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ResourceLocator {
     scheme: ResourceScheme,
@@ -26,7 +30,7 @@ pub struct ResourceLocator {
 }
 
 impl ResourceLocator {
-    /// Creates a locator from a typed scheme and validated canonical value.
+    /// Creates a locator from a typed scheme and validated value.
     pub const fn new(
         scheme: ResourceScheme,
         value: BoundedText<RESOURCE_LOCATOR_MAX_BYTES>,
@@ -39,7 +43,7 @@ impl ResourceLocator {
         self.scheme
     }
 
-    /// Borrows the opaque canonical locator value.
+    /// Borrows the opaque locator value.
     pub fn value(&self) -> &str {
         self.value.as_str()
     }

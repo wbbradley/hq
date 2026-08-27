@@ -44,7 +44,7 @@ use crate::{
 
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 13;
-const SCHEMA_MARKER: &str = "hq-store-v13-harness-supervision-2026-08-27";
+const SCHEMA_MARKER: &str = "hq-store-v13-path-resource-identity-2026-08-27";
 const SCHEMA_TABLES: [&str; 114] = [
     "storage_metadata",
     "canonical_facts",
@@ -934,8 +934,10 @@ CREATE TABLE project_fork_participants (
 CREATE TABLE project_resources (
     key_digest BLOB NOT NULL REFERENCES project_projects(key_digest),
     resource_id BLOB NOT NULL CHECK(typeof(resource_id) = 'blob' AND length(resource_id) = 32),
-    locator_scheme INTEGER NOT NULL CHECK(locator_scheme BETWEEN 1 AND 4),
-    locator_value TEXT NOT NULL CHECK(typeof(locator_value) = 'text' AND length(CAST(locator_value AS BLOB)) BETWEEN 1 AND 4096),
+    display_scheme INTEGER NOT NULL CHECK(display_scheme BETWEEN 1 AND 4),
+    display_value TEXT NOT NULL CHECK(typeof(display_value) = 'text' AND length(CAST(display_value AS BLOB)) BETWEEN 1 AND 4096),
+    canonical_scheme INTEGER NOT NULL CHECK(canonical_scheme BETWEEN 1 AND 4),
+    canonical_value TEXT NOT NULL CHECK(typeof(canonical_value) = 'text' AND length(CAST(canonical_value AS BLOB)) BETWEEN 1 AND 4096),
     health INTEGER NOT NULL CHECK(health BETWEEN 1 AND 4),
     PRIMARY KEY (key_digest, resource_id)
 ) STRICT, WITHOUT ROWID;

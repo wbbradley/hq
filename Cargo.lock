@@ -450,6 +450,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hq-resources"
+version = "0.1.0"
+dependencies = [
+ "hq-domain",
+]
+
+[[package]]
 name = "hq-store"
 version = "0.1.0"
 dependencies = [

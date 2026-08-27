@@ -142,7 +142,7 @@ Nested objects have exactly the listed members in order.
 | repository context | `{"directory":locator,"repository":locator-or-null,"worktree":locator-or-null,"branch":text-or-null}` |
 | operation correlation | `{"provider":text,"session":text,"id":hex}` |
 | message | `{"id":hex,"sender":mailbox-address,"recipient":mailbox-address-or-null,"body":text,"purpose":enum,"presentation":enum,"correlation":operation-or-null,"project":hex-or-null}` |
-| resource | `{"id":hex,"locator":locator,"health":enum}` |
+| resource | `{"id":hex,"display":locator,"canonical":locator,"health":enum}` |
 | assignment binding | `{"assignment":hex,"agent":hex,"provider":text,"session":text}` |
 
 Closed enum strings are:

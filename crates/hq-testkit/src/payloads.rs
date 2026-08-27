@@ -36,7 +36,8 @@ impl FactBuilder {
         let message_id = values.message_id();
         let resource = ProjectResource {
             resource_id: values.resource_id(),
-            locator: locator("/work/project")?,
+            display_locator: locator("/work/project")?,
+            canonical_locator: locator("/work/project")?,
             health: ResourceHealth::Healthy,
         };
         let operation =
@@ -240,7 +241,8 @@ impl FactBuilder {
                 old_resource_id: resource_id,
                 new_resource: ProjectResource {
                     resource_id: values.resource_id(),
-                    locator: locator("/work/replacement")?,
+                    display_locator: locator("/work/replacement")?,
+                    canonical_locator: locator("/work/replacement")?,
                     health: ResourceHealth::Unknown,
                 },
             },

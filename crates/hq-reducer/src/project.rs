@@ -514,6 +514,10 @@ fn validate_creation(
         .map(|resource| resource.resource_id)
         .collect::<BTreeSet<_>>();
     if resource_ids.len() != resources.as_slice().len()
+        || resources
+            .as_slice()
+            .iter()
+            .any(|resource| !valid_path_resource(resource))
         || primary.is_some_and(|id| !resource_ids.contains(&id))
     {
         return Err(invalid(ProjectReason::ResourceInvariant));
@@ -866,7 +870,8 @@ fn apply_payload(
             ..
         } => {
             require_active_human(fact, context)?;
-            if state.resources.contains_key(&resource.resource_id) {
+            if !valid_path_resource(resource) || state.resources.contains_key(&resource.resource_id)
+            {
                 return Err(invalid(ProjectReason::ResourceInvariant));
             }
             state
@@ -895,7 +900,8 @@ fn apply_payload(
             ..
         } => {
             require_active_human(fact, context)?;
-            if !state.resources.contains_key(old_resource_id)
+            if !valid_path_resource(new_resource)
+                || !state.resources.contains_key(old_resource_id)
                 || (*old_resource_id != new_resource.resource_id
                     && state.resources.contains_key(&new_resource.resource_id))
             {
@@ -1060,6 +1066,22 @@ fn apply_payload(
     }
     state.head = fact.id();
     Ok(())
+}
+
+fn valid_path_resource(resource: &ProjectResource) -> bool {
+    resource.display_locator.scheme() == ResourceScheme::WorkingTree
+        && resource.canonical_locator.scheme() == ResourceScheme::WorkingTree
+        && valid_absolute_path(resource.display_locator.value())
+        && valid_absolute_path(resource.canonical_locator.value())
+}
+
+fn valid_absolute_path(value: &str) -> bool {
+    value.starts_with('/')
+        && !value.contains('\0')
+        && (value == "/" || (!value.ends_with('/') && !value.contains("//")))
+        && !value
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
 }
 
 fn valid_agent_binding_parent(
@@ -1338,7 +1360,7 @@ fn aggregate_keys(fact: &Fact) -> Vec<ProjectAggregateKey> {
                 keys.extend(resources.as_slice().iter().map(|resource| {
                     ProjectAggregateKey::Resource {
                         home: *home,
-                        locator: resource.locator.clone(),
+                        locator: resource.canonical_locator.clone(),
                     }
                 }));
             }
@@ -1597,7 +1619,10 @@ fn claim_conflict_map<P: ResourceConflictPolicy>(
             }
             for left_resource in left.resources.values() {
                 for right_resource in right.resources.values() {
-                    if policy.conflicts(&left_resource.locator, &right_resource.locator) {
+                    if policy.conflicts(
+                        &left_resource.canonical_locator,
+                        &right_resource.canonical_locator,
+                    ) {
                         conflicts
                             .entry((left.project_id, left_resource.resource_id))
                             .or_default()
@@ -1636,7 +1661,7 @@ fn claim_conflict_participants<P: ResourceConflictPolicy>(
             other
                 .resources
                 .values()
-                .any(|right| policy.conflicts(&left.locator, &right.locator))
+                .any(|right| policy.conflicts(&left.canonical_locator, &right.canonical_locator))
         }) {
             participants.insert(candidate_fact);
             participants.insert(other.head);

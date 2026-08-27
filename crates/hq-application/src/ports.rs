@@ -246,77 +246,27 @@ pub trait ControlHarness {
 /// Read-only external resource inspection request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceInspectionRequest {
-    project_id: ProjectId,
-    resource_id: ResourceId,
-    locator: ResourceLocator,
-}
-
-impl ResourceInspectionRequest {
-    /// Constructs a resource inspection with explicit semantic identity and locator.
-    pub const fn new(
-        project_id: ProjectId,
-        resource_id: ResourceId,
-        locator: ResourceLocator,
-    ) -> Self {
-        Self {
-            project_id,
-            resource_id,
-            locator,
-        }
-    }
-
-    /// Returns the owning project identity.
-    pub const fn project_id(&self) -> ProjectId {
-        self.project_id
-    }
-
-    /// Returns the resource identity.
-    pub const fn resource_id(&self) -> ResourceId {
-        self.resource_id
-    }
-
-    /// Returns the typed resource locator.
-    pub const fn locator(&self) -> &ResourceLocator {
-        &self.locator
-    }
+    /// Owning project identity.
+    pub project_id: ProjectId,
+    /// Stable resource identity.
+    pub resource_id: ResourceId,
+    /// Normalized human-selected spelling to re-resolve.
+    pub display_locator: ResourceLocator,
+    /// Immutable canonical identity expected after re-resolution.
+    pub canonical_locator: ResourceLocator,
 }
 
 /// Typed resource observation suitable for a later canonical health fact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceInspectionResult {
-    health: ResourceHealth,
-    details: Option<ContentText>,
-    checked_at: Timestamp,
-}
-
-impl ResourceInspectionResult {
-    /// Constructs one inert external observation.
-    pub const fn new(
-        health: ResourceHealth,
-        details: Option<ContentText>,
-        checked_at: Timestamp,
-    ) -> Self {
-        Self {
-            health,
-            details,
-            checked_at,
-        }
-    }
-
-    /// Returns the typed health classification.
-    pub const fn health(&self) -> ResourceHealth {
-        self.health
-    }
-
-    /// Returns bounded inert details.
-    pub const fn details(&self) -> Option<&ContentText> {
-        self.details.as_ref()
-    }
-
-    /// Returns the explicit observation time.
-    pub const fn checked_at(&self) -> Timestamp {
-        self.checked_at
-    }
+    /// Typed health classification.
+    pub health: ResourceHealth,
+    /// Current canonical identity when it could be observed.
+    pub observed_canonical: Option<ResourceLocator>,
+    /// Bounded inert details.
+    pub details: Option<ContentText>,
+    /// Explicit observation time.
+    pub checked_at: Timestamp,
 }
 
 /// External resource observation capability.

@@ -345,7 +345,8 @@ pub(super) enum ResourceHealthDto {
 
 object!(ResourceDto {
     id: Hex32,
-    locator: LocatorDto,
+    display: LocatorDto,
+    canonical: LocatorDto,
     health: ResourceHealthDto,
 });
 object!(BindingDto {
