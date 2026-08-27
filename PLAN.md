@@ -54,16 +54,25 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[storage/high] Implement the atomic mutation and inbound-ingest engine** — Implement the common
-  transaction path for local fact-backed commands and remotely verified facts: stable mutation
-  receipt lookup and digest conflict, transaction-consistent decision, explicit time/ID/random
-  inputs, signing, canonical append, dependency data, reduction, projection update, durable
-  per-recipient outbox intent, result receipt, revision allocation, commit, and post-commit
-  invalidation. Keep unsigned local operational mutations on explicitly separate paths with the
-  same retry discipline where client-visible. Add failpoints around every write and commit boundary,
-  lost-response replay tests, local/remote path equality, and same-ID/different-input conflicts.
-  Complete this work when each crash recovers to an old valid state or new valid state, never a
-  hybrid.
+- **[storage/high] Implement the common atomic canonical-ingest transaction** — Replace the
+  append-only remote path with one transaction that deduplicates a verified semantic fact, appends
+  canonical evidence and dependency rows, performs complete reduction as the initial correctness
+  oracle, replaces every projection package, derives durable per-recipient outbox intent, allocates
+  a change revision, commits, and then emits a non-blocking revision invalidation. Add write- and
+  commit-boundary failpoints, duplicate-ingest and local/remote common-path equality fixtures, and
+  reopen assertions proving every interruption leaves the old valid state or the new valid state,
+  never a hybrid. Keep repair from altering receipts, revisions, or outbox state.
+
+- **[storage/high] Implement transaction-consistent local fact-backed mutations** — Add a bounded
+  typed store request that first looks up a stable mutation receipt and rejects a reused command ID
+  with a different request digest, otherwise decides against the snapshot held by the same SQLite
+  transaction using only explicit time, ID, and randomness inputs, signs the deterministic event
+  plan, and enters the common canonical-ingest path. Persist the exact typed result receipt in the
+  same commit. Keep unsigned local operational mutations on explicitly separate paths with the same
+  retry discipline where client-visible. Add signing, rejection, lost-response replay,
+  same-ID/different-input conflict, local/remote equality, and failpoint/reopen tests. Complete this
+  work when retries return the original result and every crash recovers to an old or new valid state
+  without a hybrid.
 
 - **[storage/high] Add incremental reduction, repair equality, and scalable conversation queries** —
   Implement deterministic dependency indexes and affected-closure selection, then patch projections

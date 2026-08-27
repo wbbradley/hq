@@ -8,13 +8,14 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use hq_domain::{CommandId, Revision};
 use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::AuthorityPolicy;
 
 use crate::{
     AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
-    ConversationProjectionSnapshot, ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError,
-    StoreErrorClass, database::Database,
+    ConversationProjectionSnapshot, MutationReceipt, OutboxIntent, ProjectProjectionSnapshot,
+    ReductionIndexSnapshot, StoreError, StoreErrorClass, database::Database,
 };
 
 /// Result of appending immutable verified evidence.
@@ -179,6 +180,17 @@ enum Request {
     LoadProjectSnapshot {
         reply: SyncSender<Result<ProjectProjectionSnapshot, StoreError>>,
     },
+    CurrentRevision {
+        reply: SyncSender<Result<Revision, StoreError>>,
+    },
+    LoadMutationReceipt {
+        command_id: CommandId,
+        reply: SyncSender<Result<Option<MutationReceipt>, StoreError>>,
+    },
+    LoadOutboxIntents {
+        limit: usize,
+        reply: SyncSender<Result<Vec<OutboxIntent>, StoreError>>,
+    },
     Close {
         reply: SyncSender<()>,
     },
@@ -324,6 +336,42 @@ impl Store {
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
+    /// Returns the monotonic revision of the last committed relevant change.
+    pub fn current_revision(&self) -> Result<Revision, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::CurrentRevision { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads the exact retained answer for one retryable command, when present.
+    pub fn load_mutation_receipt(
+        &self,
+        command_id: CommandId,
+    ) -> Result<Option<MutationReceipt>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadMutationReceipt { command_id, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads a bounded deterministic prefix of durable per-recipient outbox intents.
+    pub fn load_outbox_intents(&self, limit: usize) -> Result<Vec<OutboxIntent>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadOutboxIntents { limit, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -394,6 +442,15 @@ fn run(path: &Path, receiver: &Receiver<Request>, started: &SyncSender<Result<()
             }
             Request::LoadProjectSnapshot { reply } => {
                 let _ = reply.send(database.load_project_snapshot());
+            }
+            Request::CurrentRevision { reply } => {
+                let _ = reply.send(database.current_revision());
+            }
+            Request::LoadMutationReceipt { command_id, reply } => {
+                let _ = reply.send(database.load_mutation_receipt(command_id));
+            }
+            Request::LoadOutboxIntents { limit, reply } => {
+                let _ = reply.send(database.load_outbox_intents(limit));
             }
             Request::Close { reply } => {
                 let _ = reply.send(());
@@ -473,6 +530,27 @@ mod tests {
             .requests
             .send(Request::LoadProjectSnapshot { reply })
             .expect("project request is accepted");
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::CurrentRevision { reply })
+            .expect("revision request is accepted");
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::LoadMutationReceipt {
+                command_id: hq_domain::CommandId::from_bytes([1; 32]),
+                reply,
+            })
+            .expect("receipt request is accepted");
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::LoadOutboxIntents { limit: 1, reply })
+            .expect("outbox request is accepted");
         assert!(
             store
                 .load_corpus()

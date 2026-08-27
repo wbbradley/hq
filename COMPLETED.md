@@ -4573,3 +4573,66 @@ workspace check/build/tests/doctests, strict Clippy, all four required core/prot
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so project rows, queries, tests, specification, and bookkeeping form
      one reviewable change.
+
+## 2026-08-27 — Durable mutation receipts, revisions, and outbox intents
+
+Advanced the unreleased Rust database to storage v7 and added strictly relational durable
+operational state outside the repair allowlist. Typed mutation receipts bind a stable command ID,
+exact request digest, closed committed/rejected result kind, bounded exact result bytes, and
+revision. Change revisions preserve the complete `u64` domain as big-endian bytes, increment
+monotonically, and fail explicitly on exhaustion. Per-recipient outbox intents retain exact signed
+canonical bytes and creating revision behind a fact/installation identity. Equal writes deduplicate
+and unequal receipt or outbox reuse fails closed. Bounded actor queries return only typed receipts,
+revisions, and intents; no connection or row shape escapes.
+
+Unit and public contracts cover inclusive byte bounds, closed result codecs, full-width revision
+round-trip and exhaustion, exact receipt/outbox equality and collisions, invalid query limits,
+actor reply loss, repair preservation, close/reopen, and strict schema identity. Architecture,
+behavior, causal, protocol, and dependency verifiers; locked workspace format/check/build/tests/
+doctests/Clippy; all four required targets; both 512-run protocol fuzz smokes; whitespace checks;
+and the unchanged Go vet/build/fresh test suite pass.
+
+### Original plan entry
+
+- **[storage/high] Add durable mutation receipts, revisions, and outbox intents** — Define bounded,
+  typed storage contracts and a versioned SQLite representation for mutation request digests and
+  exact result receipts, monotonic change revisions, and per-recipient canonical outbox intents.
+  Preserve exact canonical bytes for retry, make receipt and outbox identities collide on unequal
+  content, keep these operational rows outside repair, and expose read models without leaking SQL
+  shapes. Add round-trip, full-`u64`, reopen, collision, and repair-preservation tests. Complete this
+  work when the operational primitives are durable, strictly decoded, and independently usable by
+  the later common transaction engine.
+
+  **Implementation plan**
+
+  - Add bounded typed exact-result and exact-canonical-byte owners plus public mutation receipt and
+    outbox intent read models. Keep construction invariants and raw storage identities encapsulated.
+  - Advance the unreleased schema identity and add strict receipt, singleton revision, and
+    per-fact/per-installation outbox tables. Encode revisions as fixed-width big-endian bytes.
+  - Implement private closed row codecs, equality-aware inserts, explicit collision classes,
+    monotonic allocation with exhaustion, and deterministic bounded reads through the store actor.
+  - Prove repair never touches operational state and that all three primitives retain exact values
+    through close/reopen. Update the normative storage contract and schema adversarial assertions.
+  - Run every Rust architecture/spec/dependency/build/test/lint/target/fuzz gate and the unchanged Go
+    vet/build/test suite before recording completion.
+
+  **Risks and mitigations**
+
+  - SQLite integers cannot represent every `u64`; use eight-byte big-endian revisions and exercise
+    `u64::MAX` plus exhaustion explicitly.
+  - Opaque result or event bytes could permit unbounded work; validate inclusive byte budgets at
+    construction and row decoding, and reject outbox query limits outside `1..=1024`.
+  - Repair could accidentally become destructive as its allowlist grows; keep operational tables
+    out of every clear path and prove exact values before and after repair and reopen.
+  - Stable identities can hide unequal retries; compare every retained field on duplicate writes
+    and return typed mutation or immutable-identity conflicts on any mismatch.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** bounds, codecs, collisions, repair preservation, reopen, and all repository gates.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so schema, operational types, actor queries, tests, specification,
+     and bookkeeping form one reviewable change.

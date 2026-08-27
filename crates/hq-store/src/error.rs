@@ -21,6 +21,14 @@ pub enum StoreErrorClass {
     InvalidEvidence,
     /// One immutable fact identity was reused with unequal evidence or indexes.
     IdentityCollision,
+    /// One mutation identity was reused with a different request or retained result.
+    MutationConflict,
+    /// A bounded operational query or mutation request was invalid.
+    InvalidOperationalRequest,
+    /// The monotonic durable revision reached its maximum representable value.
+    RevisionExhausted,
+    /// A durable receipt, revision, or outbox row failed strict decoding.
+    OperationalStateCorrupt,
     /// The bounded store actor is no longer accepting requests.
     ActorClosed,
     /// The owning store worker stopped without a valid response.
@@ -63,6 +71,12 @@ impl fmt::Display for StoreError {
             StoreErrorClass::CorruptDatabase => "database is corrupt",
             StoreErrorClass::InvalidEvidence => "stored fact evidence is invalid",
             StoreErrorClass::IdentityCollision => "immutable fact identity was reused",
+            StoreErrorClass::MutationConflict => {
+                "mutation identity was reused with different input"
+            }
+            StoreErrorClass::InvalidOperationalRequest => "operational store request is invalid",
+            StoreErrorClass::RevisionExhausted => "change revision is exhausted",
+            StoreErrorClass::OperationalStateCorrupt => "durable operational state is corrupt",
             StoreErrorClass::ActorClosed => "store actor is closed",
             StoreErrorClass::WorkerStopped => "store worker stopped",
             StoreErrorClass::DatabaseUnavailable => "database operation failed",

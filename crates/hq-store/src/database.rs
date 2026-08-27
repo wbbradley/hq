@@ -3,6 +3,7 @@
 mod agent;
 mod authority;
 mod conversation;
+mod operational;
 mod project;
 mod repair;
 
@@ -27,9 +28,9 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 6;
-const SCHEMA_MARKER: &str = "hq-store-v6-project-projections-2026-08-27";
-const SCHEMA_TABLES: [&str; 95] = [
+const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_MARKER: &str = "hq-store-v7-operational-primitives-2026-08-27";
+const SCHEMA_TABLES: [&str; 98] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -125,6 +126,9 @@ const SCHEMA_TABLES: [&str; 95] = [
     "project_output_facts",
     "project_commands",
     "project_command_support",
+    "mutation_receipts",
+    "change_revision",
+    "outbox_intents",
 ];
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
@@ -975,6 +979,34 @@ CREATE TABLE project_command_support (
     fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
     PRIMARY KEY (key_digest, fact_id)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE mutation_receipts (
+    command_id BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(command_id) = 'blob' AND length(command_id) = 32),
+    request_digest BLOB NOT NULL
+        CHECK(typeof(request_digest) = 'blob' AND length(request_digest) = 32),
+    result_kind INTEGER NOT NULL CHECK(result_kind IN (1, 2)),
+    result_bytes BLOB NOT NULL
+        CHECK(typeof(result_bytes) = 'blob' AND length(result_bytes) <= 65536),
+    revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE change_revision (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8)
+) STRICT;
+
+INSERT INTO change_revision(singleton, revision) VALUES (1, X'0000000000000000');
+
+CREATE TABLE outbox_intents (
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    recipient_installation BLOB NOT NULL
+        CHECK(typeof(recipient_installation) = 'blob' AND length(recipient_installation) = 32),
+    exact_canonical_bytes BLOB NOT NULL
+        CHECK(typeof(exact_canonical_bytes) = 'blob' AND length(exact_canonical_bytes) BETWEEN 1 AND 65536),
+    revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8),
+    PRIMARY KEY (fact_id, recipient_installation)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -1152,6 +1184,24 @@ impl Database {
         agent::load(&self.connection)?;
         project::load(&self.connection)
     }
+
+    pub(super) fn current_revision(&self) -> Result<hq_domain::Revision, StoreError> {
+        operational::current_revision(&self.connection)
+    }
+
+    pub(super) fn load_mutation_receipt(
+        &self,
+        command_id: hq_domain::CommandId,
+    ) -> Result<Option<crate::MutationReceipt>, StoreError> {
+        operational::load_receipt(&self.connection, command_id)
+    }
+
+    pub(super) fn load_outbox_intents(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::OutboxIntent>, StoreError> {
+        operational::load_outbox_intents(&self.connection, limit)
+    }
 }
 
 fn inspect_existing(connection: &Connection) -> Result<bool, StoreError> {
@@ -1257,7 +1307,7 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
             |row| row.get(0),
         )
         .map_err(sql_error)?;
-    if table_count != 95 {
+    if table_count != i64::try_from(SCHEMA_TABLES.len()).unwrap_or(i64::MAX) {
         return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
     }
     for table in SCHEMA_TABLES {
@@ -1768,7 +1818,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> VerifiedSemanticFact {
+    pub(super) fn fixture() -> VerifiedSemanticFact {
         let signer = Bip340Signer::from_secret_bytes({
             let mut secret = [0_u8; 32];
             secret[31] = 1;

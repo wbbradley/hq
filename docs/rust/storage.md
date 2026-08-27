@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v6 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v7 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `6`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `7`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,13 +23,13 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v6 ownership | Rebuildable |
+| Class | Storage v7 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
 | Deterministic reduction indexes | Reverse dependencies, decisions, diagnostics, conflicts, and reducer order | Yes, only through an explicit repair operation |
 | Materialized projections | Complete authority, conversation/activity, named-agent, and project frontiers, typed values, ordered children, and support | Yes, only through explicit repair |
-| Durable operational state | Reserved for receipts, revisions, outbox, delivery, cursors, and saga checkpoints | Generally no |
+| Durable operational state | Mutation receipts, change revision, and canonical outbox intents; delivery, cursors, and saga checkpoints remain reserved | No |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
 
@@ -74,7 +74,7 @@ deletes only the rebuildable reduction, authority, conversation/activity, named-
 tables, writes every normalized replacement group, reads all five typed snapshots back through private fixed-width and
 closed-vocabulary row codecs, and requires exact snapshot and digest equality before commit.
 Canonical facts, exact event bytes,
-canonical parent and authority rows, schema metadata, and future durable operational tables are
+canonical parent and authority rows, schema metadata, and durable operational tables are
 outside the repair allowlist. Dropping or failing the transaction at any replacement or verification
 checkpoint leaves the preceding complete structural/authority/conversation/agent/project set intact, and
 repeating a successful repair is idempotent.
@@ -85,6 +85,25 @@ reconsidered. A database with no completed reduction index returns `NotRepaired`
 out-of-vocabulary, oversized, cross-domain, noncontiguous, or digest-inconsistent rebuildable rows
 return `RebuildableStateCorrupt`. Neither case triggers implicit repair. This makes the authoritative
 batch/rebuild boundary visible to later projection and incremental-reduction packages.
+
+## Durable operational primitives
+
+`mutation_receipts` binds one 32-byte command identity to its 32-byte exact-request digest, a
+closed committed/rejected result kind, bounded exact result bytes, and the transaction's revision.
+An equal insertion is idempotent; any unequal reuse is a mutation conflict. These bytes are an
+application-owned exact result encoding, not serialized Rust domain structs or diagnostic prose.
+
+`change_revision` stores the full unsigned 64-bit revision as fixed-width big-endian bytes, so it
+does not silently lose the upper half of the domain in SQLite's signed integer representation.
+Allocation is monotonic and fails explicitly at `u64::MAX` rather than wrapping. Public reads expose
+the typed `Revision` only.
+
+`outbox_intents` has one identity per canonical fact and recipient installation. It retains the
+exact bounded signed canonical event bytes and creating revision so later encryption and relay
+retries never reconstruct canonical evidence. Unequal reuse of that identity fails closed. Public
+queries are deterministically ordered and capped at 1,024 rows; transport wrappers and delivery
+attempts will extend operational state without changing canonical identity. Explicit repair never
+deletes, rewrites, or derives any receipt, revision, or outbox row.
 
 ## Authority projections
 
