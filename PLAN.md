@@ -54,16 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[authority/high] Implement peer, capability, and human-account reduction** — Add pure reducers
-  for installation-local identity/binding facts, directional peer routing, mailbox access grants,
-  observations and revokes, human-account creation, device grants, acceptances, revocations,
-  selection, and membership frontiers. Authorization must use explicitly cited historical facts at
-  the action's causal point. Prove that observed pre-revoke actions survive, concurrent or later
-  unauthorized traffic fails closed, and a regranted device becomes authoritative only through a
-  causal-maximal acceptance descending from the revoke. Cover missing authority, conflicting roots,
-  every topological arrival order, and unrelated-parent attacks. Complete this work when the full
-  authority race matrix and batch-reduction laws pass.
-
 - **[conversation/high] Implement conversation and activity reduction** — Add questions, answers,
   asynchronous messages, cancellation, archive/restore/reject, delivery-relevant semantic state,
   typed presentation/correlation, and the separate non-actionable harness-activity stream. Define

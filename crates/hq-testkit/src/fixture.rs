@@ -3,7 +3,7 @@
 use std::{error::Error, fmt};
 
 use hq_domain::{
-    AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, FactScope,
+    AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, FactId, FactScope,
     InstallationAddress, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxKind, SemanticFact,
     SemanticFactError, SemanticPayload, ShortText, Timestamp, ValidatedValueError,
 };
@@ -46,6 +46,30 @@ impl From<SemanticFactError> for FixtureError {
 pub struct FactBuilder;
 
 impl FactBuilder {
+    /// Wraps a payload with explicit causal references for reducer scenarios.
+    pub fn with_causal(
+        values: &mut DeterministicValues,
+        author: InstallationAddress,
+        authored_at: Timestamp,
+        scope: FactScope,
+        parents: impl IntoIterator<Item = FactId>,
+        authorities: impl IntoIterator<Item = AuthorityReference>,
+        payload: SemanticPayload,
+    ) -> Result<SemanticFact, FixtureError> {
+        SemanticFact::new(
+            values.fact_id(),
+            author,
+            authored_at,
+            scope,
+            CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+                BoundedSet::new(parents)?,
+                authorities,
+            )?,
+            payload,
+        )
+        .map_err(Into::into)
+    }
+
     /// Wraps a payload as a root fixture under an explicit author and scope.
     pub fn root(
         values: &mut DeterministicValues,

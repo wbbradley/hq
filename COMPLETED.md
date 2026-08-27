@@ -3188,3 +3188,81 @@ test run pass.
   4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.
+
+## 2026-08-27 — Peer, capability, and human-account reduction
+
+Added exact catalog authority roles and a pure `AuthorityReducer` with explicit local policy,
+normalized installation, mailbox, peer-route, capability, account, membership, and selection
+projections, exact causal support, and closed decisions. The reducer enforces signer, scope, role,
+subject, audience, unique-root, remove-wins, owner-observation, historical-authority, and full-frontier
+regrant/reaccept rules. Added causal fixtures and executable coverage for `AUTH-001` through
+`AUTH-022`, including all 5,040 arrival orders for the mailbox race. Workspace format, architecture
+and spec verification, check/build/test/doctest/strict-Clippy, cargo-deny, four-target core checks,
+whitespace, and the complete Go build/vet/fresh-test regression suite pass.
+
+### Original plan entry
+
+- **[authority/high] Implement peer, capability, and human-account reduction** — Add pure reducers
+  for installation-local identity/binding facts, directional peer routing, mailbox access grants,
+  observations and revokes, human-account creation, device grants, acceptances, revocations,
+  selection, and membership frontiers. Authorization must use explicitly cited historical facts at
+  the action's causal point. Prove that observed pre-revoke actions survive, concurrent or later
+  unauthorized traffic fails closed, and a regranted device becomes authoritative only through a
+  causal-maximal acceptance descending from the revoke. Cover missing authority, conflicting roots,
+  every topological arrival order, and unrelated-parent attacks. Complete this work when the full
+  authority race matrix and batch-reduction laws pass.
+
+  **Implementation plan**
+
+  - Add failing authority fixtures and public-contract tests first for installation and mailbox
+    roots, exact local signer/scope rules, peer route block/restore frontiers, directional mailbox
+    grants, owner observations, grant revocation, human-account roots, device grant/accept/revoke,
+    local account selection, and authorization of later peer/account-scoped fact families.
+  - Introduce typed authority aggregate keys, closed rejection/conflict reasons, and normalized
+    projections for installations, mailboxes, peer routes, capability lineages, human accounts,
+    device memberships, and local selections. Every active projection will retain exact support and
+    every multivalue or unique-root conflict will expose all participants.
+  - Validate required parent kinds, typed authority roles, signer, subject, audience, and scope
+    independently; never infer authority from an ordinary ancestor, peer route, current display
+    state, relay metadata, or a fact ID/timestamp ordering. Treat wrong signer/subject relationships
+    as invalid and available-but-insufficient historical authority as unauthorized.
+  - Derive peer routing as a remove-wins register: concurrent block beats route set, a restore must
+    descend from every maximal block, and unrelated descendants cannot clear a block. Keep route
+    history visible while emitting no routable singleton for a conflicted or blocked frontier.
+  - Derive mailbox capability history at each action's causal point. Require actions to cite the
+    exact matching grant, preserve only actions made usable before an owner-signed observation that
+    a revoke cites, reject concurrent/post-revoke old-grant actions, and require a regrant lineage
+    to descend from every maximal prior revoke.
+  - Derive human membership from one account creator root plus exact target-key acceptance. Apply
+    remove-wins across every causal-maximal acceptance/revoke, require post-revoke grant and
+    acceptance lineages to descend from all revoke maxima, and accept account-scoped actions only
+    through the creator or one active maximal acceptance for the exact account.
+  - Exhaust every topological arrival order for the named `AUTH-001` through `AUTH-022` race shapes,
+    plus duplicates, conflicting roots, missing parents, partial frontiers, changed payload/key,
+    wrong account/direction, and unrelated-parent attacks. Re-run all reducer laws to prove the
+    authority stage preserves complete-batch input invariance and projection retraction.
+  - Document the public authority model and run format, workspace check/build/test/doctests, strict
+    Clippy, architecture/spec verification, dependency policy, four-target core checks, whitespace,
+    and the unchanged Go build/vet/fresh full regression suite before recording the package.
+
+  **Risks and mitigations**
+
+  - Revocation is non-monotone in projections even though knowledge is add-only; compute authority
+    from the complete usable graph on every batch and include revokes/observations in aggregate
+    membership so fixed-point reclassification retracts affected descendants.
+  - A historical acceptance can remain structurally maximal in a partial lineage; require the exact
+    grant/accept payload and signer match and compare against every maximal revoke before granting
+    account authority.
+  - Base authority must remain reusable by conversation, activity, project, and remote-control
+    reducers; keep policy in a focused pure module with typed normalized outputs and no dependency
+    on those packages' projection rules.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including every named authority scenario
+     and repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.

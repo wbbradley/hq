@@ -302,7 +302,7 @@ impl DomainReducer for DecisionReducer {
         match fact.id().as_bytes()[31] {
             1 => DomainDecision::Unauthorized {
                 reason: TestReason::Rejected,
-                failed_authorities: BTreeSet::from([AuthorityRole::Grant]),
+                failed_authorities: BTreeSet::from([AuthorityRole::MailboxGrant]),
             },
             2 | 3 => DomainDecision::Conflicted {
                 reason: TestReason::Conflict,
@@ -367,7 +367,7 @@ fn report_normalizes_every_domain_decision_and_conflict() -> Result<(), Box<dyn 
     );
     assert_eq!(
         report.decisions()[&id(1)].failed_authorities(),
-        &BTreeSet::from([AuthorityRole::Grant])
+        &BTreeSet::from([AuthorityRole::MailboxGrant])
     );
     assert_eq!(
         report.decisions()[&id(2)].status(),

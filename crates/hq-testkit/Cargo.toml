@@ -11,5 +11,8 @@ publish.workspace = true
 [dependencies]
 hq-domain.workspace = true
 
+[dev-dependencies]
+hq-reducer.workspace = true
+
 [lints]
 workspace = true

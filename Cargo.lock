@@ -65,6 +65,7 @@ name = "hq-testkit"
 version = "0.1.0"
 dependencies = [
  "hq-domain",
+ "hq-reducer",
 ]
 
 [[package]]

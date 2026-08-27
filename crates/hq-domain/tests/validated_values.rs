@@ -97,7 +97,10 @@ fn authority_references_must_name_declared_parents_and_unique_roles()
     assert_eq!(
         CausalReferences::<4, 4>::new(
             parents.clone(),
-            [AuthorityReference::new(AuthorityRole::Grant, unrelated)]
+            [AuthorityReference::new(
+                AuthorityRole::MailboxGrant,
+                unrelated,
+            )]
         ),
         Err(ValidatedValueError::AuthorityNotParent)
     );
@@ -105,8 +108,8 @@ fn authority_references_must_name_declared_parents_and_unique_roles()
         CausalReferences::<4, 4>::new(
             parents,
             [
-                AuthorityReference::new(AuthorityRole::Grant, parent),
-                AuthorityReference::new(AuthorityRole::Grant, parent),
+                AuthorityReference::new(AuthorityRole::MailboxGrant, parent),
+                AuthorityReference::new(AuthorityRole::MailboxGrant, parent),
             ]
         ),
         Err(ValidatedValueError::DuplicateAuthorityRole)
@@ -114,6 +117,28 @@ fn authority_references_must_name_declared_parents_and_unique_roles()
     let root = CausalReferences::<4, 4>::new(BoundedSet::new([])?, [])?;
     assert_eq!(root.parents().iter().len(), 0);
     Ok(())
+}
+
+#[test]
+fn authority_roles_use_exact_catalog_vocabulary() {
+    assert_eq!(
+        AuthorityRole::ALL,
+        [
+            AuthorityRole::LocalInstallation,
+            AuthorityRole::MailboxOwner,
+            AuthorityRole::MailboxGrant,
+            AuthorityRole::AccountCreator,
+            AuthorityRole::DeviceGrant,
+            AuthorityRole::AccountMembership,
+            AuthorityRole::PreviousState,
+            AuthorityRole::ProjectHome,
+            AuthorityRole::ActiveHuman,
+            AuthorityRole::Assignment,
+            AuthorityRole::Dispatch,
+            AuthorityRole::Request,
+            AuthorityRole::OutputBinding,
+        ]
+    );
 }
 
 #[test]

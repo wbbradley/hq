@@ -9,20 +9,49 @@ use crate::{BoundedSet, FactId, ValidatedValueError};
 pub enum AuthorityRole {
     /// The installation root authorizing local control state.
     LocalInstallation,
-    /// A capability or membership grant.
-    Grant,
-    /// A post-grant acceptance.
-    Acceptance,
-    /// The unique aggregate creator.
-    Creator,
+    /// The installation and mailbox root authorizing a directional access grant.
+    MailboxOwner,
+    /// The exact directional mailbox capability grant.
+    MailboxGrant,
+    /// The unique creator root of a human account.
+    AccountCreator,
+    /// The exact creator-issued grant to a human device.
+    DeviceGrant,
+    /// A creator root or active device acceptance authorizing an account action.
+    AccountMembership,
     /// The immediately previous home-linear state.
     PreviousState,
+    /// The immutable installation root authoritative for a project.
+    ProjectHome,
+    /// Active human-account membership authorizing a project or remote command.
+    ActiveHuman,
     /// The active project assignment.
     Assignment,
     /// The accepted input dispatch.
     Dispatch,
     /// A signed remote-control request.
     Request,
+    /// The exact dispatch, assignment, and thread provenance for project output.
+    OutputBinding,
+}
+
+impl AuthorityRole {
+    /// Every authority role in stable semantic order.
+    pub const ALL: [Self; 13] = [
+        Self::LocalInstallation,
+        Self::MailboxOwner,
+        Self::MailboxGrant,
+        Self::AccountCreator,
+        Self::DeviceGrant,
+        Self::AccountMembership,
+        Self::PreviousState,
+        Self::ProjectHome,
+        Self::ActiveHuman,
+        Self::Assignment,
+        Self::Dispatch,
+        Self::Request,
+        Self::OutputBinding,
+    ];
 }
 
 /// One typed authority edge to a required parent.
