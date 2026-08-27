@@ -44,6 +44,25 @@ impl fmt::Display for LocalSessionPumpStartError {
 
 impl Error for LocalSessionPumpStartError {}
 
+/// Failure while binding, publishing, and transferring the local runtime listener.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalSessionPumpOpenError {
+    /// The private listener could not be bound.
+    Bind(RuntimeArtifactErrorClass),
+    /// Atomic readiness metadata could not be published.
+    Publish(RuntimeArtifactErrorClass),
+    /// The bound listener could not transfer into asynchronous ownership.
+    Start(LocalSessionPumpStartError),
+}
+
+impl fmt::Display for LocalSessionPumpOpenError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "local session pump could not open: {self:?}")
+    }
+}
+
+impl Error for LocalSessionPumpOpenError {}
+
 /// One bounded unit of progress from the sole local listener/session pump.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalSessionPumpEvent {
@@ -200,6 +219,16 @@ impl LocalSessionPump {
     pub fn close_intake(&mut self) {
         self.listener.take();
         self.sessions.close_intake();
+    }
+
+    /// Stops decoded request dispatch while retaining accepted response writes.
+    pub fn close_request_intake(&mut self) {
+        self.sessions.close_request_intake();
+    }
+
+    /// Returns responses accepted by session writers but not yet confirmed written.
+    pub fn pending_response_count(&self) -> usize {
+        self.sessions.pending_response_count()
     }
 
     /// Performs one explicit bounded invalidation pass for an external revision wake.

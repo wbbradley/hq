@@ -18,8 +18,70 @@ use hq_local_api::{
     LifecycleControl, RevisionHub,
     protocol::v1::{LifecycleRequest, LifecycleStatus},
 };
+use hq_node::{CancellationToken, ComponentDrain, ComponentError, NodeComponent};
 
 pub struct TestDirectory(PathBuf);
+
+#[derive(Debug, Default)]
+pub struct UnavailableNodeComponent;
+
+impl NodeComponent for UnavailableNodeComponent {
+    fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
+        Ok(())
+    }
+
+    fn stop_intake(&mut self) -> Result<(), ComponentError> {
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<ComponentDrain, ComponentError> {
+        Ok(ComponentDrain::Complete)
+    }
+
+    fn force_stop(&mut self) -> Result<(), ComponentError> {
+        Ok(())
+    }
+}
+
+impl PublishWake for UnavailableNodeComponent {
+    fn publish_wake(&self, _revision: Revision) -> Result<WakeDisposition, ApplicationError> {
+        unavailable()
+    }
+}
+
+impl ConfigureRelays for UnavailableNodeComponent {
+    fn configure_relay(
+        &self,
+        _request: &EffectRequest<RelayConfiguration>,
+    ) -> Result<EffectOutcome<()>, ApplicationError> {
+        unavailable()
+    }
+
+    fn synchronize(
+        &self,
+        _request: &EffectRequest<SynchronizationRequest>,
+    ) -> Result<EffectOutcome<()>, ApplicationError> {
+        unavailable()
+    }
+}
+
+impl hq_application::ControlHarness for UnavailableNodeComponent {
+    fn control_harness(
+        &self,
+        _request: &EffectRequest<AgentSessionRequest>,
+    ) -> Result<EffectOutcome<AgentSessionResult>, ApplicationError> {
+        unavailable()
+    }
+}
+
+impl InspectResource for UnavailableNodeComponent {
+    fn inspect_resource(
+        &self,
+        _request: &EffectRequest<ResourceInspectionRequest>,
+    ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
+        unavailable()
+    }
+}
 
 #[derive(Clone)]
 pub struct UnavailableApplicationPorts {

@@ -5780,3 +5780,86 @@ both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh te
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before lifecycle and
      signal coordination.
+
+## 2026-08-27 — Ordered lifecycle, signal, and graceful node drain
+
+Composed the ready `NodeOwner` and bounded local session pump under one asynchronous runtime owner.
+The runtime binds and publishes readiness before the one-time listener transfer, projects typed
+status/readiness from node-owned state, and records stop/restart intent in a call-scoped cell before
+the sole event loop performs the lifecycle mutation. No owner mutex or DTO accessor boilerplate was
+introduced: runtime configuration and complete shutdown diagnostics are plain public data, while
+methods remain limited to ownership and state transitions.
+
+The registry now distinguishes connection admission from decoded-request intake and tracks each
+accepted response until its exact write confirmation or session loss. Drain closes listener and
+request intake first, preserves an accepted lifecycle acknowledgement behind a fixed deadline, then
+joins every local I/O task before ordered component/task/foundation cleanup. Queued decoded events
+take precedence over a completed transport join, preventing immediate peer EOF from erasing an
+already-decoded restart request. `SIGINT` and `SIGTERM` share the same stop path, restart remains an
+intent for the later coordinator, and cleanup issues accumulate without preventing artifact or
+state-lock release.
+
+Real authenticated-client contracts cover ready status, delivered stop acknowledgement, lost
+restart acknowledgement, connected-client EOF, repeated/conflicting lifecycle intent, external
+shutdown selection, Unix signal registration, cleanup failure accumulation, zero retained
+sessions/tasks, artifact removal, state-lock reacquisition, immediate listener rebind, and invalid
+zero timeout. Full locked workspace format/check/build/tests/doctests/Clippy,
+architecture/dependency/behavior/specification verifiers, four supported core and node target
+checks, both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[node/high] Coordinate lifecycle requests, Unix signals, and graceful node drain** — Compose the
+  local session pump with the sole `NodeOwner`, implement typed status/readiness/stop/restart control,
+  and route `SIGINT`/`SIGTERM` plus protocol lifecycle intent through one ordered asynchronous drain.
+  Preserve already-accepted lifecycle acknowledgements before closing clients, then join all local
+  I/O, drain components/tasks, clean readiness/socket artifacts, and return explicit stop versus
+  restart intent. Test signals, repeated stop/restart, lost lifecycle acknowledgements, connected
+  client shutdown, cleanup failures, and immediate restart/rebind on Linux and macOS.
+
+  **Implementation plan**
+
+  - Add a complete runtime configuration from the existing pump configuration, safe build metadata,
+    authority policy, and a nonzero accepted-response drain timeout. Start from a ready `NodeOwner`:
+    bind the listener, publish readiness with the same boot nonce, and transfer the listener into the
+    pump. Any partial startup failure drops the owner and cleans its exact artifacts.
+  - Implement a call-scoped lifecycle capability from an immutable status snapshot plus a one-call
+    intent sink. Status/readiness return the current typed phase, build, and durable revision. Stop or
+    restart returns `Draining` and records one intent; after dispatch returns, the sole runtime mutates
+    `NodeOwner` before processing another event. Do not add interior mutability to node ownership.
+  - Track response-write admission in the session registry independently of protocol internals.
+    When drain starts, close listener and decoded-request intake, then continue only terminal and
+    exact write-completion progress until every response accepted before drain is written or its
+    session closes. A fixed timeout closes remaining sessions and is recorded in the plain report.
+  - Select fairly between pump progress and one fused shutdown future. Protocol stop/restart keeps
+    its exact response in the accepted-write drain; `SIGINT` and `SIGTERM` map to stop without a
+    protocol acknowledgement. Repeated lifecycle transition calls remain idempotent and conflicting
+    stop/restart intent fails closed.
+  - After accepted response drain, close/join every local session task before invoking the existing
+    synchronous ordered component/task/foundation shutdown. Return plain intent, timeout, local
+    session, and node cleanup diagnostics; restart means only clean release for a later coordinator.
+  - Add deterministic runtime contracts with real authenticated clients and scripted shutdown
+    futures for status/readiness, stop/restart acknowledgement success and loss, accepted response
+    drain, nonreading timeout, connected-client close, repeated intent, component cleanup issues,
+    zero retained tasks, immediate state-lock reacquisition, and listener rebind. Compile and smoke
+    the real Unix signal registration on Linux and macOS without signaling the shared test process.
+
+  **Risks and decisions**
+
+  - `LifecycleControl` uses `&self`; hiding the owner behind a mutex would blur the sole event-loop
+    mutation boundary. Record intent in a call-local cell and apply it immediately after synchronous
+    request dispatch, before any next event.
+  - Closing sessions immediately can discard the very stop/restart response that tells a client its
+    request was accepted. Close request intake first, retain exact already-queued writes, and close
+    descriptors only after completion, loss, or the explicit deadline.
+  - Waiting without a deadline lets one nonreading peer prevent signals and ownership release. Use
+    one fixed runtime-configured deadline and report timeout rather than silently claiming delivery.
+  - Restart is intent, not process spawning. This package returns `Restart` only after complete
+    cleanup; the following client/CLI coordinator owns replacement startup and convergence.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing lifecycle, accepted-write drain, timeout, signal-selection, and cleanup contracts.
+  2. Implement response-intake closure and the sole runtime coordinator over `NodeOwner` and pump.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before autostart/CLI.

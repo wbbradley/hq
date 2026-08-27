@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[node/high] Coordinate lifecycle requests, Unix signals, and graceful node drain** — Compose the
-  local session pump with the sole `NodeOwner`, implement typed status/readiness/stop/restart control,
-  and route `SIGINT`/`SIGTERM` plus protocol lifecycle intent through one ordered asynchronous drain.
-  Preserve already-accepted lifecycle acknowledgements before closing clients, then join all local
-  I/O, drain components/tasks, clean readiness/socket artifacts, and return explicit stop versus
-  restart intent. Test signals, repeated stop/restart, lost lifecycle acknowledgements, connected
-  client shutdown, cleanup failures, and immediate restart/rebind on Linux and macOS.
-
 - **[node/high] Implement convergent autostart and lifecycle CLI roles** — Add one client coordinator
   that probes the owned socket, starts the foreground-node child only when absent, waits on typed
   readiness, and converges concurrent launchers on one owner without PID-file authority. Wire

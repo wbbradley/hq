@@ -12,14 +12,14 @@ use hq_application::{
 use hq_domain::{Page, PageCursor, Revision};
 use hq_local_api::RevisionHub;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use hq_local_api::protocol::v1::{BuildMetadata, Id32};
+use hq_local_api::protocol::v1::{BuildMetadata, Id32, LifecycleState, LifecycleStatus};
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 use hq_store::StoreGateway;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::{
-    AcceptedLocalStream, NodePhase, ReadinessRecord, RuntimeArtifactError,
-    local_transport::ready_record,
+    AcceptedLocalStream, LocalSessionPump, LocalSessionPumpConfig, LocalSessionPumpOpenError,
+    NodePhase, ReadinessRecord, RuntimeArtifactError, local_transport::ready_record,
 };
 use crate::{
     CancellationToken, NodeAdmission, NodeFoundation, NodeLifecycleError, TaskJoinReport,
@@ -400,6 +400,66 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
         )?;
         foundation.publish_readiness(&record)?;
         Ok(record)
+    }
+
+    /// Binds, publishes, and transfers the private listener into the sole session pump.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn open_local_session_pump(
+        &mut self,
+        config: LocalSessionPumpConfig,
+        build: BuildMetadata,
+    ) -> Result<(LocalSessionPump, ReadinessRecord), LocalSessionPumpOpenError> {
+        self.bind_local_listener()
+            .map_err(|error| LocalSessionPumpOpenError::Bind(error.class()))?;
+        let record = self
+            .publish_readiness(build.clone(), config.boot_nonce)
+            .map_err(|error| LocalSessionPumpOpenError::Publish(error.class()))?;
+        let foundation = self
+            .foundation
+            .as_mut()
+            .ok_or(LocalSessionPumpOpenError::Start(
+                crate::LocalSessionPumpStartError::Listener(
+                    crate::RuntimeArtifactErrorClass::NotBound,
+                ),
+            ))?;
+        let pump = LocalSessionPump::start(foundation, config, self.revisions.clone(), build)
+            .map_err(LocalSessionPumpOpenError::Start)?;
+        Ok((pump, record))
+    }
+
+    /// Projects the current node-owned lifecycle into the local protocol DTO.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn lifecycle_status(
+        &self,
+        build: BuildMetadata,
+    ) -> Result<LifecycleStatus, NodeLifecycleError> {
+        let lifecycle = self
+            .foundation
+            .as_ref()
+            .ok_or(NodeLifecycleError)?
+            .lifecycle();
+        let state = match lifecycle.phase() {
+            NodePhase::Starting => LifecycleState::Starting,
+            NodePhase::Ready => LifecycleState::Ready,
+            NodePhase::Draining => LifecycleState::Draining,
+            NodePhase::Failed => LifecycleState::Failed,
+            NodePhase::Stopped => LifecycleState::Stopped,
+        };
+        Ok(LifecycleStatus {
+            state,
+            build,
+            revision: lifecycle.revision(),
+            detail: None,
+        })
+    }
+
+    /// Enters an orderly stop drain without replacing an existing restart intent.
+    pub fn request_stop(&mut self) -> Result<(), NodeLifecycleError> {
+        self.foundation
+            .as_mut()
+            .ok_or(NodeLifecycleError)?
+            .begin_drain()
+            .map(|_| ())
     }
 
     /// Enters drain while retaining clean-restart intent.

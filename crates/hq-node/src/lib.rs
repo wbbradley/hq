@@ -3,6 +3,8 @@
 mod components;
 mod coordination;
 mod foundation;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod graceful_runtime;
 mod identity;
 mod lifecycle;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -17,6 +19,11 @@ mod session_registry;
 
 pub use foundation::{
     NodeFoundation, NodeFoundationConfig, NodeReadinessError, NodeShutdownError, NodeStartupError,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use graceful_runtime::{
+    LocalNodeRuntime, LocalNodeRuntimeConfig, LocalNodeRuntimeError, LocalNodeRuntimeReport,
+    LocalNodeRuntimeStartError, UnixShutdownSignals, UnixSignalRegistrationError,
 };
 pub use identity::{
     BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity, LocalConfiguration,
@@ -42,7 +49,7 @@ pub use session_io::{
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use session_pump::{
-    LocalSessionPump, LocalSessionPumpConfig, LocalSessionPumpEvent,
+    LocalSessionPump, LocalSessionPumpConfig, LocalSessionPumpEvent, LocalSessionPumpOpenError,
     LocalSessionPumpShutdownReport, LocalSessionPumpStartError,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -109,6 +109,8 @@ pub enum LocalSessionDisconnectCause {
     Protocol(ServerSessionError),
     /// A response could not enter the fixed encoded-write queue.
     Response(LocalSessionSendError),
+    /// Decoded request intake was closed for an orderly node drain.
+    RequestIntakeClosed,
     /// A final protocol response completed and requires orderly close.
     PostWriteClose,
     /// The owned byte task did not return normally.
@@ -159,6 +161,7 @@ struct SessionSlot {
     session: ServerSession,
     io: LocalSessionHandle,
     closing: bool,
+    pending_response: bool,
 }
 
 /// Sole bounded owner of active local server sessions and their I/O tasks.
@@ -173,6 +176,7 @@ pub struct LocalSessionRegistry {
     tasks: JoinSet<SessionTaskOutput>,
     task_sessions: BTreeMap<tokio::task::Id, Id32>,
     accepting: bool,
+    accepting_requests: bool,
 }
 
 impl LocalSessionRegistry {
@@ -189,6 +193,7 @@ impl LocalSessionRegistry {
             tasks: JoinSet::new(),
             task_sessions: BTreeMap::new(),
             accepting: true,
+            accepting_requests: true,
         }
     }
 
@@ -222,6 +227,7 @@ impl LocalSessionRegistry {
                 session,
                 io,
                 closing: false,
+                pending_response: false,
             },
         );
         let task = self.tasks.spawn(async move {
@@ -248,6 +254,7 @@ impl LocalSessionRegistry {
             return None;
         }
         tokio::select! {
+            biased;
             event = self.events.recv() => {
                 event.map(|event| self.dispatch_event(event, application, lifecycle))
             }
@@ -258,6 +265,11 @@ impl LocalSessionRegistry {
     /// Stops admission while retaining all currently owned sessions for explicit drain.
     pub fn close_intake(&mut self) {
         self.accepting = false;
+    }
+
+    /// Stops decoded request dispatch while retaining accepted response writes.
+    pub fn close_request_intake(&mut self) {
+        self.accepting_requests = false;
     }
 
     /// Delivers at most one coalesced invalidation per active session without waiting.
@@ -300,6 +312,14 @@ impl LocalSessionRegistry {
     /// Returns the number of session I/O tasks awaiting a join.
     pub fn task_count(&self) -> usize {
         self.tasks.len()
+    }
+
+    /// Returns responses accepted by session writers but not yet confirmed written.
+    pub fn pending_response_count(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|slot| slot.pending_response)
+            .count()
     }
 
     /// Closes intake and every descriptor, consumes terminal events, and joins all tasks.
@@ -377,6 +397,13 @@ impl LocalSessionRegistry {
                 if slot.closing {
                     return LocalSessionDispatch::StaleEvent { session_id };
                 }
+                if !self.accepting_requests {
+                    self.begin_close(session_id);
+                    return LocalSessionDispatch::SessionClosing {
+                        session_id,
+                        cause: LocalSessionDisconnectCause::RequestIntakeClosed,
+                    };
+                }
                 let routed = slot
                     .session
                     .receive(message, application, lifecycle)
@@ -387,7 +414,10 @@ impl LocalSessionRegistry {
                             .map_err(LocalSessionDisconnectCause::Response)
                     });
                 match routed {
-                    Ok(()) => LocalSessionDispatch::MessageHandled { session_id },
+                    Ok(()) => {
+                        slot.pending_response = true;
+                        LocalSessionDispatch::MessageHandled { session_id }
+                    }
                     Err(cause) => {
                         self.begin_close(session_id);
                         LocalSessionDispatch::SessionClosing { session_id, cause }
@@ -403,6 +433,7 @@ impl LocalSessionRegistry {
                 }
                 match slot.session.confirm_written(ticket) {
                     Ok(ServerWriteDisposition::Continue) => {
+                        slot.pending_response = false;
                         LocalSessionDispatch::WriteConfirmed { session_id }
                     }
                     Ok(ServerWriteDisposition::Close) => {
@@ -459,6 +490,7 @@ impl LocalSessionRegistry {
     fn begin_close(&mut self, session_id: Id32) {
         if let Some(slot) = self.sessions.get_mut(&session_id) {
             slot.closing = true;
+            slot.pending_response = false;
             slot.session.disconnect();
             slot.io.close();
         }
