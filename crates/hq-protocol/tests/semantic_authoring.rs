@@ -35,6 +35,25 @@ fn every_semantic_family_authors_back_to_the_exact_verified_v1_record() {
 }
 
 #[test]
+fn every_semantic_family_round_trips_through_unsigned_local_planning_content() {
+    for (family, body) in valid_bodies() {
+        let original = verified_record(
+            family,
+            &body,
+            [u8::try_from(family).expect("family fits u8"); 32],
+        );
+        let semantic = original.into_semantic_fact().expect("catalog DTO converts");
+        let plan = CanonicalEventPlan::from_fact(semantic.fact());
+        let content = plan.clone().encode_content().expect("plan encodes");
+        assert_eq!(
+            CanonicalEventPlan::decode_content(&content)
+                .unwrap_or_else(|error| panic!("family {family} plan failed: {error}")),
+            plan
+        );
+    }
+}
+
+#[test]
 fn typed_authoring_preserves_canonical_and_control_authority_namespaces() {
     let bodies = valid_bodies();
     for (family, body, parents, authorities) in [

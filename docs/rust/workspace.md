@@ -44,6 +44,13 @@ the consumer-side capability traits documented in `docs/rust/application-service
 local sessions, relays, managed runtimes, resource observers, and the node implement or compose
 those ports; application services never import their concrete types.
 
+`hq-local-api` owns the independently versioned local API v1 DTOs, canonical JSON codec, bounded
+length framing, negotiation values, exact mutation-plan replay representation, lifecycle/domain/
+effect request families, client snapshot/page values, typed errors, and revision-only invalidations
+specified in `docs/protocol/local-api-v1.md`. Its unsigned semantic-plan bridge reuses the canonical
+protocol owner's exhaustive semantic spelling, but the bytes carry no authority and must still pass
+ordinary node signing and canonical verification. No local API production source imports storage.
+
 ## Supported target matrix
 
 ADR 0001 defines four first-release targets:

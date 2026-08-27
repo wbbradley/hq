@@ -2,7 +2,7 @@
 
 use hq_domain as domain;
 
-use super::{encode_dto, model};
+use super::{decode::decode_unsigned_content, encode_dto, model, semantic};
 use crate::{Bip340Signer, DispatchOutcome, FailureClass, ProtocolError};
 
 /// Deterministic unsigned semantic event inputs owned independently of protocol DTOs.
@@ -45,6 +45,47 @@ impl CanonicalEventPlan {
             fact.scope().clone(),
             fact.causal().clone(),
             fact.payload().clone(),
+        )
+    }
+
+    /// Encodes deterministic unsigned semantic content for the local planning boundary.
+    ///
+    /// These bytes are not a fact and carry no authorship evidence. They become admissible only
+    /// after [`Self::sign`] produces and verifies an ordinary signed canonical event.
+    pub fn encode_content(self) -> Result<Vec<u8>, ProtocolError> {
+        let millis = u64::try_from(self.authored_at.as_unix_millis())
+            .map_err(|_| ProtocolError::new(FailureClass::DomainValueInvalid))?;
+        encode_dto(&self.into_dto(millis))
+    }
+
+    /// Strictly decodes untrusted canonical unsigned content from the local planning boundary.
+    ///
+    /// The result still has no domain authority. Signing and ordinary verification remain required
+    /// before the plan can enter the canonical fact set.
+    pub fn decode_content(bytes: &[u8]) -> Result<Self, ProtocolError> {
+        let dto = decode_unsigned_content(bytes)?;
+        if encode_dto(&dto)?.as_slice() != bytes {
+            return Err(ProtocolError::new(FailureClass::ContentNonCanonical));
+        }
+        semantic::plan(&dto)
+    }
+
+    /// Consumes the plan into its deterministic semantic authoring inputs.
+    pub fn into_parts(
+        self,
+    ) -> (
+        domain::InstallationId,
+        domain::Timestamp,
+        domain::FactScope,
+        domain::CausalReferences<{ domain::MAX_FACT_PARENTS }, { domain::MAX_FACT_AUTHORITIES }>,
+        domain::SemanticPayload,
+    ) {
+        (
+            self.author,
+            self.authored_at,
+            self.scope,
+            self.causal,
+            self.payload,
         )
     }
 

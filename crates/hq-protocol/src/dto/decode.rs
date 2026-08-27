@@ -52,6 +52,39 @@ pub(super) fn decode_content(
     verified_public_key: [u8; 32],
 ) -> Result<ContentDto, ProtocolError> {
     let raw: RawContentDto = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    decode_raw_content(
+        raw,
+        expected_namespace,
+        expected_version,
+        Some(expected_family),
+        verified_public_key,
+    )
+}
+
+pub(super) fn decode_unsigned_content(bytes: &[u8]) -> Result<ContentDto, ProtocolError> {
+    let raw: RawContentDto = serde_json::from_slice(bytes).map_err(|_| malformed())?;
+    let namespace = match raw.protocol {
+        ProtocolDto::Canonical => ProtocolNamespace::Canonical,
+        ProtocolDto::Control => ProtocolNamespace::Control,
+    };
+    let verified_public_key = if raw.family == 1 {
+        serde_json::from_str::<InstallationDeclaredDto>(raw.body.get())
+            .map_err(|_| malformed())?
+            .signing
+            .0
+    } else {
+        [0; 32]
+    };
+    decode_raw_content(raw, namespace, 1, None, verified_public_key)
+}
+
+fn decode_raw_content(
+    raw: RawContentDto,
+    expected_namespace: ProtocolNamespace,
+    expected_version: u64,
+    expected_family: Option<u64>,
+    verified_public_key: [u8; 32],
+) -> Result<ContentDto, ProtocolError> {
     let namespace = match raw.protocol {
         ProtocolDto::Canonical => ProtocolNamespace::Canonical,
         ProtocolDto::Control => ProtocolNamespace::Control,
@@ -59,13 +92,11 @@ pub(super) fn decode_content(
     if namespace != expected_namespace {
         return Err(ProtocolError::new(FailureClass::NamespaceConfusion));
     }
-    if raw.version != expected_version || raw.family != expected_family {
+    if raw.version != expected_version || expected_family.is_some_and(|family| family != raw.family)
+    {
         return Err(malformed());
     }
     let body = decode_body(raw.family, &raw.body)?;
-    if body.family() != raw.family {
-        return Err(malformed());
-    }
     let content = ContentDto {
         protocol: raw.protocol,
         version: raw.version,

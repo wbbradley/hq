@@ -54,15 +54,26 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[local-api/high] Specify and implement the reconnecting local client protocol** — Define local
-  API v1 framing, strict bounds, version negotiation, build metadata, lifecycle operations, typed
-  domain requests/results/errors, stable mutation retry, and revision invalidations. Implement the
-  client and server-session libraries, registering subscriptions before reading the acknowledged
-  revision and activating them only after acknowledgement is written. Coalesce subscriber wakes
-  without blocking commits and make clients reconnect, renegotiate, resubscribe, and request an
-  authoritative full snapshot. Test concurrent clients, lost mutation responses, stale sockets,
-  version mismatch, slow subscribers, revision races, and reconnect. Complete this work when all
-  clients can use one protocol library without storage access.
+- **[local-api/high] Implement race-safe server sessions and bounded invalidation fanout** — Build
+  the transport-independent server-session library over application capabilities. Register each
+  subscription before reading the revision its acknowledgement names, activate only after that
+  acknowledgement is confirmed written, cancel pending/active registrations on disconnect, and
+  coalesce each slow subscriber to one nonblocking pending wake carrying the newest revision,
+  broad topics, and a full-snapshot flag. Route lifecycle and typed domain operations without any
+  storage dependency. Test concurrent clients, revision races at every registration phase, stale
+  sockets, slow/nonreading subscribers, cancellation, response loss, and commits while fanout is
+  saturated.
+
+- **[local-api/high] Implement reconnecting local client replay and resubscription** — Build the
+  shared client state machine and transport adapter contract used by CLI, TUI, and local harness
+  launchers. Negotiate on every connection, retry a lost mutation response with the exact stable ID
+  and bytes, never retry changed input under an existing ID, detect stale sessions, reconnect with
+  bounded backoff, re-register subscriptions, and request a fresh authoritative full snapshot
+  before treating invalidations as current. Test disconnects before/after mutation commit,
+  incompatible restarted servers, repeated connection loss, invalidation gaps, resubscription races,
+  clean lifecycle restart, and two clients racing. Complete this work when all clients can use one
+  protocol library without storage access and reconnect without duplicate mutations or revision
+  gaps.
 
 - **[node/high] Compose node ownership, startup, and graceful lifecycle** — Build the sole composition
   root owning the installation lock and identity handle, store thread, local listener, subscriptions,

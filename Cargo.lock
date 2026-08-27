@@ -298,6 +298,14 @@ version = "0.1.0"
 [[package]]
 name = "hq-local-api"
 version = "0.1.0"
+dependencies = [
+ "hq-application",
+ "hq-domain",
+ "hq-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "hq-node"

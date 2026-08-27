@@ -219,6 +219,25 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Architecture verification rejects runtime, persistence, transport, terminal, filesystem,
   process, and provider-specific implementation concerns in `hq-application`.
 
+## Local API v1 wire gates
+
+- Four-byte big-endian framing rejects an oversized declaration before body decode, and rejects
+  truncation, trailing bytes, malformed UTF-8/JSON, unknown fields/variants, and any decodable JSON
+  whose canonical re-encoding differs.
+- Negotiation chooses the highest common nonzero version, reports disjoint ranges explicitly, and
+  carries bounded diagnostic build metadata without using build identity as authority.
+- Every lifecycle, query, fact mutation, relay/sync effect, neutral agent-session effect, resource
+  inspection, subscription, response, error, and invalidation family round-trips through the one v1
+  codec; decoded values reapply all constructor bounds.
+- Every one of the 48 semantic fact families round-trips through the unsigned local planning bridge.
+  The exact mutation digest binds canonical plan bytes plus auxiliary randomness; changing either
+  under the same command ID changes or invalidates the digest.
+- Snapshot and conversation-page values are bounded, typed client DTOs rather than serialized Rust
+  domain/application structs or storage rows. Invalidations contain revision/topics/full-refresh
+  intent only and never contain projection rows or message bodies.
+- Architecture verification allows `hq-local-api` to depend inward on domain, canonical protocol,
+  and application only; no storage dependency or SQLite vocabulary is present.
+
 ## Scenario maintenance rule
 
 Every new semantic catalog row adds at least one valid scenario and one missing-parent,

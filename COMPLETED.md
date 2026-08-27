@@ -4997,3 +4997,79 @@ fuzz smokes; whitespace checks; and the unchanged Go vet/build/fresh test suite 
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so application contracts, storage adaptation, tests, specifications,
      and bookkeeping form one reviewable change.
+
+## 2026-08-27 — Bounded local API v1 wire protocol
+
+Specified and implemented a storage-independent local API v1 codec with an independently versioned
+handshake, build metadata, four-byte big-endian framing, strict canonical JSON, closed typed message
+families, inclusive allocation bounds, lifecycle and domain operations, authoritative snapshots and
+conversation pages, stable mutation identity, exact retry payloads, and revision-only invalidations.
+Plain wire records use idiomatic public fields while invariant-bearing values retain validated
+constructors.
+
+Added unsigned canonical-plan content transitions for all 48 semantic fact families without
+granting signer or evidence authority. Mutation requests bind exact plan bytes and auxiliary signing
+randomness with a domain-separated SHA-256 digest before conversion to application fact plans.
+Normative and executable specifications cover message families, bounds, canonicality, truncation,
+unknown data, incompatible versions, digest mismatch, and the subscription and replay rules.
+
+The full locked workspace format/check/tests/Clippy suite, architecture and specification
+verifiers, dependency checks, four supported compilation targets, both 512-run protocol fuzz
+smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[local-api/high] Specify local API v1 and implement its bounded typed wire contract** — Write
+  `docs/protocol/local-api-v1.md` and implement the independently versioned handshake, build
+  metadata, length-delimited framing, strict decoding and allocation bounds, lifecycle operations,
+  domain queries, explicit request/result/error DTOs, stable mutation identity and exact retry
+  payload, authoritative snapshot/page representations, and revision-only invalidation messages.
+  Keep DTOs and conversions in `hq-local-api`; domain and application types must not become wire
+  formats. Test every message family, boundary size, truncation, trailing/unknown data, incompatible
+  versions, noncanonical encodings, and mutation digest mismatch. Complete this work when a client
+  and a server can interoperate semantically through one storage-independent v1 codec.
+
+  **Implementation plan**
+
+  - Specify a four-byte big-endian length prefix around canonical compact JSON, reject declared
+    oversize before body work, deny unknown DTO fields/variants, and require byte-identical
+    re-encoding so equivalent but noncanonical JSON cannot create replay aliases.
+  - Own closed v1 handshake, request, response, error, snapshot/page, effect, subscription, and
+    invalidation DTOs in `hq-local-api`, with semantic validation after deserialization and named
+    inclusive bounds for every variable-size value.
+  - Reuse `hq-protocol`'s exhaustive canonical semantic DTO mapping for unsigned mutation plans,
+    while exposing a distinct encode/decode transition that cannot produce verified evidence.
+    Bind exact plan bytes and auxiliary signing randomness into a domain-separated SHA-256 request
+    digest and convert only validated bytes into an application `FactPlan`.
+  - Cover every top-level and application-operation family with semantic round trips, exercise
+    incremental framing, all framing/canonicality failures, inclusive bounds, digest tampering, and
+    all 48 unsigned semantic plan families. Add executable checks that the normative specification
+    names every bound and the replay/subscription/trust rules.
+  - Update workspace and acceptance documentation, run focused protocol gates, then run the full
+    locked workspace, architecture, dependency, fuzz, target, whitespace, and unchanged-Go gates.
+
+  **Risks and decisions**
+
+  - Standard Rust enum encodings are not a protocol contract; every union has explicit lowercase
+    tags, including a dedicated success/error response union instead of serializing `Result`.
+  - Plain owned wire records expose documented public fields for idiomatic matching/destructuring;
+    only true invariant wrappers keep private fields. Both encoding and decoding revalidate the
+    complete message, so public DTO construction cannot bypass the wire boundary.
+  - Unsigned canonical-plan content deliberately shares semantic spelling with signed canonical v1
+    but carries no signer or fact identity. Only the node's later sign-and-verify transition may
+    produce admissible evidence.
+  - Snapshot DTOs are a bounded, closed client query representation. They are neither reducer Rust
+    layouts nor storage rows; server-session conversion and race ordering remain in the immediately
+    following package.
+  - The incremental decoder retains at most one maximum frame. Socket adapters must feed bounded
+    reads and close after any framing violation rather than accumulating attacker-controlled input.
+
+  **Post-Plan Execution Steps**
+
+  1. Implement the expanded plan above completely, preserving the independent protocol and trust
+     boundaries.
+  2. Test every message family, semantic-plan family, bound, malformed input class, and replay
+     invariant, then run repository-wide gates.
+  3. Commit the implementation and specifications with one Conventional Commit.
+  4. Remove this exact entry from **Next Up**, append it verbatim with completion evidence to
+     `COMPLETED.md`, and amend the same commit before advancing to server sessions.

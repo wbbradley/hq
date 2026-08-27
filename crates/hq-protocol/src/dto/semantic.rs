@@ -89,6 +89,32 @@ pub(super) fn convert(
     Ok(VerifiedSemanticFact { record, fact })
 }
 
+pub(super) fn plan(dto: &model::ContentDto) -> Result<super::CanonicalEventPlan, ProtocolError> {
+    let signing_key = match &dto.body {
+        model::BodyDto::InstallationDeclared(value) => signing(value.signing),
+        model::BodyDto::HumanAccountCreated(value) => signing(value.creator.signing),
+        model::BodyDto::HumanDeviceAccepted(value) => signing(value.device.signing),
+        _ => domain::SigningPublicKey::from_bytes([0; 32]),
+    };
+    let author = domain::InstallationAddress::new(
+        domain::InstallationId::from_bytes(dto.author.0),
+        signing_key,
+    );
+    let scope = scope(&dto.scope);
+    let causal = causal(&dto.parents, &dto.authorities)?;
+    let payload = payload(&dto.body, author, &scope)?;
+    let authored_at = domain::Timestamp::from_unix_millis(
+        i64::try_from(dto.time.0).map_err(|_| failure(FailureClass::DomainValueInvalid))?,
+    );
+    Ok(super::CanonicalEventPlan::new(
+        author.installation_id(),
+        authored_at,
+        scope,
+        causal,
+        payload,
+    ))
+}
+
 fn scope(value: &model::ScopeDto) -> domain::FactScope {
     match value {
         model::ScopeDto::Local((_, installation)) => domain::FactScope::InstallationPrivate(

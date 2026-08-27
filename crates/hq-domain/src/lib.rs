@@ -26,7 +26,10 @@ mod time;
 pub use address::{InstallationAddress, MailboxAddress};
 pub use bounded::{BoundedSet, BoundedText, BoundedVec, NonEmptyBoundedSet, ValidatedValueError};
 pub use causal::{AuthorityReference, AuthorityRole, CausalReferences};
-pub use correlation::{OperationCorrelation, ProviderId, ProviderSessionId};
+pub use correlation::{
+    OperationCorrelation, PROVIDER_ID_MAX_BYTES, PROVIDER_SESSION_ID_MAX_BYTES, ProviderId,
+    ProviderSessionId,
+};
 pub use envelope::{Command, Outcome, Page, PageCursor, VersionedView};
 pub use error::{DomainError, ErrorCategory, ErrorCode};
 pub use fact_catalog::{FactKind, ProtocolClass, RetentionClass};
@@ -35,6 +38,6 @@ pub use ids::{
     FactId, GrantId, InstallationId, MailboxId, MessageId, OperationId, ProjectId, ReceiptId,
     ResourceId, SigningPublicKey, ThreadId,
 };
-pub use resource::{ResourceLocator, ResourceScheme};
+pub use resource::{RESOURCE_LOCATOR_MAX_BYTES, ResourceLocator, ResourceScheme};
 pub use semantic_fact::*;
 pub use time::{Revision, Timestamp};

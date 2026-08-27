@@ -101,7 +101,7 @@ jobs:
           rustup toolchain install 1.98.0 --profile minimal
           rustup target add --toolchain 1.98.0 "${{ matrix.target }}"
       - name: Check portable core and protocol
-        run: cargo check --locked -p hq-domain -p hq-reducer -p hq-protocol -p hq-application --target "${{ matrix.target }}"
+        run: cargo check --locked -p hq-domain -p hq-reducer -p hq-protocol -p hq-application -p hq-local-api --target "${{ matrix.target }}"
 
   rust-protocol-fuzz:
     name: Rust protocol fuzz smoke
