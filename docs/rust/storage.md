@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v3 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v4 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `3`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `4`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,12 +23,12 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v3 ownership | Rebuildable |
+| Class | Storage v4 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
 | Deterministic reduction indexes | Reverse dependencies, decisions, diagnostics, conflicts, and reducer order | Yes, only through an explicit repair operation |
-| Materialized projections | Complete authority frontiers, typed values, and support; other reducer domains reserved | Yes, only through explicit repair |
+| Materialized projections | Complete authority and conversation/activity frontiers, typed values, ordered children, and support; later reducer domains reserved | Yes, only through explicit repair |
 | Durable operational state | Reserved for receipts, revisions, outbox, delivery, cursors, and saga checkpoints | Generally no |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
@@ -70,13 +70,14 @@ role parameters. Debug prose and generic domain serialization are not persistenc
 ## Explicit repair
 
 `repair(policy)` first computes the complete oracle without writes. It then opens one transaction,
-deletes only the rebuildable reduction and authority tables, writes every normalized replacement
-group, reads both typed snapshots back through private fixed-width and closed-vocabulary row codecs,
-and requires exact snapshot and digest equality before commit. Canonical facts, exact event bytes,
+deletes only the rebuildable reduction, authority, and conversation/activity tables, writes every
+normalized replacement group, reads all three typed snapshots back through private fixed-width and
+closed-vocabulary row codecs, and requires exact snapshot and digest equality before commit.
+Canonical facts, exact event bytes,
 canonical parent and authority rows, schema metadata, and future durable operational tables are
 outside the repair allowlist. Dropping or failing the transaction at any replacement or verification
-checkpoint leaves the preceding complete structural/authority pair intact, and repeating a
-successful repair is idempotent.
+checkpoint leaves the preceding complete structural/authority/conversation set intact, and
+repeating a successful repair is idempotent.
 
 `load_reduction_index()` is read-only and returns the last successful repair even when newer
 canonical facts have since arrived; callers request an explicit repair when they need those facts
@@ -106,6 +107,35 @@ bounds, ordinals, key/value pairing, parent/child ownership and row-count limits
 digest over every authority row before returning it. Unknown, partial, orphaned, duplicated,
 cross-key, oversized, or valid-looking changed rows return `RebuildableStateCorrupt`; repair remains
 the only recovery path.
+
+## Conversation and activity projections
+
+`ConversationProjectionSnapshot` is the SQL-independent persisted query boundary for the complete
+conversation/activity report. It owns typed ordered maps for all `ConversationAggregateKey`
+frontiers, all six `ConversationProjectionKey` variants and values, and every transitive support
+set. `load_conversation_snapshot()` first validates the structural and authority packages from the
+same repair, then returns the last explicitly repaired conversation view without rerunning a
+reducer. A later append therefore leaves the prior snapshot readable and intentionally stale until
+the caller repairs.
+
+Storage uses explicit master rows for all aggregate and projection key variants. Composite activity
+and retention namespaces retain source installation/mailbox, provider, session, operation, optional
+item, activity kind, logical key, and runtime in individually validated columns; a private digest is
+only a relational identity and is recomputed from those columns on load. Dedicated parent and child
+tables retain thread roots, answers, cancellations, pairwise causal relations and ready order;
+typed message content, optional recipient/correlation/project shapes, reversible state frontier and
+peer receipt evidence; action-group order and final answer; selected snapshots and permanent
+completed records; the progress-retention order and total; aggregate frontiers; and support.
+
+Private exhaustive codecs cover every closed message purpose, presentation kind, activity kind and
+status, causal relation, boolean, fixed identity, bounded content/provider/session/error value, and
+optional shape. Positive activity sequence numbers use fixed-width big-endian bytes so the complete
+`NonZeroU64` domain round-trips despite SQLite's signed integer range. Ordered children require
+unique contiguous zero-based positions; thread relation and ready-answer sets, final-answer
+membership, rejection/open state, completed-record identity, and the 200-item retention budget are
+checked on reconstruction. Counts are bounded before allocation, and a digest covers every explicit
+conversation row. Unknown, partial, orphaned, cross-key, noncontiguous, oversized, or
+constraint-valid changed rows return `RebuildableStateCorrupt` until explicit repair.
 
 The correctness-first oracle currently clones the bounded semantic corpus for the four reducers.
 That cost is deliberate for repair equality; measured shared-report or incremental optimization is

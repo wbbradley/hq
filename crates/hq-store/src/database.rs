@@ -1,6 +1,7 @@
 //! Private SQLite schema, row codecs, and transactions.
 
 mod authority;
+mod conversation;
 mod repair;
 
 use std::{path::Path, time::Duration};
@@ -16,15 +17,15 @@ use rusqlite::{
 };
 
 use crate::{
-    AppendOutcome, AuthorityProjectionSnapshot, CompleteSnapshot, ReductionIndexSnapshot,
-    RepairOutcome, StoreError, StoreErrorClass,
+    AppendOutcome, AuthorityProjectionSnapshot, CompleteSnapshot, ConversationProjectionSnapshot,
+    ReductionIndexSnapshot, RepairOutcome, StoreError, StoreErrorClass,
     paths::{prepare_database_path, validate_database_path},
     snapshot::build_complete_snapshot,
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 3;
-const SCHEMA_MARKER: &str = "hq-store-v3-authority-projections-2026-08-27";
+const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_MARKER: &str = "hq-store-v4-conversation-projections-2026-08-27";
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
 const SCHEMA: &str = r"
@@ -318,6 +319,165 @@ CREATE TABLE authority_account_selection_candidates (
     account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
     PRIMARY KEY (installation_id, account_id)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_state (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    aggregate_key_count INTEGER NOT NULL CHECK(aggregate_key_count >= 0),
+    frontier_count INTEGER NOT NULL CHECK(frontier_count >= 0),
+    projection_key_count INTEGER NOT NULL CHECK(projection_key_count >= 0),
+    projection_count INTEGER NOT NULL CHECK(projection_count >= 0),
+    support_count INTEGER NOT NULL CHECK(support_count >= 0),
+    row_count INTEGER NOT NULL CHECK(row_count >= 0),
+    row_digest BLOB NOT NULL CHECK(typeof(row_digest) = 'blob' AND length(row_digest) = 32)
+) STRICT;
+
+CREATE TABLE conversation_aggregate_keys (
+    key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 4),
+    key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
+    key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) <= 256),
+    operation_id BLOB NOT NULL CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    item_present INTEGER NOT NULL CHECK(item_present IN (0, 1)),
+    item TEXT NOT NULL CHECK(typeof(item) = 'text' AND length(CAST(item AS BLOB)) <= 128),
+    activity_kind INTEGER NOT NULL CHECK(activity_kind BETWEEN 0 AND 5),
+    logical_key TEXT NOT NULL CHECK(typeof(logical_key) = 'text' AND length(CAST(logical_key AS BLOB)) <= 128),
+    runtime TEXT NOT NULL CHECK(typeof(runtime) = 'text' AND length(CAST(runtime AS BLOB)) <= 128)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_frontiers (
+    key_digest BLOB NOT NULL REFERENCES conversation_aggregate_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_projection_keys (
+    key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 6),
+    key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
+    key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) <= 256),
+    operation_id BLOB NOT NULL CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    item_present INTEGER NOT NULL CHECK(item_present IN (0, 1)),
+    item TEXT NOT NULL CHECK(typeof(item) = 'text' AND length(CAST(item AS BLOB)) <= 128),
+    activity_kind INTEGER NOT NULL CHECK(activity_kind BETWEEN 0 AND 5),
+    logical_key TEXT NOT NULL CHECK(typeof(logical_key) = 'text' AND length(CAST(logical_key AS BLOB)) <= 128),
+    runtime TEXT NOT NULL CHECK(typeof(runtime) = 'text' AND length(CAST(runtime AS BLOB)) <= 128)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_support (
+    key_digest BLOB NOT NULL REFERENCES conversation_projection_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_threads (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
+    root_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    root_message BLOB NOT NULL CHECK(typeof(root_message) = 'blob' AND length(root_message) = 32),
+    cancelled INTEGER NOT NULL CHECK(cancelled IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_thread_answers (
+    key_digest BLOB NOT NULL REFERENCES conversation_threads(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_thread_cancellations (
+    key_digest BLOB NOT NULL REFERENCES conversation_threads(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_thread_relations (
+    key_digest BLOB NOT NULL REFERENCES conversation_threads(key_digest),
+    answer_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    cancellation_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    relation INTEGER NOT NULL CHECK(relation BETWEEN 1 AND 3),
+    PRIMARY KEY (key_digest, answer_fact, cancellation_fact)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_thread_ready_answers (
+    key_digest BLOB NOT NULL REFERENCES conversation_threads(key_digest),
+    position INTEGER NOT NULL CHECK(position >= 0),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, position),
+    UNIQUE (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_messages (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
+    sender_installation BLOB NOT NULL CHECK(typeof(sender_installation) = 'blob' AND length(sender_installation) = 32),
+    sender_mailbox BLOB NOT NULL CHECK(typeof(sender_mailbox) = 'blob' AND length(sender_mailbox) = 32),
+    recipient_present INTEGER NOT NULL CHECK(recipient_present IN (0, 1)),
+    recipient_installation BLOB NOT NULL CHECK(typeof(recipient_installation) = 'blob' AND length(recipient_installation) = 32),
+    recipient_mailbox BLOB NOT NULL CHECK(typeof(recipient_mailbox) = 'blob' AND length(recipient_mailbox) = 32),
+    body TEXT NOT NULL CHECK(typeof(body) = 'text' AND length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),
+    purpose INTEGER NOT NULL CHECK(purpose BETWEEN 1 AND 3),
+    presentation INTEGER NOT NULL CHECK(presentation BETWEEN 1 AND 3),
+    correlation_present INTEGER NOT NULL CHECK(correlation_present IN (0, 1)),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) <= 256),
+    operation_id BLOB NOT NULL CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    project_present INTEGER NOT NULL CHECK(project_present IN (0, 1)),
+    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
+    open INTEGER NOT NULL CHECK(open IN (0, 1)),
+    rejected INTEGER NOT NULL CHECK(rejected IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_message_frontiers (
+    key_digest BLOB NOT NULL REFERENCES conversation_messages(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_message_receipts (
+    key_digest BLOB NOT NULL REFERENCES conversation_messages(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_action_groups (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
+    final_answer_present INTEGER NOT NULL CHECK(final_answer_present IN (0, 1)),
+    final_answer BLOB NOT NULL CHECK(typeof(final_answer) = 'blob' AND length(final_answer) = 32)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_action_entries (
+    key_digest BLOB NOT NULL REFERENCES conversation_action_groups(key_digest),
+    position INTEGER NOT NULL CHECK(position >= 0),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, position),
+    UNIQUE (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_activities (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    sequence BLOB NOT NULL CHECK(typeof(sequence) = 'blob' AND length(sequence) = 8),
+    status INTEGER NOT NULL CHECK(status BETWEEN 1 AND 5),
+    failure_reason TEXT NOT NULL CHECK(typeof(failure_reason) = 'text' AND length(CAST(failure_reason AS BLOB)) <= 96),
+    content TEXT NOT NULL CHECK(typeof(content) = 'text' AND length(CAST(content AS BLOB)) BETWEEN 1 AND 16384),
+    truncated INTEGER NOT NULL CHECK(truncated IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_activity_retentions (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
+    total_progress INTEGER NOT NULL CHECK(total_progress >= 0)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE conversation_retained_progress (
+    key_digest BLOB NOT NULL REFERENCES conversation_activity_retentions(key_digest),
+    position INTEGER NOT NULL CHECK(position >= 0),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, position),
+    UNIQUE (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -441,9 +601,19 @@ impl Database {
         let complete = self.complete_snapshot(policy)?;
         let expected = complete.normalized_index();
         let expected_authority = complete.authority_projection_snapshot();
-        let (persisted, authority) =
-            repair::replace(&mut self.connection, &expected, &expected_authority)?;
-        Ok(RepairOutcome::new(complete, persisted, authority))
+        let expected_conversation = complete.conversation_projection_snapshot();
+        let (persisted, authority, conversation) = repair::replace(
+            &mut self.connection,
+            &expected,
+            &expected_authority,
+            &expected_conversation,
+        )?;
+        Ok(RepairOutcome::new(
+            complete,
+            persisted,
+            authority,
+            conversation,
+        ))
     }
 
     pub(super) fn load_reduction_index(&self) -> Result<ReductionIndexSnapshot, StoreError> {
@@ -455,6 +625,14 @@ impl Database {
     ) -> Result<AuthorityProjectionSnapshot, StoreError> {
         repair::load(&self.connection)?;
         authority::load(&self.connection)
+    }
+
+    pub(super) fn load_conversation_snapshot(
+        &self,
+    ) -> Result<ConversationProjectionSnapshot, StoreError> {
+        repair::load(&self.connection)?;
+        authority::load(&self.connection)?;
+        conversation::load(&self.connection)
     }
 }
 
@@ -561,7 +739,7 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
             |row| row.get(0),
         )
         .map_err(sql_error)?;
-    if table_count != 34 {
+    if table_count != 52 {
         return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
     }
     for table in [
@@ -599,6 +777,24 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
         "authority_membership_grant_relays",
         "authority_account_selections",
         "authority_account_selection_candidates",
+        "conversation_state",
+        "conversation_aggregate_keys",
+        "conversation_frontiers",
+        "conversation_projection_keys",
+        "conversation_support",
+        "conversation_threads",
+        "conversation_thread_answers",
+        "conversation_thread_cancellations",
+        "conversation_thread_relations",
+        "conversation_thread_ready_answers",
+        "conversation_messages",
+        "conversation_message_frontiers",
+        "conversation_message_receipts",
+        "conversation_action_groups",
+        "conversation_action_entries",
+        "conversation_activities",
+        "conversation_activity_retentions",
+        "conversation_retained_progress",
     ] {
         let present: i64 = connection
             .query_row(
@@ -1006,6 +1202,8 @@ mod tests {
             RepairFailpoint::AfterState,
             RepairFailpoint::AfterAuthorityInsert,
             RepairFailpoint::AfterAuthorityVerification,
+            RepairFailpoint::AfterConversationInsert,
+            RepairFailpoint::AfterConversationVerification,
             RepairFailpoint::AfterVerification,
         ] {
             let mut connection = Connection::open_in_memory().expect("memory database opens");
@@ -1026,18 +1224,26 @@ mod tests {
                 .expect("prior snapshot reduces");
             let prior = prior_complete.normalized_index();
             let prior_authority = prior_complete.authority_projection_snapshot();
-            repair::replace(&mut database.connection, &prior, &prior_authority)
-                .expect("prior index persists");
+            let prior_conversation = prior_complete.conversation_projection_snapshot();
+            repair::replace(
+                &mut database.connection,
+                &prior,
+                &prior_authority,
+                &prior_conversation,
+            )
+            .expect("prior index persists");
             let replacement_complete = database
                 .complete_snapshot(replacement_policy)
                 .expect("replacement snapshot reduces");
             let replacement = replacement_complete.normalized_index();
             let replacement_authority = replacement_complete.authority_projection_snapshot();
+            let replacement_conversation = replacement_complete.conversation_projection_snapshot();
 
             let error = replace_with_failpoint(
                 &mut database.connection,
                 &replacement,
                 &replacement_authority,
+                &replacement_conversation,
                 failpoint,
             )
             .expect_err("repair failpoint interrupts replacement");
@@ -1051,13 +1257,19 @@ mod tests {
                 prior_authority
             );
             assert_eq!(
+                conversation::load(&database.connection)
+                    .expect("prior conversation remains loadable"),
+                prior_conversation
+            );
+            assert_eq!(
                 repair::replace(
                     &mut database.connection,
                     &replacement,
-                    &replacement_authority
+                    &replacement_authority,
+                    &replacement_conversation,
                 )
                 .expect("retry succeeds"),
-                (replacement, replacement_authority)
+                (replacement, replacement_authority, replacement_conversation,)
             );
         }
     }

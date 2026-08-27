@@ -118,6 +118,14 @@ pub fn verified_child(parent_id: [u8; 32]) -> VerifiedSemanticFact {
         .expect("child converts")
 }
 
+pub fn verified_question(parent_id: [u8; 32]) -> VerifiedSemanticFact {
+    let parent = hex(&parent_id);
+    let content = format!(
+        r#"{{"p":"hq/canonical","v":1,"f":15,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":2000,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[["c","{parent}"]],"auth":[["local-installation","c","{parent}"]],"body":{{"id":"5555555555555555555555555555555555555555555555555555555555555555","sender":{{"installation":"1111111111111111111111111111111111111111111111111111111111111111","mailbox":"3333333333333333333333333333333333333333333333333333333333333333"}},"recipient":{{"installation":"1111111111111111111111111111111111111111111111111111111111111111","mailbox":"3333333333333333333333333333333333333333333333333333333333333333"}},"body":"question","purpose":"question","presentation":"message","correlation":{{"provider":"test-provider","session":"session-1","id":"7777777777777777777777777777777777777777777777777777777777777777"}},"project":null}}}}"#
+    );
+    signed_fact(2, content.as_bytes(), [10; 32])
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);

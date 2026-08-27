@@ -7,8 +7,8 @@ use hq_reducer::AuthorityPolicy;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::{
-    AuthorityProjectionSnapshot, IndexedConflict, IndexedDecision, ReductionDomain,
-    ReductionIndexSnapshot, StoreError, StoreErrorClass,
+    AuthorityProjectionSnapshot, ConversationProjectionSnapshot, IndexedConflict, IndexedDecision,
+    ReductionDomain, ReductionIndexSnapshot, StoreError, StoreErrorClass,
     snapshot::{
         decode_domain, decode_reason, decode_role, decode_status, encode_domain, encode_reason,
         encode_role, encode_status, reason_belongs_to_domain,
@@ -31,6 +31,8 @@ pub(crate) enum RepairFailpoint {
     AfterState,
     AfterAuthorityInsert,
     AfterAuthorityVerification,
+    AfterConversationInsert,
+    AfterConversationVerification,
     AfterVerification,
 }
 
@@ -38,11 +40,20 @@ pub(crate) fn replace(
     connection: &mut Connection,
     expected: &ReductionIndexSnapshot,
     expected_authority: &AuthorityProjectionSnapshot,
-) -> Result<(ReductionIndexSnapshot, AuthorityProjectionSnapshot), StoreError> {
+    expected_conversation: &ConversationProjectionSnapshot,
+) -> Result<
+    (
+        ReductionIndexSnapshot,
+        AuthorityProjectionSnapshot,
+        ConversationProjectionSnapshot,
+    ),
+    StoreError,
+> {
     replace_at(
         connection,
         expected,
         expected_authority,
+        expected_conversation,
         RepairFailpoint::Never,
     )
 }
@@ -52,24 +63,49 @@ pub(crate) fn replace_with_failpoint(
     connection: &mut Connection,
     expected: &ReductionIndexSnapshot,
     expected_authority: &AuthorityProjectionSnapshot,
+    expected_conversation: &ConversationProjectionSnapshot,
     failpoint: RepairFailpoint,
-) -> Result<(ReductionIndexSnapshot, AuthorityProjectionSnapshot), StoreError> {
-    replace_at(connection, expected, expected_authority, failpoint)
+) -> Result<
+    (
+        ReductionIndexSnapshot,
+        AuthorityProjectionSnapshot,
+        ConversationProjectionSnapshot,
+    ),
+    StoreError,
+> {
+    replace_at(
+        connection,
+        expected,
+        expected_authority,
+        expected_conversation,
+        failpoint,
+    )
 }
 
 fn replace_at(
     connection: &mut Connection,
     expected: &ReductionIndexSnapshot,
     expected_authority: &AuthorityProjectionSnapshot,
+    expected_conversation: &ConversationProjectionSnapshot,
     failpoint: RepairFailpoint,
-) -> Result<(ReductionIndexSnapshot, AuthorityProjectionSnapshot), StoreError> {
+) -> Result<
+    (
+        ReductionIndexSnapshot,
+        AuthorityProjectionSnapshot,
+        ConversationProjectionSnapshot,
+    ),
+    StoreError,
+> {
     let transaction = connection.transaction().map_err(database)?;
     clear_rebuildable(&transaction)?;
     super::authority::clear(&transaction)?;
+    super::conversation::clear(&transaction)?;
     fail_at(failpoint, RepairFailpoint::AfterClear)?;
     insert_index(&transaction, expected, failpoint)?;
     super::authority::insert(&transaction, expected_authority)?;
     fail_at(failpoint, RepairFailpoint::AfterAuthorityInsert)?;
+    super::conversation::insert(&transaction, expected_conversation)?;
+    fail_at(failpoint, RepairFailpoint::AfterConversationInsert)?;
     let persisted = load_from_connection(&transaction)?;
     if persisted != *expected {
         return Err(corrupt());
@@ -79,9 +115,14 @@ fn replace_at(
         return Err(corrupt());
     }
     fail_at(failpoint, RepairFailpoint::AfterAuthorityVerification)?;
+    let persisted_conversation = super::conversation::load(&transaction)?;
+    if persisted_conversation != *expected_conversation {
+        return Err(corrupt());
+    }
+    fail_at(failpoint, RepairFailpoint::AfterConversationVerification)?;
     fail_at(failpoint, RepairFailpoint::AfterVerification)?;
     transaction.commit().map_err(database)?;
-    Ok((persisted, persisted_authority))
+    Ok((persisted, persisted_authority, persisted_conversation))
 }
 
 pub(crate) fn load(connection: &Connection) -> Result<ReductionIndexSnapshot, StoreError> {

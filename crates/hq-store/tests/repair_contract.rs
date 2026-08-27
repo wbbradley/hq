@@ -29,12 +29,13 @@ fn empty_complete_snapshot_has_four_empty_reports_and_can_be_repaired() {
     assert_eq!(snapshot.conversation().facts().facts().count(), 0);
     assert_eq!(snapshot.agent().facts().facts().count(), 0);
     assert_eq!(snapshot.project().facts().facts().count(), 0);
+    let repaired = store
+        .repair(authority_policy())
+        .expect("empty repair succeeds");
+    assert_eq!(repaired.persisted(), &snapshot.normalized_index());
     assert_eq!(
-        store
-            .repair(authority_policy())
-            .expect("empty repair succeeds")
-            .persisted(),
-        &snapshot.normalized_index()
+        repaired.conversation(),
+        &snapshot.conversation_projection_snapshot()
     );
 }
 

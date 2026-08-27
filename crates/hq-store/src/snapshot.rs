@@ -12,7 +12,7 @@ use hq_reducer::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::AuthorityProjectionSnapshot;
+use crate::{AuthorityProjectionSnapshot, ConversationProjectionSnapshot};
 use crate::{StoreError, StoreErrorClass};
 
 /// One independently materialized reducer domain.
@@ -244,6 +244,11 @@ impl CompleteSnapshot {
     /// Returns the conversation and activity report.
     pub const fn conversation(&self) -> &ConversationReport {
         &self.conversation
+    }
+
+    /// Clones the complete conversation projection/frontier/support oracle.
+    pub fn conversation_projection_snapshot(&self) -> ConversationProjectionSnapshot {
+        ConversationProjectionSnapshot::from_report(&self.conversation)
     }
 
     /// Returns the named-agent report.

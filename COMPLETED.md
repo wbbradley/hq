@@ -3934,7 +3934,6 @@ Go build/vet/fresh full regression gates pass.
   5. **Amend the same commit** so identity/configuration code, tests, dependency policy, and plan
      bookkeeping form one reviewable change.
 
-
 ## 2026-08-27 — Verified DTO semantic conversion
 
 Implemented the sole reducer-ready transition from a complete `VerifiedSupportedRecord` into
@@ -4323,4 +4322,94 @@ build/vet/fresh full regression gates pass.
   4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so authority rows, typed queries, tests, specification, and plan
+     bookkeeping form one reviewable change.
+
+## 2026-08-27 — Complete conversation and activity projections
+
+Added a typed SQL-independent conversation/activity snapshot and storage v4 relational projections
+for all aggregate frontiers, threads, messages and state history, peer receipts, action groups,
+activity snapshots and completed records, retention, and support. Composite key columns retain every
+typed namespace component behind recomputed private digests; closed codecs validate optional shapes,
+ordered children, causal relations, full-width nonzero sequences, bounds, counts, and cross-key
+invariants. Extended one repair transaction across structural, authority, and conversation packages
+with rollback checkpoints, exact readback, valid-looking corruption detection, staleness, policy
+replacement, repeated repair, and reopen coverage. Formatting, architecture/behavior/causal/protocol
+verifiers, workspace check/build/tests/doctests, strict Clippy, dependency policy, all four
+release-target core/protocol checks, both 512-run fuzz smokes, whitespace, and unchanged Go
+build/vet/fresh full regression gates pass.
+
+### Original plan entry
+
+- **[storage/high] Persist conversation and activity projections** — Add explicit fresh schema rows
+  and private codecs for every conversation, message-state, action-group, activity, retention,
+  frontier, support, and conflict projection. Extend the same complete repair transaction and expose
+  typed conversation/activity query snapshots whose equality is independent of SQL layout. Cover
+  missing conversation history, message state, answers/cancellations, delivery evidence, activity
+  coalescing, equal sequence conflicts, retention compaction, corruption, reopen, and repeated
+  repair. Complete this package when fresh conversation reports equal persisted typed queries exactly.
+
+  **Implementation plan**
+
+  - Add failing public store contracts for empty and populated typed conversation snapshots, exact
+    equality with `CompleteSnapshot::conversation()` frontiers/projections/support, repair readback,
+    repeated repair, stale rows after append, explicit reconsideration, close/reopen, and authority-
+    policy replacement. Keep public fixtures as valid signed protocol evidence and use private
+    relational fixtures to exhaust values not economical to express through one signed history.
+  - Add a SQL-independent `ConversationProjectionSnapshot` owning ordered aggregate frontiers,
+    projection values, and transitive support. Expose only reducer/domain identities and values;
+    keep connections, row discriminants, surrogate identities, and storage-specific encodings
+    private to `hq-store`.
+  - Advance the unreleased fresh schema identity and add explicit rebuildable tables for message-
+    identity, thread, message-state, and composite activity frontiers; thread roots, answers,
+    cancellations, pairwise causal relations, and ready order; message content, state frontier, and
+    peer receipt evidence; action-group entries/final answer; selected and completed activity;
+    session retention order; and support rows for all six projection-key variants. Do not place
+    durable operational state, canonical evidence, or later agent/project projections in these
+    replacement groups.
+  - Implement exhaustive private codecs for aggregate and projection key variants, fixed identities,
+    mailbox addresses, bounded content/short/provider/session/error text, optional recipients,
+    message purpose/presentation, optional correlation/project scope, activity kind/status,
+    nonzero full-width sequence numbers, booleans, causal relations, ordered children, and retention
+    counts. Reconstruct all validated domain values through constructors; reject unknown codes,
+    wrong widths, bad UTF-8/bounds, invalid option shapes, duplicate positions, orphan/cross-key
+    children, impossible key/value pairings, and oversized row counts before allocation.
+  - Derive the expected typed snapshot directly from the conversation report in the existing
+    complete oracle. Add conversation clear/insert/readback verification to the same repair
+    transaction as structural and authority state, with store-owned counts and a digest covering
+    every explicit conversation row so valid-looking mutation fails closed. Ordinary reads must
+    validate all three persisted packages and never silently rerun reduction.
+  - Add conversation repair failpoints and prove each failure preserves the preceding structural,
+    authority, and conversation snapshots and allows explicit retry. Corrupt every conversation
+    table family with constraint-valid mutations and prove typed reads reject the package until
+    repair while immutable corpus bytes and unrelated authority rows remain exact.
+  - Exercise questions/asynchronous roots, answers and cancellations with every causal relation,
+    reversible archive/restore and absorbing rejection, peer receipt evidence, typed action groups,
+    snapshot coalescing, durable completed records, equal-sequence/runtime conflicts, composite
+    activity keys, and the 200-item progress-retention boundary. Round-trip every closed scalar and
+    projection variant even when integration scenarios overlap.
+  - Update `docs/rust/storage.md` for conversation ownership, query, codec, staleness, and atomic
+    repair semantics. Run format, all architecture/spec verifiers, workspace check/build/test/
+    doctests, strict Clippy, dependency policy, four-target core/protocol checks, both fuzz smokes,
+    whitespace, and unchanged Go build/vet/fresh full regression suite before recording.
+
+  **Risks and mitigations**
+
+  - Composite activity keys and optional message fields can alias if flattened loosely; use explicit
+    typed columns, closed option shapes, full parent keys on children, and exact snapshot readback.
+  - SQLite signed integers cannot represent every positive `NonZeroU64`; persist sequences as exact
+    fixed-width big-endian bytes and validate nonzero reconstruction.
+  - Ordered ready/action/retention lists can silently duplicate or gap; store unique zero-based
+    positions and require contiguous order plus set/cardinality invariants on load.
+  - A conversation-only repair failure must not weaken earlier atomicity; perform all three package
+    replacements in one transaction and exercise failpoints before and after conversation verify.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** every conversation/activity codec, repair, rollback, corruption, lifecycle, and
+     repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so typed queries, relational rows, tests, specification, and plan
      bookkeeping form one reviewable change.
