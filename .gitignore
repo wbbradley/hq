@@ -2,6 +2,7 @@
 /deploy/rnostr/data/
 /deploy/rnostr/rnostr.toml
 /dist/
+/crates/hq-protocol/fuzz/artifacts/
 *.db
 *.db-shm
 *.db-wal

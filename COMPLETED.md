@@ -3625,3 +3625,94 @@ whitespace, and unchanged Go build/vet/fresh regression gates pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so specifications, tests, and plan bookkeeping form one reviewable
      change.
+
+## 2026-08-27 — Signed-event cryptographic trust boundary
+
+Implemented bounded exact HQ NIP-01 event parsing and encoding, SHA-256 event identity, raw
+32-byte BIP-340 signing and verification, retained raw/preimage/content bytes, and disjoint
+raw, parsed, cryptographically verified, supported, and verified-unsupported owners. Added a
+specialized canonical JSON cursor and closed redacted failures for malformed wire shapes, limits,
+wrong kind/tags, tampering, invalid keys/signatures, authored-time disagreement, namespace
+confusion, unsupported prefixes, and frozen Go schemas. Published tests for both signed-event
+vectors and selected official BIP-340 valid/invalid vectors, a compile-fail trust-state proof,
+adversarial boundary coverage, and a seeded raw-byte cargo-fuzz smoke gate pinned to cargo-fuzz
+0.12.0 and nightly-2026-08-26. `k256` 0.14 and `sha2` 0.11 remain pure Rust and compile on all
+four release triples; root and isolated-fuzz dependency policies, every Rust workspace/spec/
+architecture gate, whitespace, and unchanged Go build/vet/fresh regression suite pass.
+
+### Original plan entry
+
+- **[protocol/high] Implement strict signed-event framing and the cryptographic trust boundary** —
+  Implement bounded exact NIP-01 outer-event parsing/encoding, SHA-256 identity, BIP-340
+  signing/verification, retained raw/preimage/content bytes, distinct raw/parsed/verified types, and
+  bounded protocol-prefix dispatch into supported content or verified-unsupported records. Reject
+  wrong kind/tags, non-canonical outer JSON, tampering, bad keys/signatures, time disagreement, and
+  old Go schemas before DTO or reducer access. Complete this split package when the published event
+  vectors and independent BIP-340 vectors pass and no unverified value can call a verified API.
+
+  **Implementation plan**
+
+  - Add failing public API tests first for the two published signed-event vectors, selected official
+    BIP-340 valid/invalid vectors, exact byte retention, each trust-state constructor boundary,
+    deterministic preimage/ID reconstruction, and an explicit signer supplied auxiliary randomness.
+  - Add narrowly owned protocol dependencies at current reviewed releases: pure-Rust `k256` Schnorr
+    verification/signing and `sha2` hashing, with default features minimized, workspace dependency
+    policy updated, licenses audited, and four-target compilation retained. Keep key material out of
+    domain types and ensure signer/debug/error surfaces never expose a secret.
+  - Replace the walking-skeleton-only boundary with immutable `RawEventBytes`, `ParsedOuterEvent`,
+    `CryptographicallyVerifiedEvent`, `SupportedContentBytes`, and
+    `VerifiedUnsupportedRecord` owners. Preserve the walking skeleton only as an explicitly
+    non-normative compatibility path until later application work removes it.
+  - Implement a specialized allocation-bounded JSON cursor for the exact seven-member outer object
+    and NIP-01 string escaping. Enforce member order, unknown/duplicate/missing rejection, minimal
+    integer and escape spellings, valid UTF-8/scalars, empty tags, no whitespace/trailing bytes, and
+    raw/content limits before copying attacker-controlled data.
+  - Encode the exact event-ID preimage and outer event without a generic JSON value. Recompute
+    SHA-256 before signature verification, compare IDs without data-dependent early exit, parse
+    x-only keys/signatures canonically, verify BIP-340 over the 32-byte event ID, and retain exact
+    raw, reconstructed preimage, and decoded content bytes.
+  - Add a signer boundary that accepts a validated secret-key owner plus caller-supplied
+    cryptographic auxiliary randomness, derives the x-only public key, signs the precomputed event
+    ID exactly once, self-verifies, zeroizes key material through its crypto owner, and produces the
+    same immutable verified representation used by inbound events.
+  - Implement bounded prefix dispatch for the exact ordered `p`, `v`, and `f` content fields.
+    Distinguish supported canonical/control content, verified unsupported protocol/version/family,
+    namespace confusion, and malformed prefixes without constructing payload DTOs or semantic facts.
+  - Add boundary and adversarial tests for zero/maximum lengths, one-byte-over limits, malformed
+    UTF-8/JSON/escapes/hex/integers, reordered/duplicate/unknown members, nonempty tags, wrong kind,
+    ID/content/signature tampering, invalid curve points and signature scalars, namespace confusion,
+    unsupported values, and legacy Go event/schema samples. Prove failure values expose no verified
+    content and unsupported values expose no supported content.
+  - Add a raw-byte cargo-fuzz target and seeded corpus for outer parse/verify/dispatch; build it in a
+    pinned short smoke gate and document longer sanitizer runs. Run format, all spec/architecture
+    verifiers, workspace check/build/test/doctests, strict Clippy, dependency policy, four-target
+    core checks, whitespace, and unchanged Go build/vet/fresh regression suite before recording.
+
+  **Risks and mitigations**
+
+  - A prehash/signing-trait mismatch could silently sign SHA-256(event-ID) instead of the NIP-01
+    event ID; use the explicit prehash interfaces, official BIP-340 vectors, published HQ vectors,
+    and independent verifier results to pin the exact 32-byte message semantics.
+  - Generic JSON parsing can normalize duplicates, ordering, numbers, or escapes before policy sees
+    them; keep the small outer grammar in a byte cursor and require deterministic re-encoding where
+    decoded strings are involved.
+  - Unsupported content must be retained only after cryptographic proof but must not be mistaken for
+    a valid DTO; use disjoint types with no shared semantic conversion method and classify only a
+    bounded canonical prefix.
+  - Signing APIs can accidentally make secrets cloneable or printable; wrap the zeroizing crypto
+    key, omit `Clone`/`Debug`/serialization, take explicit auxiliary randomness, and return closed
+    redacted errors.
+  - Fuzz tooling uses nightly and may not exist on a contributor machine; keep deterministic corpus
+    regression tests on stable, pin cargo-fuzz for CI/smoke use, and treat longer fuzz duration as an
+    additive security gate rather than replacing ordinary tests.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including every vector, boundary,
+     adversarial case, fuzz smoke, and repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so code, tests, fuzz assets, and plan bookkeeping form one reviewable
+     change.

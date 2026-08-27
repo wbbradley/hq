@@ -100,8 +100,22 @@ jobs:
         run: |
           rustup toolchain install 1.98.0 --profile minimal
           rustup target add --toolchain 1.98.0 "${{ matrix.target }}"
-      - name: Check pure core
-        run: cargo check --locked -p hq-domain -p hq-reducer --target "${{ matrix.target }}"
+      - name: Check portable core and protocol
+        run: cargo check --locked -p hq-domain -p hq-reducer -p hq-protocol --target "${{ matrix.target }}"
+
+  rust-protocol-fuzz:
+    name: Rust protocol fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Install pinned nightly toolchain
+        run: rustup toolchain install nightly-2026-08-26 --profile minimal
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.12.0
+      - name: Fuzz signed-event boundary
+        run: scripts/verify-rust-protocol-fuzz.sh
 
   rust-dependencies:
     name: Rust dependency policy
@@ -115,4 +129,4 @@ jobs:
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --version 0.20.2
       - name: Audit dependencies
-        run: cargo deny check
+        run: scripts/verify-rust-dependencies.sh

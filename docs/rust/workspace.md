@@ -49,8 +49,9 @@ ADR 0001 defines four first-release targets:
 | macOS | x86-64 | `x86_64-apple-darwin` |
 | macOS | Apple Silicon | `aarch64-apple-darwin` |
 
-CI runs the complete Rust workspace natively on Linux and macOS and cross-checks the pure core for
-all four triples. A cross-target check is compilation evidence, not an adapter or lifecycle test.
+CI runs the complete Rust workspace natively on Linux and macOS, cross-checks the pure core and
+pure-Rust protocol boundary for all four triples, and runs a pinned signed-event fuzz smoke gate on
+Linux. A cross-target check is compilation evidence, not an adapter or lifecycle test.
 Windows is deliberately absent: inexpensive core portability is welcome, but product support
 requires the separate local-transport, ownership, lifecycle, path-policy, and acceptance work in
 ADR 0001.
@@ -66,11 +67,12 @@ cargo check --locked --workspace --all-targets --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-targets --all-features
 cargo build --locked --workspace --all-targets --all-features
-cargo deny check
+scripts/verify-rust-dependencies.sh
+scripts/verify-rust-protocol-fuzz.sh
 ```
 
-`deny.toml` rejects advisories, wildcard dependency versions, unknown registries, unknown Git
-sources, and licenses outside the recorded allowlist; duplicate versions are visible warnings.
-CI pins cargo-deny 0.20.2. When adding a dependency, put it in the narrowest adapter that owns the
-capability, justify every new license or source, and update the architecture allowlist only when
-the intended direction in this document changes.
+The root and isolated fuzz policies reject advisories, wildcard dependency versions, unknown
+registries, unknown Git sources, and licenses outside their recorded allowlists; duplicate versions
+are visible warnings. CI pins cargo-deny 0.20.2. When adding a dependency, put it in the narrowest
+adapter that owns the capability, justify every new license or source, and update the architecture
+allowlist only when the intended direction in this document changes.

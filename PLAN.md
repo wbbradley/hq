@@ -54,14 +54,14 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[protocol/high] Implement strict canonical encoding and cryptographic verification** — Implement
-  canonical v1 DTO conversion, deterministic encoding, duplicate/unknown-field policy, exact byte
-  retention, bounds after escaping, NIP-01 identity, BIP-340 signing/verification, and distinct raw,
-  parsed, cryptographically verified, and semantic types. Add independent standard vectors,
-  round-trip fixtures, fuzz targets, and malformed, tampered, non-canonical, boundary-sized, and
-  unsupported-version corpora. Explicitly reject old Go schemas without a translation path.
-  Complete this work when exact v1 vectors are stable and adversarial input cannot bypass a trust
-  boundary or reach reduction as a falsely verified fact.
+- **[protocol/high] Implement canonical v1 DTO encoding and semantic conversion** — Implement all
+  owned canonical/control v1 DTOs, strict complete-content decoding, deterministic encoding,
+  duplicate/unknown-field policy, decoded and post-escaping bounds, typed reference conversion, and
+  the lossless transition from supported verified content to every `SemanticFact` family. Add
+  exhaustive round-trip fixtures, independent vectors, malformed/non-canonical/boundary corpora,
+  and structure-aware fuzz targets. Explicitly reject old Go schemas without a translation path.
+  Complete this split package when all 48 mappings are executable, exact v1 vectors are stable, and
+  adversarial content cannot reach reduction as a falsely verified semantic fact.
 
 - **[identity/high] Implement installation identity and local configuration persistence** —
   Implement the new Rust state-directory layout, stable installation identity, root-key generation
