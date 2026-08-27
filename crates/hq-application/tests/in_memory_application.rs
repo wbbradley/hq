@@ -32,6 +32,6 @@ fn duplicate_submission_does_not_change_the_projection() -> Result<(), Box<dyn E
     application.submit(fact.clone());
     application.submit(fact);
 
-    assert_eq!(application.summary().unique_fact_count(), 1);
+    assert_eq!(application.summary()?.facts().ids().count(), 1);
     Ok(())
 }

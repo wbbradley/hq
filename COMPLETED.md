@@ -3115,3 +3115,76 @@ cargo-deny, four target checks, Go build/vet, and the fresh full Go suite pass.
   2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
+## 2026-08-27 — Causal graph and complete-batch reducer framework
+
+Replaced the reducer summary skeleton with an immutable deduplicating `FactSet`, absorbing identity
+collisions, complete parent/reverse indexes including missing vertices, iterative structural and
+usable reachability, exact cycle membership, reverse-dependant closure, deterministic dependency
+order, and exact usable aggregate frontiers. Added fixed-point normalized decisions with separate
+missing and present-unusable blockers, a pure generic domain-reducer seam, transitive projection
+support, normalized conflict observations, and the exact typed Kahn presentation comparator. The
+application/node walking path now consumes the graph-only complete report. Twelve causal-law and
+adversarial tests cover all 64 four-node generated DAGs, merge/permutation/duplicate invariance,
+clock reversal, failure propagation, collisions, cycles, every decision class, support, and
+non-convergent policy rejection. Workspace format/check/build/test/doctest/strict-Clippy gates,
+architecture/spec verifiers, cargo-deny, all four core targets, Go build/vet, and a fresh full Go
+test run pass.
+
+### Original plan entry
+
+- **[algebra/high] Implement the causal graph and complete batch reducer framework** — Implement
+  immutable fact-set ingestion, deduplication, parent and reverse-dependency graphs, reachability,
+  topological processing, unresolved dependency tracking, causal frontiers, projection support,
+  normalized reduction decisions, and the single canonical presentation comparator. Expose one pure
+  complete-batch reduction entry point and no storage/runtime dependency. Use generated DAGs to
+  prove merge semilattice laws, permutation and duplicate invariance, parent-before-child ordering,
+  deferred readiness, and exact maximal frontiers. Complete this work when domain reducers can plug
+  into a lawful batch engine and no arrival or receiver clock affects semantic output.
+
+  **Implementation plan**
+
+  - Add failing public-API and generated-DAG tests first for exact deduplication, unequal-content ID
+    collisions, missing and unusable blockers, present cycles, reverse dependencies, structural and
+    usable reachability, exact aggregate frontiers, and deterministic parent-before-child order.
+  - Replace the reducer walking skeleton with small pure modules for immutable fact-set ingestion,
+    graph indexes, normalized decisions/reasons, domain-stage integration, projection support, and
+    presentation ordering. Use ordered collections for normalized output and iterative graph
+    algorithms so input iteration order and recursion depth cannot affect results.
+  - Define a decoupled domain-stage interface that receives explicit complete-set/graph context and
+    returns only closed semantic decisions and typed projection contributions. Provide a permissive
+    stage for graph-law tests while preserving a single complete-batch entry point for later
+    authority, conversation, agent, and project reducers.
+  - Compute readiness and usability to a deterministic fixed point: collisions and cycles fail
+    intrinsically, absent parents are listed separately from present-unusable parents, and no
+    unusable fact carries causal support. Derive exact usable frontiers and transitive support only
+    after decisions stabilize.
+  - Implement the reducer-owned Kahn presentation comparator using explicit typed presentation
+    keys, retaining causal precedence even when signed clocks move backwards and returning an
+    explicit invalid-order error for cyclic selected input.
+  - Prove `LAW-MERGE-SET-UNION`, `LAW-INPUT-INVARIANCE`, `LAW-CAUSAL-DOMINANCE`,
+    `LAW-EXACT-MAXIMAL-FRONTIERS`, and `LAW-DEFERRED-READINESS` across deterministic generated DAGs,
+    arrival permutations, duplicates, and clock-skew cases. Document the public framework and its
+    boundary from protocol, storage, runtime, and receiver clocks.
+  - Run formatting, workspace check/build/test/doctests, strict Clippy, architecture verification,
+    dependency policy, and the retained Go regression suite before recording the package.
+
+  **Risks and mitigations**
+
+  - A one-pass domain callback could make a later conflict or revoke input-order-sensitive; expose
+    complete-set context and repeat domain classification to a stable normalized result.
+  - A graph-only topological order could accidentally choose a domain winner; keep presentation
+    ordering and semantic admission as separate typed operations and never use timestamps or IDs as
+    authority/conflict rules.
+  - Collision and cycle members cannot safely support descendants; represent both with closed reason
+    codes and propagate them as present-unusable blockers rather than silently dropping them.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including the repository-wide gates named
+     above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.

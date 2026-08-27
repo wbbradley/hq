@@ -328,6 +328,21 @@ patch(R(E), reduce_affected(E union delta, affected(E, delta)))
 Equality covers decisions and reason codes, blocker sets, frontiers, support IDs, aggregates,
 conflicts, presentation order, and normalized observations. Performance never weakens this scope.
 
+## Rust framework mapping
+
+`hq-reducer::reduce_complete` is the single pure complete-batch entry point. `FactSet` owns exact
+deduplication and absorbing identity-collision detection; `CausalGraph` owns declared parent and
+reverse-dependant indexes, iterative reachability, cycle membership, and affected-descendant
+closure. The generic `DomainReducer` interface supplies only closed domain decisions, typed
+aggregate membership, typed projection contributions, conflicts, and selected presentation
+entries over an immutable `ReductionContext`.
+
+The framework repeats domain classification over normalized complete-set snapshots until the
+decision map stabilizes, then derives usable frontiers, transitive usable support, conflicts, and
+presentation order. An oscillating domain implementation fails explicitly instead of exposing a
+partial or iteration-order-dependent report. `GraphOnlyReducer` is the permissive composition and
+graph-law stage; it grants no product authority and derives no domain projection.
+
 ## Normalized reduction report
 
 `R` returns representation-independent values suitable for tests and application queries:

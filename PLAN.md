@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[algebra/high] Implement the causal graph and complete batch reducer framework** — Implement
-  immutable fact-set ingestion, deduplication, parent and reverse-dependency graphs, reachability,
-  topological processing, unresolved dependency tracking, causal frontiers, projection support,
-  normalized reduction decisions, and the single canonical presentation comparator. Expose one pure
-  complete-batch reduction entry point and no storage/runtime dependency. Use generated DAGs to
-  prove merge semilattice laws, permutation and duplicate invariance, parent-before-child ordering,
-  deferred readiness, and exact maximal frontiers. Complete this work when domain reducers can plug
-  into a lawful batch engine and no arrival or receiver clock affects semantic output.
-
 - **[authority/high] Implement peer, capability, and human-account reduction** — Add pure reducers
   for installation-local identity/binding facts, directional peer routing, mailbox access grants,
   observations and revokes, human-account creation, device grants, acceptances, revocations,

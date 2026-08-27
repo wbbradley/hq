@@ -32,11 +32,11 @@ provider dependency to point from `hq-codex` to the neutral harness contract. Pr
 identities remain valid domain vocabulary. This source scan complements
 Cargo's cycle checks: dependency acyclicity alone does not prove that a core crate is pure.
 
-The current in-memory skeleton is intentionally non-normative. It validates a small frame in
-`hq-protocol`, constructs an `hq-domain` fact, submits it through `hq-application`, derives a stable
-summary in `hq-reducer`, and composes the path in `hq-node`. It proves dependency direction and
-test placement only. The domain and causal-kernel packages replace these small shapes with the
-cataloged semantics.
+The in-memory composition path remains intentionally non-normative at the protocol boundary: it
+validates a small frame in `hq-protocol`, constructs an `hq-domain` fact, and submits it through
+`hq-application`. Reduction now uses the normative pure complete-batch causal kernel in
+`hq-reducer`; later domain packages plug authorization, aggregate, and projection policy into that
+kernel without moving graph logic into application or adapter crates.
 
 ## Supported target matrix
 
