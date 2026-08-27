@@ -54,14 +54,14 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[domain/high] Implement validated domain values and deterministic test support** — Implement
-  newtyped IDs, keys, addresses, causal references, bounded text and collections, timestamps,
-  correlation values, resource locators, fact payload enums, commands, outcomes, views, and typed
-  error categories without wire or database representation leakage. Build deterministic key, ID,
-  clock, random-byte, fact, graph, and state-machine generators in `hq-testkit`. Test constructors,
-  bounds, non-interchangeability, equality, ordering primitives, and invalid-state exclusion.
-  Complete this work when later pure logic can express every cataloged semantic fact and test case
-  without raw strings or ambient time/randomness.
+- **[domain/high] Model semantic fact payloads and deterministic test support** — Define a typed
+  payload variant for every canonical and remote-control family in the semantic fact catalog using
+  only validated `hq-domain` primitives. Build deterministic key, ID, clock, random-byte, fact,
+  graph, and state-machine generators in `hq-testkit`, with catalog fixtures and shrink-friendly
+  construction. Test complete catalog coverage, payload-specific invalid-state exclusion,
+  deterministic generation, and the ability to express every named acceptance scenario without
+  raw strings or ambient time/randomness. Complete this work when later reducers and protocol code
+  need no ad hoc semantic DTOs or test entropy.
 
 - **[algebra/high] Implement the causal graph and complete batch reducer framework** — Implement
   immutable fact-set ingestion, deduplication, parent and reverse-dependency graphs, reachability,

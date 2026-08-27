@@ -17,12 +17,8 @@ impl FactSummary {
     }
 
     /// Returns the skeleton fact identities in deterministic order.
-    pub fn ordered_fact_ids(&self) -> Vec<u64> {
-        self.ordered_fact_ids
-            .iter()
-            .copied()
-            .map(FactId::value)
-            .collect()
+    pub fn ordered_fact_ids(&self) -> &[FactId] {
+        &self.ordered_fact_ids
     }
 }
 
@@ -40,18 +36,27 @@ pub fn summarize(facts: &[Fact]) -> FactSummary {
 
 #[cfg(test)]
 mod tests {
-    use hq_domain::{Fact, FactId};
+    use hq_domain::{BoundedText, Fact, FactId, SKELETON_PAYLOAD_MAX_BYTES, ValidatedValueError};
 
     use super::summarize;
 
     #[test]
-    fn summary_is_deterministic_and_deduplicated() {
-        let facts = [
-            Fact::new(FactId::new(2), "second"),
-            Fact::new(FactId::new(1), "first"),
-            Fact::new(FactId::new(2), "second"),
-        ];
+    fn summary_is_deterministic_and_deduplicated() -> Result<(), ValidatedValueError> {
+        let fact_id = |value| {
+            let mut bytes = [0; 32];
+            bytes[31] = value;
+            FactId::from_bytes(bytes)
+        };
+        let fact = |value, payload| {
+            BoundedText::<SKELETON_PAYLOAD_MAX_BYTES>::new(payload)
+                .map(|payload| Fact::new(fact_id(value), payload))
+        };
+        let facts = [fact(2, "second")?, fact(1, "first")?, fact(2, "second")?];
 
-        assert_eq!(summarize(&facts).ordered_fact_ids(), [1, 2]);
+        assert_eq!(
+            summarize(&facts).ordered_fact_ids(),
+            [fact_id(1), fact_id(2)]
+        );
+        Ok(())
     }
 }

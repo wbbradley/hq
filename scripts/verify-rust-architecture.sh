@@ -100,9 +100,9 @@ fi
 
 for core_crate in hq-domain hq-reducer; do
   if grep -ERiq --include='Cargo.toml' --include='*.rs' \
-    '(tokio|rusqlite|sqlite|nostr|ratatui|std::fs|std::process|provider|codex)' \
+    '(tokio|rusqlite|sqlite|nostr|ratatui|std::fs|std::process|codex|claude|anthropic|openai)' \
     "$repository_root/crates/$core_crate"; then
-    fail "$core_crate contains a forbidden runtime, adapter, filesystem, process, or provider reference"
+    fail "$core_crate contains a forbidden runtime, adapter, filesystem, process, or provider-specific reference"
   fi
 done
 

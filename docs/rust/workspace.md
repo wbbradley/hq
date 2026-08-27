@@ -26,9 +26,10 @@ making the skeleton a supported replacement for the Go executable.
 | `hq-testkit` | Deterministic builders and scripted adapters | Pure and application crates |
 
 An allowlist in `scripts/verify-rust-architecture.sh` enforces direct internal dependencies. The
-same verifier rejects Tokio, SQLite, Nostr, Ratatui, filesystem, process, and provider concerns in
-`hq-domain` and `hq-reducer`; rejects Codex vocabulary in `hq-harness`; and requires the provider
-dependency to point from `hq-codex` to the neutral harness contract. This source scan complements
+same verifier rejects Tokio, SQLite, Nostr, Ratatui, filesystem, process, and provider-specific
+concerns in `hq-domain` and `hq-reducer`; rejects Codex vocabulary in `hq-harness`; and requires the
+provider dependency to point from `hq-codex` to the neutral harness contract. Provider-neutral
+identities remain valid domain vocabulary. This source scan complements
 Cargo's cycle checks: dependency acyclicity alone does not prove that a core crate is pure.
 
 The current in-memory skeleton is intentionally non-normative. It validates a small frame in

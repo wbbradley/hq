@@ -2,7 +2,7 @@
 
 use std::{error::Error, fmt};
 
-use hq_domain::{Fact, FactId};
+use hq_domain::{BoundedText, Fact, FactId, SKELETON_PAYLOAD_MAX_BYTES};
 
 /// A pre-serialization frame used only by the workspace walking skeleton.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,7 +26,11 @@ impl InMemoryFrame {
             return Err(DecodeError::EmptyPayload);
         }
 
-        Ok(Fact::new(FactId::new(self.fact_id), self.payload))
+        let payload = BoundedText::<SKELETON_PAYLOAD_MAX_BYTES>::new(self.payload)
+            .map_err(|_| DecodeError::PayloadTooLong)?;
+        let mut id_bytes = [0; 32];
+        id_bytes[24..].copy_from_slice(&self.fact_id.to_be_bytes());
+        Ok(Fact::new(FactId::from_bytes(id_bytes), payload))
     }
 }
 
@@ -35,12 +39,15 @@ impl InMemoryFrame {
 pub enum DecodeError {
     /// The frame contained no semantic payload.
     EmptyPayload,
+    /// The frame exceeded the walking-skeleton payload limit.
+    PayloadTooLong,
 }
 
 impl fmt::Display for DecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyPayload => formatter.write_str("fact payload is empty"),
+            Self::PayloadTooLong => formatter.write_str("fact payload is too long"),
         }
     }
 }

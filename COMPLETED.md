@@ -2746,6 +2746,7 @@ and backup decisions. The unchanged Go baseline passes build, vet, cached tests,
   2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
 ## 2026-08-27 — Causal fact algebra and semantic fact catalog
 
 Specified an implementation-independent causal algebra with structural and usable reachability,
@@ -2906,6 +2907,95 @@ checks, Go build/vet, and the fresh full Go suite pass.
     compilation for x86-64 and ARM64 but does not pretend to exercise target-specific adapters.
   - Dependency policy starts deny-by-default for unknown registries and Git sources while allowing
     the common MIT, Apache-2.0, BSD, ISC, Unicode, and Zlib families expected by later packages.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+## 2026-08-27 — Validated domain primitives and error taxonomy
+
+Replaced numeric skeleton identities with eleven distinct opaque 32-byte ID types and separate
+signing/encryption public keys. Added bounded text, vector, root-capable set, and non-empty set
+types; typed installation/mailbox addresses; timestamps and revisions; causal parents and
+role-specific authority references; provider-neutral operation correlation; resource locators;
+command, outcome, page, and versioned-view envelopes; and structured domain errors. Constructors
+exclude empty, oversized, duplicate, and unrelated-authority states without I/O, encoding, clocks,
+or randomness. Updated the walking skeleton, documentation, and architecture rule accordingly.
+Public tests, compile-fail doctest, format, strict Clippy, architecture/spec verifiers, cargo-deny,
+all four core targets, Go build/vet, and the fresh full Go suite pass.
+
+### Original plan entry
+
+- **[domain/high] Implement validated domain primitives and error taxonomy** — Replace the walking
+  skeleton's placeholder identity and payload shapes with newtyped IDs, public keys, addresses,
+  causal references, bounded text and collections, timestamps, correlation values, resource
+  locators, generic command/outcome/view envelopes, and typed error categories. Test constructors,
+  bounds, non-interchangeability, equality, deterministic ordering primitives, and invalid-state
+  exclusion without wire, storage, filesystem I/O, ambient time, or random generation. Complete
+  this work when the fact catalog and reducers can depend on validated vocabulary rather than raw
+  strings, integers, or byte arrays.
+
+  Implementation plan:
+
+  - Add focused `hq-domain` modules for identifiers and keys, bounded values, time, addressing,
+    causal dependency references, correlation, resource locators, command/outcome/view envelopes,
+    and structured domain errors. Use private representation, fallible constructors, owned data,
+    explicit accessors, and deterministic `Eq`/`Ord` only where the semantics require them.
+  - Define distinct fixed-width newtypes for fact, installation, mailbox, account, agent, project,
+    message, resource, command, receipt, and operation identities plus public signing/encryption
+    keys. Provide byte access without textual parsing or encoding policy; keep secret-key custody,
+    signatures, hashing, and serialization outside this package.
+  - Define reusable non-empty bounded text and bounded unique collections; an explicit signed
+    millisecond timestamp; typed local, account, mailbox, provider/session, operation, and project
+    correlation; typed authority roles/references and parent sets; and scheme-tagged resource
+    locators that validate their opaque canonical value without touching the filesystem.
+  - Write public-contract tests first for empty/oversize/duplicate rejection, type-specific
+    address construction, stable ordering, authority-parent consistency helpers, resource scheme
+    separation, typed errors, and command/outcome/page behavior. Replace the skeleton's numeric
+    fact identity and raw payload construction while keeping its boundary test passing.
+  - Document which invariants are enforced now and which belong to protocol verification or the
+    following semantic-payload package. Run format, strict Clippy, architecture, cargo-deny,
+    Cargo check/build/tests/doctests, four-target pure-core checks, whitespace checks, and the
+    unchanged Go build/vet/fresh full suite before archiving this split package.
+
+  Risks and decisions:
+
+  - Fixed-width byte identities are semantic opaque values, not a commitment to a textual or wire
+    encoding. Protocol code will later prove content-derived IDs and signatures before constructing
+    verified facts.
+  - Generic bounded types reject invalid inputs but do not silently normalize Unicode, paths, or
+    external provider identifiers; producers must supply the canonical form owned by their
+    protocol or adapter.
+  - Ordering on IDs and timestamps supports sets, indexes, and the specified presentation tuple;
+    it never selects a winner for a concurrent semantic conflict.
+  - The 48 catalog payload variants and deterministic test generators remain in the next split
+    package so this commit stays reviewable and its primitives can be evaluated independently.
 
   ## Post-Plan Execution Steps
 
