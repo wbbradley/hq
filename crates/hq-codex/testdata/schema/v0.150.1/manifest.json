@@ -1,0 +1,10 @@
+{
+  "package": "@openai/codex",
+  "version": "0.150.1",
+  "command": "codex app-server generate-json-schema --experimental --out <directory>",
+  "generated_at": "2026-08-27",
+  "artifacts": {
+    "codex_app_server_protocol.schemas.json": "e9bad0a20736e7d3aba18c0f04bef59856fb212ae21049fe17d786682203cfae",
+    "codex_app_server_protocol.v2.schemas.json": "844b52d4a5a8cda58794e28b3b119c3a3d20a588b7db83209c298bec62704092"
+  }
+}

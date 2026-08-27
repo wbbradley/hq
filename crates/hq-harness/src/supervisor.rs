@@ -629,10 +629,7 @@ fn reconcile_delivery(
         ));
     }
     if delivery.state == HarnessDeliveryState::Uncertain {
-        match worker.session.lookup_submission(
-            delivery.submission.submission_id,
-            delivery.submission.digest,
-        )? {
+        match worker.session.lookup_submission(&delivery.submission)? {
             HarnessSubmissionLookup::Accepted => {
                 return set_delivery_state(
                     dependencies,

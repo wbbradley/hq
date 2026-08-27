@@ -357,7 +357,12 @@ dependencies = [
 name = "hq-codex"
 version = "0.1.0"
 dependencies = [
+ "hq-domain",
  "hq-harness",
+ "hq-testkit",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

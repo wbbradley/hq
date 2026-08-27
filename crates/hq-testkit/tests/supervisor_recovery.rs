@@ -716,17 +716,18 @@ impl HarnessSession for TestSession {
 
     fn lookup_submission(
         &mut self,
-        submission_id: MessageId,
-        digest: CommandDigest,
+        submission: &HarnessSubmission,
     ) -> Result<HarnessSubmissionLookup, HarnessError> {
         match self
             .state
             .accepted
             .lock()
             .expect("provider locks")
-            .get(&submission_id)
+            .get(&submission.submission_id)
         {
-            Some(accepted) if accepted == &digest => Ok(HarnessSubmissionLookup::Accepted),
+            Some(accepted) if accepted == &submission.digest => {
+                Ok(HarnessSubmissionLookup::Accepted)
+            }
             Some(_) => Err(HarnessError::new(
                 HarnessErrorClass::SubmissionIdentityConflict,
             )),

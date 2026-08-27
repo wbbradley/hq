@@ -1,0 +1,1 @@
+{"method":"item/tool/requestUserInput","id":40,"params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_question","questions":[{"id":"scope","header":"Scope","question":"Proceed with this scope?","options":[{"label":"Yes","description":"Continue."},{"label":"No","description":"Stop."}]}]}}

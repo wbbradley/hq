@@ -194,6 +194,10 @@ const fn map_harness_error(error: HarnessError) -> ApplicationError {
         | HarnessErrorClass::PersistenceCollision => ApplicationErrorCode::StateIdentityConflict,
         HarnessErrorClass::Backpressure => ApplicationErrorCode::IntakeFull,
         HarnessErrorClass::Crashed
+        | HarnessErrorClass::ProtocolViolation
+        | HarnessErrorClass::TransportClosed
+        | HarnessErrorClass::ProcessFailed
+        | HarnessErrorClass::CompatibilityMismatch
         | HarnessErrorClass::Unavailable
         | HarnessErrorClass::CleanupFailed => ApplicationErrorCode::AdapterUnavailable,
     };

@@ -65,7 +65,7 @@ allowed_internal_dependency() {
       hq-local-api:hq-domain | hq-local-api:hq-protocol | hq-local-api:hq-application | \
       hq-relay:hq-domain | hq-relay:hq-protocol | hq-relay:hq-application | \
       hq-harness:hq-domain | \
-      hq-codex:hq-domain | hq-codex:hq-application | hq-codex:hq-harness | \
+      hq-codex:hq-domain | hq-codex:hq-harness | hq-codex:hq-testkit | \
       hq-tui:hq-domain | hq-tui:hq-application | \
       hq-node:hq-domain | hq-node:hq-reducer | hq-node:hq-protocol | \
       hq-node:hq-application | hq-node:hq-store | hq-node:hq-local-api | \
@@ -102,6 +102,14 @@ done
 
 grep -Eq '^hq-harness(\.workspace)?[[:space:]]*=' "$repository_root/crates/hq-codex/Cargo.toml" ||
   fail "hq-codex must depend on the neutral hq-harness contract"
+
+if grep -ERq --include='*.rs' 'hq_testkit' \
+  "$repository_root/crates/hq-codex/src/adapter.rs" \
+  "$repository_root/crates/hq-codex/src/process.rs" \
+  "$repository_root/crates/hq-codex/src/protocol.rs" \
+  "$repository_root/crates/hq-codex/src/transport.rs"; then
+  fail "hq-codex production sources may not depend on hq-testkit"
+fi
 
 if grep -ERiq --include='Cargo.toml' --include='*.rs' \
   '(^|[^a-z])(codex|claude|anthropic|openai)([^a-z]|$)' \

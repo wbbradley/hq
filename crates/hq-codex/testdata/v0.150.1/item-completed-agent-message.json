@@ -1,0 +1,1 @@
+{"method":"item/completed","params":{"threadId":"thr_fixture","turnId":"turn_fixture","item":{"type":"agentMessage","id":"item_answer","text":"finished","phase":"final_answer"}}}

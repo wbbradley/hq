@@ -1,5 +1,21 @@
 # Completed
 
+## 2026-08-27 — Pinned Codex app-server adapter
+
+Implemented the Codex provider boundary against pinned official CLI `0.150.1` schemas and fixtures. The adapter owns a bounded stdio JSON-RPC process, exact start/resume/read and turn lifecycle behavior, durable-submission reconciliation, supported fail-closed server requests, normalized output/activity, redacted typed failures, and graceful-to-forced shutdown. Passive configuration uses public fields while process and protocol invariants remain opaque. A real adapter seam passes the neutral 14-scenario conformance suite; deterministic transport/process/fixture tests, an opt-in installed-provider start/resume smoke, all locked workspace gates, four supported targets, fuzzing, dependency policy, and unchanged Go gates pass.
+
+### Original plan entry
+
+- **[codex/high] Implement and pin the Codex provider adapter** — Select a current supported Codex
+  app-server baseline using official schema/documentation and installed-binary evidence, pin its
+  generated fixtures, and privately implement process startup, bounded JSONL/JSON-RPC transport,
+  initialization, exact thread start/resume/read behavior, turn start/steer/interrupt,
+  stable-submission reconciliation, supported server requests, additive notification tolerance,
+  normalized output/activity, typed failure causes, stderr trust boundary, and shutdown escalation.
+  Keep every Codex DTO and method name out of neutral crates. Complete this work when the neutral
+  conformance suite, pinned protocol fixtures, process tests, and opt-in installed-provider smoke
+  test pass.
+
 ## 2026-08-26 — Durable installation-local TUI drafts
 
 Added unsigned, installation-local SQLite drafts with optimistic versions and wire-7 RPC/client operations. The TUI now restores drafts before its first render, coalesces serialized autosaves over a documented 250 ms abrupt-loss window, requires successful persistence before stow or graceful quit, explicitly deletes canceled or emptied drafts, and retains bodies on failures and stale targets for reselection. Atomic submission uses the stable draft UUID as message identity, commits normal replies or project inputs with draft consumption in one transaction, preserves project activation intent, restores target wakes on RPC replay, and prevents duplicate messages after lost responses. Store, RPC, client, TUI, restart, stale-target, debounce-order, rollback, project-input, replay, full-suite, vet, build, and focused race tests pass.

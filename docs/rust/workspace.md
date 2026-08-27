@@ -22,7 +22,7 @@ making the skeleton a supported replacement for the Go executable.
 | `hq-local-api` | Local client protocol and sessions | Domain, protocol, application |
 | `hq-relay` | Encrypted relay transport | Domain, protocol, application |
 | `hq-harness` | Provider-neutral runtime contract, registry, buffer, and supervisor | Domain |
-| `hq-codex` | Private Codex adapter | Domain, application, `hq-harness` |
+| `hq-codex` | Private Codex adapter | Domain, `hq-harness` |
 | `hq-tui` | Pure UI state plus terminal adapter | Domain, application |
 | `hq-node` | Composition, runtime ownership, single binary | Any inward crate |
 | `hq-testkit` | Deterministic builders, reusable conformance, and scripted adapters | Domain, harness; reducer in tests |
@@ -43,6 +43,12 @@ capabilities. Its operational ownership and recovery contract is
 owner tokens and copied secret environments remain opaque. `hq-testkit` owns the reusable scenario driver and deterministic scripted adapter in
 `docs/testing/conformance-v1.md`. Production adapters depend inward on the neutral contract; the
 neutral contract never imports a provider adapter or its wire vocabulary.
+
+`hq-codex` implements the pinned provider boundary in `docs/codex-adapter-v1.md`. Passive launch and
+factory configuration use public fields; child ownership, RPC identities, recovery maps, pending
+interactive requests, and mutable session state remain opaque capabilities. Its private synchronous
+JSONL/process implementation adds no async runtime and no Codex DTO or method name crosses into a
+neutral crate.
 
 The in-memory composition path remains intentionally non-normative at the protocol boundary: it
 validates a small frame in `hq-protocol`, constructs an `hq-domain` fact, and submits it through
@@ -114,9 +120,9 @@ ADR 0001 defines four first-release targets:
 | macOS | Apple Silicon | `aarch64-apple-darwin` |
 
 CI runs the complete Rust workspace natively on Linux and macOS, cross-checks the pure core,
-application, protocol, neutral harness, and reusable conformance boundaries for all four triples,
-and runs a pinned signed-event fuzz smoke gate on Linux. A cross-target check is compilation
-evidence, not an adapter or lifecycle test.
+application, protocol, neutral harness, reusable conformance boundary, and standard-library Codex
+adapter for all four triples, and runs pinned protocol fuzz smoke gates on Linux. A cross-target
+check is compilation evidence, not an installed-provider or lifecycle test.
 Windows is deliberately absent: inexpensive core portability is welcome, but product support
 requires the separate local-transport, ownership, lifecycle, path-policy, and acceptance work in
 ADR 0001.

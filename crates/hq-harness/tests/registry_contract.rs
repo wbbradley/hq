@@ -201,8 +201,7 @@ impl HarnessSession for StubSession {
 
     fn lookup_submission(
         &mut self,
-        _submission_id: hq_domain::MessageId,
-        _digest: hq_domain::CommandDigest,
+        _submission: &HarnessSubmission,
     ) -> Result<HarnessSubmissionLookup, HarnessError> {
         Ok(HarnessSubmissionLookup::Missing)
     }

@@ -54,16 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[codex/high] Implement and pin the Codex provider adapter** — Select a current supported Codex
-  app-server baseline using official schema/documentation and installed-binary evidence, pin its
-  generated fixtures, and privately implement process startup, bounded JSONL/JSON-RPC transport,
-  initialization, exact thread start/resume/read behavior, turn start/steer/interrupt,
-  stable-submission reconciliation, supported server requests, additive notification tolerance,
-  normalized output/activity, typed failure causes, stderr trust boundary, and shutdown escalation.
-  Keep every Codex DTO and method name out of neutral crates. Complete this work when the neutral
-  conformance suite, pinned protocol fixtures, process tests, and opt-in installed-provider smoke
-  test pass.
-
 - **[resources/high] Implement path-resource identity, conflict, health, and release assessment** —
   Implement home-qualified absolute path locators, human spelling versus canonical identity,
   nearest-existing-ancestor handling for missing paths, symlink revalidation, equal/ancestor/

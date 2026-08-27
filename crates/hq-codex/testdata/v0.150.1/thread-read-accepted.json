@@ -1,0 +1,1 @@
+{"id":3,"result":{"thread":{"id":"thr_fixture","turns":[{"id":"turn_fixture","status":"completed","items":[{"type":"userMessage","id":"item_user","clientId":"0404040404040404040404040404040404040404040404040404040404040404","content":[{"type":"text","text":"durable input"}]}]}]}}}

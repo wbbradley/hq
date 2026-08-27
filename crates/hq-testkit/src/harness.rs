@@ -23,6 +23,8 @@ use hq_harness::{
     OpenedHarnessSession,
 };
 
+const CONFORMANCE_EVENT_WAIT: Duration = Duration::from_secs(1);
+
 /// Capability-named scenarios every managed provider adapter must exercise.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum HarnessConformanceScenario {
@@ -130,6 +132,8 @@ pub struct HarnessConformanceFixture {
     pub factory: Arc<dyn HarnessFactory>,
     /// Read-only neutral trace for direct assertions.
     pub trace: Arc<dyn HarnessConformanceTrace>,
+    /// Adapter-specific exact events expected by the output/activity scenario.
+    pub expected_output_activity: Vec<HarnessEvent>,
 }
 
 /// Adapter-specific fixture source consumed by the reusable neutral runner.
@@ -340,7 +344,7 @@ fn response_loss_accepted(
     )?;
     let lookup = opened
         .session
-        .lookup_submission(submission.submission_id, submission.digest)
+        .lookup_submission(&submission)
         .map_err(|_| failure(scenario, "authoritative lookup failed"))?;
     ensure(
         scenario,
@@ -367,7 +371,7 @@ fn response_loss_missing_retry(
     )?;
     let lookup = opened
         .session
-        .lookup_submission(submission.submission_id, submission.digest)
+        .lookup_submission(&submission)
         .map_err(|_| failure(scenario, "missing lookup failed"))?;
     ensure(
         scenario,
@@ -403,7 +407,7 @@ fn active_operation_race(
     )?;
     let event = opened
         .session
-        .poll_event(Duration::ZERO)
+        .poll_event(CONFORMANCE_EVENT_WAIT)
         .map_err(|_| failure(scenario, "operation-race event failed"))?;
     ensure(
         scenario,
@@ -418,7 +422,7 @@ fn active_operation_race(
     )?;
     let lookup = opened
         .session
-        .lookup_submission(submission.submission_id, submission.digest)
+        .lookup_submission(&submission)
         .map_err(|_| failure(scenario, "racing lookup failed"))?;
     ensure(
         scenario,
@@ -523,7 +527,7 @@ fn secret_request_rejection(
     let mut opened = open(fixture, HarnessSessionRequest::Start, scenario)?;
     let error = opened
         .session
-        .poll_event(Duration::ZERO)
+        .poll_event(CONFORMANCE_EVENT_WAIT)
         .err()
         .ok_or_else(|| {
             failure(
@@ -551,11 +555,11 @@ fn output_activity_order(
     scenario: HarnessConformanceScenario,
 ) -> Result<(), HarnessConformanceFailure> {
     let mut opened = open(fixture, HarnessSessionRequest::Start, scenario)?;
-    let expected = scripted_events(scenario)?;
+    let expected = fixture.expected_output_activity.clone();
     for expected_event in expected {
         let actual = opened
             .session
-            .poll_event(Duration::ZERO)
+            .poll_event(CONFORMANCE_EVENT_WAIT)
             .map_err(|_| failure(scenario, "normalized event poll failed"))?;
         ensure(
             scenario,
@@ -595,12 +599,19 @@ fn crash_isolation(
         .map_err(|_| failure(scenario, "second sibling did not open"))?;
     let first_error = first
         .session
-        .poll_event(Duration::ZERO)
+        .poll_event(CONFORMANCE_EVENT_WAIT)
         .err()
         .ok_or_else(|| failure(scenario, "scripted sibling did not crash"))?;
     ensure(
         scenario,
-        first_error.class == HarnessErrorClass::Crashed,
+        matches!(
+            first_error.class,
+            HarnessErrorClass::Crashed
+                | HarnessErrorClass::ProtocolViolation
+                | HarnessErrorClass::TransportClosed
+                | HarnessErrorClass::ProcessFailed
+                | HarnessErrorClass::CompatibilityMismatch
+        ),
         "crashed sibling returned the wrong class",
     )?;
     ensure(
@@ -635,7 +646,7 @@ fn teardown(
     )?;
     let pending = opened
         .session
-        .drain(Duration::ZERO)
+        .drain(CONFORMANCE_EVENT_WAIT)
         .map_err(|_| failure(scenario, "pending drain failed"))?;
     ensure(
         scenario,
@@ -651,7 +662,7 @@ fn teardown(
         matches!(
             opened
                 .session
-                .poll_event(Duration::ZERO)
+                .poll_event(CONFORMANCE_EVENT_WAIT)
                 .map_err(|_| failure(scenario, "teardown event drain failed"))?,
             HarnessEventPoll::Event(HarnessEvent::Output(_))
         ),
@@ -746,7 +757,7 @@ fn expect_request(
     scenario: HarnessConformanceScenario,
 ) -> Result<HarnessInteractiveRequest, HarnessConformanceFailure> {
     match session
-        .poll_event(Duration::ZERO)
+        .poll_event(CONFORMANCE_EVENT_WAIT)
         .map_err(|_| failure(scenario, "interactive request poll failed"))?
     {
         HarnessEventPoll::Event(HarnessEvent::InteractiveRequest(request)) => Ok(request),
@@ -869,6 +880,7 @@ impl HarnessConformanceSubject for ScriptedHarnessSubject {
                 state: Arc::clone(&state),
             }),
             trace: Arc::new(ScriptedTrace { scenario, state }),
+            expected_output_activity: scripted_events(scenario)?,
         })
     }
 }
@@ -1048,18 +1060,19 @@ impl HarnessSession for ScriptedSession {
 
     fn lookup_submission(
         &mut self,
-        submission_id: MessageId,
-        digest: CommandDigest,
+        submission: &HarnessSubmission,
     ) -> Result<HarnessSubmissionLookup, HarnessError> {
         record(
             &self.state,
             HarnessConformanceObservation::SubmissionLookup {
-                submission_id,
-                digest,
+                submission_id: submission.submission_id,
+                digest: submission.digest,
             },
         )?;
-        match self.accepted.get(&submission_id) {
-            Some(accepted) if accepted == &digest => Ok(HarnessSubmissionLookup::Accepted),
+        match self.accepted.get(&submission.submission_id) {
+            Some(accepted) if accepted == &submission.digest => {
+                Ok(HarnessSubmissionLookup::Accepted)
+            }
             Some(_) => Err(HarnessError::new(
                 HarnessErrorClass::SubmissionIdentityConflict,
             )),

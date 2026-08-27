@@ -63,6 +63,14 @@ pub enum HarnessErrorClass {
     IntakeClosed,
     /// The provider instance or session ended unexpectedly.
     Crashed,
+    /// The provider protocol violated a closed framing, envelope, identity, or DTO invariant.
+    ProtocolViolation,
+    /// The provider transport closed or failed independently of a confirmed process exit.
+    TransportClosed,
+    /// The owned provider process exited unsuccessfully.
+    ProcessFailed,
+    /// A provider introduced an unsupported authority-bearing protocol method.
+    CompatibilityMismatch,
     /// The adapter cannot currently determine or perform the requested effect.
     Unavailable,
     /// A mismatched or failed owner could not be force-stopped cleanly.
@@ -375,11 +383,10 @@ pub trait HarnessSession: Send {
         submission: HarnessSubmission,
     ) -> Result<HarnessSubmissionOutcome, HarnessError>;
 
-    /// Reconciles authoritative provider acceptance for one stable identity.
+    /// Reconciles authoritative provider acceptance for one complete durable submission.
     fn lookup_submission(
         &mut self,
-        submission_id: MessageId,
-        digest: CommandDigest,
+        submission: &HarnessSubmission,
     ) -> Result<HarnessSubmissionLookup, HarnessError>;
 
     /// Requests cancellation of one exact HQ-correlated operation.
