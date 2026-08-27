@@ -74,6 +74,29 @@ latest-revision value and attempts a capacity-one wake without blocking. Multipl
 coalesce; a disconnected or backpressured observer cannot fail or delay the durable commit. A lost
 response is recovered by exact replay through the same canonical lineage.
 
+## Transaction-consistent local mutations
+
+`execute_local_mutation(request)` is the fact-backed local mutation boundary. Its bounded request
+owns a stable command ID and request digest, explicit authority policy, a shared signer capability
+that exposes no secret bytes, and a one-shot decision callback. One immediate transaction first
+loads the receipt. Equal input returns its exact retained kind, bytes, and original revision before
+the callback; a changed digest under the same command ID is `MutationConflict`.
+
+For a new command, storage reverifies and completely reduces the transaction-visible corpus, then
+invokes the callback with that snapshot. A committed decision supplies a typed
+`CanonicalEventPlan`, explicit BIP-340 auxiliary randomness, and bounded exact result bytes. Storage
+canonically authors and verifies the event, calls the same transaction-owned append/reduce/project/
+outbox/lineage engine as remote ingest, requires the new fact to be admitted, and stores the
+committed receipt at that engine's revision. The fact, dependency rows, every projection package,
+outbox intents, lineage, receipt, and revision therefore commit together or all roll back.
+
+A rejected decision writes no canonical fact. It atomically allocates a revision and stores the
+exact rejected receipt so response loss remains reconcilable. New committed and rejected local
+transactions publish the same capacity-one post-commit invalidation; retry and conflict publish
+nothing. Repair cannot alter receipts or revisions. Unsigned local configuration, repair, and later
+operational saga mutations remain separately named operations and cannot enter an optional-fact
+variant of this path.
+
 ## Complete-batch oracle
 
 `complete_snapshot(policy)` performs one actor-owned corpus read and full protocol reverification,

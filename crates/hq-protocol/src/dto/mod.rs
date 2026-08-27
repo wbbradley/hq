@@ -1,5 +1,6 @@
 //! Strict owned v1 DTO verification and deterministic encoding.
 
+mod author;
 mod decode;
 pub(crate) mod model;
 mod semantic;
@@ -9,6 +10,7 @@ use std::fmt;
 use decode::decode_content;
 use model::ContentDto;
 
+pub use author::CanonicalEventPlan;
 pub use semantic::VerifiedSemanticFact;
 
 use crate::{

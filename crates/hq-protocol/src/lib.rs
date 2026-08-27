@@ -10,7 +10,7 @@ pub use dispatch::{
     DispatchOutcome, ProtocolNamespace, SupportedContentBytes, UnsupportedReason,
     VerifiedUnsupportedRecord,
 };
-pub use dto::{VerifiedSemanticFact, VerifiedSupportedRecord};
+pub use dto::{CanonicalEventPlan, VerifiedSemanticFact, VerifiedSupportedRecord};
 pub use error::{FailureClass, ProtocolError};
 pub use signed_event::{
     Bip340Signer, CryptographicallyVerifiedEvent, HQ_EVENT_KIND, MAX_CONTENT_BYTES,

@@ -209,6 +209,20 @@ After outer cryptographic verification, dispatch examines only bounded top-level
 Unsupported records retain exact verified event and content bytes plus the recognized discriminator,
 version, and family when available. They never expose a semantic payload or enter reduction.
 
+## Typed local authoring
+
+`CanonicalEventPlan` is the production authoring boundary for local canonical and control records.
+It owns only typed domain author, millisecond time, scope, bounded causal references, and one of the
+48 semantic payload variants. Protocol DTO types remain private. The protocol implementation maps
+every semantic family exhaustively to its v1 body, applies the canonical namespace and sorting rules,
+encodes the exact content record, and signs it with caller-supplied BIP-340 auxiliary randomness.
+
+Authoring does not create a privileged trust state. The resulting event reruns ordinary prefix
+dispatch, complete DTO decoding and byte-equality verification, and intrinsic semantic conversion.
+A signer/author mismatch, negative or inconsistent time, invalid scope/payload relationship, or
+other impossible plan therefore fails before storage. The verified event ID remains the sole fact
+identity; IDs, time, and signing randomness are explicit inputs and no ambient source is consulted.
+
 ## Intrinsic semantic conversion
 
 Only a cryptographically verified, supported, byte-canonical record can convert to a semantic fact.

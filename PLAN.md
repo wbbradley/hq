@@ -54,17 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[storage/high] Implement transaction-consistent local fact-backed mutations** — Add a bounded
-  typed store request that first looks up a stable mutation receipt and rejects a reused command ID
-  with a different request digest, otherwise decides against the snapshot held by the same SQLite
-  transaction using only explicit time, ID, and randomness inputs, signs the deterministic event
-  plan, and enters the common canonical-ingest path. Persist the exact typed result receipt in the
-  same commit. Keep unsigned local operational mutations on explicitly separate paths with the same
-  retry discipline where client-visible. Add signing, rejection, lost-response replay,
-  same-ID/different-input conflict, local/remote equality, and failpoint/reopen tests. Complete this
-  work when retries return the original result and every crash recovers to an old or new valid state
-  without a hybrid.
-
 - **[storage/high] Add incremental reduction, repair equality, and scalable conversation queries** —
   Implement deterministic dependency indexes and affected-closure selection, then patch projections
   incrementally while continuously comparing with fresh batch rebuilds. Build a conversation-local

@@ -4712,3 +4712,94 @@ checks; and the unchanged Go vet/build/fresh test suite pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so engine, schema, tests, specification, and bookkeeping form one
      reviewable change.
+
+## 2026-08-27 — Transaction-consistent local fact-backed mutations
+
+Added a bounded local mutation contract that looks up stable receipts before invoking a one-shot
+decision callback against the complete snapshot held by the same immediate SQLite transaction. The
+protocol now owns typed semantic authoring for all 48 fact families, deterministic canonical
+encoding, BIP-340 signing with explicit auxiliary randomness, and ordinary trust-transition
+reverification. Committed plans enter the exact remote canonical-ingest core; rejected decisions
+atomically allocate only a revision and exact result receipt. Exact retries return retained bytes
+without deciding, signing, revision churn, outbox work, or observer wakes, while changed digests
+fail as typed conflicts.
+
+File-backed failpoints cover receipt lookup, snapshot, decision, signing, every common ingest write,
+rejected revision, receipt persistence, and both sides of commit. Reopen assertions prove every
+pre-commit interruption retains the complete old state, response loss replays the complete new
+state, repair preserves receipts, and local and remote ingest produce identical canonical evidence,
+indexes, projections, outbox, and revisions. Signer mismatches and reducer-unadmitted local facts
+fail closed with no durable state. Protocol, trust-transition, and storage specifications describe
+the ownership and transaction boundaries.
+
+Architecture, behavior, causal, protocol, and dependency verifiers; locked workspace format/check/
+build/tests/doctests/Clippy; all four required targets; both 512-run protocol fuzz smokes; whitespace
+checks; and the unchanged Go vet/build/fresh test suite pass.
+
+### Original plan entry
+
+- **[storage/high] Implement transaction-consistent local fact-backed mutations** — Add a bounded
+  typed store request that first looks up a stable mutation receipt and rejects a reused command ID
+  with a different request digest, otherwise decides against the snapshot held by the same SQLite
+  transaction using only explicit time, ID, and randomness inputs, signs the deterministic event
+  plan, and enters the common canonical-ingest path. Persist the exact typed result receipt in the
+  same commit. Keep unsigned local operational mutations on explicitly separate paths with the same
+  retry discipline where client-visible. Add signing, rejection, lost-response replay,
+  same-ID/different-input conflict, local/remote equality, and failpoint/reopen tests. Complete this
+  work when retries return the original result and every crash recovers to an old or new valid state
+  without a hybrid.
+
+  **Implementation plan**
+
+  - Add a protocol-owned `CanonicalEventPlan` built only from typed domain author, time, scope,
+    causal references, and payload values. Exhaustively translate all 48 semantic families into the
+    private v1 DTO model, encode canonically, sign with caller-supplied BIP-340 auxiliary randomness,
+    and rerun the ordinary dispatch/DTO/semantic trust transitions before returning verified input.
+  - Add a bounded `LocalMutationRequest` carrying stable command ID and digest, explicit authority
+    policy, a non-secret shared signer handle, and a one-shot pure decision callback. The callback
+    receives the complete snapshot read inside the transaction and returns either a typed event plan
+    plus exact committed result bytes or exact rejected result bytes; it has no store or ambient
+    clock/randomness access.
+  - Refactor common canonical ingest into a caller-owned transaction core. Keep remote ingest as a
+    thin immediate-transaction wrapper, and call the identical append/reduce/project/outbox/lineage
+    core from local mutation without nesting or duplicating commit behavior.
+  - In one immediate transaction, load and strictly compare any retained receipt before invoking the
+    decision callback; otherwise reverify and reduce the transaction-visible corpus, decide, sign,
+    pass committed plans through the common core, persist the exact committed or rejected receipt at
+    the transaction revision, and commit. Exact retry returns the original receipt without deciding,
+    signing, allocating a revision, emitting outbox work, or waking observers.
+  - Allocate a revision for a durable rejection as well as a committed fact, publish the existing
+    capacity-one invalidation only after a new local transaction commits, and fail closed if a local
+    committed plan unexpectedly names canonical evidence without its atomic receipt. Keep repair and
+    future unsigned operational/saga mutations on separately named APIs rather than an optional-fact
+    mutation path.
+  - Add public and file-backed failpoint contracts for signing, policy rejection, receipt replay,
+    same-ID/different-digest conflict, dropped actor response, local/remote common-engine equality,
+    every local/common write boundary, reopen, repair preservation, and secret-redacted diagnostics.
+    Update the protocol/storage specifications and run every Rust and unchanged Go gate.
+
+  **Risks and mitigations**
+
+  - Letting application code serialize private DTOs would invert protocol ownership; expose one
+    typed semantic event plan and keep all family-specific wire translation inside `hq-protocol`.
+  - Deciding before opening the transaction would authorize against a stale snapshot; invoke the
+    one-shot callback only after receipt lookup and complete transaction-visible reduction.
+  - Passing secret bytes through actor messages would widen the secret boundary; pass only a shared
+    signer capability whose API exposes public key and signing, then verify its output normally.
+  - A retry could rerun nondeterministic planning or create revision/outbox churn; compare the stable
+    digest first and return retained exact bytes before the callback or common engine.
+  - Rejected commands have no canonical fact but still create durable reconciliation state; allocate
+    their receipt revision atomically and wake readers only after commit.
+  - Splitting local and remote implementations can drift; make both wrappers call one transaction-
+    owned common engine and compare complete corpus, indexes, projections, outbox, and revision in a
+    deterministic two-database fixture.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** authoring, signing, decisions, retry/conflict, atomicity, equality, reopen, and gates.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so protocol authoring, transaction engine, tests, specifications, and
+     bookkeeping form one reviewable change.

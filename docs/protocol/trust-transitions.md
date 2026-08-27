@@ -114,6 +114,11 @@ causal references; and the mapped body becomes exactly one semantic payload. The
 dropped only after conversion succeeds, while immutable verified bytes remain addressable for
 audit/storage.
 
+Local production runs the same transitions in the forward direction from a typed
+`CanonicalEventPlan`: exhaustive private DTO mapping, canonical encoding, signing with explicit
+auxiliary randomness, dispatch, DTO verification, and semantic conversion. A locally produced
+event receives no shortcut or stronger trust type than identical remotely received bytes.
+
 ### Semantic fact to reducer admission
 
 Reducer admission is the first stage allowed to consult the complete fact batch and derived causal

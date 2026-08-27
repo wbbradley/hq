@@ -38,8 +38,9 @@ pub use authority_snapshot::AuthorityProjectionSnapshot;
 pub use conversation_snapshot::ConversationProjectionSnapshot;
 pub use error::{StoreError, StoreErrorClass};
 pub use operational::{
-    MAX_MUTATION_RESULT_BYTES, MAX_OUTBOX_QUERY_ITEMS, MutationReceipt, MutationResultBytes,
-    MutationResultKind, OperationalValueError, OutboxIntent,
+    LocalMutationCommit, LocalMutationDecision, LocalMutationRequest, MAX_MUTATION_RESULT_BYTES,
+    MAX_OUTBOX_QUERY_ITEMS, MutationReceipt, MutationResultBytes, MutationResultKind,
+    OperationalValueError, OutboxIntent,
 };
 pub use project_snapshot::ProjectProjectionSnapshot;
 pub use snapshot::{

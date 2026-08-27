@@ -140,7 +140,7 @@ pub fn verified_device_acceptance(grant_fact_id: [u8; 32]) -> VerifiedSemanticFa
         .expect("acceptance converts")
 }
 
-fn signer(secret_value: u8) -> Bip340Signer {
+pub fn signer(secret_value: u8) -> Bip340Signer {
     Bip340Signer::from_secret_bytes({
         let mut secret = [0_u8; 32];
         secret[31] = secret_value;

@@ -18,8 +18,9 @@ use hq_reducer::AuthorityPolicy;
 
 use crate::{
     AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
-    ConversationProjectionSnapshot, MutationReceipt, OutboxIntent, ProjectProjectionSnapshot,
-    ReductionIndexSnapshot, StoreError, StoreErrorClass, database::Database,
+    ConversationProjectionSnapshot, LocalMutationRequest, MutationReceipt, OutboxIntent,
+    ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
+    database::Database,
 };
 
 /// Result of atomically ingesting immutable verified evidence.
@@ -196,6 +197,10 @@ impl RepairOutcome {
 }
 
 enum Request {
+    LocalMutation {
+        request: LocalMutationRequest,
+        reply: SyncSender<Result<MutationReceipt, StoreError>>,
+    },
     Ingest {
         fact: Box<VerifiedSemanticFact>,
         policy: AuthorityPolicy,
@@ -311,6 +316,20 @@ impl Store {
                 policy,
                 reply,
             })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Executes one retryable local fact-backed mutation in a single durable transaction.
+    pub fn execute_local_mutation(
+        &self,
+        request: LocalMutationRequest,
+    ) -> Result<MutationReceipt, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LocalMutation { request, reply })
             .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
         response
             .recv()
@@ -493,6 +512,19 @@ fn run(
     }
     while let Ok(request) = receiver.recv() {
         match request {
+            Request::LocalMutation { request, reply } => {
+                match database.execute_local_mutation(request) {
+                    Ok((receipt, inserted)) => {
+                        if inserted {
+                            invalidations.publish(receipt.revision());
+                        }
+                        let _ = reply.send(Ok(receipt));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
             Request::Ingest {
                 fact,
                 policy,
@@ -555,6 +587,7 @@ mod tests {
         fs,
         num::NonZeroUsize,
         sync::{
+            Arc,
             atomic::{AtomicU64, Ordering},
             mpsc::{TrySendError, sync_channel},
         },
@@ -572,6 +605,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn dropped_one_shot_reply_does_not_stop_the_actor() {
         let (root, database) = test_path();
         let store = Store::open(&database, NonZeroUsize::MIN).expect("store opens");
@@ -651,12 +685,46 @@ mod tests {
                 reply,
             })
             .expect("ingest request is accepted");
+        let plan = hq_protocol::CanonicalEventPlan::from_fact(
+            crate::database::tests::root_fixture().fact(),
+        );
+        let signer = hq_protocol::Bip340Signer::from_secret_bytes({
+            let mut secret = [0_u8; 32];
+            secret[31] = 1;
+            secret
+        })
+        .expect("fixture signer constructs");
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::LocalMutation {
+                request: crate::LocalMutationRequest::new(
+                    hq_domain::CommandId::from_bytes([0x21; 32]),
+                    hq_domain::CommandDigest::from_bytes([0x22; 32]),
+                    hq_reducer::AuthorityPolicy::new(
+                        hq_domain::InstallationId::from_bytes([0x11; 32]),
+                        hq_domain::MailboxId::from_bytes([0x33; 32]),
+                    ),
+                    Arc::new(signer),
+                    move |_| {
+                        crate::LocalMutationDecision::commit(
+                            plan,
+                            [6; 32],
+                            crate::MutationResultBytes::new(b"root".to_vec())
+                                .expect("result is bounded"),
+                        )
+                    },
+                ),
+                reply,
+            })
+            .expect("local mutation request is accepted");
         assert_eq!(
             store
                 .load_corpus()
                 .expect("actor survives dropped reply")
                 .len(),
-            1
+            2
         );
         store.close().expect("store closes");
         fs::remove_dir_all(root).expect("test state cleans up");

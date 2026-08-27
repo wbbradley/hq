@@ -1,14 +1,137 @@
 //! Typed durable coordination values that are not rebuildable projections.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
 use hq_domain::{CommandDigest, CommandId, FactId, InstallationId, Revision};
-use hq_protocol::MAX_EVENT_BYTES;
+use hq_protocol::{Bip340Signer, CanonicalEventPlan, MAX_EVENT_BYTES};
+use hq_reducer::AuthorityPolicy;
+
+use crate::CompleteSnapshot;
 
 /// Maximum encoded mutation result retained for exact retry.
 pub const MAX_MUTATION_RESULT_BYTES: usize = 65_536;
 /// Maximum outbox intents returned by one store query.
 pub const MAX_OUTBOX_QUERY_ITEMS: usize = 1_024;
+
+pub(crate) type LocalDecisionCallback =
+    Box<dyn FnOnce(&CompleteSnapshot) -> LocalMutationDecision + Send + 'static>;
+
+/// Bounded typed request for one retryable local fact-backed mutation.
+pub struct LocalMutationRequest {
+    command_id: CommandId,
+    request_digest: CommandDigest,
+    policy: AuthorityPolicy,
+    signer: Arc<Bip340Signer>,
+    decide: LocalDecisionCallback,
+}
+
+impl LocalMutationRequest {
+    /// Creates a request whose one-shot decision runs against the transaction snapshot.
+    pub fn new<D>(
+        command_id: CommandId,
+        request_digest: CommandDigest,
+        policy: AuthorityPolicy,
+        signer: Arc<Bip340Signer>,
+        decide: D,
+    ) -> Self
+    where
+        D: FnOnce(&CompleteSnapshot) -> LocalMutationDecision + Send + 'static,
+    {
+        Self {
+            command_id,
+            request_digest,
+            policy,
+            signer,
+            decide: Box::new(decide),
+        }
+    }
+
+    /// Returns the stable retry identity.
+    pub const fn command_id(&self) -> CommandId {
+        self.command_id
+    }
+
+    /// Returns the digest of the exact command input.
+    pub const fn request_digest(&self) -> CommandDigest {
+        self.request_digest
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        CommandId,
+        CommandDigest,
+        AuthorityPolicy,
+        Arc<Bip340Signer>,
+        LocalDecisionCallback,
+    ) {
+        (
+            self.command_id,
+            self.request_digest,
+            self.policy,
+            self.signer,
+            self.decide,
+        )
+    }
+}
+
+impl fmt::Debug for LocalMutationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalMutationRequest")
+            .field("command_id", &self.command_id)
+            .field("request_digest", &self.request_digest)
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Committed local event plan and exact client result.
+pub struct LocalMutationCommit {
+    pub(crate) plan: CanonicalEventPlan,
+    pub(crate) auxiliary_randomness: [u8; 32],
+    pub(crate) result: MutationResultBytes,
+}
+
+/// Pure decision returned from a transaction-consistent local snapshot.
+pub enum LocalMutationDecision {
+    /// Author and commit one canonical fact.
+    Commit(Box<LocalMutationCommit>),
+    /// Persist a stable domain rejection without a canonical fact.
+    Reject(MutationResultBytes),
+}
+
+impl LocalMutationDecision {
+    /// Creates a committed decision from explicit signing inputs and exact result bytes.
+    pub fn commit(
+        plan: CanonicalEventPlan,
+        auxiliary_randomness: [u8; 32],
+        result: MutationResultBytes,
+    ) -> Self {
+        Self::Commit(Box::new(LocalMutationCommit {
+            plan,
+            auxiliary_randomness,
+            result,
+        }))
+    }
+
+    /// Creates a rejected decision with exact stable result bytes.
+    pub const fn reject(result: MutationResultBytes) -> Self {
+        Self::Reject(result)
+    }
+
+    pub(crate) fn into_parts(self) -> LocalMutationDecisionParts {
+        match self {
+            Self::Commit(commit) => LocalMutationDecisionParts::Commit(commit),
+            Self::Reject(result) => LocalMutationDecisionParts::Reject(result),
+        }
+    }
+}
+
+pub(crate) enum LocalMutationDecisionParts {
+    Commit(Box<LocalMutationCommit>),
+    Reject(MutationResultBytes),
+}
 
 /// Validation failure for bounded operational bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,5 +334,34 @@ mod tests {
         )
         .expect_err("empty canonical evidence rejects");
         assert_eq!(error, OperationalValueError::Empty);
+    }
+
+    #[test]
+    fn local_request_debug_exposes_only_public_coordination_values() {
+        let signer = Bip340Signer::from_secret_bytes({
+            let mut secret = [0_u8; 32];
+            secret[31] = 1;
+            secret
+        })
+        .expect("fixture signer constructs");
+        let request = LocalMutationRequest::new(
+            CommandId::from_bytes([1; 32]),
+            CommandDigest::from_bytes([2; 32]),
+            AuthorityPolicy::new(
+                InstallationId::from_bytes([3; 32]),
+                hq_domain::MailboxId::from_bytes([4; 32]),
+            ),
+            Arc::new(signer),
+            |_| {
+                LocalMutationDecision::reject(
+                    MutationResultBytes::new(Vec::new()).expect("unit result is valid"),
+                )
+            },
+        );
+        let debug = format!("{request:?}");
+        assert!(debug.contains("command_id"));
+        assert!(debug.contains("request_digest"));
+        assert!(!debug.contains("signer"));
+        assert!(!debug.contains("decide"));
     }
 }

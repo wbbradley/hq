@@ -25,8 +25,10 @@ use rusqlite::{
 
 use crate::{
     AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
-    ConversationProjectionSnapshot, IngestOutcome, OutboxIntent, ProjectProjectionSnapshot,
-    ReductionIndexSnapshot, RepairOutcome, StoreError, StoreErrorClass,
+    ConversationProjectionSnapshot, IngestOutcome, LocalMutationRequest, MutationReceipt,
+    MutationResultKind, OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot,
+    RepairOutcome, StoreError, StoreErrorClass,
+    operational::LocalMutationDecisionParts,
     paths::{prepare_database_path, validate_database_path},
     snapshot::build_complete_snapshot,
 };
@@ -1071,6 +1073,17 @@ impl Database {
         ingest_with_failpoint(&mut self.connection, fact, policy, IngestFailpoint::Never)
     }
 
+    pub(super) fn execute_local_mutation(
+        &mut self,
+        request: LocalMutationRequest,
+    ) -> Result<(MutationReceipt, bool), StoreError> {
+        execute_local_mutation_with_failpoint(
+            &mut self.connection,
+            request,
+            LocalMutationFailpoint::Never,
+        )
+    }
+
     pub(super) fn complete_snapshot(
         &mut self,
         policy: AuthorityPolicy,
@@ -1172,6 +1185,21 @@ enum IngestFailpoint {
     AfterCommit,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum LocalMutationFailpoint {
+    Never,
+    AfterReceiptLookup,
+    AfterSnapshot,
+    AfterDecision,
+    AfterSigning,
+    Ingest(IngestFailpoint),
+    AfterRejectedRevision,
+    AfterReceipt,
+    BeforeCommit,
+    AfterCommit,
+}
+
 fn ingest_with_failpoint(
     connection: &mut Connection,
     fact: &VerifiedSemanticFact,
@@ -1181,14 +1209,26 @@ fn ingest_with_failpoint(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
+    let outcome = ingest_in_transaction(&transaction, fact, policy, failpoint)?;
+    fail_ingest_at(failpoint, IngestFailpoint::BeforeCommit)?;
+    transaction.commit().map_err(sql_error)?;
+    fail_ingest_at(failpoint, IngestFailpoint::AfterCommit)?;
+    Ok(outcome)
+}
+
+fn ingest_in_transaction(
+    transaction: &Transaction<'_>,
+    fact: &VerifiedSemanticFact,
+    policy: AuthorityPolicy,
+    failpoint: IngestFailpoint,
+) -> Result<IngestOutcome, StoreError> {
     let fact_id = fact.fact().id();
-    if let Some(revision) = operational::canonical_commit_revision(&transaction, fact_id)? {
-        if append_in_transaction(&transaction, fact, Failpoint::Never)?
+    if let Some(revision) = operational::canonical_commit_revision(transaction, fact_id)? {
+        if append_in_transaction(transaction, fact, Failpoint::Never)?
             != CanonicalAppendOutcome::AlreadyPresent
         {
             return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
         }
-        transaction.commit().map_err(sql_error)?;
         return Ok(IngestOutcome::AlreadyPresent(revision));
     }
 
@@ -1196,12 +1236,12 @@ fn ingest_with_failpoint(
         IngestFailpoint::Canonical(value) => value,
         _ => Failpoint::Never,
     };
-    if append_in_transaction(&transaction, fact, canonical_failpoint)?
+    if append_in_transaction(transaction, fact, canonical_failpoint)?
         != CanonicalAppendOutcome::Inserted
     {
         return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
     }
-    let facts = load_facts(&transaction)?;
+    let facts = load_facts(transaction)?;
     let complete = build_complete_snapshot(&facts, policy)?;
     fail_ingest_at(failpoint, IngestFailpoint::AfterReduction)?;
     let index = complete.normalized_index();
@@ -1212,7 +1252,7 @@ fn ingest_with_failpoint(
     #[cfg(test)]
     if let IngestFailpoint::Repair(repair_failpoint) = failpoint {
         repair::replace_in_transaction_with_failpoint(
-            &transaction,
+            transaction,
             &index,
             &authority,
             &conversation,
@@ -1222,7 +1262,7 @@ fn ingest_with_failpoint(
         )?;
     } else {
         repair::replace_in_transaction(
-            &transaction,
+            transaction,
             &index,
             &authority,
             &conversation,
@@ -1232,7 +1272,7 @@ fn ingest_with_failpoint(
     }
     #[cfg(not(test))]
     repair::replace_in_transaction(
-        &transaction,
+        transaction,
         &index,
         &authority,
         &conversation,
@@ -1240,7 +1280,7 @@ fn ingest_with_failpoint(
         &project,
     )?;
     fail_ingest_at(failpoint, IngestFailpoint::AfterProjectionReplacement)?;
-    let revision = operational::allocate_revision(&transaction)?;
+    let revision = operational::allocate_revision(transaction)?;
     fail_ingest_at(failpoint, IngestFailpoint::AfterRevision)?;
     if fact_is_admitted(&index, fact_id) {
         for recipient in outbox_recipients(fact, policy, &authority) {
@@ -1251,16 +1291,75 @@ fn ingest_with_failpoint(
                 revision,
             )
             .map_err(|_| StoreError::new(StoreErrorClass::InvalidEvidence))?;
-            operational::put_outbox_intent(&transaction, &intent)?;
+            operational::put_outbox_intent(transaction, &intent)?;
         }
     }
     fail_ingest_at(failpoint, IngestFailpoint::AfterOutbox)?;
-    operational::put_canonical_commit(&transaction, fact_id, revision)?;
+    operational::put_canonical_commit(transaction, fact_id, revision)?;
     fail_ingest_at(failpoint, IngestFailpoint::AfterCanonicalCommit)?;
-    fail_ingest_at(failpoint, IngestFailpoint::BeforeCommit)?;
-    transaction.commit().map_err(sql_error)?;
-    fail_ingest_at(failpoint, IngestFailpoint::AfterCommit)?;
     Ok(IngestOutcome::Inserted(revision))
+}
+
+fn execute_local_mutation_with_failpoint(
+    connection: &mut Connection,
+    request: LocalMutationRequest,
+    failpoint: LocalMutationFailpoint,
+) -> Result<(MutationReceipt, bool), StoreError> {
+    let (command_id, request_digest, policy, signer, decide) = request.into_parts();
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    if let Some(receipt) = operational::load_receipt(&transaction, command_id)? {
+        if receipt.request_digest() != request_digest {
+            return Err(StoreError::new(StoreErrorClass::MutationConflict));
+        }
+        transaction.commit().map_err(sql_error)?;
+        return Ok((receipt, false));
+    }
+    fail_local_at(failpoint, LocalMutationFailpoint::AfterReceiptLookup)?;
+
+    let facts = load_facts(&transaction)?;
+    let snapshot = build_complete_snapshot(&facts, policy)?;
+    fail_local_at(failpoint, LocalMutationFailpoint::AfterSnapshot)?;
+    let (kind, result, revision) = match decide(&snapshot).into_parts() {
+        LocalMutationDecisionParts::Commit(commit) => {
+            fail_local_at(failpoint, LocalMutationFailpoint::AfterDecision)?;
+            let fact = commit
+                .plan
+                .sign(&signer, commit.auxiliary_randomness)
+                .map_err(|_| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?;
+            let fact_id = fact.fact().id();
+            fail_local_at(failpoint, LocalMutationFailpoint::AfterSigning)?;
+            let ingest_failpoint = match failpoint {
+                LocalMutationFailpoint::Ingest(value) => value,
+                _ => IngestFailpoint::Never,
+            };
+            let IngestOutcome::Inserted(revision) =
+                ingest_in_transaction(&transaction, &fact, policy, ingest_failpoint)?
+            else {
+                return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+            };
+            if !fact_is_admitted(&repair::load(&transaction)?, fact_id) {
+                return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
+            }
+            (MutationResultKind::Committed, commit.result, revision)
+        }
+        LocalMutationDecisionParts::Reject(result) => {
+            fail_local_at(failpoint, LocalMutationFailpoint::AfterDecision)?;
+            let revision = operational::allocate_revision(&transaction)?;
+            fail_local_at(failpoint, LocalMutationFailpoint::AfterRejectedRevision)?;
+            (MutationResultKind::Rejected, result, revision)
+        }
+    };
+    let receipt = MutationReceipt::new(command_id, request_digest, kind, result, revision);
+    if operational::put_receipt(&transaction, &receipt)? != operational::PutOutcome::Inserted {
+        return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+    }
+    fail_local_at(failpoint, LocalMutationFailpoint::AfterReceipt)?;
+    fail_local_at(failpoint, LocalMutationFailpoint::BeforeCommit)?;
+    transaction.commit().map_err(sql_error)?;
+    fail_local_at(failpoint, LocalMutationFailpoint::AfterCommit)?;
+    Ok((receipt, true))
 }
 
 fn fact_is_admitted(index: &ReductionIndexSnapshot, fact_id: FactId) -> bool {
@@ -1326,6 +1425,20 @@ fn add_account_recipients(
 
 #[allow(clippy::unnecessary_wraps)]
 fn fail_ingest_at(actual: IngestFailpoint, expected: IngestFailpoint) -> Result<(), StoreError> {
+    #[cfg(test)]
+    if std::mem::discriminant(&actual) == std::mem::discriminant(&expected) {
+        return Err(StoreError::new(StoreErrorClass::DatabaseUnavailable));
+    }
+    #[cfg(not(test))]
+    let _ = (actual, expected);
+    Ok(())
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn fail_local_at(
+    actual: LocalMutationFailpoint,
+    expected: LocalMutationFailpoint,
+) -> Result<(), StoreError> {
     #[cfg(test)]
     if std::mem::discriminant(&actual) == std::mem::discriminant(&expected) {
         return Err(StoreError::new(StoreErrorClass::DatabaseUnavailable));
@@ -1857,7 +1970,12 @@ pub(crate) mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use hq_protocol::Bip340Signer;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
+
+    use hq_protocol::{Bip340Signer, CanonicalEventPlan};
 
     const CONTENT: &str = r#"{"p":"hq/canonical","v":1,"f":2,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":1000,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[["c","3333333333333333333333333333333333333333333333333333333333333333"]],"auth":[["local-installation","c","3333333333333333333333333333333333333333333333333333333333333333"]],"body":{"mailbox":"4444444444444444444444444444444444444444444444444444444444444444","kind":"agent","label":"helper"}}"#;
 
@@ -2062,6 +2180,203 @@ pub(crate) mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
+    fn local_mutation_failpoints_reopen_to_the_complete_old_or_new_state() {
+        use super::repair::RepairFailpoint;
+        use std::{
+            fs,
+            sync::atomic::{AtomicU64, Ordering},
+        };
+
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let repair_failpoints = [
+            RepairFailpoint::AfterClear,
+            RepairFailpoint::AfterVertices,
+            RepairFailpoint::AfterReverseDependencies,
+            RepairFailpoint::AfterDecisions,
+            RepairFailpoint::AfterDependencyOrder,
+            RepairFailpoint::AfterPresentationOrder,
+            RepairFailpoint::AfterConflicts,
+            RepairFailpoint::AfterState,
+            RepairFailpoint::AfterAuthorityInsert,
+            RepairFailpoint::AfterAuthorityVerification,
+            RepairFailpoint::AfterConversationInsert,
+            RepairFailpoint::AfterConversationVerification,
+            RepairFailpoint::AfterAgentInsert,
+            RepairFailpoint::AfterAgentVerification,
+            RepairFailpoint::AfterProjectInsert,
+            RepairFailpoint::AfterProjectVerification,
+            RepairFailpoint::AfterVerification,
+        ];
+        let failpoints = [
+            LocalMutationFailpoint::AfterReceiptLookup,
+            LocalMutationFailpoint::AfterSnapshot,
+            LocalMutationFailpoint::AfterDecision,
+            LocalMutationFailpoint::AfterSigning,
+            LocalMutationFailpoint::Ingest(IngestFailpoint::Canonical(Failpoint::AfterFact)),
+            LocalMutationFailpoint::Ingest(IngestFailpoint::Canonical(Failpoint::AfterParents)),
+            LocalMutationFailpoint::Ingest(IngestFailpoint::Canonical(Failpoint::AfterAuthorities)),
+            LocalMutationFailpoint::Ingest(IngestFailpoint::AfterReduction),
+            LocalMutationFailpoint::Ingest(IngestFailpoint::AfterProjectionReplacement),
+            LocalMutationFailpoint::Ingest(IngestFailpoint::AfterRevision),
+            LocalMutationFailpoint::Ingest(IngestFailpoint::AfterOutbox),
+            LocalMutationFailpoint::Ingest(IngestFailpoint::AfterCanonicalCommit),
+            LocalMutationFailpoint::AfterReceipt,
+            LocalMutationFailpoint::BeforeCommit,
+        ]
+        .into_iter()
+        .chain(
+            repair_failpoints
+                .into_iter()
+                .map(|repair| LocalMutationFailpoint::Ingest(IngestFailpoint::Repair(repair))),
+        );
+        let policy = local_policy();
+        let command_id = hq_domain::CommandId::from_bytes([0x81; 32]);
+
+        for failpoint in failpoints {
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "hq-rust-local-mutation-test-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("test root creates");
+            let path = root.join("state").join("hq.sqlite3");
+            let mut database = Database::open(&path).expect("database opens");
+            database
+                .ingest(&fixture(), policy)
+                .expect("old unresolved fact ingests");
+            let old_index = database.load_reduction_index().expect("old index loads");
+            let old_authority = database
+                .load_authority_snapshot()
+                .expect("old authority loads");
+            let old_conversation = database
+                .load_conversation_snapshot()
+                .expect("old conversation loads");
+            let old_agent = database.load_agent_snapshot().expect("old agent loads");
+            let old_project = database.load_project_snapshot().expect("old project loads");
+
+            let error = execute_local_mutation_with_failpoint(
+                &mut database.connection,
+                committed_local_request(command_id, [0x82; 32], None),
+                failpoint,
+            )
+            .expect_err("failpoint interrupts local mutation");
+            assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+            drop(database);
+
+            let mut reopened = Database::open(&path).expect("database reopens");
+            assert_eq!(reopened.load().expect("old corpus loads").len(), 1);
+            assert_eq!(
+                reopened.current_revision().expect("old revision loads"),
+                hq_domain::Revision::new(1)
+            );
+            assert_eq!(
+                reopened
+                    .load_mutation_receipt(command_id)
+                    .expect("receipt query succeeds"),
+                None
+            );
+            assert_eq!(
+                reopened.load_reduction_index().expect("old index remains"),
+                old_index
+            );
+            assert_eq!(
+                reopened
+                    .load_authority_snapshot()
+                    .expect("old authority remains"),
+                old_authority
+            );
+            assert_eq!(
+                reopened
+                    .load_conversation_snapshot()
+                    .expect("old conversation remains"),
+                old_conversation
+            );
+            assert_eq!(
+                reopened.load_agent_snapshot().expect("old agent remains"),
+                old_agent
+            );
+            assert_eq!(
+                reopened
+                    .load_project_snapshot()
+                    .expect("old project remains"),
+                old_project
+            );
+            let (receipt, inserted) = reopened
+                .execute_local_mutation(committed_local_request(command_id, [0x82; 32], None))
+                .expect("retry commits complete new state");
+            assert!(inserted);
+            assert_eq!(receipt.revision(), hq_domain::Revision::new(2));
+            assert_eq!(reopened.load().expect("new corpus loads").len(), 2);
+            drop(reopened);
+            fs::remove_dir_all(root).expect("test state cleans up");
+        }
+    }
+
+    #[test]
+    fn rejected_local_failpoints_roll_back_revision_and_receipt() {
+        let command_id = hq_domain::CommandId::from_bytes([0x91; 32]);
+        for failpoint in [
+            LocalMutationFailpoint::AfterReceiptLookup,
+            LocalMutationFailpoint::AfterSnapshot,
+            LocalMutationFailpoint::AfterDecision,
+            LocalMutationFailpoint::AfterRejectedRevision,
+            LocalMutationFailpoint::AfterReceipt,
+            LocalMutationFailpoint::BeforeCommit,
+        ] {
+            let mut connection = Connection::open_in_memory().expect("database opens");
+            connection.execute_batch(SCHEMA).expect("schema creates");
+            let error = execute_local_mutation_with_failpoint(
+                &mut connection,
+                rejected_local_request(command_id, [0x92; 32]),
+                failpoint,
+            )
+            .expect_err("failpoint interrupts rejection");
+            assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+            assert_eq!(
+                operational::current_revision(&connection).expect("revision loads"),
+                hq_domain::Revision::new(0)
+            );
+            assert_eq!(
+                operational::load_receipt(&connection, command_id).expect("receipt query succeeds"),
+                None
+            );
+            assert!(load_facts(&connection).expect("corpus loads").is_empty());
+        }
+    }
+
+    #[test]
+    fn lost_local_response_replays_receipt_without_deciding_or_signing_again() {
+        let mut connection = Connection::open_in_memory().expect("database opens");
+        connection.execute_batch(SCHEMA).expect("schema creates");
+        let command_id = hq_domain::CommandId::from_bytes([0xa1; 32]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let error = execute_local_mutation_with_failpoint(
+            &mut connection,
+            committed_local_request(command_id, [0xa2; 32], Some(Arc::clone(&calls))),
+            LocalMutationFailpoint::AfterCommit,
+        )
+        .expect_err("response loss is simulated after commit");
+        assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+
+        let (receipt, inserted) = execute_local_mutation_with_failpoint(
+            &mut connection,
+            committed_local_request(command_id, [0xa2; 32], Some(Arc::clone(&calls))),
+            LocalMutationFailpoint::Never,
+        )
+        .expect("retry returns retained receipt");
+        assert!(!inserted);
+        assert_eq!(receipt.revision(), hq_domain::Revision::new(1));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(load_facts(&connection).expect("corpus loads").len(), 1);
+        assert_eq!(
+            operational::current_revision(&connection).expect("revision loads"),
+            hq_domain::Revision::new(1)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn repair_failpoints_preserve_the_previous_complete_index_and_allow_retry() {
         use super::repair::{RepairFailpoint, replace_with_failpoint};
 
@@ -2176,6 +2491,65 @@ pub(crate) mod tests {
         }
     }
 
+    fn local_policy() -> AuthorityPolicy {
+        AuthorityPolicy::new(
+            hq_domain::InstallationId::from_bytes([0x11; 32]),
+            hq_domain::MailboxId::from_bytes([0x44; 32]),
+        )
+    }
+
+    fn fixture_signer() -> Bip340Signer {
+        Bip340Signer::from_secret_bytes({
+            let mut secret = [0_u8; 32];
+            secret[31] = 1;
+            secret
+        })
+        .expect("fixture secret is valid")
+    }
+
+    fn committed_local_request(
+        command_id: hq_domain::CommandId,
+        digest: [u8; 32],
+        calls: Option<Arc<AtomicUsize>>,
+    ) -> crate::LocalMutationRequest {
+        let plan = CanonicalEventPlan::from_fact(root_fixture().fact());
+        crate::LocalMutationRequest::new(
+            command_id,
+            hq_domain::CommandDigest::from_bytes(digest),
+            local_policy(),
+            Arc::new(fixture_signer()),
+            move |_| {
+                if let Some(calls) = calls {
+                    calls.fetch_add(1, AtomicOrdering::SeqCst);
+                }
+                crate::LocalMutationDecision::commit(
+                    plan,
+                    [6; 32],
+                    crate::MutationResultBytes::new(b"committed".to_vec())
+                        .expect("result is bounded"),
+                )
+            },
+        )
+    }
+
+    fn rejected_local_request(
+        command_id: hq_domain::CommandId,
+        digest: [u8; 32],
+    ) -> crate::LocalMutationRequest {
+        crate::LocalMutationRequest::new(
+            command_id,
+            hq_domain::CommandDigest::from_bytes(digest),
+            local_policy(),
+            Arc::new(fixture_signer()),
+            |_| {
+                crate::LocalMutationDecision::reject(
+                    crate::MutationResultBytes::new(b"rejected".to_vec())
+                        .expect("result is bounded"),
+                )
+            },
+        )
+    }
+
     pub(crate) fn fixture() -> VerifiedSemanticFact {
         let signer = Bip340Signer::from_secret_bytes({
             let mut secret = [0_u8; 32];
@@ -2197,7 +2571,7 @@ pub(crate) mod tests {
             .expect("fixture converts")
     }
 
-    fn root_fixture() -> VerifiedSemanticFact {
+    pub(crate) fn root_fixture() -> VerifiedSemanticFact {
         const ROOT: &str = r#"{"p":"hq/canonical","v":1,"f":1,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":0,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[],"auth":[],"body":{"installation":"1111111111111111111111111111111111111111111111111111111111111111","signing":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798","encryption":"2222222222222222222222222222222222222222222222222222222222222222","label":"alpha"}}"#;
         let signer = Bip340Signer::from_secret_bytes({
             let mut secret = [0_u8; 32];
