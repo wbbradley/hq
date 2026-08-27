@@ -7,16 +7,22 @@ mod operational;
 mod project;
 mod repair;
 
-use std::{collections::BTreeSet, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::Path,
+    time::Duration,
+};
 
 use hq_domain::{
-    AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
+    AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, Page,
+    PageCursor,
 };
 use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
 };
 use hq_reducer::{
-    AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, DecisionStatus, MembershipState,
+    AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, ConversationKey, DecisionStatus,
+    MembershipState,
 };
 use rusqlite::{
     Connection, Error as SqlError, ErrorCode, OpenFlags, OptionalExtension, Transaction,
@@ -24,7 +30,7 @@ use rusqlite::{
 };
 
 use crate::{
-    AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
+    AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot, ConversationEntry,
     ConversationProjectionSnapshot, IngestOutcome, LocalMutationRequest, MutationReceipt,
     MutationResultKind, OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot,
     RepairOutcome, StoreError, StoreErrorClass,
@@ -34,9 +40,9 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 8;
-const SCHEMA_MARKER: &str = "hq-store-v8-atomic-ingest-2026-08-27";
-const SCHEMA_TABLES: [&str; 99] = [
+const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_MARKER: &str = "hq-store-v9-incremental-queries-2026-08-27";
+const SCHEMA_TABLES: [&str; 102] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -44,6 +50,7 @@ const SCHEMA_TABLES: [&str; 99] = [
     "reduction_state",
     "reduction_vertices",
     "reduction_reverse_dependencies",
+    "reduction_affected_dependencies",
     "reduction_decisions",
     "reduction_missing_dependencies",
     "reduction_unusable_dependencies",
@@ -51,6 +58,8 @@ const SCHEMA_TABLES: [&str; 99] = [
     "reduction_decision_participants",
     "reduction_dependency_order",
     "reduction_presentation_order",
+    "reduction_conversation_keys",
+    "reduction_conversation_order",
     "reduction_conflicts",
     "reduction_conflict_participants",
     "authority_state",
@@ -137,6 +146,10 @@ const SCHEMA_TABLES: [&str; 99] = [
     "outbox_intents",
     "canonical_commits",
 ];
+const SCHEMA_INDEXES: [&str; 2] = [
+    "conversation_messages_by_fact_id",
+    "conversation_activities_by_fact_id",
+];
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
 const SCHEMA: &str = r"
@@ -175,6 +188,7 @@ CREATE TABLE reduction_state (
     fact_count INTEGER NOT NULL CHECK(fact_count >= 0),
     vertex_count INTEGER NOT NULL CHECK(vertex_count >= 0),
     reverse_count INTEGER NOT NULL CHECK(reverse_count >= 0),
+    affected_count INTEGER NOT NULL CHECK(affected_count >= 0),
     decision_count INTEGER NOT NULL CHECK(decision_count >= 0),
     missing_count INTEGER NOT NULL CHECK(missing_count >= 0),
     unusable_count INTEGER NOT NULL CHECK(unusable_count >= 0),
@@ -182,6 +196,8 @@ CREATE TABLE reduction_state (
     decision_participant_count INTEGER NOT NULL CHECK(decision_participant_count >= 0),
     dependency_order_count INTEGER NOT NULL CHECK(dependency_order_count >= 0),
     presentation_order_count INTEGER NOT NULL CHECK(presentation_order_count >= 0),
+    conversation_key_count INTEGER NOT NULL CHECK(conversation_key_count >= 0),
+    conversation_order_count INTEGER NOT NULL CHECK(conversation_order_count >= 0),
     conflict_count INTEGER NOT NULL CHECK(conflict_count >= 0),
     conflict_participant_count INTEGER NOT NULL CHECK(conflict_participant_count >= 0),
     index_digest BLOB NOT NULL CHECK(typeof(index_digest) = 'blob' AND length(index_digest) = 32)
@@ -195,6 +211,12 @@ CREATE TABLE reduction_reverse_dependencies (
     parent_id BLOB NOT NULL REFERENCES reduction_vertices(fact_id) ON DELETE RESTRICT,
     child_id BLOB NOT NULL REFERENCES reduction_vertices(fact_id) ON DELETE RESTRICT,
     PRIMARY KEY (parent_id, child_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_affected_dependencies (
+    source_id BLOB NOT NULL REFERENCES reduction_vertices(fact_id) ON DELETE RESTRICT,
+    affected_id BLOB NOT NULL REFERENCES reduction_vertices(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (source_id, affected_id)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE reduction_decisions (
@@ -256,6 +278,27 @@ CREATE TABLE reduction_presentation_order (
     fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
     PRIMARY KEY (domain, position),
     UNIQUE (domain, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_conversation_keys (
+    key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+    key_kind INTEGER NOT NULL CHECK(key_kind IN (1, 2)),
+    counterparty_installation BLOB NOT NULL
+        CHECK(typeof(counterparty_installation) = 'blob' AND length(counterparty_installation) = 32),
+    counterparty_mailbox BLOB NOT NULL
+        CHECK(typeof(counterparty_mailbox) = 'blob' AND length(counterparty_mailbox) = 32),
+    thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) <= 256)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_conversation_order (
+    key_digest BLOB NOT NULL REFERENCES reduction_conversation_keys(key_digest) ON DELETE RESTRICT,
+    position INTEGER NOT NULL CHECK(position >= 0),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    entry_kind INTEGER NOT NULL CHECK(entry_kind IN (1, 2)),
+    PRIMARY KEY (key_digest, position),
+    UNIQUE (key_digest, fact_id)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE reduction_conflicts (
@@ -541,6 +584,8 @@ CREATE TABLE conversation_messages (
     rejected INTEGER NOT NULL CHECK(rejected IN (0, 1))
 ) STRICT, WITHOUT ROWID;
 
+CREATE UNIQUE INDEX conversation_messages_by_fact_id ON conversation_messages(fact_id);
+
 CREATE TABLE conversation_message_frontiers (
     key_digest BLOB NOT NULL REFERENCES conversation_messages(key_digest),
     fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
@@ -576,6 +621,8 @@ CREATE TABLE conversation_activities (
     content TEXT NOT NULL CHECK(typeof(content) = 'text' AND length(CAST(content AS BLOB)) BETWEEN 1 AND 16384),
     truncated INTEGER NOT NULL CHECK(truncated IN (0, 1))
 ) STRICT, WITHOUT ROWID;
+
+CREATE UNIQUE INDEX conversation_activities_by_fact_id ON conversation_activities(fact_id);
 
 CREATE TABLE conversation_activity_retentions (
     key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
@@ -1136,6 +1183,94 @@ impl Database {
         conversation::load(&self.connection)
     }
 
+    pub(super) fn load_conversation_entries(
+        &self,
+        key: &ConversationKey,
+        limit: usize,
+        cursor: Option<&PageCursor>,
+    ) -> Result<Page<ConversationEntry>, StoreError> {
+        if !(1..=200).contains(&limit) {
+            return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
+        }
+        let repaired: i64 = self
+            .connection
+            .query_row("SELECT count(*) FROM reduction_state", [], |row| row.get(0))
+            .map_err(sql_error)?;
+        if repaired != 1 {
+            return Err(StoreError::new(StoreErrorClass::NotRepaired));
+        }
+        let key_digest = repair::conversation_key_digest(key);
+        let persisted = repair::conversation_key_is_persisted(&self.connection, key)?;
+        let after = match cursor {
+            None => -1,
+            Some(cursor) => {
+                let (cursor_key, fact_id) = decode_conversation_cursor(cursor)?;
+                if cursor_key != key_digest || !persisted {
+                    return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
+                }
+                self.connection
+                    .query_row(
+                        "SELECT position FROM reduction_conversation_order \
+                         WHERE key_digest = ?1 AND fact_id = ?2",
+                        params![key_digest.as_slice(), fact_id.as_bytes().as_slice()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(sql_error)?
+                    .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?
+            }
+        };
+        if !persisted {
+            return Ok(Page::new(Vec::new(), None));
+        }
+        let row_limit = i64::try_from(limit + 1)
+            .map_err(|_| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT position, fact_id, entry_kind FROM reduction_conversation_order \
+                 WHERE key_digest = ?1 AND position > ?2 ORDER BY position LIMIT ?3",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map(params![key_digest.as_slice(), after, row_limit], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(sql_error)?;
+        let mut selected = Vec::with_capacity(limit + 1);
+        for (offset, row) in rows.enumerate() {
+            let (position, fact_id, entry_kind) = row.map_err(sql_error)?;
+            let expected = after
+                .checked_add(1)
+                .and_then(|value| value.checked_add(i64::try_from(offset).ok()?))
+                .ok_or_else(|| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?;
+            if position != expected {
+                return Err(StoreError::new(StoreErrorClass::RebuildableStateCorrupt));
+            }
+            selected.push((FactId::from_bytes(fixed_bytes(fact_id)?), entry_kind));
+        }
+        let has_more = selected.len() > limit;
+        selected.truncate(limit);
+        let next_cursor = if has_more {
+            let fact_id = selected
+                .last()
+                .map(|(fact_id, _)| *fact_id)
+                .ok_or_else(|| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?;
+            Some(encode_conversation_cursor(key_digest, fact_id)?)
+        } else {
+            None
+        };
+        let items = selected
+            .into_iter()
+            .map(|(fact_id, kind)| conversation::load_entry(&self.connection, fact_id, kind))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Page::new(items, next_cursor))
+    }
+
     pub(super) fn load_agent_snapshot(&self) -> Result<AgentProjectionSnapshot, StoreError> {
         repair::load(&self.connection)?;
         authority::load(&self.connection)?;
@@ -1167,6 +1302,72 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<crate::OutboxIntent>, StoreError> {
         operational::load_outbox_intents(&self.connection, limit)
+    }
+}
+
+fn encode_conversation_cursor(
+    key_digest: [u8; 32],
+    fact_id: FactId,
+) -> Result<PageCursor, StoreError> {
+    PageCursor::new(format!(
+        "v1:{}:{}",
+        lower_hex(&key_digest),
+        lower_hex(fact_id.as_bytes())
+    ))
+    .map_err(|_| StoreError::new(StoreErrorClass::OperationalStateCorrupt))
+}
+
+fn fixed_bytes(bytes: Vec<u8>) -> Result<[u8; 32], StoreError> {
+    bytes
+        .try_into()
+        .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))
+}
+
+fn decode_conversation_cursor(cursor: &PageCursor) -> Result<([u8; 32], FactId), StoreError> {
+    let value = cursor.as_str();
+    let mut parts = value.split(':');
+    let parsed = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("v1"), Some(key), Some(fact), None) => {
+            Some((decode_lower_hex(key), decode_lower_hex(fact)))
+        }
+        _ => None,
+    };
+    let Some((Some(key), Some(fact))) = parsed else {
+        return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
+    };
+    Ok((key, FactId::from_bytes(fact)))
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        result.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        result.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    result
+}
+
+fn decode_lower_hex(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64
+        || value
+            .bytes()
+            .any(|byte| !matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let mut output = [0_u8; 32];
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+        output[index] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
+    }
+    Some(output)
+}
+
+const fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
     }
 }
 
@@ -1232,6 +1433,8 @@ fn ingest_in_transaction(
         return Ok(IngestOutcome::AlreadyPresent(revision));
     }
 
+    let previous = load_previous_rebuildable(transaction)?;
+
     let canonical_failpoint = match failpoint {
         IngestFailpoint::Canonical(value) => value,
         _ => Failpoint::Never,
@@ -1249,6 +1452,15 @@ fn ingest_in_transaction(
     let conversation = complete.conversation_projection_snapshot();
     let agent = complete.agent_projection_snapshot();
     let project = complete.project_projection_snapshot();
+    validate_incremental_change(
+        previous.as_ref(),
+        &index,
+        &authority,
+        &conversation,
+        &agent,
+        &project,
+        fact_id,
+    )?;
     #[cfg(test)]
     if let IngestFailpoint::Repair(repair_failpoint) = failpoint {
         repair::replace_in_transaction_with_failpoint(
@@ -1261,7 +1473,7 @@ fn ingest_in_transaction(
             repair_failpoint,
         )?;
     } else {
-        repair::replace_in_transaction(
+        repair::patch_in_transaction(
             transaction,
             &index,
             &authority,
@@ -1271,7 +1483,7 @@ fn ingest_in_transaction(
         )?;
     }
     #[cfg(not(test))]
-    repair::replace_in_transaction(
+    repair::patch_in_transaction(
         transaction,
         &index,
         &authority,
@@ -1298,6 +1510,181 @@ fn ingest_in_transaction(
     operational::put_canonical_commit(transaction, fact_id, revision)?;
     fail_ingest_at(failpoint, IngestFailpoint::AfterCanonicalCommit)?;
     Ok(IngestOutcome::Inserted(revision))
+}
+
+struct PreviousRebuildable {
+    index: ReductionIndexSnapshot,
+    authority: AuthorityProjectionSnapshot,
+    conversation: ConversationProjectionSnapshot,
+    agent: AgentProjectionSnapshot,
+    project: ProjectProjectionSnapshot,
+}
+
+fn load_previous_rebuildable(
+    transaction: &Transaction<'_>,
+) -> Result<Option<PreviousRebuildable>, StoreError> {
+    let index = match repair::load(transaction) {
+        Ok(index) => index,
+        Err(error) if error.class() == StoreErrorClass::NotRepaired => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(PreviousRebuildable {
+        index,
+        authority: authority::load(transaction)?,
+        conversation: conversation::load(transaction)?,
+        agent: agent::load(transaction)?,
+        project: project::load(transaction)?,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_incremental_change(
+    previous: Option<&PreviousRebuildable>,
+    current: &ReductionIndexSnapshot,
+    authority: &AuthorityProjectionSnapshot,
+    conversation: &ConversationProjectionSnapshot,
+    agent: &AgentProjectionSnapshot,
+    project: &ProjectProjectionSnapshot,
+    delta: FactId,
+) -> Result<(), StoreError> {
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let affected = if previous.index.policy == current.policy {
+        affected_union(&previous.index, current, [delta])
+    } else {
+        previous
+            .index
+            .affected_dependencies
+            .keys()
+            .chain(current.affected_dependencies.keys())
+            .copied()
+            .chain(std::iter::once(delta))
+            .collect()
+    };
+    let decisions_are_covered = previous
+        .index
+        .decisions
+        .keys()
+        .chain(current.decisions.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|key| previous.index.decisions.get(key) != current.decisions.get(key))
+        .all(|(_, fact_id)| affected.contains(&fact_id));
+    if !decisions_are_covered
+        || !projection_changes_are_covered(
+            &previous.authority.frontiers,
+            &authority.frontiers,
+            &previous.authority.projections,
+            &authority.projections,
+            &previous.authority.support,
+            &authority.support,
+            &affected,
+        )
+        || !projection_changes_are_covered(
+            &previous.conversation.frontiers,
+            &conversation.frontiers,
+            &previous.conversation.projections,
+            &conversation.projections,
+            &previous.conversation.support,
+            &conversation.support,
+            &affected,
+        )
+        || !projection_changes_are_covered(
+            &previous.agent.frontiers,
+            &agent.frontiers,
+            &previous.agent.projections,
+            &agent.projections,
+            &previous.agent.support,
+            &agent.support,
+            &affected,
+        )
+        || !projection_changes_are_covered(
+            &previous.project.frontiers,
+            &project.frontiers,
+            &previous.project.projections,
+            &project.projections,
+            &previous.project.support,
+            &project.support,
+            &affected,
+        )
+    {
+        return Err(StoreError::new(StoreErrorClass::ReductionFailed));
+    }
+    Ok(())
+}
+
+fn affected_union(
+    previous: &ReductionIndexSnapshot,
+    current: &ReductionIndexSnapshot,
+    roots: impl IntoIterator<Item = FactId>,
+) -> BTreeSet<FactId> {
+    let mut affected = BTreeSet::new();
+    let mut pending = roots.into_iter().collect::<VecDeque<_>>();
+    while let Some(fact_id) = pending.pop_front() {
+        if affected.insert(fact_id) {
+            for index in [previous, current] {
+                pending.extend(
+                    index
+                        .affected_dependencies
+                        .get(&fact_id)
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                );
+            }
+        }
+    }
+    affected
+}
+
+fn projection_changes_are_covered<A, K, V>(
+    previous_frontiers: &BTreeMap<A, BTreeSet<FactId>>,
+    current_frontiers: &BTreeMap<A, BTreeSet<FactId>>,
+    previous_projections: &BTreeMap<K, V>,
+    current_projections: &BTreeMap<K, V>,
+    previous_support: &BTreeMap<K, BTreeSet<FactId>>,
+    current_support: &BTreeMap<K, BTreeSet<FactId>>,
+    affected: &BTreeSet<FactId>,
+) -> bool
+where
+    A: Ord,
+    K: Ord,
+    V: PartialEq,
+{
+    let frontiers_covered = previous_frontiers
+        .keys()
+        .chain(current_frontiers.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|key| previous_frontiers.get(*key) != current_frontiers.get(*key))
+        .all(|key| {
+            previous_frontiers
+                .get(key)
+                .into_iter()
+                .chain(current_frontiers.get(key))
+                .flatten()
+                .any(|fact_id| affected.contains(fact_id))
+        });
+    frontiers_covered
+        && previous_projections
+            .keys()
+            .chain(current_projections.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|key| {
+                previous_projections.get(*key) != current_projections.get(*key)
+                    || previous_support.get(*key) != current_support.get(*key)
+            })
+            .all(|key| {
+                previous_support
+                    .get(key)
+                    .into_iter()
+                    .chain(current_support.get(key))
+                    .flatten()
+                    .any(|fact_id| affected.contains(fact_id))
+            })
 }
 
 fn execute_local_mutation_with_failpoint(
@@ -1622,6 +2009,28 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
             .query_row(
                 "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
                 [table],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if present != 1 {
+            return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
+        }
+    }
+    let index_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    if index_count != i64::try_from(SCHEMA_INDEXES.len()).unwrap_or(i64::MAX) {
+        return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
+    }
+    for index in SCHEMA_INDEXES {
+        let present: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [index],
                 |row| row.get(0),
             )
             .map_err(sql_error)?;

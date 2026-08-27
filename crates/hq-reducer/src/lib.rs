@@ -24,9 +24,10 @@ pub use authority::{
 };
 pub use conversation::{
     ActionGroupView, ActivityKey, ActivityRetentionView, ActivitySessionKey, ActivityView,
-    CausalRelation, ConversationAggregateKey, ConversationProjection, ConversationProjectionKey,
-    ConversationReason, ConversationReducer, ConversationReport, IncompleteMessageObservation,
-    MessageView, ThreadView, incomplete_addressed_observations,
+    CausalRelation, ConversationAggregateKey, ConversationKey, ConversationProjection,
+    ConversationProjectionKey, ConversationReason, ConversationReducer, ConversationReport,
+    IncompleteMessageObservation, MessageView, ThreadView, conversation_orders,
+    incomplete_addressed_observations,
 };
 pub use decision::{DecisionReason, DecisionStatus, DomainDecision, FactDecision};
 pub use fact_set::FactSet;

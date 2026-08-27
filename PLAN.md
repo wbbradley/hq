@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[storage/high] Add incremental reduction, repair equality, and scalable conversation queries** —
-  Implement deterministic dependency indexes and affected-closure selection, then patch projections
-  incrementally while continuously comparing with fresh batch rebuilds. Build a conversation-local
-  order index or stable cursor derived from the reducer comparator so page concatenation equals
-  canonical order and later pages do not load or sort complete history. Add generated late-parent,
-  high-fanout authority, duplicate-ingest, equal-time mixed-entry, reopen/repair, and large multi-page
-  work tests plus performance budgets. Complete this work when incremental, batch, and repair views
-  are identical and query work meets the documented scaling gate.
-
 - **[application/high] Implement transport-independent application services and ports** — Implement
   identity/account, mailbox/conversation, peer/relay configuration, synchronization, agent/session,
   project, query, mutation, and subscription use cases over consumer-owned ports rather than SQL- or

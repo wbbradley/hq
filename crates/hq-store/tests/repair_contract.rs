@@ -289,6 +289,7 @@ fn partial_unknown_oversized_and_cross_domain_rows_fail_closed() {
         "UPDATE reduction_decisions SET reason_code = 9999, reason_parameter = 0 WHERE domain = 1",
         "UPDATE reduction_decisions SET reason_code = 3101, reason_parameter = 0 WHERE domain = 1",
         "UPDATE reduction_dependency_order SET position = 99 WHERE domain = 1",
+        "DELETE FROM reduction_affected_dependencies",
         "UPDATE reduction_missing_dependencies SET dependency_id = zeroblob(32) WHERE domain = 1",
     ] {
         assert_rebuildable_corruption(mutation);

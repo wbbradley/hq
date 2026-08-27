@@ -12,12 +12,12 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use hq_domain::{CommandId, Revision};
+use hq_domain::{CommandId, Page, PageCursor, Revision};
 use hq_protocol::VerifiedSemanticFact;
-use hq_reducer::AuthorityPolicy;
+use hq_reducer::{AuthorityPolicy, ConversationKey};
 
 use crate::{
-    AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
+    AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot, ConversationEntry,
     ConversationProjectionSnapshot, LocalMutationRequest, MutationReceipt, OutboxIntent,
     ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
     database::Database,
@@ -226,6 +226,12 @@ enum Request {
     LoadConversationSnapshot {
         reply: SyncSender<Result<ConversationProjectionSnapshot, StoreError>>,
     },
+    LoadConversationEntries {
+        key: ConversationKey,
+        limit: usize,
+        cursor: Option<PageCursor>,
+        reply: SyncSender<Result<Page<ConversationEntry>, StoreError>>,
+    },
     LoadAgentSnapshot {
         reply: SyncSender<Result<AgentProjectionSnapshot, StoreError>>,
     },
@@ -405,6 +411,27 @@ impl Store {
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
+    /// Loads one bounded indexed page in reducer-derived conversation-local order.
+    pub fn load_conversation_entries(
+        &self,
+        key: &ConversationKey,
+        limit: usize,
+        cursor: Option<&PageCursor>,
+    ) -> Result<Page<ConversationEntry>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadConversationEntries {
+                key: key.clone(),
+                limit,
+                cursor: cursor.cloned(),
+                reply,
+            })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Loads the last successfully repaired typed named-agent view without mutation.
     pub fn load_agent_snapshot(&self) -> Result<AgentProjectionSnapshot, StoreError> {
         let (reply, response) = mpsc::sync_channel(1);
@@ -555,6 +582,15 @@ fn run(
             }
             Request::LoadConversationSnapshot { reply } => {
                 let _ = reply.send(database.load_conversation_snapshot());
+            }
+            Request::LoadConversationEntries {
+                key,
+                limit,
+                cursor,
+                reply,
+            } => {
+                let _ =
+                    reply.send(database.load_conversation_entries(&key, limit, cursor.as_ref()));
             }
             Request::LoadAgentSnapshot { reply } => {
                 let _ = reply.send(database.load_agent_snapshot());

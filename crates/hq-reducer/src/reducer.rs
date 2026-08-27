@@ -244,6 +244,7 @@ pub struct ReductionReport<A, K, V, R> {
     graph: CausalGraph,
     decisions: BTreeMap<FactId, FactDecision<R>>,
     dependency_order: Vec<FactId>,
+    aggregate_members: BTreeMap<A, BTreeSet<FactId>>,
     frontiers: BTreeMap<A, BTreeSet<FactId>>,
     projections: BTreeMap<K, V>,
     support: BTreeMap<K, BTreeSet<FactId>>,
@@ -278,6 +279,11 @@ impl<A, K, V, R> ReductionReport<A, K, V, R> {
     /// Returns deterministic graph dependency order for known acyclic identities.
     pub fn dependency_order(&self) -> &[FactId] {
         &self.dependency_order
+    }
+
+    /// Returns every fact assigned to each typed aggregate, including unusable facts.
+    pub const fn aggregate_members(&self) -> &BTreeMap<A, BTreeSet<FactId>> {
+        &self.aggregate_members
     }
 
     /// Returns every exact usable causal maximum by typed aggregate.
@@ -328,7 +334,8 @@ where
         graph: &graph,
         decisions: &decisions,
     };
-    let frontiers = derive_frontiers(domain, &context);
+    let aggregate_members = derive_aggregate_members(domain, &context);
+    let frontiers = derive_frontiers(&aggregate_members, &context);
     let (projections, support) = derive_projections(domain, &context)?;
     let conflicts = derive_conflicts(domain, &context);
     let presentation_entries = domain.presentation_entries(&context);
@@ -344,6 +351,7 @@ where
         graph,
         decisions,
         dependency_order,
+        aggregate_members,
         frontiers,
         projections,
         support,
@@ -529,18 +537,40 @@ fn domain_decision<R>(
     }
 }
 
-fn derive_frontiers<D: DomainReducer>(
+fn derive_aggregate_members<D: DomainReducer>(
     domain: &D,
     context: &ReductionContext<'_, D::Reason>,
 ) -> BTreeMap<D::AggregateKey, BTreeSet<FactId>> {
     let mut members = BTreeMap::<D::AggregateKey, BTreeSet<FactId>>::new();
     for fact in context.facts.facts() {
-        if context.is_projected(fact.id()) {
-            for key in domain.aggregate_keys(fact, context) {
-                members.entry(key).or_default().insert(fact.id());
-            }
+        for key in domain.aggregate_keys(fact, context) {
+            members.entry(key).or_default().insert(fact.id());
         }
     }
+    members
+}
+
+fn derive_frontiers<A>(
+    aggregate_members: &BTreeMap<A, BTreeSet<FactId>>,
+    context: &ReductionContext<'_, impl Sized>,
+) -> BTreeMap<A, BTreeSet<FactId>>
+where
+    A: Clone + Ord,
+{
+    let members = aggregate_members
+        .iter()
+        .map(|(key, facts)| {
+            (
+                key.clone(),
+                facts
+                    .iter()
+                    .copied()
+                    .filter(|fact_id| context.is_projected(*fact_id))
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .filter(|(_, facts)| !facts.is_empty())
+        .collect::<BTreeMap<_, _>>();
     members
         .into_iter()
         .map(|(key, candidates)| {

@@ -4803,3 +4803,99 @@ checks; and the unchanged Go vet/build/fresh test suite pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so protocol authoring, transaction engine, tests, specifications, and
      bookkeeping form one reviewable change.
+
+## 2026-08-27 — Incremental materialization and indexed conversation queries
+
+Added a deterministic affected-dependency graph spanning causal edges, aggregate membership,
+projection support, and conflict participants. Incremental ingest grows the closure over old and
+fresh graphs, checks every changed decision and projection against it, stages the batch oracle in an
+isolated schema, applies a typed primary-key row diff in foreign-key-safe order, and requires exact
+live equality before operational writes. Explicit repair remains a complete replacement and now
+recreates and strictly validates the same dependency and conversation-order indexes.
+
+Added closed thread and provider-session conversation keys, reducer-derived induced-graph ordering,
+and a bounded typed page API. Versioned cursors bind the conversation-key digest to a stable fact,
+page scans read at most `limit + 1` indexed order rows, and targeted hydration reads only the selected
+message or durable-activity projections. Contracts cover late parents, unrelated-row protection,
+malformed and cross-key cursors, equal-time mixed pagination, repair/reopen equality, and a 1,000-entry
+fixture whose later pages use covering indexes without loading or sorting complete history.
+
+Architecture, behavior, causal, protocol, and dependency verifiers; locked workspace format/check/
+build/tests/doctests/Clippy; all four required targets; both 512-run protocol fuzz smokes; whitespace
+checks; and the unchanged Go vet/build/fresh test suite pass. The timing-sensitive Go node test also
+passed 10 isolated repetitions after one transient full-suite failure.
+
+### Original plan entry
+
+- **[storage/high] Add incremental reduction, repair equality, and scalable conversation queries** —
+  Implement deterministic dependency indexes and affected-closure selection, then patch projections
+  incrementally while continuously comparing with fresh batch rebuilds. Build a conversation-local
+  order index or stable cursor derived from the reducer comparator so page concatenation equals
+  canonical order and later pages do not load or sort complete history. Add generated late-parent,
+  high-fanout authority, duplicate-ingest, equal-time mixed-entry, reopen/repair, and large multi-page
+  work tests plus performance budgets. Complete this work when incremental, batch, and repair views
+  are identical and query work meets the documented scaling gate.
+
+  **Implementation plan**
+
+  - Extend complete reducer reports with deterministic aggregate membership and derive one
+    conservative affected-dependency graph from causal edges, shared aggregate membership,
+    projection support, and conflict participants. Calculate growth from the union of the persisted
+    and fresh graphs so disappearing conflicts and supports remain selectable; expose a pure
+    fixed-point affected-closure operation and persist the exact graph as rebuildable state.
+  - Keep `reduce_complete` as the executable policy oracle instead of creating a second partial
+    reducer with duplicated domain rules. For each new fact, build the fresh report, verify that
+    every changed decision and projection is covered by the selected closure, stage its normalized
+    relational representation in an isolated in-memory database, and apply only added, removed, or
+    changed rows to the live transaction in foreign-key-safe order. Read the complete live result
+    back and require exact batch equality before revision, outbox, lineage, or receipt writes.
+  - Advance the unreleased schema for affected dependencies and conversation-local order. Derive
+    closed thread or provider-session conversation keys relative to the explicit local authority
+    policy, select only reducer-projected message and activity winners, and run the one canonical
+    Kahn comparator independently for each key. Repair recreates the same rows from the same batch
+    report, while incremental row diffing changes only affected conversations.
+  - Add a bounded typed conversation-entry query with a closed message/activity union, a 200-item
+    maximum, and a strict versioned cursor binding the conversation-key digest to the last fact ID.
+    Resolve the cursor through the indexed conversation-local position, select at most `limit + 1`
+    rows, and hydrate only those exact typed projection rows; never load a complete snapshot or sort
+    history on a page request.
+  - Add differential contracts for every incremental prefix, late parents and descendants,
+    high-fanout authority changes, aggregate/global conflicts, exact duplicates, repair, response
+    loss, and reopen. Protect unrelated rows with aborting SQLite triggers, compare all normalized
+    reports and conversation-order rows, and exercise equal-time mixed entries across many pages.
+  - Specify explicit work budgets: page limits are `1..=200`, every page reads no more than
+    `limit + 1` order rows and hydrates no more than `limit` projections, cursor lookup and page
+    selection use covering indexes, and a later page over at least 1,000 entries performs no
+    canonical-event scan, complete projection load, or in-memory ordering. Run every Rust and
+    unchanged Go repository gate.
+
+  **Risks and mitigations**
+
+  - A narrowly modeled affected graph could miss a retraction caused by authority or global
+    constraints; include old and new causal/aggregate/support/conflict edges, fail closed when any
+    normalized change lies outside the closure, and compare the persisted result with batch on
+    every commit.
+  - Per-table patch code would duplicate nearly one hundred strict relational codecs; materialize
+    expected rows through the existing insertion codecs and use one schema-introspected typed row
+    differ that rejects unsupported SQLite value classes and updates only exact differences.
+  - Dynamic row patching can violate foreign keys transiently; delete removed rows child-first,
+    insert additions parent-first, defer checks within the owning transaction, and verify all
+    package digests plus typed snapshots before commit.
+  - Filtering one global presentation order is not generally equal to ordering an induced
+    conversation graph; derive each conversation order directly with the reducer comparator.
+  - Offset or position-only cursors can silently cross conversations or drift after a late insert;
+    bind cursors to a key digest and stable fact identity, resolve the current local position, and
+    reject malformed, stale, or cross-conversation anchors.
+  - Hydrating through the existing full-snapshot loader would defeat pagination; add targeted strict
+    projection loaders and prove bounded row work separately from full repair validation.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** closure selection, row-local patching, equality, cursor safety, query work, reopen,
+     repair, and all repository gates.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so reducer indexes, storage patching, queries, tests, specifications,
+     and bookkeeping form one reviewable change.

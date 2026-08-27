@@ -2,9 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use hq_domain::{FactId, InstallationId, MailboxId};
-use hq_reducer::AuthorityPolicy;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use hq_domain::{
+    FactId, InstallationId, MailboxAddress, MailboxId, ProviderId, ProviderSessionId, ThreadId,
+};
+use hq_reducer::{AuthorityPolicy, ConversationKey};
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, params, params_from_iter,
+    types::{Value, ValueRef},
+};
+use sha2::{Digest, Sha256};
 
 use crate::{
     AgentProjectionSnapshot, AuthorityProjectionSnapshot, ConversationProjectionSnapshot,
@@ -131,32 +137,257 @@ fn replace_at(
     Ok(persisted)
 }
 
-pub(crate) fn replace_in_transaction(
+pub(crate) fn patch_in_transaction(
     transaction: &Transaction<'_>,
     expected: &ReductionIndexSnapshot,
     expected_authority: &AuthorityProjectionSnapshot,
     expected_conversation: &ConversationProjectionSnapshot,
     expected_agent: &AgentProjectionSnapshot,
     expected_project: &ProjectProjectionSnapshot,
-) -> Result<
-    (
-        ReductionIndexSnapshot,
-        AuthorityProjectionSnapshot,
-        ConversationProjectionSnapshot,
-        AgentProjectionSnapshot,
-        ProjectProjectionSnapshot,
-    ),
-    StoreError,
-> {
-    replace_transaction_at(
-        transaction,
+) -> Result<(), StoreError> {
+    let mut staged = Connection::open_in_memory().map_err(database)?;
+    staged.execute_batch(super::SCHEMA).map_err(database)?;
+    for table in ["canonical_facts", "fact_parents", "fact_authorities"] {
+        copy_table(transaction, &staged, table)?;
+    }
+    replace(
+        &mut staged,
         expected,
         expected_authority,
         expected_conversation,
         expected_agent,
         expected_project,
-        RepairFailpoint::Never,
-    )
+    )?;
+    patch_rebuildable_tables(transaction, &staged)?;
+    let persisted = load_from_connection(transaction)?;
+    if persisted != *expected
+        || super::authority::load(transaction)? != *expected_authority
+        || super::conversation::load(transaction)? != *expected_conversation
+        || super::agent::load(transaction)? != *expected_agent
+        || super::project::load(transaction)? != *expected_project
+    {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Cell {
+    Null,
+    Integer(i64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl Cell {
+    fn from_ref(value: ValueRef<'_>) -> Result<Self, StoreError> {
+        match value {
+            ValueRef::Null => Ok(Self::Null),
+            ValueRef::Integer(value) => Ok(Self::Integer(value)),
+            ValueRef::Text(value) => String::from_utf8(value.to_vec())
+                .map(Self::Text)
+                .map_err(|_| corrupt()),
+            ValueRef::Blob(value) => Ok(Self::Blob(value.to_vec())),
+            ValueRef::Real(_) => Err(corrupt()),
+        }
+    }
+
+    fn value(&self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Integer(value) => Value::Integer(*value),
+            Self::Text(value) => Value::Text(value.clone()),
+            Self::Blob(value) => Value::Blob(value.clone()),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TableData {
+    name: &'static str,
+    columns: Vec<String>,
+    primary_key: Vec<usize>,
+    rows: BTreeMap<Vec<Cell>, Vec<Cell>>,
+}
+
+struct TableDiff {
+    table: TableData,
+    removed: Vec<Vec<Cell>>,
+    added: Vec<Vec<Cell>>,
+    changed: Vec<Vec<Cell>>,
+}
+
+fn patch_rebuildable_tables(
+    transaction: &Transaction<'_>,
+    expected: &Connection,
+) -> Result<(), StoreError> {
+    let tables = &super::SCHEMA_TABLES[4..super::SCHEMA_TABLES.len() - 4];
+    let mut diffs = Vec::with_capacity(tables.len());
+    for table in tables {
+        let current = read_table(transaction, table)?;
+        let wanted = read_table(expected, table)?;
+        if current.columns != wanted.columns || current.primary_key != wanted.primary_key {
+            return Err(corrupt());
+        }
+        let removed = current
+            .rows
+            .keys()
+            .filter(|key| !wanted.rows.contains_key(*key))
+            .cloned()
+            .collect();
+        let added = wanted
+            .rows
+            .iter()
+            .filter(|(key, _)| !current.rows.contains_key(*key))
+            .map(|(_, row)| row.clone())
+            .collect();
+        let changed = wanted
+            .rows
+            .iter()
+            .filter(|(key, row)| current.rows.get(*key).is_some_and(|value| value != *row))
+            .map(|(_, row)| row.clone())
+            .collect();
+        diffs.push(TableDiff {
+            table: wanted,
+            removed,
+            added,
+            changed,
+        });
+    }
+    transaction
+        .execute_batch("PRAGMA defer_foreign_keys = ON;")
+        .map_err(database)?;
+    for diff in diffs.iter().rev() {
+        for key in &diff.removed {
+            delete_row(transaction, &diff.table, key)?;
+        }
+        for row in &diff.changed {
+            let key = diff
+                .table
+                .primary_key
+                .iter()
+                .map(|index| row[*index].clone())
+                .collect::<Vec<_>>();
+            delete_row(transaction, &diff.table, &key)?;
+        }
+    }
+    for diff in &diffs {
+        for row in &diff.added {
+            insert_row(transaction, &diff.table, row)?;
+        }
+        for row in &diff.changed {
+            insert_row(transaction, &diff.table, row)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_table(
+    source: &Connection,
+    target: &Connection,
+    table: &'static str,
+) -> Result<(), StoreError> {
+    let data = read_table(source, table)?;
+    for row in data.rows.values() {
+        insert_row(target, &data, row)?;
+    }
+    Ok(())
+}
+
+fn read_table(connection: &Connection, name: &'static str) -> Result<TableData, StoreError> {
+    let mut info = connection
+        .prepare(&format!("PRAGMA table_info({name})"))
+        .map_err(database)?;
+    let metadata = info
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })
+        .map_err(database)?
+        .map(|row| row.map_err(database))
+        .collect::<Result<Vec<_>, _>>()?;
+    if metadata.is_empty() {
+        return Err(corrupt());
+    }
+    let columns = metadata
+        .iter()
+        .map(|(column, _)| column.clone())
+        .collect::<Vec<_>>();
+    let mut keyed = metadata
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, ordinal))| *ordinal > 0)
+        .map(|(index, (_, ordinal))| (*ordinal, index))
+        .collect::<Vec<_>>();
+    keyed.sort_unstable();
+    let primary_key = keyed
+        .into_iter()
+        .map(|(_, index)| index)
+        .collect::<Vec<_>>();
+    if primary_key.is_empty() {
+        return Err(corrupt());
+    }
+    let sql = format!("SELECT {} FROM {name}", columns.join(", "));
+    let mut statement = connection.prepare(&sql).map_err(database)?;
+    let column_count = columns.len();
+    let mut rows = statement.query([]).map_err(database)?;
+    let mut by_key = BTreeMap::new();
+    while let Some(row) = rows.next().map_err(database)? {
+        let row = (0..column_count)
+            .map(|index| {
+                row.get_ref(index)
+                    .map_err(database)
+                    .and_then(Cell::from_ref)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let key = primary_key
+            .iter()
+            .map(|index| row[*index].clone())
+            .collect::<Vec<_>>();
+        if by_key.insert(key, row).is_some() {
+            return Err(corrupt());
+        }
+    }
+    Ok(TableData {
+        name,
+        columns,
+        primary_key,
+        rows: by_key,
+    })
+}
+
+fn insert_row(connection: &Connection, table: &TableData, row: &[Cell]) -> Result<(), StoreError> {
+    let placeholders = std::iter::repeat_n("?", table.columns.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "INSERT INTO {}({}) VALUES ({placeholders})",
+        table.name,
+        table.columns.join(", ")
+    );
+    let values = row.iter().map(Cell::value).collect::<Vec<_>>();
+    connection
+        .execute(&sql, params_from_iter(values))
+        .map_err(database)?;
+    Ok(())
+}
+
+fn delete_row(connection: &Connection, table: &TableData, key: &[Cell]) -> Result<(), StoreError> {
+    let predicate = table
+        .primary_key
+        .iter()
+        .map(|index| format!("{} = ?", table.columns[*index]))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let sql = format!("DELETE FROM {} WHERE {predicate}", table.name);
+    let values = key.iter().map(Cell::value).collect::<Vec<_>>();
+    if connection
+        .execute(&sql, params_from_iter(values))
+        .map_err(database)?
+        != 1
+    {
+        return Err(corrupt());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -264,6 +495,8 @@ fn clear_rebuildable(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     transaction
         .execute_batch(
             "DELETE FROM reduction_state;
+             DELETE FROM reduction_conversation_order;
+             DELETE FROM reduction_conversation_keys;
              DELETE FROM reduction_conflict_participants;
              DELETE FROM reduction_conflicts;
              DELETE FROM reduction_presentation_order;
@@ -273,6 +506,7 @@ fn clear_rebuildable(transaction: &Transaction<'_>) -> Result<(), StoreError> {
              DELETE FROM reduction_unusable_dependencies;
              DELETE FROM reduction_missing_dependencies;
              DELETE FROM reduction_decisions;
+             DELETE FROM reduction_affected_dependencies;
              DELETE FROM reduction_reverse_dependencies;
              DELETE FROM reduction_vertices;",
         )
@@ -301,6 +535,17 @@ fn insert_index(
                     "INSERT INTO reduction_reverse_dependencies(parent_id, child_id) \
                      VALUES (?1, ?2)",
                     params![parent.as_bytes().as_slice(), child.as_bytes().as_slice()],
+                )
+                .map_err(database)?;
+        }
+    }
+    for (source, affected) in &index.affected_dependencies {
+        for target in affected {
+            transaction
+                .execute(
+                    "INSERT INTO reduction_affected_dependencies(source_id, affected_id) \
+                     VALUES (?1, ?2)",
+                    params![source.as_bytes().as_slice(), target.as_bytes().as_slice()],
                 )
                 .map_err(database)?;
         }
@@ -392,6 +637,7 @@ fn insert_index(
         &index.presentation_order,
     )?;
     fail_at(failpoint, RepairFailpoint::AfterPresentationOrder)?;
+    insert_conversation_orders(transaction, &index.conversation_orders)?;
     for (domain, conflicts) in &index.conflicts {
         for (ordinal, conflict) in conflicts.iter().enumerate() {
             let ordinal = i64::try_from(ordinal).map_err(|_| corrupt())?;
@@ -430,17 +676,18 @@ fn insert_index(
     transaction
         .execute(
             "INSERT INTO reduction_state( \
-                 singleton, policy_installation, policy_human_mailbox, fact_count, vertex_count, reverse_count, \
+                 singleton, policy_installation, policy_human_mailbox, fact_count, vertex_count, reverse_count, affected_count, \
                  decision_count, missing_count, unusable_count, failed_authority_count, \
                  decision_participant_count, dependency_order_count, presentation_order_count, \
-                 conflict_count, conflict_participant_count, index_digest \
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 conversation_key_count, conversation_order_count, conflict_count, conflict_participant_count, index_digest \
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 index.policy.local_installation().as_bytes().as_slice(),
                 index.policy.local_human_mailbox().as_bytes().as_slice(),
                 counts.fact_count,
                 counts.vertex_count,
                 counts.reverse_count,
+                counts.affected_count,
                 counts.decision_count,
                 counts.missing_count,
                 counts.unusable_count,
@@ -448,6 +695,8 @@ fn insert_index(
                 counts.decision_participant_count,
                 counts.dependency_order_count,
                 counts.presentation_order_count,
+                counts.conversation_key_count,
+                counts.conversation_order_count,
                 counts.conflict_count,
                 counts.conflict_participant_count,
                 index.digest().as_slice()
@@ -497,6 +746,151 @@ fn insert_orders(
     Ok(())
 }
 
+fn insert_conversation_orders(
+    transaction: &Transaction<'_>,
+    orders: &BTreeMap<ConversationKey, Vec<FactId>>,
+) -> Result<(), StoreError> {
+    for (key, facts) in orders {
+        let parts = conversation_key_parts(key);
+        let digest = conversation_key_digest(key);
+        transaction
+            .execute(
+                "INSERT INTO reduction_conversation_keys( \
+                     key_digest, key_kind, counterparty_installation, counterparty_mailbox, \
+                     thread_id, provider, session \
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    digest.as_slice(),
+                    parts.kind,
+                    parts.counterparty.installation_id().as_bytes().as_slice(),
+                    parts.counterparty.mailbox_id().as_bytes().as_slice(),
+                    parts.thread.as_bytes().as_slice(),
+                    parts.provider,
+                    parts.session
+                ],
+            )
+            .map_err(database)?;
+        for (position, fact_id) in facts.iter().enumerate() {
+            let family: i64 = transaction
+                .query_row(
+                    "SELECT family FROM canonical_facts WHERE fact_id = ?1",
+                    [fact_id.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(database)?
+                .ok_or_else(corrupt)?;
+            let entry_kind = match family {
+                15..=17 | 45 => 1,
+                22 => 2,
+                _ => return Err(corrupt()),
+            };
+            transaction
+                .execute(
+                    "INSERT INTO reduction_conversation_order( \
+                         key_digest, position, fact_id, entry_kind \
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        digest.as_slice(),
+                        i64::try_from(position).map_err(|_| corrupt())?,
+                        fact_id.as_bytes().as_slice(),
+                        entry_kind
+                    ],
+                )
+                .map_err(database)?;
+        }
+    }
+    Ok(())
+}
+
+struct ConversationKeyParts<'a> {
+    kind: i64,
+    counterparty: MailboxAddress,
+    thread: ThreadId,
+    provider: &'a str,
+    session: &'a str,
+}
+
+fn conversation_key_parts(key: &ConversationKey) -> ConversationKeyParts<'_> {
+    match key {
+        ConversationKey::Thread {
+            counterparty,
+            thread,
+        } => ConversationKeyParts {
+            kind: 1,
+            counterparty: *counterparty,
+            thread: *thread,
+            provider: "",
+            session: "",
+        },
+        ConversationKey::ProviderSession {
+            counterparty,
+            provider,
+            session,
+        } => ConversationKeyParts {
+            kind: 2,
+            counterparty: *counterparty,
+            thread: ThreadId::from_bytes([0; 32]),
+            provider: provider.as_str(),
+            session: session.as_str(),
+        },
+    }
+}
+
+pub(crate) fn conversation_key_digest(key: &ConversationKey) -> [u8; 32] {
+    let parts = conversation_key_parts(key);
+    let mut digest = Sha256::new();
+    digest.update(b"hq-conversation-key-v1\0");
+    digest.update(parts.kind.to_be_bytes());
+    digest.update(parts.counterparty.installation_id().as_bytes());
+    digest.update(parts.counterparty.mailbox_id().as_bytes());
+    digest.update(parts.thread.as_bytes());
+    digest.update(
+        u64::try_from(parts.provider.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(parts.provider.as_bytes());
+    digest.update(
+        u64::try_from(parts.session.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(parts.session.as_bytes());
+    digest.finalize().into()
+}
+
+pub(crate) fn conversation_key_is_persisted(
+    connection: &Connection,
+    key: &ConversationKey,
+) -> Result<bool, StoreError> {
+    let digest = conversation_key_digest(key);
+    let parts = conversation_key_parts(key);
+    let (digest_count, exact_count): (i64, i64) = connection
+        .query_row(
+            "SELECT count(*), sum(CASE WHEN key_kind = ?2 \
+               AND counterparty_installation = ?3 AND counterparty_mailbox = ?4 \
+               AND thread_id = ?5 AND provider = ?6 AND session = ?7 THEN 1 ELSE 0 END) \
+             FROM reduction_conversation_keys WHERE key_digest = ?1",
+            params![
+                digest.as_slice(),
+                parts.kind,
+                parts.counterparty.installation_id().as_bytes().as_slice(),
+                parts.counterparty.mailbox_id().as_bytes().as_slice(),
+                parts.thread.as_bytes().as_slice(),
+                parts.provider,
+                parts.session
+            ],
+            |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+        )
+        .map_err(database)?;
+    match (digest_count, exact_count) {
+        (0, 0) => Ok(false),
+        (1, 1) => Ok(true),
+        _ => Err(corrupt()),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn load_from_connection(connection: &Connection) -> Result<ReductionIndexSnapshot, StoreError> {
     let Some(state) = load_state(connection)? else {
@@ -516,10 +910,12 @@ fn load_from_connection(connection: &Connection) -> Result<ReductionIndexSnapsho
             MailboxId::from_bytes(state.policy_human_mailbox),
         ),
         reverse_dependencies: load_reverse_dependencies(connection)?,
+        affected_dependencies: load_affected_dependencies(connection)?,
         decisions: load_decisions(connection)?,
         dependency_order: load_orders(connection, "reduction_dependency_order")?,
         presentation_order: load_orders(connection, "reduction_presentation_order")?,
         conflicts: load_conflicts(connection)?,
+        conversation_orders: load_conversation_orders(connection)?,
     };
     attach_missing(connection, &mut index)?;
     attach_unusable(connection, &mut index)?;
@@ -530,6 +926,39 @@ fn load_from_connection(connection: &Connection) -> Result<ReductionIndexSnapsho
         return Err(corrupt());
     }
     Ok(index)
+}
+
+fn load_affected_dependencies(
+    connection: &Connection,
+) -> Result<BTreeMap<FactId, BTreeSet<FactId>>, StoreError> {
+    let mut affected = load_reverse_dependencies(connection)?
+        .into_keys()
+        .map(|fact_id| (fact_id, BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut statement = connection
+        .prepare(
+            "SELECT source_id, affected_id FROM reduction_affected_dependencies \
+             ORDER BY source_id, affected_id",
+        )
+        .map_err(database)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(database)?;
+    for row in rows {
+        let (source, target) = row.map_err(database)?;
+        let source = FactId::from_bytes(fixed(source)?);
+        let target = FactId::from_bytes(fixed(target)?);
+        if !affected.contains_key(&target) {
+            return Err(corrupt());
+        }
+        affected
+            .get_mut(&source)
+            .ok_or_else(corrupt)?
+            .insert(target);
+    }
+    Ok(affected)
 }
 
 fn load_reverse_dependencies(
@@ -805,6 +1234,94 @@ fn load_orders(
     Ok(orders)
 }
 
+fn load_conversation_orders(
+    connection: &Connection,
+) -> Result<BTreeMap<ConversationKey, Vec<FactId>>, StoreError> {
+    type KeyRow = (Vec<u8>, i64, Vec<u8>, Vec<u8>, Vec<u8>, String, String);
+    let mut by_digest = BTreeMap::<[u8; 32], ConversationKey>::new();
+    let mut statement = connection
+        .prepare(
+            "SELECT key_digest, key_kind, counterparty_installation, counterparty_mailbox, \
+                    thread_id, provider, session \
+             FROM reduction_conversation_keys ORDER BY key_digest",
+        )
+        .map_err(database)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        })
+        .map_err(database)?;
+    for row in rows {
+        let (digest, kind, installation, mailbox, thread, provider, session): KeyRow =
+            row.map_err(database)?;
+        let digest = fixed(digest)?;
+        let counterparty = MailboxAddress::new(
+            InstallationId::from_bytes(fixed(installation)?),
+            MailboxId::from_bytes(fixed(mailbox)?),
+        );
+        let thread = fixed(thread)?;
+        let key = match kind {
+            1 if provider.is_empty() && session.is_empty() => ConversationKey::Thread {
+                counterparty,
+                thread: ThreadId::from_bytes(thread),
+            },
+            2 if thread == [0; 32] && !provider.is_empty() && !session.is_empty() => {
+                ConversationKey::ProviderSession {
+                    counterparty,
+                    provider: ProviderId::new(provider).map_err(|_| corrupt())?,
+                    session: ProviderSessionId::new(session).map_err(|_| corrupt())?,
+                }
+            }
+            _ => return Err(corrupt()),
+        };
+        if digest != conversation_key_digest(&key) || by_digest.insert(digest, key).is_some() {
+            return Err(corrupt());
+        }
+    }
+    drop(statement);
+    let mut orders = by_digest
+        .values()
+        .cloned()
+        .map(|key| (key, Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = connection
+        .prepare(
+            "SELECT key_digest, position, fact_id, entry_kind \
+             FROM reduction_conversation_order ORDER BY key_digest, position",
+        )
+        .map_err(database)?;
+    let entries = rows
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(database)?;
+    for row in entries {
+        let (digest, position, fact_id, entry_kind) = row.map_err(database)?;
+        let key = by_digest.get(&fixed(digest)?).ok_or_else(corrupt)?;
+        let order = orders.get_mut(key).ok_or_else(corrupt)?;
+        if position != i64::try_from(order.len()).map_err(|_| corrupt())?
+            || !matches!(entry_kind, 1 | 2)
+        {
+            return Err(corrupt());
+        }
+        order.push(FactId::from_bytes(fixed(fact_id)?));
+    }
+    Ok(orders)
+}
+
 fn load_conflicts(
     connection: &Connection,
 ) -> Result<BTreeMap<ReductionDomain, Vec<IndexedConflict>>, StoreError> {
@@ -884,6 +1401,7 @@ struct Counts {
     fact_count: i64,
     vertex_count: i64,
     reverse_count: i64,
+    affected_count: i64,
     decision_count: i64,
     missing_count: i64,
     unusable_count: i64,
@@ -891,6 +1409,8 @@ struct Counts {
     decision_participant_count: i64,
     dependency_order_count: i64,
     presentation_order_count: i64,
+    conversation_key_count: i64,
+    conversation_order_count: i64,
     conflict_count: i64,
     conflict_participant_count: i64,
 }
@@ -903,6 +1423,7 @@ impl Counts {
                     (SELECT count(*) FROM reduction_decisions WHERE domain = 1), \
                     (SELECT count(*) FROM reduction_vertices), \
                     (SELECT count(*) FROM reduction_reverse_dependencies), \
+                    (SELECT count(*) FROM reduction_affected_dependencies), \
                     (SELECT count(*) FROM reduction_decisions), \
                     (SELECT count(*) FROM reduction_missing_dependencies), \
                     (SELECT count(*) FROM reduction_unusable_dependencies), \
@@ -910,6 +1431,8 @@ impl Counts {
                     (SELECT count(*) FROM reduction_decision_participants), \
                     (SELECT count(*) FROM reduction_dependency_order), \
                     (SELECT count(*) FROM reduction_presentation_order), \
+                    (SELECT count(*) FROM reduction_conversation_keys), \
+                    (SELECT count(*) FROM reduction_conversation_order), \
                     (SELECT count(*) FROM reduction_conflicts), \
                     (SELECT count(*) FROM reduction_conflict_participants)",
                 [],
@@ -918,15 +1441,18 @@ impl Counts {
                         fact_count: row.get(0)?,
                         vertex_count: row.get(1)?,
                         reverse_count: row.get(2)?,
-                        decision_count: row.get(3)?,
-                        missing_count: row.get(4)?,
-                        unusable_count: row.get(5)?,
-                        failed_authority_count: row.get(6)?,
-                        decision_participant_count: row.get(7)?,
-                        dependency_order_count: row.get(8)?,
-                        presentation_order_count: row.get(9)?,
-                        conflict_count: row.get(10)?,
-                        conflict_participant_count: row.get(11)?,
+                        affected_count: row.get(3)?,
+                        decision_count: row.get(4)?,
+                        missing_count: row.get(5)?,
+                        unusable_count: row.get(6)?,
+                        failed_authority_count: row.get(7)?,
+                        decision_participant_count: row.get(8)?,
+                        dependency_order_count: row.get(9)?,
+                        presentation_order_count: row.get(10)?,
+                        conversation_key_count: row.get(11)?,
+                        conversation_order_count: row.get(12)?,
+                        conflict_count: row.get(13)?,
+                        conflict_participant_count: row.get(14)?,
                     })
                 },
             )
@@ -966,6 +1492,7 @@ impl Counts {
             fact_count: i64::try_from(authority_facts.len()).map_err(|_| corrupt())?,
             vertex_count: i64::try_from(index.reverse_dependencies.len()).map_err(|_| corrupt())?,
             reverse_count: sum(index.reverse_dependencies.values().map(BTreeSet::len))?,
+            affected_count: sum(index.affected_dependencies.values().map(BTreeSet::len))?,
             decision_count: i64::try_from(index.decisions.len()).map_err(|_| corrupt())?,
             missing_count: sum(index
                 .decisions
@@ -985,6 +1512,9 @@ impl Counts {
                 .map(|decision| decision.conflict_participants.len()))?,
             dependency_order_count: sum(index.dependency_order.values().map(Vec::len))?,
             presentation_order_count: sum(index.presentation_order.values().map(Vec::len))?,
+            conversation_key_count: i64::try_from(index.conversation_orders.len())
+                .map_err(|_| corrupt())?,
+            conversation_order_count: sum(index.conversation_orders.values().map(Vec::len))?,
             conflict_count: sum(index.conflicts.values().map(Vec::len))?,
             conflict_participant_count: sum(index.conflicts.values().flat_map(|conflicts| {
                 conflicts.iter().map(|conflict| conflict.participants.len())
@@ -999,6 +1529,7 @@ impl Counts {
             self.fact_count,
             self.vertex_count,
             self.reverse_count,
+            self.affected_count,
             self.decision_count,
             self.missing_count,
             self.unusable_count,
@@ -1006,6 +1537,8 @@ impl Counts {
             self.decision_participant_count,
             self.dependency_order_count,
             self.presentation_order_count,
+            self.conversation_key_count,
+            self.conversation_order_count,
             self.conflict_count,
             self.conflict_participant_count,
         ]
@@ -1029,10 +1562,11 @@ struct State {
 fn load_state(connection: &Connection) -> Result<Option<State>, StoreError> {
     connection
         .query_row(
-            "SELECT policy_installation, policy_human_mailbox, fact_count, vertex_count, reverse_count, \
+            "SELECT policy_installation, policy_human_mailbox, fact_count, vertex_count, reverse_count, affected_count, \
                     decision_count, missing_count, unusable_count, failed_authority_count, \
                     decision_participant_count, dependency_order_count, \
-                    presentation_order_count, conflict_count, conflict_participant_count, \
+                    presentation_order_count, conversation_key_count, conversation_order_count, \
+                    conflict_count, conflict_participant_count, \
                     index_digest \
              FROM reduction_state WHERE singleton = 1",
             [],
@@ -1044,17 +1578,20 @@ fn load_state(connection: &Connection) -> Result<Option<State>, StoreError> {
                         fact_count: row.get(2)?,
                         vertex_count: row.get(3)?,
                         reverse_count: row.get(4)?,
-                        decision_count: row.get(5)?,
-                        missing_count: row.get(6)?,
-                        unusable_count: row.get(7)?,
-                        failed_authority_count: row.get(8)?,
-                        decision_participant_count: row.get(9)?,
-                        dependency_order_count: row.get(10)?,
-                        presentation_order_count: row.get(11)?,
-                        conflict_count: row.get(12)?,
-                        conflict_participant_count: row.get(13)?,
+                        affected_count: row.get(5)?,
+                        decision_count: row.get(6)?,
+                        missing_count: row.get(7)?,
+                        unusable_count: row.get(8)?,
+                        failed_authority_count: row.get(9)?,
+                        decision_participant_count: row.get(10)?,
+                        dependency_order_count: row.get(11)?,
+                        presentation_order_count: row.get(12)?,
+                        conversation_key_count: row.get(13)?,
+                        conversation_order_count: row.get(14)?,
+                        conflict_count: row.get(15)?,
+                        conflict_participant_count: row.get(16)?,
                     },
-                    row.get::<_, Vec<u8>>(14)?,
+                    row.get::<_, Vec<u8>>(17)?,
                 ))
             },
         )
@@ -1077,6 +1614,7 @@ fn rebuildable_row_count(connection: &Connection) -> Result<i64, StoreError> {
             "SELECT \
                 (SELECT count(*) FROM reduction_vertices) +
                 (SELECT count(*) FROM reduction_reverse_dependencies) +
+                (SELECT count(*) FROM reduction_affected_dependencies) +
                 (SELECT count(*) FROM reduction_decisions) +
                 (SELECT count(*) FROM reduction_missing_dependencies) +
                 (SELECT count(*) FROM reduction_unusable_dependencies) +
@@ -1084,6 +1622,8 @@ fn rebuildable_row_count(connection: &Connection) -> Result<i64, StoreError> {
                 (SELECT count(*) FROM reduction_decision_participants) +
                 (SELECT count(*) FROM reduction_dependency_order) +
                 (SELECT count(*) FROM reduction_presentation_order) +
+                (SELECT count(*) FROM reduction_conversation_keys) +
+                (SELECT count(*) FROM reduction_conversation_order) +
                 (SELECT count(*) FROM reduction_conflicts) +
                 (SELECT count(*) FROM reduction_conflict_participants)",
             [],

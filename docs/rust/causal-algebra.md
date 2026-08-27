@@ -338,14 +338,19 @@ conflicts, presentation order, and normalized observations. Performance never we
 `hq-reducer::reduce_complete` is the single pure complete-batch entry point. `FactSet` owns exact
 deduplication and absorbing identity-collision detection; `CausalGraph` owns declared parent and
 reverse-dependant indexes, iterative reachability, cycle membership, and affected-descendant
-closure. The generic `DomainReducer` interface supplies only closed domain decisions, typed
+closure. Complete reports retain aggregate membership even for unusable facts. Incremental callers
+form a conservative fixed-point graph from causal relationships, shared aggregates, projection
+support, and conflict participants, traversing the union of old and new edges so retractions remain
+visible. The generic `DomainReducer` interface supplies only closed domain decisions, typed
 aggregate membership, typed projection contributions, conflicts, and selected presentation
 entries over an immutable `ReductionContext`.
 
 The framework repeats domain classification over normalized complete-set snapshots until the
 decision map stabilizes, then derives usable frontiers, transitive usable support, conflicts, and
 presentation order. An oscillating domain implementation fails explicitly instead of exposing a
-partial or iteration-order-dependent report. `GraphOnlyReducer` is the permissive composition and
+partial or iteration-order-dependent report. Persistence applies exact relational row differences
+and continuously compares the typed result with this complete report; affected selection never
+defines a second domain policy. `GraphOnlyReducer` is the permissive composition and
 graph-law stage; it grants no product authority and derives no domain projection.
 
 ## Normalized reduction report

@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v8 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v9 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `8`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `9`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,11 +23,11 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v8 ownership | Rebuildable |
+| Class | Storage v9 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
-| Deterministic reduction indexes | Reverse dependencies, decisions, diagnostics, conflicts, and reducer order | Yes, through atomic ingest or explicit repair |
+| Deterministic reduction indexes | Reverse and affected dependencies, decisions, diagnostics, conflicts, global reducer order, and conversation-local order | Yes, through atomic ingest or explicit repair |
 | Materialized projections | Complete authority, conversation/activity, named-agent, and project frontiers, typed values, ordered children, and support | Yes, through atomic ingest or explicit repair |
 | Durable operational state | Mutation receipts, canonical commit revisions, change revision, and canonical outbox intents; delivery, cursors, and saga checkpoints remain reserved | No |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
@@ -57,7 +57,7 @@ never silently edits evidence or indexes.
 `ingest_verified(fact, policy)` is the only production entry for verified canonical facts. One
 immediate SQLite transaction checks durable canonical-commit lineage, appends exact evidence and
 causal indexes, reverifies the transaction-visible corpus, runs the complete four-domain reducer
-oracle, replaces and reads back every rebuildable package, allocates a full-width change revision,
+oracle, incrementally patches and reads back every rebuildable package, allocates a full-width change revision,
 derives authorized per-recipient outbox intents, stores fact-to-revision lineage, and commits. An
 error at any pre-commit boundary drops the transaction and leaves the preceding complete state.
 
@@ -106,11 +106,49 @@ caller-supplied `AuthorityPolicy`. Its typed `CompleteSnapshot` contains all fou
 reports; it contains neither SQL rows nor serialized reducer structs and does not mutate storage.
 
 The reports normalize into one `ReductionIndexSnapshot`. The snapshot has a closed reduction-domain
-enum and retains the global reverse-dependency graph (including missing vertices), every per-domain
+enum and retains the global reverse-dependency graph (including missing vertices), a conservative
+affected graph, every per-domain
 fact decision, missing and unusable dependencies, failed historical-authority roles, conflict
-participants, deterministic dependency order, and reducer-owned presentation order. Framework and
+participants, deterministic dependency order, reducer-owned presentation order, and exact
+conversation-local orders. Framework and
 domain reasons use explicit exhaustive integer codecs, including nested authority reasons and typed
 role parameters. Debug prose and generic domain serialization are not persistence formats.
+
+## Incremental materialization
+
+Every complete report exposes aggregate membership for projected and unusable facts. Storage
+normalizes undirected causal relationships, shared aggregate membership, transitive projection
+support, and conflict participants into `reduction_affected_dependencies`. Selection starts with
+the new fact and traverses the union of the persisted and fresh graph, so a disappearing conflict
+or support edge cannot hide a required retraction. A policy change conservatively selects every
+known vertex. Every changed decision, frontier, projection, and support set must cite an affected
+identity or the transaction fails with `ReductionFailed`.
+
+`reduce_complete` remains the one executable policy definition and the fresh result is the
+continuous equality oracle. Storage stages that expected representation in an isolated in-memory
+schema through the same strict relational codecs, compares typed SQLite values by primary key, and
+applies only exact differences to the live transaction. Removed and same-key changed rows are
+deleted child-first, while changes and additions are inserted parent-first with deferred
+foreign-key checking. No unchanged row is deleted or rewritten. The complete structural and four
+domain packages are then loaded and required to equal the batch snapshots before operational state
+can advance. This avoids a second, drifting partial implementation of domain policy while making
+ordinary materialization writes incremental.
+
+## Indexed conversation pages
+
+`ConversationKey` is a closed thread or provider-session identity with an exact installation-
+qualified counterparty mailbox. For every key, repair and ingest select only projected messages and
+selected/durable activity values, then invoke the reducer's canonical Kahn comparator on that
+induced conversation graph. `reduction_conversation_order` stores conversation-local positions and
+stable fact IDs; there is no dense global display rank and clients never recreate a lookalike sort.
+
+`load_conversation_entries(key, limit, cursor)` returns a typed `Page<ConversationEntry>` whose
+closed union contains either a complete `MessageView` or `ActivityView`. Limits are `1..=200`.
+The strict `v1` cursor binds the SHA-256 conversation-key digest to the last returned fact ID; a
+malformed, stale, or cross-conversation anchor is rejected. A later page resolves that fact's
+current local position through the unique covering index, selects at most `limit + 1` order rows,
+and hydrates at most `limit` exact projections. It never loads the canonical corpus, loads a full
+projection snapshot, or sorts conversation history.
 
 ## Explicit repair
 
@@ -127,8 +165,9 @@ repeating a successful repair is idempotent.
 `load_reduction_index()` is read-only and returns the last successful ingest or explicit repair. A
 database with no completed reduction index returns `NotRepaired`. Partial,
 out-of-vocabulary, oversized, cross-domain, noncontiguous, or digest-inconsistent rebuildable rows
-return `RebuildableStateCorrupt`. Neither case triggers implicit repair. This makes the authoritative
-batch/rebuild boundary visible to later projection and incremental-reduction packages.
+return `RebuildableStateCorrupt`. Neither case triggers implicit repair. This keeps the
+authoritative batch/rebuild boundary explicit while ordinary ingest uses the continuously checked
+incremental patch path.
 
 ## Durable operational primitives
 
@@ -247,6 +286,7 @@ rules, assignment-runnable consistency, nested provenance shapes, row bounds, ow
 and a digest over every explicit project row. Unknown, partial, orphaned, oversized, cross-key, or
 constraint-valid changed rows return `RebuildableStateCorrupt` until explicit repair.
 
-The correctness-first oracle currently clones the bounded semantic corpus for the four reducers.
-That cost is deliberate for repair equality; measured shared-report or incremental optimization is
-deferred to the scaling package.
+The correctness-first oracle still clones the bounded semantic corpus for the four reducers. That
+deliberate compute cost buys continuous equality; incremental materialization avoids clearing or
+rewriting unrelated relational state, and indexed conversation reads meet the independent query
+scaling gate.

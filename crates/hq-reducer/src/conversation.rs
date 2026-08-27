@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
     ActivityKind, ActivityStatus, Fact, FactId, FactScope, MailboxAddress, MessageContent,
-    MessageId, MessagePurpose, OperationCorrelation, PresentationKind, SemanticPayload, ShortText,
-    ThreadId,
+    MessageId, MessagePurpose, OperationCorrelation, PresentationKind, ProviderId,
+    ProviderSessionId, SemanticPayload, ShortText, ThreadId,
 };
 
 use crate::{
@@ -15,6 +15,108 @@ use crate::{
 
 /// Complete report produced by [`ConversationReducer`].
 pub type ConversationReport = DomainReductionReport<ConversationReducer>;
+
+/// Closed identity of one reducer-ordered conversation view.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ConversationKey {
+    /// One uncorrelated causal thread with an exact counterparty mailbox.
+    Thread {
+        /// Installation-qualified mailbox at the other side of the local human view.
+        counterparty: MailboxAddress,
+        /// Stable causal thread identity.
+        thread: ThreadId,
+    },
+    /// One provider-scoped durable session with an exact source/counterparty mailbox.
+    ProviderSession {
+        /// Installation-qualified mailbox associated with the session.
+        counterparty: MailboxAddress,
+        /// Provider namespace.
+        provider: ProviderId,
+        /// Provider-scoped session identity.
+        session: ProviderSessionId,
+    },
+}
+
+/// Derives exact conversation-local order with the one canonical presentation comparator.
+pub fn conversation_orders(
+    report: &ConversationReport,
+    policy: AuthorityPolicy,
+) -> Result<BTreeMap<ConversationKey, Vec<FactId>>, crate::PresentationError> {
+    let mut entries = BTreeMap::<ConversationKey, Vec<PresentationEntry>>::new();
+    for (key, projection) in report.projections() {
+        match (key, projection) {
+            (ConversationProjectionKey::Message(_), ConversationProjection::Message(message)) => {
+                let Some(conversation) = message_conversation_key(message, policy) else {
+                    continue;
+                };
+                if let Some(fact) = report.facts().get(message.fact_id)
+                    && let Some(entry) = presentation_entry(fact)
+                {
+                    entries.entry(conversation).or_default().push(entry);
+                }
+            }
+            (
+                ConversationProjectionKey::Activity(_)
+                | ConversationProjectionKey::ActivityRecord(_),
+                ConversationProjection::Activity(activity),
+            ) => {
+                let Some(fact) = report.facts().get(activity.fact_id) else {
+                    continue;
+                };
+                let SemanticPayload::HarnessActivityRecorded {
+                    source,
+                    correlation,
+                    ..
+                } = fact.payload()
+                else {
+                    continue;
+                };
+                if let Some(entry) = presentation_entry(fact) {
+                    entries
+                        .entry(ConversationKey::ProviderSession {
+                            counterparty: *source,
+                            provider: correlation.provider().clone(),
+                            session: correlation.session().clone(),
+                        })
+                        .or_default()
+                        .push(entry);
+                }
+            }
+            _ => {}
+        }
+    }
+    entries
+        .into_iter()
+        .map(|(key, selected)| {
+            canonical_presentation_order(report.graph(), selected).map(|order| (key, order))
+        })
+        .collect()
+}
+
+fn message_conversation_key(
+    message: &MessageView,
+    policy: AuthorityPolicy,
+) -> Option<ConversationKey> {
+    let local = MailboxAddress::new(policy.local_installation(), policy.local_human_mailbox());
+    let counterparty = if message.content.sender == local {
+        message.content.recipient?
+    } else if message.content.recipient == Some(local) || message.content.recipient.is_none() {
+        message.content.sender
+    } else {
+        return None;
+    };
+    Some(match &message.content.correlation {
+        Some(correlation) => ConversationKey::ProviderSession {
+            counterparty,
+            provider: correlation.provider().clone(),
+            session: correlation.session().clone(),
+        },
+        None => ConversationKey::Thread {
+            counterparty,
+            thread: message.thread_id,
+        },
+    })
+}
 
 /// Addressed content visible for diagnosis while causal history is incomplete.
 #[derive(Clone, Debug, Eq, PartialEq)]

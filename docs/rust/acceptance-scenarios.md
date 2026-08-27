@@ -191,6 +191,18 @@ Shrunk counterexamples must print the semantic fact list, parent/authority roles
 expected versus actual normalized report, and the first differing path. No property relies on
 sleeps, ambient clocks/randomness, public relays, installed providers, or Go output.
 
+## Storage query work gates
+
+- Conversation page limits are exactly `1..=200`; storage fetches no more than `limit + 1` order
+  rows and hydrates no more than `limit` typed projection values.
+- Cursor anchor lookup and later-page selection use the primary/unique conversation-local covering
+  indexes. A page performs no canonical-event scan, complete projection load, or in-memory sort.
+- `REG-INDEXED-PAGINATION` uses at least 1,000 equal-time mixed message/activity entries, walks the
+  entire result with non-dividing page sizes, compares concatenation to reducer order, and inspects
+  the SQLite query plan for indexed range selection.
+- Incremental write tests protect unrelated projection rows with aborting update/delete triggers;
+  a semantically unrelated append must commit without firing them, then equal batch and repair.
+
 ## Scenario maintenance rule
 
 Every new semantic catalog row adds at least one valid scenario and one missing-parent,

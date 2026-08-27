@@ -6,9 +6,9 @@ use hq_domain::{AuthorityRole, FactId};
 use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::{
     AgentReason, AgentReducer, AgentReport, AuthorityPolicy, AuthorityReason, AuthorityReducer,
-    AuthorityReport, ConflictReason, ConversationReason, ConversationReducer, ConversationReport,
-    DecisionReason, DecisionStatus, FactDecision, ProjectReason, ProjectReducer, ProjectReport,
-    ReductionReport, reduce_complete,
+    AuthorityReport, ConflictReason, ConversationKey, ConversationReason, ConversationReducer,
+    ConversationReport, DecisionReason, DecisionStatus, FactDecision, ProjectReason,
+    ProjectReducer, ProjectReport, ReductionReport, conversation_orders, reduce_complete,
 };
 use sha2::{Digest, Sha256};
 
@@ -124,10 +124,12 @@ impl IndexedConflict {
 pub struct ReductionIndexSnapshot {
     pub(crate) policy: AuthorityPolicy,
     pub(crate) reverse_dependencies: BTreeMap<FactId, BTreeSet<FactId>>,
+    pub(crate) affected_dependencies: BTreeMap<FactId, BTreeSet<FactId>>,
     pub(crate) decisions: BTreeMap<(ReductionDomain, FactId), IndexedDecision>,
     pub(crate) dependency_order: BTreeMap<ReductionDomain, Vec<FactId>>,
     pub(crate) presentation_order: BTreeMap<ReductionDomain, Vec<FactId>>,
     pub(crate) conflicts: BTreeMap<ReductionDomain, Vec<IndexedConflict>>,
+    pub(crate) conversation_orders: BTreeMap<ConversationKey, Vec<FactId>>,
 }
 
 impl ReductionIndexSnapshot {
@@ -144,6 +146,34 @@ impl ReductionIndexSnapshot {
     /// Returns the complete global reverse-dependency index, including missing vertices.
     pub const fn reverse_dependencies(&self) -> &BTreeMap<FactId, BTreeSet<FactId>> {
         &self.reverse_dependencies
+    }
+
+    /// Returns conservative causal, aggregate, support, and conflict impact edges.
+    pub const fn affected_dependencies(&self) -> &BTreeMap<FactId, BTreeSet<FactId>> {
+        &self.affected_dependencies
+    }
+
+    /// Selects roots and every transitively affected identity in deterministic order.
+    pub fn affected_closure(&self, roots: impl IntoIterator<Item = FactId>) -> BTreeSet<FactId> {
+        let mut closure = BTreeSet::new();
+        let mut pending = roots.into_iter().collect::<std::collections::VecDeque<_>>();
+        while let Some(fact_id) = pending.pop_front() {
+            if closure.insert(fact_id) {
+                pending.extend(
+                    self.affected_dependencies
+                        .get(&fact_id)
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                );
+            }
+        }
+        closure
+    }
+
+    /// Returns exact reducer-derived order for every materialized conversation.
+    pub const fn conversation_orders(&self) -> &BTreeMap<ConversationKey, Vec<FactId>> {
+        &self.conversation_orders
     }
 
     /// Returns deterministic dependency order for one domain.
@@ -167,13 +197,18 @@ impl ReductionIndexSnapshot {
 
     pub(crate) fn digest(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
-        digest.update(b"hq-reduction-index-v1\0");
+        digest.update(b"hq-reduction-index-v2\0");
         digest.update(self.policy.local_installation().as_bytes());
         digest.update(self.policy.local_human_mailbox().as_bytes());
         put_map_len(&mut digest, self.reverse_dependencies.len());
         for (parent, children) in &self.reverse_dependencies {
             digest.update(parent.as_bytes());
             put_ids(&mut digest, children.iter().copied());
+        }
+        put_map_len(&mut digest, self.affected_dependencies.len());
+        for (source, affected) in &self.affected_dependencies {
+            digest.update(source.as_bytes());
+            put_ids(&mut digest, affected.iter().copied());
         }
         put_map_len(&mut digest, self.decisions.len());
         for ((domain, fact_id), decision) in &self.decisions {
@@ -213,6 +248,11 @@ impl ReductionIndexSnapshot {
                 put_ids(&mut digest, conflict.participants.iter().copied());
             }
         }
+        put_map_len(&mut digest, self.conversation_orders.len());
+        for (key, order) in &self.conversation_orders {
+            put_conversation_key(&mut digest, key);
+            put_ids(&mut digest, order.iter().copied());
+        }
         digest.finalize().into()
     }
 }
@@ -225,6 +265,7 @@ pub struct CompleteSnapshot {
     conversation: ConversationReport,
     agent: AgentReport,
     project: ProjectReport,
+    conversation_orders: BTreeMap<ConversationKey, Vec<FactId>>,
 }
 
 impl CompleteSnapshot {
@@ -291,12 +332,19 @@ pub(crate) fn build_complete_snapshot(
     let conversation = reduce_complete(semantic.clone(), &ConversationReducer::new(policy));
     let agent = reduce_complete(semantic.clone(), &AgentReducer::new(policy));
     let project = reduce_complete(semantic, &ProjectReducer::new(policy));
+    let authority = authority.map_err(reduction_error)?;
+    let conversation = conversation.map_err(reduction_error)?;
+    let agent = agent.map_err(reduction_error)?;
+    let project = project.map_err(reduction_error)?;
+    let conversation_orders = conversation_orders(&conversation, policy)
+        .map_err(|_| StoreError::new(StoreErrorClass::ReductionFailed))?;
     Ok(CompleteSnapshot {
         policy,
-        authority: authority.map_err(reduction_error)?,
-        conversation: conversation.map_err(reduction_error)?,
-        agent: agent.map_err(reduction_error)?,
-        project: project.map_err(reduction_error)?,
+        authority,
+        conversation,
+        agent,
+        project,
+        conversation_orders,
     })
 }
 
@@ -316,11 +364,21 @@ fn normalize(snapshot: &CompleteSnapshot) -> ReductionIndexSnapshot {
                 )
             })
             .collect(),
+        affected_dependencies: snapshot
+            .authority
+            .graph()
+            .vertices()
+            .iter()
+            .copied()
+            .map(|fact_id| (fact_id, BTreeSet::new()))
+            .collect(),
         decisions: BTreeMap::new(),
         dependency_order: BTreeMap::new(),
         presentation_order: BTreeMap::new(),
         conflicts: BTreeMap::new(),
+        conversation_orders: snapshot.conversation_orders.clone(),
     };
+    connect_causal_edges(&mut index, &snapshot.authority);
     normalize_report(
         &mut index,
         ReductionDomain::Authority,
@@ -354,8 +412,15 @@ fn normalize_report<A, K, V, R>(
     report: &ReductionReport<A, K, V, R>,
     map_reason: impl Fn(R) -> ReductionReason + Copy,
 ) where
+    A: Ord,
+    K: Ord,
     R: Clone,
 {
+    connect_sets(
+        &mut index.affected_dependencies,
+        report.aggregate_members().values(),
+    );
+    connect_sets(&mut index.affected_dependencies, report.support().values());
     for (fact_id, decision) in report.decisions() {
         index
             .decisions
@@ -381,6 +446,57 @@ fn normalize_report<A, K, V, R>(
             })
             .collect(),
     );
+    connect_sets(
+        &mut index.affected_dependencies,
+        report
+            .conflicts()
+            .iter()
+            .map(hq_reducer::ConflictObservation::participants),
+    );
+    connect_sets(
+        &mut index.affected_dependencies,
+        report
+            .decisions()
+            .values()
+            .map(FactDecision::conflict_participants),
+    );
+}
+
+fn connect_causal_edges<A, K, V, R>(
+    index: &mut ReductionIndexSnapshot,
+    report: &ReductionReport<A, K, V, R>,
+) {
+    for fact_id in report.graph().vertices() {
+        for child in report.graph().children(*fact_id) {
+            index
+                .affected_dependencies
+                .entry(*fact_id)
+                .or_default()
+                .insert(*child);
+            index
+                .affected_dependencies
+                .entry(*child)
+                .or_default()
+                .insert(*fact_id);
+        }
+    }
+}
+
+fn connect_sets<'a>(
+    dependencies: &mut BTreeMap<FactId, BTreeSet<FactId>>,
+    sets: impl IntoIterator<Item = &'a BTreeSet<FactId>>,
+) {
+    for members in sets {
+        for member in members {
+            let related = dependencies.entry(*member).or_default();
+            related.extend(
+                members
+                    .iter()
+                    .copied()
+                    .filter(|candidate| candidate != member),
+            );
+        }
+    }
 }
 
 fn normalize_decision<R: Clone>(
@@ -670,6 +786,33 @@ fn put_orders(digest: &mut Sha256, orders: &BTreeMap<ReductionDomain, Vec<FactId
     for (domain, facts) in orders {
         put_i64(digest, encode_domain(*domain));
         put_ids(digest, facts.iter().copied());
+    }
+}
+
+fn put_conversation_key(digest: &mut Sha256, key: &ConversationKey) {
+    match key {
+        ConversationKey::Thread {
+            counterparty,
+            thread,
+        } => {
+            put_i64(digest, 1);
+            digest.update(counterparty.installation_id().as_bytes());
+            digest.update(counterparty.mailbox_id().as_bytes());
+            digest.update(thread.as_bytes());
+        }
+        ConversationKey::ProviderSession {
+            counterparty,
+            provider,
+            session,
+        } => {
+            put_i64(digest, 2);
+            digest.update(counterparty.installation_id().as_bytes());
+            digest.update(counterparty.mailbox_id().as_bytes());
+            put_map_len(digest, provider.as_str().len());
+            digest.update(provider.as_str().as_bytes());
+            put_map_len(digest, session.as_str().len());
+            digest.update(session.as_str().as_bytes());
+        }
     }
 }
 

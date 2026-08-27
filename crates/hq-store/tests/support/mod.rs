@@ -7,7 +7,13 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use hq_protocol::{Bip340Signer, DispatchOutcome, VerifiedSemanticFact};
+use hq_domain::{
+    ActivityKind, ActivityStatus, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences,
+    ContentText, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
+    MailboxAddress, MessageContent, MessageId, MessagePurpose, OperationCorrelation, OperationId,
+    PresentationKind, ProviderId, ProviderSessionId, SemanticPayload, ShortText, Timestamp,
+};
+use hq_protocol::{Bip340Signer, CanonicalEventPlan, DispatchOutcome, VerifiedSemanticFact};
 use hq_store::Store;
 
 pub trait TestStoreExt {
@@ -217,6 +223,89 @@ pub fn verified_question(parent_id: [u8; 32]) -> VerifiedSemanticFact {
         r#"{{"p":"hq/canonical","v":1,"f":15,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":2000,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[["c","{parent}"]],"auth":[["local-installation","c","{parent}"]],"body":{{"id":"5555555555555555555555555555555555555555555555555555555555555555","sender":{{"installation":"1111111111111111111111111111111111111111111111111111111111111111","mailbox":"3333333333333333333333333333333333333333333333333333333333333333"}},"recipient":{{"installation":"1111111111111111111111111111111111111111111111111111111111111111","mailbox":"3333333333333333333333333333333333333333333333333333333333333333"}},"body":"question","purpose":"question","presentation":"message","correlation":{{"provider":"test-provider","session":"session-1","id":"7777777777777777777777777777777777777777777777777777777777777777"}},"project":null}}}}"#
     );
     signed_fact(2, content.as_bytes(), [10; 32])
+}
+
+pub fn authored_conversation_entry(index: u16, activity: bool) -> VerifiedSemanticFact {
+    authored_conversation_entry_with_retention(index, activity, false)
+}
+
+pub fn authored_durable_conversation_entry(index: u16, activity: bool) -> VerifiedSemanticFact {
+    authored_conversation_entry_with_retention(index, activity, true)
+}
+
+fn authored_conversation_entry_with_retention(
+    index: u16,
+    activity: bool,
+    durable: bool,
+) -> VerifiedSemanticFact {
+    let root = FactId::from_bytes(verified_fact().verified_event().event_id());
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new([root]).expect("one parent validates"),
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            root,
+        )],
+    )
+    .expect("local authority validates");
+    let local = MailboxAddress::new(
+        authority_policy().local_installation(),
+        authority_policy().local_human_mailbox(),
+    );
+    let correlation = OperationCorrelation::new(
+        ProviderId::new("paged-provider").expect("provider validates"),
+        ProviderSessionId::new("paged-session").expect("session validates"),
+        OperationId::from_bytes(indexed_id(0x70, index)),
+    );
+    let payload = if activity {
+        SemanticPayload::HarnessActivityRecorded {
+            source: local,
+            correlation,
+            item: durable
+                .then(|| ShortText::new(format!("item-{index:04}")).expect("item validates")),
+            kind: if durable {
+                ActivityKind::CompletedItem
+            } else {
+                ActivityKind::Progress
+            },
+            logical_key: ShortText::new(format!("progress-{index:04}")).expect("key validates"),
+            runtime: ShortText::new("runtime-1").expect("runtime validates"),
+            sequence: std::num::NonZeroU64::new(u64::from(index) + 1)
+                .expect("sequence is positive"),
+            occurred_at: Timestamp::from_unix_millis(2_000),
+            status: ActivityStatus::Running,
+            content: ContentText::new(format!("activity {index}")).expect("content validates"),
+            truncated: false,
+        }
+    } else {
+        SemanticPayload::QuestionAsked(MessageContent {
+            message_id: MessageId::from_bytes(indexed_id(0x50, index)),
+            sender: local,
+            recipient: Some(local),
+            body: ContentText::new(format!("message {index}")).expect("body validates"),
+            purpose: MessagePurpose::Question,
+            presentation: PresentationKind::Message,
+            correlation: Some(correlation),
+            project_id: None,
+        })
+    };
+    let mut auxiliary = [0_u8; 32];
+    auxiliary[0] = u8::from(activity);
+    auxiliary[30..].copy_from_slice(&index.to_be_bytes());
+    CanonicalEventPlan::new(
+        InstallationId::from_bytes([0x11; 32]),
+        Timestamp::from_unix_millis(2_000),
+        FactScope::InstallationPrivate(InstallationId::from_bytes([0x11; 32])),
+        causal,
+        payload,
+    )
+    .sign(&signer(1), auxiliary)
+    .expect("typed conversation entry signs")
+}
+
+fn indexed_id(prefix: u8, index: u16) -> [u8; 32] {
+    let mut value = [prefix; 32];
+    value[30..].copy_from_slice(&index.to_be_bytes());
+    value
 }
 
 fn hex(bytes: &[u8]) -> String {

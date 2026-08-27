@@ -18,6 +18,7 @@ use hq_reducer::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
+use crate::ConversationEntry;
 use crate::{ConversationProjectionSnapshot, StoreError, StoreErrorClass};
 
 const MAXIMUM_CONVERSATION_ROWS: i64 = 64_000_000;
@@ -149,6 +150,109 @@ pub(super) fn load(connection: &Connection) -> Result<ConversationProjectionSnap
     };
     validate_snapshot(&snapshot, state.counts)?;
     Ok(snapshot)
+}
+
+pub(super) fn load_entry(
+    connection: &Connection,
+    fact_id: FactId,
+    entry_kind: i64,
+) -> Result<ConversationEntry, StoreError> {
+    let table = match entry_kind {
+        1 => "conversation_messages",
+        2 => "conversation_activities",
+        _ => return Err(corrupt()),
+    };
+    let sql = match table {
+        "conversation_messages" => {
+            "SELECT key_digest FROM conversation_messages WHERE fact_id = ?1"
+        }
+        "conversation_activities" => {
+            "SELECT key_digest FROM conversation_activities WHERE fact_id = ?1"
+        }
+        _ => return Err(corrupt()),
+    };
+    let mut statement = connection.prepare(sql).map_err(database)?;
+    let digests = statement
+        .query_map([fact_id.as_bytes().as_slice()], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .map_err(database)?
+        .map(|row| row.map_err(database).and_then(fixed))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [digest] = digests.as_slice() else {
+        return Err(corrupt());
+    };
+    let key = load_projection_key(connection, *digest)?;
+    let projection = load_projection(connection, *digest, &key)?;
+    match (entry_kind, projection) {
+        (1, ConversationProjection::Message(message)) if message.fact_id == fact_id => {
+            Ok(ConversationEntry::Message(message))
+        }
+        (2, ConversationProjection::Activity(activity)) if activity.fact_id == fact_id => {
+            Ok(ConversationEntry::Activity(activity))
+        }
+        _ => Err(corrupt()),
+    }
+}
+
+fn load_projection_key(
+    connection: &Connection,
+    digest: [u8; 32],
+) -> Result<ConversationProjectionKey, StoreError> {
+    type Row = (
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        String,
+        String,
+        Vec<u8>,
+        i64,
+        String,
+        i64,
+        String,
+        String,
+    );
+    let row: Row = connection
+        .query_row(
+            "SELECT key_kind, key_a, key_b, provider, session, operation_id, item_present, item, \
+                    activity_kind, logical_key, runtime \
+             FROM conversation_projection_keys WHERE key_digest = ?1",
+            [digest.as_slice()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(database)?
+        .ok_or_else(corrupt)?;
+    let parts = KeyParts {
+        kind: row.0,
+        a: fixed(row.1)?,
+        b: fixed(row.2)?,
+        provider: row.3,
+        session: row.4,
+        operation: fixed(row.5)?,
+        item: decode_item_sql(row.6, row.7).map_err(database)?,
+        activity_kind: row.8,
+        logical_key: row.9,
+        runtime: row.10,
+    };
+    if key_digest(KeyTable::Projection, &parts) != digest {
+        return Err(corrupt());
+    }
+    decode_projection_key(parts)
 }
 
 #[derive(Clone, Copy)]
@@ -1724,7 +1828,7 @@ mod tests {
             ConversationProjectionKey::Message(message),
             ConversationProjectionKey::ActionGroup(correlation.clone()),
             ConversationProjectionKey::Activity(activity_key.clone()),
-            ConversationProjectionKey::ActivityRecord(id(10)),
+            ConversationProjectionKey::ActivityRecord(id(13)),
             ConversationProjectionKey::ActivityRetention(retention_key.clone()),
         ];
         let projections = BTreeMap::from([
@@ -1786,7 +1890,7 @@ mod tests {
             (
                 keys[4].clone(),
                 ConversationProjection::Activity(ActivityView {
-                    fact_id: id(10),
+                    fact_id: id(13),
                     sequence: NonZeroU64::MIN,
                     status: ActivityStatus::Succeeded,
                     content: ContentText::new("complete").expect("content validates"),
