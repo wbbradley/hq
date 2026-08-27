@@ -3,6 +3,7 @@
 mod agent;
 mod authority;
 mod conversation;
+mod project;
 mod repair;
 
 use std::{path::Path, time::Duration};
@@ -19,16 +20,16 @@ use rusqlite::{
 
 use crate::{
     AgentProjectionSnapshot, AppendOutcome, AuthorityProjectionSnapshot, CompleteSnapshot,
-    ConversationProjectionSnapshot, ReductionIndexSnapshot, RepairOutcome, StoreError,
-    StoreErrorClass,
+    ConversationProjectionSnapshot, ProjectProjectionSnapshot, ReductionIndexSnapshot,
+    RepairOutcome, StoreError, StoreErrorClass,
     paths::{prepare_database_path, validate_database_path},
     snapshot::build_complete_snapshot,
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 5;
-const SCHEMA_MARKER: &str = "hq-store-v5-agent-projections-2026-08-27";
-const SCHEMA_TABLES: [&str; 77] = [
+const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_MARKER: &str = "hq-store-v6-project-projections-2026-08-27";
+const SCHEMA_TABLES: [&str; 95] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -106,6 +107,24 @@ const SCHEMA_TABLES: [&str; 77] = [
     "agent_rename_frontiers",
     "agent_direct_sessions",
     "agent_direct_binding_facts",
+    "project_state",
+    "project_aggregate_keys",
+    "project_frontiers",
+    "project_projection_keys",
+    "project_support",
+    "project_projects",
+    "project_fork_participants",
+    "project_resources",
+    "project_active_claims",
+    "project_claim_conflicts",
+    "project_assignments",
+    "project_assignment_support",
+    "project_inputs",
+    "project_dispatches",
+    "project_outputs",
+    "project_output_facts",
+    "project_commands",
+    "project_command_support",
 ];
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
@@ -772,6 +791,190 @@ CREATE TABLE agent_direct_binding_facts (
     fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
     PRIMARY KEY (key_digest, fact_id)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_state (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    aggregate_key_count INTEGER NOT NULL CHECK(aggregate_key_count >= 0),
+    frontier_count INTEGER NOT NULL CHECK(frontier_count >= 0),
+    projection_key_count INTEGER NOT NULL CHECK(projection_key_count >= 0),
+    projection_count INTEGER NOT NULL CHECK(projection_count >= 0),
+    support_count INTEGER NOT NULL CHECK(support_count >= 0),
+    row_count INTEGER NOT NULL CHECK(row_count >= 0),
+    row_digest BLOB NOT NULL CHECK(typeof(row_digest) = 'blob' AND length(row_digest) = 32)
+) STRICT;
+
+CREATE TABLE project_aggregate_keys (
+    key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 7),
+    key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
+    key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
+    locator_scheme INTEGER NOT NULL CHECK(locator_scheme BETWEEN 0 AND 4),
+    locator_value TEXT NOT NULL CHECK(typeof(locator_value) = 'text' AND length(CAST(locator_value AS BLOB)) <= 4096)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_frontiers (
+    key_digest BLOB NOT NULL REFERENCES project_aggregate_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_projection_keys (
+    key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 5),
+    key_id BLOB NOT NULL CHECK(typeof(key_id) = 'blob' AND length(key_id) = 32)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_support (
+    key_digest BLOB NOT NULL REFERENCES project_projection_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_projects (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES project_projection_keys(key_digest),
+    root_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT CHECK(typeof(root_id) = 'blob' AND length(root_id) = 32),
+    head_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT CHECK(typeof(head_id) = 'blob' AND length(head_id) = 32),
+    home_id BLOB NOT NULL CHECK(typeof(home_id) = 'blob' AND length(home_id) = 32),
+    mailbox_installation BLOB NOT NULL CHECK(typeof(mailbox_installation) = 'blob' AND length(mailbox_installation) = 32),
+    mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
+    predecessor_present INTEGER NOT NULL CHECK(predecessor_present IN (0, 1)),
+    predecessor_id BLOB NOT NULL CHECK(typeof(predecessor_id) = 'blob' AND length(predecessor_id) = 32),
+    name TEXT NOT NULL CHECK(typeof(name) = 'text' AND length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
+    brief_present INTEGER NOT NULL CHECK(brief_present IN (0, 1)),
+    brief TEXT NOT NULL CHECK(typeof(brief) = 'text' AND length(CAST(brief AS BLOB)) <= 16384),
+    primary_present INTEGER NOT NULL CHECK(primary_present IN (0, 1)),
+    primary_id BLOB NOT NULL CHECK(typeof(primary_id) = 'blob' AND length(primary_id) = 32),
+    lifecycle INTEGER NOT NULL CHECK(lifecycle BETWEEN 1 AND 3),
+    archived INTEGER NOT NULL CHECK(archived IN (0, 1)),
+    claimable INTEGER NOT NULL CHECK(claimable IN (0, 1)),
+    assignment_present INTEGER NOT NULL CHECK(assignment_present IN (0, 1)),
+    input_sequence BLOB NOT NULL CHECK(typeof(input_sequence) = 'blob' AND length(input_sequence) = 8)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_fork_participants (
+    key_digest BLOB NOT NULL REFERENCES project_projects(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_resources (
+    key_digest BLOB NOT NULL REFERENCES project_projects(key_digest),
+    resource_id BLOB NOT NULL CHECK(typeof(resource_id) = 'blob' AND length(resource_id) = 32),
+    locator_scheme INTEGER NOT NULL CHECK(locator_scheme BETWEEN 1 AND 4),
+    locator_value TEXT NOT NULL CHECK(typeof(locator_value) = 'text' AND length(CAST(locator_value AS BLOB)) BETWEEN 1 AND 4096),
+    health INTEGER NOT NULL CHECK(health BETWEEN 1 AND 4),
+    PRIMARY KEY (key_digest, resource_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_active_claims (
+    key_digest BLOB NOT NULL REFERENCES project_projects(key_digest),
+    resource_id BLOB NOT NULL CHECK(typeof(resource_id) = 'blob' AND length(resource_id) = 32),
+    PRIMARY KEY (key_digest, resource_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_claim_conflicts (
+    key_digest BLOB NOT NULL REFERENCES project_projects(key_digest),
+    resource_id BLOB NOT NULL CHECK(typeof(resource_id) = 'blob' AND length(resource_id) = 32),
+    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
+    PRIMARY KEY (key_digest, resource_id, project_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_assignments (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES project_projects(key_digest),
+    assignment_id BLOB NOT NULL CHECK(typeof(assignment_id) = 'blob' AND length(assignment_id) = 32),
+    agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) BETWEEN 1 AND 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) BETWEEN 1 AND 256),
+    phase INTEGER NOT NULL CHECK(phase BETWEEN 1 AND 3),
+    thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
+    launch_scheme INTEGER NOT NULL CHECK(launch_scheme BETWEEN 0 AND 4),
+    launch_value TEXT NOT NULL CHECK(typeof(launch_value) = 'text' AND length(CAST(launch_value AS BLOB)) <= 4096),
+    error_code TEXT NOT NULL CHECK(typeof(error_code) = 'text' AND length(CAST(error_code AS BLOB)) <= 128),
+    cardinality_conflicted INTEGER NOT NULL CHECK(cardinality_conflicted IN (0, 1)),
+    runnable INTEGER NOT NULL CHECK(runnable IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_assignment_support (
+    key_digest BLOB NOT NULL REFERENCES project_assignments(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_inputs (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES project_projection_keys(key_digest),
+    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
+    message_id BLOB NOT NULL CHECK(typeof(message_id) = 'blob' AND length(message_id) = 32),
+    input_fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT CHECK(typeof(input_fact_id) = 'blob' AND length(input_fact_id) = 32),
+    sequence BLOB NOT NULL CHECK(typeof(sequence) = 'blob' AND length(sequence) = 8),
+    accepted_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT CHECK(typeof(accepted_fact) = 'blob' AND length(accepted_fact) = 32)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_dispatches (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES project_projection_keys(key_digest),
+    dispatch_id BLOB NOT NULL CHECK(typeof(dispatch_id) = 'blob' AND length(dispatch_id) = 32),
+    message_id BLOB NOT NULL CHECK(typeof(message_id) = 'blob' AND length(message_id) = 32),
+    sequence BLOB NOT NULL CHECK(typeof(sequence) = 'blob' AND length(sequence) = 8),
+    assignment_id BLOB NOT NULL CHECK(typeof(assignment_id) = 'blob' AND length(assignment_id) = 32),
+    agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) BETWEEN 1 AND 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) BETWEEN 1 AND 256),
+    thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT CHECK(typeof(fact_id) = 'blob' AND length(fact_id) = 32),
+    conflicted INTEGER NOT NULL CHECK(conflicted IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_outputs (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES project_projection_keys(key_digest),
+    output_id BLOB NOT NULL CHECK(typeof(output_id) = 'blob' AND length(output_id) = 32),
+    dispatch_id BLOB NOT NULL CHECK(typeof(dispatch_id) = 'blob' AND length(dispatch_id) = 32),
+    assignment_id BLOB NOT NULL CHECK(typeof(assignment_id) = 'blob' AND length(assignment_id) = 32),
+    agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) BETWEEN 1 AND 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) BETWEEN 1 AND 256),
+    thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
+    message_id BLOB NOT NULL CHECK(typeof(message_id) = 'blob' AND length(message_id) = 32),
+    sender_installation BLOB NOT NULL CHECK(typeof(sender_installation) = 'blob' AND length(sender_installation) = 32),
+    sender_mailbox BLOB NOT NULL CHECK(typeof(sender_mailbox) = 'blob' AND length(sender_mailbox) = 32),
+    recipient_present INTEGER NOT NULL CHECK(recipient_present IN (0, 1)),
+    recipient_installation BLOB NOT NULL CHECK(typeof(recipient_installation) = 'blob' AND length(recipient_installation) = 32),
+    recipient_mailbox BLOB NOT NULL CHECK(typeof(recipient_mailbox) = 'blob' AND length(recipient_mailbox) = 32),
+    body TEXT NOT NULL CHECK(typeof(body) = 'text' AND length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),
+    purpose INTEGER NOT NULL CHECK(purpose BETWEEN 1 AND 3),
+    presentation INTEGER NOT NULL CHECK(presentation BETWEEN 1 AND 3),
+    correlation_present INTEGER NOT NULL CHECK(correlation_present IN (0, 1)),
+    correlation_provider TEXT NOT NULL CHECK(typeof(correlation_provider) = 'text' AND length(CAST(correlation_provider AS BLOB)) <= 64),
+    correlation_session TEXT NOT NULL CHECK(typeof(correlation_session) = 'text' AND length(CAST(correlation_session AS BLOB)) <= 256),
+    correlation_id BLOB NOT NULL CHECK(typeof(correlation_id) = 'blob' AND length(correlation_id) = 32),
+    project_present INTEGER NOT NULL CHECK(project_present IN (0, 1)),
+    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
+    status INTEGER NOT NULL CHECK(status BETWEEN 1 AND 3)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_output_facts (
+    key_digest BLOB NOT NULL REFERENCES project_outputs(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_commands (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES project_projection_keys(key_digest),
+    digest BLOB NOT NULL CHECK(typeof(digest) = 'blob' AND length(digest) = 32),
+    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
+    expected_head BLOB NOT NULL CHECK(typeof(expected_head) = 'blob' AND length(expected_head) = 32),
+    stage INTEGER NOT NULL CHECK(stage BETWEEN 1 AND 4),
+    received_head BLOB NOT NULL CHECK(typeof(received_head) = 'blob' AND length(received_head) = 32),
+    result_kind INTEGER NOT NULL CHECK(result_kind BETWEEN 0 AND 2),
+    result_head BLOB NOT NULL CHECK(typeof(result_head) = 'blob' AND length(result_head) = 32),
+    result_error TEXT NOT NULL CHECK(typeof(result_error) = 'text' AND length(CAST(result_error AS BLOB)) <= 128),
+    runtime_kind INTEGER NOT NULL CHECK(runtime_kind BETWEEN 0 AND 3),
+    runtime_error TEXT NOT NULL CHECK(typeof(runtime_error) = 'text' AND length(CAST(runtime_error AS BLOB)) <= 128)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_command_support (
+    key_digest BLOB NOT NULL REFERENCES project_commands(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -897,12 +1100,14 @@ impl Database {
         let expected_authority = complete.authority_projection_snapshot();
         let expected_conversation = complete.conversation_projection_snapshot();
         let expected_agent = complete.agent_projection_snapshot();
-        let (persisted, authority, conversation, agent) = repair::replace(
+        let expected_project = complete.project_projection_snapshot();
+        let (persisted, authority, conversation, agent, project) = repair::replace(
             &mut self.connection,
             &expected,
             &expected_authority,
             &expected_conversation,
             &expected_agent,
+            &expected_project,
         )?;
         Ok(RepairOutcome::new(
             complete,
@@ -910,6 +1115,7 @@ impl Database {
             authority,
             conversation,
             agent,
+            project,
         ))
     }
 
@@ -937,6 +1143,14 @@ impl Database {
         authority::load(&self.connection)?;
         conversation::load(&self.connection)?;
         agent::load(&self.connection)
+    }
+
+    pub(super) fn load_project_snapshot(&self) -> Result<ProjectProjectionSnapshot, StoreError> {
+        repair::load(&self.connection)?;
+        authority::load(&self.connection)?;
+        conversation::load(&self.connection)?;
+        agent::load(&self.connection)?;
+        project::load(&self.connection)
     }
 }
 
@@ -1043,7 +1257,7 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
             |row| row.get(0),
         )
         .map_err(sql_error)?;
-    if table_count != 77 {
+    if table_count != 95 {
         return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
     }
     for table in SCHEMA_TABLES {
@@ -1439,6 +1653,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn repair_failpoints_preserve_the_previous_complete_index_and_allow_retry() {
         use super::repair::{RepairFailpoint, replace_with_failpoint};
 
@@ -1457,6 +1672,8 @@ mod tests {
             RepairFailpoint::AfterConversationVerification,
             RepairFailpoint::AfterAgentInsert,
             RepairFailpoint::AfterAgentVerification,
+            RepairFailpoint::AfterProjectInsert,
+            RepairFailpoint::AfterProjectVerification,
             RepairFailpoint::AfterVerification,
         ] {
             let mut connection = Connection::open_in_memory().expect("memory database opens");
@@ -1479,12 +1696,14 @@ mod tests {
             let prior_authority = prior_complete.authority_projection_snapshot();
             let prior_conversation = prior_complete.conversation_projection_snapshot();
             let prior_agent = prior_complete.agent_projection_snapshot();
+            let prior_project = prior_complete.project_projection_snapshot();
             repair::replace(
                 &mut database.connection,
                 &prior,
                 &prior_authority,
                 &prior_conversation,
                 &prior_agent,
+                &prior_project,
             )
             .expect("prior index persists");
             let replacement_complete = database
@@ -1494,6 +1713,7 @@ mod tests {
             let replacement_authority = replacement_complete.authority_projection_snapshot();
             let replacement_conversation = replacement_complete.conversation_projection_snapshot();
             let replacement_agent = replacement_complete.agent_projection_snapshot();
+            let replacement_project = replacement_complete.project_projection_snapshot();
 
             let error = replace_with_failpoint(
                 &mut database.connection,
@@ -1501,6 +1721,7 @@ mod tests {
                 &replacement_authority,
                 &replacement_conversation,
                 &replacement_agent,
+                &replacement_project,
                 failpoint,
             )
             .expect_err("repair failpoint interrupts replacement");
@@ -1523,12 +1744,17 @@ mod tests {
                 prior_agent
             );
             assert_eq!(
+                project::load(&database.connection).expect("prior project remains loadable"),
+                prior_project
+            );
+            assert_eq!(
                 repair::replace(
                     &mut database.connection,
                     &replacement,
                     &replacement_authority,
                     &replacement_conversation,
                     &replacement_agent,
+                    &replacement_project,
                 )
                 .expect("retry succeeds"),
                 (
@@ -1536,6 +1762,7 @@ mod tests {
                     replacement_authority,
                     replacement_conversation,
                     replacement_agent,
+                    replacement_project,
                 )
             );
         }

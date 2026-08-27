@@ -4490,3 +4490,86 @@ whitespace, and the unchanged Go vet/build/fresh full regression suite pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so agent rows, queries, tests, specification, and bookkeeping form one
      reviewable change.
+
+## 2026-08-27 — Complete project projections and repair equality
+
+Added a typed SQL-independent project snapshot and storage v6 relational projections for every
+project, resource claim, assignment, accepted input, dispatch, output, remote command, aggregate
+frontier, and transitive support set. Explicit composite columns and private digests preserve home,
+resource, agent, and command namespaces; closed codecs validate full-width sequences, nested message
+and assignment provenance, optional shapes, lifecycle/claim/runnable rules, stage/status vocabularies,
+row bounds, counts, and exact key/value pairing. Closed the single repair transaction across the
+structural index and all four reducer reports with exact readback, rollback checkpoints, signed
+project history, conversation coexistence, staleness, policy replacement, reopen, and corruption
+coverage. Formatting, architecture/behavior/causal/protocol verifiers, dependency policy, locked
+workspace check/build/tests/doctests, strict Clippy, all four required core/protocol targets, both
+512-run fuzz smokes, whitespace, and the unchanged Go vet/build/fresh regression suite pass.
+
+### Original plan entry
+
+- **[storage/high] Persist project projections and close complete repair equality** — Add explicit
+  fresh schema rows and private codecs for every project/resource/assignment/input/dispatch/output/
+  remote-command view, including every aggregate frontier and support set. Extend typed queries and
+  the one repair transaction across all four reducer domains, prove every persisted report equals a
+  fresh complete reduction before and after reopen and repeated repair, and cover conflicts, late
+  authority, runnable state, compacted activity coexistence, and corrupted rebuildable rows.
+  Complete this package when the immutable corpus rebuilds every public projection exactly without
+  touching durable operational state.
+
+  **Implementation plan**
+
+  - Add failing public contracts for empty and populated typed project snapshots, exact report
+    equality, repair readback, repeated repair, staleness after append, explicit reconsideration,
+    policy replacement, close/reopen, and coexistence with already-persisted compacted activity.
+    Use signed protocol histories for public flows and exhaustive private relational fixtures for
+    nested states that would otherwise require a large causal scenario.
+  - Add `ProjectProjectionSnapshot` with ordered typed frontiers, all five projection-key/value
+    variants, and transitive support. Expose project/domain types only; keep schema identities,
+    surrogate digests, connections, and row discriminants private to `hq-store`.
+  - Advance the unreleased fresh schema identity and add explicit rebuildable tables for composite
+    project, home-qualified resource, agent-assignment, input, dispatch, output, and command
+    aggregate keys; project roots/heads/forks/resources/claims/conflicts/assignments; accepted
+    inputs; dispatch attribution; output provenance and content; remote command stages; aggregate
+    frontiers; and projection support.
+  - Implement closed codecs for every fixed identity, bounded short/content/provider/session/error
+    value, resource locator and health, lifecycle, assignment phase and binding, optional
+    predecessor/brief/primary/assignment/recipient/correlation/project/runtime shapes, message
+    purpose/presentation, output status, command result/stage, booleans, sets, maps, and full-width
+    input/dispatch sequences. Reconstruct through validated domain constructors, bound counts before
+    allocation, and reject unknown, malformed, duplicate, orphan, cross-key, or impossible rows.
+  - Derive expected project rows only from the complete oracle. Add project clear/insert/readback,
+    counts, and a whole-package digest to the same transaction as structural, authority,
+    conversation, and agent state. Validate every earlier package during ordinary project reads and
+    preserve explicit stale-until-repair behavior.
+  - Add project insert/verification failpoints and prove rollback preserves the preceding complete
+    five-package snapshot and retry succeeds. Apply constraint-valid corruption to every project
+    table family and prove reads fail closed until repair without changing corpus bytes, durable
+    operational state, or any earlier projection package.
+  - Round-trip open/closing/closed and archived projects; resource health, primary choice, active
+    claims and cross-project conflicts; configuring/runnable/blocked assignments and cardinality
+    conflicts; accepted inputs; conflicted dispatches; current/late/conflicted output with complete
+    typed messages; and queued/received/terminal/conflicted remote commands. Update the storage
+    specification and run every repository-wide gate before recording.
+
+  **Risks and mitigations**
+
+  - Resource and assignment namespaces can alias when flattened; retain every typed component in
+    explicit columns and recompute private digests from closed encodings.
+  - Project views contain deeply nested optional values and derived flags; use closed presence
+    shapes and verify lifecycle, claimability, assignment-runnable, stage, status, and membership
+    invariants during reconstruction.
+  - SQLite signed integers cannot cover all `u64` sequences; persist them as fixed-width big-endian
+    bytes and validate exact round-trip semantics.
+  - Closing the repair set must not weaken prior rollback or staleness guarantees; replace and
+    verify all five packages in one transaction with checkpoints around project insertion and
+    verification.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** project codecs, equality, rollback, corruption, lifecycle, and all repository gates.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so project rows, queries, tests, specification, and bookkeeping form
+     one reviewable change.

@@ -28,6 +28,7 @@ mod conversation_snapshot;
 mod database;
 mod error;
 mod paths;
+mod project_snapshot;
 mod snapshot;
 
 pub use actor::{AppendOutcome, RepairOutcome, Store, VerifiedFactCorpus};
@@ -35,6 +36,7 @@ pub use agent_snapshot::AgentProjectionSnapshot;
 pub use authority_snapshot::AuthorityProjectionSnapshot;
 pub use conversation_snapshot::ConversationProjectionSnapshot;
 pub use error::{StoreError, StoreErrorClass};
+pub use project_snapshot::ProjectProjectionSnapshot;
 pub use snapshot::{
     CompleteSnapshot, IndexedConflict, IndexedDecision, ReductionDomain, ReductionIndexSnapshot,
     ReductionReason,

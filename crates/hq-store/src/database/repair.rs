@@ -8,8 +8,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::{
     AgentProjectionSnapshot, AuthorityProjectionSnapshot, ConversationProjectionSnapshot,
-    IndexedConflict, IndexedDecision, ReductionDomain, ReductionIndexSnapshot, StoreError,
-    StoreErrorClass,
+    IndexedConflict, IndexedDecision, ProjectProjectionSnapshot, ReductionDomain,
+    ReductionIndexSnapshot, StoreError, StoreErrorClass,
     snapshot::{
         decode_domain, decode_reason, decode_role, decode_status, encode_domain, encode_reason,
         encode_role, encode_status, reason_belongs_to_domain,
@@ -36,6 +36,8 @@ pub(crate) enum RepairFailpoint {
     AfterConversationVerification,
     AfterAgentInsert,
     AfterAgentVerification,
+    AfterProjectInsert,
+    AfterProjectVerification,
     AfterVerification,
 }
 
@@ -45,12 +47,14 @@ pub(crate) fn replace(
     expected_authority: &AuthorityProjectionSnapshot,
     expected_conversation: &ConversationProjectionSnapshot,
     expected_agent: &AgentProjectionSnapshot,
+    expected_project: &ProjectProjectionSnapshot,
 ) -> Result<
     (
         ReductionIndexSnapshot,
         AuthorityProjectionSnapshot,
         ConversationProjectionSnapshot,
         AgentProjectionSnapshot,
+        ProjectProjectionSnapshot,
     ),
     StoreError,
 > {
@@ -60,6 +64,7 @@ pub(crate) fn replace(
         expected_authority,
         expected_conversation,
         expected_agent,
+        expected_project,
         RepairFailpoint::Never,
     )
 }
@@ -71,6 +76,7 @@ pub(crate) fn replace_with_failpoint(
     expected_authority: &AuthorityProjectionSnapshot,
     expected_conversation: &ConversationProjectionSnapshot,
     expected_agent: &AgentProjectionSnapshot,
+    expected_project: &ProjectProjectionSnapshot,
     failpoint: RepairFailpoint,
 ) -> Result<
     (
@@ -78,6 +84,7 @@ pub(crate) fn replace_with_failpoint(
         AuthorityProjectionSnapshot,
         ConversationProjectionSnapshot,
         AgentProjectionSnapshot,
+        ProjectProjectionSnapshot,
     ),
     StoreError,
 > {
@@ -87,6 +94,7 @@ pub(crate) fn replace_with_failpoint(
         expected_authority,
         expected_conversation,
         expected_agent,
+        expected_project,
         failpoint,
     )
 }
@@ -97,6 +105,7 @@ fn replace_at(
     expected_authority: &AuthorityProjectionSnapshot,
     expected_conversation: &ConversationProjectionSnapshot,
     expected_agent: &AgentProjectionSnapshot,
+    expected_project: &ProjectProjectionSnapshot,
     failpoint: RepairFailpoint,
 ) -> Result<
     (
@@ -104,6 +113,7 @@ fn replace_at(
         AuthorityProjectionSnapshot,
         ConversationProjectionSnapshot,
         AgentProjectionSnapshot,
+        ProjectProjectionSnapshot,
     ),
     StoreError,
 > {
@@ -112,6 +122,7 @@ fn replace_at(
     super::authority::clear(&transaction)?;
     super::conversation::clear(&transaction)?;
     super::agent::clear(&transaction)?;
+    super::project::clear(&transaction)?;
     fail_at(failpoint, RepairFailpoint::AfterClear)?;
     insert_index(&transaction, expected, failpoint)?;
     super::authority::insert(&transaction, expected_authority)?;
@@ -120,6 +131,8 @@ fn replace_at(
     fail_at(failpoint, RepairFailpoint::AfterConversationInsert)?;
     super::agent::insert(&transaction, expected_agent)?;
     fail_at(failpoint, RepairFailpoint::AfterAgentInsert)?;
+    super::project::insert(&transaction, expected_project)?;
+    fail_at(failpoint, RepairFailpoint::AfterProjectInsert)?;
     let persisted = load_from_connection(&transaction)?;
     if persisted != *expected {
         return Err(corrupt());
@@ -139,6 +152,11 @@ fn replace_at(
         return Err(corrupt());
     }
     fail_at(failpoint, RepairFailpoint::AfterAgentVerification)?;
+    let persisted_project = super::project::load(&transaction)?;
+    if persisted_project != *expected_project {
+        return Err(corrupt());
+    }
+    fail_at(failpoint, RepairFailpoint::AfterProjectVerification)?;
     fail_at(failpoint, RepairFailpoint::AfterVerification)?;
     transaction.commit().map_err(database)?;
     Ok((
@@ -146,6 +164,7 @@ fn replace_at(
         persisted_authority,
         persisted_conversation,
         persisted_agent,
+        persisted_project,
     ))
 }
 

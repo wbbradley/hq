@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v5 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v6 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `5`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `6`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,12 +23,12 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v5 ownership | Rebuildable |
+| Class | Storage v6 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
 | Deterministic reduction indexes | Reverse dependencies, decisions, diagnostics, conflicts, and reducer order | Yes, only through an explicit repair operation |
-| Materialized projections | Complete authority, conversation/activity, and named-agent frontiers, typed values, ordered children, and support; project projections reserved | Yes, only through explicit repair |
+| Materialized projections | Complete authority, conversation/activity, named-agent, and project frontiers, typed values, ordered children, and support | Yes, only through explicit repair |
 | Durable operational state | Reserved for receipts, revisions, outbox, delivery, cursors, and saga checkpoints | Generally no |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
@@ -70,13 +70,13 @@ role parameters. Debug prose and generic domain serialization are not persistenc
 ## Explicit repair
 
 `repair(policy)` first computes the complete oracle without writes. It then opens one transaction,
-deletes only the rebuildable reduction, authority, conversation/activity, and named-agent tables,
-writes every normalized replacement group, reads all four typed snapshots back through private fixed-width and
+deletes only the rebuildable reduction, authority, conversation/activity, named-agent, and project
+tables, writes every normalized replacement group, reads all five typed snapshots back through private fixed-width and
 closed-vocabulary row codecs, and requires exact snapshot and digest equality before commit.
 Canonical facts, exact event bytes,
 canonical parent and authority rows, schema metadata, and future durable operational tables are
 outside the repair allowlist. Dropping or failing the transaction at any replacement or verification
-checkpoint leaves the preceding complete structural/authority/conversation/agent set intact, and
+checkpoint leaves the preceding complete structural/authority/conversation/agent/project set intact, and
 repeating a successful repair is idempotent.
 
 `load_reduction_index()` is read-only and returns the last successful repair even when newer
@@ -160,6 +160,32 @@ semantics, lifecycle and runnable consistency, selected-candidate membership, re
 clear semantics, frontier/history membership, contiguous ownership, counts, and a digest over every
 agent row. Unknown, partial, orphaned, oversized, cross-key, or constraint-valid changed rows return
 `RebuildableStateCorrupt`; explicit repair is the only recovery path.
+
+## Project projections
+
+`ProjectProjectionSnapshot` completes the SQL-independent persisted query boundary for all four
+reducers. It owns ordered maps for every `ProjectAggregateKey` frontier, all five
+`ProjectProjectionKey` variants and values, and every transitive support set.
+`load_project_snapshot()` validates the structural, authority, conversation, and agent packages
+from the same transaction before returning the last explicitly repaired project view. Appends leave
+that view intentionally stale until explicit repair, and one successful repair proves every
+persisted projection report exactly equals the fresh complete-batch oracle.
+
+Explicit tables retain project roots, heads and fork participants; desired resources, typed health,
+primary choice, active claims and cross-project conflicts; assignment bindings, configuring/
+runnable/blocked phases and support; accepted inputs and full-width sequences; immutable dispatch
+attribution; output binding, typed message content and collision status; remote-command queued,
+received, terminal and conflicted stages; aggregate frontiers; and projection support. Composite
+resource and assignment namespaces keep their components in validated columns behind recomputed
+private digests.
+
+Private exhaustive codecs validate fixed identities, bounded text, resource schemes and health,
+project lifecycle, assignment phase, message purpose/presentation, output status, command result,
+runtime observation, every optional shape, full-width `u64` sequences, and key/value pairing.
+Loading enforces mailbox/home identity, primary and claim membership, claimability and lifecycle
+rules, assignment-runnable consistency, nested provenance shapes, row bounds, ownership, counts,
+and a digest over every explicit project row. Unknown, partial, orphaned, oversized, cross-key, or
+constraint-valid changed rows return `RebuildableStateCorrupt` until explicit repair.
 
 The correctness-first oracle currently clones the bounded semantic corpus for the four reducers.
 That cost is deliberate for repair equality; measured shared-report or incremental optimization is

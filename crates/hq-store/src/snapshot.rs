@@ -12,8 +12,10 @@ use hq_reducer::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{AgentProjectionSnapshot, AuthorityProjectionSnapshot, ConversationProjectionSnapshot};
-use crate::{StoreError, StoreErrorClass};
+use crate::{
+    AgentProjectionSnapshot, AuthorityProjectionSnapshot, ConversationProjectionSnapshot,
+    ProjectProjectionSnapshot, StoreError, StoreErrorClass,
+};
 
 /// One independently materialized reducer domain.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -264,6 +266,11 @@ impl CompleteSnapshot {
     /// Returns the project report.
     pub const fn project(&self) -> &ProjectReport {
         &self.project
+    }
+
+    /// Clones the complete project projection/frontier/support oracle.
+    pub fn project_projection_snapshot(&self) -> ProjectProjectionSnapshot {
+        ProjectProjectionSnapshot::from_report(&self.project)
     }
 
     /// Normalizes structural report data into the representation persisted by repair.

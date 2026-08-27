@@ -133,6 +133,29 @@ pub fn verified_session_binding(
     signed_fact(2, content.as_bytes(), [11; 32])
 }
 
+pub fn verified_account(installation_fact_id: [u8; 32]) -> VerifiedSemanticFact {
+    let installation = hex(&installation_fact_id);
+    let content = format!(
+        r#"{{"p":"hq/canonical","v":1,"f":10,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":3000,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[["c","{installation}"]],"auth":[["local-installation","c","{installation}"]],"body":{{"account":"5555555555555555555555555555555555555555555555555555555555555555","creator":{{"installation":"1111111111111111111111111111111111111111111111111111111111111111","signing":"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"}},"label":"primary"}}}}"#
+    );
+    signed_fact(3, content.as_bytes(), [12; 32])
+}
+
+pub fn verified_project(
+    installation_fact_id: [u8; 32],
+    account_fact_id: [u8; 32],
+) -> VerifiedSemanticFact {
+    let installation = hex(&installation_fact_id);
+    let account = hex(&account_fact_id);
+    let mut parents = [installation.as_str(), account.as_str()];
+    parents.sort_unstable();
+    let content = format!(
+        r#"{{"p":"hq/canonical","v":1,"f":27,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":4000,"scope":["account","5555555555555555555555555555555555555555555555555555555555555555"],"parents":[["c","{}"],["c","{}"]],"auth":[["account-membership","c","{account}"],["active-human","c","{account}"],["project-home","c","{installation}"]],"body":{{"project":"6666666666666666666666666666666666666666666666666666666666666666","mailbox":"4444444444444444444444444444444444444444444444444444444444444444","home":"1111111111111111111111111111111111111111111111111111111111111111","name":"project-one","brief":"signed project","predecessor":null,"resources":[{{"id":"7777777777777777777777777777777777777777777777777777777777777777","locator":{{"scheme":"worktree","value":"/workspace/project"}},"health":"healthy"}}],"primary":"7777777777777777777777777777777777777777777777777777777777777777","state":"open"}}}}"#,
+        parents[0], parents[1]
+    );
+    signed_fact(4, content.as_bytes(), [13; 32])
+}
+
 pub fn verified_question(parent_id: [u8; 32]) -> VerifiedSemanticFact {
     let parent = hex(&parent_id);
     let content = format!(

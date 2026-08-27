@@ -13,8 +13,8 @@ use hq_reducer::AuthorityPolicy;
 
 use crate::{
     AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
-    ConversationProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
-    database::Database,
+    ConversationProjectionSnapshot, ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError,
+    StoreErrorClass, database::Database,
 };
 
 /// Result of appending immutable verified evidence.
@@ -74,6 +74,7 @@ pub struct RepairOutcome {
     authority: AuthorityProjectionSnapshot,
     conversation: ConversationProjectionSnapshot,
     agent: AgentProjectionSnapshot,
+    project: ProjectProjectionSnapshot,
 }
 
 impl RepairOutcome {
@@ -83,6 +84,7 @@ impl RepairOutcome {
         authority: AuthorityProjectionSnapshot,
         conversation: ConversationProjectionSnapshot,
         agent: AgentProjectionSnapshot,
+        project: ProjectProjectionSnapshot,
     ) -> Self {
         Self {
             complete,
@@ -90,6 +92,7 @@ impl RepairOutcome {
             authority,
             conversation,
             agent,
+            project,
         }
     }
 
@@ -118,6 +121,11 @@ impl RepairOutcome {
         &self.agent
     }
 
+    /// Returns the exact typed project view read back before commit.
+    pub const fn project(&self) -> &ProjectProjectionSnapshot {
+        &self.project
+    }
+
     /// Consumes the outcome into its complete and persisted snapshots.
     pub fn into_parts(
         self,
@@ -127,6 +135,7 @@ impl RepairOutcome {
         AuthorityProjectionSnapshot,
         ConversationProjectionSnapshot,
         AgentProjectionSnapshot,
+        ProjectProjectionSnapshot,
     ) {
         (
             self.complete,
@@ -134,6 +143,7 @@ impl RepairOutcome {
             self.authority,
             self.conversation,
             self.agent,
+            self.project,
         )
     }
 }
@@ -165,6 +175,9 @@ enum Request {
     },
     LoadAgentSnapshot {
         reply: SyncSender<Result<AgentProjectionSnapshot, StoreError>>,
+    },
+    LoadProjectSnapshot {
+        reply: SyncSender<Result<ProjectProjectionSnapshot, StoreError>>,
     },
     Close {
         reply: SyncSender<()>,
@@ -300,6 +313,17 @@ impl Store {
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
+    /// Loads the last successfully repaired typed project view without mutation.
+    pub fn load_project_snapshot(&self) -> Result<ProjectProjectionSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadProjectSnapshot { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -367,6 +391,9 @@ fn run(path: &Path, receiver: &Receiver<Request>, started: &SyncSender<Result<()
             }
             Request::LoadAgentSnapshot { reply } => {
                 let _ = reply.send(database.load_agent_snapshot());
+            }
+            Request::LoadProjectSnapshot { reply } => {
+                let _ = reply.send(database.load_project_snapshot());
             }
             Request::Close { reply } => {
                 let _ = reply.send(());
@@ -440,6 +467,12 @@ mod tests {
             .requests
             .send(Request::LoadAgentSnapshot { reply })
             .expect("agent request is accepted");
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::LoadProjectSnapshot { reply })
+            .expect("project request is accepted");
         assert!(
             store
                 .load_corpus()
