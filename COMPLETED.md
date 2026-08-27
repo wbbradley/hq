@@ -2746,7 +2746,6 @@ and backup decisions. The unchanged Go baseline passes build, vet, cached tests,
   2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
-
 ## 2026-08-27 — Causal fact algebra and semantic fact catalog
 
 Specified an implementation-independent causal algebra with structural and usable reachability,
@@ -2814,6 +2813,99 @@ build/vet, and the fresh full Go test suite pass.
   - Project histories are home-linear, while resource and agent cardinality are global projections.
     A malformed home fork or cross-project conflict is exposed and fails closed rather than being
     hidden by store transaction order.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+## 2026-08-27 — Rust workspace and dependency guardrails
+
+Created the twelve-crate Rust workspace with a pinned Rust 1.98 toolchain, shared deny-level Rust
+and Clippy policy, rustfmt configuration, and the single `hq` binary owned by `hq-node`. Added a
+tested, standard-library-only walking skeleton across protocol, domain, application, reducer, and
+composition boundaries. Added automated crate inventory, direct-dependency, pure-core,
+provider-neutrality, and binary-ownership checks; strict cargo-deny policy; Linux/macOS native CI;
+and four-target pure-core checks. Documented the workspace and contributor gates. Formatting,
+architecture checks, strict Clippy, Cargo check/build/tests, cargo-deny 0.20.2, all four target
+checks, Go build/vet, and the fresh full Go suite pass.
+
+### Original plan entry
+
+- **[foundation/high] Establish the Rust workspace and dependency guardrails** — Add the Cargo
+  workspace and initial `hq-domain`, `hq-reducer`, `hq-protocol`, `hq-application`, `hq-store`,
+  `hq-local-api`, `hq-relay`, `hq-harness`, `hq-codex`, `hq-tui`, `hq-node`, and `hq-testkit`
+  boundaries, initially combining crates only where that improves clarity without weakening
+  dependency direction. Configure rustfmt, strict Clippy policy, tests, CI, dependency auditing, and
+  architecture checks that keep Tokio, SQLite, Nostr, Ratatui, filesystem, process, and provider
+  dependencies out of the pure core. Establish the ADR-0001 Linux/macOS target matrix while keeping
+  core crates portable without claiming Windows product support. Add a minimal in-memory walking
+  skeleton proving that a domain fact can cross the intended boundaries. Complete this work with a
+  clean build/test/lint run and automated forbidden-dependency enforcement.
+
+  Implementation plan:
+
+  - Add a virtual Cargo workspace with the twelve capability-named crates from the architecture,
+    a pinned stable toolchain, edition/MSRV/license metadata, shared strict Rust and Clippy lints,
+    deterministic development profiles, and no third-party runtime dependency in the initial
+    skeleton. Give every crate a documented public boundary and keep `hq-node` as the only
+    composition root and owner of the single `hq` binary.
+  - Add the smallest typed in-memory vertical slice: `hq-protocol` converts an already trusted
+    in-memory frame into an `hq-domain` fact, `hq-application` accepts the fact through a use-case
+    boundary, `hq-reducer` derives a projection without I/O, and `hq-node` composes the path. Write
+    unit and integration tests before the implementation, including duplicate submission and
+    invalid-frame behavior, without pre-empting the next package's full validated-value model.
+  - Add `scripts/verify-rust-architecture.sh` first and capture its failure while the workspace is
+    absent. Make it verify the exact workspace/crate inventory, shared lint inheritance, the single
+    binary owner, direct internal-dependency allowlists, and forbidden runtime/adapter/filesystem/
+    process/provider vocabulary in `hq-domain` and `hq-reducer`, plus the one-way
+    `hq-codex`-to-`hq-harness` boundary.
+  - Add a strict `deny.toml` for advisory, license, duplicate, wildcard, registry, and Git-source
+    policy. Extend CI without weakening the frozen Go gates: run Rust format, architecture,
+    Clippy, build, and tests natively on Linux and macOS; check the pure core against all four
+    ADR-0001 release target triples; and run cargo-deny 0.20.2 on the complete workspace.
+  - Document the workspace boundary and contributor verification commands, then run the
+    architecture verifier, Cargo metadata/format/check/build/test/Clippy gates, cargo-deny, all
+    four core target checks where locally available, whitespace checks, and the unchanged Go
+    build/vet/fresh full test suite before archiving this plan entry.
+
+  Risks and decisions:
+
+  - The skeleton uses only standard-library types and deliberately small fact/frame/projection
+    shapes. Full bounded values, cryptographic identifiers, catalog payloads, and deterministic
+    builders remain owned by the immediately following domain package.
+  - Architecture checks enforce both dependency declarations and source-level forbidden imports;
+    Cargo's acyclic graph alone cannot distinguish an allowed adapter dependency from accidental
+    I/O in the pure core.
+  - Linux and macOS native CI are product gates. Cross-target `cargo check` proves portable core
+    compilation for x86-64 and ARM64 but does not pretend to exercise target-specific adapters.
+  - Dependency policy starts deny-by-default for unknown registries and Git sources while allowing
+    the common MIT, Apache-2.0, BSD, ISC, Unicode, and Zlib families expected by later packages.
 
   ## Post-Plan Execution Steps
 

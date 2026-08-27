@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/hq-application",
+  "crates/hq-codex",
+  "crates/hq-domain",
+  "crates/hq-harness",
+  "crates/hq-local-api",
+  "crates/hq-node",
+  "crates/hq-protocol",
+  "crates/hq-reducer",
+  "crates/hq-relay",
+  "crates/hq-store",
+  "crates/hq-testkit",
+  "crates/hq-tui",
+]
+default-members = ["crates/hq-node"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/wbbradley/hq"
+publish = false
+
+[workspace.dependencies]
+hq-application = { version = "0.1.0", path = "crates/hq-application" }
+hq-codex = { version = "0.1.0", path = "crates/hq-codex" }
+hq-domain = { version = "0.1.0", path = "crates/hq-domain" }
+hq-harness = { version = "0.1.0", path = "crates/hq-harness" }
+hq-local-api = { version = "0.1.0", path = "crates/hq-local-api" }
+hq-protocol = { version = "0.1.0", path = "crates/hq-protocol" }
+hq-reducer = { version = "0.1.0", path = "crates/hq-reducer" }
+hq-relay = { version = "0.1.0", path = "crates/hq-relay" }
+hq-store = { version = "0.1.0", path = "crates/hq-store" }
+hq-testkit = { version = "0.1.0", path = "crates/hq-testkit" }
+hq-tui = { version = "0.1.0", path = "crates/hq-tui" }
+
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+expect_used = "deny"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+panic = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+struct_field_names = "allow"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

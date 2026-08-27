@@ -18,6 +18,10 @@ From a local checkout:
 go install ./cmd/hq
 ```
 
+The clean-sheet Rust implementation is being built alongside the frozen Go product. Its workspace
+layout, dependency rules, target matrix, and contributor checks are documented in
+[docs/rust/workspace.md](docs/rust/workspace.md); it is not yet the supported installed HQ.
+
 Create one installation identity before first use:
 
 ```sh

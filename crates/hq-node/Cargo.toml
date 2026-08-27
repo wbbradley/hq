@@ -1,0 +1,21 @@
+[package]
+name = "hq-node"
+description = "HQ composition root and single executable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+hq-application.workspace = true
+hq-protocol.workspace = true
+hq-reducer.workspace = true
+
+[[bin]]
+name = "hq"
+path = "src/bin/hq.rs"
+
+[lints]
+workspace = true

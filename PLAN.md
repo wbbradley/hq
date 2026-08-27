@@ -54,17 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[foundation/high] Establish the Rust workspace and dependency guardrails** — Add the Cargo
-  workspace and initial `hq-domain`, `hq-reducer`, `hq-protocol`, `hq-application`, `hq-store`,
-  `hq-local-api`, `hq-relay`, `hq-harness`, `hq-codex`, `hq-tui`, `hq-node`, and `hq-testkit`
-  boundaries, initially combining crates only where that improves clarity without weakening
-  dependency direction. Configure rustfmt, strict Clippy policy, tests, CI, dependency auditing, and
-  architecture checks that keep Tokio, SQLite, Nostr, Ratatui, filesystem, process, and provider
-  dependencies out of the pure core. Establish the ADR-0001 Linux/macOS target matrix while keeping
-  core crates portable without claiming Windows product support. Add a minimal in-memory walking
-  skeleton proving that a domain fact can cross the intended boundaries. Complete this work with a
-  clean build/test/lint run and automated forbidden-dependency enforcement.
-
 - **[domain/high] Implement validated domain values and deterministic test support** — Implement
   newtyped IDs, keys, addresses, causal references, bounded text and collections, timestamps,
   correlation values, resource locators, fact payload enums, commands, outcomes, views, and typed
