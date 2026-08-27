@@ -10,7 +10,9 @@ Related sources are the product boundary in `docs/rust/behavior-ledger.md`, the 
 `docs/rust/semantic-fact-catalog.md`, and executable cases in
 `docs/rust/acceptance-scenarios.md`. The implemented authority specialization is documented in
 `docs/rust/authority-model.md`; conversation, message-state, activity-retention, and unified
-presentation rules are documented in `docs/rust/conversation-model.md`.
+presentation rules are documented in `docs/rust/conversation-model.md`; named-agent, provider
+session, repository-context, selection, rename, and retirement rules are documented in
+`docs/rust/agent-model.md`.
 
 ## Semantic universe and notation
 

@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[agents/high] Implement named-agent and provider-session reduction** — Add pure facts and
-  projections for mailbox creation/binding/context, permanent name claims and retirement, durable
-  provider-session bindings, selection, renaming, repository context, and projectless direct
-  sessions. Keep durable session identity separate from runtime presence, leases, caller
-  environments, and process state. Define name/session conflicts and replay behavior explicitly and
-  test rebuildable history, retirement, reselection, and cross-provider namespace isolation.
-  Complete this work when all retained named-agent state derives solely from the fact set.
-
 - **[projects/high] Implement the pure project and resource-claim model** — Add project identity and
   immutable home, mailbox, metadata, predecessor, desired resources, primary path, lifecycle,
   archive state, active claims, assignment epochs, thread scope, project input sequencing, dispatch

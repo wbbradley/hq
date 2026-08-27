@@ -56,7 +56,7 @@ pub enum MailboxKind {
 }
 
 /// Typed repository context used for display, search, and launch selection only.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RepositoryContext {
     /// Canonical working directory locator.
     pub directory: ResourceLocator,

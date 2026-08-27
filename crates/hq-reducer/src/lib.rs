@@ -1,5 +1,6 @@
 //! Deterministic, complete-batch causal reduction without runtime or adapter dependencies.
 
+mod agent;
 mod authority;
 mod conversation;
 mod decision;
@@ -8,6 +9,12 @@ mod graph;
 mod presentation;
 mod reducer;
 
+pub use agent::{
+    AgentAggregateKey, AgentLifecycle, AgentProjection, AgentProjectionKey, AgentReason,
+    AgentReducer, AgentView, ContextHistoryView, DirectSessionView, NameClaimSubject,
+    NameReservationView, RenameView, SelectionCandidate, SelectionView, SessionBindingView,
+    SessionIdentity,
+};
 pub use authority::{
     AuthorityAggregateKey, AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey,
     AuthorityReason, AuthorityReducer, AuthorityReport, CapabilityView, DeviceGrantView,

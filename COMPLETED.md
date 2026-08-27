@@ -3267,6 +3267,7 @@ whitespace, and the complete Go build/vet/fresh-test regression suite pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.
 
+
 ## 2026-08-27 — Conversation and activity reduction
 
 Added a pure authority-composed `ConversationReducer` with normalized question/async threads,
@@ -3350,6 +3351,86 @@ architecture/spec, cargo-deny, four-target core, whitespace, and Go regression g
   1. **Implement** the expanded plan above completely.
   2. **Test** the implementation in proportion to risk, including every named conversation and
      activity scenario and repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.
+
+## 2026-08-27 — Named-agent and provider-session reduction
+
+Implemented a pure, authority-composed named-agent reducer with permanent name reservations,
+immutable provider-session bindings, repository-context history, causal selection and rename
+registers, absorbing retirement, and projectless direct-session projections. Added executable
+coverage for every `AGT-001` through `AGT-010` scenario, including permutation and duplicate replay,
+and documented the public model. The complete Rust workspace, architecture/behavior/spec verifiers,
+strict Clippy, dependency policy, all four core targets, whitespace checks, and unchanged Go
+build/vet/fresh regression suite pass.
+
+### Original plan entry
+
+- **[agents/high] Implement named-agent and provider-session reduction** — Add pure facts and
+  projections for mailbox creation/binding/context, permanent name claims and retirement, durable
+  provider-session bindings, selection, renaming, repository context, and projectless direct
+  sessions. Keep durable session identity separate from runtime presence, leases, caller
+  environments, and process state. Define name/session conflicts and replay behavior explicitly and
+  test rebuildable history, retirement, reselection, and cross-provider namespace isolation.
+  Complete this work when all retained named-agent state derives solely from the fact set.
+
+  **Implementation plan**
+
+  - Add failing fixtures and public-contract tests first for every named `AGT-001` through
+    `AGT-010` scenario, then generate small claim/binding/context/selection/rename/retirement graphs
+    across every arrival order, duplicates, late parents, partial frontiers, and clock reversal.
+  - Add a pure named-agent reducer that composes historical authority without duplicating it and
+    emits closed reasons, typed aggregate/projection keys, exact support, permanent name
+    reservations, mailbox/session histories, context frontiers, selection/rename registers,
+    retirement state, and projectless direct-session views.
+  - Validate installation-local signer/scope, exact agent mailbox roots, lowercase name syntax,
+    stable agent/name/mailbox subjects, typed claim and binding parents, provider/session namespace,
+    selected immutable repository context, and complete selection/rename frontiers independently.
+    Repository context remains display/search metadata and grants no authority.
+  - Treat one name, agent ID, or agent mailbox claimed incompatibly as an explicit permanent
+    conflict. Keep a retired name reserved forever, expose every participant, and never use authored
+    time, fact ID, arrival, or current runtime state to select a claimant.
+  - Treat provider plus session as one immutable binding identity: rebinding it to another mailbox
+    conflicts, one mailbox may retain several distinct sessions, and equal session text in different
+    providers remains isolated. Retain unnamed projectless mailbox/session history without
+    inventing a named runnable agent.
+  - Derive selection as a multivalue causal register. Concurrent distinct selections expose every
+    maximum and block runnable selection; one later selection resolves only when it descends from
+    every prior maximum and cites the exact name claim, binding, and matching repository context.
+  - Derive per-session display rename as an independent multivalue register with sorted candidates,
+    explicit clear, exact frontier/support, and no effect on selection or runtime. Retain all
+    mailbox context history and every causal-maximal context value.
+  - Make retirement absorbing and remove-wins against concurrent selection/rename state. Historical
+    sessions, names, contexts, and selections remain queryable, but no retired/conflicted agent is
+    runnable and no post-retirement session fact can reactivate it. Prove normalized output contains
+    no process, lease, presence, phase, caller environment, or ambient filesystem state.
+  - Document the public named-agent/session model and run format, architecture/behavior/spec
+    verifiers, workspace format/check/build/test/doctests, strict Clippy, dependency policy,
+    four-target core checks, whitespace, and unchanged Go build/vet/fresh full regression suite
+    before recording the package.
+
+  **Risks and mitigations**
+
+  - Authority already admits installation-local binding families but does not own their global
+    uniqueness or agent semantics; reuse its classification as the first stage, then apply focused
+    name/session rules without altering prior authority projections.
+  - Selection facts embed repository context while context facts are grow-only and may be
+    concurrent; require an exact projected mailbox-context value cited in the selection lineage and
+    expose context ambiguity instead of choosing a timestamp winner.
+  - Retirement is non-monotone only in runnable projections; recompute from the complete usable
+    history so late retirement retracts active selection while immutable facts and permanent name
+    reservation remain.
+  - Direct unnamed sessions and named managed agents share binding history but not lifecycle; keep
+    distinct typed projections so a mere binding never synthesizes a claim, selection, or runnable
+    worker.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including every named agent/session
+     scenario and repository-wide gate above.
   3. **Commit** all task changes with a Conventional Commit message.
   4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
