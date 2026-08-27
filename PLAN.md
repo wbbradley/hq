@@ -54,14 +54,12 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[protocol/high] Implement canonical v1 DTO encoding and semantic conversion** — Implement all
-  owned canonical/control v1 DTOs, strict complete-content decoding, deterministic encoding,
-  duplicate/unknown-field policy, decoded and post-escaping bounds, typed reference conversion, and
-  the lossless transition from supported verified content to every `SemanticFact` family. Add
-  exhaustive round-trip fixtures, independent vectors, malformed/non-canonical/boundary corpora,
-  and structure-aware fuzz targets. Explicitly reject old Go schemas without a translation path.
-  Complete this split package when all 48 mappings are executable, exact v1 vectors are stable, and
-  adversarial content cannot reach reduction as a falsely verified semantic fact.
+- **[protocol/high] Convert verified v1 DTOs into semantic facts** — Implement typed scope and
+  causal-reference conversion, all family-specific intrinsic agreement checks, and the lossless
+  transition from every verified canonical/control v1 DTO to its `SemanticFact` family. Add
+  exhaustive bidirectional semantic fixtures, authority/scope/reference adversarial matrices, and
+  conversion fuzz/property coverage. Complete this split package when all 48 semantic mappings are
+  executable and no invalid or unsupported record can reach reduction as a falsely verified fact.
 
 - **[identity/high] Implement installation identity and local configuration persistence** —
   Implement the new Rust state-directory layout, stable installation identity, root-key generation

@@ -18,5 +18,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "dto_content"
+path = "fuzz_targets/dto_content.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

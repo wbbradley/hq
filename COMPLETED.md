@@ -3716,3 +3716,106 @@ architecture gate, whitespace, and unchanged Go build/vet/fresh regression suite
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so code, tests, fuzz assets, and plan bookkeeping form one reviewable
      change.
+
+## 2026-08-27 — Canonical v1 owned DTO catalog
+
+Implemented the complete owned `hq/canonical` and `hq/control` v1 DTO catalog for all 48 numeric
+families, including fixed lowercase-hex values, required nullable fields, exact tagged scopes and
+references, every nested object/sum type, named decoded bounds, positive sequences/timestamps,
+family scope and authority-role applicability, sorted unique parents/authorities, authority-parent
+linkage, and core representational invariants. Full decoding prevalidates bounded canonical JSON,
+uses typed Serde 1.0.229 DTOs plus only `serde_json::RawValue` body isolation, rejects unknown/
+duplicate/missing fields, deterministically re-encodes with serde_json 1.0.151, and advances to
+`VerifiedSupportedRecord` only after byte equality with retained signed content. Added executable
+exact round trips for every family and both published vectors, adversarial nested/ordering/
+namespace/enum/hex/boundary coverage, inclusive named text-bound tests, and a second re-signing
+cargo-fuzz target seeded by canonical and control contents. Both fuzz targets, root and isolated
+dependency policies, all four protocol targets, every Rust workspace/spec/architecture gate,
+whitespace, and unchanged Go build/vet/fresh regressions pass.
+
+### Original plan entry
+
+- **[protocol/high] Implement strict canonical v1 DTO decoding and encoding** — Implement the
+  complete owned canonical/control v1 DTO catalog, strict full-content decoding, deterministic
+  encoding, duplicate/unknown/missing/reordered-field policy, enum and fixed-width primitive
+  vocabulary, decoded and post-escaping bounds, sorted reference representation, and a distinct
+  verified-supported DTO trust state. Add exhaustive round-trip fixtures for all 48 families,
+  independent exact vectors, malformed/non-canonical/boundary corpora, and structure-aware fuzzing.
+  Complete this split package when every normative DTO shape is executable and no non-canonical or
+  merely prefix-supported input can acquire a fully verified DTO.
+
+  **Implementation plan**
+
+  - Add failing public-contract tests first for the two published vector contents and a table with
+    one complete valid content record for every family 1 through 48. Assert exact family/namespace
+    dispatch, owned DTO variant selection, byte-for-byte re-encoding, exact verified-event
+    retention, and a disjoint `VerifiedSupportedRecord` state reached only from
+    `SupportedContentBytes`.
+  - Add current reviewed `serde` 1.0.229 with derive and `serde_json` 1.0.151 with only the required
+    standard/raw-value features to `hq-protocol`. Use them only for statically typed owned DTOs and
+    raw body isolation; never construct or expose `serde_json::Value`, maps, or domain serialization.
+    Audit the expanded graph and retain compilation on all four release targets.
+  - Define one exact common content envelope and owned protocol types for fixed hex, required
+    nullable properties, scope arrays, namespace-qualified parents, role-qualified authorities,
+    locators, contexts, operations, messages, resources, bindings, activity/runtime/result sums,
+    and every family body. Keep wire names and enum spellings in `hq-protocol`, independent of Rust
+    domain field names.
+  - Reuse the bounded canonical JSON prevalidator before Serde allocation. Deserialize the common
+    envelope with `deny_unknown_fields` and a retained raw body, require all nine properties,
+    cross-check discriminator/version/family against the consumed prefix state, then deserialize
+    the body into the exact family DTO. Reject duplicate, missing, unknown, wrong-type, overflow,
+    invalid UTF-8/scalar, floating-point, negative, and trailing input before producing a verified
+    DTO.
+  - Validate decoded primitives and collection representation without semantic construction:
+    lowercase 32-byte hex, nonempty named text bounds, positive sequences, signed-millisecond
+    range, closed enum spellings, object/array limits, unique relay/resource identities, sorted
+    unique namespace-qualified parents, sorted unique authority triples, authority-as-parent, legal
+    canonical/control reference directions, and family-applicable authority-role vocabulary.
+  - Serialize only from owned DTO structs in normative member order with every optional property
+    present as a value or `null`. Enforce final content bounds after escaping and require the result
+    to equal the retained verified content bytes before constructing `VerifiedSupportedRecord`;
+    classify every semantically equal alternate spelling or member order as non-canonical.
+  - Provide a deterministic outbound DTO encoder that performs the same validation and size checks
+    before yielding bytes suitable for the existing signer, while retaining the DTO owner for the
+    following semantic-conversion package. Keep signing, authorization, and reduction outside the
+    DTO module.
+  - Add adversarial tests covering every common/nested shape, required-null omission, duplicate and
+    unknown properties at each depth, reordered members, nonminimal escapes and numbers, bad hex,
+    unknown enums, wrong body/family pairs, invalid reference namespaces/order/roles, zero/overflow
+    sequence/time values, duplicate/oversized collections, decoded text limits, and one-byte-over
+    final escaped content. Include frozen Go schema samples and prove failures expose no DTO.
+  - Extend the isolated cargo-fuzz workspace with a content target seeded by both published vectors.
+    Re-sign bounded mutations with the fixture key so parse/dispatch/DTO validation remains
+    reachable, run the pinned smoke gate, and document longer sanitizer runs. Run format, all
+    spec/architecture verifiers, workspace check/build/test/doctests, strict Clippy, root and fuzz
+    dependency policy, four-target protocol checks, whitespace, and unchanged Go build/vet/fresh
+    regression suite before recording.
+
+  **Risks and mitigations**
+
+  - Serde normally accepts input spellings and member orders that v1 forbids; treat typed decoding
+    as provisional, serialize the exact DTO back into the normative order, and advance trust only
+    after byte equality with retained content.
+  - `Option<T>` can make a missing property indistinguishable from required `null`; use an owned
+    required-nullable wrapper or equivalent visitor so omission is rejected before canonicality
+    comparison.
+  - A generic body value or untagged enum could normalize duplicates or select an ambiguous shape;
+    retain only the raw body slice, dispatch by the already verified numeric family, and deserialize
+    exactly one named body type.
+  - Forty-eight mappings invite drift and copy/paste gaps; drive the registry from one exhaustive
+    numeric match, table-test every family, and add bidirectional consistency assertions against
+    `FactKind::ALL` and the normative mapping document.
+  - Structure-aware fuzzing cannot mutate a signature-covered payload directly; re-sign only inside
+    the isolated harness with a published fixture secret and explicit deterministic auxiliary bytes,
+    never add a production bypass around cryptographic verification.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including all 48 family fixtures, every
+     malformed/boundary class, fuzz smoke, and repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so DTO code, tests, fuzz assets, and plan bookkeeping form one
+     reviewable change.

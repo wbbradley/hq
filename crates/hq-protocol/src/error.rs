@@ -41,6 +41,12 @@ pub enum FailureClass {
     ContentTooManyItems,
     /// Signed millisecond time did not agree with the outer event seconds.
     AuthoredTimeMismatch,
+    /// Signed scope and author identity disagree intrinsically.
+    ScopeAuthorMismatch,
+    /// An authority reference did not occur in the exact parent set.
+    AuthorityNotParent,
+    /// More than one authority reference used the same semantic role.
+    DuplicateAuthorityRole,
     /// Canonical/control discriminator and family range were mixed.
     NamespaceConfusion,
     /// Frozen Go schema was presented at the Rust protocol boundary.
@@ -91,6 +97,9 @@ impl fmt::Display for ProtocolError {
             FailureClass::AuthoredTimeMismatch => {
                 "content time does not agree with outer event time"
             }
+            FailureClass::ScopeAuthorMismatch => "content scope and author disagree",
+            FailureClass::AuthorityNotParent => "authority reference is not a declared parent",
+            FailureClass::DuplicateAuthorityRole => "authority role occurs more than once",
             FailureClass::NamespaceConfusion => "protocol namespace and family disagree",
             FailureClass::LegacySchema => "legacy Go schema is not accepted",
             FailureClass::InvalidSecretKey => "signing key is invalid",

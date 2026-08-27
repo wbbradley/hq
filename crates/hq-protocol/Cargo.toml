@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 hq-domain.workspace = true
 k256.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 
 [lints]

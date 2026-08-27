@@ -1,6 +1,7 @@
 //! Strict protocol transitions into verified domain values.
 
 mod dispatch;
+mod dto;
 mod error;
 mod json;
 mod signed_event;
@@ -9,6 +10,7 @@ pub use dispatch::{
     DispatchOutcome, ProtocolNamespace, SupportedContentBytes, UnsupportedReason,
     VerifiedUnsupportedRecord,
 };
+pub use dto::VerifiedSupportedRecord;
 pub use error::{FailureClass, ProtocolError};
 pub use signed_event::{
     Bip340Signer, CryptographicallyVerifiedEvent, HQ_EVENT_KIND, MAX_CONTENT_BYTES,
