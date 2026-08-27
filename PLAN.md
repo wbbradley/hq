@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[domain/high] Model semantic fact payloads and deterministic test support** — Define a typed
-  payload variant for every canonical and remote-control family in the semantic fact catalog using
-  only validated `hq-domain` primitives. Build deterministic key, ID, clock, random-byte, fact,
-  graph, and state-machine generators in `hq-testkit`, with catalog fixtures and shrink-friendly
-  construction. Test complete catalog coverage, payload-specific invalid-state exclusion,
-  deterministic generation, and the ability to express every named acceptance scenario without
-  raw strings or ambient time/randomness. Complete this work when later reducers and protocol code
-  need no ad hoc semantic DTOs or test entropy.
-
 - **[algebra/high] Implement the causal graph and complete batch reducer framework** — Implement
   immutable fact-set ingestion, deduplication, parent and reverse-dependency graphs, reachability,
   topological processing, unresolved dependency tracking, causal frontiers, projection support,

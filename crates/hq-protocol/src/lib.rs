@@ -2,7 +2,11 @@
 
 use std::{error::Error, fmt};
 
-use hq_domain::{BoundedText, Fact, FactId, SKELETON_PAYLOAD_MAX_BYTES};
+use hq_domain::{
+    BoundedSet, CausalReferences, EncryptionPublicKey, Fact, FactId, FactScope,
+    InstallationAddress, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, SemanticPayload,
+    ShortText, SigningPublicKey, Timestamp,
+};
 
 /// A pre-serialization frame used only by the workspace walking skeleton.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,11 +30,31 @@ impl InMemoryFrame {
             return Err(DecodeError::EmptyPayload);
         }
 
-        let payload = BoundedText::<SKELETON_PAYLOAD_MAX_BYTES>::new(self.payload)
-            .map_err(|_| DecodeError::PayloadTooLong)?;
+        let label = ShortText::new(self.payload).map_err(|_| DecodeError::PayloadTooLong)?;
         let mut id_bytes = [0; 32];
         id_bytes[24..].copy_from_slice(&self.fact_id.to_be_bytes());
-        Ok(Fact::new(FactId::from_bytes(id_bytes), payload))
+        let installation_id = InstallationId::from_bytes(id_bytes);
+        let signing_key = SigningPublicKey::from_bytes(id_bytes);
+        let author = InstallationAddress::new(installation_id, signing_key);
+        let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+            BoundedSet::new([]).map_err(|_| DecodeError::InvalidSkeleton)?,
+            [],
+        )
+        .map_err(|_| DecodeError::InvalidSkeleton)?;
+        Fact::new(
+            FactId::from_bytes(id_bytes),
+            author,
+            Timestamp::from_unix_millis(0),
+            FactScope::InstallationPrivate(installation_id),
+            causal,
+            SemanticPayload::InstallationDeclared {
+                installation_id,
+                signing_key,
+                encryption_key: EncryptionPublicKey::from_bytes(id_bytes),
+                label: Some(label),
+            },
+        )
+        .map_err(|_| DecodeError::InvalidSkeleton)
     }
 }
 
@@ -41,6 +65,8 @@ pub enum DecodeError {
     EmptyPayload,
     /// The frame exceeded the walking-skeleton payload limit.
     PayloadTooLong,
+    /// The fixed walking-skeleton fixture violated a domain invariant.
+    InvalidSkeleton,
 }
 
 impl fmt::Display for DecodeError {
@@ -48,6 +74,7 @@ impl fmt::Display for DecodeError {
         match self {
             Self::EmptyPayload => formatter.write_str("fact payload is empty"),
             Self::PayloadTooLong => formatter.write_str("fact payload is too long"),
+            Self::InvalidSkeleton => formatter.write_str("walking skeleton is invalid"),
         }
     }
 }

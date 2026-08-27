@@ -3027,3 +3027,91 @@ all four core targets, Go build/vet, and the fresh full Go suite pass.
   2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+## 2026-08-27 — Semantic fact payloads and deterministic test support
+
+Replaced the text-only skeleton fact with a verified semantic envelope carrying typed author,
+scope, timestamp, causal parents, authority roles, and payload. Added an exact 48-family code
+catalog and one typed payload variant per normative FCT row, with canonical/remote-control
+isolation and focused intrinsic validation. Code, Markdown, and constructed fixtures prove exact
+bidirectional catalog coverage. Added deterministic byte/ID/key streams, explicit clocks, valid
+fact builders, all-family payload fixtures, exhaustive small arrival permutations, and
+shrink-friendly state-machine sequences. Updated the walking skeleton and documented the boundary.
+All Cargo format/check/build/test/doctest/strict-Clippy gates, architecture/spec verifiers,
+cargo-deny, four target checks, Go build/vet, and the fresh full Go suite pass.
+
+### Original plan entry
+
+- **[domain/high] Model semantic fact payloads and deterministic test support** — Define a typed
+  payload variant for every canonical and remote-control family in the semantic fact catalog using
+  only validated `hq-domain` primitives. Build deterministic key, ID, clock, random-byte, fact,
+  graph, and state-machine generators in `hq-testkit`, with catalog fixtures and shrink-friendly
+  construction. Test complete catalog coverage, payload-specific invalid-state exclusion,
+  deterministic generation, and the ability to express every named acceptance scenario without
+  raw strings or ambient time/randomness. Complete this work when later reducers and protocol code
+  need no ad hoc semantic DTOs or test entropy.
+
+  Implementation plan:
+
+  - Replace the temporary skeleton `Fact` with a verified `SemanticFact` envelope containing an
+    opaque fact ID, typed author/scope, explicit timestamp, bounded parents and authority roles,
+    and a `SemanticPayload`. Keep signatures, hashes, encoding, receipt metadata, and storage state
+    outside the domain envelope.
+  - Organize the 48 payload variants into installation/identity, authority/account, conversation/
+    activity, agent/session, project, and remote-control modules. Reuse narrow typed records for
+    labels, message presentation, lifecycle state, resource health, assignment/runtime outcomes,
+    and command stages while retaining a one-to-one `FactKind` and enum variant for every FCT ID.
+    Encode required intrinsic exclusions in fallible constructors rather than reducer branches.
+  - Add a catalog table in code mapping every `FactKind` to its stable `FCT-NNN` ID, protocol
+    class, and retention class. Add a verifier/test that extracts the normative Markdown catalog
+    and proves exact bidirectional coverage with no duplicate or invented family.
+  - Implement deterministic `hq-testkit` byte/ID/key streams, explicit clock, semantic-fact
+    builder, DAG builder, arrival permutations, and small state-machine command sequence builder.
+    All generators take an explicit seed/state, produce shrink-friendly ordered data, and expose no
+    global random or clock source. Update the walking skeleton to use a catalog payload fixture.
+  - Add tests first for catalog coverage, scope/payload matching, required constructor validation,
+    deterministic replay and fork behavior, graph parent construction, arrival permutations, and
+    enough fixtures to instantiate every acceptance-scenario domain. Document the payload/testkit
+    contract and run all Rust, architecture, dependency, target-matrix, whitespace, and unchanged
+    Go gates before archiving the package.
+
+  Risks and decisions:
+
+  - The domain catalog records semantic fields and invariants but does not assign JSON keys, enum
+    tags, numeric Nostr kinds, signature bytes, SQL columns, or local API shapes.
+  - A shared payload record is used only when fields and intrinsic validation are truly identical;
+    distinct `FactKind` and `SemanticPayload` variants preserve exhaustive reducer matching.
+  - Remote-control payloads live in the same semantic vocabulary but carry a distinct protocol
+    class and cannot be mistaken for canonical project-state facts.
+  - Testkit output is deterministic test data, not production identity, entropy, cryptography, or
+    a promise that generated graphs are semantically usable before reducer validation.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.

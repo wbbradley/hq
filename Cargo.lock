@@ -63,6 +63,9 @@ version = "0.1.0"
 [[package]]
 name = "hq-testkit"
 version = "0.1.0"
+dependencies = [
+ "hq-domain",
+]
 
 [[package]]
 name = "hq-tui"

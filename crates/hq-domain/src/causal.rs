@@ -7,6 +7,8 @@ use crate::{BoundedSet, FactId, ValidatedValueError};
 /// Semantic role played by a cited authority fact.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum AuthorityRole {
+    /// The installation root authorizing local control state.
+    LocalInstallation,
     /// A capability or membership grant.
     Grant,
     /// A post-grant acceptance.

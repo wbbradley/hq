@@ -17,8 +17,10 @@ mod causal;
 mod correlation;
 mod envelope;
 mod error;
+mod fact_catalog;
 mod ids;
 mod resource;
+mod semantic_fact;
 mod time;
 
 pub use address::{InstallationAddress, MailboxAddress};
@@ -27,36 +29,12 @@ pub use causal::{AuthorityReference, AuthorityRole, CausalReferences};
 pub use correlation::{OperationCorrelation, ProviderId, ProviderSessionId};
 pub use envelope::{Command, Outcome, Page, PageCursor, VersionedView};
 pub use error::{DomainError, ErrorCategory, ErrorCode};
+pub use fact_catalog::{FactKind, ProtocolClass, RetentionClass};
 pub use ids::{
-    AccountId, AgentId, CommandId, EncryptionPublicKey, FactId, InstallationId, MailboxId,
-    MessageId, OperationId, ProjectId, ReceiptId, ResourceId, SigningPublicKey,
+    AccountId, AgentId, AssignmentId, CommandDigest, CommandId, DispatchId, EncryptionPublicKey,
+    FactId, GrantId, InstallationId, MailboxId, MessageId, OperationId, ProjectId, ReceiptId,
+    ResourceId, SigningPublicKey, ThreadId,
 };
 pub use resource::{ResourceLocator, ResourceScheme};
+pub use semantic_fact::*;
 pub use time::{Revision, Timestamp};
-
-/// Maximum payload size used only by the in-memory boundary skeleton.
-pub const SKELETON_PAYLOAD_MAX_BYTES: usize = 4_096;
-
-/// A verified fact used temporarily by the in-memory workspace skeleton.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Fact {
-    id: FactId,
-    payload: BoundedText<SKELETON_PAYLOAD_MAX_BYTES>,
-}
-
-impl Fact {
-    /// Creates a fact after an outer boundary has validated its input.
-    pub const fn new(id: FactId, payload: BoundedText<SKELETON_PAYLOAD_MAX_BYTES>) -> Self {
-        Self { id, payload }
-    }
-
-    /// Returns the fact identity.
-    pub const fn id(&self) -> FactId {
-        self.id
-    }
-
-    /// Returns the skeleton payload.
-    pub fn payload(&self) -> &str {
-        self.payload.as_str()
-    }
-}

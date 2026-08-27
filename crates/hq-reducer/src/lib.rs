@@ -36,20 +36,43 @@ pub fn summarize(facts: &[Fact]) -> FactSummary {
 
 #[cfg(test)]
 mod tests {
-    use hq_domain::{BoundedText, Fact, FactId, SKELETON_PAYLOAD_MAX_BYTES, ValidatedValueError};
+    use std::error::Error;
+
+    use hq_domain::{
+        BoundedSet, CausalReferences, EncryptionPublicKey, Fact, FactId, FactScope,
+        InstallationAddress, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
+        SemanticPayload, ShortText, SigningPublicKey, Timestamp,
+    };
 
     use super::summarize;
 
     #[test]
-    fn summary_is_deterministic_and_deduplicated() -> Result<(), ValidatedValueError> {
+    fn summary_is_deterministic_and_deduplicated() -> Result<(), Box<dyn Error>> {
         let fact_id = |value| {
             let mut bytes = [0; 32];
             bytes[31] = value;
             FactId::from_bytes(bytes)
         };
-        let fact = |value, payload| {
-            BoundedText::<SKELETON_PAYLOAD_MAX_BYTES>::new(payload)
-                .map(|payload| Fact::new(fact_id(value), payload))
+        let fact = |value, label| -> Result<Fact, Box<dyn Error>> {
+            let id = fact_id(value);
+            let installation_id = InstallationId::from_bytes(*id.as_bytes());
+            let signing_key = SigningPublicKey::from_bytes(*id.as_bytes());
+            Ok(Fact::new(
+                id,
+                InstallationAddress::new(installation_id, signing_key),
+                Timestamp::from_unix_millis(i64::from(value)),
+                FactScope::InstallationPrivate(installation_id),
+                CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+                    BoundedSet::new([])?,
+                    [],
+                )?,
+                SemanticPayload::InstallationDeclared {
+                    installation_id,
+                    signing_key,
+                    encryption_key: EncryptionPublicKey::from_bytes(*id.as_bytes()),
+                    label: Some(ShortText::new(label)?),
+                },
+            )?)
         };
         let facts = [fact(2, "second")?, fact(1, "first")?, fact(2, "second")?];
 

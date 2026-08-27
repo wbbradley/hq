@@ -51,6 +51,7 @@ with its local revision. These are domain/application shapes, not RPC or databas
 `DomainError` has a policy-facing category and bounded stable code. Human prose, HTTP/RPC status,
 SQL details, retry timing, and presentation formatting belong outside the pure domain boundary.
 
-The temporary `Fact` and `InMemoryFrame` types remain only to keep the workspace walking skeleton
-executable. The next domain package replaces their bounded text payload with the complete semantic
-fact catalog and supplies deterministic construction through `hq-testkit`.
+`SemanticFact` now replaces the temporary text-only fact shape. `InMemoryFrame` remains only as a
+workspace boundary demonstration and constructs a real `InstallationDeclared` fixture after
+validation. The complete payload and deterministic test-support contract is documented in
+`semantic-facts.md`.
