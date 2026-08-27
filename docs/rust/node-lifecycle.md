@@ -70,3 +70,36 @@ portable length rejection, private modes, symbolic links, non-destructive stale 
 lifecycle admission transition, out-of-order restart/readiness, concurrent state ownership,
 missing identity, unsafe runtime, store-open rollback, mutation rejection during drain, checked
 store close, immediate lock reacquisition, and redacted debug surfaces.
+
+## Component ownership and drain
+
+After foundation startup, `NodeOwner` retains exactly four long-lived component slots in dependency
+order: local sessions, relay manager, harness supervisor, and project workflows. Each concrete
+owner keeps its existing application capabilities and separately implements the lifecycle seam:
+start acknowledgement, stop intake, graceful drain, and idempotent forced stop. A failed start
+force-stops the partially started component, rolls earlier components back in reverse, and then
+drops the foundation.
+
+The node owns a hierarchical cancellation root. A child observes cancellation by itself or any
+ancestor, but cancelling it cannot affect its parent or siblings. The node also owns a
+fixed-capacity task tracker: spawn intake is explicit, every accepted native thread handle remains
+tracked, shutdown closes intake and joins all handles, and returned failures and panics become
+stable named report entries. A generic nonblocking fixed-capacity mailbox returns the unsent value
+with explicit `Full` or `Closed` disposition and never allocates beyond its configured slots.
+
+Normal component shutdown executes these stages even when an earlier stage reports failure:
+
+1. enter lifecycle drain, closing mutation and launch admission;
+2. stop intake for local sessions, relays, harnesses, and project workflows in that order;
+3. cancel the node root so every component/task subtree observes shutdown;
+4. drain local sessions, relay durable handoff, provider output/activity, and project workflows;
+5. force-stop only a component whose drain failed or explicitly requested escalation;
+6. close task spawn intake and join every accepted task; and
+7. close the store/foundation and release runtime, identity, and state ownership.
+
+The returned shutdown report lists typed stage/component issues, escalated components, and the task
+join report. It is diagnostic evidence, not permission to skip cleanup. `NodeApplicationPorts`
+borrows one complete application bundle: query/mutation through `StoreGateway`, revision observation
+through `RevisionHub`, and relay, harness, and resource operations through their concrete owners.
+The identity internally shares one reference-counted signer handle with the gateway; secret bytes
+remain inaccessible and no second signer is constructed.

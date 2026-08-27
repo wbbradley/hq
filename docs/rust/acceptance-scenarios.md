@@ -267,6 +267,16 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   store-open failure, reverse-order startup rollback, checked store close, redacted structured
   component/cause/action diagnostics, and immediate state-lock/store reacquisition after clean or
   failed startup.
+- Component-owner contracts fail startup independently at all four acknowledgement positions,
+  force-stop a partially started owner, roll earlier owners back in reverse, and release the store
+  and state lock for immediate reacquisition.
+- Coordination contracts cover parent/child/sibling cancellation, fixed mailbox saturation and
+  closure without item loss, task-tracker saturation and closed intake, returned task failure,
+  panic joining, and zero retained handles after drain.
+- Shutdown traces close lifecycle admission before component intake, cancel the root, drain local/
+  relay/harness/project owners in normative order, escalate only explicit or failed drains, join
+  every task, and release the foundation. Stop/drain errors accumulate in the final typed report
+  without skipping later components or ownership release.
 
 ## Scenario maintenance rule
 

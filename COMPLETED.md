@@ -5325,3 +5325,92 @@ smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before component
      composition.
+
+## 2026-08-27 — Bounded node component ownership and ordered graceful drain
+
+Implemented the sole node runtime owner over the RAII foundation, four closed component slots,
+hierarchical cancellation, a fixed-capacity nonblocking mailbox, tracked native tasks, and the
+shared revision hub. Startup acknowledges components in dependency order and rolls back every
+partial failure in exact reverse order. Shutdown closes lifecycle and component intake, cancels the
+root, drains each owner in normative order, escalates only failed or explicitly incomplete drains,
+joins every accepted task, accumulates typed diagnostic issues, and always advances through store
+and state-lock release.
+
+Added transient complete application ports that delegate query/mutation to the store gateway,
+revision observation to the hub, and relay, harness, and resource capabilities to their concrete
+owners. The installation identity internally shares its signer through a reference-counted handle
+without exposing secret bytes. Plain diagnostic/report records use idiomatic public fields and
+startup failures are pattern-matchable; methods remain on invariant and ownership types.
+
+Deterministic contracts cover all four startup failure positions and exact rollback traces,
+retained hierarchical cancellation, sibling isolation, bounded mailbox saturation/closure,
+receiver-drop closure, task saturation/closure/failure/panic joining, delegated capabilities,
+mutation admission racing drain, restart intent, normative shutdown order, provider escalation,
+cleanup errors that do not skip tasks or later owners, zero retained handles, and immediate lock
+reacquisition. Full locked workspace format/check/build/tests/doctests/Clippy,
+architecture/dependency/behavior/specification verifiers, four supported core targets, both
+512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[node/high] Compose bounded component ownership and ordered graceful drain** — Build the sole
+  node owner over the foundation, store gateway, revision hub, local-session registry, relay-manager
+  port, harness-supervisor port, project-workflow port, hierarchical cancellation, bounded
+  mailboxes, and tracked tasks. Start and acknowledge required components in dependency order;
+  drain intake, clients, relay ingress, providers, workflows, store producers, tasks, store, and
+  ownership in the normative order. Test startup rollback at every component, saturated mailboxes,
+  mutation/drain races, task failure, provider escalation, restart, and leak-free exact-once close
+  with deterministic fake adapters.
+
+  **Implementation plan**
+
+  - Define one closed component catalog (`LocalSessions`, `RelayManager`, `HarnessSupervisor`, and
+    `ProjectWorkflows`) and one lifecycle trait with explicit start acknowledgement, stop-intake,
+    drain result, and forced-stop escalation. Keep relay/harness/resource application capabilities
+    on their existing narrow traits rather than hiding them in a generic component interface.
+  - Implement a cloneable hierarchical cancellation token whose children observe parent
+    cancellation without being able to cancel siblings, plus a fixed-capacity task tracker that
+    rejects excess tasks, closes spawn intake before drain, joins every accepted thread, and reports
+    panic or typed task failure without leaking handles.
+  - Add a fixed-capacity nonblocking mailbox primitive with explicit `Full` and `Closed` outcomes.
+    Use it as the component/test seam so every future producer must choose backpressure,
+    coalescing, or rejection instead of creating an unbounded queue.
+  - Compose `NodeOwner` over `NodeFoundation`, a shared revision hub, local-session registry, relay
+    manager, harness supervisor, and project workflow manager. Start in dependency order with
+    component-scoped cancellation children; on any failed acknowledgement, stop and drain every
+    already-started component in reverse before store/lock release.
+  - Close lifecycle admission first during shutdown, then stop local/client and external-work
+    intake, cancel the root, drain local sessions, relay ingress/durable handoff, provider output,
+    and project workflows in normative order, force-stop only components that request escalation,
+    close/join tracked tasks, and finally close the store/foundation. Accumulate typed issues while
+    continuing all later cleanup steps.
+  - Adapt the non-cloneable installation identity to share one signer handle internally with the
+    store gateway without exposing key bytes. Expose transient node application ports by delegating
+    query/mutation to `StoreGateway`, revision observation to `RevisionHub`, and relay/harness/
+    resource operations to their owning components.
+  - Add scripted trace components and concurrency tests for every startup failure position,
+    reverse rollback, mailbox saturation/closure, parent-child/sibling cancellation, tracker
+    saturation/panic/failure, mutation admission racing drain, normative shutdown order, provider
+    escalation, restart intent, component errors that do not skip cleanup, and immediate ownership
+    reacquisition with no live accepted task.
+
+  **Risks and decisions**
+
+  - Returning early on the first drain error leaks later owners. Shutdown records stable issues and
+    always advances through store close and lock release; the final report distinguishes clean,
+    escalated, and failed stages.
+  - A single cancellation flag would let one component stop siblings. Child tokens observe their
+    parent but cancel only their own subtree; only the node owner holds the root cancellation right.
+  - Treating a thread spawn as success before tracking its handle admits leaks. Capacity is reserved
+    before spawn, every accepted handle is retained, and tracker intake closes before joining.
+  - Future Tokio tasks and provider processes need different concrete escalation adapters, but the
+    ownership protocol is the same. This package pins acknowledgements and order with deterministic
+    threads/fakes; socket/runtime-specific execution remains in the following package.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing cancellation, mailbox, task, startup-rollback, and shutdown-order contracts first.
+  2. Implement component ownership and delegated application ports; update lifecycle specifications.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before Unix listener
+     and autostart work.

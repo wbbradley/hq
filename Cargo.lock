@@ -316,6 +316,7 @@ dependencies = [
  "getrandom",
  "hq-application",
  "hq-domain",
+ "hq-local-api",
  "hq-protocol",
  "hq-reducer",
  "hq-store",

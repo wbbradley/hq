@@ -1,5 +1,7 @@
 //! Composition root and runtime ownership boundary.
 
+mod components;
+mod coordination;
 mod foundation;
 mod identity;
 mod lifecycle;
@@ -46,3 +48,13 @@ pub fn run_in_memory(
 
     application.summary().map_err(InMemoryRunError::Reduce)
 }
+pub use components::{
+    ComponentDrain, ComponentError, ComponentKind, NodeApplicationPorts, NodeComponent,
+    NodeComponents, NodeOwner, NodeOwnerStartError, NodeShutdownReport, ShutdownIssue,
+    ShutdownStage,
+};
+pub use coordination::{
+    CancellationToken, MAX_TASK_NAME_BYTES, MailboxReceiveError, MailboxReceiver, MailboxSendError,
+    MailboxSender, TaskError, TaskFailure, TaskFailureKind, TaskJoinReport, TaskTracker,
+    TaskTrackerError, bounded_mailbox,
+};

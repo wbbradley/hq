@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt, num::NonZeroUsize};
 
+use hq_protocol::Bip340Signer;
 use hq_store::{Store, StoreErrorClass};
 
 use crate::{
@@ -180,6 +181,10 @@ impl NodeFoundation {
         self.store.as_ref()
     }
 
+    pub(crate) fn signer_handle(&self) -> std::sync::Arc<Bip340Signer> {
+        self.identity.signer_handle()
+    }
+
     /// Acknowledges store-backed readiness at the serialized current revision.
     pub fn mark_ready(&mut self) -> Result<NodeTransitionOutcome, NodeReadinessError> {
         let Some(store) = self.store() else {
@@ -208,6 +213,11 @@ impl NodeFoundation {
     /// Closes side-effecting intake before ordered component drain.
     pub fn begin_drain(&mut self) -> Result<NodeTransitionOutcome, NodeLifecycleError> {
         self.lifecycle.begin_drain()
+    }
+
+    /// Closes intake while retaining explicit clean-restart intent.
+    pub fn begin_restart(&mut self) -> Result<NodeTransitionOutcome, NodeLifecycleError> {
+        self.lifecycle.begin_restart()
     }
 
     /// Closes the store before releasing runtime, identity, and state ownership.

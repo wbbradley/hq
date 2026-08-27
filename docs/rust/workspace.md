@@ -71,8 +71,11 @@ and composes the state lock, identity/configuration, runtime directory, and boun
 one RAII owner. Its pure lifecycle closes mutation and launch admission at drain entry, retains
 explicit stop/restart intent, and publishes readiness only with a serialized store revision.
 Startup failures carry closed component/cause/action values and selected paths without retaining
-secret, SQLite, or operating-system diagnostics. Listener, component-manager, and task ownership
-remain in the immediately following node packages.
+secret, SQLite, or operating-system diagnostics. The node now also owns the four-slot component
+lifecycle catalog, hierarchical cancellation, fixed-capacity tracked threads and nonblocking
+mailboxes, ordered rollback/drain/escalation, shared revision hub, and the transient delegated
+application capability bundle. Unix listener execution remains in the immediately following node
+package.
 
 ## Supported target matrix
 

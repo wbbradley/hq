@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[node/high] Compose bounded component ownership and ordered graceful drain** — Build the sole
-  node owner over the foundation, store gateway, revision hub, local-session registry, relay-manager
-  port, harness-supervisor port, project-workflow port, hierarchical cancellation, bounded
-  mailboxes, and tracked tasks. Start and acknowledge required components in dependency order;
-  drain intake, clients, relay ingress, providers, workflows, store producers, tasks, store, and
-  ownership in the normative order. Test startup rollback at every component, saturated mailboxes,
-  mutation/drain races, task failure, provider escalation, restart, and leak-free exact-once close
-  with deterministic fake adapters.
-
 - **[node/high] Implement Unix local listener, coordinated autostart, and lifecycle commands** —
   Bind the private Unix socket only while holding node ownership, validate peer/path security,
   drive bounded server sessions and write confirmations, publish readiness atomically, and remove

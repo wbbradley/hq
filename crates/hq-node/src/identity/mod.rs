@@ -6,7 +6,7 @@ mod config;
 mod error;
 mod paths;
 
-use std::{fmt, fs::File, io::Read, path::Path};
+use std::{fmt, fs::File, io::Read, path::Path, sync::Arc};
 
 use hq_domain::{InstallationId, SigningPublicKey};
 use hq_protocol::Bip340Signer;
@@ -69,7 +69,7 @@ impl PublicIdentity {
 pub struct InstallationIdentity {
     public: PublicIdentity,
     secret: Zeroizing<[u8; 32]>,
-    signer: Bip340Signer,
+    signer: Arc<Bip340Signer>,
 }
 
 impl InstallationIdentity {
@@ -88,7 +88,7 @@ impl InstallationIdentity {
                 fingerprint,
             },
             secret: Zeroizing::new(secret),
-            signer,
+            signer: Arc::new(signer),
         })
     }
 
@@ -98,8 +98,12 @@ impl InstallationIdentity {
     }
 
     /// Borrows the signer without exposing root secret bytes.
-    pub const fn signer(&self) -> &Bip340Signer {
-        &self.signer
+    pub fn signer(&self) -> &Bip340Signer {
+        self.signer.as_ref()
+    }
+
+    pub(crate) fn signer_handle(&self) -> Arc<Bip340Signer> {
+        Arc::clone(&self.signer)
     }
 
     fn secret_bytes(&self) -> &[u8; 32] {
