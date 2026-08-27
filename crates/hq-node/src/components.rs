@@ -2,9 +2,6 @@
 
 use std::{error::Error, fmt, num::NonZeroUsize};
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::net::UnixStream;
-
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts, CommitFacts,
     ConfigureRelays, ControlHarness, EffectOutcome, EffectRequest, FactMutation, InspectResource,
@@ -19,12 +16,15 @@ use hq_local_api::protocol::v1::{BuildMetadata, Id32};
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 use hq_store::StoreGateway;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::{
+    AcceptedLocalStream, NodePhase, ReadinessRecord, RuntimeArtifactError,
+    local_transport::ready_record,
+};
 use crate::{
     CancellationToken, NodeAdmission, NodeFoundation, NodeLifecycleError, TaskJoinReport,
     TaskTracker,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use crate::{NodePhase, ReadinessRecord, RuntimeArtifactError, local_transport::ready_record};
 
 /// Closed long-lived component catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -367,7 +367,7 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
 
     /// Accepts one waiting same-user local connection.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn accept_local(&self) -> Result<UnixStream, RuntimeArtifactError> {
+    pub fn accept_local(&self) -> Result<AcceptedLocalStream, RuntimeArtifactError> {
         self.foundation
             .as_ref()
             .ok_or_else(RuntimeArtifactError::from_shutdown_state)?

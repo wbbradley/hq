@@ -19,6 +19,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::RuntimePaths;
 
+/// A connected Unix stream that passed foundation-owned same-user kernel validation.
+pub struct AcceptedLocalStream(UnixStream);
+
+impl fmt::Debug for AcceptedLocalStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AcceptedLocalStream(..)")
+    }
+}
+
+impl AcceptedLocalStream {
+    pub(crate) fn into_inner(self) -> UnixStream {
+        self.0
+    }
+}
+
 /// Maximum complete encoded readiness record accepted before JSON parsing.
 pub const MAX_READINESS_BYTES: usize = 4_096;
 
@@ -357,7 +372,7 @@ impl LocalTransportOwner {
         ))
     }
 
-    pub(crate) fn accept(&self) -> Result<UnixStream, RuntimeArtifactError> {
+    pub(crate) fn accept(&self) -> Result<AcceptedLocalStream, RuntimeArtifactError> {
         let listener = self
             .listener
             .as_ref()
@@ -371,7 +386,7 @@ impl LocalTransportOwner {
         })?;
         validate_same_user(system_effective_user_id(), system_peer_user_id(&stream))?;
         stream.set_nonblocking(true).map_err(operating_system)?;
-        Ok(stream)
+        Ok(AcceptedLocalStream(stream))
     }
 
     pub(crate) fn publish(&mut self, record: &ReadinessRecord) -> Result<(), RuntimeArtifactError> {

@@ -2,20 +2,20 @@
 
 use std::{error::Error, fmt, num::NonZeroUsize};
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::net::UnixStream;
-
 use hq_protocol::Bip340Signer;
 use hq_store::{Store, StoreErrorClass};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::{
+    AcceptedLocalStream, ReadinessRecord, RuntimeArtifactError,
+    local_transport::LocalTransportOwner,
+};
 use crate::{
     IdentityErrorClass, InstallationIdentity, LocalConfiguration, NodeAdmission, NodeLifecycle,
     NodeLifecycleError, NodeTransitionOutcome, RuntimeDirectoryOwner, RuntimePathErrorClass,
     RuntimePaths, StartupCause, StartupComponent, StartupDiagnostic, StateDirectoryOwner,
     StatePaths,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use crate::{ReadinessRecord, RuntimeArtifactError, local_transport::LocalTransportOwner};
 
 /// Explicit inputs for opening the node foundation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -207,7 +207,7 @@ impl NodeFoundation {
 
     /// Accepts one waiting connection and validates same-user kernel credentials.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub fn accept_local(&self) -> Result<UnixStream, RuntimeArtifactError> {
+    pub fn accept_local(&self) -> Result<AcceptedLocalStream, RuntimeArtifactError> {
         self.local_transport.accept()
     }
 

@@ -5562,3 +5562,76 @@ both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh te
   2. Refactor `ServerSession` and all callers without weakening existing protocol contracts.
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before socket I/O.
+
+## 2026-08-27 — Bounded authenticated Unix session I/O
+
+Added the minimal Tokio Unix networking, I/O, runtime, macro, and synchronization features. A raw
+accepted descriptor is now wrapped in an opaque `AcceptedLocalStream` only after foundation-owned
+kernel same-user validation, and the session driver consumes that capability exactly once.
+
+Implemented one joined per-connection future with a fixed encoded-frame queue, caller-bounded event
+channel, bounded incremental decoding, ordered full-frame writes, and a close signal independent of
+write capacity. Events are plain closed enums. Response tickets are emitted only after every byte
+of the exact frame succeeds; malformed, oversized, noncanonical, truncated, failed, peer-closed, or
+cancelled sessions terminate without retrying or falsely confirming a partial write. Either byte
+loop ending drops its sibling and descriptor before one terminal event.
+
+Red-green contracts cover partial and multiple input frames, oversized and truncated input, fixed
+and closed write queues, invalid untracked messages, exact complete-frame ticket delivery, explicit
+close while the queue is full, cancellation after a partial duplex write without completion, and
+one joined terminal event. Full locked workspace format/check/build/tests/doctests/Clippy,
+architecture/dependency/behavior/specification verifiers, four supported core and node targets,
+both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[node/high] Drive bounded Unix session I/O** — Add Tokio-owned per-connection read/write tasks
+  around the transport-independent session state, with bounded connection, decoded-message, and
+  encoded-write capacity; incremental framing; exact `ServerSession` write confirmations only after
+  full-frame completion; coalesced invalidations; and cancellation-safe disconnect cleanup. Test
+  partial/multiple frames, malformed and oversized input, lost/partial writes, queue saturation,
+  slow or nonreading peers, subscription cleanup, and zero leaked tasks on Linux and macOS.
+
+  **Implementation plan**
+
+  - Introduce the minimal current Tokio feature set for Unix networking, asynchronous read/write,
+    bounded channels, task polling, and deterministic tests. Keep SQLite and application dispatch
+    synchronous on their existing owners; this package moves only socket waits and bytes to Tokio.
+  - Replace the public raw accepted stream with an opaque `AcceptedLocalStream` created only after
+    foundation-owned kernel peer validation. Consume that capability when preparing session I/O so
+    no caller can accidentally feed an unauthenticated socket into the production driver.
+  - Define plain closed session events for decoded message, complete tracked write, and exactly one
+    terminal close cause. Use one caller-owned bounded event channel and one fixed-capacity encoded
+    write queue per connection; return explicit `Full`, `Closed`, invalid-message, or encode
+    rejection without adding fallback queues.
+  - Run bounded incremental frame decoding on the read half. Drain all complete retained frames
+    before another read, stop reading while the event channel applies backpressure, classify EOF
+    with retained bytes as truncated protocol input, and close on every malformed/oversized frame.
+  - Run ordered complete-frame writes on the write half. Emit a `Written` ticket only after every
+    byte of that exact frame succeeds; a write error, peer close, or cancellation may leave partial
+    bytes but closes the stream and never retries or confirms the ticket.
+  - Drive the read and write futures under one tracked per-session future with a separate close
+    signal that cannot be blocked behind a saturated write queue. When either half terminates, stop
+    the sibling half, drop the descriptor, emit one terminal event, and return with no child task.
+  - Add deterministic duplex and real Unix-stream contracts for partial and multiple frames,
+    malformed/oversized/truncated input, partial/lost writes, full/closed queues, ordered tickets,
+    invalidation writes, slow/nonreading peers, prompt close, and exact terminal cleanup.
+
+  **Risks and decisions**
+
+  - Cancelling `write_all` can leave a partial frame. Cancellation always closes that connection;
+    it never restarts the frame and never confirms the associated `WriteTicket`.
+  - A shared unbounded event stream would move the memory problem upstream. The future central node
+    loop supplies fixed event capacity, and each session stops socket reads while that bound is full.
+  - Spawning detached reader and writer tasks complicates exact joining. One session future polls
+    both owned halves concurrently and returns only after the descriptor and both loops are gone.
+  - Raw Unix streams would bypass the peer-credential boundary. The opaque accepted-stream
+    capability is constructible only by the foundation after kernel same-user validation.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing bounded read/write/event/close contracts before introducing Tokio.
+  2. Implement the accepted-stream capability and one joined session I/O future.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before listener-loop
+     coordination.

@@ -55,13 +55,6 @@ Use these sources in order when they disagree:
 ## Next Up
 
 
-- **[node/high] Drive bounded Unix session I/O** — Add Tokio-owned per-connection read/write tasks
-  around the transport-independent session state, with bounded connection, decoded-message, and
-  encoded-write capacity; incremental framing; exact `ServerSession` write confirmations only after
-  full-frame completion; coalesced invalidations; and cancellation-safe disconnect cleanup. Test
-  partial/multiple frames, malformed and oversized input, lost/partial writes, queue saturation,
-  slow or nonreading peers, subscription cleanup, and zero leaked tasks on Linux and macOS.
-
 - **[node/high] Coordinate the owned listener and graceful node runtime** — Drive the nonblocking
   foundation-owned listener from the sole node event loop, cap live sessions, reject excess peers,
   and route lifecycle requests plus Unix stop/restart signals through ordered component drain.

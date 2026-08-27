@@ -288,6 +288,11 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Runtime cleanup contracts cover component-start rollback, exact socket/readiness removal,
   substituted path preservation with a typed shutdown issue, continued store/state-lock release,
   no temporary-file leak, and immediate listener rebind.
+- Session-I/O contracts cover opaque peer-validated streams, partial and multiple frame reads,
+  malformed/oversized/truncated rejection, bounded decoded-event backpressure, fixed encoded-write
+  capacity, invalid untracked-message rejection, full-frame ticket completion, cancellation after a
+  partial write without completion, exactly one terminal event, and a joined driver with no child
+  task.
 
 ## Scenario maintenance rule
 

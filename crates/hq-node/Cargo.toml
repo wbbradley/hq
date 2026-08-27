@@ -26,6 +26,7 @@ zeroize.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 nix.workspace = true
+tokio.workspace = true
 
 [[bin]]
 name = "hq"

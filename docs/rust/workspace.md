@@ -80,8 +80,11 @@ mailboxes, ordered rollback/drain/escalation, shared revision hub, and the trans
 application capability bundle. The foundation now exclusively binds and owns the private `0600`
 Unix socket, probes identity-stable stale sockets without blocking, validates Linux/macOS same-user
 peer credentials, atomically publishes strict bounded readiness metadata, and removes only exact
-owned runtime identities. Asynchronous session/write execution remains in the immediately
-following node package.
+owned runtime identities. An authenticated accepted stream is an opaque capability consumed by one
+Tokio-owned bounded session I/O future. The future incrementally decodes into a caller-bounded event
+channel, writes from a fixed encoded-frame queue, emits response tickets only after complete frame
+writes, and joins its read/write halves into one exact terminal event. Listener multiplexing and
+lifecycle coordination remain in the immediately following node package.
 
 ## Supported target matrix
 

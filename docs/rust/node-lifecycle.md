@@ -138,5 +138,25 @@ Shutdown closes the listener first and conditionally removes only socket/readine
 types and device/inode identities still match this owner. Missing files are already clean; renamed,
 substituted, linked, or unrelated artifacts are preserved and reported as a typed runtime cleanup
 issue. Cleanup continues through store closure and state-lock release even after such an issue.
-The asynchronous accept/session/write loops and signal coordination remain in the next node
-package.
+Asynchronous listener multiplexing and signal coordination remain in the next node package.
+
+## Bounded local session byte I/O
+
+Only a stream returned by foundation-owned same-user credential validation can enter local session
+I/O. The raw descriptor is wrapped in an opaque accepted-stream capability and consumed exactly
+once when it is registered with Tokio; arbitrary or peer-asserted streams cannot use the production
+entry point.
+
+Each connection has one fixed encoded-frame queue and emits into a caller-owned bounded event
+channel. Its read half uses the protocol's bounded incremental decoder, drains every retained
+complete frame before reading again, and naturally stops socket reads while the event bound is
+full. Malformed, oversized, noncanonical, and truncated-at-EOF frames close only that connection.
+Its write half preserves queue order and emits a `Written` event for a session-owned ticket only
+after every byte of the exact frame succeeds. Invalidation frames are untracked and must already be
+the closed invalidation wire variant.
+
+One joined future polls both owned halves. A separate close signal is not queued behind response
+capacity; either half terminating drops its sibling and the descriptor before one terminal event is
+emitted. Cancelling a write may leave partial bytes at the peer, so cancellation always closes the
+connection and never restarts or confirms that frame. The next package owns the bounded collection
+of these futures and routes their events through the central node loop.

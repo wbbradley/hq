@@ -8,6 +8,8 @@ mod lifecycle;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod local_transport;
 mod runtime;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod session_io;
 
 pub use foundation::{
     NodeFoundation, NodeFoundationConfig, NodeReadinessError, NodeShutdownError, NodeStartupError,
@@ -22,11 +24,17 @@ pub use lifecycle::{
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local_transport::{
-    MAX_READINESS_BYTES, ReadinessRecord, RuntimeArtifactError, RuntimeArtifactErrorClass,
+    AcceptedLocalStream, MAX_READINESS_BYTES, ReadinessRecord, RuntimeArtifactError,
+    RuntimeArtifactErrorClass,
 };
 pub use runtime::{
     PORTABLE_UNIX_SOCKET_PATH_BYTES, RuntimeDirectoryOwner, RuntimePathError,
     RuntimePathErrorClass, RuntimePaths,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use session_io::{
+    LocalSessionClose, LocalSessionEvent, LocalSessionHandle, LocalSessionSendError,
+    LocalSessionStartError, prepare_local_session_io,
 };
 
 use hq_application::InMemoryApplication;
