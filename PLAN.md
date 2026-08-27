@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[transport/high] Prove two-replica convergence and controlled relay interoperability** — Compose
-  the real node relay manager, storage adapter, route resolution, root envelope identity, and common
-  canonical ingest path. Prove two distinct Rust installations converge across arbitrary delivery
-  order, duplication, downtime, offline retained catch-up, relay restart, client restart, revoke and
-  regrant traffic, and uncertain publish responses. Add an opt-in controlled real-retained-relay
-  smoke covering NIP-42 and catch-up without making external availability a unit gate. Complete this
-  package when direct state/reducer evidence proves relay order and observations cannot influence
-  the converged result.
-
 - **[harness/high] Define the provider-neutral harness contract and conformance suite** — Specify
   logical instances, durable sessions, capabilities, start/resume readiness, stable submission IDs,
   accepted/rejected/uncertain outcomes, lookup/reconciliation requirements, interactive requests,

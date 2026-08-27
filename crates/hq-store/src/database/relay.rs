@@ -476,6 +476,12 @@ fn put_cursor(
 ) -> Result<(), StoreError> {
     validate_url(&cursor.url)?;
     if cursor.generation == 0
+        || cursor.scan_started_at_millis == 0
+        || cursor
+            .covered_through_millis
+            .is_some_and(|covered| covered > cursor.scan_started_at_millis)
+        || cursor.exhausted
+            != (cursor.covered_through_millis == Some(cursor.scan_started_at_millis))
         || cursor.oldest_created_at.is_some() != cursor.oldest_wrapper_id.is_some()
     {
         return Err(invalid());
@@ -489,8 +495,7 @@ fn put_cursor(
             return Ok(());
         }
         if cursor.generation < stored.generation
-            || (cursor.generation == stored.generation
-                && (stored.exhausted && !cursor.exhausted || !boundary_advances(&stored, cursor)))
+            || (cursor.generation == stored.generation && !cursor_transition(&stored, cursor))
         {
             return Err(conflict());
         }
@@ -498,14 +503,19 @@ fn put_cursor(
     transaction
         .execute(
             "INSERT INTO relay_cursors(\
-                url, generation, oldest_created_at, oldest_wrapper_id, exhausted\
-             ) VALUES (?1, ?2, ?3, ?4, ?5) \
+                url, generation, scan_started_at_millis, covered_through_millis, \
+                oldest_created_at, oldest_wrapper_id, exhausted\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
              ON CONFLICT(url) DO UPDATE SET generation = excluded.generation, \
+                scan_started_at_millis = excluded.scan_started_at_millis, \
+                covered_through_millis = excluded.covered_through_millis, \
                 oldest_created_at = excluded.oldest_created_at, \
                 oldest_wrapper_id = excluded.oldest_wrapper_id, exhausted = excluded.exhausted",
             params![
                 cursor.url,
                 cursor.generation.to_be_bytes().as_slice(),
+                cursor.scan_started_at_millis.to_be_bytes().as_slice(),
+                cursor.covered_through_millis.map(u64::to_be_bytes),
                 cursor.oldest_created_at.map(u64::to_be_bytes),
                 cursor.oldest_wrapper_id.map(|value| value.to_vec()),
                 encode_bool(cursor.exhausted),
@@ -515,17 +525,36 @@ fn put_cursor(
     Ok(())
 }
 
+fn cursor_transition(stored: &StoredCatchupCursor, candidate: &StoredCatchupCursor) -> bool {
+    if candidate.scan_started_at_millis > stored.scan_started_at_millis {
+        return stored.exhausted
+            && !candidate.exhausted
+            && candidate.covered_through_millis == stored.covered_through_millis
+            && candidate.oldest_created_at.is_none();
+    }
+    if candidate.scan_started_at_millis < stored.scan_started_at_millis
+        || stored.exhausted
+        || (!candidate.exhausted
+            && candidate.covered_through_millis != stored.covered_through_millis)
+        || (candidate.exhausted
+            && candidate.covered_through_millis != Some(candidate.scan_started_at_millis))
+    {
+        return false;
+    }
+    boundary_advances(stored, candidate)
+        || candidate.exhausted
+            && stored.oldest_created_at == candidate.oldest_created_at
+            && stored.oldest_wrapper_id == candidate.oldest_wrapper_id
+}
+
 fn boundary_advances(stored: &StoredCatchupCursor, candidate: &StoredCatchupCursor) -> bool {
     match (
         stored.oldest_created_at.zip(stored.oldest_wrapper_id),
         candidate.oldest_created_at.zip(candidate.oldest_wrapper_id),
     ) {
         (None, Some(_)) => true,
-        (None, None) => stored.exhausted != candidate.exhausted,
-        (Some(_), None) => false,
-        (Some(old), Some(new)) => {
-            new < old || (new == old && stored.exhausted != candidate.exhausted)
-        }
+        (None | Some(_), None) => false,
+        (Some(old), Some(new)) => new < old,
     }
 }
 
@@ -808,7 +837,15 @@ type AttemptRow = (
     Vec<u8>,
     Option<Vec<u8>>,
 );
-type CursorRow = (String, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, i64);
+type CursorRow = (
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    i64,
+);
 type StagedRow = (Vec<u8>, Vec<u8>, Vec<u8>, i64, Vec<u8>);
 type QuarantineRow = (Vec<u8>, Option<Vec<u8>>, i64, Vec<u8>, i64, Vec<u8>);
 type ClaimRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
@@ -1016,16 +1053,19 @@ pub(super) fn load_cursor(
 ) -> Result<Option<StoredCatchupCursor>, StoreError> {
     connection
         .query_row(
-            "SELECT url, generation, oldest_created_at, oldest_wrapper_id, exhausted \
+            "SELECT url, generation, scan_started_at_millis, covered_through_millis, \
+                    oldest_created_at, oldest_wrapper_id, exhausted \
              FROM relay_cursors WHERE url = ?1",
             [url],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, Option<Vec<u8>>>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             },
         )
@@ -1043,11 +1083,13 @@ fn load_cursors(
     let sql = match position {
         StoredRelayPagePosition::Done => return Ok(Vec::new()),
         StoredRelayPagePosition::Start => {
-            "SELECT url, generation, oldest_created_at, oldest_wrapper_id, exhausted \
+            "SELECT url, generation, scan_started_at_millis, covered_through_millis, \
+                    oldest_created_at, oldest_wrapper_id, exhausted \
              FROM relay_cursors ORDER BY url LIMIT ?1"
         }
         StoredRelayPagePosition::After(_) => {
-            "SELECT url, generation, oldest_created_at, oldest_wrapper_id, exhausted \
+            "SELECT url, generation, scan_started_at_millis, covered_through_millis, \
+                    oldest_created_at, oldest_wrapper_id, exhausted \
              FROM relay_cursors WHERE url > ?1 ORDER BY url LIMIT ?2"
         }
     };
@@ -1072,23 +1114,39 @@ fn cursor_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CursorRow> {
         row.get(2)?,
         row.get(3)?,
         row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
     ))
 }
 
 fn decode_cursor(row: CursorRow) -> Result<StoredCatchupCursor, StoreError> {
     validate_url(&row.0).map_err(|_| corrupt())?;
-    let oldest_created_at = row.2.map(decode_u64).transpose()?;
-    let oldest_wrapper_id = row.3.map(fixed).transpose()?;
+    let scan_started_at_millis = decode_u64(row.2)?;
+    let covered_through_millis = row.3.map(decode_u64).transpose()?;
+    let oldest_created_at = row.4.map(decode_u64).transpose()?;
+    let oldest_wrapper_id = row.5.map(fixed).transpose()?;
     if oldest_created_at.is_some() != oldest_wrapper_id.is_some() {
         return Err(corrupt());
     }
-    Ok(StoredCatchupCursor {
+    let cursor = StoredCatchupCursor {
         url: row.0,
         generation: decode_positive_u64(row.1)?,
+        scan_started_at_millis,
+        covered_through_millis,
         oldest_created_at,
         oldest_wrapper_id,
-        exhausted: decode_bool(row.4)?,
-    })
+        exhausted: decode_bool(row.6)?,
+    };
+    if cursor.scan_started_at_millis == 0
+        || cursor
+            .covered_through_millis
+            .is_some_and(|covered| covered > cursor.scan_started_at_millis)
+        || cursor.exhausted
+            != (cursor.covered_through_millis == Some(cursor.scan_started_at_millis))
+    {
+        return Err(corrupt());
+    }
+    Ok(cursor)
 }
 
 fn load_staged_one(

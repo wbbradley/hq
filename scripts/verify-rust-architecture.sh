@@ -45,6 +45,16 @@ for crate in "${expected_crates[@]}"; do
     fail "$crate does not enable workspace lints"
 done
 
+grep -Eq '^tungstenite(\.workspace)?[[:space:]]*=' \
+  "$repository_root/crates/hq-relay/Cargo.toml" ||
+  fail "hq-relay must own the bounded WebSocket adapter dependency"
+for crate in "${expected_crates[@]}"; do
+  if [[ "$crate" != hq-relay ]] && grep -Eq '^tungstenite(\.workspace)?[[:space:]]*=' \
+    "$repository_root/crates/$crate/Cargo.toml"; then
+    fail "$crate may not depend directly on tungstenite; WebSocket transport belongs to hq-relay"
+  fi
+done
+
 allowed_internal_dependency() {
   case "$1:$2" in
     hq-reducer:hq-domain | \
@@ -134,6 +144,12 @@ fi
 grep -Fq 'impl RelayStatePort for RelayStoreAdapter' \
   "$repository_root/crates/hq-node/src/relay_store.rs" ||
   fail "hq-node must own the relay/store record mapping"
+
+grep -Fq 'impl NodeComponent for RelayNodeComponent' \
+  "$repository_root/crates/hq-node/src/relay_component.rs" ||
+  fail "hq-node must own the concrete relay component lifecycle"
+grep -Fq 'foundation.compose_relay(' "$repository_root/crates/hq-node/src/foreground.rs" ||
+  fail "foreground composition must construct the concrete relay through foundation ownership"
 
 binary_manifests=()
 while IFS= read -r manifest; do

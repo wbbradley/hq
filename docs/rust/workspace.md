@@ -4,7 +4,9 @@ Status: Active foundation contract
 
 The Rust rewrite lives beside the frozen Go implementation until an authorized cutover. The root
 Cargo workspace uses Rust 1.98.0, edition 2024, resolver 3, shared formatting, and deny-level Rust
-and Clippy policy. It currently has no third-party runtime dependency. `crates/hq-node` owns the
+and Clippy policy. Third-party runtime dependencies remain confined to the adapters that own them;
+in particular, only `hq-relay` imports bounded blocking Tungstenite/Rustls WebSocket transport.
+`crates/hq-node` owns the
 only binary target, named `hq`; this records the single-executable packaging decision without
 making the skeleton a supported replacement for the Go executable.
 

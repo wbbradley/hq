@@ -1,8 +1,10 @@
 //! RAII ownership of the state lock, identity, runtime namespace, and bounded store.
 
-use std::{error::Error, fmt, num::NonZeroUsize};
+use std::{error::Error, fmt, num::NonZeroUsize, sync::Arc};
 
 use hq_protocol::Bip340Signer;
+use hq_reducer::AuthorityPolicy;
+use hq_relay::RelayConnector;
 use hq_store::{Store, StoreErrorClass};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -12,9 +14,9 @@ use crate::{
 };
 use crate::{
     IdentityErrorClass, InstallationIdentity, LocalConfiguration, NodeAdmission, NodeLifecycle,
-    NodeLifecycleError, NodeTransitionOutcome, RuntimeDirectoryOwner, RuntimePathErrorClass,
-    RuntimePaths, StartupCause, StartupComponent, StartupDiagnostic, StateDirectoryOwner,
-    StatePaths,
+    NodeLifecycleError, NodeTransitionOutcome, RelayNodeComponent, RelayNodeConfig,
+    RuntimeDirectoryOwner, RuntimePathErrorClass, RuntimePaths, StartupCause, StartupComponent,
+    StartupDiagnostic, StateDirectoryOwner, StatePaths,
 };
 
 /// Explicit inputs for opening the node foundation.
@@ -193,6 +195,42 @@ impl NodeFoundation {
     /// Borrows the sole bounded store owner for later composition.
     pub const fn store(&self) -> Option<&Store> {
         self.store.as_ref()
+    }
+
+    /// Composes relay synchronization while the foundation retains store and identity ownership.
+    pub(crate) fn compose_relay(
+        &self,
+        config: RelayNodeConfig,
+        authority_policy: AuthorityPolicy,
+        connector: Arc<dyn RelayConnector>,
+    ) -> Result<RelayNodeComponent, NodeStartupError> {
+        let store = self.store.as_ref().ok_or_else(|| NodeStartupError {
+            diagnostic: StartupDiagnostic::new(
+                StartupComponent::Store,
+                StartupCause::Unavailable,
+                self.state.paths().root().to_path_buf(),
+                self.runtime.paths().root().to_path_buf(),
+            ),
+        })?;
+        let envelope = self
+            .identity
+            .envelope_codec()
+            .map_err(|error| NodeStartupError {
+                diagnostic: StartupDiagnostic::new(
+                    StartupComponent::Identity,
+                    identity_cause(error.class()),
+                    self.state.paths().root().to_path_buf(),
+                    self.runtime.paths().root().to_path_buf(),
+                ),
+            })?;
+        Ok(RelayNodeComponent::new(
+            config,
+            store,
+            envelope,
+            self.identity.public_identity().installation_id(),
+            authority_policy,
+            connector,
+        ))
     }
 
     pub(crate) fn signer_handle(&self) -> std::sync::Arc<Bip340Signer> {

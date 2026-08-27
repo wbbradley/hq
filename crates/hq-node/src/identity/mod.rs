@@ -107,6 +107,11 @@ impl InstallationIdentity {
         Arc::clone(&self.signer)
     }
 
+    pub(crate) fn envelope_codec(&self) -> Result<hq_relay::EnvelopeCodec, IdentityError> {
+        hq_relay::EnvelopeCodec::from_secret_bytes(*self.secret)
+            .map_err(|_| IdentityError::new(IdentityErrorClass::IdentityMalformed))
+    }
+
     fn secret_bytes(&self) -> &[u8; 32] {
         &self.secret
     }

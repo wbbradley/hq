@@ -222,6 +222,10 @@ pub struct StoredCatchupCursor {
     pub url: String,
     /// Policy generation for this traversal.
     pub generation: u64,
+    /// Durable identity and upper wall-clock boundary of the active backward scan.
+    pub scan_started_at_millis: u64,
+    /// Latest scan-start boundary whose complete randomized-timestamp overlap was covered.
+    pub covered_through_millis: Option<u64>,
     /// Oldest randomized wrapper timestamp observed so far.
     pub oldest_created_at: Option<u64>,
     /// Event-ID tie boundary paired with the timestamp.

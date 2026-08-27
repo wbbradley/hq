@@ -81,6 +81,14 @@ start acknowledgement, stop intake, graceful drain, and idempotent forced stop. 
 force-stops the partially started component, rolls earlier components back in reverse, and then
 drops the foundation.
 
+The foreground relay slot is concrete. `NodeFoundation::compose_relay` constructs its envelope
+codec inside installation-identity ownership, borrows the sole store long enough to issue restricted
+relay-state and replication capabilities, and returns a `RelayNodeComponent`; it does not expose a
+store getter or root secret bytes for wiring. The component owns one joined `RelayManager`, resolves
+routes only from a singular verified authority frontier, revalidates every relay hint, and sends
+opened canonical bytes through the shared parse/signature/dispatch/semantic/store-ingest path.
+Stop-intake rejects new application relay effects, while drain joins every session owner.
+
 The node owns a hierarchical cancellation root. A child observes cancellation by itself or any
 ancestor, but cancelling it cannot affect its parent or siblings. The node also owns a
 fixed-capacity task tracker: spawn intake is explicit, every accepted native thread handle remains

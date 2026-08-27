@@ -102,9 +102,22 @@ fn admitted_account_fact_creates_exact_per_recipient_intent_and_repair_preserves
         .expect("account ingests");
     let grant = verified_device_grant(account_fact_id);
     let grant_id = grant.verified_event().event_id();
+    let grant_exact = grant.verified_event().exact_event_bytes().to_vec();
     store
         .ingest_verified(grant, authority_policy())
         .expect("device grant ingests");
+    let grant_intents = store.load_outbox_intents(16).expect("grant outbox loads");
+    assert_eq!(grant_intents.len(), 1);
+    assert_eq!(
+        grant_intents[0].fact_id(),
+        hq_domain::FactId::from_bytes(grant_id)
+    );
+    assert_eq!(
+        grant_intents[0].recipient(),
+        InstallationId::from_bytes([0x22; 32])
+    );
+    assert_eq!(grant_intents[0].exact_canonical_bytes(), grant_exact);
+    assert_eq!(grant_intents[0].revision(), Revision::new(3));
     store
         .ingest_verified(verified_device_acceptance(grant_id), authority_policy())
         .expect("device acceptance ingests");
@@ -117,14 +130,17 @@ fn admitted_account_fact_creates_exact_per_recipient_intent_and_repair_preserves
     );
 
     let intents = store.load_outbox_intents(16).expect("outbox loads");
-    assert_eq!(intents.len(), 1);
-    assert_eq!(intents[0].fact_id(), project_id);
+    assert_eq!(intents.len(), 2);
+    let project_intent = intents
+        .iter()
+        .find(|intent| intent.fact_id() == project_id)
+        .expect("project intent exists");
     assert_eq!(
-        intents[0].recipient(),
+        project_intent.recipient(),
         InstallationId::from_bytes([0x22; 32])
     );
-    assert_eq!(intents[0].exact_canonical_bytes(), exact);
-    assert_eq!(intents[0].revision(), Revision::new(5));
+    assert_eq!(project_intent.exact_canonical_bytes(), exact);
+    assert_eq!(project_intent.revision(), Revision::new(5));
     store.repair(authority_policy()).expect("repair succeeds");
     assert_eq!(
         store

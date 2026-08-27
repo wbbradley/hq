@@ -18,7 +18,8 @@ use crate::{
     RelayStateMutation, RelayStatePort, RelayStateQuery, RelayUrl, RouteResolver, StagedInput,
 };
 
-const LIVE_OVERLAP_SECONDS: u64 = 300;
+const RANDOMIZED_TIMESTAMP_RANGE_SECONDS: u64 = 2 * 24 * 60 * 60;
+const TIMESTAMP_OVERLAP_SAFETY_SECONDS: u64 = 1;
 
 /// Explicit bounds and retry policy for one relay session owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,11 +168,18 @@ pub struct RelaySession {
     retained_oldest: Option<(u64, [u8; 32])>,
     retained_retry_at: Option<u64>,
     retained_stalls: u32,
+    retained_refresh: RetainedRefresh,
     live_buffer: VecDeque<Vec<u8>>,
     live_buffer_bytes: usize,
     inflight: BTreeMap<[u8; 32], RelayAttempt>,
     outbound_query: RelayStateQuery,
     staging_query: RelayStateQuery,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetainedRefresh {
+    Current,
+    AfterResumedScan,
 }
 
 impl RelaySession {
@@ -203,6 +211,7 @@ impl RelaySession {
             retained_oldest: None,
             retained_retry_at: None,
             retained_stalls: 0,
+            retained_refresh: RetainedRefresh::Current,
             live_buffer: VecDeque::new(),
             live_buffer_bytes: 0,
             inflight: BTreeMap::new(),
@@ -291,6 +300,7 @@ impl RelaySession {
         self.retained_oldest = None;
         self.retained_retry_at = None;
         self.retained_stalls = 0;
+        self.retained_refresh = RetainedRefresh::Current;
         self.inflight.clear();
     }
 
@@ -299,32 +309,64 @@ impl RelaySession {
             return Ok(());
         }
         if readable(self.policy.access) {
-            let now_seconds = self.dependencies.clock.unix_millis() / 1_000;
+            let now_millis = self.dependencies.clock.unix_millis().max(1);
+            let cursor = self.dependencies.state.cursor(&self.policy.url)?;
+            let covered_through = cursor
+                .as_ref()
+                .filter(|cursor| cursor.generation == self.policy.generation)
+                .and_then(|cursor| cursor.covered_through_millis)
+                .unwrap_or(now_millis);
             let filter = live_filter(
                 self.dependencies.envelopes.local_public_key(),
-                now_seconds.saturating_sub(LIVE_OVERLAP_SECONDS),
+                overlap_floor(covered_through),
             );
             let subscription = self.live_subscription.clone();
             self.send(RelayFrame::Request {
                 subscription,
                 filter,
             })?;
-            let cursor = self.dependencies.state.cursor(&self.policy.url)?;
-            if !cursor.as_ref().is_some_and(|cursor| {
-                cursor.generation == self.policy.generation && cursor.exhausted
-            }) {
-                self.open_retained_page(cursor.as_ref())?;
+            match cursor.filter(|cursor| cursor.generation == self.policy.generation) {
+                Some(cursor) if !cursor.exhausted => {
+                    self.retained_refresh = RetainedRefresh::AfterResumedScan;
+                    self.open_retained_page(&cursor)?;
+                }
+                Some(cursor) => {
+                    self.start_retained_scan(
+                        now_millis.max(cursor.scan_started_at_millis.saturating_add(1)),
+                        cursor.covered_through_millis,
+                    )?;
+                }
+                None => self.start_retained_scan(now_millis, None)?,
             }
         }
         self.ordinary_started = true;
         Ok(())
     }
 
-    fn open_retained_page(&mut self, cursor: Option<&CatchupCursor>) -> Result<(), RelayPortError> {
+    fn start_retained_scan(
+        &mut self,
+        scan_started_at_millis: u64,
+        covered_through_millis: Option<u64>,
+    ) -> Result<(), RelayPortError> {
+        let cursor = CatchupCursor {
+            url: self.policy.url.clone(),
+            generation: self.policy.generation,
+            scan_started_at_millis,
+            covered_through_millis,
+            oldest_created_at: None,
+            oldest_wrapper_id: None,
+            exhausted: false,
+        };
+        self.dependencies
+            .state
+            .apply(RelayStateMutation::Cursor(cursor.clone()))?;
+        self.open_retained_page(&cursor)
+    }
+
+    fn open_retained_page(&mut self, cursor: &CatchupCursor) -> Result<(), RelayPortError> {
         let until = cursor
-            .filter(|cursor| cursor.generation == self.policy.generation)
-            .and_then(|cursor| cursor.oldest_created_at)
-            .unwrap_or_else(|| self.dependencies.clock.unix_millis() / 1_000);
+            .oldest_created_at
+            .unwrap_or(cursor.scan_started_at_millis / 1_000);
         let filter = retained_filter(
             self.dependencies.envelopes.local_public_key(),
             until,
@@ -355,7 +397,8 @@ impl RelaySession {
         }
         let now = self.dependencies.clock.unix_millis();
         if self.retained_retry_at.is_none_or(|retry| retry <= now) {
-            self.open_retained_page(cursor.as_ref())?;
+            let cursor = cursor.ok_or(RelayPortError::Corrupt)?;
+            self.open_retained_page(&cursor)?;
         }
         Ok(())
     }
@@ -626,44 +669,73 @@ impl RelaySession {
         if subscription != self.retained_subscription || !self.retained_active {
             return Ok(());
         }
-        let prior = self.dependencies.state.cursor(&self.policy.url)?;
+        let prior = self
+            .dependencies
+            .state
+            .cursor(&self.policy.url)?
+            .filter(|cursor| cursor.generation == self.policy.generation)
+            .ok_or(RelayPortError::Corrupt)?;
         let short_page = self.retained_count < self.config.retained_page_items;
         let advances = self.retained_oldest.is_some_and(|candidate| {
             prior
-                .as_ref()
-                .and_then(|cursor| cursor.oldest_created_at.zip(cursor.oldest_wrapper_id))
+                .oldest_created_at
+                .zip(prior.oldest_wrapper_id)
                 .is_none_or(|oldest| candidate < oldest)
         });
-        if short_page || advances {
-            let boundary = self.retained_oldest.or_else(|| {
-                prior
-                    .as_ref()
-                    .and_then(|cursor| cursor.oldest_created_at.zip(cursor.oldest_wrapper_id))
-            });
+        let covers_prior_gap = prior.covered_through_millis.is_some_and(|covered| {
+            self.retained_oldest
+                .is_some_and(|oldest| oldest.0 < overlap_floor(covered))
+        });
+        let complete = short_page || covers_prior_gap;
+        let boundary = self
+            .retained_oldest
+            .or_else(|| prior.oldest_created_at.zip(prior.oldest_wrapper_id));
+        if complete || advances {
             self.dependencies
                 .state
                 .apply(RelayStateMutation::Cursor(CatchupCursor {
                     url: self.policy.url.clone(),
                     generation: self.policy.generation,
+                    scan_started_at_millis: prior.scan_started_at_millis,
+                    covered_through_millis: if complete {
+                        Some(prior.scan_started_at_millis)
+                    } else {
+                        prior.covered_through_millis
+                    },
                     oldest_created_at: boundary.map(|value| value.0),
                     oldest_wrapper_id: boundary.map(|value| value.1),
-                    exhausted: short_page,
+                    exhausted: complete,
                 }))?;
         }
         let subscription = self.retained_subscription.clone();
         self.send(RelayFrame::Close(subscription))?;
         self.retained_active = false;
-        if short_page {
+        if complete {
             self.retained_stalls = 0;
             self.retained_retry_at = None;
-            while let Some(exact) = self.live_buffer.pop_front() {
-                self.live_buffer_bytes = self.live_buffer_bytes.saturating_sub(exact.len());
-                self.process_input(exact, None, None, progress)?;
+            if std::mem::replace(&mut self.retained_refresh, RetainedRefresh::Current)
+                == RetainedRefresh::AfterResumedScan
+            {
+                let next_scan = self
+                    .dependencies
+                    .clock
+                    .unix_millis()
+                    .max(prior.scan_started_at_millis.saturating_add(1));
+                self.start_retained_scan(next_scan, Some(prior.scan_started_at_millis))?;
+            } else {
+                while let Some(exact) = self.live_buffer.pop_front() {
+                    self.live_buffer_bytes = self.live_buffer_bytes.saturating_sub(exact.len());
+                    self.process_input(exact, None, None, progress)?;
+                }
             }
         } else if advances {
             self.retained_stalls = 0;
-            let cursor = self.dependencies.state.cursor(&self.policy.url)?;
-            self.open_retained_page(cursor.as_ref())?;
+            let cursor = self
+                .dependencies
+                .state
+                .cursor(&self.policy.url)?
+                .ok_or(RelayPortError::Corrupt)?;
+            self.open_retained_page(&cursor)?;
         } else {
             self.retained_stalls = self.retained_stalls.saturating_add(1);
             let identity: [u8; 32] = Sha256::digest(self.policy.url.as_str().as_bytes()).into();
@@ -930,6 +1002,12 @@ fn live_filter(public_key: [u8; 32], since: u64) -> String {
     format!(
         "{{\"kinds\":[{GIFT_WRAP_KIND}],\"#p\":[\"{}\"],\"since\":{since}}}",
         hex(public_key)
+    )
+}
+
+fn overlap_floor(covered_through_millis: u64) -> u64 {
+    (covered_through_millis / 1_000).saturating_sub(
+        RANDOMIZED_TIMESTAMP_RANGE_SECONDS.saturating_add(TIMESTAMP_OVERLAP_SAFETY_SECONDS),
     )
 }
 

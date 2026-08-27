@@ -6233,3 +6233,28 @@ Added deterministic per-relay session ownership and a coalescing manager over co
   2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
+## 2026-08-27 — Two-replica relay convergence and controlled interoperability
+
+Composed the production relay manager into the foreground Rust node with verified authority-route
+resolution, secret-owning envelope construction, the common reverified canonical-ingest path, and
+restricted store capabilities instead of exposing store ownership. Added a bounded
+Tungstenite/Rustls NIP-01/NIP-42 adapter; durable schema-v12 catch-up coverage that refreshes across
+arbitrary downtime; direct grant/revoke fanout; and an opt-in pinned-rnostr smoke with actionable
+preflight. A deterministic two-installation retained-relay test now proves convergence through
+shuffled pages, duplicates, downtime, relay/client restarts, uncertain acknowledgement, and route
+revoke/regrant while transport observations remain non-authoritative. Locked workspace, strict
+Clippy, documentation, architecture/spec/dependency, four portable-target relay, both 512-run fuzz,
+shell, whitespace, and unchanged-Go gates pass. The controlled smoke was recorded separately as not
+run because the installed Docker daemon was unavailable, which remains explicitly non-gating.
+
+### Original plan entry
+
+- **[transport/high] Prove two-replica convergence and controlled relay interoperability** — Compose
+  the real node relay manager, storage adapter, route resolution, root envelope identity, and common
+  canonical ingest path. Prove two distinct Rust installations converge across arbitrary delivery
+  order, duplication, downtime, offline retained catch-up, relay restart, client restart, revoke and
+  regrant traffic, and uncertain publish responses. Add an opt-in controlled real-retained-relay
+  smoke covering NIP-42 and catch-up without making external availability a unit gate. Complete this
+  package when direct state/reducer evidence proves relay order and observations cannot influence
+  the converged result.

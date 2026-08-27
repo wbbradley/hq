@@ -33,6 +33,12 @@ host authority with an optional numeric port, contains no credentials, fragment,
 or controls, and may carry a path/query. Bracketed IPv6 authority is retained exactly. Exact
 spelling is its durable identity; HQ performs no lossy URL normalization.
 
+The production connector is a blocking Tungstenite adapter with Rustls/native roots at this outer
+I/O boundary only. Configuration bounds TCP/TLS/WebSocket handshake time, redirects, complete
+message and frame bytes, failed-write buffering, and each socket write. Every receive call installs
+the caller's remaining deadline on the underlying plain or Rustls socket; ping/pong is handled by
+the WebSocket protocol engine, binary application messages are rejected, and close is typed.
+
 A policy contains URL, read/write access, authentication mode, enabled state, and a positive
 monotonic generation. Configuration operations have a stable 32-byte operation ID and request
 digest. Equal replay is idempotent. Reusing an operation ID with unequal input conflicts. A changed
@@ -44,7 +50,9 @@ it does not delete accepted audit history, prepared wrappers, or canonical facts
 
 ## Outbound durable states
 
-Canonical ingest creates one queued outbox intent per recipient. Route resolution is a separate
+Canonical ingest creates one queued outbox intent per recipient. Human-device grants and revokes
+always include their explicitly named device even when that device is not currently active; this is
+the transport path by which pairing or removal reaches the subject. Route resolution is a separate
 read of already-verified signer/routing state immediately before first preparation. A relay cannot
 write or override a route.
 
@@ -79,17 +87,23 @@ A readable session first opens a live kind-1059 subscription filtered to the loc
 then pages retained events backward. Live events arriving during catch-up are buffered within the
 session bound and processed through the same durable deduplication transition.
 
-Gift-wrap timestamps are randomized, so a narrow `since` cursor is forbidden. Each retained page
-uses an inclusive `until` boundary, a deterministic event-ID tie boundary, and overlap. The durable
-cursor records the oldest observed `(created_at, outer ID)`, whether a stable empty/short page was
-seen, and the policy generation. Resume repeats the boundary page. Outer-ID and logical-ID
-deduplication make overlap, relay duplicates, disconnect, and restart harmless. A policy generation
-change may restart catch-up but never erases deduplication evidence.
+Gift-wrap timestamps are randomized across the preceding two days, so a narrow recent-time `since`
+cursor is forbidden. Each retained page uses an inclusive `until` boundary, a deterministic event-ID
+tie boundary, and overlap. The durable cursor records the active scan-start wall time, the latest
+fully covered scan-start time, the oldest observed `(created_at, outer ID)`, exhaustion, and policy
+generation. Resume repeats the boundary page for every unfinished scan. A new connection starts a fresh head scan
+after an exhausted scan; its live filter and backward traversal overlap the previous coverage by the
+full two-day randomization range plus one second. If a crash resumes an unfinished old scan, the
+session finishes it and then starts the connection's fresh head scan before releasing buffered live
+events. Outer-ID and logical-ID deduplication make overlap, relay duplicates, disconnect, and restart
+harmless. A policy generation change may restart catch-up but never erases deduplication evidence.
 
 Portable NIP-01 filters have no event-ID range operator. If an inclusive full page does not produce
 a strictly older `(created_at, outer ID)` boundary, HQ closes that page, retains it as unexhausted,
 and retries the same inclusive boundary with capped backoff. It never skips a possibly unbounded
-same-second tie or falsely declares exhaustion. A short page is the only exhaustion transition.
+same-second tie or falsely declares exhaustion. An initial scan exhausts only on a short page. A
+later refresh may also finish after a page crosses strictly below the prior coverage-overlap floor;
+older history was already proven by the preceding completed scan.
 
 `EOSE` closes only the named retained page or live catch-up phase. It does not certify completeness,
 authorize data, or advance domain state. Catch-up reaches exhaustion only through the documented

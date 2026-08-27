@@ -266,6 +266,8 @@ fn assert_cursor_transitions_are_monotonic(store: &Store) {
     let cursor = StoredCatchupCursor {
         url: RELAY.to_owned(),
         generation: 1,
+        scan_started_at_millis: 1_000,
+        covered_through_millis: None,
         oldest_created_at: Some(100),
         oldest_wrapper_id: Some([2; 32]),
         exhausted: false,
@@ -294,10 +296,29 @@ fn assert_cursor_transitions_are_monotonic(store: &Store) {
     );
     store
         .apply_relay_state(StoredRelayStateMutation::Cursor(StoredCatchupCursor {
+            covered_through_millis: Some(1_000),
             exhausted: true,
-            ..older
+            ..older.clone()
         }))
         .expect("same boundary may become exhausted");
+    let refresh = StoredCatchupCursor {
+        scan_started_at_millis: 2_000,
+        covered_through_millis: Some(1_000),
+        oldest_created_at: None,
+        oldest_wrapper_id: None,
+        exhausted: false,
+        ..older
+    };
+    store
+        .apply_relay_state(StoredRelayStateMutation::Cursor(refresh.clone()))
+        .expect("completed coverage may start a newer overlap scan");
+    store
+        .apply_relay_state(StoredRelayStateMutation::Cursor(StoredCatchupCursor {
+            covered_through_millis: Some(2_000),
+            exhausted: true,
+            ..refresh
+        }))
+        .expect("new overlap scan may become covered");
 }
 
 #[test]

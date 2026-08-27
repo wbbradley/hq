@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v11 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v12 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `10`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `12`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,7 +23,7 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v11 ownership | Rebuildable |
+| Class | Storage v12 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
@@ -202,9 +202,13 @@ per-URL attempt counts, deadlines, uncertain/rejected/accepted disposition, and 
 negative class; free-form relay text is never stored. Count/time cannot regress, a lost response may
 move the same uncertain attempt to its answer, and accepted is absorbing.
 
-`relay_cursors` stores one generation-qualified inclusive backward boundary per URL. Within a
-generation it can only move toward older `(created_at, wrapper ID)` pairs and exhaustion cannot
-reverse. A later current policy generation may reset traversal. `inbound_relay_claims` atomically
+Schema v12 `relay_cursors` stores one generation-qualified inclusive backward boundary per URL plus
+the active scan-start and latest fully covered scan-start wall times. A scan can only move toward
+older `(created_at, wrapper ID)` pairs. Completing it makes coverage equal its scan start. Only that
+completed state may begin a newer same-generation overlap scan with an empty boundary; an unfinished
+scan resumes rather than resetting. This lets reconnect cover arbitrarily long downtime while
+overlapping the full two-day randomized gift-wrap range. A later current policy generation may also
+reset traversal. `inbound_relay_claims` atomically
 deduplicates both outer wrapper ID and logical `(origin installation, canonical event)` identity;
 either identity mapping to unequal canonical evidence is an immutable collision.
 
@@ -223,6 +227,11 @@ queries can reach the complete state without restarting exhausted collections. S
 recomputes wrapper/staging digests and rejects malformed fixed-width values, closed codes,
 impossible optionality, or invalid monotonic generations. Explicit projection repair never deletes,
 rewrites, or derives any receipt, revision, outbox, or relay operational row.
+
+Account-addressed fanout normally uses the projected creator and active devices after the atomic
+reduction. `HumanDeviceGranted` and `HumanDeviceRevoked` additionally name their subject device
+directly, so initial pairing and removal cannot disappear merely because the post-mutation
+membership projection is pending or revoked.
 
 ## Authority projections
 

@@ -7,6 +7,7 @@ mod nip44;
 mod ports;
 mod session;
 mod url;
+mod websocket;
 
 use std::{error::Error, fmt};
 
@@ -33,6 +34,7 @@ pub use session::{
     StableRelayJitter,
 };
 pub use url::{MAX_RELAY_URL_BYTES, RelayUrl, RelayUrlError};
+pub use websocket::{WebSocketRelayConfig, WebSocketRelayConnector};
 
 /// Retained gift-wrap event kind from NIP-59.
 pub const GIFT_WRAP_KIND: u16 = 1059;

@@ -139,6 +139,67 @@ fn required_auth_precedes_live_then_retained_and_live_edge_drains_after_eose() {
 }
 
 #[test]
+fn reconnect_refreshes_an_exhausted_cursor_across_arbitrary_downtime() {
+    let fixture = Fixture::new(RelayAccess::Read, RelayAuthentication::Disabled);
+    fixture.clock.set(200_000_000);
+    fixture.connection.extend([
+        RelayReceive::Frame(RelayFrame::SubscriptionEvent {
+            subscription: "hq-retained-1".to_owned(),
+            exact_event: vec![2, 50],
+        }),
+        RelayReceive::Frame(RelayFrame::EndOfStoredEvents("hq-retained-1".to_owned())),
+        RelayReceive::TimedOut,
+    ]);
+    let mut first = fixture.session();
+    first.tick().expect("initial retained scan completes");
+    first.close().expect("first connection closes");
+    let initial = fixture
+        .state
+        .cursors
+        .lock()
+        .expect("cursors lock")
+        .get(fixture.url.as_str())
+        .cloned()
+        .expect("initial cursor stores");
+    assert!(initial.exhausted);
+    assert_eq!(initial.covered_through_millis, Some(200_000_000));
+
+    fixture.clock.set(20_000_000_000);
+    fixture.connection.extend([
+        RelayReceive::Frame(RelayFrame::SubscriptionEvent {
+            subscription: "hq-retained-1".to_owned(),
+            exact_event: vec![3, 40],
+        }),
+        RelayReceive::Frame(RelayFrame::EndOfStoredEvents("hq-retained-1".to_owned())),
+        RelayReceive::TimedOut,
+    ]);
+    let mut restarted = fixture.session();
+    restarted
+        .tick()
+        .expect("post-downtime overlap scan completes");
+    assert_eq!(
+        fixture
+            .ingest
+            .committed
+            .lock()
+            .expect("ingest locks")
+            .as_slice(),
+        &[vec![2], vec![3]]
+    );
+    let refreshed = fixture
+        .state
+        .cursors
+        .lock()
+        .expect("cursors lock")
+        .get(fixture.url.as_str())
+        .cloned()
+        .expect("refreshed cursor stores");
+    assert!(refreshed.exhausted);
+    assert_eq!(refreshed.covered_through_millis, Some(20_000_000_000));
+    assert!(refreshed.scan_started_at_millis > initial.scan_started_at_millis);
+}
+
+#[test]
 fn transient_input_stages_then_recovers_and_permanent_input_quarantines() {
     let fixture = Fixture::new(RelayAccess::Read, RelayAuthentication::Disabled);
     fixture.ingest.failures.store(1, Ordering::Release);
@@ -190,6 +251,8 @@ fn full_equal_time_page_never_claims_exhaustion_and_retries_after_backoff() {
         CatchupCursor {
             url: fixture.url.clone(),
             generation: NonZeroU64::MIN,
+            scan_started_at_millis: 1_000,
+            covered_through_millis: None,
             oldest_created_at: Some(50),
             oldest_wrapper_id: Some([2; 32]),
             exhausted: false,

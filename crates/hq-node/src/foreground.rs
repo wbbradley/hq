@@ -1,6 +1,6 @@
 //! Foreground node generation construction over currently available component owners.
 
-use std::{error::Error, fmt, future::Future, num::NonZeroUsize, time::Duration};
+use std::{error::Error, fmt, future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorCode,
@@ -17,7 +17,7 @@ use crate::{
     LocalNodeRuntimeError, LocalNodeRuntimeReport, LocalNodeRuntimeStartError,
     LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent, NodeComponents,
     NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError,
-    RuntimePaths, ShutdownIntent, StatePaths,
+    RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent, StatePaths,
 };
 
 /// Explicit capacities and paths for one foreground node process.
@@ -131,7 +131,7 @@ fn open_generation(
 ) -> Result<
     LocalNodeRuntime<
         DormantNodeComponent,
-        DormantNodeComponent,
+        RelayNodeComponent,
         DormantNodeComponent,
         DormantNodeComponent,
     >,
@@ -146,11 +146,16 @@ fn open_generation(
         foundation.public_identity().installation_id(),
         reserved_human_mailbox(),
     );
+    let relay = foundation.compose_relay(
+        RelayNodeConfig::default(),
+        policy,
+        Arc::new(hq_relay::WebSocketRelayConnector::default()),
+    )?;
     let owner = NodeOwner::start(
         foundation,
         NodeComponents::new(
             DormantNodeComponent,
-            DormantNodeComponent,
+            relay,
             DormantNodeComponent,
             DormantNodeComponent,
         ),

@@ -5,6 +5,12 @@ source of application state. Local CLI, TUI, and Codex clients use versioned dom
 signs and stores canonical events, then its continuous network engine moves exact encrypted wrappers
 through retained relays.
 
+For the Rust rewrite, the normative byte and synchronization contracts are
+[`nostr-envelope-v1.md`](protocol/nostr-envelope-v1.md) and
+[`relay-sync-v1.md`](protocol/relay-sync-v1.md). Its node now uses the real bounded
+Tungstenite/Rustls connector and concrete relay manager; the legacy Go schema/version notes below
+remain operator context until the separately authorized cutover.
+
 This release uses canonical schema 3, local domain wire 7, and SQLite schema 33. A non-empty older
 database fails startup and must be manually archived or removed before reinitialization and
 re-pairing; there is no migration or event-translation path. The implementation pins

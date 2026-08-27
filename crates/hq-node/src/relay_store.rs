@@ -216,6 +216,8 @@ fn map_mutation(mutation: RelayStateMutation) -> StoredRelayStateMutation {
             StoredRelayStateMutation::Cursor(StoredCatchupCursor {
                 url: cursor.url.into_string(),
                 generation: cursor.generation.get(),
+                scan_started_at_millis: cursor.scan_started_at_millis,
+                covered_through_millis: cursor.covered_through_millis,
                 oldest_created_at: cursor.oldest_created_at,
                 oldest_wrapper_id: cursor.oldest_wrapper_id,
                 exhausted: cursor.exhausted,
@@ -361,6 +363,8 @@ fn map_cursor(stored: StoredCatchupCursor) -> Result<CatchupCursor, RelayPortErr
     Ok(CatchupCursor {
         url: relay_url(stored.url)?,
         generation: NonZeroU64::new(stored.generation).ok_or(RelayPortError::Corrupt)?,
+        scan_started_at_millis: stored.scan_started_at_millis,
+        covered_through_millis: stored.covered_through_millis,
         oldest_created_at: stored.oldest_created_at,
         oldest_wrapper_id: stored.oldest_wrapper_id,
         exhausted: stored.exhausted,
@@ -473,7 +477,7 @@ fn relay_url(value: String) -> Result<RelayUrl, RelayPortError> {
     RelayUrl::new(value).map_err(|_| RelayPortError::Corrupt)
 }
 
-const fn map_store_error(error: StoreError) -> RelayPortError {
+pub(crate) const fn map_store_error(error: StoreError) -> RelayPortError {
     match error.class() {
         StoreErrorClass::InvalidOperationalRequest => RelayPortError::InvalidInput,
         StoreErrorClass::IdentityCollision

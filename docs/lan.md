@@ -69,9 +69,31 @@ hq daemon status
 
 Use one node per database. `hq daemon status` shows whether lifecycle RPC responds; `hq daemon restart` replaces the node instance and connected clients reconnect/resubscribe. `hq status` uses domain RPC to show account members, pending device fanout, relay-accepted sends, last receive time, invalid account traffic, and revoked-device traffic. Short database paths use a sibling mode-`0600` Unix socket; long paths use a stable hash under the user runtime directory. Windows named-pipe transport is not available yet.
 
-## Automated smoke test
+## Rust transport interoperability smoke
 
-The opt-in test builds the current source, creates three temporary state directories, starts the pinned rnostr container with two allowed installations, pairs two human devices, sends asynchronous transport probes and cross-machine answers, restarts the relay, catches up an offline device, checks duplicate suppression and auth failure, and revokes the second device.
+The Rust transport has a separate ignored, explicitly opted-in smoke. Its wrapper starts the pinned
+rnostr digest with two fixed test-only keys in temporary state, then proves bounded WS framing,
+NIP-42 for both clients, exact kind-1059 publish acknowledgement, retained `REQ`/`EVENT`/`EOSE`,
+exact canonical opening, reconnect, and repeated catch-up:
+
+```sh
+HQ_RUN_CONTROLLED_RELAY_SMOKE=1 ./scripts/rust-relay-smoke.sh
+```
+
+Docker and an available daemon are preflight requirements; absence exits with an actionable error
+and is not a merge-gate failure. The default port is 17448. `HQ_CONTROLLED_RELAY_PORT` changes the
+temporary container port, `HQ_CONTROLLED_RELAY_KEEP=1` retains its printed state directory, and a
+pre-existing controlled `ws://` or `wss://` endpoint can be tested by setting
+`HQ_CONTROLLED_RELAY_URL` and invoking the ignored Cargo test directly. Never put production keys in
+this test.
+
+## Legacy end-to-end smoke test
+
+The older full-product smoke builds the Go client while the Rust CLI is incomplete. It creates three
+temporary state directories, starts the pinned rnostr container with two allowed installations,
+pairs two human devices, sends asynchronous transport probes and cross-machine answers, restarts the
+relay, catches up an offline device, checks duplicate suppression and auth failure, and revokes the
+second device.
 
 ```sh
 HQ_RUN_REAL_RELAY_SMOKE=1 ./scripts/lan-smoke.sh

@@ -91,18 +91,9 @@ impl RelayEnvelopePort for EnvelopeCodec {
 }
 
 fn decode_canonical(exact: &[u8]) -> Result<hq_protocol::VerifiedSemanticFact, RelayPortError> {
-    let verified = hq_protocol::RawEventBytes::new(exact.to_vec())
-        .and_then(hq_protocol::RawEventBytes::parse)
-        .and_then(hq_protocol::ParsedOuterEvent::verify)
-        .map_err(|_| RelayPortError::Corrupt)?;
-    let supported = match verified.dispatch().map_err(|_| RelayPortError::Corrupt)? {
-        hq_protocol::DispatchOutcome::Supported(value) => value,
-        hq_protocol::DispatchOutcome::Unsupported(_) => return Err(RelayPortError::Corrupt),
-    };
-    supported
-        .decode_v1()
-        .and_then(hq_protocol::VerifiedSupportedRecord::into_semantic_fact)
-        .map_err(|_| RelayPortError::Corrupt)
+    hq_protocol::decode_semantic_event(exact.to_vec())
+        .map_err(|_| RelayPortError::Corrupt)?
+        .ok_or(RelayPortError::Corrupt)
 }
 
 const fn map_local_envelope_error(error: crate::EnvelopeError) -> RelayPortError {

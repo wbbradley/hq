@@ -42,8 +42,8 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 11;
-const SCHEMA_MARKER: &str = "hq-store-v11-relay-session-state-2026-08-27";
+const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_MARKER: &str = "hq-store-v12-relay-catchup-coverage-2026-08-27";
 const SCHEMA_TABLES: [&str; 110] = [
     "storage_metadata",
     "canonical_facts",
@@ -1142,6 +1142,11 @@ CREATE TABLE relay_attempts (
 CREATE TABLE relay_cursors (
     url TEXT PRIMARY KEY NOT NULL REFERENCES relay_policies(url) ON DELETE RESTRICT,
     generation BLOB NOT NULL CHECK(typeof(generation) = 'blob' AND length(generation) = 8),
+    scan_started_at_millis BLOB NOT NULL
+        CHECK(typeof(scan_started_at_millis) = 'blob' AND length(scan_started_at_millis) = 8),
+    covered_through_millis BLOB
+        CHECK(covered_through_millis IS NULL OR
+              (typeof(covered_through_millis) = 'blob' AND length(covered_through_millis) = 8)),
     oldest_created_at BLOB
         CHECK(oldest_created_at IS NULL OR
               (typeof(oldest_created_at) = 'blob' AND length(oldest_created_at) = 8)),
@@ -1149,7 +1154,8 @@ CREATE TABLE relay_cursors (
         CHECK(oldest_wrapper_id IS NULL OR
               (typeof(oldest_wrapper_id) = 'blob' AND length(oldest_wrapper_id) = 32)),
     exhausted INTEGER NOT NULL CHECK(exhausted IN (0, 1)),
-    CHECK((oldest_created_at IS NULL) = (oldest_wrapper_id IS NULL))
+    CHECK((oldest_created_at IS NULL) = (oldest_wrapper_id IS NULL)),
+    CHECK(covered_through_millis IS NULL OR covered_through_millis <= scan_started_at_millis)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE inbound_relay_claims (
@@ -1988,6 +1994,15 @@ fn outbox_recipients(
             add_account_recipients(&mut recipients, *account_id, authority);
             recipients.insert(*target_home);
         }
+    }
+    match fact.fact().payload() {
+        hq_domain::SemanticPayload::HumanDeviceGranted { device, .. } => {
+            recipients.insert(device.installation_id());
+        }
+        hq_domain::SemanticPayload::HumanDeviceRevoked { device_id, .. } => {
+            recipients.insert(*device_id);
+        }
+        _ => {}
     }
     recipients.remove(&fact.fact().author().installation_id());
     recipients.remove(&policy.local_installation());

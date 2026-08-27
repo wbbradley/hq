@@ -299,6 +299,52 @@ pub struct RelayStateHandle {
     requests: SyncSender<Request>,
 }
 
+/// Owned canonical-ingest and verified-authority query capability for background replication.
+#[derive(Clone)]
+pub struct ReplicationHandle {
+    requests: SyncSender<Request>,
+}
+
+impl ReplicationHandle {
+    /// Atomically ingests one already reverified semantic fact.
+    pub fn ingest_verified(
+        &self,
+        fact: VerifiedSemanticFact,
+        policy: AuthorityPolicy,
+    ) -> Result<IngestOutcome, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Ingest {
+                fact: Box::new(fact),
+                policy,
+                reply,
+            })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads the current verified authority projection used for route selection.
+    pub fn load_authority_snapshot(&self) -> Result<AuthorityProjectionSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadAuthoritySnapshot { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+}
+
+impl fmt::Debug for ReplicationHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReplicationHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl RelayStateHandle {
     /// Applies one atomic durable relay synchronization transition.
     pub fn apply(&self, mutation: StoredRelayStateMutation) -> Result<(), StoreError> {
@@ -451,23 +497,20 @@ impl Store {
         }
     }
 
+    /// Creates an owned background replication capability without store shutdown ownership.
+    pub fn replication_handle(&self) -> ReplicationHandle {
+        ReplicationHandle {
+            requests: self.requests.clone(),
+        }
+    }
+
     /// Atomically ingests one verified fact and every derived durable state package.
     pub fn ingest_verified(
         &self,
         fact: VerifiedSemanticFact,
         policy: AuthorityPolicy,
     ) -> Result<IngestOutcome, StoreError> {
-        let (reply, response) = mpsc::sync_channel(1);
-        self.requests
-            .send(Request::Ingest {
-                fact: Box::new(fact),
-                policy,
-                reply,
-            })
-            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
-        response
-            .recv()
-            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+        self.replication_handle().ingest_verified(fact, policy)
     }
 
     /// Executes one retryable local fact-backed mutation in a single durable transaction.
@@ -533,13 +576,7 @@ impl Store {
 
     /// Loads the last successfully repaired typed authority projection view without mutation.
     pub fn load_authority_snapshot(&self) -> Result<AuthorityProjectionSnapshot, StoreError> {
-        let (reply, response) = mpsc::sync_channel(1);
-        self.requests
-            .send(Request::LoadAuthoritySnapshot { reply })
-            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
-        response
-            .recv()
-            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+        self.replication_handle().load_authority_snapshot()
     }
 
     /// Loads the last successfully repaired typed conversation/activity view without mutation.

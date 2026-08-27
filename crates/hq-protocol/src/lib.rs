@@ -17,6 +17,20 @@ pub use signed_event::{
     MAX_EVENT_BYTES, ParsedOuterEvent, RawEventBytes, verify_bip340,
 };
 
+/// Re-verifies exact signed event bytes through dispatch and semantic conversion.
+///
+/// A verified but unsupported protocol/version/family is returned as `None`, remaining distinct
+/// from malformed or semantically invalid evidence.
+pub fn decode_semantic_event(
+    exact_event: Vec<u8>,
+) -> Result<Option<VerifiedSemanticFact>, ProtocolError> {
+    let verified = RawEventBytes::new(exact_event)?.parse()?.verify()?;
+    let DispatchOutcome::Supported(supported) = verified.dispatch()? else {
+        return Ok(None);
+    };
+    supported.decode_v1()?.into_semantic_fact().map(Some)
+}
+
 use std::{error::Error, fmt};
 
 use hq_domain::{
