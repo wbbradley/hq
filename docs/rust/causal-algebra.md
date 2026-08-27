@@ -12,7 +12,8 @@ Related sources are the product boundary in `docs/rust/behavior-ledger.md`, the 
 `docs/rust/authority-model.md`; conversation, message-state, activity-retention, and unified
 presentation rules are documented in `docs/rust/conversation-model.md`; named-agent, provider
 session, repository-context, selection, rename, and retirement rules are documented in
-`docs/rust/agent-model.md`.
+`docs/rust/agent-model.md`; home-linear projects, resource claims, assignments, dispatch provenance,
+late output, and remote-control isolation are documented in `docs/rust/project-model.md`.
 
 ## Semantic universe and notation
 

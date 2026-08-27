@@ -3435,3 +3435,97 @@ build/vet/fresh regression suite pass.
   4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.
+
+## 2026-08-27 — Pure project and resource-claim model
+
+Implemented the pure home-linear project reducer, explicit lifecycle/archive/resource transition
+model, pluggable path-claim policy, global assignment cardinality, exact agent/session and thread
+binding, contiguous input sequencing, at-most-once dispatch attribution, current/late output
+classification, and isolated remote-command stages. Added grouped executable coverage mapping
+every PRJ-001 through PRJ-023 and CTL-001 through CTL-004 scenario and documented the public
+model. The complete Rust workspace, architecture/behavior/spec verifiers, strict Clippy,
+dependency policy, all four core targets, whitespace checks, and unchanged Go build/vet/fresh
+regression suite pass.
+
+### Original plan entry
+
+- **[projects/high] Implement the pure project and resource-claim model** — Add project identity and
+  immutable home, mailbox, metadata, predecessor, desired resources, primary path, lifecycle,
+  archive state, active claims, assignment epochs, thread scope, project input sequencing, dispatch
+  attribution, expected-head compare-and-swap, remote command/result state, and late-output
+  classification. Model reversible domain transitions separately from operational saga states and
+  keep resource-kind policy behind explicit pure interfaces. Test stale heads, concurrent commands,
+  assignment cardinality, close/reopen/archive laws, force-takeover authority, and inactive-output
+  behavior. Complete this work when the project transition model satisfies every invariant in the
+  retained project specification without filesystem or provider I/O.
+
+  **Implementation plan**
+
+  - Add failing public-contract fixtures first for every named `PRJ-001` through `PRJ-023` and
+    `CTL-001` through `CTL-004` acceptance scenario. Generate small home-linear histories and
+    global project sets across arrival permutations, duplicates, late parents, partial frontiers,
+    stale siblings, and authored-clock reversal.
+  - Add a pure project reducer that composes historical authority plus named-agent and conversation
+    projections without copying their rules. Emit closed decisions, typed aggregate/projection
+    keys, exact support and blockers, immutable project identity, unique home/mailbox roots,
+    complete accepted history, authoritative head/frontier, and explicit fork participants.
+  - Express the home transition algebra as pure functions over typed state. Creation establishes
+    immutable home, mailbox, predecessor, metadata, desired resources, optional primary path,
+    lifecycle, archive state, and input sequence; every later canonical project fact must cite the
+    exact unique head, and sibling or stale children remain visible without becoming a winner.
+  - Separate stable lifecycle from operational preparation/closing/configuring states. Enforce
+    atomic reopen, resource replacement, activation compensation, close, force-close, reopen,
+    archive, and unarchive laws; archive requires closed and unassigned state, unarchive yields a
+    visible closed claim-free project, and runtime observations never assert external cessation.
+  - Put resource overlap behind a pure policy interface. For first-release path resources compare
+    home-qualified canonical locators for equality or ancestor/descendant overlap, permit overlap
+    within one project and equal spelling across homes, activate all desired claims atomically, and
+    expose every cross-project conflict without using fact ID, timestamp, or arrival as a winner.
+  - Model assignment epochs explicitly from configuring through runnable, blocked, and ended.
+    Enforce at most one active agent per project and one active project per agent, exact selected
+    immutable project-thread scope, provider-session binding, launch context, graceful/forced end
+    authority, conflict retraction, and restoration when a competing epoch validly ends.
+  - Derive one contiguous home input sequence and immutable at-most-once dispatch attribution.
+    Validate the exact accepted project message, current runnable assignment, agent, scoped thread,
+    provider session, and sequence; expose duplicate ID/sequence/dispatch conflicts rather than
+    choosing a branch.
+  - Retain project output by stable ID and complete provenance. Deduplicate identical retries,
+    conflict any changed body/presentation/correlation/binding, classify output against the complete
+    assignment history as current or late-from-inactive, and never allow output to mutate lifecycle,
+    claims, assignment, or dispatch authority.
+  - Derive remote command views independently from canonical project state: active-device requests
+    queue only, home receipts record the observed head, committed outcomes cite canonical descendant
+    facts, rejected outcomes retain typed stale/current-head and runtime certainty, and unequal
+    receipt or terminal values conflict without a selected result.
+  - Document the public project/resource model and run format, architecture/behavior/spec
+    verifiers, workspace format/check/build/test/doctests, strict Clippy, dependency policy,
+    four-target core checks, whitespace, and unchanged Go build/vet/fresh full regression suite
+    before recording the package.
+
+  **Risks and mitigations**
+
+  - Home-linear validity and global safety can retract different projections; compute accepted
+    history first, then derive project state, path conflicts, assignment cardinality, dispatch, and
+    output status as separate deterministic passes with explicit cross-pass inputs.
+  - A generic workflow framework would obscure project-specific transition laws; keep a small typed
+    transition function and explicit per-fact validation, sharing only proven graph/frontier and
+    multivalue helpers.
+  - Resource identity in this package is semantic rather than filesystem-derived; accept only typed
+    canonical locators and delegate materialization, symlink revalidation, health, and release
+    assessment to later adapters while proving those observations cannot change lifecycle.
+  - Remote control and operational saga checkpoints are observable but not competing project-state
+    authorities; project only home-signed canonical facts and retain command/runtime uncertainty in
+    disjoint views.
+  - The payload catalog is intentionally large; keep normalized state and view structs bounded and
+    keyed, factor validation by semantic family, and use focused generated fixtures to prevent one
+    monolithic reducer path from hiding invariant gaps.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including every named project/control
+     scenario and repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.

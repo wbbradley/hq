@@ -54,16 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[projects/high] Implement the pure project and resource-claim model** — Add project identity and
-  immutable home, mailbox, metadata, predecessor, desired resources, primary path, lifecycle,
-  archive state, active claims, assignment epochs, thread scope, project input sequencing, dispatch
-  attribution, expected-head compare-and-swap, remote command/result state, and late-output
-  classification. Model reversible domain transitions separately from operational saga states and
-  keep resource-kind policy behind explicit pure interfaces. Test stale heads, concurrent commands,
-  assignment cardinality, close/reopen/archive laws, force-takeover authority, and inactive-output
-  behavior. Complete this work when the project transition model satisfies every invariant in the
-  retained project specification without filesystem or provider I/O.
-
 - **[protocol/high] Specify canonical facts, remote control, and trust transitions** — Write
   canonical fact v1 and remote-control v1 as new protocols with independent version spaces,
   deterministic encoding rules, strict decoding policy, size/count/text bounds, event identity,

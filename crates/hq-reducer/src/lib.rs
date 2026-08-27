@@ -7,6 +7,7 @@ mod decision;
 mod fact_set;
 mod graph;
 mod presentation;
+mod project;
 mod reducer;
 
 pub use agent::{
@@ -33,6 +34,12 @@ pub use graph::CausalGraph;
 pub use presentation::{
     PresentationEntry, PresentationError, PresentationFamily, PresentationItemId, PresentationKey,
     PresentationPublicId, canonical_presentation_order,
+};
+pub use project::{
+    PathResourcePolicy, ProjectAggregateKey, ProjectAssignmentPhase, ProjectAssignmentView,
+    ProjectDispatchView, ProjectInputView, ProjectLifecycle, ProjectOutputStatus,
+    ProjectOutputView, ProjectProjection, ProjectProjectionKey, ProjectReason, ProjectReducer,
+    ProjectView, RemoteCommandStage, RemoteCommandView, ResourceConflictPolicy,
 };
 pub use reducer::{
     ConflictObservation, ConflictReason, DomainReducer, DomainReductionReport, GraphOnlyReducer,
