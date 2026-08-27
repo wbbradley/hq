@@ -1,0 +1,345 @@
+# HQ Rust Rewrite
+
+## Goal
+
+Build a clean-sheet Rust implementation of HQ that satisfies
+`rust-rewrite-design.md`, the reviewed Rust-era specifications produced by this plan, and the
+acceptance matrix in that design. Preserve the distributed causal-fact model and its algebraic
+laws. Do not preserve Go databases, canonical schemas, local RPC, command syntax, package
+boundaries, UI details, or other compatibility merely because the Go implementation has them.
+
+The autonomous work ends with a verified, cutover-ready Rust release candidate and a rehearsed
+operator procedure. Replacing, deleting, or disabling a live Go installation, activating a
+production identity, and declaring a production soak successful require separate user authority.
+
+## Authoritative sources
+
+Use these sources in order when they disagree:
+
+1. The decisions, non-goals, invariants, acceptance matrix, and definition of done in
+   `rust-rewrite-design.md`.
+2. Rust-era specifications and ADRs created by this plan.
+3. The algebraic laws currently recorded in `../crdt-algebra-laws.html` and then copied into the
+   tracked Rust-era specifications.
+4. Retained product intent extracted from `docs/`, `rust-port.md`, and
+   `rust-port-transcript.md`.
+5. Frozen Go code and tests as scenario sources and defect evidence, never as a compatibility
+   oracle.
+
+## Execution contract
+
+- The ordered list under **Next Up** is the complete remaining roadmap, not merely the next task.
+- Execute the first item with the `next-task` skill using the exact path
+  `/Users/wbbradley/src/hq/PLAN.md`. After completing and recording it, continue with the new first
+  item until the queue is empty.
+- If the first item is too large for one coherent, reviewable commit, split it into smaller
+  capability-named items at the front of the queue before implementation. Do not encode sequence
+  positions in durable names.
+- Refine later items as specifications and implementation reveal better boundaries. Add every
+  newly discovered requirement, regression, recovery obligation, or acceptance gap to the queue at
+  the correct dependency position. Never narrow or delete required scope except by completing it
+  and recording it in `COMPLETED.md`.
+- Use test-first development where practical. Keep domain policy pure, dependencies pointed inward,
+  and I/O behind the boundaries in the rewrite design. Every task must leave the repository
+  formatted, lint-clean, tested in proportion to its risk, and committed with a Conventional
+  Commit.
+- Resolve routine implementation choices autonomously. Choose the simplest first-principles option
+  consistent with the architecture, security model, and retained behavior, and record material
+  decisions as ADRs. Stop only for a decision that changes product scope or security posture,
+  expands authority, requires destructive or externally consequential action, or remains genuinely
+  irresolvable from evidence.
+- Do not claim the goal complete merely because **Next Up** is empty. Audit every acceptance-matrix
+  row and the definition of done in `rust-rewrite-design.md` against current evidence; add any
+  missing work back to the queue and continue.
+
+## Next Up
+
+- **[design/high] Establish the Rust behavior ledger and product boundary** — Record the frozen Go
+  baseline without changing it, then classify every externally meaningful capability from the
+  authoritative sources as **retain**, **redesign**, or **drop** in a tracked Rust-era behavior
+  ledger. Resolve the first-release feature/deferred boundary, supported operating-system surface,
+  identity backup scope, CLI/TUI workflow inventory, and other product-level choices. For choices
+  not fixed by the rewrite design, select a conservative first-principles default and record it in
+  a focused ADR. Preserve the four former Go-plan findings as Rust requirements: causal-maximal
+  regrant authority, one canonical conversation comparator, indexed pagination, and non-disruptive
+  relay wakes. Complete this work when no Go-facing compatibility assumption or retained user
+  workflow remains uncategorized and later tasks can rely on a stable product boundary.
+
+- **[design/high] Specify the causal fact algebra and semantic fact catalog** — Create tracked,
+  implementation-independent specifications for the add-only fact set, graph terminology,
+  reachability, usability, deferred dependencies, causal maxima, explicit historical authority,
+  projection retraction, deterministic conflict rules, and canonical presentation order. Catalog
+  every retained fact family for identity, installation-local control, peers, mailbox capabilities,
+  human accounts, conversations, activity, agents, sessions, projects, and remote control. For each
+  fact define required parents and authorities, validation, unresolved behavior, conflict policy,
+  projection effects, retention class, and normalized observations. Turn all nine algebraic laws,
+  safety properties, and known Go defects into named acceptance scenarios. Complete this work when
+  the pure reducer can be implemented without consulting Go control flow or prose with an undefined
+  conflict outcome.
+
+- **[foundation/high] Establish the Rust workspace and dependency guardrails** — Add the Cargo
+  workspace and initial `hq-domain`, `hq-reducer`, `hq-protocol`, `hq-application`, `hq-store`,
+  `hq-local-api`, `hq-relay`, `hq-harness`, `hq-codex`, `hq-tui`, `hq-node`, and `hq-testkit`
+  boundaries, initially combining crates only where that improves clarity without weakening
+  dependency direction. Configure rustfmt, strict Clippy policy, tests, CI, dependency auditing, and
+  architecture checks that keep Tokio, SQLite, Nostr, Ratatui, filesystem, process, and provider
+  dependencies out of the pure core. Add a minimal in-memory walking skeleton proving that a domain
+  fact can cross the intended boundaries. Complete this work with a clean build/test/lint run and
+  automated forbidden-dependency enforcement.
+
+- **[domain/high] Implement validated domain values and deterministic test support** — Implement
+  newtyped IDs, keys, addresses, causal references, bounded text and collections, timestamps,
+  correlation values, resource locators, fact payload enums, commands, outcomes, views, and typed
+  error categories without wire or database representation leakage. Build deterministic key, ID,
+  clock, random-byte, fact, graph, and state-machine generators in `hq-testkit`. Test constructors,
+  bounds, non-interchangeability, equality, ordering primitives, and invalid-state exclusion.
+  Complete this work when later pure logic can express every cataloged semantic fact and test case
+  without raw strings or ambient time/randomness.
+
+- **[algebra/high] Implement the causal graph and complete batch reducer framework** — Implement
+  immutable fact-set ingestion, deduplication, parent and reverse-dependency graphs, reachability,
+  topological processing, unresolved dependency tracking, causal frontiers, projection support,
+  normalized reduction decisions, and the single canonical presentation comparator. Expose one pure
+  complete-batch reduction entry point and no storage/runtime dependency. Use generated DAGs to
+  prove merge semilattice laws, permutation and duplicate invariance, parent-before-child ordering,
+  deferred readiness, and exact maximal frontiers. Complete this work when domain reducers can plug
+  into a lawful batch engine and no arrival or receiver clock affects semantic output.
+
+- **[authority/high] Implement peer, capability, and human-account reduction** — Add pure reducers
+  for installation-local identity/binding facts, directional peer routing, mailbox access grants,
+  observations and revokes, human-account creation, device grants, acceptances, revocations,
+  selection, and membership frontiers. Authorization must use explicitly cited historical facts at
+  the action's causal point. Prove that observed pre-revoke actions survive, concurrent or later
+  unauthorized traffic fails closed, and a regranted device becomes authoritative only through a
+  causal-maximal acceptance descending from the revoke. Cover missing authority, conflicting roots,
+  every topological arrival order, and unrelated-parent attacks. Complete this work when the full
+  authority race matrix and batch-reduction laws pass.
+
+- **[conversation/high] Implement conversation and activity reduction** — Add questions, answers,
+  asynchronous messages, cancellation, archive/restore/reject, delivery-relevant semantic state,
+  typed presentation/correlation, and the separate non-actionable harness-activity stream. Define
+  one reducer-owned causal ordering comparator and deterministic activity coalescing/retention rules;
+  no store or UI may recreate them. Test missing parents, concurrent answer/cancellation, equal-time
+  messages and activity, delayed occurrence data, final-answer selection, action grouping, and
+  projection retraction. Complete this work when normalized conversation and activity views are
+  deterministic for all generated arrival orders.
+
+- **[agents/high] Implement named-agent and provider-session reduction** — Add pure facts and
+  projections for mailbox creation/binding/context, permanent name claims and retirement, durable
+  provider-session bindings, selection, renaming, repository context, and projectless direct
+  sessions. Keep durable session identity separate from runtime presence, leases, caller
+  environments, and process state. Define name/session conflicts and replay behavior explicitly and
+  test rebuildable history, retirement, reselection, and cross-provider namespace isolation.
+  Complete this work when all retained named-agent state derives solely from the fact set.
+
+- **[projects/high] Implement the pure project and resource-claim model** — Add project identity and
+  immutable home, mailbox, metadata, predecessor, desired resources, primary path, lifecycle,
+  archive state, active claims, assignment epochs, thread scope, project input sequencing, dispatch
+  attribution, expected-head compare-and-swap, remote command/result state, and late-output
+  classification. Model reversible domain transitions separately from operational saga states and
+  keep resource-kind policy behind explicit pure interfaces. Test stale heads, concurrent commands,
+  assignment cardinality, close/reopen/archive laws, force-takeover authority, and inactive-output
+  behavior. Complete this work when the project transition model satisfies every invariant in the
+  retained project specification without filesystem or provider I/O.
+
+- **[protocol/high] Specify canonical facts, remote control, and trust transitions** — Write
+  canonical fact v1 and remote-control v1 as new protocols with independent version spaces,
+  deterministic encoding rules, strict decoding policy, size/count/text bounds, event identity,
+  signatures, audience and authority representation, unsupported-version behavior, and exact trust
+  transitions from raw bytes to verified semantic facts. Decide the provisional Nostr application
+  kind and encoding using an ADR rather than inheriting Go values. Define exact vectors and
+  adversarial cases before implementation. Complete this work when every semantic fact has an
+  unambiguous DTO mapping and no domain struct accidentally serves as a wire schema.
+
+- **[protocol/high] Implement strict canonical encoding and cryptographic verification** — Implement
+  canonical v1 DTO conversion, deterministic encoding, duplicate/unknown-field policy, exact byte
+  retention, bounds after escaping, NIP-01 identity, BIP-340 signing/verification, and distinct raw,
+  parsed, cryptographically verified, and semantic types. Add independent standard vectors,
+  round-trip fixtures, fuzz targets, and malformed, tampered, non-canonical, boundary-sized, and
+  unsupported-version corpora. Explicitly reject old Go schemas without a translation path.
+  Complete this work when exact v1 vectors are stable and adversarial input cannot bypass a trust
+  boundary or reach reduction as a falsely verified fact.
+
+- **[identity/high] Implement installation identity and local configuration persistence** —
+  Implement the new Rust state-directory layout, stable installation identity, root-key generation
+  and loading, signer access, secure atomic file creation and permissions, public identity display,
+  and the identity export/import/backup behavior retained by the behavior ledger. Keep secret keys
+  out of SQLite, logs, diagnostics, RPC results, and canonical facts, and reject unsafe overwrite or
+  concurrent-use conditions. Implement typed local configuration for relay and provider defaults
+  without turning configuration into signed domain state. Test fresh initialization, partial-write
+  recovery, permission failures, redaction, backup round trips where retained, duplicate identity
+  protection, and path derivation. Complete this work when the node and store can consume one
+  explicit secure identity/configuration boundary without reading Go state or formats.
+
+- **[storage/high] Build the SQLite owner, schema, and complete rebuild path** — Design a fresh
+  SQLite schema by data class: immutable canonical knowledge, deterministic indexes, rebuildable
+  projections, durable operational state, ephemeral state, and bounded rejected/temporary input.
+  Implement one dedicated synchronous store thread owning one `rusqlite` connection, bounded typed
+  requests, transaction-scoped functions, secure file settings, schema initialization, exact fact
+  storage, normalized queries, and a repair command that discards rebuildable state and applies the
+  complete batch reducer. Test open/close, rollback-on-drop, corruption/incompatible-schema errors,
+  deterministic rebuild, and client isolation from SQL. Complete this work when a fact corpus can
+  rebuild every projection exactly through the public query boundary.
+
+- **[storage/high] Implement the atomic mutation and inbound-ingest engine** — Implement the common
+  transaction path for local fact-backed commands and remotely verified facts: stable mutation
+  receipt lookup and digest conflict, transaction-consistent decision, explicit time/ID/random
+  inputs, signing, canonical append, dependency data, reduction, projection update, durable
+  per-recipient outbox intent, result receipt, revision allocation, commit, and post-commit
+  invalidation. Keep unsigned local operational mutations on explicitly separate paths with the
+  same retry discipline where client-visible. Add failpoints around every write and commit boundary,
+  lost-response replay tests, local/remote path equality, and same-ID/different-input conflicts.
+  Complete this work when each crash recovers to an old valid state or new valid state, never a
+  hybrid.
+
+- **[storage/high] Add incremental reduction, repair equality, and scalable conversation queries** —
+  Implement deterministic dependency indexes and affected-closure selection, then patch projections
+  incrementally while continuously comparing with fresh batch rebuilds. Build a conversation-local
+  order index or stable cursor derived from the reducer comparator so page concatenation equals
+  canonical order and later pages do not load or sort complete history. Add generated late-parent,
+  high-fanout authority, duplicate-ingest, equal-time mixed-entry, reopen/repair, and large multi-page
+  work tests plus performance budgets. Complete this work when incremental, batch, and repair views
+  are identical and query work meets the documented scaling gate.
+
+- **[application/high] Implement transport-independent application services and ports** — Implement
+  identity/account, mailbox/conversation, peer/relay configuration, synchronization, agent/session,
+  project, query, mutation, and subscription use cases over consumer-owned ports rather than SQL- or
+  transport-shaped interfaces. Keep command decisions pure and represent external side effects as
+  explicit requests/results with stable identities and rejected/committed/uncertain outcomes. Add
+  focused fakes and use-case tests for authorization, mutation replay, error classification, and
+  authoritative snapshot semantics. Complete this work when no supported use case requires local
+  RPC, SQLite, Nostr, terminal, filesystem, or provider-specific knowledge.
+
+- **[local-api/high] Specify and implement the reconnecting local client protocol** — Define local
+  API v1 framing, strict bounds, version negotiation, build metadata, lifecycle operations, typed
+  domain requests/results/errors, stable mutation retry, and revision invalidations. Implement the
+  client and server-session libraries, registering subscriptions before reading the acknowledged
+  revision and activating them only after acknowledgement is written. Coalesce subscriber wakes
+  without blocking commits and make clients reconnect, renegotiate, resubscribe, and request an
+  authoritative full snapshot. Test concurrent clients, lost mutation responses, stale sockets,
+  version mismatch, slow subscribers, revision races, and reconnect. Complete this work when all
+  clients can use one protocol library without storage access.
+
+- **[node/high] Compose node ownership, startup, and graceful lifecycle** — Build the sole composition
+  root owning the installation lock and identity handle, store thread, local listener, subscriptions,
+  relay manager, harness supervisor, project workflow manager, root cancellation tree, bounded
+  mailboxes, and tracked tasks. Implement state/runtime path policy, secure permissions, structured
+  diagnostics and redaction, coordinated auto-start/readiness, status, stop, restart, and ordered
+  drain semantics. Test concurrent starts, failed readiness with actionable causes, restart with
+  connected clients, mutation during shutdown, task/process leak detection, and exact owner release.
+  Complete this work when fake external adapters support a reliable local multi-client node.
+
+- **[transport/high] Specify and implement the encrypted Nostr envelope** — Write Nostr envelope v1
+  independently from canonical v1, then implement recipient binding, NIP-44 encryption, NIP-59
+  wrapping, NIP-42 authentication inputs, identity agreement, randomized transport timestamps,
+  exact durable wrapper creation before first publish, and exact-byte reuse within a retry lineage.
+  Define relay-visible data and input/quarantine bounds. Add standard vectors and tamper,
+  wrong-recipient, signer mismatch, key reuse, retry, and size tests. Complete this work when opened
+  envelopes yield only raw canonical bytes for the common verification/ingest path and transport
+  metadata cannot grant domain authority.
+
+- **[transport/high] Implement durable relay synchronization and replica convergence** — Implement
+  one owner per relay session, retained catch-up with overlapping pagination, live subscription,
+  NIP-42 authentication, outbound attempts, positive/negative acceptance, backoff, staging,
+  quarantine, wrapper/logical deduplication, configuration refresh, and coalesced work wakes that do
+  not restart healthy sessions. Use a deterministic scripted relay for disconnect, duplicate,
+  response-loss, EOSE, offline catch-up, auth, and restart cases, followed by a controlled real-relay
+  smoke test. Complete this work when two distinct Rust installations converge across arbitrary
+  delivery order and downtime without relay observations influencing reduction.
+
+- **[harness/high] Define the provider-neutral harness contract and conformance suite** — Specify
+  logical instances, durable sessions, capabilities, start/resume readiness, stable submission IDs,
+  accepted/rejected/uncertain outcomes, lookup/reconciliation requirements, interactive requests,
+  normalized output/activity, cancellation, and shutdown. Implement neutral traits and a scripted
+  fake provider; registration must reject adapters lacking safe idempotency or reconciliation.
+  Ensure neutral crates contain no Codex vocabulary. Complete this work when the fake passes a
+  reusable conformance suite covering new/resumed sessions, response loss, active-operation races,
+  interactive requests, output, crash isolation, and teardown.
+
+- **[harness/high] Implement supervisor ownership, delivery recovery, and bounded persistence** —
+  Implement one logical worker owner per named agent, durable ownership and delivery ledgers,
+  pending/uncertain/accepted reconciliation, automatic wake from durable pending work, bounded FIFO
+  plus keyed coalescing, output-before-activity persistence, stable output collision checks,
+  environment-copy/redaction policy, and stop-intake/drain/escalate shutdown. Test daemon restart,
+  lease races, response loss, buffer saturation, coalescing order, partial output/activity commits,
+  concurrent agents, secret exclusion, drain timeout, and forced process termination with the fake
+  adapter. Complete this work when accepted work is never silently lost or duplicated.
+
+- **[codex/high] Implement and pin the Codex provider adapter** — Select a current supported Codex
+  app-server baseline using official schema/documentation and installed-binary evidence, pin its
+  generated fixtures, and privately implement process startup, bounded JSONL/JSON-RPC transport,
+  initialization, exact thread start/resume/read behavior, turn start/steer/interrupt,
+  stable-submission reconciliation, supported server requests, additive notification tolerance,
+  normalized output/activity, typed failure causes, stderr trust boundary, and shutdown escalation.
+  Keep every Codex DTO and method name out of neutral crates. Complete this work when the neutral
+  conformance suite, pinned protocol fixtures, process tests, and opt-in installed-provider smoke
+  test pass.
+
+- **[resources/high] Implement path-resource identity, conflict, health, and release assessment** —
+  Implement home-qualified absolute path locators, human spelling versus canonical identity,
+  nearest-existing-ancestor handling for missing paths, symlink revalidation, equal/ancestor/
+  descendant conflict detection, project-local overlap, resource health, Git cleanliness, primary
+  path selection, launch-directory validation, and advisory claim persistence. Keep filesystem/Git
+  observations outside pure project policy and never silently relocate or delete resources. Test
+  missing/inaccessible paths, symlinks, worktrees sharing a Git directory, dirty/unknown release,
+  atomic replacement, and explicit force behavior. Complete this work when every path decision is
+  deterministic, explainable, and auditable.
+
+- **[projects/high] Implement project command, activation, dispatch, and provisioning sagas** —
+  Implement home-authoritative project commands/results, durable remote routing, expected-head
+  serialization, resource acquisition/release, assignment/configuration/runnable transitions,
+  thread creation/resume, pending-message sequencing and at-most-once dispatch, graceful and forced
+  close/takeover, retirement, late output, and Git worktree provisioning. Every filesystem, Git,
+  network, and provider boundary must use a stable operation ID, explicit checkpoint,
+  reconciliation-before-retry, compensation, and definite-versus-unknown outcome. Test crashes and
+  failures at every boundary, stale commands, competing devices, blocked handoff, restart repair,
+  and complete attribution. Complete this work when every saga reaches a documented stable or
+  explicitly reconcilable state.
+
+- **[cli/medium] Complete the Rust command-line client** — Implement the retained command workflows
+  from the behavior ledger over `hq-local-api` only, including identity/account, messaging, peers,
+  relays/status/sync, named agents and sessions, projects/resources/worktrees, lifecycle control,
+  noninteractive output, machine-readable output, and actionable typed diagnostics. Do not preserve
+  Go spelling where a simpler coherent Rust-era surface is better. Add parser, rendering, retry,
+  autostart, non-TTY, and end-to-end fake-node tests plus generated help. Complete this work when
+  every retained non-TUI workflow is available without direct storage, signing, relay, or provider
+  access.
+
+- **[tui/high] Build the pure Ratatui application architecture and terminal shell** — Implement
+  `UiModel`, the closed `UiEvent` enum, pure update transitions, explicit `UiEffect` values, stale
+  effect-response suppression, one effect executor, borrowed rendering, responsive layout,
+  terminal input, redraw scheduling, reconnect state, and RAII terminal restoration. Add model and
+  effect tests, deterministic buffer snapshots across representative terminal sizes, and normal,
+  error, cancellation, and panic restoration tests. Complete this work when the UI shell has no
+  domain/storage side channel and can render/reconnect against a scripted local client.
+
+- **[tui/high] Implement retained mailbox, agent, and project workflows** — Add authoritative
+  snapshot reload, conversation/activity presentation in reducer order, inbox filtering, typed
+  technical disclosure, reply/new-message composition, durable drafts, focus, logical selection and
+  scroll anchors, archive/restore, agent/session management, project-first composition, resource
+  conflict previews, activation/close/takeover flows, progress, and actionable errors. Preserve
+  semantic user workflows rather than Bubble Tea cells or key bindings. Test invalidation and
+  resize during editing, reconnect with in-flight commands, stale targets/heads, activity
+  coalescing, modal cancellation, and complete CLI/TUI use-case parity where intended. Complete
+  this work when every retained interactive workflow survives reload and never reimplements domain
+  ordering or authority.
+
+- **[verification/high] Qualify the integrated Rust system against the acceptance matrix** — Run and
+  strengthen the complete fixture, property, model, fuzz, crash/reopen, lifecycle, architecture,
+  security/redaction, and end-to-end suites across the assembled node, clients, relay, harness, and
+  project workflows. Establish and meet explicit budgets for cold readiness, full rebuild,
+  late-parent/high-fanout ingestion, long-conversation paging, invalidation-to-redraw, bounded queue
+  behavior, memory, release build time, and graceful shutdown. Audit every acceptance-matrix row
+  against direct evidence and add missing work to the queue rather than waiving it. Complete this
+  work only when unexplained failures, invariants without tests, and algorithmic regressions are
+  absent.
+
+- **[release/high] Produce and rehearse the cutover-ready Rust release candidate** — Build release
+  artifacts, complete operator and recovery documentation, verify identity backup behavior in
+  first-release scope, and dogfood only with new identities and new state directories on controlled
+  relays. Rehearse installation, startup, offline catch-up, relay loss, provider crash, database
+  repair, backup/restore where supported, node replacement, clean shutdown, and rollback to an
+  untouched archived Go installation. Produce a cutover checklist and evidence bundle without
+  opening or mutating Go state and without switching a live production identity. Complete this work
+  when the definition of done is proven and an operator can separately authorize soak and cutover
+  with known rollback steps.
