@@ -5959,3 +5959,70 @@ checks, both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/
      and single-binary roles.
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before relay transport.
+
+## 2026-08-27 — Encrypted Nostr envelope v1
+
+Specified the Rust transport protocol independently from canonical v1 and pinned the reviewed
+NIP-44, NIP-59, NIP-42, and standard-vector revisions. The specification fixes the schema-1 HQ
+rumor, kind-13 seal, retained kind-1059 gift wrap, relay-visible metadata, trust transitions,
+redacted failure classes, allocation limits, quarantine evidence limit, timestamp window, exact
+retry lineage, one-use-key uniqueness claim, and the rule that transport observations never grant
+domain authority. It also deliberately drops the old Go policy of persisting an unnecessary
+one-use secret after the wrapper has been fully signed.
+
+Implemented bounded NIP-44 v2 with normalized x-only secp256k1 ECDH, HKDF-SHA256, ChaCha20,
+HMAC-SHA256, constant-time MAC comparison, current short and extended length prefixes, strict
+base64/version/padding checks, early allocation bounds, and derived-key zeroization. Added strict
+NIP-01 transport event construction and verification, schema-1 preparation/opening, recipient and
+sender/origin/canonical agreement, independently randomized prior-two-day timestamps, immutable
+exact publish bytes, durable relay-visible metadata restoration, one-use collision checks, and
+bounded signed NIP-42 inputs under `hq-relay::envelope::v1`. Passive configs and reports use public
+fields; only root-key ownership and immutable retry bytes remain opaque.
+
+Tests reproduce the published NIP-44 vector, round-trip the extended-length form and exact embedded
+canonical bytes, detect ciphertext and outer-event tampering, reject wrong recipients and signer
+mismatches, prove fresh one-use keys and byte-identical retries, verify persistence metadata,
+timestamp bounds, collision behavior, oversize input, and exact NIP-42 tags. Full locked workspace
+format/check/tests/doctests/strict-Clippy, architecture/dependency/behavior/specification verifiers,
+four supported relay target checks, both 512-run fuzz smokes, whitespace checks, and unchanged Go
+vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[transport/high] Specify and implement the encrypted Nostr envelope** — Write Nostr envelope v1
+  independently from canonical v1, then implement recipient binding, NIP-44 encryption, NIP-59
+  wrapping, NIP-42 authentication inputs, identity agreement, randomized transport timestamps,
+  exact durable wrapper creation before first publish, and exact-byte reuse within a retry lineage.
+  Define relay-visible data and input/quarantine bounds. Add standard vectors and tamper,
+  wrong-recipient, signer mismatch, key reuse, retry, and size tests. Complete this work when opened
+  envelopes yield only raw canonical bytes for the common verification/ingest path and transport
+  metadata cannot grant domain authority.
+
+  Implementation plan:
+  - Specify schema-1 envelope bytes, independently pinned NIP-44/59/42 rules, relay-visible
+    metadata, trust transitions, size limits, redacted failure classes, and bounded quarantine
+    evidence in `docs/protocol/nostr-envelope-v1.md`.
+  - Add `hq-relay::nip44` from the published standard vectors: normalized x-only secp256k1 ECDH,
+    HKDF-SHA256, ChaCha20, HMAC-SHA256, current short/extended length padding, strict base64/version
+    and allocation preflight, constant-time MAC verification, and zeroization of derived keys.
+  - Add strict NIP-01 transport-event encoding and verification, then schema-1 rumor, signed kind-13
+    seal, and signed kind-1059 gift-wrap preparation/opening with exact recipient, signer, canonical
+    ID, installation ID, and public-key agreement.
+  - Model a prepared retry lineage as an owned validated exact wrapper plus public persistence
+    metadata. Publishing can only borrow those retained bytes; reconstructing durable state verifies
+    all relay-visible metadata and wrapper integrity, and a separate one-use-key claim detects
+    cross-lineage reuse.
+  - Produce typed NIP-42 kind-22242 signing inputs without giving relay challenges or URLs domain
+    authority. Cover official vectors, round trips, tampering at every layer, wrong recipients,
+    signer/origin mismatches, fresh and reused one-use keys, exact retries, timestamp windows,
+    malformed/oversize input, and bounded quarantine evidence.
+
+  Risks and follow-ups:
+  - NIP-44's current extended-length form is newer than the frozen Go implementation; pin the
+    reviewed upstream revisions and test both short and extended lengths so the Rust protocol is
+    intentional rather than accidental compatibility.
+  - Exact wrapper reuse is a storage/session obligation as well as a codec invariant. This package
+    defines validated persistence/retry objects; the following durable relay package must enforce
+    the one-use public-key uniqueness claim transactionally before first publish.
+  - NIP-59 hides the real signer only inside the outer encryption and NIP-42 reveals the root key to
+    a relay. Document both observations and retain no plaintext or secret material in quarantine.

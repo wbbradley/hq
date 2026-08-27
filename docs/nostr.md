@@ -41,8 +41,9 @@ active device.
 
 Seal and wrapper timestamps are independently randomized into the prior two days. The canonical
 event retains its signed application time. Before first publish, the node durably stores the exact
-gift-wrap bytes, ID, ciphertext, timestamp, and one-use key. Every retry reuses those exact bytes.
-HQ rejects an ephemeral key reused by different wrappers.
+gift-wrap bytes, ID, ciphertext, timestamp, and one-use public-key claim. The fully signed wrapper
+does not require retaining the one-use secret. Every retry reuses those exact bytes. HQ rejects an
+ephemeral public key reused by different wrappers.
 
 ## Relay-visible data
 

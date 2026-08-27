@@ -25,6 +25,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bech32"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -218,6 +224,7 @@ dependencies = [
  "digest",
  "ff",
  "group",
+ "hkdf",
  "hybrid-array",
  "rand_core",
  "sec1",
@@ -283,6 +290,15 @@ dependencies = [
  "ff",
  "rand_core",
  "subtle",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac",
 ]
 
 [[package]]
@@ -372,6 +388,19 @@ dependencies = [
 [[package]]
 name = "hq-relay"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "chacha20",
+ "getrandom",
+ "hmac",
+ "hq-domain",
+ "hq-protocol",
+ "k256",
+ "serde",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
 
 [[package]]
 name = "hq-store"

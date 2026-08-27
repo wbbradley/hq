@@ -128,6 +128,7 @@ dependencies = [
  "block-buffer",
  "const-oid",
  "crypto-common",
+ "ctutils",
 ]
 
 [[package]]
@@ -155,6 +156,7 @@ dependencies = [
  "digest",
  "ff",
  "group",
+ "hkdf",
  "hybrid-array",
  "rand_core",
  "sec1",
@@ -198,6 +200,24 @@ dependencies = [
  "ff",
  "rand_core",
  "subtle",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac",
+]
+
+[[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest",
 ]
 
 [[package]]

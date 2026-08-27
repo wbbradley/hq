@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[transport/high] Specify and implement the encrypted Nostr envelope** — Write Nostr envelope v1
-  independently from canonical v1, then implement recipient binding, NIP-44 encryption, NIP-59
-  wrapping, NIP-42 authentication inputs, identity agreement, randomized transport timestamps,
-  exact durable wrapper creation before first publish, and exact-byte reuse within a retry lineage.
-  Define relay-visible data and input/quarantine bounds. Add standard vectors and tamper,
-  wrong-recipient, signer mismatch, key reuse, retry, and size tests. Complete this work when opened
-  envelopes yield only raw canonical bytes for the common verification/ingest path and transport
-  metadata cannot grant domain authority.
-
 - **[transport/high] Implement durable relay synchronization and replica convergence** — Implement
   one owner per relay session, retained catch-up with overlapping pagination, live subscription,
   NIP-42 authentication, outbound attempts, positive/negative acceptance, backoff, staging,

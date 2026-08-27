@@ -10,3 +10,18 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+base64.workspace = true
+chacha20.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+hq-protocol.workspace = true
+k256.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hq-domain.workspace = true

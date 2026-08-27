@@ -25,7 +25,9 @@ repository = "https://github.com/wbbradley/hq"
 publish = false
 
 [workspace.dependencies]
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 bech32 = { version = "0.12.0", default-features = false, features = ["alloc"] }
+chacha20 = { version = "0.10.1", default-features = false, features = ["cipher", "zeroize"] }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = { version = "0.4.3", default-features = false }
 hq-application = { version = "0.1.0", path = "crates/hq-application" }
@@ -39,7 +41,8 @@ hq-relay = { version = "0.1.0", path = "crates/hq-relay" }
 hq-store = { version = "0.1.0", path = "crates/hq-store" }
 hq-testkit = { version = "0.1.0", path = "crates/hq-testkit" }
 hq-tui = { version = "0.1.0", path = "crates/hq-tui" }
-k256 = { version = "0.14.0", default-features = false, features = ["schnorr"] }
+hmac = { version = "0.13.0", default-features = false }
+k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "schnorr"] }
 nix = { version = "0.31.3", default-features = false, features = ["fs", "socket", "user"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 scrypt = { version = "0.12.0", default-features = false }
