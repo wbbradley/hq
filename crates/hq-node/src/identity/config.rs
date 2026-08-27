@@ -3,53 +3,25 @@
 use std::collections::BTreeSet;
 
 use hq_domain::ProviderId;
+use hq_relay::RelayUrl;
 use serde::{Deserialize, Serialize};
 
 use super::{IdentityError, IdentityErrorClass};
 
 const MAX_RELAYS: usize = 16;
-const MAX_RELAY_BYTES: usize = 2_048;
 pub(super) const MAX_CONFIGURATION_BYTES: u64 = 65_536;
-
-/// Validated local WebSocket relay endpoint.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct RelayEndpoint(String);
-
-impl RelayEndpoint {
-    /// Validates a `ws` or `wss` endpoint without performing network I/O.
-    pub fn new(value: String) -> Result<Self, IdentityError> {
-        let valid_scheme = value.starts_with("wss://") || value.starts_with("ws://");
-        let suffix = value.split_once("://").map(|(_, suffix)| suffix);
-        if !valid_scheme
-            || suffix.is_none_or(str::is_empty)
-            || value.len() > MAX_RELAY_BYTES
-            || !value.is_ascii()
-            || value
-                .bytes()
-                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-        {
-            return Err(IdentityError::new(IdentityErrorClass::ConfigurationInvalid));
-        }
-        Ok(Self(value))
-    }
-
-    /// Borrows the exact endpoint spelling.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 /// Versioned unsigned installation-local defaults.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalConfiguration {
-    relays: Vec<RelayEndpoint>,
+    relays: Vec<RelayUrl>,
     default_provider: Option<ProviderId>,
 }
 
 impl LocalConfiguration {
     /// Validates, sorts, and owns local defaults.
     pub fn new(
-        relays: impl IntoIterator<Item = RelayEndpoint>,
+        relays: impl IntoIterator<Item = RelayUrl>,
         default_provider: Option<ProviderId>,
     ) -> Result<Self, IdentityError> {
         let relays = relays.into_iter().collect::<Vec<_>>();
@@ -67,7 +39,7 @@ impl LocalConfiguration {
     }
 
     /// Returns relay endpoints in canonical order.
-    pub fn relays(&self) -> &[RelayEndpoint] {
+    pub fn relays(&self) -> &[RelayUrl] {
         &self.relays
     }
 
@@ -88,7 +60,11 @@ struct ConfigurationDto {
 pub(super) fn encode(value: &LocalConfiguration) -> Result<Vec<u8>, IdentityError> {
     let dto = ConfigurationDto {
         version: 1,
-        relays: value.relays.iter().map(|relay| relay.0.clone()).collect(),
+        relays: value
+            .relays
+            .iter()
+            .map(|relay| relay.as_str().to_owned())
+            .collect(),
         default_provider: value
             .default_provider
             .as_ref()
@@ -109,7 +85,10 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LocalConfiguration, IdentityError> 
     let relays = dto
         .relays
         .into_iter()
-        .map(RelayEndpoint::new)
+        .map(|value| {
+            RelayUrl::new(value)
+                .map_err(|_| IdentityError::new(IdentityErrorClass::ConfigurationInvalid))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let provider = dto
         .default_provider

@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v9 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v10 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `9`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `10`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,13 +23,13 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v9 ownership | Rebuildable |
+| Class | Storage v10 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
 | Deterministic reduction indexes | Reverse and affected dependencies, decisions, diagnostics, conflicts, global reducer order, and conversation-local order | Yes, through atomic ingest or explicit repair |
 | Materialized projections | Complete authority, conversation/activity, named-agent, and project frontiers, typed values, ordered children, and support | Yes, through atomic ingest or explicit repair |
-| Durable operational state | Mutation receipts, canonical commit revisions, change revision, and canonical outbox intents; delivery, cursors, and saga checkpoints remain reserved | No |
+| Durable operational state | Mutation receipts, canonical commit revisions, change revision, canonical outbox intents, relay policies, prepared wrappers, attempts, cursors, deduplication, staging, and quarantine; later saga checkpoints remain reserved | No |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
 
@@ -186,9 +186,41 @@ the typed `Revision` only.
 `outbox_intents` has one identity per canonical fact and recipient installation. It retains the
 exact bounded signed canonical event bytes and creating revision so later encryption and relay
 retries never reconstruct canonical evidence. Unequal reuse of that identity fails closed. Public
-queries are deterministically ordered and capped at 1,024 rows; transport wrappers and delivery
-attempts will extend operational state without changing canonical identity. Explicit repair never
-deletes, rewrites, or derives any receipt, revision, or outbox row.
+queries are deterministically ordered and capped at 1,024 rows.
+
+Relay configuration uses `relay_policy_operations` for stable operation ID/request-digest replay
+and `relay_policies` for the current positive monotonic generation. Equal desired state under a new
+operation reuses the generation; changed access, authentication, or enabled state advances it.
+Exact URL spelling is the key. The store owns plain records and validates the bounded `ws`/`wss`
+shape at its transaction boundary; only the node maps these records to `hq-relay` values.
+
+`prepared_relay_outbox` binds one canonical fact/recipient lineage to exact kind-1059 bytes and all
+public envelope metadata. Wrapper IDs and one-use public keys are independently unique. The
+lineage, exact bytes, and both uniqueness claims commit before first publish in one transaction;
+equal replay is a no-op and any unequal reuse fails closed. `relay_attempts` retains positive
+per-URL attempt counts, deadlines, and uncertain/rejected/accepted disposition. Count/time cannot
+regress, a lost response may move the same uncertain attempt to its answer, and accepted is
+absorbing.
+
+`relay_cursors` stores one generation-qualified inclusive backward boundary per URL. Within a
+generation it can only move toward older `(created_at, wrapper ID)` pairs and exhaustion cannot
+reverse. A later current policy generation may reset traversal. `inbound_relay_claims` atomically
+deduplicates both outer wrapper ID and logical `(origin installation, canonical event)` identity;
+either identity mapping to unequal canonical evidence is an immutable collision.
+
+`relay_staging` retains exact retryable outer bytes in FIFO order. It is capped transactionally at
+1,024 rows and 64 MiB, evicts nothing, and returns backpressure when either inclusive bound is
+full. A successful staged retry removes its row in the same transaction as its outer/logical claim;
+a permanent result removes it in the same transaction as matching quarantine evidence.
+`relay_quarantine` stores only digest, optional verified outer ID, redacted failure code,
+receive time, complete byte length, and at most a 4 KiB raw outer prefix. It evicts the oldest
+`(receive time, digest)` rows until both its 1,024-row and 4 MiB sample bounds hold. Neither table
+contains opened canonical plaintext or secrets.
+
+Every collection in a deterministic relay-state page is capped at 1,024 records. Strict decoding recomputes
+wrapper/staging digests and rejects malformed fixed-width values, closed codes, impossible
+optionality, or invalid monotonic generations. Explicit projection repair never deletes, rewrites,
+or derives any receipt, revision, outbox, or relay operational row.
 
 ## Authority projections
 

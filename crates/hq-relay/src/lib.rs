@@ -2,6 +2,8 @@
 
 pub mod envelope;
 mod nip44;
+mod ports;
+mod url;
 
 use std::{error::Error, fmt};
 
@@ -10,6 +12,15 @@ pub use envelope::{
     PreparedEnvelope, PreparedEnvelopeMetadata, RandomSource, SystemRandom,
     check_one_use_key_claim,
 };
+pub use ports::{
+    AttemptDisposition, CanonicalIngest, CatchupCursor, DesiredRelayPolicy, InboundClaim,
+    LogicalEnvelopeId, MAX_QUARANTINE_BYTES, MAX_QUARANTINE_ITEMS, MAX_STAGING_BYTES,
+    MAX_STAGING_ITEMS, MAX_STATE_QUERY_ITEMS, OutboundIntent, OutboxKey, PreparedOutbound,
+    QuarantineEvidence, RelayAttempt, RelayClock, RelayConnection, RelayConnector, RelayFrame,
+    RelayPolicy, RelayPolicyChange, RelayPortError, RelaySleeper, RelayStateMutation,
+    RelayStatePort, RelayStateSnapshot, ResolvedRoute, RouteResolver, StagedInput,
+};
+pub use url::{MAX_RELAY_URL_BYTES, RelayUrl, RelayUrlError};
 
 /// Retained gift-wrap event kind from NIP-59.
 pub const GIFT_WRAP_KIND: u16 = 1059;

@@ -6026,3 +6026,112 @@ vet/build/fresh tests pass.
     the one-use public-key uniqueness claim transactionally before first publish.
   - NIP-59 hides the real signer only inside the outer encryption and NIP-42 reveals the root key to
     a relay. Document both observations and retain no plaintext or secret material in quarantine.
+
+## 2026-08-27 — Durable relay synchronization state
+
+Specified relay synchronization v1 with explicit ownership, exact retry lineage, monotonic
+attempt and cursor rules, dual deduplication, bounded staging and quarantine, generation changes,
+shutdown obligations, and the invariant that relays never grant canonical authority. Added one
+shared validated `RelayUrl` and consumer-owned relay ports whose passive records use idiomatic
+public fields; only values protecting validation or exact-byte invariants remain opaque.
+
+Implemented clean-sheet storage schema v10 with storage-owned records and strict transactional
+tables for policy operations and generations, prepared wrappers and one-use-key claims, attempts,
+cursors, inbound claims, staging, and quarantine. Equal retries are idempotent, unequal identity
+reuse conflicts, preparation and uniqueness claims commit together, monotonic transitions fail
+closed, successful or permanently rejected staged input is removed atomically, staging applies
+backpressure at its inclusive bounds, and quarantine evicts deterministically. State survives
+restart and is excluded from projection repair. A narrow cloneable store handle lets future relay
+session owners share requests without sharing store shutdown ownership.
+
+Added the node-only adapter between relay and storage vocabularies, including strict URL, code,
+generation, and prepared-envelope revalidation. Replaced the duplicate node URL type, updated
+storage and architecture documentation, and strengthened dependency checks so transport and SQLite
+records cannot leak across their boundary. Contracts cover public fields, URL bounds, stable policy
+operations, collisions, uncertain attempt recovery, cursor regression, dual claims, atomic staged
+transitions, FIFO/backpressure, deterministic quarantine eviction, corruption, restart, and repair.
+All locked workspace format/check/build/tests/doctests/strict-Clippy gates, architecture/dependency/
+behavior/specification verifiers, four supported portable targets including `hq-relay`, both
+512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[transport/high] Specify and persist durable relay synchronization state** — Define the complete
+  relay synchronization state machine and its consumer-owned ports, then extend clean-sheet storage
+  for versioned relay policies, prepared exact wrappers and one-use-key claims, per-relay attempt and
+  acceptance state, overlapping catch-up cursors, outer/logical deduplication, bounded staging, and
+  bounded quarantine. Keep relay DTOs out of SQLite and SQLite DTOs out of `hq-relay`; map them only
+  at the node composition boundary. Complete this package when every durable transition is bounded,
+  transactional, collision-checked, survives restart, and is unchanged by explicit projection
+  repair.
+
+  **Implementation plan**
+
+  - Create `docs/protocol/relay-sync-v1.md` with ownership, state transitions, exact retry and
+    relay-acceptance semantics, overlap cursor rules, deduplication identities, generation changes,
+    staging/quarantine bounds and eviction, shutdown obligations, and non-authority rules.
+  - Add `crates/hq-relay/src/url.rs` for one validated WebSocket `RelayUrl`; replace the duplicate
+    node-local relay endpoint type. Add `crates/hq-relay/src/ports.rs` with public-field configuration
+    and observation records plus consumer-owned persistence, route-resolution, canonical-ingest,
+    clock, and connection traits. Keep validated identities/exact-byte lineages opaque only where a
+    mutation would break an invariant.
+  - Extend `crates/hq-store/src/operational.rs`, `database/operational.rs`, `database.rs`, `actor.rs`,
+    `error.rs`, and `lib.rs` with storage-owned relay records and bounded actor requests. Bump the
+    clean-sheet schema/marker and add strict tables/constraints for configuration generations,
+    prepared wrappers, one-use public keys, attempts, acceptance, cursors, inbound identities,
+    staging, and quarantine; do not add a migration from old non-empty schemas.
+  - Add the node-only mapping adapter and update `crates/hq-node/src/identity/config.rs` and exports
+    so unsigned local defaults and durable policy use the same validated relay URL without letting
+    local configuration bypass the durable generation/operation boundary.
+  - Write failing URL/port tests and store contracts first: inclusive bounds; equal replay versus
+    changed-value collision; atomic prepare plus one-use claim; response-loss attempt recovery;
+    acceptance monotonicity; overlap cursor regression; outer and logical duplicate idempotency;
+    FIFO staging; deterministic quarantine count/byte eviction; corruption rejection; restart and
+    projection-repair preservation; and public fields on passive relay records.
+  - Update `docs/rust/storage.md`, architecture/dependency checks, and schema contract expectations;
+    then run every locked workspace, supported-target, fuzz, whitespace, and unchanged-Go gate.
+
+  **Risks and decisions**
+
+  - Existing outbox intents lack routes and encryption keys. This package stores no inferred route;
+    the later session owner resolves signed routing state through a read port immediately before
+    first preparation, and relay observations can never write that route.
+  - Exact preparation and a one-use-key claim must commit together. A crash may leave an intent
+    queued or a complete prepared lineage, never bytes without their uniqueness claim.
+  - Staging contains retryable exact outer bytes; quarantine retains only bounded raw outer evidence
+    and redacted classification, never decrypted plaintext or secrets. Count and total-byte bounds
+    are enforced transactionally before commit.
+  - Schema v9 has no production Rust data yet and the rewrite explicitly rejects migration. Bump the
+    clean-sheet identity and keep non-empty older databases incompatible rather than inventing a
+    transitional protocol.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.

@@ -25,6 +25,10 @@ pub enum StoreErrorClass {
     MutationConflict,
     /// A bounded operational query or mutation request was invalid.
     InvalidOperationalRequest,
+    /// A durable relay transition regressed or reused a stable identity unequally.
+    RelayStateConflict,
+    /// Bounded relay staging cannot accept another exact wrapper.
+    RelayStagingFull,
     /// The monotonic durable revision reached its maximum representable value.
     RevisionExhausted,
     /// A durable receipt, revision, or outbox row failed strict decoding.
@@ -75,6 +79,8 @@ impl fmt::Display for StoreError {
                 "mutation identity was reused with different input"
             }
             StoreErrorClass::InvalidOperationalRequest => "operational store request is invalid",
+            StoreErrorClass::RelayStateConflict => "relay state transition conflicts",
+            StoreErrorClass::RelayStagingFull => "relay staging is full",
             StoreErrorClass::RevisionExhausted => "change revision is exhausted",
             StoreErrorClass::OperationalStateCorrupt => "durable operational state is corrupt",
             StoreErrorClass::ActorClosed => "store actor is closed",

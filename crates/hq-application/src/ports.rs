@@ -130,9 +130,12 @@ pub enum RelayAuthentication {
 /// Typed local relay configuration request without transport implementation details.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayConfiguration {
-    endpoint: ResourceLocator,
-    access: RelayAccess,
-    authentication: RelayAuthentication,
+    /// Typed relay endpoint locator.
+    pub endpoint: ResourceLocator,
+    /// Allowed synchronization direction.
+    pub access: RelayAccess,
+    /// Connection authentication policy.
+    pub authentication: RelayAuthentication,
 }
 
 impl RelayConfiguration {
@@ -147,21 +150,6 @@ impl RelayConfiguration {
             access,
             authentication,
         }
-    }
-
-    /// Returns the typed endpoint locator.
-    pub const fn endpoint(&self) -> &ResourceLocator {
-        &self.endpoint
-    }
-
-    /// Returns the allowed direction.
-    pub const fn access(&self) -> RelayAccess {
-        self.access
-    }
-
-    /// Returns the authentication policy.
-    pub const fn authentication(&self) -> RelayAuthentication {
-        self.authentication
     }
 }
 

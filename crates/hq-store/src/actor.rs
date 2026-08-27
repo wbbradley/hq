@@ -20,7 +20,7 @@ use crate::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
     ConversationEntry, ConversationProjectionSnapshot, LocalMutationRequest, MutationReceipt,
     OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
-    database::Database,
+    StoredRelayStateMutation, StoredRelayStateSnapshot, database::Database,
 };
 
 /// Result of atomically ingesting immutable verified evidence.
@@ -252,6 +252,14 @@ enum Request {
         limit: usize,
         reply: SyncSender<Result<Vec<OutboxIntent>, StoreError>>,
     },
+    ApplyRelayState {
+        mutation: StoredRelayStateMutation,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    LoadRelayState {
+        limit: usize,
+        reply: SyncSender<Result<StoredRelayStateSnapshot, StoreError>>,
+    },
     Close {
         reply: SyncSender<()>,
     },
@@ -259,11 +267,49 @@ enum Request {
 
 /// Sole owner of one bounded SQLite worker and its request intake.
 ///
-/// The value is intentionally not `Clone`; callers that need shared access can place it in an
-/// `Arc`, preserving one explicit owner and one shutdown point.
+/// The value is intentionally not `Clone`; owned tasks clone only narrow request capabilities,
+/// preserving one explicit worker owner and one shutdown point.
 pub struct Store {
     requests: SyncSender<Request>,
     worker: Option<JoinHandle<()>>,
+}
+
+/// Cloneable relay-state request capability without store-worker ownership.
+#[derive(Clone)]
+pub struct RelayStateHandle {
+    requests: SyncSender<Request>,
+}
+
+impl RelayStateHandle {
+    /// Applies one atomic durable relay synchronization transition.
+    pub fn apply(&self, mutation: StoredRelayStateMutation) -> Result<(), StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ApplyRelayState { mutation, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one deterministic bounded page of durable relay synchronization state.
+    pub fn load(&self, limit: usize) -> Result<StoredRelayStateSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadRelayState { limit, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+}
+
+impl fmt::Debug for RelayStateHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RelayStateHandle")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Store {
@@ -309,6 +355,13 @@ impl Store {
                 let _ = worker.join();
                 Err(StoreError::new(StoreErrorClass::WorkerStopped))
             }
+        }
+    }
+
+    /// Creates a relay-only request capability for owned synchronization tasks.
+    pub fn relay_state_handle(&self) -> RelayStateHandle {
+        RelayStateHandle {
+            requests: self.requests.clone(),
         }
     }
 
@@ -504,6 +557,16 @@ impl Store {
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
+    /// Applies one atomic durable relay synchronization transition.
+    pub fn apply_relay_state(&self, mutation: StoredRelayStateMutation) -> Result<(), StoreError> {
+        self.relay_state_handle().apply(mutation)
+    }
+
+    /// Loads one deterministic bounded page of durable relay synchronization state.
+    pub fn load_relay_state(&self, limit: usize) -> Result<StoredRelayStateSnapshot, StoreError> {
+        self.relay_state_handle().load(limit)
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -623,6 +686,12 @@ fn run(
             }
             Request::LoadOutboxIntents { limit, reply } => {
                 let _ = reply.send(database.load_outbox_intents(limit));
+            }
+            Request::ApplyRelayState { mutation, reply } => {
+                let _ = reply.send(database.apply_relay_state(mutation));
+            }
+            Request::LoadRelayState { limit, reply } => {
+                let _ = reply.send(database.load_relay_state(limit));
             }
             Request::Close { reply } => {
                 let _ = reply.send(());

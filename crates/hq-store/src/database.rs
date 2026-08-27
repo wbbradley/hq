@@ -5,6 +5,7 @@ mod authority;
 mod conversation;
 mod operational;
 mod project;
+mod relay;
 mod repair;
 
 use std::{
@@ -41,9 +42,9 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 9;
-const SCHEMA_MARKER: &str = "hq-store-v9-incremental-queries-2026-08-27";
-const SCHEMA_TABLES: [&str; 102] = [
+const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_MARKER: &str = "hq-store-v10-durable-relay-sync-2026-08-27";
+const SCHEMA_TABLES: [&str; 110] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -146,7 +147,16 @@ const SCHEMA_TABLES: [&str; 102] = [
     "change_revision",
     "outbox_intents",
     "canonical_commits",
+    "relay_policy_operations",
+    "relay_policies",
+    "prepared_relay_outbox",
+    "relay_attempts",
+    "relay_cursors",
+    "inbound_relay_claims",
+    "relay_staging",
+    "relay_quarantine",
 ];
+const OPERATIONAL_TABLE_COUNT: usize = 12;
 const SCHEMA_INDEXES: [&str; 2] = [
     "conversation_messages_by_fact_id",
     "conversation_activities_by_fact_id",
@@ -1067,6 +1077,116 @@ CREATE TABLE canonical_commits (
     fact_id BLOB PRIMARY KEY NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
     revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE relay_policy_operations (
+    operation_id BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    request_digest BLOB NOT NULL
+        CHECK(typeof(request_digest) = 'blob' AND length(request_digest) = 32),
+    url TEXT NOT NULL CHECK(typeof(url) = 'text' AND length(url) BETWEEN 1 AND 2048),
+    access INTEGER NOT NULL CHECK(access BETWEEN 1 AND 3),
+    authentication INTEGER NOT NULL CHECK(authentication BETWEEN 1 AND 3),
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+    generation BLOB NOT NULL CHECK(typeof(generation) = 'blob' AND length(generation) = 8)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE relay_policies (
+    url TEXT PRIMARY KEY NOT NULL CHECK(typeof(url) = 'text' AND length(url) BETWEEN 1 AND 2048),
+    access INTEGER NOT NULL CHECK(access BETWEEN 1 AND 3),
+    authentication INTEGER NOT NULL CHECK(authentication BETWEEN 1 AND 3),
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+    generation BLOB NOT NULL CHECK(typeof(generation) = 'blob' AND length(generation) = 8)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE prepared_relay_outbox (
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    recipient_installation BLOB NOT NULL
+        CHECK(typeof(recipient_installation) = 'blob' AND length(recipient_installation) = 32),
+    wrapper_id BLOB NOT NULL UNIQUE
+        CHECK(typeof(wrapper_id) = 'blob' AND length(wrapper_id) = 32),
+    one_use_public_key BLOB NOT NULL UNIQUE
+        CHECK(typeof(one_use_public_key) = 'blob' AND length(one_use_public_key) = 32),
+    recipient_public_key BLOB NOT NULL
+        CHECK(typeof(recipient_public_key) = 'blob' AND length(recipient_public_key) = 32),
+    canonical_event_id BLOB NOT NULL
+        CHECK(typeof(canonical_event_id) = 'blob' AND length(canonical_event_id) = 32),
+    canonical_sha256 BLOB NOT NULL
+        CHECK(typeof(canonical_sha256) = 'blob' AND length(canonical_sha256) = 32),
+    wrapper_sha256 BLOB NOT NULL
+        CHECK(typeof(wrapper_sha256) = 'blob' AND length(wrapper_sha256) = 32),
+    seal_created_at BLOB NOT NULL
+        CHECK(typeof(seal_created_at) = 'blob' AND length(seal_created_at) = 8),
+    gift_wrap_created_at BLOB NOT NULL
+        CHECK(typeof(gift_wrap_created_at) = 'blob' AND length(gift_wrap_created_at) = 8),
+    exact_wire BLOB NOT NULL
+        CHECK(typeof(exact_wire) = 'blob' AND length(exact_wire) BETWEEN 1 AND 262144),
+    PRIMARY KEY (fact_id, recipient_installation)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE relay_attempts (
+    url TEXT NOT NULL REFERENCES relay_policies(url) ON DELETE RESTRICT,
+    wrapper_id BLOB NOT NULL REFERENCES prepared_relay_outbox(wrapper_id) ON DELETE RESTRICT,
+    attempts INTEGER NOT NULL CHECK(attempts BETWEEN 1 AND 4294967295),
+    disposition INTEGER NOT NULL CHECK(disposition BETWEEN 1 AND 3),
+    last_attempt_millis BLOB NOT NULL
+        CHECK(typeof(last_attempt_millis) = 'blob' AND length(last_attempt_millis) = 8),
+    retry_at_millis BLOB
+        CHECK(retry_at_millis IS NULL OR
+              (typeof(retry_at_millis) = 'blob' AND length(retry_at_millis) = 8)),
+    PRIMARY KEY (url, wrapper_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE relay_cursors (
+    url TEXT PRIMARY KEY NOT NULL REFERENCES relay_policies(url) ON DELETE RESTRICT,
+    generation BLOB NOT NULL CHECK(typeof(generation) = 'blob' AND length(generation) = 8),
+    oldest_created_at BLOB
+        CHECK(oldest_created_at IS NULL OR
+              (typeof(oldest_created_at) = 'blob' AND length(oldest_created_at) = 8)),
+    oldest_wrapper_id BLOB
+        CHECK(oldest_wrapper_id IS NULL OR
+              (typeof(oldest_wrapper_id) = 'blob' AND length(oldest_wrapper_id) = 32)),
+    exhausted INTEGER NOT NULL CHECK(exhausted IN (0, 1)),
+    CHECK((oldest_created_at IS NULL) = (oldest_wrapper_id IS NULL))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE inbound_relay_claims (
+    wrapper_id BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(wrapper_id) = 'blob' AND length(wrapper_id) = 32),
+    origin_installation_id BLOB NOT NULL
+        CHECK(typeof(origin_installation_id) = 'blob' AND length(origin_installation_id) = 32),
+    canonical_event_id BLOB NOT NULL
+        CHECK(typeof(canonical_event_id) = 'blob' AND length(canonical_event_id) = 32),
+    canonical_sha256 BLOB NOT NULL
+        CHECK(typeof(canonical_sha256) = 'blob' AND length(canonical_sha256) = 32),
+    received_at_millis BLOB NOT NULL
+        CHECK(typeof(received_at_millis) = 'blob' AND length(received_at_millis) = 8),
+    UNIQUE (origin_installation_id, canonical_event_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE relay_staging (
+    wrapper_sha256 BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(wrapper_sha256) = 'blob' AND length(wrapper_sha256) = 32),
+    exact_outer BLOB NOT NULL
+        CHECK(typeof(exact_outer) = 'blob' AND length(exact_outer) BETWEEN 1 AND 262144),
+    first_received_millis BLOB NOT NULL
+        CHECK(typeof(first_received_millis) = 'blob' AND length(first_received_millis) = 8),
+    attempts INTEGER NOT NULL CHECK(attempts BETWEEN 0 AND 4294967295),
+    retry_at_millis BLOB NOT NULL
+        CHECK(typeof(retry_at_millis) = 'blob' AND length(retry_at_millis) = 8)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE relay_quarantine (
+    wrapper_sha256 BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(wrapper_sha256) = 'blob' AND length(wrapper_sha256) = 32),
+    wrapper_id BLOB
+        CHECK(wrapper_id IS NULL OR (typeof(wrapper_id) = 'blob' AND length(wrapper_id) = 32)),
+    failure_code INTEGER NOT NULL CHECK(failure_code BETWEEN 1 AND 65535),
+    received_at_millis BLOB NOT NULL
+        CHECK(typeof(received_at_millis) = 'blob' AND length(received_at_millis) = 8),
+    byte_len INTEGER NOT NULL CHECK(byte_len >= 1),
+    raw_sample BLOB NOT NULL
+        CHECK(typeof(raw_sample) = 'blob' AND length(raw_sample) <= 4096 AND length(raw_sample) <= byte_len)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -1318,6 +1438,20 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<crate::OutboxIntent>, StoreError> {
         operational::load_outbox_intents(&self.connection, limit)
+    }
+
+    pub(super) fn apply_relay_state(
+        &mut self,
+        mutation: crate::StoredRelayStateMutation,
+    ) -> Result<(), StoreError> {
+        relay::apply(&mut self.connection, mutation)
+    }
+
+    pub(super) fn load_relay_state(
+        &self,
+        limit: usize,
+    ) -> Result<crate::StoredRelayStateSnapshot, StoreError> {
+        relay::load(&self.connection, limit)
     }
 }
 

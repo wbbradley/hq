@@ -121,6 +121,20 @@ for core_crate in hq-domain hq-reducer hq-application; do
   fi
 done
 
+if grep -ERq --include='*.rs' '(hq_store|StoredRelay|rusqlite)' \
+  "$repository_root/crates/hq-relay/src"; then
+  fail "hq-relay contains storage-adapter vocabulary"
+fi
+
+if grep -ERq --include='*.rs' '(hq_relay|RelayPortError|DurableEnvelope)' \
+  "$repository_root/crates/hq-store/src"; then
+  fail "hq-store contains relay-consumer vocabulary"
+fi
+
+grep -Fq 'impl RelayStatePort for RelayStoreAdapter' \
+  "$repository_root/crates/hq-node/src/relay_store.rs" ||
+  fail "hq-node must own the relay/store record mapping"
+
 binary_manifests=()
 while IFS= read -r manifest; do
   binary_manifests+=("$manifest")

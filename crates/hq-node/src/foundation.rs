@@ -367,12 +367,14 @@ const fn store_cause(class: StoreErrorClass) -> StartupCause {
         | StoreErrorClass::IdentityCollision
         | StoreErrorClass::MutationConflict
         | StoreErrorClass::InvalidOperationalRequest
+        | StoreErrorClass::RelayStateConflict
         | StoreErrorClass::RevisionExhausted
         | StoreErrorClass::OperationalStateCorrupt
         | StoreErrorClass::ReductionFailed
         | StoreErrorClass::NotRepaired
         | StoreErrorClass::RebuildableStateCorrupt => StartupCause::Malformed,
         StoreErrorClass::FileSystem
+        | StoreErrorClass::RelayStagingFull
         | StoreErrorClass::ActorClosed
         | StoreErrorClass::WorkerStopped
         | StoreErrorClass::DatabaseUnavailable => StartupCause::Unavailable,

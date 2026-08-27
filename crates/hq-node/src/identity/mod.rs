@@ -13,8 +13,9 @@ use hq_protocol::Bip340Signer;
 use zeroize::Zeroizing;
 
 pub use backup::BackupPassword;
-pub use config::{LocalConfiguration, RelayEndpoint};
+pub use config::LocalConfiguration;
 pub use error::{IdentityError, IdentityErrorClass};
+pub use hq_relay::RelayUrl as RelayEndpoint;
 pub use paths::{StateDirectoryOwner, StatePaths};
 
 use atomic::{WriteMode, atomic_write};

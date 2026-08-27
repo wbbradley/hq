@@ -142,8 +142,11 @@ fn decode_receipt(
 fn map_store_error(error: StoreError) -> ApplicationError {
     let code = match error.class() {
         StoreErrorClass::MutationConflict => ApplicationErrorCode::CommandIdentityConflict,
-        StoreErrorClass::IdentityCollision => ApplicationErrorCode::StateIdentityConflict,
+        StoreErrorClass::IdentityCollision | StoreErrorClass::RelayStateConflict => {
+            ApplicationErrorCode::StateIdentityConflict
+        }
         StoreErrorClass::InvalidOperationalRequest => ApplicationErrorCode::InvalidRequest,
+        StoreErrorClass::RelayStagingFull => ApplicationErrorCode::IntakeFull,
         StoreErrorClass::ActorClosed
         | StoreErrorClass::WorkerStopped
         | StoreErrorClass::DatabaseUnavailable

@@ -54,14 +54,24 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[transport/high] Implement durable relay synchronization and replica convergence** — Implement
-  one owner per relay session, retained catch-up with overlapping pagination, live subscription,
-  NIP-42 authentication, outbound attempts, positive/negative acceptance, backoff, staging,
-  quarantine, wrapper/logical deduplication, configuration refresh, and coalesced work wakes that do
-  not restart healthy sessions. Use a deterministic scripted relay for disconnect, duplicate,
-  response-loss, EOSE, offline catch-up, auth, and restart cases, followed by a controlled real-relay
-  smoke test. Complete this work when two distinct Rust installations converge across arbitrary
-  delivery order and downtime without relay observations influencing reduction.
+- **[transport/high] Implement owned relay sessions and deterministic synchronization** — Implement
+  one state-machine owner per configured relay over the durable ports: connection/authentication,
+  live subscription before retained backward pagination with overlap, live-edge buffering,
+  outbound exact wrapper preparation and byte-identical retry, positive/duplicate/negative `OK`,
+  disconnect and response-loss recovery, bounded exponential backoff, configuration refresh,
+  coalesced work wakes, staging retry, quarantine, and graceful drain. Use a deterministic scripted
+  relay for EOSE, duplicates, auth, rejection, missed wake, reconnect, restart, and shutdown. Complete
+  this package when healthy sessions survive ordinary wakes and every scripted failure converges to
+  the documented durable state without relay metadata reaching canonical reduction.
+
+- **[transport/high] Prove two-replica convergence and controlled relay interoperability** — Compose
+  the real node relay manager, storage adapter, route resolution, root envelope identity, and common
+  canonical ingest path. Prove two distinct Rust installations converge across arbitrary delivery
+  order, duplication, downtime, offline retained catch-up, relay restart, client restart, revoke and
+  regrant traffic, and uncertain publish responses. Add an opt-in controlled real-retained-relay
+  smoke covering NIP-42 and catch-up without making external availability a unit gate. Complete this
+  package when direct state/reducer evidence proves relay order and observations cannot influence
+  the converged result.
 
 - **[harness/high] Define the provider-neutral harness contract and conformance suite** — Specify
   logical instances, durable sessions, capabilities, start/resume readiness, stable submission IDs,

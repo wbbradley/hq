@@ -221,7 +221,8 @@ fn patch_rebuildable_tables(
     transaction: &Transaction<'_>,
     expected: &Connection,
 ) -> Result<(), StoreError> {
-    let tables = &super::SCHEMA_TABLES[4..super::SCHEMA_TABLES.len() - 4];
+    let tables =
+        &super::SCHEMA_TABLES[4..super::SCHEMA_TABLES.len() - super::OPERATIONAL_TABLE_COUNT];
     let mut diffs = Vec::with_capacity(tables.len());
     for table in tables {
         let current = read_table(transaction, table)?;
