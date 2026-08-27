@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[local-api/high] Implement race-safe server sessions and bounded invalidation fanout** — Build
-  the transport-independent server-session library over application capabilities. Register each
-  subscription before reading the revision its acknowledgement names, activate only after that
-  acknowledgement is confirmed written, cancel pending/active registrations on disconnect, and
-  coalesce each slow subscriber to one nonblocking pending wake carrying the newest revision,
-  broad topics, and a full-snapshot flag. Route lifecycle and typed domain operations without any
-  storage dependency. Test concurrent clients, revision races at every registration phase, stale
-  sockets, slow/nonreading subscribers, cancellation, response loss, and commits while fanout is
-  saturated.
 
 - **[local-api/high] Implement reconnecting local client replay and resubscription** — Build the
   shared client state machine and transport adapter contract used by CLI, TUI, and local harness

@@ -5073,3 +5073,91 @@ smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
   3. Commit the implementation and specifications with one Conventional Commit.
   4. Remove this exact entry from **Next Up**, append it verbatim with completion evidence to
      `COMPLETED.md`, and amend the same commit before advancing to server sessions.
+
+
+## 2026-08-27 — Race-safe local server sessions and bounded invalidation fanout
+
+Implemented a transport-independent negotiated server session over application capabilities plus a
+separate node-lifecycle capability. Every typed local API request family routes through exhaustive
+application-to-wire conversions, responses are correlated, and only one response write may remain
+unconfirmed. Session-owned single-use write tickets activate pending subscriptions only after the
+acknowledgement frame is confirmed; response loss, disconnect, and drop cancel every owned pending
+or active registration.
+
+Added a fixed-capacity shared revision hub implementing the two-phase observer port. Publications
+perform no I/O, filter unrelated topics, and retain at most one in-place coalesced notice per
+subscriber with the maximum revision, unioned topics, and sticky full-snapshot requirement.
+Application now owns a closed client projection catalog, while storage supplies indexed conversation
+summaries from the same serialized authoritative snapshot and local API alone maps the catalog to
+wire DTOs.
+
+Contracts cover handshake and protocol order, all routed request families, revision races before and
+after acknowledgement writes, single-use tickets, response loss, stale disconnects, capacity,
+10,000-write slow readers, and concurrent publish/poll/cancel. Full locked workspace format/check/
+build/tests/doctests/Clippy, architecture and specification verifiers, dependency policy, four
+supported targets, both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh
+tests pass.
+
+### Original plan entry
+
+- **[local-api/high] Implement race-safe server sessions and bounded invalidation fanout** — Build
+  the transport-independent server-session library over application capabilities. Register each
+  subscription before reading the revision its acknowledgement names, activate only after that
+  acknowledgement is confirmed written, cancel pending/active registrations on disconnect, and
+  coalesce each slow subscriber to one nonblocking pending wake carrying the newest revision,
+  broad topics, and a full-snapshot flag. Route lifecycle and typed domain operations without any
+  storage dependency. Test concurrent clients, revision races at every registration phase, stale
+  sockets, slow/nonreading subscribers, cancellation, response loss, and commits while fanout is
+  saturated.
+
+  **Implementation plan**
+
+  - Add an exhaustive local API v1 conversion module that is the sole boundary between wire DTOs
+    and application/domain/reducer values. Convert authoritative projection packages into bounded
+    snapshot items, bounded conversation queries/pages, exact mutation and effect requests/results,
+    subscription topics, and closed redacted errors without exposing storage or serializing Rust
+    layouts.
+  - Define a narrow local lifecycle capability and a synchronous transport-independent server
+    session. Require a completed handshake before requests, correlate every response, reject
+    protocol-order violations, and represent response writes as explicit tickets whose successful
+    confirmation performs subscription activation. A failed/lost write or disconnect cancels every
+    pending and active registration owned by that session.
+  - Implement a shared revision hub behind `ObserveRevisions`. Register bounded unique
+    subscriptions as pending, record matching commits during every pending/active phase, expose
+    invalidations only after activation, and retain at most one coalesced wake per subscription with
+    the maximum revision, unioned broad topics, and sticky full-snapshot requirement.
+  - Keep publication nonblocking and bounded under slow readers: reject excess subscribers at
+    registration, never queue multiple wakes for one subscriber, filter unrelated topics unless a
+    full snapshot is required, and make cancellation idempotent. Session polling consumes only its
+    own active invalidations and stale session cleanup releases all capacity.
+  - Add deterministic trace and concurrency contracts for handshake/order errors, every routed
+    request family, acknowledgement-write activation, commits before snapshot/during write/after
+    activation, lost responses, disconnect cancellation, saturated registration, slow and
+    nonreading clients, coalescing, stale sockets, and concurrent publication/cancellation.
+
+  **Risks and decisions**
+
+  - Returning an acknowledgement is not proof that bytes reached the transport. Activation is a
+    distinct post-write confirmation on an opaque session-owned ticket; tickets cannot be replayed
+    across sessions or confirmed twice.
+  - A channel per commit would make memory proportional to publisher speed. The hub stores one
+    bounded aggregate per subscription and polling removes it, so publication performs no I/O and
+    does not wait for readers.
+  - Commits racing before the acknowledged snapshot read may produce a redundant invalidation but
+    cannot create a gap. Commits after pending registration remain coalesced until write-confirmed
+    activation.
+  - Lifecycle control is a local composition capability, not an application/domain or storage
+    concern. Keep it beside the server session so the later node package can supply ownership and
+    drain semantics.
+  - Snapshot conversion is intentionally exhaustive over closed reducer projection variants. Any
+    future semantic variant must fail compilation until its stable local representation is chosen.
+
+  **Post-Plan Execution Steps**
+
+  1. Implement the expanded plan above completely with red race, routing, conversion, and capacity
+     contracts first.
+  2. Run focused local API tests, full locked Rust gates, architecture/dependency/specification
+     checks, supported targets, fuzz smokes, whitespace checks, and the unchanged Go gates.
+  3. Commit the implementation and documentation with one Conventional Commit.
+  4. Remove this exact entry from **Next Up**, append it verbatim with completion evidence to
+     `COMPLETED.md`, and amend the same commit before advancing to the reconnecting client.

@@ -5,14 +5,21 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use hq_domain::{FactId, Revision};
-use hq_reducer::{
-    ActivityView, AgentAggregateKey, AgentProjection, AgentProjectionKey, AgentReport,
-    AuthorityAggregateKey, AuthorityProjection, AuthorityProjectionKey, AuthorityReport,
-    ConversationAggregateKey, ConversationProjection, ConversationProjectionKey,
-    ConversationReport, MessageView, ProjectAggregateKey, ProjectProjection, ProjectProjectionKey,
-    ProjectReport,
+use hq_domain::{
+    AccountId, AgentId, CommandDigest, CommandId, ContentText, DispatchId, EncryptionPublicKey,
+    FactId, GrantId, InstallationId, MailboxAddress, MailboxKind, MessageId, ProjectId, ProviderId,
+    ProviderSessionId, Revision, ShortText, SigningPublicKey,
 };
+use hq_reducer::{
+    ActivityView, AgentAggregateKey, AgentLifecycle, AgentProjection, AgentProjectionKey,
+    AgentReport, AuthorityAggregateKey, AuthorityProjection, AuthorityProjectionKey,
+    AuthorityReport, ConversationAggregateKey, ConversationProjection, ConversationProjectionKey,
+    ConversationReport, MembershipState, MessageView, PeerRouteState, ProjectAggregateKey,
+    ProjectLifecycle, ProjectOutputStatus, ProjectProjection, ProjectProjectionKey, ProjectReport,
+    RemoteCommandStage,
+};
+
+use crate::ApplicationValueError;
 
 /// One normalized projection package independent of persistence layout and transport encoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,6 +166,396 @@ impl DomainSnapshot {
     pub const fn project(&self) -> &ProjectProjectionSnapshot {
         &self.project
     }
+
+    /// Derives the closed client-facing projection catalog without persistence or wire layouts.
+    #[allow(clippy::too_many_lines)]
+    pub fn client_projections(&self) -> Result<Vec<ClientProjection>, ApplicationValueError> {
+        let mut items = Vec::new();
+        let selected_accounts = self
+            .authority
+            .projections()
+            .values()
+            .filter_map(|projection| match projection {
+                AuthorityProjection::AccountSelection { active, .. } => *active,
+                AuthorityProjection::Installation(_)
+                | AuthorityProjection::Mailbox(_)
+                | AuthorityProjection::PeerRoute(_)
+                | AuthorityProjection::MailboxCapability(_)
+                | AuthorityProjection::Account { .. }
+                | AuthorityProjection::Membership(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+
+        for (key, projection) in self.authority.projections() {
+            let item = match (key, projection) {
+                (
+                    AuthorityProjectionKey::Installation(installation_id),
+                    AuthorityProjection::Installation(view),
+                ) => ClientProjection::Installation {
+                    installation_id: *installation_id,
+                    signing_key: view.signing_key,
+                    encryption_key: view.encryption_key,
+                    label: view.label.clone(),
+                },
+                (AuthorityProjectionKey::Mailbox(address), AuthorityProjection::Mailbox(view)) => {
+                    ClientProjection::Mailbox {
+                        address: *address,
+                        kind: view.kind,
+                        label: view.label.clone(),
+                    }
+                }
+                (
+                    AuthorityProjectionKey::PeerRoute { owner, peer },
+                    AuthorityProjection::PeerRoute(view),
+                ) => ClientProjection::PeerRoute {
+                    owner: *owner,
+                    peer: *peer,
+                    state: match view.state() {
+                        PeerRouteState::Routable => ClientPeerRouteState::Routable,
+                        PeerRouteState::Blocked => ClientPeerRouteState::Blocked,
+                        PeerRouteState::Conflicted => ClientPeerRouteState::Conflicted,
+                    },
+                    frontier: view.frontier().clone(),
+                },
+                (
+                    AuthorityProjectionKey::MailboxCapability(grant_id),
+                    AuthorityProjection::MailboxCapability(view),
+                ) => ClientProjection::MailboxCapability {
+                    grant_id: *grant_id,
+                    mailbox: view.mailbox,
+                    grantee_installation: view.grantee.installation_id(),
+                    active: view.is_active(),
+                },
+                (
+                    AuthorityProjectionKey::Account(account_id),
+                    AuthorityProjection::Account { creator, label, .. },
+                ) => ClientProjection::Account {
+                    account_id: *account_id,
+                    creator_installation: creator.installation_id(),
+                    label: label.clone(),
+                    selected: selected_accounts.contains(account_id),
+                },
+                (
+                    AuthorityProjectionKey::Membership { account, device },
+                    AuthorityProjection::Membership(view),
+                ) => ClientProjection::Membership {
+                    account_id: *account,
+                    device: *device,
+                    state: match view.state() {
+                        MembershipState::Pending => ClientMembershipState::Pending,
+                        MembershipState::Active => ClientMembershipState::Active,
+                        MembershipState::Revoked => ClientMembershipState::Revoked,
+                    },
+                    active_acceptances: view.active_acceptances.clone(),
+                },
+                (
+                    AuthorityProjectionKey::AccountSelection(installation_id),
+                    AuthorityProjection::AccountSelection { candidates, active },
+                ) => ClientProjection::AccountSelection {
+                    installation_id: *installation_id,
+                    candidates: candidates.clone(),
+                    active: *active,
+                },
+                _ => return Err(ApplicationValueError::InvalidEncoding),
+            };
+            items.push(item);
+        }
+
+        for projection in self.conversation.projections().values() {
+            match projection {
+                ConversationProjection::Thread(_)
+                | ConversationProjection::Message(_)
+                | ConversationProjection::ActionGroup(_)
+                | ConversationProjection::Activity(_)
+                | ConversationProjection::ActivityRetention(_) => {}
+            }
+        }
+
+        for (key, projection) in self.agent.projections() {
+            match (key, projection) {
+                (AgentProjectionKey::Agent(agent_id), AgentProjection::Agent(view)) => {
+                    items.push(ClientProjection::Agent {
+                        agent_id: *agent_id,
+                        names: view.names.clone(),
+                        lifecycle: match view.lifecycle {
+                            AgentLifecycle::Active => ClientAgentLifecycle::Active,
+                            AgentLifecycle::Conflicted => ClientAgentLifecycle::Conflicted,
+                            AgentLifecycle::Retired => ClientAgentLifecycle::Retired,
+                        },
+                        runnable: view.runnable,
+                    });
+                }
+                (AgentProjectionKey::Session(session), AgentProjection::Session(view)) => {
+                    items.push(ClientProjection::AgentSession {
+                        provider: session.provider.clone(),
+                        session: session.session.clone(),
+                        mailbox: view.mailbox,
+                        conflicted: view.conflicted,
+                    });
+                }
+                (AgentProjectionKey::Selection(agent_id), AgentProjection::Selection(view)) => {
+                    items.push(ClientProjection::AgentSelection {
+                        agent_id: *agent_id,
+                        selected: view.active.as_ref().map(|active| {
+                            (
+                                active.session.provider.clone(),
+                                active.session.session.clone(),
+                            )
+                        }),
+                        conflicted: view.conflicted,
+                    });
+                }
+                (AgentProjectionKey::Rename { agent, session }, AgentProjection::Rename(view)) => {
+                    items.push(ClientProjection::AgentSessionName {
+                        agent_id: *agent,
+                        provider: session.provider.clone(),
+                        session: session.session.clone(),
+                        resolved: view.resolved,
+                        display_name: view.display_name.clone(),
+                    });
+                }
+                (AgentProjectionKey::Name(_), AgentProjection::Name(_))
+                | (AgentProjectionKey::Context(_), AgentProjection::Context(_))
+                | (AgentProjectionKey::DirectSession { .. }, AgentProjection::DirectSession(_)) => {
+                }
+                _ => return Err(ApplicationValueError::InvalidEncoding),
+            }
+        }
+
+        for (key, projection) in self.project.projections() {
+            let item = match (key, projection) {
+                (ProjectProjectionKey::Project(project_id), ProjectProjection::Project(view)) => {
+                    ClientProjection::Project {
+                        project_id: *project_id,
+                        home: view.home,
+                        name: view.name.clone(),
+                        lifecycle: match view.lifecycle {
+                            ProjectLifecycle::Open => ClientProjectLifecycle::Open,
+                            ProjectLifecycle::Closing => ClientProjectLifecycle::Closing,
+                            ProjectLifecycle::Closed => ClientProjectLifecycle::Closed,
+                        },
+                        archived: view.archived,
+                        claimable: view.claimable,
+                        head: view.head,
+                        input_sequence: view.input_sequence,
+                    }
+                }
+                (ProjectProjectionKey::Input(_), ProjectProjection::Input(view)) => {
+                    ClientProjection::ProjectInput {
+                        project_id: view.project_id,
+                        message_id: view.message_id,
+                        sequence: view.sequence,
+                        accepted_fact: view.accepted_fact,
+                    }
+                }
+                (ProjectProjectionKey::Dispatch(_), ProjectProjection::Dispatch(view)) => {
+                    ClientProjection::ProjectDispatch {
+                        dispatch_id: view.dispatch_id,
+                        message_id: view.message_id,
+                        sequence: view.sequence,
+                        fact_id: view.fact_id,
+                        conflicted: view.conflicted,
+                    }
+                }
+                (ProjectProjectionKey::Output(_), ProjectProjection::Output(view)) => {
+                    ClientProjection::ProjectOutput {
+                        output_id: view.output_id,
+                        dispatch_id: view.dispatch_id,
+                        status: match view.status {
+                            ProjectOutputStatus::Current => ClientProjectOutputStatus::Current,
+                            ProjectOutputStatus::LateFromInactive => {
+                                ClientProjectOutputStatus::LateFromInactive
+                            }
+                            ProjectOutputStatus::Conflicted => {
+                                ClientProjectOutputStatus::Conflicted
+                            }
+                        },
+                        content: view.message.body.clone(),
+                    }
+                }
+                (ProjectProjectionKey::Command(command_id), ProjectProjection::Command(view)) => {
+                    ClientProjection::RemoteCommand {
+                        command_id: *command_id,
+                        request_digest: view.digest,
+                        project_id: view.project_id,
+                        stage: match view.stage {
+                            RemoteCommandStage::Queued => ClientRemoteCommandStage::Queued,
+                            RemoteCommandStage::Received { .. } => {
+                                ClientRemoteCommandStage::Received
+                            }
+                            RemoteCommandStage::Terminal { .. } => {
+                                ClientRemoteCommandStage::Terminal
+                            }
+                            RemoteCommandStage::Conflicted => ClientRemoteCommandStage::Conflicted,
+                        },
+                    }
+                }
+                _ => return Err(ApplicationValueError::InvalidEncoding),
+            };
+            items.push(item);
+        }
+        Ok(items)
+    }
+}
+
+/// Stable client presentation of a peer-route register.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientPeerRouteState {
+    Routable,
+    Blocked,
+    Conflicted,
+}
+/// Stable client presentation of account membership.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientMembershipState {
+    Pending,
+    Active,
+    Revoked,
+}
+/// Stable client presentation of named-agent lifecycle.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientAgentLifecycle {
+    Active,
+    Conflicted,
+    Retired,
+}
+/// Stable client presentation of project lifecycle.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientProjectLifecycle {
+    Open,
+    Closing,
+    Closed,
+}
+/// Stable client presentation of project output provenance.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientProjectOutputStatus {
+    Current,
+    LateFromInactive,
+    Conflicted,
+}
+/// Stable client presentation of remote-command progress.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientRemoteCommandStage {
+    Queued,
+    Received,
+    Terminal,
+    Conflicted,
+}
+
+/// Closed, representation-independent projection catalog consumed by local clients.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientProjection {
+    Installation {
+        installation_id: InstallationId,
+        signing_key: SigningPublicKey,
+        encryption_key: EncryptionPublicKey,
+        label: Option<ShortText>,
+    },
+    Mailbox {
+        address: MailboxAddress,
+        kind: MailboxKind,
+        label: Option<ShortText>,
+    },
+    Account {
+        account_id: AccountId,
+        creator_installation: InstallationId,
+        label: Option<ShortText>,
+        selected: bool,
+    },
+    PeerRoute {
+        owner: InstallationId,
+        peer: InstallationId,
+        state: ClientPeerRouteState,
+        frontier: BTreeSet<FactId>,
+    },
+    MailboxCapability {
+        grant_id: GrantId,
+        mailbox: MailboxAddress,
+        grantee_installation: InstallationId,
+        active: bool,
+    },
+    Membership {
+        account_id: AccountId,
+        device: InstallationId,
+        state: ClientMembershipState,
+        active_acceptances: BTreeSet<FactId>,
+    },
+    AccountSelection {
+        installation_id: InstallationId,
+        candidates: BTreeSet<AccountId>,
+        active: Option<AccountId>,
+    },
+    Conversation {
+        key: hq_reducer::ConversationKey,
+        latest_fact: Option<FactId>,
+        open_messages: u32,
+    },
+    Agent {
+        agent_id: AgentId,
+        names: BTreeSet<ShortText>,
+        lifecycle: ClientAgentLifecycle,
+        runnable: bool,
+    },
+    AgentSession {
+        provider: ProviderId,
+        session: ProviderSessionId,
+        mailbox: Option<MailboxAddress>,
+        conflicted: bool,
+    },
+    AgentSelection {
+        agent_id: AgentId,
+        selected: Option<(ProviderId, ProviderSessionId)>,
+        conflicted: bool,
+    },
+    AgentSessionName {
+        agent_id: AgentId,
+        provider: ProviderId,
+        session: ProviderSessionId,
+        resolved: bool,
+        display_name: Option<ShortText>,
+    },
+    Project {
+        project_id: ProjectId,
+        home: InstallationId,
+        name: ShortText,
+        lifecycle: ClientProjectLifecycle,
+        archived: bool,
+        claimable: bool,
+        head: FactId,
+        input_sequence: u64,
+    },
+    ProjectInput {
+        project_id: ProjectId,
+        message_id: MessageId,
+        sequence: u64,
+        accepted_fact: FactId,
+    },
+    ProjectDispatch {
+        dispatch_id: DispatchId,
+        message_id: MessageId,
+        sequence: u64,
+        fact_id: FactId,
+        conflicted: bool,
+    },
+    ProjectOutput {
+        output_id: MessageId,
+        dispatch_id: DispatchId,
+        status: ClientProjectOutputStatus,
+        content: ContentText,
+    },
+    RemoteCommand {
+        command_id: CommandId,
+        request_digest: CommandDigest,
+        project_id: ProjectId,
+        stage: ClientRemoteCommandStage,
+    },
 }
 
 impl Default for DomainSnapshot {
@@ -172,12 +569,30 @@ impl Default for DomainSnapshot {
 pub struct AuthoritativeSnapshot {
     revision: Revision,
     domain: DomainSnapshot,
+    conversations: Vec<ConversationSummary>,
 }
 
 impl AuthoritativeSnapshot {
     /// Constructs one revisioned authoritative view.
     pub const fn new(revision: Revision, domain: DomainSnapshot) -> Self {
-        Self { revision, domain }
+        Self {
+            revision,
+            domain,
+            conversations: Vec::new(),
+        }
+    }
+
+    /// Constructs one revisioned view with its indexed conversation summaries.
+    pub const fn with_conversations(
+        revision: Revision,
+        domain: DomainSnapshot,
+        conversations: Vec<ConversationSummary>,
+    ) -> Self {
+        Self {
+            revision,
+            domain,
+            conversations,
+        }
     }
 
     /// Returns the serialized state revision.
@@ -189,6 +604,35 @@ impl AuthoritativeSnapshot {
     pub const fn domain(&self) -> &DomainSnapshot {
         &self.domain
     }
+
+    /// Returns indexed conversation discovery summaries in stable key order.
+    pub fn conversations(&self) -> &[ConversationSummary] {
+        &self.conversations
+    }
+
+    /// Derives the complete client-facing projection catalog.
+    pub fn client_projections(&self) -> Result<Vec<ClientProjection>, ApplicationValueError> {
+        let mut projections = self.domain.client_projections()?;
+        projections.extend(self.conversations.iter().map(|summary| {
+            ClientProjection::Conversation {
+                key: summary.key.clone(),
+                latest_fact: summary.latest_fact,
+                open_messages: summary.open_messages,
+            }
+        }));
+        Ok(projections)
+    }
+}
+
+/// Plain indexed conversation discovery summary owned by the application boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationSummary {
+    /// Stable typed conversation identity.
+    pub key: hq_reducer::ConversationKey,
+    /// Canonically latest presented fact, when the conversation is nonempty.
+    pub latest_fact: Option<FactId>,
+    /// Number of currently open actionable messages.
+    pub open_messages: u32,
 }
 
 /// One actionable message or non-actionable activity in canonical conversation order.

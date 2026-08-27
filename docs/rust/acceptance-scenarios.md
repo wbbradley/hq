@@ -237,6 +237,13 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   intent only and never contain projection rows or message bodies.
 - Architecture verification allows `hq-local-api` to depend inward on domain, canonical protocol,
   and application only; no storage dependency or SQLite vocabulary is present.
+- Server-session contracts require a written hello before requests, only one unconfirmed response,
+  session-owned single-use write tickets, post-write subscription activation, and idempotent cleanup
+  after lost responses or stale disconnects. Every typed request family routes through application
+  capabilities and the separate node-lifecycle capability.
+- Revision-hub contracts cover pending/active race phases, unrelated-topic filtering, saturated
+  registration, 10,000 coalesced slow-reader publishes, and concurrent publish/poll/cancel without
+  blocking or growing more than one pending wake per subscriber.
 
 ## Scenario maintenance rule
 

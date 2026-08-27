@@ -9,6 +9,8 @@ mod snapshot;
 use hq_domain::Fact;
 use hq_reducer::{GraphOnlyReducer, GraphReductionReport, ReduceError, reduce_complete};
 
+pub use hq_reducer::ConversationKey;
+
 pub use error::{
     ApplicationError, ApplicationErrorClass, ApplicationErrorCode, ApplicationValueError,
 };
@@ -26,8 +28,11 @@ pub use ports::{
 };
 pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{
-    AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, ConversationEntry,
-    ConversationProjectionSnapshot, DomainSnapshot, ProjectProjectionSnapshot, ProjectionSnapshot,
+    AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot,
+    ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState, ClientProjectLifecycle,
+    ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
+    ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot, ProjectProjectionSnapshot,
+    ProjectionSnapshot,
 };
 
 /// Minimal in-memory use-case host for the workspace walking skeleton.

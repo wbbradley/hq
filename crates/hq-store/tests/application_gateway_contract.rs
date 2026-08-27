@@ -22,19 +22,23 @@ mod support;
 
 use support::{
     TestDirectory, TestStoreExt, authority_policy, open_store, signer, verified_child,
-    verified_fact,
+    verified_fact, verified_question,
 };
 
 #[test]
 fn authoritative_snapshot_is_one_revisioned_application_view() -> Result<(), Box<dyn Error>> {
     let directory = TestDirectory::new();
     let store = open_store(&directory.database_path());
-    store.append_verified(verified_fact())?;
+    let root = verified_fact();
+    let question = verified_question(root.verified_event().event_id());
+    let question_id = question.fact().id();
+    store.append_verified(root)?;
+    store.append_verified(question)?;
     let gateway = StoreGateway::new(&store, authority_policy(), Arc::new(signer(1)));
 
     let snapshot = gateway.authoritative_snapshot()?;
 
-    assert_eq!(snapshot.revision(), Revision::new(1));
+    assert_eq!(snapshot.revision(), Revision::new(2));
     assert_eq!(
         snapshot.domain().authority(),
         &store.load_authority_snapshot()?
@@ -45,6 +49,9 @@ fn authoritative_snapshot_is_one_revisioned_application_view() -> Result<(), Box
     );
     assert_eq!(snapshot.domain().agent(), &store.load_agent_snapshot()?);
     assert_eq!(snapshot.domain().project(), &store.load_project_snapshot()?);
+    assert_eq!(snapshot.conversations().len(), 1);
+    assert_eq!(snapshot.conversations()[0].latest_fact, Some(question_id));
+    assert_eq!(snapshot.conversations()[0].open_messages, 1);
     Ok(())
 }
 

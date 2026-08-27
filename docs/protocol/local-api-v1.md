@@ -162,6 +162,11 @@ its acknowledgement. The acknowledgement contains that snapshot. The subscriptio
 only after the acknowledgement frame is confirmed written. Disconnect cancels pending or active
 registration idempotently.
 
+A server session accepts at most one unconfirmed response write. The opaque confirmation ticket is
+owned by that session, is single-use, and cannot activate another session's registration. The next
+request is not routed until the prior response is confirmed, bounding retained write state and
+preventing response-loss ambiguity from accumulating side effects.
+
 Each active subscriber has one nonblocking coalescing wake slot. New wakes union broad topics,
 retain the greatest revision, and set `full_snapshot` if any coalesced wake requires it. A slow or
 nonreading subscriber never blocks a commit.

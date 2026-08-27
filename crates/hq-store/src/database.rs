@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use hq_application::ConversationSummary;
 use hq_domain::{
     AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, Page,
     PageCursor,
@@ -21,8 +22,8 @@ use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
 };
 use hq_reducer::{
-    AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, ConversationKey, DecisionStatus,
-    MembershipState,
+    AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, ConversationKey,
+    ConversationProjection, DecisionStatus, MembershipState,
 };
 use rusqlite::{
     Connection, Error as SqlError, ErrorCode, OpenFlags, OptionalExtension, Transaction,
@@ -1287,15 +1288,17 @@ impl Database {
     }
 
     pub(super) fn load_authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, StoreError> {
-        repair::load(&self.connection)?;
+        let index = repair::load(&self.connection)?;
         let authority = authority::load(&self.connection)?;
         let conversation = conversation::load(&self.connection)?;
         let agent = agent::load(&self.connection)?;
         let project = project::load(&self.connection)?;
         let revision = operational::current_revision(&self.connection)?;
-        Ok(AuthoritativeSnapshot::new(
+        let conversations = conversation_summaries(&index, &conversation)?;
+        Ok(AuthoritativeSnapshot::with_conversations(
             revision,
             DomainSnapshot::new(authority, conversation, agent, project),
+            conversations,
         ))
     }
 
@@ -1316,6 +1319,40 @@ impl Database {
     ) -> Result<Vec<crate::OutboxIntent>, StoreError> {
         operational::load_outbox_intents(&self.connection, limit)
     }
+}
+
+fn conversation_summaries(
+    index: &ReductionIndexSnapshot,
+    snapshot: &ConversationProjectionSnapshot,
+) -> Result<Vec<ConversationSummary>, StoreError> {
+    let open_messages = snapshot
+        .projections()
+        .values()
+        .filter_map(|projection| match projection {
+            ConversationProjection::Message(message) => Some((message.fact_id, message.open)),
+            ConversationProjection::Thread(_)
+            | ConversationProjection::ActionGroup(_)
+            | ConversationProjection::Activity(_)
+            | ConversationProjection::ActivityRetention(_) => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    index
+        .conversation_orders()
+        .iter()
+        .map(|(key, order)| {
+            let open_messages = order
+                .iter()
+                .filter(|fact_id| open_messages.get(fact_id).is_some_and(|open| *open))
+                .count();
+            Ok(ConversationSummary {
+                key: key.clone(),
+                latest_fact: order.last().copied(),
+                open_messages: u32::try_from(open_messages)
+                    .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?,
+            })
+        })
+        .collect()
 }
 
 fn encode_conversation_cursor(

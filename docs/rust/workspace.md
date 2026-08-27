@@ -50,6 +50,12 @@ effect request families, client snapshot/page values, typed errors, and revision
 specified in `docs/protocol/local-api-v1.md`. Its unsigned semantic-plan bridge reuses the canonical
 protocol owner's exhaustive semantic spelling, but the bytes carry no authority and must still pass
 ordinary node signing and canonical verification. No local API production source imports storage.
+The transport-independent server session accepts only one unconfirmed response write, activates a
+pending subscription from that response's session-owned confirmation ticket, and cancels every
+owned registration on disconnect. Its shared revision hub has a fixed registration capacity and
+one in-place coalesced invalidation per slow subscriber. Application owns the closed normalized
+client projection catalog; the local API performs the only conversion from that catalog to wire
+DTOs and does not import reducer or storage crates.
 
 ## Supported target matrix
 
