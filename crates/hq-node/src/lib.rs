@@ -10,6 +10,8 @@ mod local_transport;
 mod runtime;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_io;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod session_registry;
 
 pub use foundation::{
     NodeFoundation, NodeFoundationConfig, NodeReadinessError, NodeShutdownError, NodeStartupError,
@@ -35,6 +37,13 @@ pub use runtime::{
 pub use session_io::{
     LocalSessionClose, LocalSessionEvent, LocalSessionHandle, LocalSessionSendError,
     LocalSessionStartError, prepare_local_session_io,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use session_registry::{
+    LocalSessionAdmissionError, LocalSessionDisconnectCause, LocalSessionDispatch,
+    LocalSessionInvalidationFailure, LocalSessionInvalidationReport, LocalSessionRegistry,
+    LocalSessionRegistryConfig, LocalSessionShutdownReport, LocalSessionTaskFailure,
+    LocalSessionTaskFailureKind,
 };
 
 use hq_application::InMemoryApplication;

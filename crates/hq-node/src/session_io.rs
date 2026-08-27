@@ -150,7 +150,7 @@ pub fn prepare_local_session_io(
 ) -> Result<
     (
         LocalSessionHandle,
-        impl Future<Output = ()> + Send + 'static,
+        impl Future<Output = LocalSessionClose> + Send + 'static,
     ),
     LocalSessionStartError,
 > {
@@ -169,7 +169,7 @@ async fn drive_session(
     outbound: mpsc::Receiver<QueuedFrame>,
     events: mpsc::Sender<LocalSessionEvent>,
     close: watch::Receiver<bool>,
-) {
+) -> LocalSessionClose {
     let (read_half, write_half) = stream.into_split();
     let cause = {
         let read = read_loop(read_half, session_id, events.clone(), close.clone());
@@ -183,6 +183,7 @@ async fn drive_session(
     let _ = events
         .send(LocalSessionEvent::Closed { session_id, cause })
         .await;
+    cause
 }
 
 async fn read_loop(

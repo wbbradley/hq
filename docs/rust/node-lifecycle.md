@@ -158,5 +158,25 @@ the closed invalidation wire variant.
 One joined future polls both owned halves. A separate close signal is not queued behind response
 capacity; either half terminating drops its sibling and the descriptor before one terminal event is
 emitted. Cancelling a write may leave partial bytes at the peer, so cancellation always closes the
-connection and never restarts or confirms that frame. The next package owns the bounded collection
-of these futures and routes their events through the central node loop.
+connection and never restarts or confirms that frame.
+
+## Bounded local session registry
+
+One central registry owns a fixed number of peer-validated connections. Each admitted connection
+has exactly one transport-independent `ServerSession`, one bounded I/O handle, and one joined byte
+task. Duplicate connection identities and capacity excess are rejected before spawning. Plain
+configuration and drain reports expose their data directly; session and stream internals remain
+opaque because they enforce ticket, registration, descriptor, and task-ownership invariants.
+
+Decoded messages borrow the current application and lifecycle capabilities only for that dispatch.
+The exact response is queued or the connection is closed; only a matching completed write ticket
+advances server state. Protocol errors, malformed input, write failure, queue saturation, and task
+failure close only the affected connection. A rejected final protocol version closes after its
+typed response has been fully written.
+
+Revision notifications remain coalesced in the shared revision hub. A bounded delivery pass takes
+at most one wake per active connection. If the fixed writer queue cannot accept it, the registry
+closes that slow connection and cancels its registrations; reconnect performs a full authoritative
+refresh, so no retry queue is retained. Drain closes intake, signals every descriptor independently
+of queue capacity, consumes terminal events while shared event capacity is saturated, joins every
+task, cancels pending and active subscriptions, and reports zero retained sessions and tasks.

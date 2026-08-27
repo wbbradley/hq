@@ -5635,3 +5635,77 @@ both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh te
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before listener-loop
      coordination.
+
+## 2026-08-27 — Bounded local session registry and dispatch
+
+Added a fixed-capacity central registry that exclusively owns one transport-independent
+`ServerSession`, bounded I/O handle, and joined byte task per authenticated connection. Admission
+rejects closed intake, duplicate IDs, and full capacity before spawning. Dispatch borrows current
+application and lifecycle capabilities per decoded message, queues exact responses, confirms only
+matching completed tickets, and closes only the affected session on protocol, transport, queue, or
+task failure. Post-write disposition is explicit, so final version rejection closes without a
+state-inspection accessor.
+
+Added bounded coalesced-invalidation delivery with deterministic slow-subscriber eviction and
+registration cancellation. Explicit drain closes independently of queue capacity, consumes a
+saturated shared event channel, joins every task, and reports zero retained sessions/tasks through
+plain public report fields. Real authenticated Unix-stream contracts cover admission, negotiation
+and request round trips, exact confirmations, response loss, event/write saturation, malformed-peer
+sibling isolation, subscription cleanup, and complete drain. Shared application fakes remove test
+duplication. Full locked workspace format/check/build/tests/doctests/Clippy,
+architecture/dependency/behavior/specification verifiers, four supported core and node targets,
+both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[node/high] Own bounded local session registry and dispatch** — Compose authenticated session
+  I/O with one `ServerSession` per connection under a fixed-capacity central registry. Route decoded
+  messages through call-scoped application/lifecycle capabilities, enqueue exact responses,
+  confirm only matching completed tickets, deliver coalesced invalidations, disconnect saturated or
+  failed sessions, and join every accepted I/O future. Test duplicate identities, capacity,
+  negotiation/request round trips, response loss, write/event saturation, invalidation pressure,
+  sibling isolation, disconnect cleanup, and zero retained sessions/tasks on Linux and macOS.
+
+  **Implementation plan**
+
+  - Define one registry configuration with explicit nonzero session, event, and per-session write
+    capacities. Retain a bounded map from connection ID to `ServerSession` plus its sole I/O handle,
+    and a `JoinSet` containing exactly one future for each admitted map entry.
+  - Admit only opaque peer-validated streams. Reject capacity and duplicate IDs before spawning;
+    prepare one I/O driver, reserve the map entry, spawn it, and roll back the entry if spawn setup
+    cannot complete.
+  - Route each decoded message against application and lifecycle capabilities borrowed only for the
+    dispatch call. Enqueue the returned `OutboundMessage`; on full/closed/encode failure disconnect
+    that session so its pending ticket and registrations are cancelled rather than silently lost.
+  - Confirm a write only when the event's connection and ticket match that exact `ServerSession`.
+    Treat stale/unknown completion, protocol-state failure, driver termination, or task panic as a
+    session-local close without affecting siblings.
+  - Poll each active session's coalesced invalidation at bounded safe points. If its fixed write
+    queue cannot accept the notice, close the slow/nonreading session; reconnect performs a complete
+    authoritative refresh, so no unbounded invalidation retry queue is introduced.
+  - Provide explicit close-intake and drain operations. Close every session through the independent
+    close signal, consume terminal events, cancel all revision registrations, join every task, and
+    return a plain diagnostic report with zero retained entries.
+  - Add deterministic multi-client contracts over real authenticated Unix streams for admission,
+    dispatch, exact confirmations, response loss, duplicate/capacity rejection, slow-writer
+    eviction, malformed disconnect, sibling survival, subscription cleanup, and complete drain.
+
+  **Risks and decisions**
+
+  - A map entry inserted after spawn could lose the only task handle on an intervening failure.
+    Reserve all bounded state before spawn and keep task/map counts equal as an executable invariant.
+  - Retrying a response after queue rejection would duplicate uncertain transport effects. Close
+    the session; client replay policy remains responsible for mutation reconciliation.
+  - Removing a coalesced invalidation before discovering a full write queue could lose a wake.
+    Saturation closes the session, forcing the reconnecting client to refresh from authoritative
+    state instead of retaining another queue.
+  - One bad peer must not stop the node loop. Every protocol, queue, write, and join failure is
+    scoped to its connection ID; only explicit registry drain closes siblings.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing registry capacity, dispatch, saturation, sibling, and drain contracts first.
+  2. Implement central session ownership over existing protocol and byte-I/O machines.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before listener/signal
+     coordination.

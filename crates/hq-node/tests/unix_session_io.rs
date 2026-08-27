@@ -7,19 +7,11 @@ mod support;
 
 use std::{num::NonZeroUsize, os::unix::net::UnixStream};
 
-use hq_application::{
-    AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationErrorCode,
-    ApplicationPorts, AuthoritativeSnapshot, CommitFacts, ConfigureRelays, ConversationEntry,
-    ConversationKey, EffectOutcome, EffectRequest, FactMutation, InspectResource, MutationAttempt,
-    ObserveRevisions, PublishWake, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
-};
-use hq_domain::{OperationId, Page, PageCursor, Revision};
 use hq_local_api::protocol::v1::{
-    BuildMetadata, ClientHello, Id32, InvalidationTopic, LifecycleRequest, LifecycleStatus,
-    MAX_FRAME_BYTES, RevisionInvalidation, V1, VersionRange, WireMessage,
+    BuildMetadata, ClientHello, Id32, InvalidationTopic, MAX_FRAME_BYTES, RevisionInvalidation, V1,
+    VersionRange, WireMessage,
 };
-use hq_local_api::{LifecycleControl, RevisionHub, ServerSession};
+use hq_local_api::{RevisionHub, ServerSession};
 use hq_node::{
     AcceptedLocalStream, LocalSessionClose, LocalSessionEvent, LocalSessionSendError,
     NodeFoundation, NodeFoundationConfig, RuntimePaths, StateDirectoryOwner, StatePaths,
@@ -27,103 +19,7 @@ use hq_node::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use support::TestDirectory;
-
-#[derive(Clone)]
-struct UnavailablePorts {
-    hub: RevisionHub,
-}
-
-fn unavailable<T>() -> Result<T, ApplicationError> {
-    Err(ApplicationError::new(
-        ApplicationErrorCode::AdapterUnavailable,
-    ))
-}
-
-impl hq_application::QueryDomain for UnavailablePorts {
-    fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, ApplicationError> {
-        unavailable()
-    }
-
-    fn conversation_entries(
-        &self,
-        _key: &ConversationKey,
-        _limit: usize,
-        _cursor: Option<&PageCursor>,
-    ) -> Result<Page<ConversationEntry>, ApplicationError> {
-        unavailable()
-    }
-}
-
-impl CommitFacts for UnavailablePorts {
-    fn commit_facts(&self, _request: FactMutation) -> Result<MutationAttempt, ApplicationError> {
-        unavailable()
-    }
-}
-
-impl PublishWake for UnavailablePorts {
-    fn publish_wake(&self, _revision: Revision) -> Result<WakeDisposition, ApplicationError> {
-        unavailable()
-    }
-}
-
-impl ConfigureRelays for UnavailablePorts {
-    fn configure_relay(
-        &self,
-        _request: &EffectRequest<RelayConfiguration>,
-    ) -> Result<EffectOutcome<()>, ApplicationError> {
-        unavailable()
-    }
-
-    fn synchronize(
-        &self,
-        _request: &EffectRequest<SynchronizationRequest>,
-    ) -> Result<EffectOutcome<()>, ApplicationError> {
-        unavailable()
-    }
-}
-
-impl hq_application::ControlHarness for UnavailablePorts {
-    fn control_harness(
-        &self,
-        _request: &EffectRequest<AgentSessionRequest>,
-    ) -> Result<EffectOutcome<AgentSessionResult>, ApplicationError> {
-        unavailable()
-    }
-}
-
-impl InspectResource for UnavailablePorts {
-    fn inspect_resource(
-        &self,
-        _request: &EffectRequest<ResourceInspectionRequest>,
-    ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
-        unavailable()
-    }
-}
-
-impl ObserveRevisions for UnavailablePorts {
-    fn register_subscription(&self, request: &SubscriptionRequest) -> Result<(), ApplicationError> {
-        self.hub.register_subscription(request)
-    }
-
-    fn activate_subscription(&self, operation_id: OperationId) -> Result<(), ApplicationError> {
-        self.hub.activate_subscription(operation_id)
-    }
-
-    fn cancel_subscription(&self, operation_id: OperationId) -> Result<(), ApplicationError> {
-        self.hub.cancel_subscription(operation_id)
-    }
-}
-
-impl ApplicationPorts for UnavailablePorts {}
-
-struct Lifecycle;
-
-impl LifecycleControl for Lifecycle {
-    fn lifecycle(&self, _request: LifecycleRequest) -> Result<LifecycleStatus, ApplicationError> {
-        unavailable()
-    }
-}
+use support::{TestDirectory, UnavailableLifecycle, unavailable_application};
 
 fn foundation(directory: &TestDirectory) -> (NodeFoundation, RuntimePaths) {
     let state = StatePaths::new(directory.path().join("state")).expect("state paths");
@@ -350,10 +246,10 @@ async fn tracked_ticket_is_emitted_only_after_the_exact_complete_frame_is_readab
     let driver = tokio::spawn(driver);
     let mut client = tokio::net::UnixStream::from_std(client).expect("Tokio client");
     let hub = RevisionHub::new(1).expect("hub capacity");
-    let application = Application::new(UnavailablePorts { hub: hub.clone() });
+    let application = unavailable_application(hub.clone());
     let mut server = ServerSession::new(hub, build_for_server(), session_id);
     let outbound = server
-        .receive(hello("server-write"), &application, &Lifecycle)
+        .receive(hello("server-write"), &application, &UnavailableLifecycle)
         .expect("server hello prepared");
     let ticket = outbound.ticket();
     handle

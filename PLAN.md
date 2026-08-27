@@ -54,7 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-
 - **[node/high] Coordinate the owned listener and graceful node runtime** — Drive the nonblocking
   foundation-owned listener from the sole node event loop, cap live sessions, reject excess peers,
   and route lifecycle requests plus Unix stop/restart signals through ordered component drain.

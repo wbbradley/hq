@@ -18,5 +18,6 @@ pub use hub::{
     DEFAULT_MAX_SUBSCRIPTIONS, FanoutDisposition, HubConfigError, RevisionHub, RevisionNotice,
 };
 pub use server::{
-    LifecycleControl, OutboundMessage, ServerSession, ServerSessionError, WriteTicket,
+    LifecycleControl, OutboundMessage, ServerSession, ServerSessionError, ServerWriteDisposition,
+    WriteTicket,
 };

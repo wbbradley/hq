@@ -26,7 +26,9 @@ use hq_local_api::protocol::v1::{
     SessionControlDto, SubscriptionRequestDto, SynchronizationRequestDto, V1, VersionRange,
     WireMessage,
 };
-use hq_local_api::{LifecycleControl, RevisionHub, ServerSession, ServerSessionError};
+use hq_local_api::{
+    LifecycleControl, RevisionHub, ServerSession, ServerSessionError, ServerWriteDisposition,
+};
 #[derive(Clone)]
 struct Ports {
     hub: RevisionHub,
@@ -430,9 +432,10 @@ fn version_rejection_closes_only_after_its_response_is_confirmed() {
         ),
         Err(ServerSessionError::Disconnected)
     );
-    server
-        .confirm_written(outbound.ticket())
-        .expect("rejection written");
+    assert_eq!(
+        server.confirm_written(outbound.ticket()),
+        Ok(ServerWriteDisposition::Close)
+    );
 }
 
 #[test]

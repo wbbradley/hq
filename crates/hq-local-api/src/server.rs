@@ -67,6 +67,15 @@ enum AfterWrite {
     Close,
 }
 
+/// Transport action required after one exact response write is confirmed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServerWriteDisposition {
+    /// The negotiated session remains available for another request.
+    Continue,
+    /// The final protocol response was delivered and the transport must close.
+    Close,
+}
+
 /// Closed session-state failure requiring transport cleanup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServerSessionError {
@@ -160,24 +169,27 @@ impl ServerSession {
     }
 
     /// Confirms a full successful frame write and performs its ordered post-write transition.
-    pub fn confirm_written(&mut self, ticket: WriteTicket) -> Result<(), ServerSessionError> {
+    pub fn confirm_written(
+        &mut self,
+        ticket: WriteTicket,
+    ) -> Result<ServerWriteDisposition, ServerSessionError> {
         let after = self
             .writes
             .remove(&ticket)
             .ok_or(ServerSessionError::UnknownWriteTicket)?;
         match after {
-            AfterWrite::None => Ok(()),
+            AfterWrite::None => Ok(ServerWriteDisposition::Continue),
             AfterWrite::Activate(operation_id) => {
                 if let Err(error) = self.hub.activate_subscription(operation_id) {
                     let _ = self.hub.cancel_subscription(operation_id);
                     self.subscriptions.remove(&operation_id);
                     return Err(ServerSessionError::Activation(error));
                 }
-                Ok(())
+                Ok(ServerWriteDisposition::Continue)
             }
             AfterWrite::Close => {
                 self.disconnect();
-                Ok(())
+                Ok(ServerWriteDisposition::Close)
             }
         }
     }
