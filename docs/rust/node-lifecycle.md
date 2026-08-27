@@ -88,6 +88,12 @@ tracked, shutdown closes intake and joins all handles, and returned failures and
 stable named report entries. A generic nonblocking fixed-capacity mailbox returns the unsent value
 with explicit `Full` or `Closed` disposition and never allocates beyond its configured slots.
 
+The future socket runtime is a central node loop rather than a set of tasks that each retain store,
+relay, harness, and project owners. Each `ServerSession` owns negotiation, write-ticket, and
+subscription state, but borrows a fresh transient application bundle and the lifecycle capability
+only while dispatching one decoded request. This preserves the sole component owner and ordered
+shutdown boundary without introducing reference-counted capability wrappers for task lifetimes.
+
 Normal component shutdown executes these stages even when an earlier stage reports failure:
 
 1. enter lifecycle drain, closing mutation and launch admission;

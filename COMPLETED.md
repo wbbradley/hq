@@ -5497,3 +5497,68 @@ vet/build/fresh tests pass.
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before session-loop
      work.
+
+## 2026-08-27 — Call-scoped server-session capabilities
+
+Refactored `ServerSession` into connection protocol state plus revision-registration ownership. It
+no longer stores generic application or lifecycle owners; each decoded request borrows a complete
+application service and lifecycle capability only for synchronous dispatch. Negotiation, exact
+single-use write tickets, close-after-version-rejection, post-write subscription activation,
+coalesced invalidations, and disconnect cleanup remain in the session state machine.
+
+Added a red-green contract proving one session can outlive and repeatedly use fresh temporary
+capability bundles, plus a two-session contract proving drop cancels only the dropped session's
+pending registration while the sibling remains active. Updated runtime specifications to pin the
+central node-loop decision and avoid reference-counting concrete component owners solely for task
+lifetimes. Plain protocol/result records remain public data; methods remain only on state-transition
+and ownership types.
+
+Full locked workspace format/check/build/tests/doctests/Clippy,
+architecture/dependency/behavior/specification verifiers, four supported core and node targets,
+both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[local-api/high] Decouple server-session state from borrowed node capabilities** — Refactor the
+  transport-independent `ServerSession` so it retains only connection protocol state, shared
+  revision registrations, and write-transition ownership. Execute each decoded request against an
+  application service and lifecycle capability borrowed only for that call. Preserve exact write
+  confirmations, post-write subscription activation, close-after-rejection, coalesced
+  invalidations, and disconnect cancellation while allowing the future node event loop to own
+  non-`'static` component capabilities without reference-counting every owner.
+
+  **Implementation plan**
+
+  - Remove application/lifecycle type parameters and stored capability fields from `ServerSession`;
+    keep negotiation, session identity, write tickets, subscription identities, and the cloned
+    bounded revision hub as the session-owned invariant state.
+  - Change request receipt to borrow one complete `Application` and `LifecycleControl` for the
+    duration of synchronous dispatch only. Do not introduce trait objects, public adapter structs,
+    or accessor-only wrappers; ordinary protocol/result records keep their public fields and the
+    session retains methods only for ordered state transitions.
+  - Preserve the rule that no second request is admitted while a response ticket is pending, a
+    subscription becomes active only after its exact acknowledgement frame is confirmed written,
+    and version rejection closes only after its exact response is confirmed.
+  - Prove that one session can be driven repeatedly through freshly borrowed application bundles,
+    that dropping those bundles leaves no retained borrow, and that disconnect/drop cancels all
+    pending and active registrations without affecting sibling sessions.
+  - Update protocol/runtime specifications to pin the central node-loop ownership decision before
+    adding asynchronous socket tasks.
+
+  **Risks and decisions**
+
+  - Lifting the store and every component into `Arc` solely for task lifetimes would blur the sole
+    owner and shutdown order. The central node loop will own components and lend capabilities only
+    while processing a decoded request.
+  - Moving all protocol state into the node would duplicate negotiation, ticket, and subscription
+    invariants. `ServerSession` remains the one transport-independent state machine; only external
+    capabilities become call-scoped.
+  - Subscription registration and acknowledgement span a write. The revision hub remains retained
+    session state so pending registration is cancelled on every write failure, disconnect, or drop.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing compile/runtime contracts for fresh borrowed bundles and retained session state.
+  2. Refactor `ServerSession` and all callers without weakening existing protocol contracts.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before socket I/O.

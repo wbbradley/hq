@@ -240,7 +240,8 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Server-session contracts require a written hello before requests, only one unconfirmed response,
   session-owned single-use write tickets, post-write subscription activation, and idempotent cleanup
   after lost responses or stale disconnects. Every typed request family routes through application
-  capabilities and the separate node-lifecycle capability.
+  capabilities and the separate node-lifecycle capability borrowed only for that call; a session
+  retains no concrete node capability, and dropping it cancels only its own revision registrations.
 - Revision-hub contracts cover pending/active race phases, unrelated-topic filtering, saturated
   registration, 10,000 coalesced slow-reader publishes, and concurrent publish/poll/cancel without
   blocking or growing more than one pending wake per subscriber.

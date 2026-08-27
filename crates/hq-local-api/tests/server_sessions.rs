@@ -152,22 +152,22 @@ fn build() -> BuildMetadata {
     BuildMetadata::new("hq", "0.1.0", Some("0123456789ab")).expect("bounded build")
 }
 
-fn session(hub: RevisionHub) -> ServerSession<Ports, Lifecycle> {
-    ServerSession::new(
-        Application::new(Ports::new(hub.clone())),
-        Lifecycle,
-        hub,
-        build(),
-        Id32::new([99; 32]),
+fn session(hub: RevisionHub) -> (ServerSession, Application<Ports>) {
+    let application = Application::new(Ports::new(hub.clone()));
+    (
+        ServerSession::new(hub, build(), Id32::new([99; 32])),
+        application,
     )
 }
 
-fn negotiate(session: &mut ServerSession<Ports, Lifecycle>) {
+fn negotiate(session: &mut ServerSession, application: &Application<Ports>) {
     let hello = WireMessage::ClientHello(ClientHello::new(
         VersionRange::new(V1, V1).expect("v1 range"),
         build(),
     ));
-    let outbound = session.receive(hello).expect("hello accepted");
+    let outbound = session
+        .receive(hello, application, &Lifecycle)
+        .expect("hello accepted");
     assert!(matches!(outbound.message(), WireMessage::ServerHello(_)));
     session
         .confirm_written(outbound.ticket())
@@ -227,17 +227,29 @@ fn assert_success(outbound: &hq_local_api::OutboundMessage) {
 #[test]
 fn handshake_is_mandatory_and_write_tickets_are_session_owned_once() {
     let hub = RevisionHub::new(4).expect("capacity");
-    let mut server = session(hub);
+    let (mut server, application) = session(hub);
     assert_eq!(
-        server.receive(request(1, Request::AuthoritativeSnapshot)),
+        server.receive(
+            request(1, Request::AuthoritativeSnapshot),
+            &application,
+            &Lifecycle,
+        ),
         Err(ServerSessionError::ProtocolOrder)
     );
-    negotiate(&mut server);
+    negotiate(&mut server, &application);
     let outbound = server
-        .receive(request(1, Request::AuthoritativeSnapshot))
+        .receive(
+            request(1, Request::AuthoritativeSnapshot),
+            &application,
+            &Lifecycle,
+        )
         .expect("request routes");
     assert_eq!(
-        server.receive(request(2, Request::AuthoritativeSnapshot)),
+        server.receive(
+            request(2, Request::AuthoritativeSnapshot),
+            &application,
+            &Lifecycle,
+        ),
         Err(ServerSessionError::WritePending)
     );
     server
@@ -248,10 +260,14 @@ fn handshake_is_mandatory_and_write_tickets_are_session_owned_once() {
         Err(ServerSessionError::UnknownWriteTicket)
     );
     assert_eq!(
-        server.receive(WireMessage::ClientHello(ClientHello::new(
-            VersionRange::new(V1, V1).expect("range"),
-            build(),
-        ))),
+        server.receive(
+            WireMessage::ClientHello(ClientHello::new(
+                VersionRange::new(V1, V1).expect("range"),
+                build(),
+            )),
+            &application,
+            &Lifecycle,
+        ),
         Err(ServerSessionError::ProtocolOrder)
     );
 }
@@ -259,20 +275,24 @@ fn handshake_is_mandatory_and_write_tickets_are_session_owned_once() {
 #[test]
 fn subscription_commits_are_hidden_until_ack_write_then_delivered_without_a_gap() {
     let hub = RevisionHub::new(4).expect("capacity");
-    let mut server = session(hub.clone());
-    negotiate(&mut server);
+    let (mut server, application) = session(hub.clone());
+    negotiate(&mut server, &application);
     let operation_id = OperationId::from_bytes([44; 32]);
     let outbound = server
-        .receive(request(
-            1,
-            Request::Subscribe(
-                SubscriptionRequestDto::new(
-                    Id32::new(*operation_id.as_bytes()),
-                    vec![InvalidationTopic::Conversation],
-                )
-                .expect("subscription"),
+        .receive(
+            request(
+                1,
+                Request::Subscribe(
+                    SubscriptionRequestDto::new(
+                        Id32::new(*operation_id.as_bytes()),
+                        vec![InvalidationTopic::Conversation],
+                    )
+                    .expect("subscription"),
+                ),
             ),
-        ))
+            &application,
+            &Lifecycle,
+        )
         .expect("ack prepared");
     assert!(matches!(
         outbound.message(),
@@ -294,16 +314,20 @@ fn subscription_commits_are_hidden_until_ack_write_then_delivered_without_a_gap(
 #[test]
 fn lost_acknowledgement_and_stale_disconnect_cancel_pending_and_active_capacity() {
     let hub = RevisionHub::new(1).expect("capacity");
-    let mut server = session(hub.clone());
-    negotiate(&mut server);
+    let (mut server, application) = session(hub.clone());
+    negotiate(&mut server, &application);
     let outbound = server
-        .receive(request(
-            1,
-            Request::Subscribe(
-                SubscriptionRequestDto::new(Id32::new([45; 32]), vec![InvalidationTopic::All])
-                    .expect("subscription"),
+        .receive(
+            request(
+                1,
+                Request::Subscribe(
+                    SubscriptionRequestDto::new(Id32::new([45; 32]), vec![InvalidationTopic::All])
+                        .expect("subscription"),
+                ),
             ),
-        ))
+            &application,
+            &Lifecycle,
+        )
         .expect("ack prepared");
     assert_eq!(hub.len(), 1);
     server.disconnect();
@@ -313,7 +337,11 @@ fn lost_acknowledgement_and_stale_disconnect_cancel_pending_and_active_capacity(
         Err(ServerSessionError::UnknownWriteTicket)
     );
     assert_eq!(
-        server.receive(request(2, Request::AuthoritativeSnapshot)),
+        server.receive(
+            request(2, Request::AuthoritativeSnapshot),
+            &application,
+            &Lifecycle,
+        ),
         Err(ServerSessionError::Disconnected)
     );
 }
@@ -321,8 +349,8 @@ fn lost_acknowledgement_and_stale_disconnect_cancel_pending_and_active_capacity(
 #[test]
 fn every_typed_request_family_routes_without_storage_types() {
     let hub = RevisionHub::new(8).expect("capacity");
-    let mut server = session(hub);
-    negotiate(&mut server);
+    let (mut server, application) = session(hub);
+    negotiate(&mut server, &application);
     let page = ConversationPageRequest::new(
         ConversationKeyDto::Thread {
             counterparty_installation: Id32::new([1; 32]),
@@ -363,10 +391,11 @@ fn every_typed_request_family_routes_without_storage_types() {
 
     for (index, request_body) in requests.into_iter().enumerate() {
         let outbound = server
-            .receive(request(
-                u64::try_from(index + 1).expect("small index"),
-                request_body,
-            ))
+            .receive(
+                request(u64::try_from(index + 1).expect("small index"), request_body),
+                &application,
+                &Lifecycle,
+            )
             .expect("route succeeds");
         assert_success(&outbound);
         server
@@ -378,19 +407,27 @@ fn every_typed_request_family_routes_without_storage_types() {
 #[test]
 fn version_rejection_closes_only_after_its_response_is_confirmed() {
     let hub = RevisionHub::new(1).expect("capacity");
-    let mut server = session(hub);
+    let (mut server, application) = session(hub);
     let outbound = server
-        .receive(WireMessage::ClientHello(ClientHello::new(
-            VersionRange::new(2, 3).expect("range"),
-            build(),
-        )))
+        .receive(
+            WireMessage::ClientHello(ClientHello::new(
+                VersionRange::new(2, 3).expect("range"),
+                build(),
+            )),
+            &application,
+            &Lifecycle,
+        )
         .expect("rejection prepared");
     assert!(matches!(
         outbound.message(),
         WireMessage::VersionRejected(_)
     ));
     assert_eq!(
-        server.receive(request(1, Request::AuthoritativeSnapshot)),
+        server.receive(
+            request(1, Request::AuthoritativeSnapshot),
+            &application,
+            &Lifecycle,
+        ),
         Err(ServerSessionError::Disconnected)
     );
     server
@@ -407,4 +444,88 @@ fn public_dto_fields_remain_idiomatic_while_session_tickets_keep_their_invariant
     let AuthoritativeSnapshotDto { revision, items } = snapshot;
     assert_eq!(revision, 7);
     assert!(items.is_empty());
+}
+
+#[test]
+fn one_session_accepts_fresh_call_scoped_capabilities_without_retaining_them() {
+    let hub = RevisionHub::new(4).expect("capacity");
+    let mut server = ServerSession::new(hub.clone(), build(), Id32::new([98; 32]));
+
+    {
+        let application = Application::new(Ports::new(hub.clone()));
+        let hello = WireMessage::ClientHello(ClientHello::new(
+            VersionRange::new(V1, V1).expect("v1 range"),
+            build(),
+        ));
+        let outbound = server
+            .receive(hello, &application, &Lifecycle)
+            .expect("hello accepted through temporary capabilities");
+        server
+            .confirm_written(outbound.ticket())
+            .expect("hello written");
+    }
+
+    let application = Application::new(Ports::new(hub));
+    let outbound = server
+        .receive(
+            request(1, Request::AuthoritativeSnapshot),
+            &application,
+            &Lifecycle,
+        )
+        .expect("later request uses a fresh capability bundle");
+    assert_success(&outbound);
+}
+
+#[test]
+fn dropping_one_call_scoped_session_cancels_only_its_revision_registration() {
+    let hub = RevisionHub::new(2).expect("capacity");
+    let (mut dropped, dropped_application) = session(hub.clone());
+    let (mut sibling, sibling_application) = session(hub.clone());
+    negotiate(&mut dropped, &dropped_application);
+    negotiate(&mut sibling, &sibling_application);
+
+    let dropped_ack = dropped
+        .receive(
+            request(
+                1,
+                Request::Subscribe(
+                    SubscriptionRequestDto::new(
+                        Id32::new([71; 32]),
+                        vec![InvalidationTopic::Conversation],
+                    )
+                    .expect("dropped subscription"),
+                ),
+            ),
+            &dropped_application,
+            &Lifecycle,
+        )
+        .expect("pending acknowledgement");
+    let sibling_ack = sibling
+        .receive(
+            request(
+                1,
+                Request::Subscribe(
+                    SubscriptionRequestDto::new(
+                        Id32::new([72; 32]),
+                        vec![InvalidationTopic::Conversation],
+                    )
+                    .expect("sibling subscription"),
+                ),
+            ),
+            &sibling_application,
+            &Lifecycle,
+        )
+        .expect("sibling acknowledgement");
+    sibling
+        .confirm_written(sibling_ack.ticket())
+        .expect("sibling acknowledgement written");
+    assert_eq!(hub.len(), 2);
+
+    drop((dropped_ack, dropped));
+    assert_eq!(hub.len(), 1);
+    let _ = hub.publish(Revision::new(9), [SubscriptionTopic::Conversation], false);
+    assert!(matches!(
+        sibling.poll_invalidation(),
+        Some(WireMessage::Invalidation(invalidation)) if invalidation.revision == 9
+    ));
 }

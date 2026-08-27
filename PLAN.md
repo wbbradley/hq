@@ -54,14 +54,21 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[node/high] Drive bounded Unix sessions and coordinated graceful runtime** — Add the asynchronous
-  accept/session/write loops over the owned listener, bounded connection/task/write capacity,
-  incremental frame decoding, exact `ServerSession` write confirmations, coalesced invalidations,
-  slow/nonreading-client containment, and lifecycle control routed through the sole node owner.
-  Coordinate stop/restart requests and Unix signals through ordered component drain without lost
-  acknowledgements or leaked clients. Test partial/multiple frames, malformed input, lost writes,
-  saturation, slow readers, disconnect cleanup, signals, and connected-client stop/restart on Linux
-  and macOS.
+
+- **[node/high] Drive bounded Unix session I/O** — Add Tokio-owned per-connection read/write tasks
+  around the transport-independent session state, with bounded connection, decoded-message, and
+  encoded-write capacity; incremental framing; exact `ServerSession` write confirmations only after
+  full-frame completion; coalesced invalidations; and cancellation-safe disconnect cleanup. Test
+  partial/multiple frames, malformed and oversized input, lost/partial writes, queue saturation,
+  slow or nonreading peers, subscription cleanup, and zero leaked tasks on Linux and macOS.
+
+- **[node/high] Coordinate the owned listener and graceful node runtime** — Drive the nonblocking
+  foundation-owned listener from the sole node event loop, cap live sessions, reject excess peers,
+  and route lifecycle requests plus Unix stop/restart signals through ordered component drain.
+  Preserve response acknowledgements already accepted before drain, notify and close connected
+  clients, join every I/O task, and clean runtime artifacts without leaks. Test accept saturation,
+  signals, repeated stop/restart, lost lifecycle acknowledgements, connected-client shutdown, and
+  immediate restart/rebind on Linux and macOS.
 
 - **[node/high] Implement convergent autostart and lifecycle CLI roles** — Add one client coordinator
   that probes the owned socket, starts the foreground-node child only when absent, waits on typed

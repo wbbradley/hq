@@ -92,10 +92,8 @@ impl fmt::Display for ServerSessionError {
 
 impl Error for ServerSessionError {}
 
-/// One negotiated local connection over application capabilities and a shared revision hub.
-pub struct ServerSession<P, L> {
-    application: Application<P>,
-    lifecycle: L,
+/// Protocol state and revision registrations for one negotiated local connection.
+pub struct ServerSession {
     hub: RevisionHub,
     build: BuildMetadata,
     session_id: Id32,
@@ -107,7 +105,7 @@ pub struct ServerSession<P, L> {
     subscriptions: BTreeSet<OperationId>,
 }
 
-impl<P, L> fmt::Debug for ServerSession<P, L> {
+impl fmt::Debug for ServerSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServerSession")
@@ -121,22 +119,10 @@ impl<P, L> fmt::Debug for ServerSession<P, L> {
     }
 }
 
-impl<P, L> ServerSession<P, L>
-where
-    P: ApplicationPorts,
-    L: LifecycleControl,
-{
+impl ServerSession {
     /// Constructs one fresh unnegotiated session.
-    pub const fn new(
-        application: Application<P>,
-        lifecycle: L,
-        hub: RevisionHub,
-        build: BuildMetadata,
-        session_id: Id32,
-    ) -> Self {
+    pub const fn new(hub: RevisionHub, build: BuildMetadata, session_id: Id32) -> Self {
         Self {
-            application,
-            lifecycle,
             hub,
             build,
             session_id,
@@ -149,8 +135,17 @@ where
         }
     }
 
-    /// Handles one already-decoded message without performing transport I/O.
-    pub fn receive(&mut self, message: WireMessage) -> Result<OutboundMessage, ServerSessionError> {
+    /// Handles one decoded message through capabilities borrowed only for this call.
+    pub fn receive<P, L>(
+        &mut self,
+        message: WireMessage,
+        application: &Application<P>,
+        lifecycle: &L,
+    ) -> Result<OutboundMessage, ServerSessionError>
+    where
+        P: ApplicationPorts,
+        L: LifecycleControl,
+    {
         self.ensure_open()?;
         if !self.writes.is_empty() {
             return Err(ServerSessionError::WritePending);
@@ -161,7 +156,7 @@ where
         let WireMessage::Request(envelope) = message else {
             return Err(ServerSessionError::ProtocolOrder);
         };
-        self.handle_request(envelope)
+        self.handle_request(envelope, application, lifecycle)
     }
 
     /// Confirms a full successful frame write and performs its ordered post-write transition.
@@ -265,19 +260,23 @@ where
     }
 
     #[allow(clippy::too_many_lines)]
-    fn handle_request(
+    fn handle_request<P, L>(
         &mut self,
         envelope: RequestEnvelope,
-    ) -> Result<OutboundMessage, ServerSessionError> {
+        application: &Application<P>,
+        lifecycle: &L,
+    ) -> Result<OutboundMessage, ServerSessionError>
+    where
+        P: ApplicationPorts,
+        L: LifecycleControl,
+    {
         let request_id = envelope.id;
         let mut after = AfterWrite::None;
         let result = match envelope.request {
-            Request::Lifecycle(request) => self
-                .lifecycle
-                .lifecycle(request)
-                .map(ResponseResult::Lifecycle),
-            Request::AuthoritativeSnapshot => self
-                .application
+            Request::Lifecycle(request) => {
+                lifecycle.lifecycle(request).map(ResponseResult::Lifecycle)
+            }
+            Request::AuthoritativeSnapshot => application
                 .authoritative_snapshot()
                 .and_then(|snapshot| {
                     snapshot_to_v1(&snapshot).map_err(|_| internal_conversion_error())
@@ -286,30 +285,29 @@ where
             Request::ConversationPage(request) => page_request_from_v1(request)
                 .map_err(|_| invalid_request_error())
                 .and_then(|(key, limit, cursor)| {
-                    self.application
-                        .conversation_entries(&key, limit, cursor.as_ref())
+                    application.conversation_entries(&key, limit, cursor.as_ref())
                 })
                 .and_then(|page| page_to_v1(&page).map_err(|_| internal_conversion_error()))
                 .map(ResponseResult::ConversationPage),
             Request::Mutation(request) => mutation_from_v1(request)
                 .map_err(|_| invalid_request_error())
-                .and_then(|request| self.application.execute_mutation(request))
+                .and_then(|request| application.execute_mutation(request))
                 .map(|completion| ResponseResult::Mutation(mutation_to_v1(completion.attempt()))),
             Request::ConfigureRelay(request) => relay_effect_from_v1(&request)
                 .map_err(|_| invalid_request_error())
-                .and_then(|request| self.application.configure_relay(&request))
+                .and_then(|request| application.configure_relay(&request))
                 .map(|outcome| ResponseResult::EmptyEffect(empty_effect_to_v1(&outcome))),
             Request::Synchronize(request) => synchronization_effect_from_v1(&request)
                 .map_err(|_| invalid_request_error())
-                .and_then(|request| self.application.synchronize(&request))
+                .and_then(|request| application.synchronize(&request))
                 .map(|outcome| ResponseResult::EmptyEffect(empty_effect_to_v1(&outcome))),
             Request::ControlAgentSession(request) => agent_effect_from_v1(&request)
                 .map_err(|_| invalid_request_error())
-                .and_then(|request| self.application.control_agent_session(&request))
+                .and_then(|request| application.control_agent_session(&request))
                 .map(|outcome| ResponseResult::AgentSession(agent_effect_to_v1(&outcome))),
             Request::InspectResource(request) => resource_effect_from_v1(&request)
                 .map_err(|_| invalid_request_error())
-                .and_then(|request| self.application.inspect_resource(&request))
+                .and_then(|request| application.inspect_resource(&request))
                 .map(|outcome| ResponseResult::ResourceInspection(resource_effect_to_v1(&outcome))),
             Request::Subscribe(request) => {
                 let subscription =
@@ -317,7 +315,7 @@ where
                 subscription.and_then(|subscription| {
                     let operation_id = subscription.operation_id();
                     self.hub.register_subscription(&subscription)?;
-                    match self.application.authoritative_snapshot() {
+                    match application.authoritative_snapshot() {
                         Ok(snapshot) => {
                             if let Ok(snapshot) = snapshot_to_v1(&snapshot) {
                                 self.subscriptions.insert(operation_id);
@@ -382,7 +380,7 @@ where
     }
 }
 
-impl<P, L> Drop for ServerSession<P, L> {
+impl Drop for ServerSession {
     fn drop(&mut self) {
         if self.disconnected {
             return;
