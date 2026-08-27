@@ -1,0 +1,289 @@
+{
+  "corpus": "hq-protocol-adversarial-v1",
+  "mutation_language": {
+    "replace-once": "Replace the first and only exact UTF-8 byte substring named find with replacement.",
+    "set-json-field": "Parse only the already verified fixture representation named by target, set the exact JSON Pointer to value, then encode using the stated canonical schema.",
+    "repeat": "Concatenate the stated Unicode scalar exactly count times before canonical UTF-8 JSON encoding.",
+    "resign-fixture-key": "After a content mutation, rebuild created_at from content time, kind 6000, empty tags, NIP-01 ID, and a valid BIP-340 signature using secret key 0000000000000000000000000000000000000000000000000000000000000001.",
+    "retain-outer-crypto": "Leave the original outer ID, public key, timestamp, kind, tags, and signature unchanged."
+  },
+  "cases": [
+    {
+      "name": "content-closing-brace-missing",
+      "class": "malformed-json",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "replace-once",
+        "find": "\"label\":\"alpha\"}}",
+        "replacement": "\"label\":\"alpha\"}"
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "content-malformed-json"
+    },
+    {
+      "name": "printable-scalar-unnecessarily-escaped",
+      "class": "noncanonical-escape",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "replace-once",
+        "find": "\"label\":\"alpha\"",
+        "replacement": "\"label\":\"\\u0061lpha\""
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "noncanonical-bytes"
+    },
+    {
+      "name": "duplicate-protocol-discriminator",
+      "class": "duplicate-member",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "replace-once",
+        "find": "{\"p\":\"hq/canonical\",",
+        "replacement": "{\"p\":\"hq/canonical\",\"p\":\"hq/canonical\","
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "content-duplicate-member"
+    },
+    {
+      "name": "unknown-top-level-member",
+      "class": "unknown-member",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "replace-once",
+        "find": "\"auth\":[],\"body\":",
+        "replacement": "\"auth\":[],\"extension\":null,\"body\":"
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "content-unknown-member"
+    },
+    {
+      "name": "version-before-protocol",
+      "class": "member-order",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "replace-once",
+        "find": "{\"p\":\"hq/canonical\",\"v\":1,",
+        "replacement": "{\"v\":1,\"p\":\"hq/canonical\","
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "content-member-order"
+    },
+    {
+      "name": "label-one-byte-over-decoded-limit",
+      "class": "decoded-bound",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/body/label",
+        "value": {
+          "op": "repeat",
+          "scalar": "a",
+          "count": 129
+        }
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "decoded-bound:MAX_SHORT_TEXT_BYTES"
+    },
+    {
+      "name": "valid-decoded-project-exceeds-canonical-escaped-limit",
+      "class": "encoded-bound",
+      "entrypoint": "canonical-encoder",
+      "input": {
+        "envelope": {
+          "p": "hq/canonical",
+          "v": 1,
+          "f": 27,
+          "author": "1111111111111111111111111111111111111111111111111111111111111111",
+          "time": 0,
+          "scope": [
+            "account",
+            "3333333333333333333333333333333333333333333333333333333333333333"
+          ],
+          "parents": [],
+          "auth": []
+        },
+        "family": 27,
+        "project": "6666666666666666666666666666666666666666666666666666666666666666",
+        "mailbox": "8888888888888888888888888888888888888888888888888888888888888888",
+        "home": "1111111111111111111111111111111111111111111111111111111111111111",
+        "name": "p",
+        "brief": null,
+        "predecessor": null,
+        "resource_count": 64,
+        "resource_id_rule": "32-byte big-endian integer from 1 through 64",
+        "locator": {
+          "scheme": "opaque",
+          "value": {
+            "op": "repeat",
+            "scalar": "U+0001",
+            "count": 4096
+          }
+        },
+        "resource_health": "unknown",
+        "primary": null,
+        "state": "closed"
+      },
+      "last_state": "encoder-input",
+      "failure": "encoded-bound:MAX_CONTENT_BYTES"
+    },
+    {
+      "name": "nonhex-author",
+      "class": "invalid-hex",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/author",
+        "value": "g111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "invalid-hex"
+    },
+    {
+      "name": "unowned-outer-kind",
+      "class": "wrong-kind",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/event/kind",
+        "value": 6001
+      },
+      "outer": "retain-outer-crypto",
+      "last_state": "ParsedOuterEvent",
+      "failure": "wrong-kind"
+    },
+    {
+      "name": "future-canonical-version",
+      "class": "unsupported-version",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/v",
+        "value": 2
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "VerifiedUnsupportedRecord",
+      "failure": "unsupported-version"
+    },
+    {
+      "name": "future-canonical-family",
+      "class": "unsupported-family",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/f",
+        "value": 49
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "VerifiedUnsupportedRecord",
+      "failure": "unsupported-family"
+    },
+    {
+      "name": "canonical-family-under-control-discriminator",
+      "class": "namespace-confusion",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/p",
+        "value": "hq/control"
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "namespace-confusion"
+    },
+    {
+      "name": "changed-content-with-original-id-and-signature",
+      "class": "content-tamper",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "replace-once",
+        "find": "\"alpha\"",
+        "replacement": "\"bravo\""
+      },
+      "outer": "retain-outer-crypto",
+      "last_state": "ParsedOuterEvent",
+      "failure": "event-id-mismatch"
+    },
+    {
+      "name": "signature-last-nibble-changed",
+      "class": "bad-signature",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "replace-once",
+        "target": "/event/sig",
+        "find": "cce3",
+        "replacement": "cce2"
+      },
+      "outer": "retain-outer-crypto",
+      "last_state": "ParsedOuterEvent",
+      "failure": "bad-signature"
+    },
+    {
+      "name": "local-scope-does-not-name-author",
+      "class": "authority-scope-mismatch",
+      "base": "canonical-installation-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/scope/1",
+        "value": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "VerifiedSupportedRecord",
+      "failure": "scope-author-mismatch"
+    },
+    {
+      "name": "authority-does-not-occur-in-parents",
+      "class": "authority-scope-mismatch",
+      "base": "remote-command-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/auth/0/2",
+        "value": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "authority-not-parent"
+    },
+    {
+      "name": "control-parents-not-sorted",
+      "class": "member-order",
+      "base": "remote-command-v1",
+      "mutation": {
+        "op": "set-json-field",
+        "target": "/parents",
+        "value": [
+          [
+            "r",
+            "8888888888888888888888888888888888888888888888888888888888888888"
+          ],
+          [
+            "c",
+            "4b63dbd21d18790058d9f0483fb06b7223594b843f235849456553f957a90022"
+          ]
+        ]
+      },
+      "outer": "resign-fixture-key",
+      "last_state": "CryptographicallyVerifiedEvent",
+      "failure": "noncanonical-parent-order"
+    },
+    {
+      "name": "outer-content-over-limit",
+      "class": "encoded-bound",
+      "entrypoint": "outer-parser",
+      "input": {
+        "event_prefix": "{\"id\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"pubkey\":\"79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798\",\"created_at\":0,\"kind\":6000,\"tags\":[],\"content\":\"",
+        "content_scalar": "a",
+        "content_scalar_count": 1048577,
+        "event_suffix": "\",\"sig\":\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"}"
+      },
+      "last_state": "RawEventBytes",
+      "failure": "content-too-large:MAX_CONTENT_BYTES"
+    }
+  ]
+}

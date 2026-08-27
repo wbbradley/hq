@@ -3529,3 +3529,99 @@ regression suite pass.
   4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.
+
+## 2026-08-27 — Canonical fact, remote-control, and trust specifications
+
+Specified independent `hq/canonical` v1 and `hq/control` v1 protocols with strict canonical UTF-8
+JSON, named raw/decoded/encoded bounds, signed scope and typed cross-namespace causal references,
+exact NIP-01 event construction, and provisional regular kind 6000 selected through a revision-pinned
+ADR. Published an exhaustive owned DTO mapping for all 48 semantic families and an explicit trust
+state/failure model that prevents malformed, failed, or verified-unsupported input from exposing a
+semantic fact. Added exact canonical and control vectors whose preimages reproduce their SHA-256 IDs
+and whose BIP-340 signatures passed both `nak 0.20.2` and the independent btcsuite Schnorr verifier,
+plus a machine-readable adversarial corpus and consistency/link/vector-integrity checks. All Rust
+workspace, strict-Clippy, architecture/behavior/causal/protocol-spec, cargo-deny, four-target core,
+whitespace, and unchanged Go build/vet/fresh regression gates pass.
+
+### Original plan entry
+
+- **[protocol/high] Specify canonical facts, remote control, and trust transitions** — Write
+  canonical fact v1 and remote-control v1 as new protocols with independent version spaces,
+  deterministic encoding rules, strict decoding policy, size/count/text bounds, event identity,
+  signatures, audience and authority representation, unsupported-version behavior, and exact trust
+  transitions from raw bytes to verified semantic facts. Decide the provisional Nostr application
+  kind and encoding using an ADR rather than inheriting Go values. Define exact vectors and
+  adversarial cases before implementation. Complete this work when every semantic fact has an
+  unambiguous DTO mapping and no domain struct accidentally serves as a wire schema.
+
+  **Implementation plan**
+
+  - Verify the current primary NIP-01/NIP registry requirements for event serialization, identity,
+    Schnorr signatures, application-kind ranges, and extensibility. Record the checked revisions
+    and write an ADR selecting one provisional immutable application kind plus its compatibility
+    and registration posture without inheriting any Go kind or schema.
+  - Specify two independent versioned namespaces: canonical fact v1 for `FCT-001` through
+    `FCT-045`, and remote-control v1 for `FCT-046` through `FCT-048`. Give each an explicit media
+    shape, protocol discriminator, version field, supported-family registry, typed ID namespace,
+    and unsupported-version/family retention behavior.
+  - Define the exact UTF-8 JSON wire grammar and one canonical byte form: object member order,
+    integers, booleans, null/omission, string escaping, Unicode policy, arrays, duplicate and unknown
+    members, trailing data, depth/count limits, and rejection of semantically equal non-canonical
+    spellings. Bounds apply to decoded semantic values and to final encoded bytes after escaping.
+  - Define NIP-01 event construction independently from the payload DTO: exact application kind,
+    fixed tag vocabulary/order, empty-versus-present tag rules, content bytes, event serialization,
+    SHA-256 identity, 32-byte lowercase hex, BIP-340 signing, signature verification, public-key
+    agreement, and preservation of the exact verified event and content bytes.
+  - Specify signed scope/audience DTOs and typed causal references. Encode parents as a sorted unique
+    list and authorities as sorted unique role/fact pairs whose IDs also occur in parents; define
+    canonical and remote-control cross-namespace reference rules and reject unknown roles, duplicate
+    roles, role/parent mismatch, and audience/author contradictions before semantic construction.
+  - Publish an exhaustive mapping table from every semantic payload field and nested enum/value to
+    an owned protocol DTO field, including numeric catalog family IDs, bounded text/collections,
+    optional values, timestamps, nonzero sequences, repository/resource locators, messages,
+    activity, agent/session, project/assignment/input/output, and remote command/result/runtime
+    variants. Domain enum or Rust field spelling is never normative wire vocabulary.
+  - Define the trust-state machine and failure taxonomy from untrusted raw event bytes through
+    bounded outer parse, canonical event verification, exact content retention, protocol dispatch,
+    bounded DTO parse, canonical re-encoding equality, semantic conversion, and reducer admission.
+    Raw, parsed, cryptographically verified, verified-supported, verified-unsupported, and semantic
+    values remain distinct and no failed or unsupported state exposes a `SemanticFact`.
+  - Add exact hand-checkable canonical and remote-control vectors with payload bytes, NIP-01 event
+    preimage, event ID, public key, signature, and expected semantic mapping, plus adversarial corpora
+    for malformed JSON, escaping, duplicate/unknown fields, ordering, bounds, invalid hex,
+    wrong kind/version/family, namespace confusion, tampering, bad signatures, and authority/scope
+    mismatch. State which independent implementation or standard vector validates crypto values.
+  - Add machine-readable protocol-spec consistency tests that prove all 48 catalog families appear
+    exactly once in the mapping/registry, protocol ranges remain disjoint, every bound is named,
+    vectors are exact files rather than prose ellipses, and ADR/spec links are complete.
+  - Run documentation format/link checks, architecture/behavior/causal-spec verifiers, workspace
+    format/check/build/test/doctests, strict Clippy, dependency policy, four-target core checks,
+    whitespace, and unchanged Go build/vet/fresh full regression suite before recording the package.
+
+  **Risks and mitigations**
+
+  - Nostr kind registration and NIP text can change; cite the exact upstream revision reviewed,
+    select a provisional regular-event kind through the ADR, and isolate the kind as outer carriage
+    so a future registered value does not silently change canonical payload v1 bytes.
+  - Generic JSON libraries accept multiple spellings and usually lose duplicate/order information;
+    specify validation over exact retained bytes and canonical re-encoding equality before choosing
+    an implementation library in the next package.
+  - One shared version field could couple immutable facts to remote workflow evolution; keep two
+    discriminators and version registries even though both ride the same signed-event boundary.
+  - Exhaustive payload mapping is large and typo-prone; key it to stable `FCT-xxx` numbers, generate
+    consistency assertions from the domain catalog, and require a named DTO for every nested sum
+    type instead of an untyped payload map.
+  - A cryptographically valid event is not necessarily an authorized or meaningful HQ fact; make
+    each trust transition explicit and preserve verified unsupported input without allowing it into
+    semantic conversion or reduction.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the specification in proportion to risk, including registry/mapping consistency,
+     exact vectors, adversarial cases, and every repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so specifications, tests, and plan bookkeeping form one reviewable
+     change.

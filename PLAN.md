@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[protocol/high] Specify canonical facts, remote control, and trust transitions** — Write
-  canonical fact v1 and remote-control v1 as new protocols with independent version spaces,
-  deterministic encoding rules, strict decoding policy, size/count/text bounds, event identity,
-  signatures, audience and authority representation, unsupported-version behavior, and exact trust
-  transitions from raw bytes to verified semantic facts. Decide the provisional Nostr application
-  kind and encoding using an ADR rather than inheriting Go values. Define exact vectors and
-  adversarial cases before implementation. Complete this work when every semantic fact has an
-  unambiguous DTO mapping and no domain struct accidentally serves as a wire schema.
-
 - **[protocol/high] Implement strict canonical encoding and cryptographic verification** — Implement
   canonical v1 DTO conversion, deterministic encoding, duplicate/unknown-field policy, exact byte
   retention, bounds after escaping, NIP-01 identity, BIP-340 signing/verification, and distinct raw,
