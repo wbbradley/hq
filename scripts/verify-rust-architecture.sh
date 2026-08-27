@@ -98,6 +98,20 @@ if grep -ERiq --include='Cargo.toml' --include='*.rs' '(^|[^a-z])(codex)([^a-z]|
   fail "hq-harness contains Codex-specific vocabulary"
 fi
 
+for crate in "${expected_crates[@]}"; do
+  if [[ "$crate" != hq-store ]] && grep -Eq '^rusqlite(\.workspace)?[[:space:]]*=' \
+    "$repository_root/crates/$crate/Cargo.toml"; then
+    fail "$crate may not depend directly on rusqlite; SQLite belongs to hq-store"
+  fi
+done
+
+while IFS= read -r rust_source; do
+  if grep -Eq '(^|[^a-z])rusqlite::' "$rust_source" &&
+    [[ "$rust_source" != "$repository_root/crates/hq-store/src/database.rs" ]]; then
+    fail "rusqlite production API use escaped hq-store's private database module: $rust_source"
+  fi
+done < <(find "$repository_root"/crates/hq-*/src -type f -name '*.rs' | sort)
+
 for core_crate in hq-domain hq-reducer; do
   if grep -ERiq --include='Cargo.toml' --include='*.rs' \
     '(tokio|rusqlite|sqlite|nostr|ratatui|std::fs|std::process|codex|claude|anthropic|openai)' \

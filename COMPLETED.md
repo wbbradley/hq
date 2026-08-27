@@ -4025,3 +4025,113 @@ whitespace, and unchanged Go build/vet/fresh full regression gates pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so conversion code, tests, fuzz assets, and plan bookkeeping form one
      reviewable change.
+
+## 2026-08-27 — SQLite owner and immutable verified fact corpus
+
+Implemented the sole Rust SQLite ownership boundary as a non-cloneable synchronous store actor
+with a bounded typed mailbox, one private bundled-rusqlite connection, acknowledged lifecycle,
+redacted failures, and architecture enforcement preventing SQLite from escaping `hq-store`.
+Storage v1 uses a private WAL database, exact application/version/schema identity, read-only
+foreign-state inspection, strict permissions and sidecar checks, immutable exact signed-event
+rows, and normalized parent and typed-authority indexes. Append is transactional and exact-replay
+idempotent while unequal valid signatures under one event ID fail closed. Corpus load is bounded,
+snapshot-consistent, and reruns the complete raw-to-semantic trust pipeline before comparing every
+stored index. Reopen, late-parent, collision, failpoint, rollback, actor backpressure/lifecycle,
+schema/version, foreign-database nonmutation, corruption, permissions/symlinks, unsupported and
+tampered evidence, compile-fail isolation, workspace, dependency, four-target, fuzz, and unchanged
+fresh Go regression gates pass.
+
+### Original plan entry
+
+- **[storage/high] Establish the SQLite owner and immutable verified fact corpus** — Design the
+  fresh Rust schema by durability class, implement one dedicated synchronous store thread owning one
+  `rusqlite` connection behind a bounded typed mailbox, and durably append exact verified signed
+  events plus normalized causal indexes without exposing SQL, rows, transactions, or connections.
+  Apply secure database/directory modes and SQLite settings, reject incompatible/corrupt/Go schemas,
+  make equal duplicate append idempotent and unequal identity reuse fail closed, and re-run the full
+  protocol trust pipeline when loading the corpus. Test open/close/reopen, rollback-on-drop and
+  failpoints, mailbox shutdown/backpressure, permission/schema/corruption errors, exact evidence
+  retention, and compile-fail SQL isolation. Complete this package when later rebuild and mutation
+  work can depend on one typed authoritative corpus owner with no alternate database-opening path.
+
+  **Implementation plan**
+
+  - Add failing public-contract tests first for secure fresh open, append, equal duplicate replay,
+    deterministic load, explicit close, drop/reopen, exact signed-event retention, and reconstruction
+    of reducer-ready semantic facts through the complete raw/parse/signature/dispatch/DTO/semantic
+    trust pipeline. Use only valid signed protocol fixtures at the public boundary.
+  - Specify the fresh storage v1 schema and durability classes in `docs/rust/storage.md`. Use a
+    nonzero SQLite application ID and one exact user version; classify the signed event corpus as
+    immutable canonical knowledge, parent and authority edges as normalized rebuildable indexes,
+    and reserve materialized, operational, ephemeral, and rejected-input ownership without copying
+    a Go table or schema number.
+  - Add current reviewed `rusqlite` 0.40.2 with its bundled modern SQLite implementation only to
+    `hq-store`. Keep the connection, statements, transactions, SQL strings, schema row codecs, and
+    failpoint seam private. Add protocol accessors only for already-verified namespace/family
+    metadata needed to cross-check stored rows; do not serialize domain values generically.
+  - Implement a non-cloneable `Store` owner whose worker thread opens and exclusively owns one
+    connection. Route coarse append/load/close commands over a bounded `sync_channel` with typed
+    one-shot replies, acknowledge startup and shutdown, close intake before joining, and map worker
+    loss or panic to stable redacted error classes. Make the public API safe to share by reference
+    without exposing a database handle or table-shaped CRUD.
+  - Create or validate only the immediate state directory as `0700`, reject directory/database
+    symlinks and unsafe existing modes, create the database as `0600` before SQLite opens it, and
+    reject non-regular files. Configure foreign keys, WAL, full durability, busy timeout,
+    `trusted_schema=OFF`, and defensive mode on the owning connection; verify the effective safety
+    settings and keep sidecars inside the private directory.
+  - On open, distinguish a new empty file from existing state. Initialize the entire v1 schema in
+    one exclusive transaction, set and verify application/user versions, run integrity and foreign
+    key checks, and fail closed on foreign, Go-era, newer, older, malformed, or corrupt databases.
+    Never migrate, reset, repair, attach, or otherwise interpret a non-v1 database in normal node
+    startup.
+  - Append one `VerifiedSemanticFact` transactionally as exact signed event bytes plus verified
+    namespace/family, sorted parent edges, and unique typed authority edges. Return `Inserted` for a
+    new identity and `AlreadyPresent` only when every immutable byte and indexed value agrees;
+    classify any unequal reuse of one fact ID as a closed identity collision. Use foreign keys and
+    checks for byte widths, namespace/family ranges, and authority roles without requiring parents
+    to have arrived.
+  - Load facts in fact-ID order, bound every database blob/count before allocation, and rerun raw
+    bounds, strict outer parsing, event-ID/signature verification, supported dispatch, canonical v1
+    DTO verification, and semantic conversion. Cross-check the stored ID, namespace, family,
+    parents, and authorities against the reconstructed owner, rejecting tampering rather than
+    trusting or silently rebuilding immutable/indexed rows.
+  - Add internal transaction failpoints after each append write group and prove rollback-on-error
+    and rollback-on-drop with a reopened connection. Add adversarial tests for unsupported or
+    tampered evidence, unequal row reuse, partial indexes, foreign keys, corrupt bytes, foreign/Go
+    schemas, wrong versions, unsafe modes, symlinks, missing parents, bounded-mailbox saturation,
+    dropped replies, shutdown acknowledgement, and worker failure. Add compile-fail examples showing
+    callers cannot obtain connections, execute SQL, or manufacture corpus facts from raw bytes.
+  - Run format, all architecture/spec verifiers, workspace check/build/test/doctests, strict
+    Clippy, dependency policy, four-target core/protocol checks, whitespace, and unchanged Go
+    build/vet/fresh full regression suite before recording.
+
+  **Risks and mitigations**
+
+  - Opening through SQLite before validating the path can follow a symlink or create a permissive
+    file; validate with non-following metadata, create privately first, revalidate the opened file,
+    and rely on the already-held node state lock for same-user replacement exclusion.
+  - WAL can weaken durability or leave privately scoped sidecars with surprising settings; pin and
+    verify full synchronous WAL behavior, private directory/database modes, foreign keys, defensive
+    mode, and explicit close/checkpoint behavior, then exercise reopen after abrupt actor drop.
+  - Treating normalized indexes as authority could let corruption change reduction; reconstruct
+    every semantic fact from exact signed bytes and compare all stored indexes before returning a
+    corpus. The following repair package may replace rebuildable rows only after this check has a
+    deliberate repair entry point.
+  - A convenient raw append or query API could bypass trust states and later become a second commit
+    path; accept only `VerifiedSemanticFact`, return only typed corpus owners/outcomes, keep every
+    lower-level function private, and pin the isolation boundary with compile-fail documentation.
+  - A synchronous bounded channel can deadlock shutdown if ownership and producers are ambiguous;
+    keep one non-cloneable owner, permit shared references through ordinary `Arc`, acknowledge every
+    accepted request, close intake before join, and state-test saturation, disconnect, panic, and
+    last-owner drop.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including persistence, trust replay,
+     corruption, failpoints, permissions, actor lifecycle, and every repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so store code, tests, specification, dependencies, and plan
+     bookkeeping form one reviewable change.

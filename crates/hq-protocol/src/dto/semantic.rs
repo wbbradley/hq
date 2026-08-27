@@ -5,7 +5,7 @@ use std::fmt;
 use hq_domain as domain;
 
 use super::{VerifiedSupportedRecord, model};
-use crate::{CryptographicallyVerifiedEvent, FailureClass, ProtocolError};
+use crate::{CryptographicallyVerifiedEvent, FailureClass, ProtocolError, ProtocolNamespace};
 
 /// A semantic fact together with the exact cryptographically verified record that produced it.
 pub struct VerifiedSemanticFact {
@@ -14,6 +14,16 @@ pub struct VerifiedSemanticFact {
 }
 
 impl VerifiedSemanticFact {
+    /// Returns the independently versioned signed-content namespace.
+    pub const fn namespace(&self) -> ProtocolNamespace {
+        self.record.namespace()
+    }
+
+    /// Returns the exact supported v1 family number.
+    pub const fn family(&self) -> u64 {
+        self.record.family()
+    }
+
     /// Returns the fully validated semantic fact.
     pub const fn fact(&self) -> &domain::SemanticFact {
         &self.fact

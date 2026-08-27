@@ -54,15 +54,16 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[storage/high] Build the SQLite owner, schema, and complete rebuild path** — Design a fresh
-  SQLite schema by data class: immutable canonical knowledge, deterministic indexes, rebuildable
-  projections, durable operational state, ephemeral state, and bounded rejected/temporary input.
-  Implement one dedicated synchronous store thread owning one `rusqlite` connection, bounded typed
-  requests, transaction-scoped functions, secure file settings, schema initialization, exact fact
-  storage, normalized queries, and a repair command that discards rebuildable state and applies the
-  complete batch reducer. Test open/close, rollback-on-drop, corruption/incompatible-schema errors,
-  deterministic rebuild, and client isolation from SQL. Complete this work when a fact corpus can
-  rebuild every projection exactly through the public query boundary.
+- **[storage/high] Persist complete batch projections and implement repair** — Extend the fresh
+  schema with deterministic dependency/frontier/support indexes and normalized materialized
+  authority, conversation, activity, agent, and project projections. Define one typed public store
+  snapshot/query boundary independent of SQL layout, rebuild all domain reports from the complete
+  reverified fact corpus under explicit local authority policy, transactionally replace only
+  rebuildable tables, and implement idempotent repair that never mutates immutable facts or durable
+  operational state. Add projection codecs/rows without serializing domain structs generically,
+  prove reopen and repeated-repair equality against fresh reducers, and cover missing parents,
+  conflicts, late authority, compacted activity, and corrupted rebuildable rows. Complete this
+  package when a fact corpus rebuilds every projection exactly through the public query boundary.
 
 - **[storage/high] Implement the atomic mutation and inbound-ingest engine** — Implement the common
   transaction path for local fact-backed commands and remotely verified facts: stable mutation

@@ -1,0 +1,67 @@
+//! Redacted persistence failures.
+
+use std::{error::Error, fmt};
+
+/// Stable persistence failure classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreErrorClass {
+    /// The database path cannot be safely used.
+    InvalidPath,
+    /// A state or database path is a symbolic link.
+    SymbolicLink,
+    /// Existing state is accessible beyond the owning operating-system user.
+    UnsafePermissions,
+    /// A filesystem operation failed.
+    FileSystem,
+    /// The database belongs to another schema or schema version.
+    IncompatibleSchema,
+    /// SQLite reported malformed or corrupt database content.
+    CorruptDatabase,
+    /// Stored signed evidence or its normalized indexes failed verification.
+    InvalidEvidence,
+    /// One immutable fact identity was reused with unequal evidence or indexes.
+    IdentityCollision,
+    /// The bounded store actor is no longer accepting requests.
+    ActorClosed,
+    /// The owning store worker stopped without a valid response.
+    WorkerStopped,
+    /// A database operation failed without establishing corruption.
+    DatabaseUnavailable,
+}
+
+/// A redacted persistence failure with a stable classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoreError {
+    class: StoreErrorClass,
+}
+
+impl StoreError {
+    pub(crate) const fn new(class: StoreErrorClass) -> Self {
+        Self { class }
+    }
+
+    /// Returns the stable failure classification.
+    pub const fn class(self) -> StoreErrorClass {
+        self.class
+    }
+}
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self.class {
+            StoreErrorClass::InvalidPath => "database path is invalid",
+            StoreErrorClass::SymbolicLink => "database path contains a symbolic link",
+            StoreErrorClass::UnsafePermissions => "database permissions are unsafe",
+            StoreErrorClass::FileSystem => "database filesystem operation failed",
+            StoreErrorClass::IncompatibleSchema => "database schema is incompatible",
+            StoreErrorClass::CorruptDatabase => "database is corrupt",
+            StoreErrorClass::InvalidEvidence => "stored fact evidence is invalid",
+            StoreErrorClass::IdentityCollision => "immutable fact identity was reused",
+            StoreErrorClass::ActorClosed => "store actor is closed",
+            StoreErrorClass::WorkerStopped => "store worker stopped",
+            StoreErrorClass::DatabaseUnavailable => "database operation failed",
+        })
+    }
+}
+
+impl Error for StoreError {}
