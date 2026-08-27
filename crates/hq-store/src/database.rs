@@ -1,5 +1,6 @@
 //! Private SQLite schema, row codecs, and transactions.
 
+mod authority;
 mod repair;
 
 use std::{path::Path, time::Duration};
@@ -15,15 +16,15 @@ use rusqlite::{
 };
 
 use crate::{
-    AppendOutcome, CompleteSnapshot, ReductionIndexSnapshot, RepairOutcome, StoreError,
-    StoreErrorClass,
+    AppendOutcome, AuthorityProjectionSnapshot, CompleteSnapshot, ReductionIndexSnapshot,
+    RepairOutcome, StoreError, StoreErrorClass,
     paths::{prepare_database_path, validate_database_path},
     snapshot::build_complete_snapshot,
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 2;
-const SCHEMA_MARKER: &str = "hq-store-v2-repair-foundation-2026-08-27";
+const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_MARKER: &str = "hq-store-v3-authority-projections-2026-08-27";
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
 const SCHEMA: &str = r"
@@ -161,6 +162,162 @@ CREATE TABLE reduction_conflict_participants (
     PRIMARY KEY (domain, ordinal, participant_id),
     FOREIGN KEY (domain, ordinal) REFERENCES reduction_conflicts(domain, ordinal)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_state (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    frontier_count INTEGER NOT NULL CHECK(frontier_count >= 0),
+    projection_count INTEGER NOT NULL CHECK(projection_count >= 0),
+    support_count INTEGER NOT NULL CHECK(support_count >= 0),
+    row_count INTEGER NOT NULL CHECK(row_count >= 0),
+    row_digest BLOB NOT NULL CHECK(typeof(row_digest) = 'blob' AND length(row_digest) = 32)
+) STRICT;
+
+CREATE TABLE authority_frontiers (
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 7),
+    key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
+    key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_kind, key_a, key_b, fact_id)
+) STRICT;
+
+CREATE TABLE authority_support (
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 7),
+    key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
+    key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_kind, key_a, key_b, fact_id)
+) STRICT;
+
+CREATE TABLE authority_installations (
+    installation_id BLOB PRIMARY KEY NOT NULL CHECK(typeof(installation_id) = 'blob' AND length(installation_id) = 32),
+    root_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    signing_key BLOB NOT NULL CHECK(typeof(signing_key) = 'blob' AND length(signing_key) = 32),
+    encryption_key BLOB NOT NULL CHECK(typeof(encryption_key) = 'blob' AND length(encryption_key) = 32),
+    label TEXT CHECK(label IS NULL OR (typeof(label) = 'text' AND length(CAST(label AS BLOB)) BETWEEN 1 AND 128))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_mailboxes (
+    owner_id BLOB NOT NULL CHECK(typeof(owner_id) = 'blob' AND length(owner_id) = 32),
+    mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
+    create_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    mailbox_kind INTEGER NOT NULL CHECK(mailbox_kind IN (1, 2)),
+    label TEXT CHECK(label IS NULL OR (typeof(label) = 'text' AND length(CAST(label AS BLOB)) BETWEEN 1 AND 128)),
+    PRIMARY KEY (owner_id, mailbox_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_peer_routes (
+    owner_id BLOB NOT NULL CHECK(typeof(owner_id) = 'blob' AND length(owner_id) = 32),
+    peer_id BLOB NOT NULL CHECK(typeof(peer_id) = 'blob' AND length(peer_id) = 32),
+    route_state INTEGER NOT NULL CHECK(route_state BETWEEN 1 AND 3),
+    PRIMARY KEY (owner_id, peer_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_peer_route_facts (
+    owner_id BLOB NOT NULL,
+    peer_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    relation INTEGER NOT NULL CHECK(relation IN (1, 2)),
+    reason TEXT CHECK((relation = 1 AND reason IS NULL) OR (relation = 2 AND typeof(reason) = 'text' AND length(CAST(reason AS BLOB)) BETWEEN 1 AND 96)),
+    PRIMARY KEY (owner_id, peer_id, fact_id, relation),
+    FOREIGN KEY (owner_id, peer_id) REFERENCES authority_peer_routes(owner_id, peer_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_peer_route_candidates (
+    owner_id BLOB NOT NULL,
+    peer_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    candidate_installation BLOB NOT NULL CHECK(typeof(candidate_installation) = 'blob' AND length(candidate_installation) = 32),
+    candidate_signing_key BLOB NOT NULL CHECK(typeof(candidate_signing_key) = 'blob' AND length(candidate_signing_key) = 32),
+    encryption_key BLOB NOT NULL CHECK(typeof(encryption_key) = 'blob' AND length(encryption_key) = 32),
+    label TEXT CHECK(label IS NULL OR (typeof(label) = 'text' AND length(CAST(label AS BLOB)) BETWEEN 1 AND 128)),
+    PRIMARY KEY (owner_id, peer_id, fact_id),
+    FOREIGN KEY (owner_id, peer_id) REFERENCES authority_peer_routes(owner_id, peer_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_peer_route_relays (
+    owner_id BLOB NOT NULL,
+    peer_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL,
+    position INTEGER NOT NULL CHECK(position >= 0),
+    scheme INTEGER NOT NULL CHECK(scheme BETWEEN 1 AND 4),
+    value TEXT NOT NULL CHECK(typeof(value) = 'text' AND length(CAST(value AS BLOB)) BETWEEN 1 AND 4096),
+    PRIMARY KEY (owner_id, peer_id, fact_id, position),
+    FOREIGN KEY (owner_id, peer_id, fact_id) REFERENCES authority_peer_route_candidates(owner_id, peer_id, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_capabilities (
+    grant_id BLOB PRIMARY KEY NOT NULL CHECK(typeof(grant_id) = 'blob' AND length(grant_id) = 32),
+    mailbox_owner BLOB NOT NULL CHECK(typeof(mailbox_owner) = 'blob' AND length(mailbox_owner) = 32),
+    mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
+    grantee_installation BLOB NOT NULL CHECK(typeof(grantee_installation) = 'blob' AND length(grantee_installation) = 32),
+    grantee_signing_key BLOB NOT NULL CHECK(typeof(grantee_signing_key) = 'blob' AND length(grantee_signing_key) = 32),
+    active INTEGER NOT NULL CHECK(active IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_capability_facts (
+    grant_id BLOB NOT NULL REFERENCES authority_capabilities(grant_id),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    relation INTEGER NOT NULL CHECK(relation IN (1, 2)),
+    PRIMARY KEY (grant_id, fact_id, relation)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_accounts (
+    account_id BLOB PRIMARY KEY NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
+    root_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    creator_installation BLOB NOT NULL CHECK(typeof(creator_installation) = 'blob' AND length(creator_installation) = 32),
+    creator_signing_key BLOB NOT NULL CHECK(typeof(creator_signing_key) = 'blob' AND length(creator_signing_key) = 32),
+    label TEXT CHECK(label IS NULL OR (typeof(label) = 'text' AND length(CAST(label AS BLOB)) BETWEEN 1 AND 128))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_memberships (
+    account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
+    device_id BLOB NOT NULL CHECK(typeof(device_id) = 'blob' AND length(device_id) = 32),
+    membership_state INTEGER NOT NULL CHECK(membership_state BETWEEN 1 AND 3),
+    PRIMARY KEY (account_id, device_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_membership_facts (
+    account_id BLOB NOT NULL,
+    device_id BLOB NOT NULL,
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    relation INTEGER NOT NULL CHECK(relation BETWEEN 1 AND 4),
+    PRIMARY KEY (account_id, device_id, fact_id, relation),
+    FOREIGN KEY (account_id, device_id) REFERENCES authority_memberships(account_id, device_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_membership_grants (
+    account_id BLOB NOT NULL,
+    device_id BLOB NOT NULL,
+    grant_id BLOB NOT NULL CHECK(typeof(grant_id) = 'blob' AND length(grant_id) = 32),
+    grant_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    granted_installation BLOB NOT NULL CHECK(typeof(granted_installation) = 'blob' AND length(granted_installation) = 32),
+    granted_signing_key BLOB NOT NULL CHECK(typeof(granted_signing_key) = 'blob' AND length(granted_signing_key) = 32),
+    label TEXT CHECK(label IS NULL OR (typeof(label) = 'text' AND length(CAST(label AS BLOB)) BETWEEN 1 AND 128)),
+    PRIMARY KEY (account_id, device_id, grant_id),
+    FOREIGN KEY (account_id, device_id) REFERENCES authority_memberships(account_id, device_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_membership_grant_relays (
+    account_id BLOB NOT NULL,
+    device_id BLOB NOT NULL,
+    grant_id BLOB NOT NULL,
+    position INTEGER NOT NULL CHECK(position >= 0),
+    scheme INTEGER NOT NULL CHECK(scheme BETWEEN 1 AND 4),
+    value TEXT NOT NULL CHECK(typeof(value) = 'text' AND length(CAST(value AS BLOB)) BETWEEN 1 AND 4096),
+    PRIMARY KEY (account_id, device_id, grant_id, position),
+    FOREIGN KEY (account_id, device_id, grant_id) REFERENCES authority_membership_grants(account_id, device_id, grant_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_account_selections (
+    installation_id BLOB PRIMARY KEY NOT NULL CHECK(typeof(installation_id) = 'blob' AND length(installation_id) = 32),
+    active_account BLOB CHECK(active_account IS NULL OR (typeof(active_account) = 'blob' AND length(active_account) = 32))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authority_account_selection_candidates (
+    installation_id BLOB NOT NULL REFERENCES authority_account_selections(installation_id),
+    account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
+    PRIMARY KEY (installation_id, account_id)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -283,12 +440,21 @@ impl Database {
     pub(super) fn repair(&mut self, policy: AuthorityPolicy) -> Result<RepairOutcome, StoreError> {
         let complete = self.complete_snapshot(policy)?;
         let expected = complete.normalized_index();
-        let persisted = repair::replace(&mut self.connection, &expected)?;
-        Ok(RepairOutcome::new(complete, persisted))
+        let expected_authority = complete.authority_projection_snapshot();
+        let (persisted, authority) =
+            repair::replace(&mut self.connection, &expected, &expected_authority)?;
+        Ok(RepairOutcome::new(complete, persisted, authority))
     }
 
     pub(super) fn load_reduction_index(&self) -> Result<ReductionIndexSnapshot, StoreError> {
         repair::load(&self.connection)
+    }
+
+    pub(super) fn load_authority_snapshot(
+        &self,
+    ) -> Result<AuthorityProjectionSnapshot, StoreError> {
+        repair::load(&self.connection)?;
+        authority::load(&self.connection)
     }
 }
 
@@ -395,7 +561,7 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
             |row| row.get(0),
         )
         .map_err(sql_error)?;
-    if table_count != 16 {
+    if table_count != 34 {
         return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
     }
     for table in [
@@ -415,6 +581,24 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
         "reduction_presentation_order",
         "reduction_conflicts",
         "reduction_conflict_participants",
+        "authority_state",
+        "authority_frontiers",
+        "authority_support",
+        "authority_installations",
+        "authority_mailboxes",
+        "authority_peer_routes",
+        "authority_peer_route_facts",
+        "authority_peer_route_candidates",
+        "authority_peer_route_relays",
+        "authority_capabilities",
+        "authority_capability_facts",
+        "authority_accounts",
+        "authority_memberships",
+        "authority_membership_facts",
+        "authority_membership_grants",
+        "authority_membership_grant_relays",
+        "authority_account_selections",
+        "authority_account_selection_candidates",
     ] {
         let present: i64 = connection
             .query_row(
@@ -820,6 +1004,8 @@ mod tests {
             RepairFailpoint::AfterPresentationOrder,
             RepairFailpoint::AfterConflicts,
             RepairFailpoint::AfterState,
+            RepairFailpoint::AfterAuthorityInsert,
+            RepairFailpoint::AfterAuthorityVerification,
             RepairFailpoint::AfterVerification,
         ] {
             let mut connection = Connection::open_in_memory().expect("memory database opens");
@@ -835,26 +1021,43 @@ mod tests {
                 hq_domain::InstallationId::from_bytes([0x22; 32]),
                 hq_domain::MailboxId::from_bytes([0x55; 32]),
             );
-            let prior = database
+            let prior_complete = database
                 .complete_snapshot(first_policy)
-                .expect("prior snapshot reduces")
-                .normalized_index();
-            repair::replace(&mut database.connection, &prior).expect("prior index persists");
-            let replacement = database
+                .expect("prior snapshot reduces");
+            let prior = prior_complete.normalized_index();
+            let prior_authority = prior_complete.authority_projection_snapshot();
+            repair::replace(&mut database.connection, &prior, &prior_authority)
+                .expect("prior index persists");
+            let replacement_complete = database
                 .complete_snapshot(replacement_policy)
-                .expect("replacement snapshot reduces")
-                .normalized_index();
+                .expect("replacement snapshot reduces");
+            let replacement = replacement_complete.normalized_index();
+            let replacement_authority = replacement_complete.authority_projection_snapshot();
 
-            let error = replace_with_failpoint(&mut database.connection, &replacement, failpoint)
-                .expect_err("repair failpoint interrupts replacement");
+            let error = replace_with_failpoint(
+                &mut database.connection,
+                &replacement,
+                &replacement_authority,
+                failpoint,
+            )
+            .expect_err("repair failpoint interrupts replacement");
             assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
             assert_eq!(
                 repair::load(&database.connection).expect("prior index remains loadable"),
                 prior
             );
             assert_eq!(
-                repair::replace(&mut database.connection, &replacement).expect("retry succeeds"),
-                replacement
+                authority::load(&database.connection).expect("prior authority remains loadable"),
+                prior_authority
+            );
+            assert_eq!(
+                repair::replace(
+                    &mut database.connection,
+                    &replacement,
+                    &replacement_authority
+                )
+                .expect("retry succeeds"),
+                (replacement, replacement_authority)
             );
         }
     }

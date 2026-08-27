@@ -12,7 +12,8 @@ use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::AuthorityPolicy;
 
 use crate::{
-    CompleteSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass, database::Database,
+    AuthorityProjectionSnapshot, CompleteSnapshot, ReductionIndexSnapshot, StoreError,
+    StoreErrorClass, database::Database,
 };
 
 /// Result of appending immutable verified evidence.
@@ -69,13 +70,19 @@ impl fmt::Debug for VerifiedFactCorpus {
 pub struct RepairOutcome {
     complete: CompleteSnapshot,
     persisted: ReductionIndexSnapshot,
+    authority: AuthorityProjectionSnapshot,
 }
 
 impl RepairOutcome {
-    pub(crate) fn new(complete: CompleteSnapshot, persisted: ReductionIndexSnapshot) -> Self {
+    pub(crate) fn new(
+        complete: CompleteSnapshot,
+        persisted: ReductionIndexSnapshot,
+        authority: AuthorityProjectionSnapshot,
+    ) -> Self {
         Self {
             complete,
             persisted,
+            authority,
         }
     }
 
@@ -89,9 +96,20 @@ impl RepairOutcome {
         &self.persisted
     }
 
+    /// Returns the exact typed authority projection view read back before commit.
+    pub const fn authority(&self) -> &AuthorityProjectionSnapshot {
+        &self.authority
+    }
+
     /// Consumes the outcome into its complete and persisted snapshots.
-    pub fn into_parts(self) -> (CompleteSnapshot, ReductionIndexSnapshot) {
-        (self.complete, self.persisted)
+    pub fn into_parts(
+        self,
+    ) -> (
+        CompleteSnapshot,
+        ReductionIndexSnapshot,
+        AuthorityProjectionSnapshot,
+    ) {
+        (self.complete, self.persisted, self.authority)
     }
 }
 
@@ -113,6 +131,9 @@ enum Request {
     },
     LoadReductionIndex {
         reply: SyncSender<Result<ReductionIndexSnapshot, StoreError>>,
+    },
+    LoadAuthoritySnapshot {
+        reply: SyncSender<Result<AuthorityProjectionSnapshot, StoreError>>,
     },
     Close {
         reply: SyncSender<()>,
@@ -215,6 +236,17 @@ impl Store {
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
+    /// Loads the last successfully repaired typed authority projection view without mutation.
+    pub fn load_authority_snapshot(&self) -> Result<AuthorityProjectionSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadAuthoritySnapshot { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -274,6 +306,9 @@ fn run(path: &Path, receiver: &Receiver<Request>, started: &SyncSender<Result<()
             Request::LoadReductionIndex { reply } => {
                 let _ = reply.send(database.load_reduction_index());
             }
+            Request::LoadAuthoritySnapshot { reply } => {
+                let _ = reply.send(database.load_authority_snapshot());
+            }
             Request::Close { reply } => {
                 let _ = reply.send(());
                 break;
@@ -328,6 +363,12 @@ mod tests {
                 reply,
             })
             .expect("repair request is accepted");
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::LoadAuthoritySnapshot { reply })
+            .expect("authority request is accepted");
         assert!(
             store
                 .load_corpus()

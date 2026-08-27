@@ -170,6 +170,42 @@ pub struct PeerRouteView {
 }
 
 impl PeerRouteView {
+    /// Reconstructs a typed route view from explicitly decoded persisted parts.
+    pub fn from_parts(
+        state: PeerRouteState,
+        frontier: BTreeSet<FactId>,
+        routes: BTreeMap<FactId, PeerRouteCandidate>,
+        blocks: BTreeMap<FactId, ErrorCode>,
+    ) -> Option<Self> {
+        let every_frontier_fact_is_retained = frontier
+            .iter()
+            .all(|fact| routes.contains_key(fact) || blocks.contains_key(fact));
+        let frontier_blocks = frontier
+            .iter()
+            .filter(|fact| blocks.contains_key(fact))
+            .count();
+        let frontier_routes = frontier
+            .iter()
+            .filter(|fact| routes.contains_key(fact))
+            .count();
+        let expected = if frontier_blocks > 0 {
+            PeerRouteState::Blocked
+        } else if frontier_routes == 1 {
+            PeerRouteState::Routable
+        } else {
+            PeerRouteState::Conflicted
+        };
+        let histories_are_disjoint = routes.keys().all(|fact| !blocks.contains_key(fact));
+        (every_frontier_fact_is_retained && histories_are_disjoint && state == expected).then_some(
+            Self {
+                state,
+                frontier,
+                routes,
+                blocks,
+            },
+        )
+    }
+
     /// Returns remove-wins current route state.
     pub const fn state(&self) -> PeerRouteState {
         self.state
@@ -209,6 +245,24 @@ pub struct CapabilityView {
 }
 
 impl CapabilityView {
+    /// Reconstructs a typed capability view from explicitly decoded persisted parts.
+    pub fn from_parts(
+        mailbox: MailboxAddress,
+        grantee: InstallationAddress,
+        active: bool,
+        revoke_frontier: BTreeSet<FactId>,
+        observed_actions: BTreeSet<FactId>,
+    ) -> Option<Self> {
+        (active == revoke_frontier.is_empty() && revoke_frontier.is_disjoint(&observed_actions))
+            .then_some(Self {
+                mailbox,
+                grantee,
+                active,
+                revoke_frontier,
+                observed_actions,
+            })
+    }
+
     /// Reports whether this grant is currently active.
     pub const fn is_active(&self) -> bool {
         self.active
@@ -243,6 +297,49 @@ pub struct MembershipView {
 }
 
 impl MembershipView {
+    /// Reconstructs a typed membership view from explicitly decoded persisted parts.
+    pub fn from_parts(
+        state: MembershipState,
+        frontier: BTreeSet<FactId>,
+        grants: BTreeMap<GrantId, DeviceGrantView>,
+        acceptances: BTreeSet<FactId>,
+        revokes: BTreeSet<FactId>,
+        active_acceptances: BTreeSet<FactId>,
+    ) -> Option<Self> {
+        let grant_facts = grants
+            .values()
+            .map(|grant| grant.grant_fact)
+            .collect::<BTreeSet<_>>();
+        let retained = grant_facts
+            .iter()
+            .copied()
+            .chain(acceptances.iter().copied())
+            .chain(revokes.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let expected = if !active_acceptances.is_empty() {
+            MembershipState::Active
+        } else if !revokes.is_empty() {
+            MembershipState::Revoked
+        } else {
+            MembershipState::Pending
+        };
+        let histories_are_disjoint = grant_facts.is_disjoint(&acceptances)
+            && grant_facts.is_disjoint(&revokes)
+            && acceptances.is_disjoint(&revokes);
+        (state == expected
+            && active_acceptances.is_subset(&acceptances)
+            && histories_are_disjoint
+            && frontier.is_subset(&retained))
+        .then_some(Self {
+            state,
+            frontier,
+            grants,
+            acceptances,
+            revokes,
+            active_acceptances,
+        })
+    }
+
     /// Returns current remove-wins membership state.
     pub const fn state(&self) -> MembershipState {
         self.state

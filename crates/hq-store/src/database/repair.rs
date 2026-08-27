@@ -7,8 +7,8 @@ use hq_reducer::AuthorityPolicy;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::{
-    IndexedConflict, IndexedDecision, ReductionDomain, ReductionIndexSnapshot, StoreError,
-    StoreErrorClass,
+    AuthorityProjectionSnapshot, IndexedConflict, IndexedDecision, ReductionDomain,
+    ReductionIndexSnapshot, StoreError, StoreErrorClass,
     snapshot::{
         decode_domain, decode_reason, decode_role, decode_status, encode_domain, encode_reason,
         encode_role, encode_status, reason_belongs_to_domain,
@@ -29,41 +29,59 @@ pub(crate) enum RepairFailpoint {
     AfterPresentationOrder,
     AfterConflicts,
     AfterState,
+    AfterAuthorityInsert,
+    AfterAuthorityVerification,
     AfterVerification,
 }
 
 pub(crate) fn replace(
     connection: &mut Connection,
     expected: &ReductionIndexSnapshot,
-) -> Result<ReductionIndexSnapshot, StoreError> {
-    replace_at(connection, expected, RepairFailpoint::Never)
+    expected_authority: &AuthorityProjectionSnapshot,
+) -> Result<(ReductionIndexSnapshot, AuthorityProjectionSnapshot), StoreError> {
+    replace_at(
+        connection,
+        expected,
+        expected_authority,
+        RepairFailpoint::Never,
+    )
 }
 
 #[cfg(test)]
 pub(crate) fn replace_with_failpoint(
     connection: &mut Connection,
     expected: &ReductionIndexSnapshot,
+    expected_authority: &AuthorityProjectionSnapshot,
     failpoint: RepairFailpoint,
-) -> Result<ReductionIndexSnapshot, StoreError> {
-    replace_at(connection, expected, failpoint)
+) -> Result<(ReductionIndexSnapshot, AuthorityProjectionSnapshot), StoreError> {
+    replace_at(connection, expected, expected_authority, failpoint)
 }
 
 fn replace_at(
     connection: &mut Connection,
     expected: &ReductionIndexSnapshot,
+    expected_authority: &AuthorityProjectionSnapshot,
     failpoint: RepairFailpoint,
-) -> Result<ReductionIndexSnapshot, StoreError> {
+) -> Result<(ReductionIndexSnapshot, AuthorityProjectionSnapshot), StoreError> {
     let transaction = connection.transaction().map_err(database)?;
     clear_rebuildable(&transaction)?;
+    super::authority::clear(&transaction)?;
     fail_at(failpoint, RepairFailpoint::AfterClear)?;
     insert_index(&transaction, expected, failpoint)?;
+    super::authority::insert(&transaction, expected_authority)?;
+    fail_at(failpoint, RepairFailpoint::AfterAuthorityInsert)?;
     let persisted = load_from_connection(&transaction)?;
     if persisted != *expected {
         return Err(corrupt());
     }
+    let persisted_authority = super::authority::load(&transaction)?;
+    if persisted_authority != *expected_authority {
+        return Err(corrupt());
+    }
+    fail_at(failpoint, RepairFailpoint::AfterAuthorityVerification)?;
     fail_at(failpoint, RepairFailpoint::AfterVerification)?;
     transaction.commit().map_err(database)?;
-    Ok(persisted)
+    Ok((persisted, persisted_authority))
 }
 
 pub(crate) fn load(connection: &Connection) -> Result<ReductionIndexSnapshot, StoreError> {

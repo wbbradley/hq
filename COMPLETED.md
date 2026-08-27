@@ -4236,3 +4236,91 @@ build/vet/fresh regression gates pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so batch snapshot, repair, tests, specification, and plan bookkeeping
      form one reviewable change.
+
+## 2026-08-27 — Complete authority projections
+
+Added a typed SQL-independent authority snapshot and storage v3 relational projections for every
+authority aggregate, frontier, support edge, history child, relay hint, conflict, and local account
+selection. Extended the existing repair transaction so structural and authority indexes replace and
+verify atomically, including authority-specific rollback failpoints, strict closed codecs, bounded
+loading, valid-looking corruption detection, stale-read behavior, policy replacement, repeated
+repair, and reopen equality. Added validated reducer reconstruction boundaries and documented
+ownership, query, codec, and repair semantics. Formatting, architecture/behavior/causal/protocol
+verifiers, workspace check/build/tests/doctests, strict Clippy, dependency policy, all four
+release-target core/protocol checks, both 512-run fuzz smokes, whitespace, and unchanged Go
+build/vet/fresh full regression gates pass.
+
+### Original plan entry
+
+- **[storage/high] Persist complete authority projections** — Extend the fresh schema and existing
+  repair transaction with every authority aggregate frontier, typed projection value, and transitive
+  support edge. Expose one typed `AuthorityProjectionSnapshot` independent of SQL layout and prove it
+  equals the authority report in the same complete oracle before commit, after reopen, and after
+  repeated repair. Cover installations, mailboxes, peer routes and blocks, mailbox capabilities,
+  accounts, device memberships, local account selection, conflicts, late authority, and corruption.
+  Complete this package when later services can query the full persisted authority view without
+  rerunning a reducer or decoding database-shaped values.
+
+  **Implementation plan**
+
+  - Add failing public store contracts first for empty and populated authority snapshots, equality
+    with `CompleteSnapshot::authority()` frontiers/projections/support, repair readback, repeated
+    repair, close/reopen, policy replacement, stale-index behavior after append, and explicit repair
+    reconsideration. Keep all integration inputs in valid signed protocol trust states; use private
+    codec-unit fixtures only to exhaust variants that are not yet convenient signed scenarios.
+  - Add a typed `AuthorityProjectionSnapshot` owning ordered maps for every
+    `AuthorityAggregateKey` frontier, every `AuthorityProjectionKey`/`AuthorityProjection` pair, and
+    every projection support set. Its public API returns domain types and aggregate queries, never
+    SQL rows, discriminants, serialized blobs, or connection-shaped operations.
+  - Advance the unreleased fresh schema identity and add rebuildable authority tables. Use explicit
+    variant rows and normalized child rows for installations, mailboxes, route candidates/blocks/
+    relays/frontiers, capabilities/revokes/observations, accounts, memberships/grants/relays/
+    acceptances/revokes/frontiers, account-selection candidates, aggregate frontiers, and projection
+    support. Keep canonical evidence, operational state, and later conversation/agent/project rows
+    outside this package's delete and insert groups.
+  - Implement exhaustive private integer/row codecs for aggregate keys, projection keys, mailbox/
+    route/membership states, optional bounded text, installation/mailbox addresses, signing and
+    encryption keys, error codes, relay resource schemes/values, and every authority projection
+    variant. Reconstruct through validated domain constructors, reject unknown kinds, wrong widths,
+    invalid UTF-8/bounds, duplicates, orphan child rows, cross-key rows, and impossible variant/key
+    pairings, and check stored counts before allocating.
+  - Derive the expected typed authority snapshot directly from the already-computed complete oracle.
+    Extend the one repair transaction with authority clear/insert/readback groups and require exact
+    authority equality together with the structural-index equality before commit. Include authority
+    rows and a store-owned digest/count marker in stale persisted reads without making ordinary reads
+    mutate or silently recompute them.
+  - Add rollback failpoints around each new authority replacement group. Prove failures retain the
+    preceding structural and authority snapshots and that an explicit retry succeeds. Add corruption
+    tests for every table family and key/value vocabulary plus valid-looking support/frontier/child
+    leakage; prove repair preserves exact immutable corpus bytes and never touches unrelated rows.
+  - Exercise root identity conflicts, route set/block/frontier restoration, capability revoke and
+    observed-action history, account roots, membership pending/active/revoked and regrant frontiers,
+    local selection candidates/active choice, late authorities, policy change, reopen, and
+    idempotence. Round-trip every authority projection/key/state codec exhaustively even when a
+    higher-level signed scenario already covers it.
+  - Update `docs/rust/storage.md` with authority ownership, query, codec, and repair semantics. Run
+    format, all architecture/spec verifiers, workspace check/build/test/doctests, strict Clippy,
+    dependency policy, four-target core/protocol checks, fuzz smoke, whitespace, and unchanged Go
+    build/vet/fresh full regression suite before recording.
+
+  **Risks and mitigations**
+
+  - Nested route and membership histories can be flattened inconsistently; use one typed snapshot as
+    the codec oracle, explicit parent keys and ordinals, foreign keys, and exact readback equality.
+  - Reusing reducer types at the public boundary must not make their memory layout a file format;
+    persist only explicit store-owned rows and reconstruct values through typed constructors.
+  - Policy-dependent account selection can drift from policy-independent history; store the policy in
+    the existing repair marker and replace all authority rows atomically whenever policy changes.
+  - Expanding repair can accidentally weaken the structural rollback guarantee; make the authority
+    groups part of the same transaction and prove every new failpoint leaves the prior complete pair.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** authority codec, equality, repair, rollback, corruption, lifecycle, and every
+     repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so authority rows, typed queries, tests, specification, and plan
+     bookkeeping form one reviewable change.

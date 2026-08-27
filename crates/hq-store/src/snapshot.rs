@@ -12,6 +12,7 @@ use hq_reducer::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::AuthorityProjectionSnapshot;
 use crate::{StoreError, StoreErrorClass};
 
 /// One independently materialized reducer domain.
@@ -233,6 +234,11 @@ impl CompleteSnapshot {
     /// Returns the authority report.
     pub const fn authority(&self) -> &AuthorityReport {
         &self.authority
+    }
+
+    /// Clones the complete authority projection/frontier/support oracle.
+    pub fn authority_projection_snapshot(&self) -> AuthorityProjectionSnapshot {
+        AuthorityProjectionSnapshot::from_report(&self.authority)
     }
 
     /// Returns the conversation and activity report.

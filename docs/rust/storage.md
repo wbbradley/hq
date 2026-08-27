@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v2 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v3 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `2`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `3`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,12 +23,12 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v1 ownership | Rebuildable |
+| Class | Storage v3 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
 | Deterministic reduction indexes | Reverse dependencies, decisions, diagnostics, conflicts, and reducer order | Yes, only through an explicit repair operation |
-| Materialized projections | Reserved for reducer reports and query rows | Yes |
+| Materialized projections | Complete authority frontiers, typed values, and support; other reducer domains reserved | Yes, only through explicit repair |
 | Durable operational state | Reserved for receipts, revisions, outbox, delivery, cursors, and saga checkpoints | Generally no |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
@@ -70,12 +70,13 @@ role parameters. Debug prose and generic domain serialization are not persistenc
 ## Explicit repair
 
 `repair(policy)` first computes the complete oracle without writes. It then opens one transaction,
-deletes only the rebuildable reduction tables, writes every normalized replacement group, reads the
-typed index back through private fixed-width and closed-vocabulary row codecs, and requires exact
-snapshot and digest equality before commit. Canonical facts, exact event bytes, canonical parent and
-authority rows, schema metadata, and future durable operational tables are outside the repair
-allowlist. Dropping or failing the transaction at any replacement or verification checkpoint leaves
-the preceding complete index intact, and repeating a successful repair is idempotent.
+deletes only the rebuildable reduction and authority tables, writes every normalized replacement
+group, reads both typed snapshots back through private fixed-width and closed-vocabulary row codecs,
+and requires exact snapshot and digest equality before commit. Canonical facts, exact event bytes,
+canonical parent and authority rows, schema metadata, and future durable operational tables are
+outside the repair allowlist. Dropping or failing the transaction at any replacement or verification
+checkpoint leaves the preceding complete structural/authority pair intact, and repeating a
+successful repair is idempotent.
 
 `load_reduction_index()` is read-only and returns the last successful repair even when newer
 canonical facts have since arrived; callers request an explicit repair when they need those facts
@@ -83,6 +84,28 @@ reconsidered. A database with no completed reduction index returns `NotRepaired`
 out-of-vocabulary, oversized, cross-domain, noncontiguous, or digest-inconsistent rebuildable rows
 return `RebuildableStateCorrupt`. Neither case triggers implicit repair. This makes the authoritative
 batch/rebuild boundary visible to later projection and incremental-reduction packages.
+
+## Authority projections
+
+`AuthorityProjectionSnapshot` is the representation-independent persisted query boundary for the
+complete authority report. It owns ordered typed maps for every `AuthorityAggregateKey` frontier,
+every `AuthorityProjectionKey` and value, and every transitive support set. Callers can inspect
+installations, installation-qualified mailboxes, directional peer-route histories, mailbox
+capabilities, account roots, device memberships, and the policy-local account-selection register
+without SQL access or another reducer run. `load_authority_snapshot()` is read-only, verifies that
+the structural half of the same repair is intact, and retains the explicit stale-until-repair
+semantics of `load_reduction_index()`.
+
+Authority values are not serialized Rust structs. Dedicated strict tables and normalized child rows
+store each projection variant: route candidates, blocks, relay locators and frontiers; capability
+revoke and observed-action facts; membership grants, relay locators, acceptances, revokes and
+frontiers; selection candidates; aggregate frontiers; and projection support. Private exhaustive
+codecs map every key, state, address, public key, bounded label/error code, relay scheme/value, and
+child relation. Loading reconstructs values through typed constructors, enforces fixed widths,
+bounds, ordinals, key/value pairing, parent/child ownership and row-count limits, and verifies a
+digest over every authority row before returning it. Unknown, partial, orphaned, duplicated,
+cross-key, oversized, or valid-looking changed rows return `RebuildableStateCorrupt`; repair remains
+the only recovery path.
 
 The correctness-first oracle currently clones the bounded semantic corpus for the four reducers.
 That cost is deliberate for repair equality; measured shared-report or incremental optimization is

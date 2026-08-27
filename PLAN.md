@@ -54,14 +54,13 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[storage/high] Persist authority and conversation/activity projections** — Add explicit fresh
-  schema rows and private codecs for every authority, conversation, message-state, action-group,
-  activity, retention, frontier, support, and conflict projection. Extend repair to replace them from
-  the complete oracle and expose typed query snapshots whose equality is independent of SQL layout.
-  Cover unique roots, capability and membership frontiers, account selection, missing conversation
-  history, message state, answers/cancellations, delivery evidence, activity coalescing, equal
-  sequence conflicts, retention compaction, corruption, reopen, and repeated repair. Complete this
-  package when fresh authority and conversation reports equal persisted typed queries exactly.
+- **[storage/high] Persist conversation and activity projections** — Add explicit fresh schema rows
+  and private codecs for every conversation, message-state, action-group, activity, retention,
+  frontier, support, and conflict projection. Extend the same complete repair transaction and expose
+  typed conversation/activity query snapshots whose equality is independent of SQL layout. Cover
+  missing conversation history, message state, answers/cancellations, delivery evidence, activity
+  coalescing, equal sequence conflicts, retention compaction, corruption, reopen, and repeated
+  repair. Complete this package when fresh conversation reports equal persisted typed queries exactly.
 
 - **[storage/high] Persist agent/project projections and close complete repair equality** — Add
   explicit fresh schema rows and private codecs for every agent name/lifecycle/session/context/

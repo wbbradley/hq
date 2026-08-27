@@ -45,8 +45,8 @@ fn foreign_sqlite_schema_is_not_opened_or_migrated() {
 #[test]
 fn wrong_version_or_schema_marker_is_incompatible() {
     for mutation in [
-        "PRAGMA user_version = 3",
-        "UPDATE storage_metadata SET schema_marker = 'not-hq-store-v2'",
+        "PRAGMA user_version = 4",
+        "UPDATE storage_metadata SET schema_marker = 'not-hq-store-v3'",
         "CREATE TABLE unexpected_table(value INTEGER)",
     ] {
         let directory = TestDirectory::new();
@@ -72,7 +72,7 @@ fn relative_database_paths_are_rejected() {
 }
 
 #[test]
-fn an_unclaimed_empty_sqlite_file_is_initialized_as_storage_v2() {
+fn an_unclaimed_empty_sqlite_file_is_initialized_as_storage_v3() {
     let directory = TestDirectory::new();
     let database = directory.database_path();
     fs::create_dir_all(database.parent().expect("database parent exists"))

@@ -22,12 +22,14 @@
 //! ```
 
 mod actor;
+mod authority_snapshot;
 mod database;
 mod error;
 mod paths;
 mod snapshot;
 
 pub use actor::{AppendOutcome, RepairOutcome, Store, VerifiedFactCorpus};
+pub use authority_snapshot::AuthorityProjectionSnapshot;
 pub use error::{StoreError, StoreErrorClass};
 pub use snapshot::{
     CompleteSnapshot, IndexedConflict, IndexedDecision, ReductionDomain, ReductionIndexSnapshot,
