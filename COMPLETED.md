@@ -3820,6 +3820,121 @@ whitespace, and unchanged Go build/vet/fresh regressions pass.
   5. **Amend the same commit** so DTO code, tests, fuzz assets, and plan bookkeeping form one
      reviewable change.
 
+## 2026-08-27 — Installation identity and local configuration persistence
+
+Implemented the Rust state layout and exclusive process-lifetime ownership boundary in `hq-node`,
+with exact private modes, symlink rejection, stable identity/configuration/database paths, durable
+same-directory atomic writes, and a fixed bounded binary identity format. Added non-cloneable
+zeroizing installation authority, safe public metadata and signer access, canonical typed unsigned
+relay/provider defaults, and a versioned encrypted identity-only backup/import package. NIP-49 uses
+NFKC passwords, bounded scrypt costs, XChaCha20-Poly1305, classic canonical `ncryptsec` Bech32,
+the official vector, authenticated public-key agreement, no-overwrite import/export, and no Go or
+database/history/configuration compatibility. Public, adversarial, redaction, compile-fail,
+permission, lock, corruption, partial-file, entropy, Unicode, bounds, and round-trip tests pass.
+Workspace format/check/build/test/doctests/strict-Clippy, architecture/behavior/causal/protocol
+verifiers, root and fuzz dependency policy, four core/protocol targets, whitespace, and unchanged
+Go build/vet/fresh full regression gates pass.
+
+### Original plan entry
+
+- **[identity/high] Implement installation identity and local configuration persistence** —
+  Implement the new Rust state-directory layout, stable installation identity, root-key generation
+  and loading, signer access, secure atomic file creation and permissions, public identity display,
+  and the identity export/import/backup behavior retained by the behavior ledger. Keep secret keys
+  out of SQLite, logs, diagnostics, RPC results, and canonical facts, and reject unsafe overwrite or
+  concurrent-use conditions. Use the ADR-0002 Rust-era encrypted package with NIP-49 secret
+  protection, keep database/history migration outside it, and omit a routine recursive reset
+  command. Implement typed local configuration for relay and provider defaults without turning
+  configuration into signed domain state. Test fresh initialization, partial-write recovery,
+  permission failures, redaction, backup round trips, duplicate identity protection, and path
+  derivation. Complete this work when the node and store can consume one explicit secure
+  identity/configuration boundary without reading Go state or formats.
+
+  **Implementation plan**
+
+  - Add failing public-contract tests first for explicit and environment-derived state paths,
+    exclusive node ownership, fresh initialization, reopen with stable identity/public key, signer
+    access, public inspection redaction, strict local configuration, encrypted export/import, and
+    refusal to overwrite an existing identity. Keep all filesystem tests isolated under unique
+    temporary directories and assert the exact Unix directory/file modes on Linux and macOS.
+  - Keep the boundary in `hq-node`, the sole composition/I/O owner, rather than adding a new crate or
+    leaking filesystem and secret-key concepts inward. Define `StatePaths`, an exclusive
+    `StateDirectoryOwner`, a non-cloneable `InstallationIdentity`, redacted closed errors, public
+    identity metadata, typed relay/provider configuration, and narrow load/init/export/import APIs
+    that later node/store composition can consume without opening each other's files.
+  - Specify and implement a fresh fixed binary identity-file v1 containing only a magic/version,
+    32-byte installation identity, and valid 32-byte secp256k1 secret. Generate both identities from
+    an injectable CSPRNG boundary, reject zero/invalid scalars and malformed/trailing files, retain
+    secrets only in zeroizing owners and the crypto signer, and derive public keys rather than
+    trusting stored duplicates. Do not parse Go keys, databases, backup JSON, or schemas.
+  - Implement the state layout with an explicit root plus stable identity, configuration, database,
+    and ownership-lock paths. Derive the default from `XDG_STATE_HOME` or `HOME` without hidden
+    database overrides. Create directories as `0700`, identity/config/lock files as `0600`, reject
+    symlinks and unsafe existing permissions, acquire the standard-library exclusive file lock, and
+    keep its handle alive for the full owner lifetime so concurrent init/load/import fails closed.
+  - Centralize durable atomic writes: same-directory unpredictable `create_new` temporary file,
+    restricted mode at creation, complete write and file sync, no-overwrite checks for identity and
+    backup creation, atomic rename for configuration replacement, parent-directory sync, and scoped
+    partial-file cleanup on every ordinary error. Test injected short/write/sync/rename failures or
+    an equivalent seam plus recovery in the presence of abandoned unrelated temporary files.
+  - Implement NIP-49 exactly over raw secret bytes: NFKC-normalized bounded password, scrypt with
+    fixed export cost and encoded/import-validated `log_n`, `r=8`, `p=1`, random 16-byte salt,
+    random 24-byte XChaCha20-Poly1305 nonce, one-byte security associated data, version 2, classic
+    `ncryptsec` Bech32 encoding, authenticated decryption, and zeroization of password, derived key,
+    plaintext, and intermediate secret buffers. Pin the official NIP-49 vector and reject wrong
+    passwords, corruption, wrong HRP/checksum/version/length/security byte, and unreasonable KDF
+    costs before expensive allocation.
+  - Define the surrounding bounded canonical backup package v1 with installation identity, derived
+    public key, and `ncryptsec`; export by exclusive durable creation and import only into an absent
+    identity while holding state ownership. Strictly reject missing/unknown/duplicate/reordered
+    fields and noncanonical encodings, verify decrypted key/public-key agreement, and never include
+    history, SQLite, configuration, relay state, provider state, credentials, or operational data.
+  - Define canonical unsigned local configuration v1 with a bounded ordered-unique set of typed
+    `ws`/`wss` relay endpoints and an optional validated provider default. Load absence as explicit
+    defaults, reject unknown/reordered/duplicate/oversized/noncanonical input, atomically replace
+    only the configuration file, and expose no conversion from configuration into signed facts.
+  - Add adversarial and redaction coverage for malformed/oversized/trailing identity files, invalid
+    keys, insecure modes, directory/file symlinks, occupied locks, existing import/export targets,
+    bad environment/path inputs, entropy failure, partial-write recovery, backup tampering and
+    Unicode normalization, configuration limits, and `Debug`/`Display` surfaces. Run format, all
+    architecture/spec verifiers, workspace check/build/test/doctests, strict Clippy, dependency
+    policy, four-target core/protocol checks, whitespace, and unchanged Go build/vet/fresh full
+    regression suite before recording.
+
+  **Risks and mitigations**
+
+  - A convenient serializable identity type could leak the root secret into logs, RPC, SQLite, or
+    canonical facts; keep the secret owner private and non-serializable, implement only redacted
+    debug output, and expose public metadata plus signing behavior through separate methods.
+  - File modes applied after creation leave a disclosure window and rename can silently overwrite;
+    set modes in `OpenOptions` before creation, serialize same-state operations with the owner lock,
+    use exclusive creation for identity/backup destinations, and test every collision path.
+  - Password encryption is easy to make subtly non-interoperable; pin the normative NIP-49 byte
+    layout and official vector, use classic Bech32 rather than Bech32m, normalize NFKC before scrypt,
+    authenticate the security byte, and validate cost/length fields before deriving a key.
+  - Test-friendly weak KDF parameters can accidentally become a production downgrade; keep the
+    production export cost constant, bound imported NIP-49 costs to the reviewed range, and limit any
+    cheap deterministic helper to private unit-test code.
+  - Crash recovery and durability differ from ordinary successful I/O; use one atomic-write helper,
+    sync the completed file and containing directory, clean only temporary paths created by the
+    current attempt, and treat an absent final identity as uninitialized rather than consuming a
+    partial file.
+  - Advisory locks do not stop a second host from using an imported identity; enforce same-state
+    local exclusion mechanically and retain the explicit distributed duplicate-identity warning in
+    public backup documentation and later operator/cutover procedures.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including cryptographic vectors, filesystem
+     failure/recovery, redaction, configuration, and every repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so identity/configuration code, tests, dependency policy, and plan
+     bookkeeping form one reviewable change.
+
+
 ## 2026-08-27 — Verified DTO semantic conversion
 
 Implemented the sole reducer-ready transition from a complete `VerifiedSupportedRecord` into

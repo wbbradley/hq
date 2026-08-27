@@ -25,6 +25,9 @@ repository = "https://github.com/wbbradley/hq"
 publish = false
 
 [workspace.dependencies]
+bech32 = { version = "0.12.0", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = { version = "0.4.3", default-features = false }
 hq-application = { version = "0.1.0", path = "crates/hq-application" }
 hq-codex = { version = "0.1.0", path = "crates/hq-codex" }
 hq-domain = { version = "0.1.0", path = "crates/hq-domain" }
@@ -37,9 +40,12 @@ hq-store = { version = "0.1.0", path = "crates/hq-store" }
 hq-testkit = { version = "0.1.0", path = "crates/hq-testkit" }
 hq-tui = { version = "0.1.0", path = "crates/hq-tui" }
 k256 = { version = "0.14.0", default-features = false, features = ["schnorr"] }
+scrypt = { version = "0.12.0", default-features = false }
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.151", default-features = false, features = ["raw_value", "std"] }
 sha2 = { version = "0.11.0", default-features = false }
+unicode-normalization = { version = "0.1.25", default-features = false }
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 
 [workspace.lints.rust]
 missing_docs = "deny"

@@ -54,19 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[identity/high] Implement installation identity and local configuration persistence** —
-  Implement the new Rust state-directory layout, stable installation identity, root-key generation
-  and loading, signer access, secure atomic file creation and permissions, public identity display,
-  and the identity export/import/backup behavior retained by the behavior ledger. Keep secret keys
-  out of SQLite, logs, diagnostics, RPC results, and canonical facts, and reject unsafe overwrite or
-  concurrent-use conditions. Use the ADR-0002 Rust-era encrypted package with NIP-49 secret
-  protection, keep database/history migration outside it, and omit a routine recursive reset
-  command. Implement typed local configuration for relay and provider defaults without turning
-  configuration into signed domain state. Test fresh initialization, partial-write recovery,
-  permission failures, redaction, backup round trips, duplicate identity protection, and path
-  derivation. Complete this work when the node and store can consume one explicit secure
-  identity/configuration boundary without reading Go state or formats.
-
 - **[storage/high] Build the SQLite owner, schema, and complete rebuild path** — Design a fresh
   SQLite schema by data class: immutable canonical knowledge, deterministic indexes, rebuildable
   projections, durable operational state, ephemeral state, and bounded rejected/temporary input.

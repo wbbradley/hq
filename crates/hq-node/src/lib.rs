@@ -1,5 +1,12 @@
 //! Composition root and runtime ownership boundary.
 
+mod identity;
+
+pub use identity::{
+    BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity, LocalConfiguration,
+    PublicIdentity, RelayEndpoint, StateDirectoryOwner, StatePaths,
+};
+
 use hq_application::InMemoryApplication;
 use hq_protocol::{DecodeError, InMemoryFrame};
 use hq_reducer::{GraphReductionReport, ReduceError};
