@@ -54,16 +54,23 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[storage/high] Persist complete batch projections and implement repair** — Extend the fresh
-  schema with deterministic dependency/frontier/support indexes and normalized materialized
-  authority, conversation, activity, agent, and project projections. Define one typed public store
-  snapshot/query boundary independent of SQL layout, rebuild all domain reports from the complete
-  reverified fact corpus under explicit local authority policy, transactionally replace only
-  rebuildable tables, and implement idempotent repair that never mutates immutable facts or durable
-  operational state. Add projection codecs/rows without serializing domain structs generically,
-  prove reopen and repeated-repair equality against fresh reducers, and cover missing parents,
-  conflicts, late authority, compacted activity, and corrupted rebuildable rows. Complete this
-  package when a fact corpus rebuilds every projection exactly through the public query boundary.
+- **[storage/high] Persist authority and conversation/activity projections** — Add explicit fresh
+  schema rows and private codecs for every authority, conversation, message-state, action-group,
+  activity, retention, frontier, support, and conflict projection. Extend repair to replace them from
+  the complete oracle and expose typed query snapshots whose equality is independent of SQL layout.
+  Cover unique roots, capability and membership frontiers, account selection, missing conversation
+  history, message state, answers/cancellations, delivery evidence, activity coalescing, equal
+  sequence conflicts, retention compaction, corruption, reopen, and repeated repair. Complete this
+  package when fresh authority and conversation reports equal persisted typed queries exactly.
+
+- **[storage/high] Persist agent/project projections and close complete repair equality** — Add
+  explicit fresh schema rows and private codecs for every agent name/lifecycle/session/context/
+  selection/rename/direct-session view and every project/resource/assignment/input/dispatch/output/
+  remote-command view, including frontier and support indexes. Extend the typed query boundary and
+  repair transaction across all domains, prove every report projection equals a fresh reducer before
+  and after reopen and repeated repair, and cover conflicts, late authority, runnable state, compacted
+  activity coexistence, and corrupted rebuildable rows. Complete this package when the immutable fact
+  corpus rebuilds every public projection exactly without touching durable operational state.
 
 - **[storage/high] Implement the atomic mutation and inbound-ingest engine** — Implement the common
   transaction path for local fact-backed commands and remotely verified facts: stable mutation

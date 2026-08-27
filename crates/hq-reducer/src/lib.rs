@@ -12,7 +12,7 @@ mod reducer;
 
 pub use agent::{
     AgentAggregateKey, AgentLifecycle, AgentProjection, AgentProjectionKey, AgentReason,
-    AgentReducer, AgentView, ContextHistoryView, DirectSessionView, NameClaimSubject,
+    AgentReducer, AgentReport, AgentView, ContextHistoryView, DirectSessionView, NameClaimSubject,
     NameReservationView, RenameView, SelectionCandidate, SelectionView, SessionBindingView,
     SessionIdentity,
 };
@@ -39,7 +39,7 @@ pub use project::{
     PathResourcePolicy, ProjectAggregateKey, ProjectAssignmentPhase, ProjectAssignmentView,
     ProjectDispatchView, ProjectInputView, ProjectLifecycle, ProjectOutputStatus,
     ProjectOutputView, ProjectProjection, ProjectProjectionKey, ProjectReason, ProjectReducer,
-    ProjectView, RemoteCommandStage, RemoteCommandView, ResourceConflictPolicy,
+    ProjectReport, ProjectView, RemoteCommandStage, RemoteCommandView, ResourceConflictPolicy,
 };
 pub use reducer::{
     ConflictObservation, ConflictReason, DomainReducer, DomainReductionReport, GraphOnlyReducer,

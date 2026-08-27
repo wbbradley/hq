@@ -345,7 +345,9 @@ version = "0.1.0"
 dependencies = [
  "hq-domain",
  "hq-protocol",
+ "hq-reducer",
  "rusqlite",
+ "sha2",
 ]
 
 [[package]]

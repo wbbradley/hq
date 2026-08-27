@@ -9,8 +9,11 @@ use std::{
 };
 
 use hq_protocol::VerifiedSemanticFact;
+use hq_reducer::AuthorityPolicy;
 
-use crate::{StoreError, StoreErrorClass, database::Database};
+use crate::{
+    CompleteSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass, database::Database,
+};
 
 /// Result of appending immutable verified evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,6 +64,37 @@ impl fmt::Debug for VerifiedFactCorpus {
     }
 }
 
+/// Successful complete repair and the exact persisted structural view it verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairOutcome {
+    complete: CompleteSnapshot,
+    persisted: ReductionIndexSnapshot,
+}
+
+impl RepairOutcome {
+    pub(crate) fn new(complete: CompleteSnapshot, persisted: ReductionIndexSnapshot) -> Self {
+        Self {
+            complete,
+            persisted,
+        }
+    }
+
+    /// Returns all fresh complete-batch reports.
+    pub const fn complete(&self) -> &CompleteSnapshot {
+        &self.complete
+    }
+
+    /// Returns the normalized structural index read back before commit.
+    pub const fn persisted(&self) -> &ReductionIndexSnapshot {
+        &self.persisted
+    }
+
+    /// Consumes the outcome into its complete and persisted snapshots.
+    pub fn into_parts(self) -> (CompleteSnapshot, ReductionIndexSnapshot) {
+        (self.complete, self.persisted)
+    }
+}
+
 enum Request {
     Append {
         fact: Box<VerifiedSemanticFact>,
@@ -68,6 +102,17 @@ enum Request {
     },
     Load {
         reply: SyncSender<Result<VerifiedFactCorpus, StoreError>>,
+    },
+    CompleteSnapshot {
+        policy: AuthorityPolicy,
+        reply: SyncSender<Result<CompleteSnapshot, StoreError>>,
+    },
+    Repair {
+        policy: AuthorityPolicy,
+        reply: SyncSender<Result<RepairOutcome, StoreError>>,
+    },
+    LoadReductionIndex {
+        reply: SyncSender<Result<ReductionIndexSnapshot, StoreError>>,
     },
     Close {
         reply: SyncSender<()>,
@@ -134,6 +179,42 @@ impl Store {
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
+    /// Reverifies the corpus and runs every complete-batch reducer under one explicit policy.
+    pub fn complete_snapshot(
+        &self,
+        policy: AuthorityPolicy,
+    ) -> Result<CompleteSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::CompleteSnapshot { policy, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Rebuilds structural rows from the complete oracle and verifies them before commit.
+    pub fn repair(&self, policy: AuthorityPolicy) -> Result<RepairOutcome, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Repair { policy, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads the last successfully repaired normalized structural index without mutating it.
+    pub fn load_reduction_index(&self) -> Result<ReductionIndexSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadReductionIndex { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -184,6 +265,15 @@ fn run(path: &Path, receiver: &Receiver<Request>, started: &SyncSender<Result<()
             Request::Load { reply } => {
                 let _ = reply.send(database.load().map(VerifiedFactCorpus::new));
             }
+            Request::CompleteSnapshot { policy, reply } => {
+                let _ = reply.send(database.complete_snapshot(policy));
+            }
+            Request::Repair { policy, reply } => {
+                let _ = reply.send(database.repair(policy));
+            }
+            Request::LoadReductionIndex { reply } => {
+                let _ = reply.send(database.load_reduction_index());
+            }
             Request::Close { reply } => {
                 let _ = reply.send(());
                 break;
@@ -226,6 +316,18 @@ mod tests {
             .requests
             .send(Request::Load { reply })
             .expect("request is accepted");
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::Repair {
+                policy: hq_reducer::AuthorityPolicy::new(
+                    hq_domain::InstallationId::from_bytes([0x11; 32]),
+                    hq_domain::MailboxId::from_bytes([0x33; 32]),
+                ),
+                reply,
+            })
+            .expect("repair request is accepted");
         assert!(
             store
                 .load_corpus()

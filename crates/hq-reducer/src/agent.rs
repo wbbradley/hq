@@ -242,6 +242,9 @@ pub struct AgentReducer {
     authority: AuthorityPolicy,
 }
 
+/// Complete normalized named-agent report.
+pub type AgentReport = crate::DomainReductionReport<AgentReducer>;
+
 impl AgentReducer {
     /// Creates the reducer from explicit installation-local authority policy.
     pub const fn new(authority: AuthorityPolicy) -> Self {

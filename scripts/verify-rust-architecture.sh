@@ -107,7 +107,8 @@ done
 
 while IFS= read -r rust_source; do
   if grep -Eq '(^|[^a-z])rusqlite::' "$rust_source" &&
-    [[ "$rust_source" != "$repository_root/crates/hq-store/src/database.rs" ]]; then
+    [[ "$rust_source" != "$repository_root/crates/hq-store/src/database.rs" ]] &&
+    [[ "$rust_source" != "$repository_root/crates/hq-store/src/database/"*.rs ]]; then
     fail "rusqlite production API use escaped hq-store's private database module: $rust_source"
   fi
 done < <(find "$repository_root"/crates/hq-*/src -type f -name '*.rs' | sort)

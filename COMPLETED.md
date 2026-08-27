@@ -4135,3 +4135,104 @@ fresh Go regression gates pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so store code, tests, specification, dependencies, and plan
      bookkeeping form one reviewable change.
+
+
+## 2026-08-27 — Complete-batch snapshot and repair foundation
+
+Added one actor-owned complete-batch oracle that reverifies the immutable corpus once under an
+explicit authority policy and runs all four authoritative reducers. Added typed complete and
+normalized reduction-index snapshots, storage v2 structural tables, exhaustive closed reason
+codecs, bounded fail-closed row loading, and one explicit repair transaction that replaces only
+rebuildable rows and verifies exact readback before commit. Empty/populated snapshots, direct
+reducer equality, missing and late parents, unusable authority, root conflicts, idempotence,
+reopen, immutable corpus preservation, stale-index semantics, corruption, dropped replies,
+nine rollback checkpoints, and successful retry are covered. Formatting, architecture/behavior/
+causal/protocol verifiers, workspace check/build/tests/doctests, strict Clippy, dependency policy,
+all four release-target core/protocol checks, both fuzz smokes, whitespace, and unchanged Go
+build/vet/fresh regression gates pass.
+
+### Original plan entry
+
+- **[storage/high] Implement the complete-batch snapshot and repair foundation** — Reverify the
+  immutable corpus under explicit local authority policy, run all four authoritative batch reducers,
+  and expose one typed in-memory `CompleteSnapshot`. Extend the fresh schema with normalized reverse
+  dependencies, per-domain decisions and diagnostic edges, dependency order, and presentation order;
+  transactionally replace only those rebuildable rows and expose a typed persisted-index snapshot
+  independent of SQL. Prove idempotent repair, rollback at each replacement group, exact equality
+  with fresh reports, and immutable-corpus preservation across missing parents, conflicts, late
+  authority, corruption, and reopen. Complete this package when later projection codecs can consume
+  one batch oracle and repair transaction without inventing another reduction or database path.
+
+  **Implementation plan**
+
+  - Add failing store-contract tests first for an explicit `AuthorityPolicy`, empty and populated
+    complete snapshots, all four reducer reports, a typed normalized persisted-index view, repair,
+    repeated-repair equality, close/reopen equality, and late-parent reconsideration. Construct every
+    public input through valid signed protocol trust states and compare against direct
+    `reduce_complete` calls over the same semantic facts.
+  - Keep one immutable-corpus read and one SQLite transaction on the owning actor thread. Reverify
+    exact event bytes using the existing corpus loader, clone only reducer-ready `SemanticFact`
+    values at the pure boundary, and run `AuthorityReducer`, `ConversationReducer`, `AgentReducer`,
+    and `ProjectReducer` with the same caller-supplied local authority policy. Return a
+    `CompleteSnapshot` containing typed reports, never database rows or serialized domain structs.
+  - Extend fresh storage schema identity to the next unreleased version and add only rebuildable
+    structural tables: reverse dependency edges including missing vertices, per-domain fact
+    decisions, missing/unusable dependency diagnostics, failed authority roles, conflict
+    participants, deterministic dependency positions, and reducer-owned presentation positions.
+    Do not add domain projection-value, operational, receipt, revision, outbox, or staging rows yet.
+  - Define stable store-owned enums for the four reduction domains, six decision statuses, framework
+    versus domain reason codes, and typed diagnostic records. Implement exhaustive explicit mappings
+    from every authority, conversation/activity, agent, and project reason variant, including nested
+    authority reasons and authority-role parameters; do not persist `Debug` text or generic Serde
+    encodings.
+  - Normalize each fresh report into one representation-independent `ReductionIndexSnapshot` with
+    ordered domain/fact decisions, dependency order, presentation order, reverse dependencies,
+    missing dependencies, unusable dependency statuses, failed roles, and conflict participants.
+    Store and load that normalized type through private row codecs with fixed-width identity checks,
+    closed integer vocabularies, uniqueness constraints, and count bounds before allocation.
+  - Implement `repair(policy)` as one transaction that computes the complete oracle before writes,
+    deletes only rebuildable structural rows, inserts every replacement group, reads the persisted
+    normalized index back inside the transaction, compares it to the fresh normalization, and commits
+    only on exact equality. Never update or delete canonical facts, parent/authority corpus rows,
+    schema metadata, or future durable operational tables.
+  - Make ordinary complete-snapshot reads pure with respect to storage and make persisted-index reads
+    fail closed on absent, partial, unknown, duplicate, oversized, or cross-domain rows. Give explicit
+    `NotRepaired` and `RebuildableStateCorrupt` classifications so callers can choose repair rather
+    than silently accepting or mutating a damaged view.
+  - Add failpoints after each delete/insert/verification group and prove rollback preserves the prior
+    complete index. Add adversarial tests for missing and late parents, unusable authorities,
+    identity/root conflicts, corrupted statuses/reasons/positions/diagnostic edges, cross-domain
+    leakage, repeated repair, corpus byte/count equality before and after repair, reopen, dropped
+    replies, and a repair failure followed by a successful retry.
+  - Update `docs/rust/storage.md` with the batch-oracle, schema-evolution, repair, and public-boundary
+    contract. Run format, all architecture/spec verifiers, workspace check/build/test/doctests,
+    strict Clippy, dependency policy, four-target core/protocol checks, fuzz smoke, whitespace, and
+    unchanged Go build/vet/fresh full regression suite before recording.
+
+  **Risks and mitigations**
+
+  - Four independent reports can drift if they see different corpus snapshots or policies; load and
+    reverify once, capture one explicit policy value, and derive all reports before the repair
+    transaction writes any rebuildable row.
+  - Persisting reducer `Debug` output would make schema compatibility depend on prose and Rust type
+    names; use closed store-owned integer codecs with exhaustive matches and typed public enums.
+  - Repair can accidentally become a hidden mutation or erase future operational state; centralize
+    the exact rebuildable table set, test canonical row/byte equality, and reject any delete target
+    outside that private allowlist.
+  - A partial or corrupt normalized index must not masquerade as an authoritative snapshot; validate
+    row cardinality and referential/domain consistency, compare repaired rows to fresh normalization
+    before commit, and require explicit repair after typed corruption detection.
+  - Cloning the corpus into four current reducer reports has bounded but nontrivial memory cost; keep
+    this correctness-first batch oracle, record the limit, and leave shared-report or incremental
+    optimization to the later measured scaling package.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including batch equality, repair rollback,
+     corruption, actor lifecycle, and every repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so batch snapshot, repair, tests, specification, and plan bookkeeping
+     form one reviewable change.

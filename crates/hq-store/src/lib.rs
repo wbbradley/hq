@@ -25,6 +25,11 @@ mod actor;
 mod database;
 mod error;
 mod paths;
+mod snapshot;
 
-pub use actor::{AppendOutcome, Store, VerifiedFactCorpus};
+pub use actor::{AppendOutcome, RepairOutcome, Store, VerifiedFactCorpus};
 pub use error::{StoreError, StoreErrorClass};
+pub use snapshot::{
+    CompleteSnapshot, IndexedConflict, IndexedDecision, ReductionDomain, ReductionIndexSnapshot,
+    ReductionReason,
+};

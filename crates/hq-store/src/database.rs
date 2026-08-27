@@ -1,24 +1,29 @@
 //! Private SQLite schema, row codecs, and transactions.
 
+mod repair;
+
 use std::{path::Path, time::Duration};
 
 use hq_domain::{AuthorityRole, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS};
 use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
 };
+use hq_reducer::AuthorityPolicy;
 use rusqlite::{
     Connection, Error as SqlError, ErrorCode, OpenFlags, OptionalExtension, Transaction,
     TransactionBehavior, config::DbConfig, params,
 };
 
 use crate::{
-    AppendOutcome, StoreError, StoreErrorClass,
+    AppendOutcome, CompleteSnapshot, ReductionIndexSnapshot, RepairOutcome, StoreError,
+    StoreErrorClass,
     paths::{prepare_database_path, validate_database_path},
+    snapshot::build_complete_snapshot,
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 1;
-const SCHEMA_MARKER: &str = "hq-store-v1-corpus-2026-08-27";
+const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_MARKER: &str = "hq-store-v2-repair-foundation-2026-08-27";
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
 const SCHEMA: &str = r"
@@ -46,6 +51,115 @@ CREATE TABLE fact_authorities (
     authority_fact_id BLOB NOT NULL
         CHECK(typeof(authority_fact_id) = 'blob' AND length(authority_fact_id) = 32),
     PRIMARY KEY (fact_id, authority_role)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_state (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    policy_installation BLOB NOT NULL
+        CHECK(typeof(policy_installation) = 'blob' AND length(policy_installation) = 32),
+    policy_human_mailbox BLOB NOT NULL
+        CHECK(typeof(policy_human_mailbox) = 'blob' AND length(policy_human_mailbox) = 32),
+    fact_count INTEGER NOT NULL CHECK(fact_count >= 0),
+    vertex_count INTEGER NOT NULL CHECK(vertex_count >= 0),
+    reverse_count INTEGER NOT NULL CHECK(reverse_count >= 0),
+    decision_count INTEGER NOT NULL CHECK(decision_count >= 0),
+    missing_count INTEGER NOT NULL CHECK(missing_count >= 0),
+    unusable_count INTEGER NOT NULL CHECK(unusable_count >= 0),
+    failed_authority_count INTEGER NOT NULL CHECK(failed_authority_count >= 0),
+    decision_participant_count INTEGER NOT NULL CHECK(decision_participant_count >= 0),
+    dependency_order_count INTEGER NOT NULL CHECK(dependency_order_count >= 0),
+    presentation_order_count INTEGER NOT NULL CHECK(presentation_order_count >= 0),
+    conflict_count INTEGER NOT NULL CHECK(conflict_count >= 0),
+    conflict_participant_count INTEGER NOT NULL CHECK(conflict_participant_count >= 0),
+    index_digest BLOB NOT NULL CHECK(typeof(index_digest) = 'blob' AND length(index_digest) = 32)
+) STRICT;
+
+CREATE TABLE reduction_vertices (
+    fact_id BLOB PRIMARY KEY NOT NULL CHECK(typeof(fact_id) = 'blob' AND length(fact_id) = 32)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_reverse_dependencies (
+    parent_id BLOB NOT NULL REFERENCES reduction_vertices(fact_id) ON DELETE RESTRICT,
+    child_id BLOB NOT NULL REFERENCES reduction_vertices(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (parent_id, child_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_decisions (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    status INTEGER NOT NULL CHECK(status BETWEEN 1 AND 6),
+    reason_code INTEGER NOT NULL CHECK(reason_code >= 0),
+    reason_parameter INTEGER NOT NULL CHECK(reason_parameter >= 0),
+    PRIMARY KEY (domain, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_missing_dependencies (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    dependency_id BLOB NOT NULL
+        CHECK(typeof(dependency_id) = 'blob' AND length(dependency_id) = 32),
+    PRIMARY KEY (domain, fact_id, dependency_id),
+    FOREIGN KEY (domain, fact_id) REFERENCES reduction_decisions(domain, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_unusable_dependencies (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    dependency_id BLOB NOT NULL
+        CHECK(typeof(dependency_id) = 'blob' AND length(dependency_id) = 32),
+    dependency_status INTEGER NOT NULL CHECK(dependency_status BETWEEN 1 AND 6),
+    PRIMARY KEY (domain, fact_id, dependency_id),
+    FOREIGN KEY (domain, fact_id) REFERENCES reduction_decisions(domain, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_failed_authorities (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    authority_role INTEGER NOT NULL CHECK(authority_role BETWEEN 1 AND 13),
+    PRIMARY KEY (domain, fact_id, authority_role),
+    FOREIGN KEY (domain, fact_id) REFERENCES reduction_decisions(domain, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_decision_participants (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    participant_id BLOB NOT NULL
+        CHECK(typeof(participant_id) = 'blob' AND length(participant_id) = 32),
+    PRIMARY KEY (domain, fact_id, participant_id),
+    FOREIGN KEY (domain, fact_id) REFERENCES reduction_decisions(domain, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_dependency_order (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    position INTEGER NOT NULL CHECK(position >= 0),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (domain, position),
+    UNIQUE (domain, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_presentation_order (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    position INTEGER NOT NULL CHECK(position >= 0),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (domain, position),
+    UNIQUE (domain, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_conflicts (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    reason_code INTEGER NOT NULL CHECK(reason_code > 0),
+    reason_parameter INTEGER NOT NULL CHECK(reason_parameter >= 0),
+    PRIMARY KEY (domain, ordinal)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE reduction_conflict_participants (
+    domain INTEGER NOT NULL CHECK(domain BETWEEN 1 AND 4),
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    participant_id BLOB NOT NULL
+        CHECK(typeof(participant_id) = 'blob' AND length(participant_id) = 32),
+    PRIMARY KEY (domain, ordinal, participant_id),
+    FOREIGN KEY (domain, ordinal) REFERENCES reduction_conflicts(domain, ordinal)
 ) STRICT, WITHOUT ROWID;
 ";
 
@@ -157,6 +271,25 @@ impl Database {
         transaction.commit().map_err(sql_error)?;
         Ok(facts)
     }
+
+    pub(super) fn complete_snapshot(
+        &mut self,
+        policy: AuthorityPolicy,
+    ) -> Result<CompleteSnapshot, StoreError> {
+        let facts = self.load()?;
+        build_complete_snapshot(&facts, policy)
+    }
+
+    pub(super) fn repair(&mut self, policy: AuthorityPolicy) -> Result<RepairOutcome, StoreError> {
+        let complete = self.complete_snapshot(policy)?;
+        let expected = complete.normalized_index();
+        let persisted = repair::replace(&mut self.connection, &expected)?;
+        Ok(RepairOutcome::new(complete, persisted))
+    }
+
+    pub(super) fn load_reduction_index(&self) -> Result<ReductionIndexSnapshot, StoreError> {
+        repair::load(&self.connection)
+    }
 }
 
 fn inspect_existing(connection: &Connection) -> Result<bool, StoreError> {
@@ -262,7 +395,7 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
             |row| row.get(0),
         )
         .map_err(sql_error)?;
-    if table_count != 4 {
+    if table_count != 16 {
         return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
     }
     for table in [
@@ -270,6 +403,18 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
         "canonical_facts",
         "fact_parents",
         "fact_authorities",
+        "reduction_state",
+        "reduction_vertices",
+        "reduction_reverse_dependencies",
+        "reduction_decisions",
+        "reduction_missing_dependencies",
+        "reduction_unusable_dependencies",
+        "reduction_failed_authorities",
+        "reduction_decision_participants",
+        "reduction_dependency_order",
+        "reduction_presentation_order",
+        "reduction_conflicts",
+        "reduction_conflict_participants",
     ] {
         let present: i64 = connection
             .query_row(
@@ -659,6 +804,58 @@ mod tests {
                 })
                 .expect("authority count reads");
             assert_eq!((parent_count, authority_count), (0, 0));
+        }
+    }
+
+    #[test]
+    fn repair_failpoints_preserve_the_previous_complete_index_and_allow_retry() {
+        use super::repair::{RepairFailpoint, replace_with_failpoint};
+
+        for failpoint in [
+            RepairFailpoint::AfterClear,
+            RepairFailpoint::AfterVertices,
+            RepairFailpoint::AfterReverseDependencies,
+            RepairFailpoint::AfterDecisions,
+            RepairFailpoint::AfterDependencyOrder,
+            RepairFailpoint::AfterPresentationOrder,
+            RepairFailpoint::AfterConflicts,
+            RepairFailpoint::AfterState,
+            RepairFailpoint::AfterVerification,
+        ] {
+            let mut connection = Connection::open_in_memory().expect("memory database opens");
+            connection.execute_batch(SCHEMA).expect("schema creates");
+            append_with_failpoint(&mut connection, &fixture(), Failpoint::Never)
+                .expect("fixture appends");
+            let mut database = Database { connection };
+            let first_policy = AuthorityPolicy::new(
+                hq_domain::InstallationId::from_bytes([0x11; 32]),
+                hq_domain::MailboxId::from_bytes([0x44; 32]),
+            );
+            let replacement_policy = AuthorityPolicy::new(
+                hq_domain::InstallationId::from_bytes([0x22; 32]),
+                hq_domain::MailboxId::from_bytes([0x55; 32]),
+            );
+            let prior = database
+                .complete_snapshot(first_policy)
+                .expect("prior snapshot reduces")
+                .normalized_index();
+            repair::replace(&mut database.connection, &prior).expect("prior index persists");
+            let replacement = database
+                .complete_snapshot(replacement_policy)
+                .expect("replacement snapshot reduces")
+                .normalized_index();
+
+            let error = replace_with_failpoint(&mut database.connection, &replacement, failpoint)
+                .expect_err("repair failpoint interrupts replacement");
+            assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+            assert_eq!(
+                repair::load(&database.connection).expect("prior index remains loadable"),
+                prior
+            );
+            assert_eq!(
+                repair::replace(&mut database.connection, &replacement).expect("retry succeeds"),
+                replacement
+            );
         }
     }
 

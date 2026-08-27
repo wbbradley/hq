@@ -27,6 +27,12 @@ pub enum StoreErrorClass {
     WorkerStopped,
     /// A database operation failed without establishing corruption.
     DatabaseUnavailable,
+    /// Pure complete-batch reduction failed to produce a coherent report.
+    ReductionFailed,
+    /// No successful repair has materialized the structural index yet.
+    NotRepaired,
+    /// Rebuildable structural rows are partial, unknown, or inconsistent.
+    RebuildableStateCorrupt,
 }
 
 /// A redacted persistence failure with a stable classification.
@@ -60,6 +66,9 @@ impl fmt::Display for StoreError {
             StoreErrorClass::ActorClosed => "store actor is closed",
             StoreErrorClass::WorkerStopped => "store worker stopped",
             StoreErrorClass::DatabaseUnavailable => "database operation failed",
+            StoreErrorClass::ReductionFailed => "complete reduction failed",
+            StoreErrorClass::NotRepaired => "rebuildable state has not been repaired",
+            StoreErrorClass::RebuildableStateCorrupt => "rebuildable state is corrupt",
         })
     }
 }

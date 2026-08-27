@@ -325,6 +325,9 @@ pub struct ProjectReducer<P = PathResourcePolicy> {
     resources: P,
 }
 
+/// Complete normalized first-release project report.
+pub type ProjectReport = crate::DomainReductionReport<ProjectReducer<PathResourcePolicy>>;
+
 impl ProjectReducer<PathResourcePolicy> {
     /// Creates the first-release project reducer with path-resource semantics.
     pub const fn new(authority: AuthorityPolicy) -> Self {

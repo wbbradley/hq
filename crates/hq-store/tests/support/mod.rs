@@ -49,7 +49,31 @@ pub fn verified_fact() -> VerifiedSemanticFact {
     verified_fact_with_auxiliary([7; 32])
 }
 
+pub fn verified_fact_with_label(
+    label: &str,
+    auxiliary_randomness: [u8; 32],
+) -> VerifiedSemanticFact {
+    let content =
+        CANONICAL_CONTENT.replace("\"label\":\"alpha\"", &format!("\"label\":\"{label}\""));
+    signed_fact(0, content.as_bytes(), auxiliary_randomness)
+}
+
+pub fn authority_policy() -> hq_reducer::AuthorityPolicy {
+    hq_reducer::AuthorityPolicy::new(
+        hq_domain::InstallationId::from_bytes([0x11; 32]),
+        hq_domain::MailboxId::from_bytes([0x33; 32]),
+    )
+}
+
 pub fn verified_fact_with_auxiliary(auxiliary_randomness: [u8; 32]) -> VerifiedSemanticFact {
+    signed_fact(0, CANONICAL_CONTENT.as_bytes(), auxiliary_randomness)
+}
+
+fn signed_fact(
+    created_at: u64,
+    content: &[u8],
+    auxiliary_randomness: [u8; 32],
+) -> VerifiedSemanticFact {
     let signer = Bip340Signer::from_secret_bytes({
         let mut secret = [0_u8; 32];
         secret[31] = 1;
@@ -57,7 +81,7 @@ pub fn verified_fact_with_auxiliary(auxiliary_randomness: [u8; 32]) -> VerifiedS
     })
     .expect("fixture secret is valid");
     let event = signer
-        .sign(0, CANONICAL_CONTENT.as_bytes(), auxiliary_randomness)
+        .sign(created_at, content, auxiliary_randomness)
         .expect("fixture signs");
     let DispatchOutcome::Supported(supported) = event.dispatch().expect("fixture dispatches")
     else {
