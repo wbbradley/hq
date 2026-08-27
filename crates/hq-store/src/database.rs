@@ -1,5 +1,6 @@
 //! Private SQLite schema, row codecs, and transactions.
 
+mod agent;
 mod authority;
 mod conversation;
 mod repair;
@@ -17,15 +18,95 @@ use rusqlite::{
 };
 
 use crate::{
-    AppendOutcome, AuthorityProjectionSnapshot, CompleteSnapshot, ConversationProjectionSnapshot,
-    ReductionIndexSnapshot, RepairOutcome, StoreError, StoreErrorClass,
+    AgentProjectionSnapshot, AppendOutcome, AuthorityProjectionSnapshot, CompleteSnapshot,
+    ConversationProjectionSnapshot, ReductionIndexSnapshot, RepairOutcome, StoreError,
+    StoreErrorClass,
     paths::{prepare_database_path, validate_database_path},
     snapshot::build_complete_snapshot,
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 4;
-const SCHEMA_MARKER: &str = "hq-store-v4-conversation-projections-2026-08-27";
+const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_MARKER: &str = "hq-store-v5-agent-projections-2026-08-27";
+const SCHEMA_TABLES: [&str; 77] = [
+    "storage_metadata",
+    "canonical_facts",
+    "fact_parents",
+    "fact_authorities",
+    "reduction_state",
+    "reduction_vertices",
+    "reduction_reverse_dependencies",
+    "reduction_decisions",
+    "reduction_missing_dependencies",
+    "reduction_unusable_dependencies",
+    "reduction_failed_authorities",
+    "reduction_decision_participants",
+    "reduction_dependency_order",
+    "reduction_presentation_order",
+    "reduction_conflicts",
+    "reduction_conflict_participants",
+    "authority_state",
+    "authority_frontiers",
+    "authority_support",
+    "authority_installations",
+    "authority_mailboxes",
+    "authority_peer_routes",
+    "authority_peer_route_facts",
+    "authority_peer_route_candidates",
+    "authority_peer_route_relays",
+    "authority_capabilities",
+    "authority_capability_facts",
+    "authority_accounts",
+    "authority_memberships",
+    "authority_membership_facts",
+    "authority_membership_grants",
+    "authority_membership_grant_relays",
+    "authority_account_selections",
+    "authority_account_selection_candidates",
+    "conversation_state",
+    "conversation_aggregate_keys",
+    "conversation_frontiers",
+    "conversation_projection_keys",
+    "conversation_support",
+    "conversation_threads",
+    "conversation_thread_answers",
+    "conversation_thread_cancellations",
+    "conversation_thread_relations",
+    "conversation_thread_ready_answers",
+    "conversation_messages",
+    "conversation_message_frontiers",
+    "conversation_message_receipts",
+    "conversation_action_groups",
+    "conversation_action_entries",
+    "conversation_activities",
+    "conversation_activity_retentions",
+    "conversation_retained_progress",
+    "agent_state",
+    "agent_aggregate_keys",
+    "agent_frontiers",
+    "agent_projection_keys",
+    "agent_support",
+    "agent_names",
+    "agent_name_claims",
+    "agent_agents",
+    "agent_agent_claims",
+    "agent_agent_names",
+    "agent_agent_mailboxes",
+    "agent_agent_retirements",
+    "agent_sessions",
+    "agent_session_bindings",
+    "agent_contexts",
+    "agent_context_history",
+    "agent_context_frontiers",
+    "agent_selections",
+    "agent_selection_candidates",
+    "agent_selection_frontiers",
+    "agent_renames",
+    "agent_rename_candidates",
+    "agent_rename_frontiers",
+    "agent_direct_sessions",
+    "agent_direct_binding_facts",
+];
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
 const SCHEMA: &str = r"
@@ -478,6 +559,219 @@ CREATE TABLE conversation_retained_progress (
     PRIMARY KEY (key_digest, position),
     UNIQUE (key_digest, fact_id)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_state (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    aggregate_key_count INTEGER NOT NULL CHECK(aggregate_key_count >= 0),
+    frontier_count INTEGER NOT NULL CHECK(frontier_count >= 0),
+    projection_key_count INTEGER NOT NULL CHECK(projection_key_count >= 0),
+    projection_count INTEGER NOT NULL CHECK(projection_count >= 0),
+    support_count INTEGER NOT NULL CHECK(support_count >= 0),
+    row_count INTEGER NOT NULL CHECK(row_count >= 0),
+    row_digest BLOB NOT NULL CHECK(typeof(row_digest) = 'blob' AND length(row_digest) = 32)
+) STRICT;
+
+CREATE TABLE agent_aggregate_keys (
+    key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 7),
+    key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
+    key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
+    name TEXT NOT NULL CHECK(typeof(name) = 'text' AND length(CAST(name AS BLOB)) <= 128),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) <= 256)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_frontiers (
+    key_digest BLOB NOT NULL REFERENCES agent_aggregate_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_projection_keys (
+    key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
+    key_kind INTEGER NOT NULL CHECK(key_kind BETWEEN 1 AND 7),
+    key_a BLOB NOT NULL CHECK(typeof(key_a) = 'blob' AND length(key_a) = 32),
+    key_b BLOB NOT NULL CHECK(typeof(key_b) = 'blob' AND length(key_b) = 32),
+    name TEXT NOT NULL CHECK(typeof(name) = 'text' AND length(CAST(name AS BLOB)) <= 128),
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) <= 256)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_support (
+    key_digest BLOB NOT NULL REFERENCES agent_projection_keys(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_names (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES agent_projection_keys(key_digest),
+    conflicted INTEGER NOT NULL CHECK(conflicted IN (0, 1)),
+    retired INTEGER NOT NULL CHECK(retired IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_name_claims (
+    key_digest BLOB NOT NULL REFERENCES agent_names(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    mailbox_installation BLOB NOT NULL CHECK(typeof(mailbox_installation) = 'blob' AND length(mailbox_installation) = 32),
+    mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_agents (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES agent_projection_keys(key_digest),
+    lifecycle INTEGER NOT NULL CHECK(lifecycle BETWEEN 1 AND 3),
+    runnable INTEGER NOT NULL CHECK(runnable IN (0, 1)),
+    selected_present INTEGER NOT NULL CHECK(selected_present IN (0, 1)),
+    selected_provider TEXT NOT NULL CHECK(typeof(selected_provider) = 'text' AND length(CAST(selected_provider AS BLOB)) <= 64),
+    selected_session TEXT NOT NULL CHECK(typeof(selected_session) = 'text' AND length(CAST(selected_session AS BLOB)) <= 256),
+    name_reserved INTEGER NOT NULL CHECK(name_reserved IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_agent_claims (
+    key_digest BLOB NOT NULL REFERENCES agent_agents(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_agent_names (
+    key_digest BLOB NOT NULL REFERENCES agent_agents(key_digest),
+    name TEXT NOT NULL CHECK(typeof(name) = 'text' AND length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
+    PRIMARY KEY (key_digest, name)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_agent_mailboxes (
+    key_digest BLOB NOT NULL REFERENCES agent_agents(key_digest),
+    installation_id BLOB NOT NULL CHECK(typeof(installation_id) = 'blob' AND length(installation_id) = 32),
+    mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
+    PRIMARY KEY (key_digest, installation_id, mailbox_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_agent_retirements (
+    key_digest BLOB NOT NULL REFERENCES agent_agents(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_sessions (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES agent_projection_keys(key_digest),
+    conflicted INTEGER NOT NULL CHECK(conflicted IN (0, 1)),
+    mailbox_present INTEGER NOT NULL CHECK(mailbox_present IN (0, 1)),
+    mailbox_installation BLOB NOT NULL CHECK(typeof(mailbox_installation) = 'blob' AND length(mailbox_installation) = 32),
+    mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_session_bindings (
+    key_digest BLOB NOT NULL REFERENCES agent_sessions(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    mailbox_installation BLOB NOT NULL CHECK(typeof(mailbox_installation) = 'blob' AND length(mailbox_installation) = 32),
+    mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_contexts (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES agent_projection_keys(key_digest)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_context_history (
+    key_digest BLOB NOT NULL REFERENCES agent_contexts(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    directory_scheme INTEGER NOT NULL CHECK(directory_scheme BETWEEN 1 AND 4),
+    directory_value TEXT NOT NULL CHECK(typeof(directory_value) = 'text' AND length(CAST(directory_value AS BLOB)) BETWEEN 1 AND 4096),
+    repository_present INTEGER NOT NULL CHECK(repository_present IN (0, 1)),
+    repository_scheme INTEGER NOT NULL CHECK(repository_scheme BETWEEN 0 AND 4),
+    repository_value TEXT NOT NULL CHECK(typeof(repository_value) = 'text' AND length(CAST(repository_value AS BLOB)) <= 4096),
+    worktree_present INTEGER NOT NULL CHECK(worktree_present IN (0, 1)),
+    worktree_scheme INTEGER NOT NULL CHECK(worktree_scheme BETWEEN 0 AND 4),
+    worktree_value TEXT NOT NULL CHECK(typeof(worktree_value) = 'text' AND length(CAST(worktree_value AS BLOB)) <= 4096),
+    branch_present INTEGER NOT NULL CHECK(branch_present IN (0, 1)),
+    branch TEXT NOT NULL CHECK(typeof(branch) = 'text' AND length(CAST(branch AS BLOB)) <= 128),
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_context_frontiers (
+    key_digest BLOB NOT NULL REFERENCES agent_contexts(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_selections (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES agent_projection_keys(key_digest),
+    active_present INTEGER NOT NULL CHECK(active_present IN (0, 1)),
+    active_provider TEXT NOT NULL CHECK(typeof(active_provider) = 'text' AND length(CAST(active_provider AS BLOB)) <= 64),
+    active_session TEXT NOT NULL CHECK(typeof(active_session) = 'text' AND length(CAST(active_session AS BLOB)) <= 256),
+    active_directory_scheme INTEGER NOT NULL CHECK(active_directory_scheme BETWEEN 0 AND 4),
+    active_directory_value TEXT NOT NULL CHECK(typeof(active_directory_value) = 'text' AND length(CAST(active_directory_value AS BLOB)) <= 4096),
+    active_repository_present INTEGER NOT NULL CHECK(active_repository_present IN (0, 1)),
+    active_repository_scheme INTEGER NOT NULL CHECK(active_repository_scheme BETWEEN 0 AND 4),
+    active_repository_value TEXT NOT NULL CHECK(typeof(active_repository_value) = 'text' AND length(CAST(active_repository_value AS BLOB)) <= 4096),
+    active_worktree_present INTEGER NOT NULL CHECK(active_worktree_present IN (0, 1)),
+    active_worktree_scheme INTEGER NOT NULL CHECK(active_worktree_scheme BETWEEN 0 AND 4),
+    active_worktree_value TEXT NOT NULL CHECK(typeof(active_worktree_value) = 'text' AND length(CAST(active_worktree_value AS BLOB)) <= 4096),
+    active_branch_present INTEGER NOT NULL CHECK(active_branch_present IN (0, 1)),
+    active_branch TEXT NOT NULL CHECK(typeof(active_branch) = 'text' AND length(CAST(active_branch AS BLOB)) <= 128),
+    conflicted INTEGER NOT NULL CHECK(conflicted IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_selection_candidates (
+    key_digest BLOB NOT NULL REFERENCES agent_selections(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) BETWEEN 1 AND 64),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) BETWEEN 1 AND 256),
+    directory_scheme INTEGER NOT NULL CHECK(directory_scheme BETWEEN 1 AND 4),
+    directory_value TEXT NOT NULL CHECK(typeof(directory_value) = 'text' AND length(CAST(directory_value AS BLOB)) BETWEEN 1 AND 4096),
+    repository_present INTEGER NOT NULL CHECK(repository_present IN (0, 1)),
+    repository_scheme INTEGER NOT NULL CHECK(repository_scheme BETWEEN 0 AND 4),
+    repository_value TEXT NOT NULL CHECK(typeof(repository_value) = 'text' AND length(CAST(repository_value AS BLOB)) <= 4096),
+    worktree_present INTEGER NOT NULL CHECK(worktree_present IN (0, 1)),
+    worktree_scheme INTEGER NOT NULL CHECK(worktree_scheme BETWEEN 0 AND 4),
+    worktree_value TEXT NOT NULL CHECK(typeof(worktree_value) = 'text' AND length(CAST(worktree_value AS BLOB)) <= 4096),
+    branch_present INTEGER NOT NULL CHECK(branch_present IN (0, 1)),
+    branch TEXT NOT NULL CHECK(typeof(branch) = 'text' AND length(CAST(branch AS BLOB)) <= 128),
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_selection_frontiers (
+    key_digest BLOB NOT NULL REFERENCES agent_selections(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_renames (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES agent_projection_keys(key_digest),
+    resolved INTEGER NOT NULL CHECK(resolved IN (0, 1)),
+    display_name_present INTEGER NOT NULL CHECK(display_name_present IN (0, 1)),
+    display_name TEXT NOT NULL CHECK(typeof(display_name) = 'text' AND length(CAST(display_name AS BLOB)) <= 128)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_rename_candidates (
+    key_digest BLOB NOT NULL REFERENCES agent_renames(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    display_name_present INTEGER NOT NULL CHECK(display_name_present IN (0, 1)),
+    display_name TEXT NOT NULL CHECK(typeof(display_name) = 'text' AND length(CAST(display_name AS BLOB)) <= 128),
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_rename_frontiers (
+    key_digest BLOB NOT NULL REFERENCES agent_renames(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_direct_sessions (
+    key_digest BLOB PRIMARY KEY NOT NULL REFERENCES agent_projection_keys(key_digest),
+    mailbox_installation BLOB NOT NULL CHECK(typeof(mailbox_installation) = 'blob' AND length(mailbox_installation) = 32),
+    mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
+    named_agent_present INTEGER NOT NULL CHECK(named_agent_present IN (0, 1)),
+    named_agent BLOB NOT NULL CHECK(typeof(named_agent) = 'blob' AND length(named_agent) = 32),
+    conflicted INTEGER NOT NULL CHECK(conflicted IN (0, 1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE agent_direct_binding_facts (
+    key_digest BLOB NOT NULL REFERENCES agent_direct_sessions(key_digest),
+    fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    PRIMARY KEY (key_digest, fact_id)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -602,17 +896,20 @@ impl Database {
         let expected = complete.normalized_index();
         let expected_authority = complete.authority_projection_snapshot();
         let expected_conversation = complete.conversation_projection_snapshot();
-        let (persisted, authority, conversation) = repair::replace(
+        let expected_agent = complete.agent_projection_snapshot();
+        let (persisted, authority, conversation, agent) = repair::replace(
             &mut self.connection,
             &expected,
             &expected_authority,
             &expected_conversation,
+            &expected_agent,
         )?;
         Ok(RepairOutcome::new(
             complete,
             persisted,
             authority,
             conversation,
+            agent,
         ))
     }
 
@@ -633,6 +930,13 @@ impl Database {
         repair::load(&self.connection)?;
         authority::load(&self.connection)?;
         conversation::load(&self.connection)
+    }
+
+    pub(super) fn load_agent_snapshot(&self) -> Result<AgentProjectionSnapshot, StoreError> {
+        repair::load(&self.connection)?;
+        authority::load(&self.connection)?;
+        conversation::load(&self.connection)?;
+        agent::load(&self.connection)
     }
 }
 
@@ -739,63 +1043,10 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
             |row| row.get(0),
         )
         .map_err(sql_error)?;
-    if table_count != 52 {
+    if table_count != 77 {
         return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
     }
-    for table in [
-        "storage_metadata",
-        "canonical_facts",
-        "fact_parents",
-        "fact_authorities",
-        "reduction_state",
-        "reduction_vertices",
-        "reduction_reverse_dependencies",
-        "reduction_decisions",
-        "reduction_missing_dependencies",
-        "reduction_unusable_dependencies",
-        "reduction_failed_authorities",
-        "reduction_decision_participants",
-        "reduction_dependency_order",
-        "reduction_presentation_order",
-        "reduction_conflicts",
-        "reduction_conflict_participants",
-        "authority_state",
-        "authority_frontiers",
-        "authority_support",
-        "authority_installations",
-        "authority_mailboxes",
-        "authority_peer_routes",
-        "authority_peer_route_facts",
-        "authority_peer_route_candidates",
-        "authority_peer_route_relays",
-        "authority_capabilities",
-        "authority_capability_facts",
-        "authority_accounts",
-        "authority_memberships",
-        "authority_membership_facts",
-        "authority_membership_grants",
-        "authority_membership_grant_relays",
-        "authority_account_selections",
-        "authority_account_selection_candidates",
-        "conversation_state",
-        "conversation_aggregate_keys",
-        "conversation_frontiers",
-        "conversation_projection_keys",
-        "conversation_support",
-        "conversation_threads",
-        "conversation_thread_answers",
-        "conversation_thread_cancellations",
-        "conversation_thread_relations",
-        "conversation_thread_ready_answers",
-        "conversation_messages",
-        "conversation_message_frontiers",
-        "conversation_message_receipts",
-        "conversation_action_groups",
-        "conversation_action_entries",
-        "conversation_activities",
-        "conversation_activity_retentions",
-        "conversation_retained_progress",
-    ] {
+    for table in SCHEMA_TABLES {
         let present: i64 = connection
             .query_row(
                 "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
@@ -1204,6 +1455,8 @@ mod tests {
             RepairFailpoint::AfterAuthorityVerification,
             RepairFailpoint::AfterConversationInsert,
             RepairFailpoint::AfterConversationVerification,
+            RepairFailpoint::AfterAgentInsert,
+            RepairFailpoint::AfterAgentVerification,
             RepairFailpoint::AfterVerification,
         ] {
             let mut connection = Connection::open_in_memory().expect("memory database opens");
@@ -1225,11 +1478,13 @@ mod tests {
             let prior = prior_complete.normalized_index();
             let prior_authority = prior_complete.authority_projection_snapshot();
             let prior_conversation = prior_complete.conversation_projection_snapshot();
+            let prior_agent = prior_complete.agent_projection_snapshot();
             repair::replace(
                 &mut database.connection,
                 &prior,
                 &prior_authority,
                 &prior_conversation,
+                &prior_agent,
             )
             .expect("prior index persists");
             let replacement_complete = database
@@ -1238,12 +1493,14 @@ mod tests {
             let replacement = replacement_complete.normalized_index();
             let replacement_authority = replacement_complete.authority_projection_snapshot();
             let replacement_conversation = replacement_complete.conversation_projection_snapshot();
+            let replacement_agent = replacement_complete.agent_projection_snapshot();
 
             let error = replace_with_failpoint(
                 &mut database.connection,
                 &replacement,
                 &replacement_authority,
                 &replacement_conversation,
+                &replacement_agent,
                 failpoint,
             )
             .expect_err("repair failpoint interrupts replacement");
@@ -1262,14 +1519,24 @@ mod tests {
                 prior_conversation
             );
             assert_eq!(
+                agent::load(&database.connection).expect("prior agent remains loadable"),
+                prior_agent
+            );
+            assert_eq!(
                 repair::replace(
                     &mut database.connection,
                     &replacement,
                     &replacement_authority,
                     &replacement_conversation,
+                    &replacement_agent,
                 )
                 .expect("retry succeeds"),
-                (replacement, replacement_authority, replacement_conversation,)
+                (
+                    replacement,
+                    replacement_authority,
+                    replacement_conversation,
+                    replacement_agent,
+                )
             );
         }
     }

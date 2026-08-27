@@ -2,9 +2,9 @@
 
 Status: normative persistence specification
 
-HQ storage v4 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v5 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `4`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+version `5`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
 release has shipped yet, schema evolution advances the fresh-database identity rather than adding
 an in-place migration path.
 
@@ -23,12 +23,12 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v4 ownership | Rebuildable |
+| Class | Storage v5 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
 | Deterministic reduction indexes | Reverse dependencies, decisions, diagnostics, conflicts, and reducer order | Yes, only through an explicit repair operation |
-| Materialized projections | Complete authority and conversation/activity frontiers, typed values, ordered children, and support; later reducer domains reserved | Yes, only through explicit repair |
+| Materialized projections | Complete authority, conversation/activity, and named-agent frontiers, typed values, ordered children, and support; project projections reserved | Yes, only through explicit repair |
 | Durable operational state | Reserved for receipts, revisions, outbox, delivery, cursors, and saga checkpoints | Generally no |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
@@ -70,13 +70,13 @@ role parameters. Debug prose and generic domain serialization are not persistenc
 ## Explicit repair
 
 `repair(policy)` first computes the complete oracle without writes. It then opens one transaction,
-deletes only the rebuildable reduction, authority, and conversation/activity tables, writes every
-normalized replacement group, reads all three typed snapshots back through private fixed-width and
+deletes only the rebuildable reduction, authority, conversation/activity, and named-agent tables,
+writes every normalized replacement group, reads all four typed snapshots back through private fixed-width and
 closed-vocabulary row codecs, and requires exact snapshot and digest equality before commit.
 Canonical facts, exact event bytes,
 canonical parent and authority rows, schema metadata, and future durable operational tables are
 outside the repair allowlist. Dropping or failing the transaction at any replacement or verification
-checkpoint leaves the preceding complete structural/authority/conversation set intact, and
+checkpoint leaves the preceding complete structural/authority/conversation/agent set intact, and
 repeating a successful repair is idempotent.
 
 `load_reduction_index()` is read-only and returns the last successful repair even when newer
@@ -136,6 +136,30 @@ membership, rejection/open state, completed-record identity, and the 200-item re
 checked on reconstruction. Counts are bounded before allocation, and a digest covers every explicit
 conversation row. Unknown, partial, orphaned, cross-key, noncontiguous, oversized, or
 constraint-valid changed rows return `RebuildableStateCorrupt` until explicit repair.
+
+## Named-agent projections
+
+`AgentProjectionSnapshot` is the SQL-independent persisted query boundary for the complete
+named-agent report. It owns ordered typed maps for every `AgentAggregateKey` frontier, all seven
+`AgentProjectionKey` variants and values, and every transitive support set.
+`load_agent_snapshot()` first validates the structural, authority, and conversation packages from
+the same repair, then returns the last explicitly repaired named-agent view. A later append remains
+invisible to this query until the caller explicitly repairs.
+
+Dedicated tables retain permanent name claims; normalized agent lifecycle, mailbox and retirement
+sets; immutable provider-session binding histories; grow-only repository-context histories and
+frontiers; durable selection candidates and active values; rename candidates, resolution and clear
+state; direct-session bindings; aggregate frontiers; and projection support. Composite keys keep
+agent, installation-qualified mailbox, provider, and provider-session fields in explicit validated
+columns; private digests are recomputed relational identities rather than serialized domain state.
+
+Private exhaustive codecs reconstruct nested repository contexts and optional resource locators,
+bounded names/provider/session/branch values, closed locator schemes and lifecycle states, booleans,
+and fixed-width identities. Loading checks projection key/value pairing, name and session conflict
+semantics, lifecycle and runnable consistency, selected-candidate membership, rename resolution and
+clear semantics, frontier/history membership, contiguous ownership, counts, and a digest over every
+agent row. Unknown, partial, orphaned, oversized, cross-key, or constraint-valid changed rows return
+`RebuildableStateCorrupt`; explicit repair is the only recovery path.
 
 The correctness-first oracle currently clones the bounded semantic corpus for the four reducers.
 That cost is deliberate for repair equality; measured shared-report or incremental optimization is

@@ -22,6 +22,7 @@
 //! ```
 
 mod actor;
+mod agent_snapshot;
 mod authority_snapshot;
 mod conversation_snapshot;
 mod database;
@@ -30,6 +31,7 @@ mod paths;
 mod snapshot;
 
 pub use actor::{AppendOutcome, RepairOutcome, Store, VerifiedFactCorpus};
+pub use agent_snapshot::AgentProjectionSnapshot;
 pub use authority_snapshot::AuthorityProjectionSnapshot;
 pub use conversation_snapshot::ConversationProjectionSnapshot;
 pub use error::{StoreError, StoreErrorClass};

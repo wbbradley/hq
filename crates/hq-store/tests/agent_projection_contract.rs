@@ -1,0 +1,200 @@
+//! Persisted named-agent projection contracts.
+
+#![allow(clippy::expect_used)]
+
+use hq_domain::{InstallationId, MailboxAddress, MailboxId, ProviderId, ProviderSessionId};
+use hq_reducer::{AgentProjection, AgentProjectionKey, SessionIdentity};
+use hq_store::StoreErrorClass;
+use rusqlite::Connection;
+
+mod support;
+
+use support::{
+    TestDirectory, authority_policy, open_store, verified_child, verified_fact,
+    verified_session_binding,
+};
+
+#[test]
+fn repair_persists_the_exact_typed_agent_report_and_reopens() {
+    let directory = TestDirectory::new();
+    let database = directory.database_path();
+    let store = open_store(&database);
+    append_session_fixture(&store);
+
+    assert_eq!(
+        store
+            .load_agent_snapshot()
+            .expect_err("fresh agent rows are absent")
+            .class(),
+        StoreErrorClass::NotRepaired
+    );
+    let repaired = store.repair(authority_policy()).expect("repair succeeds");
+    assert_eq!(
+        repaired.complete().agent_projection_snapshot(),
+        *repaired.agent()
+    );
+    assert!(matches!(
+        repaired.agent().projection(&session_key()),
+        Some(AgentProjection::Session(_))
+    ));
+    assert!(matches!(
+        repaired.agent().projection(&direct_session_key()),
+        Some(AgentProjection::DirectSession(_))
+    ));
+    let expected = repaired.agent().clone();
+    assert_eq!(
+        store
+            .repair(authority_policy())
+            .expect("repeated repair succeeds")
+            .agent(),
+        &expected
+    );
+    store.close().expect("store closes");
+
+    let reopened = open_store(&database);
+    assert_eq!(
+        reopened
+            .load_agent_snapshot()
+            .expect("agent snapshot reopens"),
+        expected
+    );
+}
+
+#[test]
+fn agent_snapshot_changes_only_after_explicit_repair() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let root_id = root.verified_event().event_id();
+    let mailbox = verified_child(root_id);
+    let mailbox_id = mailbox.verified_event().event_id();
+    store.append_verified(root).expect("root appends");
+    store.append_verified(mailbox).expect("mailbox appends");
+    let before = store
+        .repair(authority_policy())
+        .expect("initial repair succeeds")
+        .agent()
+        .clone();
+    assert!(before.projections().is_empty());
+    store
+        .append_verified(verified_session_binding(root_id, mailbox_id))
+        .expect("binding appends");
+
+    assert_eq!(
+        store
+            .load_agent_snapshot()
+            .expect("old agent snapshot remains explicit"),
+        before
+    );
+    let after = store
+        .repair(authority_policy())
+        .expect("explicit reconsideration succeeds")
+        .agent()
+        .clone();
+    assert_ne!(after, before);
+    assert_eq!(after.projections().len(), 2);
+}
+
+#[test]
+fn repair_replaces_agent_rows_under_the_new_explicit_policy() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    append_session_fixture(&store);
+    assert!(
+        !store
+            .repair(authority_policy())
+            .expect("first repair succeeds")
+            .agent()
+            .projections()
+            .is_empty()
+    );
+    let replacement_policy = hq_reducer::AuthorityPolicy::new(
+        InstallationId::from_bytes([0x22; 32]),
+        MailboxId::from_bytes([0x44; 32]),
+    );
+
+    let replacement = store
+        .repair(replacement_policy)
+        .expect("replacement repair succeeds");
+    assert_eq!(replacement.complete().policy(), replacement_policy);
+    assert_eq!(
+        replacement.complete().agent_projection_snapshot(),
+        *replacement.agent()
+    );
+    assert_eq!(
+        store
+            .load_agent_snapshot()
+            .expect("replacement agent snapshot loads"),
+        *replacement.agent()
+    );
+}
+
+#[test]
+fn agent_corruption_fails_closed_until_explicit_repair() {
+    let directory = TestDirectory::new();
+    let database = directory.database_path();
+    let store = open_store(&database);
+    append_session_fixture(&store);
+    store.repair(authority_policy()).expect("repair succeeds");
+    store.close().expect("store closes");
+
+    let connection = Connection::open(&database).expect("corruption connection opens");
+    connection
+        .execute(
+            "UPDATE agent_session_bindings SET mailbox_id = zeroblob(32)",
+            [],
+        )
+        .expect("valid-looking corruption writes");
+    drop(connection);
+
+    let reopened = open_store(&database);
+    assert_eq!(
+        reopened
+            .load_agent_snapshot()
+            .expect_err("changed projection rejects")
+            .class(),
+        StoreErrorClass::RebuildableStateCorrupt
+    );
+    let repaired = reopened
+        .repair(authority_policy())
+        .expect("repair recovers agent rows");
+    assert_eq!(
+        reopened
+            .load_agent_snapshot()
+            .expect("agent snapshot reloads"),
+        *repaired.agent()
+    );
+}
+
+fn append_session_fixture(store: &hq_store::Store) {
+    let root = verified_fact();
+    let root_id = root.verified_event().event_id();
+    let mailbox = verified_child(root_id);
+    let mailbox_id = mailbox.verified_event().event_id();
+    store.append_verified(root).expect("root appends");
+    store.append_verified(mailbox).expect("mailbox appends");
+    store
+        .append_verified(verified_session_binding(root_id, mailbox_id))
+        .expect("binding appends");
+}
+
+fn session() -> SessionIdentity {
+    SessionIdentity {
+        provider: ProviderId::new("test-provider").expect("provider validates"),
+        session: ProviderSessionId::new("session-1").expect("session validates"),
+    }
+}
+
+fn session_key() -> AgentProjectionKey {
+    AgentProjectionKey::Session(session())
+}
+
+fn direct_session_key() -> AgentProjectionKey {
+    AgentProjectionKey::DirectSession {
+        mailbox: MailboxAddress::new(
+            InstallationId::from_bytes([0x11; 32]),
+            MailboxId::from_bytes([0x33; 32]),
+        ),
+        session: session(),
+    }
+}

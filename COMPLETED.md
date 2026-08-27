@@ -4413,3 +4413,80 @@ build/vet/fresh full regression gates pass.
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so typed queries, relational rows, tests, specification, and plan
      bookkeeping form one reviewable change.
+
+## 2026-08-27 — Complete named-agent projections
+
+Added a typed SQL-independent agent snapshot and storage v5 relational projections for every
+aggregate frontier, permanent name and lifecycle view, immutable session binding, repository
+context history, session selection, rename register, direct-session binding, and transitive support
+set. Explicit composite columns and recomputed private digests prevent namespace aliasing; closed
+codecs validate nested optional resource locators, bounded text, lifecycle and register invariants,
+counts, ownership, and exact key/value pairings. Extended the single repair transaction across the
+structural, authority, conversation, and agent packages with exact readback, rollback checkpoints,
+staleness, policy replacement, reopen, and constraint-valid corruption coverage. Formatting,
+architecture/behavior/causal/protocol verifiers, dependency policy, locked workspace check/build/
+tests/doctests, strict Clippy, all four required core/protocol targets, both 512-run fuzz smokes,
+whitespace, and the unchanged Go vet/build/fresh full regression suite pass.
+
+### Original plan entry
+
+- **[storage/high] Persist complete agent projections** — Add explicit fresh schema rows and private
+  codecs for every agent name, lifecycle, session binding, repository context, selection, rename,
+  and direct-session view, including every aggregate frontier and projection support set. Extend the
+  typed query boundary and the existing atomic repair transaction, prove exact equality with the
+  fresh agent report before and after reopen and repeated repair, and cover name/mailbox/session
+  conflicts, retirement, runnable selection, late authority, policy replacement, and corruption.
+  Complete this package when later services can query the entire persisted agent view without SQL
+  knowledge or reducer execution.
+
+  **Implementation plan**
+
+  - Add failing public contracts for empty and populated typed agent snapshots, exact report
+    equality, repair readback, repeated repair, staleness after append, explicit reconsideration,
+    policy replacement, and close/reopen. Use valid signed fixtures for public flows and private
+    relational fixtures to exhaust nested variants and register states.
+  - Add `AgentProjectionSnapshot` with ordered typed frontiers, all seven projection-key/value
+    variants, and transitive support. Keep schema identities, row kinds, digests, and connections
+    behind the store boundary.
+  - Advance the unreleased fresh schema identity and add explicit rebuildable master/child tables
+    for composite aggregate and projection keys; name claims/subjects; lifecycle claims, names,
+    mailboxes, retirements and selected session; session bindings; repository context history and
+    frontier; selection candidates and frontier; rename candidates and frontier; direct-session
+    binding facts; aggregate frontiers; and projection support.
+  - Implement exhaustive closed codecs for short/provider/session text, fixed IDs, mailbox and
+    session identities, lifecycle, booleans, optional agent/mailbox/session/name values, repository
+    contexts and optional resource locators/branches, ordered or set children, and all key/value
+    pairings. Reconstruct validated domain values through constructors, bound counts before
+    allocation, and reject unknown, malformed, duplicate, orphan, cross-key, or impossible rows.
+  - Derive expected rows only from the existing complete oracle. Add agent clear/insert/readback,
+    counts, and whole-package digest verification to the same transaction as structural, authority,
+    and conversation state. Validate every earlier package during ordinary agent reads and preserve
+    explicit stale-until-repair behavior.
+  - Add agent insert/verification failpoints and prove rollback preserves the preceding four-package
+    snapshot and retry succeeds. Apply constraint-valid corruption to every agent table family and
+    prove it fails closed until repair without changing corpus bytes or earlier projection rows.
+  - Round-trip name conflict/retirement state, active/conflicted/retired lifecycle, runnable and
+    conflicted selections, session binding conflicts, context histories/frontiers, resolved clear
+    and conflicted rename states, and named/unnamed/conflicted direct sessions. Update storage docs
+    and run every repository-wide gate before recording.
+
+  **Risks and mitigations**
+
+  - Provider/session and mailbox composites can alias when flattened; store every component in
+    explicit columns behind a recomputed private key digest.
+  - Repository contexts contain multiple optional resource locators; use closed presence shapes and
+    validated scheme/value constructors for every nested field.
+  - Derived booleans and optional active values can contradict child history; validate lifecycle,
+    conflict, frontier, selection, rename, and binding invariants during reconstruction.
+  - Extending repair must preserve prior atomic guarantees; add agent checkpoints inside the same
+    transaction and verify all four packages after every failed replacement.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** agent codecs, equality, rollback, corruption, lifecycle, and all repository gates.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so agent rows, queries, tests, specification, and bookkeeping form one
+     reviewable change.

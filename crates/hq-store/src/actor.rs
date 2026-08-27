@@ -12,8 +12,9 @@ use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::AuthorityPolicy;
 
 use crate::{
-    AuthorityProjectionSnapshot, CompleteSnapshot, ConversationProjectionSnapshot,
-    ReductionIndexSnapshot, StoreError, StoreErrorClass, database::Database,
+    AgentProjectionSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
+    ConversationProjectionSnapshot, ReductionIndexSnapshot, StoreError, StoreErrorClass,
+    database::Database,
 };
 
 /// Result of appending immutable verified evidence.
@@ -72,6 +73,7 @@ pub struct RepairOutcome {
     persisted: ReductionIndexSnapshot,
     authority: AuthorityProjectionSnapshot,
     conversation: ConversationProjectionSnapshot,
+    agent: AgentProjectionSnapshot,
 }
 
 impl RepairOutcome {
@@ -80,12 +82,14 @@ impl RepairOutcome {
         persisted: ReductionIndexSnapshot,
         authority: AuthorityProjectionSnapshot,
         conversation: ConversationProjectionSnapshot,
+        agent: AgentProjectionSnapshot,
     ) -> Self {
         Self {
             complete,
             persisted,
             authority,
             conversation,
+            agent,
         }
     }
 
@@ -109,6 +113,11 @@ impl RepairOutcome {
         &self.conversation
     }
 
+    /// Returns the exact typed named-agent view read back before commit.
+    pub const fn agent(&self) -> &AgentProjectionSnapshot {
+        &self.agent
+    }
+
     /// Consumes the outcome into its complete and persisted snapshots.
     pub fn into_parts(
         self,
@@ -117,12 +126,14 @@ impl RepairOutcome {
         ReductionIndexSnapshot,
         AuthorityProjectionSnapshot,
         ConversationProjectionSnapshot,
+        AgentProjectionSnapshot,
     ) {
         (
             self.complete,
             self.persisted,
             self.authority,
             self.conversation,
+            self.agent,
         )
     }
 }
@@ -151,6 +162,9 @@ enum Request {
     },
     LoadConversationSnapshot {
         reply: SyncSender<Result<ConversationProjectionSnapshot, StoreError>>,
+    },
+    LoadAgentSnapshot {
+        reply: SyncSender<Result<AgentProjectionSnapshot, StoreError>>,
     },
     Close {
         reply: SyncSender<()>,
@@ -275,6 +289,17 @@ impl Store {
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
     }
 
+    /// Loads the last successfully repaired typed named-agent view without mutation.
+    pub fn load_agent_snapshot(&self) -> Result<AgentProjectionSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadAgentSnapshot { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -339,6 +364,9 @@ fn run(path: &Path, receiver: &Receiver<Request>, started: &SyncSender<Result<()
             }
             Request::LoadConversationSnapshot { reply } => {
                 let _ = reply.send(database.load_conversation_snapshot());
+            }
+            Request::LoadAgentSnapshot { reply } => {
+                let _ = reply.send(database.load_agent_snapshot());
             }
             Request::Close { reply } => {
                 let _ = reply.send(());
@@ -406,6 +434,12 @@ mod tests {
             .requests
             .send(Request::LoadConversationSnapshot { reply })
             .expect("conversation request is accepted");
+        let (reply, response) = sync_channel(1);
+        drop(response);
+        store
+            .requests
+            .send(Request::LoadAgentSnapshot { reply })
+            .expect("agent request is accepted");
         assert!(
             store
                 .load_corpus()

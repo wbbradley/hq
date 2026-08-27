@@ -7,8 +7,9 @@ use hq_reducer::AuthorityPolicy;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::{
-    AuthorityProjectionSnapshot, ConversationProjectionSnapshot, IndexedConflict, IndexedDecision,
-    ReductionDomain, ReductionIndexSnapshot, StoreError, StoreErrorClass,
+    AgentProjectionSnapshot, AuthorityProjectionSnapshot, ConversationProjectionSnapshot,
+    IndexedConflict, IndexedDecision, ReductionDomain, ReductionIndexSnapshot, StoreError,
+    StoreErrorClass,
     snapshot::{
         decode_domain, decode_reason, decode_role, decode_status, encode_domain, encode_reason,
         encode_role, encode_status, reason_belongs_to_domain,
@@ -33,6 +34,8 @@ pub(crate) enum RepairFailpoint {
     AfterAuthorityVerification,
     AfterConversationInsert,
     AfterConversationVerification,
+    AfterAgentInsert,
+    AfterAgentVerification,
     AfterVerification,
 }
 
@@ -41,11 +44,13 @@ pub(crate) fn replace(
     expected: &ReductionIndexSnapshot,
     expected_authority: &AuthorityProjectionSnapshot,
     expected_conversation: &ConversationProjectionSnapshot,
+    expected_agent: &AgentProjectionSnapshot,
 ) -> Result<
     (
         ReductionIndexSnapshot,
         AuthorityProjectionSnapshot,
         ConversationProjectionSnapshot,
+        AgentProjectionSnapshot,
     ),
     StoreError,
 > {
@@ -54,6 +59,7 @@ pub(crate) fn replace(
         expected,
         expected_authority,
         expected_conversation,
+        expected_agent,
         RepairFailpoint::Never,
     )
 }
@@ -64,12 +70,14 @@ pub(crate) fn replace_with_failpoint(
     expected: &ReductionIndexSnapshot,
     expected_authority: &AuthorityProjectionSnapshot,
     expected_conversation: &ConversationProjectionSnapshot,
+    expected_agent: &AgentProjectionSnapshot,
     failpoint: RepairFailpoint,
 ) -> Result<
     (
         ReductionIndexSnapshot,
         AuthorityProjectionSnapshot,
         ConversationProjectionSnapshot,
+        AgentProjectionSnapshot,
     ),
     StoreError,
 > {
@@ -78,6 +86,7 @@ pub(crate) fn replace_with_failpoint(
         expected,
         expected_authority,
         expected_conversation,
+        expected_agent,
         failpoint,
     )
 }
@@ -87,12 +96,14 @@ fn replace_at(
     expected: &ReductionIndexSnapshot,
     expected_authority: &AuthorityProjectionSnapshot,
     expected_conversation: &ConversationProjectionSnapshot,
+    expected_agent: &AgentProjectionSnapshot,
     failpoint: RepairFailpoint,
 ) -> Result<
     (
         ReductionIndexSnapshot,
         AuthorityProjectionSnapshot,
         ConversationProjectionSnapshot,
+        AgentProjectionSnapshot,
     ),
     StoreError,
 > {
@@ -100,12 +111,15 @@ fn replace_at(
     clear_rebuildable(&transaction)?;
     super::authority::clear(&transaction)?;
     super::conversation::clear(&transaction)?;
+    super::agent::clear(&transaction)?;
     fail_at(failpoint, RepairFailpoint::AfterClear)?;
     insert_index(&transaction, expected, failpoint)?;
     super::authority::insert(&transaction, expected_authority)?;
     fail_at(failpoint, RepairFailpoint::AfterAuthorityInsert)?;
     super::conversation::insert(&transaction, expected_conversation)?;
     fail_at(failpoint, RepairFailpoint::AfterConversationInsert)?;
+    super::agent::insert(&transaction, expected_agent)?;
+    fail_at(failpoint, RepairFailpoint::AfterAgentInsert)?;
     let persisted = load_from_connection(&transaction)?;
     if persisted != *expected {
         return Err(corrupt());
@@ -120,9 +134,19 @@ fn replace_at(
         return Err(corrupt());
     }
     fail_at(failpoint, RepairFailpoint::AfterConversationVerification)?;
+    let persisted_agent = super::agent::load(&transaction)?;
+    if persisted_agent != *expected_agent {
+        return Err(corrupt());
+    }
+    fail_at(failpoint, RepairFailpoint::AfterAgentVerification)?;
     fail_at(failpoint, RepairFailpoint::AfterVerification)?;
     transaction.commit().map_err(database)?;
-    Ok((persisted, persisted_authority, persisted_conversation))
+    Ok((
+        persisted,
+        persisted_authority,
+        persisted_conversation,
+        persisted_agent,
+    ))
 }
 
 pub(crate) fn load(connection: &Connection) -> Result<ReductionIndexSnapshot, StoreError> {

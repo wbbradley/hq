@@ -12,7 +12,7 @@ use hq_reducer::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{AuthorityProjectionSnapshot, ConversationProjectionSnapshot};
+use crate::{AgentProjectionSnapshot, AuthorityProjectionSnapshot, ConversationProjectionSnapshot};
 use crate::{StoreError, StoreErrorClass};
 
 /// One independently materialized reducer domain.
@@ -254,6 +254,11 @@ impl CompleteSnapshot {
     /// Returns the named-agent report.
     pub const fn agent(&self) -> &AgentReport {
         &self.agent
+    }
+
+    /// Clones the complete named-agent projection/frontier/support oracle.
+    pub fn agent_projection_snapshot(&self) -> AgentProjectionSnapshot {
+        AgentProjectionSnapshot::from_report(&self.agent)
     }
 
     /// Returns the project report.

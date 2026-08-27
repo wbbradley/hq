@@ -37,6 +37,7 @@ fn empty_complete_snapshot_has_four_empty_reports_and_can_be_repaired() {
         repaired.conversation(),
         &snapshot.conversation_projection_snapshot()
     );
+    assert_eq!(repaired.agent(), &snapshot.agent_projection_snapshot());
 }
 
 #[test]

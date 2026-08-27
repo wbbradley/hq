@@ -118,6 +118,21 @@ pub fn verified_child(parent_id: [u8; 32]) -> VerifiedSemanticFact {
         .expect("child converts")
 }
 
+pub fn verified_session_binding(
+    installation_fact_id: [u8; 32],
+    mailbox_fact_id: [u8; 32],
+) -> VerifiedSemanticFact {
+    let installation = hex(&installation_fact_id);
+    let mailbox = hex(&mailbox_fact_id);
+    let mut parents = [installation.as_str(), mailbox.as_str()];
+    parents.sort_unstable();
+    let content = format!(
+        r#"{{"p":"hq/canonical","v":1,"f":3,"author":"1111111111111111111111111111111111111111111111111111111111111111","time":2000,"scope":["local","1111111111111111111111111111111111111111111111111111111111111111"],"parents":[["c","{}"],["c","{}"]],"auth":[["local-installation","c","{installation}"]],"body":{{"mailbox":"3333333333333333333333333333333333333333333333333333333333333333","provider":"test-provider","session":"session-1"}}}}"#,
+        parents[0], parents[1]
+    );
+    signed_fact(2, content.as_bytes(), [11; 32])
+}
+
 pub fn verified_question(parent_id: [u8; 32]) -> VerifiedSemanticFact {
     let parent = hex(&parent_id);
     let content = format!(

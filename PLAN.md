@@ -54,14 +54,14 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[storage/high] Persist agent/project projections and close complete repair equality** — Add
-  explicit fresh schema rows and private codecs for every agent name/lifecycle/session/context/
-  selection/rename/direct-session view and every project/resource/assignment/input/dispatch/output/
-  remote-command view, including frontier and support indexes. Extend the typed query boundary and
-  repair transaction across all domains, prove every report projection equals a fresh reducer before
-  and after reopen and repeated repair, and cover conflicts, late authority, runnable state, compacted
-  activity coexistence, and corrupted rebuildable rows. Complete this package when the immutable fact
-  corpus rebuilds every public projection exactly without touching durable operational state.
+- **[storage/high] Persist project projections and close complete repair equality** — Add explicit
+  fresh schema rows and private codecs for every project/resource/assignment/input/dispatch/output/
+  remote-command view, including every aggregate frontier and support set. Extend typed queries and
+  the one repair transaction across all four reducer domains, prove every persisted report equals a
+  fresh complete reduction before and after reopen and repeated repair, and cover conflicts, late
+  authority, runnable state, compacted activity coexistence, and corrupted rebuildable rows.
+  Complete this package when the immutable corpus rebuilds every public projection exactly without
+  touching durable operational state.
 
 - **[storage/high] Implement the atomic mutation and inbound-ingest engine** — Implement the common
   transaction path for local fact-backed commands and remotely verified facts: stable mutation
