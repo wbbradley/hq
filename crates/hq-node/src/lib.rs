@@ -5,6 +5,8 @@ mod coordination;
 mod foundation;
 mod identity;
 mod lifecycle;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod local_transport;
 mod runtime;
 
 pub use foundation::{
@@ -17,6 +19,10 @@ pub use identity::{
 pub use lifecycle::{
     NodeAdmission, NodeLifecycle, NodeLifecycleError, NodePhase, NodeTransitionOutcome,
     OperatorAction, ShutdownIntent, StartupCause, StartupComponent, StartupDiagnostic,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use local_transport::{
+    MAX_READINESS_BYTES, ReadinessRecord, RuntimeArtifactError, RuntimeArtifactErrorClass,
 };
 pub use runtime::{
     PORTABLE_UNIX_SOCKET_PATH_BYTES, RuntimeDirectoryOwner, RuntimePathError,

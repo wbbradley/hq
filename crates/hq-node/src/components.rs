@@ -2,6 +2,9 @@
 
 use std::{error::Error, fmt, num::NonZeroUsize};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::net::UnixStream;
+
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts, CommitFacts,
     ConfigureRelays, ControlHarness, EffectOutcome, EffectRequest, FactMutation, InspectResource,
@@ -11,6 +14,8 @@ use hq_application::{
 };
 use hq_domain::{Page, PageCursor, Revision};
 use hq_local_api::RevisionHub;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use hq_local_api::protocol::v1::{BuildMetadata, Id32};
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 use hq_store::StoreGateway;
 
@@ -18,6 +23,8 @@ use crate::{
     CancellationToken, NodeAdmission, NodeFoundation, NodeLifecycleError, TaskJoinReport,
     TaskTracker,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::{NodePhase, ReadinessRecord, RuntimeArtifactError, local_transport::ready_record};
 
 /// Closed long-lived component catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -347,6 +354,52 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
             harness: &components.harness,
             project: &components.project,
         })
+    }
+
+    /// Binds the private local listener through the retained foundation owner.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn bind_local_listener(&mut self) -> Result<(), RuntimeArtifactError> {
+        self.foundation
+            .as_mut()
+            .ok_or_else(RuntimeArtifactError::from_shutdown_state)?
+            .bind_local_listener()
+    }
+
+    /// Accepts one waiting same-user local connection.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn accept_local(&self) -> Result<UnixStream, RuntimeArtifactError> {
+        self.foundation
+            .as_ref()
+            .ok_or_else(RuntimeArtifactError::from_shutdown_state)?
+            .accept_local()
+    }
+
+    /// Atomically publishes diagnostic readiness for this acknowledged node generation.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn publish_readiness(
+        &mut self,
+        build: BuildMetadata,
+        boot_nonce: Id32,
+    ) -> Result<ReadinessRecord, RuntimeArtifactError> {
+        let foundation = self
+            .foundation
+            .as_mut()
+            .ok_or_else(RuntimeArtifactError::from_shutdown_state)?;
+        if foundation.lifecycle().phase() != NodePhase::Ready {
+            return Err(RuntimeArtifactError::from_nonready_state());
+        }
+        let revision = foundation
+            .lifecycle()
+            .revision()
+            .ok_or_else(RuntimeArtifactError::from_shutdown_state)?;
+        let record = ready_record(
+            build,
+            foundation.public_identity().installation_id(),
+            revision,
+            boot_nonce,
+        )?;
+        foundation.publish_readiness(&record)?;
+        Ok(record)
     }
 
     /// Enters drain while retaining clean-restart intent.

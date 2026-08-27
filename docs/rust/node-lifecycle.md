@@ -37,8 +37,9 @@ limit of 103 pathname bytes reserves the terminating NUL in macOS's 104-byte `so
 while also fitting Linux. Construction rejects a longer socket path before filesystem or bind work.
 
 Runtime-directory preparation creates or validates the root but never removes a socket, readiness
-file, or other stale artifact. Only the later listener package may replace stale runtime artifacts,
-and only after it holds the installation state lock and proves that no live listener owns them.
+file, or other stale artifact. Listener binding may replace a stale socket only after the
+foundation holds the installation state lock, a nonblocking probe proves that no live listener
+responds, and the socket device/inode remains unchanged immediately before removal.
 
 ## Lifecycle and admission
 
@@ -103,3 +104,33 @@ borrows one complete application bundle: query/mutation through `StoreGateway`, 
 through `RevisionHub`, and relay, harness, and resource operations through their concrete owners.
 The identity internally shares one reference-counted signer handle with the gateway; secret bytes
 remain inaccessible and no second signer is constructed.
+
+## Unix listener and readiness artifact ownership
+
+The live `NodeFoundation` is the only public socket bind boundary. Binding rejects symbolic links,
+non-sockets, modes other than `0600`, and a path that accepts or is conservatively completing a
+connection. A connection-refused socket is stale; it is removed and rebound only while its original
+device/inode identity still occupies the path. The retained listener is nonblocking and its created
+socket identity remains owned until checked shutdown or best-effort drop.
+
+Every accepted stream is checked before protocol parsing. Linux uses kernel `SO_PEERCRED`; macOS
+uses `getpeereid`. The peer user must equal the process effective user. Missing credentials and
+mismatches fail closed and drop the accepted descriptor. The safe `nix` wrapper is confined to this
+node boundary; no unsafe code or peer-supplied identity enters application/domain policy.
+
+`node-ready.v1.json` is a maximum 4096-byte, canonical, unknown-field-denying JSON diagnostic with
+these fields: readiness-metadata version, `ready` lifecycle state, nonzero process ID, bounded build
+metadata, nonzero installation ID, acknowledged store revision, and a nonzero boot nonce. The
+process ID, build, pathname qualifier, and boot nonce grant no ownership or domain authority.
+`NodeOwner` can publish only after its foundation and four components have acknowledged readiness.
+Publication creates a unique `0600` same-directory temporary file, writes and syncs the complete
+record, atomically renames it, syncs the runtime directory, and retains the installed device/inode.
+Reading checks file type, mode, and length before allocating the bounded body, then validates and
+canonicalizes every field.
+
+Shutdown closes the listener first and conditionally removes only socket/readiness paths whose
+types and device/inode identities still match this owner. Missing files are already clean; renamed,
+substituted, linked, or unrelated artifacts are preserved and reported as a typed runtime cleanup
+issue. Cleanup continues through store closure and state-lock release even after such an issue.
+The asynchronous accept/session/write loops and signal coordination remain in the next node
+package.

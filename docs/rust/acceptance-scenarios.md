@@ -277,6 +277,16 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   relay/harness/project owners in normative order, escalate only explicit or failed drains, join
   every task, and release the foundation. Stop/drain errors accumulate in the final typed report
   without skipping later components or ownership release.
+- Unix listener contracts reject reserved symlinks, regular files, unsafe modes, and live
+  listeners; replace only an identity-stable connection-refused socket; enforce `0600`; and accept
+  protocol bytes only after Linux/macOS kernel credentials match the effective user.
+- Readiness contracts cover ready-only versioned records, nonzero process/installation/boot values,
+  bounded canonical decode and pre-allocation file limits, private atomic replacement, duplicate
+  boot-nonce rejection, and the rule that stale readiness never grants or blocks listener
+  ownership.
+- Runtime cleanup contracts cover component-start rollback, exact socket/readiness removal,
+  substituted path preservation with a typed shutdown issue, continued store/state-lock release,
+  no temporary-file leak, and immediate listener rebind.
 
 ## Scenario maintenance rule
 

@@ -5414,3 +5414,86 @@ architecture/dependency/behavior/specification verifiers, four supported core ta
   3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
   4. Commit conventionally, archive this exact entry with evidence, and amend before Unix listener
      and autostart work.
+
+## 2026-08-27 — Private Unix listener and atomic readiness ownership
+
+Implemented foundation-owned Unix listener binding inside the live installation lock, conservative
+nonblocking stale-socket probing, owner-only socket modes, and identity-guarded removal. Accepted
+connections are validated against Linux `SO_PEERCRED` or macOS `getpeereid` before protocol bytes
+can enter the node. The platform credential seam is private, so callers cannot substitute the
+security decision.
+
+Added a bounded, canonical, versioned readiness record with idiomatic public data fields and
+ready-only validation. Publication uses a unique `0600` same-directory temporary file, file sync,
+atomic rename, directory sync, retained device/inode ownership, and duplicate boot-nonce rejection.
+Startup rollback, checked shutdown, and drop close the listener and preserve every substituted or
+unrelated path while continuing through store and state-lock release.
+
+Deterministic filesystem and real Unix-socket contracts cover regular files, symlinks, unsafe modes,
+absent/stale/live sockets, kernel same-user acceptance, scripted mismatch and missing-credential
+failure, readiness bounds and canonical round trips, atomic replacement, lifecycle gating,
+identity-changing cleanup, no temporary leaks, and immediate reacquisition. Full locked workspace
+format/check/build/tests/doctests/Clippy, architecture/dependency/behavior/specification verifiers,
+four supported core and node targets, both 512-run fuzz smokes, whitespace checks, and unchanged Go
+vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[node/high] Own the private Unix listener and atomic readiness artifacts** — Bind the
+  installation-qualified Unix socket only through the live node foundation, reject unsafe artifact
+  types and live competing listeners, replace only a proven stale socket, enforce owner-only modes,
+  validate accepted peers as the effective user, and publish versioned readiness metadata through
+  an atomic owned file. Cleanup must remove only the exact socket/readiness identities created by
+  this owner. Test symlinks, ordinary files, stale/live sockets, replacement races, peer mismatch,
+  atomic visibility, startup failure cleanup, path substitution, and immediate rebind on Linux and
+  macOS.
+
+  **Implementation plan**
+
+  - Define closed redacted listener/readiness failure classes and a versioned readiness record with
+    lifecycle phase, process identity, safe build identity, installation identity, authoritative
+    revision, and a fresh non-authoritative boot nonce. Validate every decoded field and bound the
+    complete file before allocating or parsing.
+  - Make the foundation the only public bind entry point so socket cleanup authority cannot exist
+    without the installation state lock. Bind directly when absent; when the address is occupied,
+    reject symbolic links and non-sockets, probe the exact socket, classify a successful connection
+    as live ownership, and unlink/retry only a connection-refused socket whose device/inode identity
+    is unchanged.
+  - Retain the bound socket identity and enforce `0600` after bind. Validate accepted Unix-stream
+    credentials against the process effective user through a narrow platform adapter covering the
+    first-release Linux and macOS targets; credential failure or mismatch closes the stream before
+    protocol parsing.
+  - Publish readiness only after `NodeOwner` has acknowledged foundation and components ready.
+    Write a unique owner-only temporary file in the runtime directory, sync it, rename atomically,
+    sync the directory, and retain the installed file identity. Never infer readiness from socket
+    existence alone.
+  - On explicit shutdown, startup rollback, or drop, close the listener before conditionally
+    removing the socket and readiness file. Re-stat each path without following links and unlink
+    only when its device/inode identity still matches this owner; preserve every substituted or
+    unrelated artifact.
+  - Add deterministic filesystem and real Unix-socket contracts for absent/stale/live paths,
+    symlink and regular-file attacks, identity-changing cleanup races, private modes, same-user and
+    scripted mismatched peers, readiness round-trip/atomicity/bounds, partial publication failure,
+    exact cleanup, and immediate rebind/reacquisition.
+
+  **Risks and decisions**
+
+  - Blind stale-socket deletion can disconnect another process or delete a substituted path. Probe
+    only while holding the state lock and compare the original device/inode immediately before the
+    conditional unlink.
+  - Filesystem modes alone do not prove the peer after descriptor transfer or platform quirks.
+    Check kernel-reported credentials on every accepted connection before handing bytes to the
+    local protocol.
+  - A readiness file written before rename can be observed partially. Use same-directory atomic
+    replacement, strict versioned decoding, and directory sync; the file remains diagnostic and
+    never grants ownership or authority.
+  - Destructors cannot surface cleanup failure. Provide checked cleanup for ordinary shutdown and
+    identity-guarded best-effort drop for rollback/panic containment.
+
+  **Post-Plan Execution Steps**
+
+  1. Add failing artifact, stale/live probe, peer-credential, readiness, and cleanup contracts.
+  2. Implement foundation-owned binding/publication and update lifecycle/security specifications.
+  3. Run every Rust, target, fuzz, dependency, whitespace, and unchanged-Go gate.
+  4. Commit conventionally, archive this exact entry with evidence, and amend before session-loop
+     work.

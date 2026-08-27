@@ -40,6 +40,7 @@ hq-store = { version = "0.1.0", path = "crates/hq-store" }
 hq-testkit = { version = "0.1.0", path = "crates/hq-testkit" }
 hq-tui = { version = "0.1.0", path = "crates/hq-tui" }
 k256 = { version = "0.14.0", default-features = false, features = ["schnorr"] }
+nix = { version = "0.31.3", default-features = false, features = ["fs", "socket", "user"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 scrypt = { version = "0.12.0", default-features = false }
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }

@@ -24,6 +24,9 @@ serde_json.workspace = true
 unicode-normalization.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+nix.workspace = true
+
 [[bin]]
 name = "hq"
 path = "src/bin/hq.rs"

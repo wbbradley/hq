@@ -2,6 +2,9 @@
 
 use std::{error::Error, fmt, num::NonZeroUsize};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::net::UnixStream;
+
 use hq_protocol::Bip340Signer;
 use hq_store::{Store, StoreErrorClass};
 
@@ -11,6 +14,8 @@ use crate::{
     RuntimePaths, StartupCause, StartupComponent, StartupDiagnostic, StateDirectoryOwner,
     StatePaths,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::{ReadinessRecord, RuntimeArtifactError, local_transport::LocalTransportOwner};
 
 /// Explicit inputs for opening the node foundation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +74,8 @@ pub enum NodeShutdownError {
     Lifecycle,
     /// The store worker did not acknowledge and join cleanly.
     Store,
+    /// Listener or readiness cleanup detected failure or path substitution.
+    Runtime,
 }
 
 impl fmt::Display for NodeShutdownError {
@@ -76,6 +83,7 @@ impl fmt::Display for NodeShutdownError {
         formatter.write_str(match self {
             Self::Lifecycle => "node shutdown lifecycle is invalid",
             Self::Store => "node store did not shut down cleanly",
+            Self::Runtime => "node runtime artifacts did not shut down cleanly",
         })
     }
 }
@@ -106,6 +114,8 @@ impl Error for NodeReadinessError {}
 pub struct NodeFoundation {
     lifecycle: NodeLifecycle,
     store: Option<Store>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    local_transport: LocalTransportOwner,
     runtime: RuntimeDirectoryOwner,
     configuration: LocalConfiguration,
     identity: InstallationIdentity,
@@ -143,12 +153,16 @@ impl NodeFoundation {
         })?;
         let runtime = RuntimeDirectoryOwner::prepare(config.runtime)
             .map_err(|error| diagnostic(StartupComponent::Runtime, runtime_cause(error.class())))?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let local_transport = LocalTransportOwner::new(runtime.paths().clone());
         let store = Store::open(state.paths().database_file(), config.store_capacity)
             .map_err(|error| diagnostic(StartupComponent::Store, store_cause(error.class())))?;
 
         Ok(Self {
             lifecycle: NodeLifecycle::new(),
             store: Some(store),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            local_transport,
             runtime,
             configuration,
             identity,
@@ -183,6 +197,26 @@ impl NodeFoundation {
 
     pub(crate) fn signer_handle(&self) -> std::sync::Arc<Bip340Signer> {
         self.identity.signer_handle()
+    }
+
+    /// Binds and retains the private nonblocking local listener while state ownership is live.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn bind_local_listener(&mut self) -> Result<(), RuntimeArtifactError> {
+        self.local_transport.bind()
+    }
+
+    /// Accepts one waiting connection and validates same-user kernel credentials.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn accept_local(&self) -> Result<UnixStream, RuntimeArtifactError> {
+        self.local_transport.accept()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn publish_readiness(
+        &mut self,
+        record: &ReadinessRecord,
+    ) -> Result<(), RuntimeArtifactError> {
+        self.local_transport.publish(record)
     }
 
     /// Acknowledges store-backed readiness at the serialized current revision.
@@ -222,14 +256,25 @@ impl NodeFoundation {
 
     /// Closes the store before releasing runtime, identity, and state ownership.
     pub fn shutdown(mut self) -> Result<(), NodeShutdownError> {
-        self.lifecycle
+        let lifecycle = self
+            .lifecycle
             .begin_drain()
-            .map_err(|_| NodeShutdownError::Lifecycle)?;
-        self.close_store()?;
-        self.lifecycle
+            .map(|_| ())
+            .map_err(|_| NodeShutdownError::Lifecycle);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let runtime = self
+            .local_transport
+            .cleanup()
+            .map_err(|_| NodeShutdownError::Runtime);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let runtime = Ok(());
+        let store = self.close_store();
+        let stopped = self
+            .lifecycle
             .acknowledge_stopped()
-            .map_err(|_| NodeShutdownError::Lifecycle)?;
-        Ok(())
+            .map(|_| ())
+            .map_err(|_| NodeShutdownError::Lifecycle);
+        lifecycle.and(runtime).and(store).and(stopped)
     }
 
     fn close_store(&mut self) -> Result<(), NodeShutdownError> {
@@ -254,6 +299,8 @@ impl NodeFoundation {
 impl Drop for NodeFoundation {
     fn drop(&mut self) {
         let _ = self.lifecycle.begin_drain();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let _ = self.local_transport.cleanup();
         let _ = self.close_store();
         let _ = self.lifecycle.acknowledge_stopped();
     }

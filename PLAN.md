@@ -54,15 +54,22 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[node/high] Implement Unix local listener, coordinated autostart, and lifecycle commands** —
-  Bind the private Unix socket only while holding node ownership, validate peer/path security,
-  drive bounded server sessions and write confirmations, publish readiness atomically, and remove
-  only owned runtime artifacts on shutdown. Add one-client coordinator for probe/start/wait with
-  concurrent-start convergence and actionable phase/path/cause/action failures. Wire explicit
-  foreground run, status, readiness, stop, and restart roles through the single `hq` executable.
-  Test partial frames, slow/nonreading clients, stale sockets, lost acknowledgements, concurrent
-  launchers, connected-client restart/reconnect, signals, and runtime artifact cleanup on Linux and
-  macOS.
+- **[node/high] Drive bounded Unix sessions and coordinated graceful runtime** — Add the asynchronous
+  accept/session/write loops over the owned listener, bounded connection/task/write capacity,
+  incremental frame decoding, exact `ServerSession` write confirmations, coalesced invalidations,
+  slow/nonreading-client containment, and lifecycle control routed through the sole node owner.
+  Coordinate stop/restart requests and Unix signals through ordered component drain without lost
+  acknowledgements or leaked clients. Test partial/multiple frames, malformed input, lost writes,
+  saturation, slow readers, disconnect cleanup, signals, and connected-client stop/restart on Linux
+  and macOS.
+
+- **[node/high] Implement convergent autostart and lifecycle CLI roles** — Add one client coordinator
+  that probes the owned socket, starts the foreground-node child only when absent, waits on typed
+  readiness, and converges concurrent launchers on one owner without PID-file authority. Wire
+  explicit foreground run, status, readiness, stop, and restart roles through the single `hq`
+  executable with actionable phase/path/cause/action diagnostics. Test absent/stale/live nodes,
+  concurrent starters, child failure, readiness timeout, lost lifecycle acknowledgements,
+  connected-client reconnect after restart, and runtime artifact cleanup on Linux and macOS.
 
 - **[transport/high] Specify and implement the encrypted Nostr envelope** — Write Nostr envelope v1
   independently from canonical v1, then implement recipient binding, NIP-44 encryption, NIP-59

@@ -74,8 +74,11 @@ Startup failures carry closed component/cause/action values and selected paths w
 secret, SQLite, or operating-system diagnostics. The node now also owns the four-slot component
 lifecycle catalog, hierarchical cancellation, fixed-capacity tracked threads and nonblocking
 mailboxes, ordered rollback/drain/escalation, shared revision hub, and the transient delegated
-application capability bundle. Unix listener execution remains in the immediately following node
-package.
+application capability bundle. The foundation now exclusively binds and owns the private `0600`
+Unix socket, probes identity-stable stale sockets without blocking, validates Linux/macOS same-user
+peer credentials, atomically publishes strict bounded readiness metadata, and removes only exact
+owned runtime identities. Asynchronous session/write execution remains in the immediately
+following node package.
 
 ## Supported target matrix
 
