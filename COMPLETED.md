@@ -2746,3 +2746,102 @@ and backup decisions. The unchanged Go baseline passes build, vet, cached tests,
   2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
+## 2026-08-27 — Causal fact algebra and semantic fact catalog
+
+Specified an implementation-independent causal algebra with structural and usable reachability,
+typed dependencies, deferred reconsideration, exact causal frontiers, projection retraction,
+historical authority, explicit conflict registers, deterministic presentation, batch reduction, and
+normalized observations. Cataloged 48 canonical and remote-control fact families with complete
+authority, validation, conflict, projection, retention, and observation rules. Added 115 named
+acceptance scenarios covering all nine algebraic laws, authority races, domain conflicts, project
+invariants, remote-control isolation, security attacks, and inherited regressions, plus a portable
+completeness verifier. Both Rust-spec verifiers, Bash syntax, ShellCheck, whitespace checks, Go
+build/vet, and the fresh full Go test suite pass.
+
+### Original plan entry
+
+- **[design/high] Specify the causal fact algebra and semantic fact catalog** — Create tracked,
+  implementation-independent specifications for the add-only fact set, graph terminology,
+  reachability, usability, deferred dependencies, causal maxima, explicit historical authority,
+  projection retraction, deterministic conflict rules, and canonical presentation order. Catalog
+  every retained fact family for identity, installation-local control, peers, mailbox capabilities,
+  human accounts, conversations, activity, agents, sessions, projects, and remote control. For each
+  fact define required parents and authorities, validation, unresolved behavior, conflict policy,
+  projection effects, retention class, and normalized observations. Turn all nine algebraic laws,
+  safety properties, and known Go defects into named acceptance scenarios. Complete this work when
+  the pure reducer can be implemented without consulting Go control flow or prose with an undefined
+  conflict outcome.
+
+  Implementation plan:
+
+  - Add `docs/rust/causal-algebra.md` to define semantic fact identity, the add-only set and merge,
+    structural versus usable reachability, dependency roles, decision categories, reconsideration,
+    causal frontiers, projection support/retraction, complete-batch reduction, incremental equality,
+    explicit historical authority, conflict registers, and the sole presentation comparator.
+    Specify normalized reducer output without importing wire, SQL, clock, transport, or runtime
+    representation.
+  - Add `docs/rust/semantic-fact-catalog.md` with one durable catalog ID for every retained fact or
+    signed remote-control family. For each entry record its semantic payload, scope/signer, required
+    parents, authority references, validation, unresolved behavior, concurrent-conflict policy,
+    projection effects/support, retention, and normalized observations. Expand the tricky peer,
+    revoke/regrant, human-membership, conversation/activity, agent/session, global project-claim,
+    linear project-history, dispatch, and remote-control rules into implementation-ready sections.
+  - Add `docs/rust/acceptance-scenarios.md` defining deterministic fixture vocabulary and normalized
+    observations, then name scenarios for all nine laws, graph/dependency safety, every authority
+    race, message/activity conflict and ordering, agent/session conflicts, project transitions and
+    cross-project invariants, remote commands, projection retraction, and all four inherited
+    regressions.
+  - Add `scripts/verify-rust-causal-spec.sh` first and show that it fails while the specifications
+    are absent. Make it verify catalog field completeness and unique IDs, required fact families,
+    nine named laws, required attack/regression scenarios, cross-document links, allowed retention
+    and protocol-class values, and the absence of unresolved markers. Extend the behavior-ledger
+    verifier only if the new specifications expose a product-boundary omission.
+  - Run Bash syntax and ShellCheck on both specification verifiers, both verifiers themselves,
+    whitespace checks, the Go build/vet gates, and a fresh full Go test suite to prove the frozen
+    scenario source remains intact before archiving this plan entry.
+
+  Risks and decisions:
+
+  - Semantic facts must not freeze JSON fields, Nostr kinds, SQL rows, numeric protocol limits, or
+    Go type names. Protocol work will map each catalog entry explicitly later.
+  - Every declared parent is a required causal dependency; authority references are typed roles
+    within that set. An absent or currently unusable parent blocks semantic support, and an
+    unrelated usable parent can never supply authority.
+  - Safety-sensitive singleton state uses remove-wins or an explicit multivalue conflict, never a
+    timestamp/fact-ID winner. Signed times and stable IDs are reserved for deterministic
+    presentation after causal readiness.
+  - Project histories are home-linear, while resource and agent cardinality are global projections.
+    A malformed home fork or cross-project conflict is exposed and fails closed rather than being
+    hidden by store transaction order.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.

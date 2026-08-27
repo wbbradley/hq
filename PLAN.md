@@ -54,18 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[design/high] Specify the causal fact algebra and semantic fact catalog** — Create tracked,
-  implementation-independent specifications for the add-only fact set, graph terminology,
-  reachability, usability, deferred dependencies, causal maxima, explicit historical authority,
-  projection retraction, deterministic conflict rules, and canonical presentation order. Catalog
-  every retained fact family for identity, installation-local control, peers, mailbox capabilities,
-  human accounts, conversations, activity, agents, sessions, projects, and remote control. For each
-  fact define required parents and authorities, validation, unresolved behavior, conflict policy,
-  projection effects, retention class, and normalized observations. Turn all nine algebraic laws,
-  safety properties, and known Go defects into named acceptance scenarios. Complete this work when
-  the pure reducer can be implemented without consulting Go control flow or prose with an undefined
-  conflict outcome.
-
 - **[foundation/high] Establish the Rust workspace and dependency guardrails** — Add the Cargo
   workspace and initial `hq-domain`, `hq-reducer`, `hq-protocol`, `hq-application`, `hq-store`,
   `hq-local-api`, `hq-relay`, `hq-harness`, `hq-codex`, `hq-tui`, `hq-node`, and `hq-testkit`
