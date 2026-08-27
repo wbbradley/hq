@@ -244,6 +244,14 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Revision-hub contracts cover pending/active race phases, unrelated-topic filtering, saturated
   registration, 10,000 coalesced slow-reader publishes, and concurrent publish/poll/cancel without
   blocking or growing more than one pending wake per subscriber.
+- Reconnecting-client contracts cover negotiation on every generation, stale-socket rejection,
+  capped deterministic backoff, terminal version incompatibility, byte-identical mutation replay
+  across ambiguous pre/post-commit response loss, changed-command rejection, bounded completed
+  identity history, correlated ordinary response/loss reporting, and clean lifecycle restart.
+- Client subscription contracts cover per-server-session registration identities, early and
+  coalesced invalidations, acknowledgement snapshots as fresh bases, repeated full refresh while a
+  returned revision is behind, resubscription after acknowledgement loss, and two independent
+  clients racing without sharing registration state.
 
 ## Scenario maintenance rule
 

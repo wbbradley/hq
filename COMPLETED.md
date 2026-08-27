@@ -5161,3 +5161,89 @@ tests pass.
   3. Commit the implementation and documentation with one Conventional Commit.
   4. Remove this exact entry from **Next Up**, append it verbatim with completion evidence to
      `COMPLETED.md`, and amend the same commit before advancing to the reconnecting client.
+
+## 2026-08-27 — Reconnecting local client replay and resubscription
+
+Implemented one transport-independent reconnecting client state machine and narrow connect/write/
+close adapter contract for every local frontend. It negotiates v1 on every generation, ignores
+stale socket events, stops on explicit incompatibility, and emits deterministic exponential
+backoff capped by validated policy. Ordinary requests retain correlation but are reported lost
+rather than silently replayed; snapshot or registration failures reconnect from a clean base.
+
+In-flight mutations retain their original request ID, command ID, digest, and complete encoded
+frame, which is replayed byte-for-byte after ambiguous response loss. Changed command reuse is
+rejected before transport, concurrent mutations are capped, and completed identities use a bounded
+oldest-first window. Logical subscriptions survive connections, derive fresh registrations from
+the client seed and server session, accept the acknowledgement snapshot as their base, and
+coalesce revision wakes into repeated full refreshes until current.
+
+Contracts cover loss before or after mutation commit through the shared durable receipt path,
+exact replay, changed input, repeated loss and capped backoff, incompatible and stale sessions,
+lost acknowledgements, early/coalesced invalidations, behind snapshots, resubscription, lifecycle
+restart response loss, bounded history, and independent clients. Full locked workspace format/
+check/build/tests/doctests/Clippy, architecture/dependency/specification verifiers, four supported
+targets, both 512-run fuzz smokes, whitespace checks, and unchanged Go vet/build/fresh tests pass.
+
+### Original plan entry
+
+- **[local-api/high] Implement reconnecting local client replay and resubscription** — Build the
+  shared client state machine and transport adapter contract used by CLI, TUI, and local harness
+  launchers. Negotiate on every connection, retry a lost mutation response with the exact stable ID
+  and bytes, never retry changed input under an existing ID, detect stale sessions, reconnect with
+  bounded backoff, re-register subscriptions, and request a fresh authoritative full snapshot
+  before treating invalidations as current. Test disconnects before/after mutation commit,
+  incompatible restarted servers, repeated connection loss, invalidation gaps, resubscription races,
+  clean lifecycle restart, and two clients racing. Complete this work when all clients can use one
+  protocol library without storage access and reconnect without duplicate mutations or revision
+  gaps.
+
+  **Implementation plan**
+
+  - Define one transport-agnostic client state machine driven by explicit connection-generation,
+    frame, write-failure, disconnect, and reconnect-timer events. Emit bounded connect/write/close
+    actions rather than opening sockets or sleeping, and define the narrow adapter trait shared by
+    CLI, TUI, harness launchers, and deterministic tests.
+  - Negotiate local API v1 on every new connection and bind all later input to that connection's
+    local generation plus the server's ephemeral session ID. Ignore stale connection events, stop
+    automatic retry on explicit version incompatibility, and use deterministic exponential backoff
+    capped at a configured maximum without consulting ambient time.
+  - Retain each in-flight mutation as its exact canonical frame, request ID, command ID, and digest.
+    Replay that byte-identical frame after negotiation when a response was lost, keep completed
+    command identity/digest history bounded, and reject any changed request under an existing
+    command ID before it reaches a transport.
+  - Represent one logical broad-topic subscription intent independently from a connection. Derive a
+    distinct registration ID from its stable client seed and negotiated server session, register it
+    after every reconnect, and treat its acknowledgement snapshot as the fresh authoritative base.
+    Ignore invalidations until that base is accepted; coalesce later revision-only notices while one
+    authoritative refresh request is in flight and refresh again if the returned revision remains
+    behind the newest notice.
+  - Add deterministic scripted-adapter contracts for disconnect before/after mutation commit,
+    byte-exact replay, changed-command rejection, repeated connection loss and capped backoff,
+    incompatible restarted servers, stale frames, lost subscription acknowledgement,
+    resubscription races, invalidation gaps, clean lifecycle restart, bounded retained identity
+    history, and two independent clients racing one server.
+
+  **Risks and decisions**
+
+  - Reconstructing an equivalent mutation request could change framing or correlation bytes. Store
+    and replay the original encoded frame verbatim; decode only the eventual correlated response.
+  - Server session IDs are diagnostic, but combining the stable client subscription seed with the
+    negotiated session ID creates a fresh registration identity without granting either value
+    authority. This avoids stale-registration collisions across reconnects.
+  - A revision invalidation is not a patch. Once received, the client marks its view stale and asks
+    for a complete authoritative snapshot; it never infers missing rows or applies projection data
+    from notifications.
+  - Unbounded completed-command memory would turn stable identity defense into a leak. Retain a
+    documented fixed-size oldest-first identity window while never evicting an in-flight mutation.
+  - Backoff scheduling and connection I/O remain adapter responsibilities. The pure state machine
+    supplies explicit capped delays and generation-scoped actions so tests need no clock or socket.
+
+  **Post-Plan Execution Steps**
+
+  1. Implement the expanded plan with red deterministic state-machine and scripted-transport tests
+     first.
+  2. Run focused client tests and every repository-wide Rust, target, fuzz, dependency, whitespace,
+     and unchanged-Go gate.
+  3. Commit the implementation and documentation with one Conventional Commit.
+  4. Remove this exact entry from **Next Up**, append it verbatim with completion evidence to
+     `COMPLETED.md`, and amend the same commit before advancing to node composition.

@@ -54,18 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-
-- **[local-api/high] Implement reconnecting local client replay and resubscription** — Build the
-  shared client state machine and transport adapter contract used by CLI, TUI, and local harness
-  launchers. Negotiate on every connection, retry a lost mutation response with the exact stable ID
-  and bytes, never retry changed input under an existing ID, detect stale sessions, reconnect with
-  bounded backoff, re-register subscriptions, and request a fresh authoritative full snapshot
-  before treating invalidations as current. Test disconnects before/after mutation commit,
-  incompatible restarted servers, repeated connection loss, invalidation gaps, resubscription races,
-  clean lifecycle restart, and two clients racing. Complete this work when all clients can use one
-  protocol library without storage access and reconnect without duplicate mutations or revision
-  gaps.
-
 - **[node/high] Compose node ownership, startup, and graceful lifecycle** — Build the sole composition
   root owning the installation lock and identity handle, store thread, local listener, subscriptions,
   relay manager, harness supervisor, project workflow manager, root cancellation tree, bounded

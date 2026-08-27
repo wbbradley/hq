@@ -144,11 +144,15 @@ plan_content
 auxiliary_randomness
 ```
 
-The client retains the complete mutation bytes until a definite response. If a response may have
-been lost, it repeats the exact frame payload with the same command ID. The durable receipt returns
-the original completed result. Reusing the ID with any changed plan byte, randomness byte, or digest
-is a conflict. A result is either a completed committed/rejected receipt or explicit uncertainty;
-post-commit relay-wake failure does not change a committed receipt.
+The shared client retains the complete encoded mutation frame until a definite response. If a
+response may have been lost, whether before or after commit, it repeats those bytes with the same
+request and command IDs after renegotiation: it repeats the exact frame payload. The durable receipt
+returns the original completed result. Reusing the command ID with any changed plan byte,
+randomness byte, or digest is rejected
+before transport. Completed command IDs and digests are retained in a configured bounded
+oldest-first window; in-flight mutations are never evicted. A result is either a completed
+committed/rejected receipt or explicit uncertainty; post-commit relay-wake failure does not change a
+committed receipt.
 
 ## Revision subscriptions
 
@@ -171,9 +175,13 @@ Each active subscriber has one nonblocking coalescing wake slot. New wakes union
 retain the greatest revision, and set `full_snapshot` if any coalesced wake requires it. A slow or
 nonreading subscriber never blocks a commit.
 
-After reconnect, a client renegotiates, registers a new subscription, accepts its authoritative full
-snapshot, and only then treats later invalidations as current. It never infers missed rows from a
-revision gap.
+After reconnect, a client renegotiates and derives a new registration ID from its stable local
+subscription seed plus the server's ephemeral session ID. It accepts the registration
+acknowledgement's authoritative full snapshot as a fresh base and only then treats invalidations as
+current. An invalidation marks the view stale and triggers a complete authoritative snapshot; it is
+not a patch. Notices coalesce to their greatest revision while a refresh is in flight, and a
+returned snapshot behind that revision immediately triggers another refresh. The client never
+infers missed rows from a revision gap.
 
 ## Failure and close policy
 
@@ -181,3 +189,10 @@ Malformed, oversized, noncanonical, unknown-version, or out-of-state input close
 any bounded typed response the session can safely produce. Application rejections use typed error
 responses and keep the session usable. A stale socket or lost response provides no evidence about
 mutation/effect completion; stable reconciliation rules apply.
+
+The shared client scopes every transport event to a monotonically allocated local connection
+generation and ignores late events from older sockets. Each connection starts with negotiation.
+Explicit version rejection is terminal; ordinary disconnects use deterministic exponential backoff
+bounded by configured positive minimum and maximum delays. Ordinary query/control requests are not
+silently replayed after response loss: the client reports their request IDs as lost so the caller
+can apply method-specific policy. Retry-safe mutations follow the exact-frame rule above.
