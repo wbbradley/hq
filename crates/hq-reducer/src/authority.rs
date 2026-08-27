@@ -346,10 +346,10 @@ impl DomainReducer for AuthorityReducer {
     }
 }
 
-fn classify_fact(
+pub(crate) fn classify_fact(
     policy: AuthorityPolicy,
     fact: &Fact,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> DomainDecision<AuthorityReason> {
     let result = match fact.payload() {
         SemanticPayload::InstallationDeclared {
@@ -436,7 +436,7 @@ fn classify_fact(
 fn validate_installation_root(
     fact: &Fact,
     installation_id: InstallationId,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     if fact.causal().parents().iter().next().is_some() {
         return Err(AuthorityReason::RootHasParents);
@@ -458,7 +458,7 @@ fn validate_mailbox_root(
     fact: &Fact,
     mailbox_id: MailboxId,
     kind: MailboxKind,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     validate_local_fact(fact, context)?;
     if kind == MailboxKind::Human
@@ -505,7 +505,7 @@ fn validate_mailbox_root(
 fn validate_mailbox_binding(
     fact: &Fact,
     mailbox_id: MailboxId,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     validate_local_fact(fact, context)?;
     let expected = MailboxAddress::new(fact.author().installation_id(), mailbox_id);
@@ -523,7 +523,7 @@ fn validate_mailbox_binding(
 
 fn validate_local_fact(
     fact: &Fact,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     let installation_id = match fact.scope() {
         FactScope::InstallationPrivate(installation_id) => *installation_id,
@@ -553,7 +553,7 @@ fn validate_mailbox_grant(
     grant_id: GrantId,
     mailbox: MailboxAddress,
     grantee: InstallationAddress,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     if !matches!(fact.scope(), FactScope::PeerAddressed(scope) if *scope == mailbox)
         || fact.author().installation_id() != mailbox.installation_id()
@@ -601,7 +601,7 @@ fn validate_mailbox_revoke(
     grant_id: GrantId,
     mailbox: MailboxAddress,
     grantee_id: InstallationId,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     if !matches!(fact.scope(), FactScope::PeerAddressed(scope) if *scope == mailbox)
         || fact.author().installation_id() != mailbox.installation_id()
@@ -633,7 +633,7 @@ fn validate_mailbox_observation(
     fact: &Fact,
     grant_id: GrantId,
     action_id: FactId,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     let target = match fact.scope() {
         FactScope::PeerAddressed(target) => *target,
@@ -669,7 +669,7 @@ fn validate_account_root(
     fact: &Fact,
     account_id: AccountId,
     creator: InstallationAddress,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     validate_local_fact(fact, context)?;
     if creator != fact.author() {
@@ -692,7 +692,7 @@ fn validate_device_grant(
     account_id: AccountId,
     grant_id: GrantId,
     device: InstallationAddress,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     if !matches!(fact.scope(), FactScope::AccountAddressed(scope) if *scope == account_id) {
         return Err(AuthorityReason::ScopeMismatch);
@@ -744,7 +744,7 @@ fn validate_device_acceptance(
     account_id: AccountId,
     grant_id: GrantId,
     device: InstallationAddress,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     if !matches!(fact.scope(), FactScope::AccountAddressed(scope) if *scope == account_id)
         || fact.author() != device
@@ -783,7 +783,7 @@ fn validate_device_revoke(
     account_id: AccountId,
     grant_id: GrantId,
     device_id: InstallationId,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     if !matches!(fact.scope(), FactScope::AccountAddressed(scope) if *scope == account_id) {
         return Err(AuthorityReason::ScopeMismatch);
@@ -809,7 +809,7 @@ fn validate_device_revoke(
 
 fn validate_scoped_action(
     fact: &Fact,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     match fact.scope() {
         FactScope::InstallationPrivate(_) => validate_local_fact(fact, context),
@@ -823,7 +823,7 @@ fn validate_scoped_action(
 fn validate_peer_action(
     fact: &Fact,
     target: MailboxAddress,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     let grant = required_authority(fact, AuthorityRole::MailboxGrant)?;
     let grant_id = match context.facts().get(grant).map(Fact::payload) {
@@ -852,7 +852,7 @@ fn validate_peer_action(
 fn validate_account_action(
     fact: &Fact,
     account_id: AccountId,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     let authority = required_authority(fact, AuthorityRole::AccountMembership)?;
     match context.facts().get(authority).map(Fact::payload) {
@@ -888,7 +888,7 @@ fn validate_grant_for_action(
     grant: FactId,
     grant_id: GrantId,
     target: MailboxAddress,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Result<(), AuthorityReason> {
     match context.facts().get(grant).map(Fact::payload) {
         Some(SemanticPayload::MailboxAccessGranted {
@@ -940,7 +940,7 @@ fn account_root_subject(fact: &Fact) -> Option<AccountId> {
 }
 
 fn mailbox_revokes<'a>(
-    context: &ReductionContext<'a, AuthorityReason>,
+    context: &ReductionContext<'a, impl Sized>,
     grant_id: GrantId,
 ) -> Vec<&'a Fact> {
     context
@@ -951,7 +951,7 @@ fn mailbox_revokes<'a>(
 }
 
 fn mailbox_lineage_revokes<'a>(
-    context: &ReductionContext<'a, AuthorityReason>,
+    context: &ReductionContext<'a, impl Sized>,
     mailbox: MailboxAddress,
     grantee: InstallationId,
 ) -> Vec<&'a Fact> {
@@ -963,7 +963,7 @@ fn mailbox_lineage_revokes<'a>(
 }
 
 fn account_revokes<'a>(
-    context: &ReductionContext<'a, AuthorityReason>,
+    context: &ReductionContext<'a, impl Sized>,
     account_id: AccountId,
     device_id: InstallationId,
 ) -> Vec<&'a Fact> {
@@ -978,7 +978,7 @@ fn active_acceptance(
     acceptance: FactId,
     account_id: AccountId,
     device_id: InstallationId,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> bool {
     account_revokes(context, account_id, device_id)
         .into_iter()
@@ -990,7 +990,7 @@ fn account_action_survives_revokes(
     acceptance: FactId,
     account_id: AccountId,
     device_id: InstallationId,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> bool {
     account_revokes(context, account_id, device_id)
         .into_iter()
@@ -1001,7 +1001,7 @@ fn account_action_survives_revokes(
 }
 
 fn reaches_with_candidate(
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
     ancestor: FactId,
     descendant: FactId,
     candidate: FactId,
@@ -1041,7 +1041,7 @@ fn reaches_with_candidate(
 
 fn unique_conflict_participants(
     fact: &Fact,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> BTreeSet<FactId> {
     context
         .facts()
@@ -1151,7 +1151,7 @@ fn aggregate_key(fact: &Fact) -> Option<AuthorityAggregateKey> {
 
 fn derive_authority_projections(
     policy: AuthorityPolicy,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Vec<ProjectionContribution<AuthorityProjectionKey, AuthorityProjection>> {
     let mut output = Vec::new();
     for fact in context
@@ -1203,7 +1203,7 @@ fn derive_authority_projections(
 }
 
 fn peer_route_projections(
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Vec<ProjectionContribution<AuthorityProjectionKey, AuthorityProjection>> {
     let mut groups = BTreeMap::<(InstallationId, InstallationId), BTreeSet<FactId>>::new();
     for fact in context
@@ -1284,7 +1284,7 @@ fn peer_route_projections(
 }
 
 fn capability_projections(
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Vec<ProjectionContribution<AuthorityProjectionKey, AuthorityProjection>> {
     context
         .facts()
@@ -1343,7 +1343,7 @@ fn capability_projections(
 }
 
 fn account_projections(
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Vec<ProjectionContribution<AuthorityProjectionKey, AuthorityProjection>> {
     context
         .facts()
@@ -1369,7 +1369,7 @@ fn account_projections(
 }
 
 fn membership_projections(
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Vec<ProjectionContribution<AuthorityProjectionKey, AuthorityProjection>> {
     let mut groups = BTreeMap::<(AccountId, InstallationId), BTreeSet<FactId>>::new();
     for fact in context
@@ -1472,7 +1472,7 @@ fn membership_projections(
 
 fn selection_projections(
     policy: AuthorityPolicy,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Vec<ProjectionContribution<AuthorityProjectionKey, AuthorityProjection>> {
     let members = context
         .facts()
@@ -1507,7 +1507,7 @@ fn selection_projections(
 
 fn maximal_members(
     members: &BTreeSet<FactId>,
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> BTreeSet<FactId> {
     members
         .iter()
@@ -1522,7 +1522,7 @@ fn maximal_members(
 }
 
 fn derive_authority_conflicts(
-    context: &ReductionContext<'_, AuthorityReason>,
+    context: &ReductionContext<'_, impl Sized>,
 ) -> Vec<ConflictObservation<AuthorityReason>> {
     let mut groups = BTreeMap::<AuthorityAggregateKey, BTreeSet<FactId>>::new();
     for fact in context

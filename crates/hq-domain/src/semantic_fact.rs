@@ -112,7 +112,7 @@ pub struct MessageContent {
 }
 
 /// Activity class that remains non-actionable conversation content.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ActivityKind {
     /// Operation status snapshot.
     Status,
@@ -120,8 +120,25 @@ pub enum ActivityKind {
     Progress,
     /// Plan or task state.
     Plan,
+    /// Aggregate working-tree or proposed-change snapshot.
+    Diff,
     /// Completed command, file, or tool record.
     CompletedItem,
+}
+
+/// Typed state of one normalized harness activity record.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ActivityStatus {
+    /// Informational snapshot without a lifecycle claim.
+    Snapshot,
+    /// The correlated operation or item is running.
+    Running,
+    /// The correlated operation or item completed successfully.
+    Succeeded,
+    /// The correlated operation or item failed with a stable reason.
+    Failed(ErrorCode),
+    /// The correlated operation or item was explicitly interrupted.
+    Interrupted,
 }
 
 /// Terminal/runtime observation without claiming external truth.
@@ -305,9 +322,13 @@ pub enum SemanticPayload {
     HarnessActivityRecorded {
         source: MailboxAddress,
         correlation: OperationCorrelation,
+        item: Option<ShortText>,
         kind: ActivityKind,
         logical_key: ShortText,
+        runtime: ShortText,
         sequence: NonZeroU64,
+        occurred_at: Timestamp,
+        status: ActivityStatus,
         content: ContentText,
         truncated: bool,
     },

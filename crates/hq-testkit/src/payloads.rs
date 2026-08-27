@@ -168,9 +168,13 @@ impl FactBuilder {
             SemanticPayload::HarnessActivityRecorded {
                 source: mailbox,
                 correlation: operation.clone(),
+                item: Some(text("item")?),
                 kind: ActivityKind::Progress,
                 logical_key: text("build")?,
+                runtime: text("runtime")?,
                 sequence: NonZeroU64::MIN,
+                occurred_at: Timestamp::from_unix_millis(1),
+                status: hq_domain::ActivityStatus::Running,
                 content: content_text("running")?,
                 truncated: false,
             },

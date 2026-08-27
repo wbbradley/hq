@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[conversation/high] Implement conversation and activity reduction** — Add questions, answers,
-  asynchronous messages, cancellation, archive/restore/reject, delivery-relevant semantic state,
-  typed presentation/correlation, and the separate non-actionable harness-activity stream. Define
-  one reducer-owned causal ordering comparator and deterministic activity coalescing/retention rules;
-  no store or UI may recreate them. Test missing parents, concurrent answer/cancellation, equal-time
-  messages and activity, delayed occurrence data, final-answer selection, action grouping, and
-  projection retraction. Complete this work when normalized conversation and activity views are
-  deterministic for all generated arrival orders.
-
 - **[agents/high] Implement named-agent and provider-session reduction** — Add pure facts and
   projections for mailbox creation/binding/context, permanent name claims and retirement, durable
   provider-session bindings, selection, renaming, repository context, and projectless direct

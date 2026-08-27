@@ -1,6 +1,7 @@
 //! Deterministic, complete-batch causal reduction without runtime or adapter dependencies.
 
 mod authority;
+mod conversation;
 mod decision;
 mod fact_set;
 mod graph;
@@ -12,6 +13,12 @@ pub use authority::{
     AuthorityReason, AuthorityReducer, AuthorityReport, CapabilityView, DeviceGrantView,
     InstallationView, MailboxView, MembershipState, MembershipView, PeerRouteCandidate,
     PeerRouteState, PeerRouteView,
+};
+pub use conversation::{
+    ActionGroupView, ActivityKey, ActivityRetentionView, ActivitySessionKey, ActivityView,
+    CausalRelation, ConversationAggregateKey, ConversationProjection, ConversationProjectionKey,
+    ConversationReason, ConversationReducer, ConversationReport, IncompleteMessageObservation,
+    MessageView, ThreadView, incomplete_addressed_observations,
 };
 pub use decision::{DecisionReason, DecisionStatus, DomainDecision, FactDecision};
 pub use fact_set::FactSet;

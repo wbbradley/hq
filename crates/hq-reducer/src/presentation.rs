@@ -22,7 +22,7 @@ pub enum PresentationFamily {
 }
 
 /// Typed item or request correlation used by the canonical ready key.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PresentationItemId {
     /// Conversation message identity.
     Message(MessageId),
@@ -30,6 +30,8 @@ pub enum PresentationItemId {
     Command(CommandId),
     /// Project dispatch identity.
     Dispatch(DispatchId),
+    /// Harness-neutral activity item identity.
+    Activity(ShortText),
     /// Semantic fact identity when no narrower public identifier exists.
     Fact(FactId),
 }

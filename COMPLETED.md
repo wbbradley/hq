@@ -3266,3 +3266,91 @@ whitespace, and the complete Go build/vet/fresh-test regression suite pass.
   4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
      text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
   5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.
+
+## 2026-08-27 — Conversation and activity reduction
+
+Added a pure authority-composed `ConversationReducer` with normalized question/async threads,
+independent answer/cancellation relation matrices, stable message-ID conflicts, remove-wins
+archive/restore, absorbing rejection, causal peer-receipt evidence, typed action groups and final
+answers, and inert incomplete addressed observations. Completed the typed activity payload and
+implemented source/provider/session/operation/item/runtime namespaces, semantic-sequence winners,
+explicit sequence/runtime conflicts, durable completed history, and deterministic newest-200 progress
+retention. All `CONV-001`–`CONV-016`, `ACT-001`–`ACT-009`, and `REG-002` cases execute,
+including exhaustive small permutations and a 205-record rebuild. All Rust workspace, strict-Clippy,
+architecture/spec, cargo-deny, four-target core, whitespace, and Go regression gates pass.
+
+### Original plan entry
+
+- **[conversation/high] Implement conversation and activity reduction** — Add questions, answers,
+  asynchronous messages, cancellation, archive/restore/reject, delivery-relevant semantic state,
+  typed presentation/correlation, and the separate non-actionable harness-activity stream. Define
+  one reducer-owned causal ordering comparator and deterministic activity coalescing/retention rules;
+  no store or UI may recreate them. Test missing parents, concurrent answer/cancellation, equal-time
+  messages and activity, delayed occurrence data, final-answer selection, action grouping, and
+  projection retraction. Complete this work when normalized conversation and activity views are
+  deterministic for all generated arrival orders.
+
+  **Implementation plan**
+
+  - Add failing public-contract fixtures and tests first for every named `CONV-001` through
+    `CONV-016`, `ACT-001` through `ACT-009`, and `REG-002` scenario. Generate small answer,
+    cancellation, message-state, and activity graphs across every topological arrival order,
+    duplicates, late parents, equal authored/occurrence times, clock reversal, and projection
+    retraction.
+  - Complete the typed harness-neutral activity value model needed by the retained contract:
+    provider/session/operation plus optional item correlation, runtime-lifetime identity, signed
+    occurrence time, positive source sequence, kind/status, bounded content, and explicit
+    truncation. Keep message purpose, presentation kind, public ID, and operation grouping typed;
+    prove that prose imitating authority, correlation, or final-answer markers is inert.
+  - Add a focused pure conversation/activity reducer that composes the existing authority policy
+    without duplicating its rules. Introduce closed reasons, typed aggregate/projection keys, exact
+    support, incomplete addressed observations, and normalized thread, message-state, delivery,
+    action-group, final-answer, activity-history, activity-winner, collision, and unified-entry
+    views.
+  - Validate exact root/child/state target kinds, derived thread identity, sender/recipient reversal,
+    compatible scope and correlation, required causal ancestry, controlling mailbox/account, and
+    complete state frontiers. Treat unequal stable message IDs as explicit conflicts; retain answers
+    and cancellations independently and expose every before/after/concurrent relation.
+  - Implement archive/restore as a remove-wins register over causal maxima and rejection as an
+    absorbing tombstone. A restore opens only after every maximal archive and never after rejection;
+    state facts remain auditable while open/action projections retract and exact frontier/support
+    changes are visible.
+  - Derive peer-received evidence only from a usable peer-authored child that cites the outbound
+    message, never from relay or receipt metadata. Select ready answers and typed final answers only
+    through the reducer-owned canonical presentation traversal, retaining all candidates and using
+    operation correlation as the action group.
+  - Keep activity in a disjoint non-actionable stream. Coalesce snapshot/progress facts only within
+    the full source mailbox, provider, session, operation, kind, item, and runtime namespace; choose
+    higher semantic sequence across concurrent snapshots, report equal-sequence unequal-content or
+    conflicting-runtime collisions, retain completed items as history, and deterministically keep
+    the newest 200 progress winners per source/provider session while canonical facts remain intact.
+  - Feed all projected messages and retained activity through the sole typed Kahn comparator,
+    including occurrence and correlation tie breakers while preserving parent-before-child order.
+    Document the normalized model and run format, architecture/behavior/spec verifiers, workspace
+    format/check/build/test/doctests, strict Clippy, dependency policy, four-target core checks,
+    whitespace, and unchanged Go build/vet/fresh full regression suite before recording the package.
+
+  **Risks and mitigations**
+
+  - Conversation classification depends on historical authority but must also expose domain-specific
+    decisions and projections; factor reusable authority-stage helpers and wrap their closed reasons
+    rather than copying or weakening signer, scope, membership, and revocation checks.
+  - Stable presentation order and activity winner selection solve different problems; use semantic
+    sequence only inside an exact activity aggregate, then order retained entries with the canonical
+    comparator so timestamps or fact IDs never decide a conflict.
+  - Incomplete addressed content is intentionally observable before it is usable; expose it through
+    a separate inert projection that cannot support a thread, action, delivery, archive, answer, or
+    final-answer view until the missing causal history projects.
+  - Activity retention is a disposable-view policy over permanent canonical facts; compute the
+    budget from complete normalized winners with a total typed key so batch, late-parent replay, and
+    repair rebuilds select exactly the same 200 rows.
+
+  **Post-Plan Execution Steps**
+
+  1. **Implement** the expanded plan above completely.
+  2. **Test** the implementation in proportion to risk, including every named conversation and
+     activity scenario and repository-wide gate above.
+  3. **Commit** all task changes with a Conventional Commit message.
+  4. **Update this plan** by removing this completed entry from **Next Up** and appending its exact
+     text, implementation plan, risks, and completion evidence to `COMPLETED.md`.
+  5. **Amend the same commit** so code, tests, and plan bookkeeping form one reviewable change.

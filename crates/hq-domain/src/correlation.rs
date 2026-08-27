@@ -40,7 +40,7 @@ impl ProviderSessionId {
 }
 
 /// Typed correlation for one provider operation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct OperationCorrelation {
     provider: ProviderId,
     session: ProviderSessionId,

@@ -9,7 +9,8 @@ The semantic types described here are mapped explicitly by later protocol specif
 Related sources are the product boundary in `docs/rust/behavior-ledger.md`, the fact inventory in
 `docs/rust/semantic-fact-catalog.md`, and executable cases in
 `docs/rust/acceptance-scenarios.md`. The implemented authority specialization is documented in
-`docs/rust/authority-model.md`.
+`docs/rust/authority-model.md`; conversation, message-state, activity-retention, and unified
+presentation rules are documented in `docs/rust/conversation-model.md`.
 
 ## Semantic universe and notation
 
