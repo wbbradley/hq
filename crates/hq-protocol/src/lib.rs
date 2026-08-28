@@ -4,6 +4,7 @@ mod dispatch;
 mod dto;
 mod error;
 mod json;
+mod pairing;
 mod signed_event;
 
 pub use dispatch::{
@@ -12,6 +13,10 @@ pub use dispatch::{
 };
 pub use dto::{CanonicalEventPlan, VerifiedSemanticFact, VerifiedSupportedRecord};
 pub use error::{FailureClass, ProtocolError};
+pub use pairing::{
+    MAX_PAIRING_INVITATION_BYTES, MAX_PAIRING_INVITATION_FACTS, PAIRING_INVITATION_V1,
+    PairingGrant, PairingInvitationError, VerifiedPairingInvitation,
+};
 pub use signed_event::{
     Bip340Signer, CryptographicallyVerifiedEvent, HQ_EVENT_KIND, MAX_CONTENT_BYTES,
     MAX_EVENT_BYTES, ParsedOuterEvent, RawEventBytes, verify_bip340,

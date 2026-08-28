@@ -25,8 +25,8 @@ store-owned cursor.
 
 | Capability | Contract |
 | --- | --- |
-| `QueryDomain` | One revisioned authoritative refresh and bounded indexed conversation pages |
-| `CommitFacts` | Execute or reconcile a stable transaction-consistent fact mutation |
+| `QueryDomain` | One revisioned authoritative refresh, bounded indexed conversation pages, and bounded exact causal-evidence closure |
+| `CommitFacts` | Execute or reconcile a stable transaction-consistent fact mutation, or reverify and idempotently ingest exact public evidence |
 | `PublishWake` | Nonblocking, coalescible prompt for post-commit replication/reconciliation work |
 | `ConfigureRelays` | Stable relay-policy and explicit synchronization operations |
 | `ControlHarness` | Neutral named-agent start, exact resume, and stop operations |
@@ -72,6 +72,7 @@ not schedule work.
 Human-account administration uses pure planners in this crate. Each planner accepts public passive
 `LocalInstallationAuthority` and `LocalFactInputs` records and returns an ordinary `FactPlan` for
 reserved human-mailbox creation, creator-account creation, or frontier-complete account selection.
+It also plans creator-only frontier-complete device grants and exact target-key device acceptance.
 The records expose fields directly; they contain no secret or mutable capability. The CLI supplies
 only exact roots and frontiers from an authoritative snapshot, while the node-owned gateway remains
 the sole signer and commit capability.

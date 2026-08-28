@@ -468,6 +468,7 @@ CREATE TABLE authority_membership_grants (
     granted_installation BLOB NOT NULL CHECK(typeof(granted_installation) = 'blob' AND length(granted_installation) = 32),
     granted_signing_key BLOB NOT NULL CHECK(typeof(granted_signing_key) = 'blob' AND length(granted_signing_key) = 32),
     label TEXT CHECK(label IS NULL OR (typeof(label) = 'text' AND length(CAST(label AS BLOB)) BETWEEN 1 AND 128)),
+    active INTEGER NOT NULL CHECK(active IN (0, 1)),
     PRIMARY KEY (account_id, device_id, grant_id),
     FOREIGN KEY (account_id, device_id) REFERENCES authority_memberships(account_id, device_id)
 ) STRICT, WITHOUT ROWID;

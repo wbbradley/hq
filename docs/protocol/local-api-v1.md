@@ -51,6 +51,7 @@ All limits are inclusive. A larger value is rejected before it can become applic
 | opaque page cursor | 512 bytes, nonempty |
 | invalidation topics | 6, nonempty, sorted, unique |
 | authoritative snapshot | 16,384 projection items |
+| canonical evidence transfer | 64 exact events and 524,288 aggregate event bytes |
 | provider namespace | 64 bytes, nonempty |
 | provider session | 256 bytes, nonempty |
 | resource locator | 4,096 bytes, nonempty |
@@ -93,6 +94,7 @@ Request methods are closed and typed:
 - authoritative snapshot;
 - bounded reducer-ordered conversation page;
 - exact retryable canonical-fact mutation;
+- bounded exact canonical-evidence closure query and reverified idempotent import;
 - relay configuration and explicit synchronization effects;
 - provider-neutral named-agent session control;
 - read-only resource inspection;
@@ -101,7 +103,8 @@ Request methods are closed and typed:
 - idempotent subscription cancellation.
 
 Successful response families are lifecycle status, authoritative snapshot, conversation page,
-mutation attempt, empty external effect, agent-session effect, resource-inspection effect, typed
+mutation attempt, canonical evidence, evidence-ingest outcomes, empty external effect,
+agent-session effect, resource-inspection effect, typed
 project-command progress, subscription acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
 and optional bounded inert detail. Machine behavior depends on class/code, never detail text.
 
@@ -130,6 +133,20 @@ items name their unique creator root, and account-selection items name the compl
 selection frontier. These are public fact identities, not signing capability. Because HQ v1 has
 not shipped and has no standing installations, this is the clean v1 snapshot shape; it introduces
 no compatibility branch or protocol-version bump.
+
+Membership items additionally carry their complete causal-maximal grant/accept/revoke frontier and
+the complete creator-issued grant history. Each grant names its stable ID, exact signed fact,
+target installation and signing key, optional label, bounded relay hints, and derived
+causal-frontier/active status. These passive fields let clients reuse the current unrevoked grant,
+build frontier-complete regrants only after revocation, and verify exact target binding without
+reconstructing storage rows.
+
+The canonical-evidence query accepts sorted unique roots and returns their complete transitive
+parent closure as sorted `(fact_id, exact_event)` values. Import accepts the same bounded shape,
+cryptographically and semantically re-verifies the entire request before its first insertion, and
+then uses ordinary idempotent canonical ingestion. Existing facts retain their original revision.
+Neither operation grants authority; imported facts become usable only if ordinary complete
+reduction projects their signed lineage.
 
 Conversation bodies and activity are loaded through the bounded page method using a typed thread or
 provider-session conversation key. The continuation cursor is opaque, belongs to this query, and is

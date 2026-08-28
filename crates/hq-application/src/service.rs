@@ -1,14 +1,16 @@
 //! Stateless orchestration over transport-independent application ports.
 
-use hq_domain::{OperationId, Page, PageCursor};
+use std::collections::BTreeSet;
+
+use hq_domain::{FactId, OperationId, Page, PageCursor};
 use hq_reducer::ConversationKey;
 
 use crate::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts,
-    AuthoritativeSnapshot, ConversationEntry, EffectOutcome, EffectRequest, FactMutation,
-    MutationAttempt, MutationOutcome, ProjectCommandOutcome, ProjectCommandRequest,
-    RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest,
-    SynchronizationRequest, WakeDisposition,
+    AuthoritativeSnapshot, CanonicalEvidence, ConversationEntry, EffectOutcome, EffectRequest,
+    EvidenceIngestOutcome, FactMutation, MutationAttempt, MutationOutcome, ProjectCommandOutcome,
+    ProjectCommandRequest, RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult,
+    SubscriptionRequest, SynchronizationRequest, WakeDisposition,
 };
 
 /// Durable mutation attempt plus separate post-commit scheduling evidence.
@@ -84,6 +86,25 @@ where
     /// Loads one complete authoritative projection refresh.
     pub fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, ApplicationError> {
         self.ports.authoritative_snapshot()
+    }
+
+    /// Loads one bounded exact canonical evidence closure for offline transfer.
+    pub fn canonical_evidence(
+        &self,
+        roots: &BTreeSet<FactId>,
+        maximum_facts: usize,
+        maximum_bytes: usize,
+    ) -> Result<Vec<CanonicalEvidence>, ApplicationError> {
+        self.ports
+            .canonical_evidence(roots, maximum_facts, maximum_bytes)
+    }
+
+    /// Reverifies and idempotently imports exact canonical evidence.
+    pub fn ingest_canonical_evidence(
+        &self,
+        evidence: &[CanonicalEvidence],
+    ) -> Result<Vec<EvidenceIngestOutcome>, ApplicationError> {
+        self.ports.ingest_canonical_evidence(evidence)
     }
 
     /// Executes, routes, or reconciles one exact project command.

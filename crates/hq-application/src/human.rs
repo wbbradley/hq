@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use hq_domain::{
     AccountId, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, FactId, FactScope,
-    InstallationAddress, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxId,
-    MailboxKind, SemanticPayload, ShortText, SigningPublicKey, Timestamp,
+    GrantId, InstallationAddress, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
+    MailboxId, MailboxKind, RelayHints, SemanticPayload, ShortText, SigningPublicKey, Timestamp,
 };
 
 use crate::{ApplicationError, ApplicationErrorCode, FactPlan};
@@ -28,6 +28,25 @@ pub struct LocalFactInputs {
     pub authored_at: Timestamp,
     /// Caller-selected BIP-340 auxiliary input, fresh or deliberately replay-stable.
     pub auxiliary_randomness: [u8; 32],
+}
+
+/// Passive complete intent for one creator-issued human-device grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanDeviceGrantRequest {
+    /// Human account receiving the device membership.
+    pub account_id: AccountId,
+    /// Exact immutable account creator root.
+    pub account_root: FactId,
+    /// Stable grant identity.
+    pub grant_id: GrantId,
+    /// Exact target installation and signing key.
+    pub device: InstallationAddress,
+    /// Optional signed device label.
+    pub label: Option<ShortText>,
+    /// Signed non-authority relay hints.
+    pub relay_hints: RelayHints,
+    /// Complete causal-maximal history for this account and device.
+    pub membership_frontier: BTreeSet<FactId>,
 }
 
 /// Plans creation of the reserved local human mailbox.
@@ -98,6 +117,71 @@ pub fn plan_human_account_selection(
         FactScope::InstallationPrivate(authority.installation_id),
         causal,
         SemanticPayload::HumanAccountSelected { account_id },
+        inputs.auxiliary_randomness,
+    ))
+}
+
+/// Plans one creator-signed device grant or frontier-complete regrant.
+pub fn plan_human_device_grant(
+    authority: LocalInstallationAuthority,
+    inputs: LocalFactInputs,
+    request: HumanDeviceGrantRequest,
+) -> Result<FactPlan, ApplicationError> {
+    if request.device.installation_id() == authority.installation_id {
+        return Err(invalid_request(()));
+    }
+    let mut parents = request.membership_frontier;
+    parents.insert(request.account_root);
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new(parents).map_err(invalid_request)?,
+        [AuthorityReference::new(
+            AuthorityRole::AccountCreator,
+            request.account_root,
+        )],
+    )
+    .map_err(invalid_request)?;
+    Ok(FactPlan::new(
+        authority.installation_id,
+        inputs.authored_at,
+        FactScope::AccountAddressed(request.account_id),
+        causal,
+        SemanticPayload::HumanDeviceGranted {
+            account_id: request.account_id,
+            grant_id: request.grant_id,
+            device: request.device,
+            label: request.label,
+            relay_hints: request.relay_hints,
+        },
+        inputs.auxiliary_randomness,
+    ))
+}
+
+/// Plans one target-key acceptance of an exact device grant.
+pub fn plan_human_device_acceptance(
+    authority: LocalInstallationAuthority,
+    inputs: LocalFactInputs,
+    account_id: AccountId,
+    grant_id: GrantId,
+    grant_fact: FactId,
+) -> Result<FactPlan, ApplicationError> {
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new([grant_fact]).map_err(invalid_request)?,
+        [AuthorityReference::new(
+            AuthorityRole::DeviceGrant,
+            grant_fact,
+        )],
+    )
+    .map_err(invalid_request)?;
+    Ok(FactPlan::new(
+        authority.installation_id,
+        inputs.authored_at,
+        FactScope::AccountAddressed(account_id),
+        causal,
+        SemanticPayload::HumanDeviceAccepted {
+            account_id,
+            grant_id,
+            device: InstallationAddress::new(authority.installation_id, authority.signing_key),
+        },
         inputs.auxiliary_randomness,
     ))
 }
@@ -208,5 +292,89 @@ mod tests {
                 .all(|fact| plan.causal().parents().contains(fact))
         );
         assert!(plan.causal().parents().contains(&authority().root_fact));
+    }
+
+    #[test]
+    fn device_grant_and_acceptance_bind_exact_creator_target_and_frontier() {
+        let account = AccountId::from_bytes([11; 32]);
+        let account_root = FactId::from_bytes([12; 32]);
+        let grant_id = GrantId::from_bytes([13; 32]);
+        let target = InstallationAddress::new(
+            InstallationId::from_bytes([14; 32]),
+            SigningPublicKey::from_bytes([15; 32]),
+        );
+        let frontier = [FactId::from_bytes([16; 32]), FactId::from_bytes([17; 32])]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let grant = plan_human_device_grant(
+            authority(),
+            inputs(),
+            HumanDeviceGrantRequest {
+                account_id: account,
+                account_root,
+                grant_id,
+                device: target,
+                label: Some(ShortText::new("laptop").expect("label")),
+                relay_hints: RelayHints::new([]).expect("relay hints"),
+                membership_frontier: frontier.clone(),
+            },
+        )
+        .expect("grant plan");
+        assert_eq!(
+            grant.causal().authority(AuthorityRole::AccountCreator),
+            Some(account_root)
+        );
+        assert!(
+            frontier
+                .iter()
+                .all(|fact| grant.causal().parents().contains(fact))
+        );
+        assert!(matches!(
+            grant.payload(),
+            SemanticPayload::HumanDeviceGranted {
+                account_id,
+                grant_id: planned_grant,
+                device,
+                ..
+            } if *account_id == account && *planned_grant == grant_id && *device == target
+        ));
+
+        let grant_fact = FactId::from_bytes([18; 32]);
+        let acceptance =
+            plan_human_device_acceptance(authority(), inputs(), account, grant_id, grant_fact)
+                .expect("acceptance plan");
+        assert_eq!(
+            acceptance.causal().authority(AuthorityRole::DeviceGrant),
+            Some(grant_fact)
+        );
+        assert!(matches!(
+            acceptance.payload(),
+            SemanticPayload::HumanDeviceAccepted { device, .. }
+                if *device == InstallationAddress::new(
+                    authority().installation_id,
+                    authority().signing_key,
+                )
+        ));
+    }
+
+    #[test]
+    fn creator_cannot_grant_its_own_installation_as_a_device() {
+        let result = plan_human_device_grant(
+            authority(),
+            inputs(),
+            HumanDeviceGrantRequest {
+                account_id: AccountId::from_bytes([19; 32]),
+                account_root: FactId::from_bytes([20; 32]),
+                grant_id: GrantId::from_bytes([21; 32]),
+                device: InstallationAddress::new(
+                    authority().installation_id,
+                    authority().signing_key,
+                ),
+                label: None,
+                relay_hints: RelayHints::new([]).expect("relay hints"),
+                membership_frontier: BTreeSet::new(),
+            },
+        );
+        assert!(result.is_err());
     }
 }

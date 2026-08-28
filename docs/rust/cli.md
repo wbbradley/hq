@@ -7,7 +7,7 @@ hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>
 ```
 
 The installed commands currently include `help`, `version`, `identity`, `config`,
-`human create|show|select`, and `daemon run|status|readiness|stop|restart`. `daemon run` is the
+`human create|show|select|invite|join`, and `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
 autostart and service managers. `daemon status` never starts a process; `readiness` may start one
 candidate and waits for all concurrent candidates to converge on the sole state-directory owner.
@@ -29,6 +29,21 @@ Changed immutable creator data, conflicting roots, or ambiguous authority fail c
 renders all projected accounts plus the complete local selection candidates and unique active
 selection. `human select ACCOUNT_ID` requires the exact creator root or one currently active
 membership acceptance and cites the complete prior selection frontier.
+
+`human invite INSTALLATION_ID SIGNING_KEY ABSOLUTE_PATH [--label LABEL] [--relay URL]...`
+requires the uniquely selected creator account. It derives a deterministic grant identity from the
+exact target, signed metadata, and complete current membership frontier; authors or reconciles that
+grant; requests its exact transitive canonical ancestry from the node; re-verifies the result; and
+creates one new mode-`0600` regular file without overwrite. The path is never rendered. A changed
+frontier produces a distinct regrant identity.
+
+`human join ABSOLUTE_PATH` reads one bounded regular non-symlink file, requires its unique canonical
+pairing encoding, verifies every embedded signature and the complete grant ancestry offline,
+requires the exact local installation and signing key named by the grant, and reduces the evidence
+before importing it. It then reconciles the reserved human mailbox, idempotently imports the exact
+events, authors the target-key acceptance through a pure plan, and selects the account. A lost
+ordinary import response may be retried once because exact evidence ingestion is idempotent;
+re-running the command after any interruption converges without another revision.
 
 Identity output has only the installation ID, signing public key, and public fingerprint.
 Configuration output has the optional provider and the complete canonical relay list. Both are

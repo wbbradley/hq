@@ -1,6 +1,7 @@
 //! Bounded typed store actor and public corpus owner.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt,
     num::NonZeroUsize,
     path::Path,
@@ -12,6 +13,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use hq_application::CanonicalEvidence;
 use hq_domain::{AgentId, CommandId, FactId, InstallationId, Page, PageCursor, Revision};
 use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
@@ -243,6 +245,12 @@ enum Request {
     AuthoritativeSnapshot {
         reply: SyncSender<Result<AuthoritativeSnapshot, StoreError>>,
     },
+    CanonicalEvidence {
+        roots: BTreeSet<FactId>,
+        maximum_facts: usize,
+        maximum_bytes: usize,
+        reply: SyncSender<Result<Vec<CanonicalEvidence>, StoreError>>,
+    },
     CurrentRevision {
         reply: SyncSender<Result<Revision, StoreError>>,
     },
@@ -414,6 +422,27 @@ impl ApplicationStateHandle {
         let (reply, response) = mpsc::sync_channel(1);
         self.requests
             .send(Request::AuthoritativeSnapshot { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one bounded exact transitive canonical evidence closure.
+    pub fn canonical_evidence(
+        &self,
+        roots: &BTreeSet<FactId>,
+        maximum_facts: usize,
+        maximum_bytes: usize,
+    ) -> Result<Vec<CanonicalEvidence>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::CanonicalEvidence {
+                roots: roots.clone(),
+                maximum_facts,
+                maximum_bytes,
+                reply,
+            })
             .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
         response
             .recv()
@@ -1053,17 +1082,7 @@ fn run(
     while let Ok(request) = receiver.recv() {
         match request {
             Request::LocalMutation { request, reply } => {
-                match database.execute_local_mutation(request) {
-                    Ok((receipt, inserted)) => {
-                        if inserted {
-                            invalidations.publish(receipt.revision());
-                        }
-                        let _ = reply.send(Ok(receipt));
-                    }
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                    }
-                }
+                execute_local_mutation(&mut database, request, &reply, invalidations);
             }
             Request::Ingest {
                 fact,
@@ -1114,6 +1133,20 @@ fn run(
             Request::AuthoritativeSnapshot { reply } => {
                 let _ = reply.send(database.load_authoritative_snapshot());
             }
+            Request::CanonicalEvidence {
+                roots,
+                maximum_facts,
+                maximum_bytes,
+                reply,
+            } => {
+                reply_canonical_evidence(
+                    &mut database,
+                    &roots,
+                    maximum_facts,
+                    maximum_bytes,
+                    &reply,
+                );
+            }
             Request::CurrentRevision { reply } => {
                 let _ = reply.send(database.current_revision());
             }
@@ -1132,6 +1165,83 @@ fn run(
             }
         }
     }
+}
+
+fn execute_local_mutation(
+    database: &mut Database,
+    request: LocalMutationRequest,
+    reply: &SyncSender<Result<MutationReceipt, StoreError>>,
+    invalidations: &InvalidationEmitter,
+) {
+    match database.execute_local_mutation(request) {
+        Ok((receipt, inserted)) => {
+            if inserted {
+                invalidations.publish(receipt.revision());
+            }
+            let _ = reply.send(Ok(receipt));
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
+
+fn reply_canonical_evidence(
+    database: &mut Database,
+    roots: &BTreeSet<FactId>,
+    maximum_facts: usize,
+    maximum_bytes: usize,
+    reply: &SyncSender<Result<Vec<CanonicalEvidence>, StoreError>>,
+) {
+    let result = database
+        .load()
+        .and_then(|facts| canonical_evidence_closure(&facts, roots, maximum_facts, maximum_bytes));
+    let _ = reply.send(result);
+}
+
+fn canonical_evidence_closure(
+    facts: &[VerifiedSemanticFact],
+    roots: &BTreeSet<FactId>,
+    maximum_facts: usize,
+    maximum_bytes: usize,
+) -> Result<Vec<CanonicalEvidence>, StoreError> {
+    if roots.is_empty() || maximum_facts == 0 || maximum_bytes == 0 {
+        return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
+    }
+    let by_id = facts
+        .iter()
+        .map(|fact| (fact.fact().id(), fact))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeSet::new();
+    let mut pending = roots.iter().copied().collect::<Vec<_>>();
+    let mut total_bytes = 0_usize;
+    while let Some(current) = pending.pop() {
+        if !selected.insert(current) {
+            continue;
+        }
+        let fact = by_id
+            .get(&current)
+            .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?;
+        total_bytes = total_bytes
+            .checked_add(fact.verified_event().exact_event_bytes().len())
+            .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?;
+        if selected.len() > maximum_facts || total_bytes > maximum_bytes {
+            return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
+        }
+        pending.extend(fact.fact().causal().parents().iter().copied());
+    }
+    selected
+        .into_iter()
+        .map(|fact_id| {
+            by_id
+                .get(&fact_id)
+                .map(|fact| CanonicalEvidence {
+                    fact_id,
+                    exact_event: fact.verified_event().exact_event_bytes().to_vec(),
+                })
+                .ok_or_else(|| StoreError::new(StoreErrorClass::InvalidOperationalRequest))
+        })
+        .collect()
 }
 
 fn handle_project_saga_request(database: &mut Database, request: ProjectSagaRequest) {

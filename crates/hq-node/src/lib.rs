@@ -21,6 +21,8 @@ mod local_client;
 mod local_transport;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod node_coordinator;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod pairing_file;
 mod project_component;
 mod project_resource;
 mod project_store;

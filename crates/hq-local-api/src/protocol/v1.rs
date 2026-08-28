@@ -27,6 +27,10 @@ pub const MAX_CURSOR_BYTES: usize = 512;
 pub const MAX_TOPICS: usize = 6;
 /// Maximum projection items in one full client snapshot.
 pub const MAX_SNAPSHOT_ITEMS: usize = 16_384;
+/// Maximum canonical evidence items in one transfer.
+pub const MAX_CANONICAL_EVIDENCE_ITEMS: usize = 64;
+/// Maximum aggregate exact event bytes in one transfer.
+pub const MAX_CANONICAL_EVIDENCE_BYTES: usize = 512 * 1024;
 
 const MUTATION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mutation\0";
 
@@ -448,7 +452,7 @@ impl SubscriptionRequestDto {
 }
 
 /// Resource-locator scheme named independently by local API v1.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceSchemeDto {
     /// Canonical Git repository identity.
@@ -462,7 +466,7 @@ pub enum ResourceSchemeDto {
 }
 
 /// Typed external resource locator.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLocatorDto {
     /// Typed locator scheme.
@@ -818,6 +822,36 @@ pub enum RemoteCommandProgressDto {
     Conflicted,
 }
 
+/// One exact signed canonical event paired with its verified fact identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalEvidenceDto {
+    /// Verified canonical fact identity.
+    pub fact_id: Id32,
+    /// Exact UTF-8 outer event JSON.
+    pub exact_event: String,
+}
+
+/// Bounded roots for one transitive canonical evidence query.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalEvidenceRequestDto {
+    /// Sorted unique root facts whose complete ancestry is requested.
+    pub roots: Vec<Id32>,
+}
+
+/// Result of one reverified idempotent evidence import.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceIngestOutcomeDto {
+    /// Verified canonical fact identity.
+    pub fact_id: Id32,
+    /// Original canonical commit revision.
+    pub revision: u64,
+    /// Whether this call inserted previously unknown evidence.
+    pub inserted: bool,
+}
+
 /// Closed local API v1 request families.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -830,6 +864,10 @@ pub enum Request {
     ConversationPage(ConversationPageRequest),
     /// Execute or reconcile one exact retryable mutation.
     Mutation(MutationRequest),
+    /// Load bounded exact transitive canonical evidence.
+    CanonicalEvidence(CanonicalEvidenceRequestDto),
+    /// Reverify and idempotently import bounded exact canonical evidence.
+    IngestCanonicalEvidence(Vec<CanonicalEvidenceDto>),
     /// Apply or reconcile one typed relay configuration effect.
     ConfigureRelay(EffectRequestDto<RelayConfigurationDto>),
     /// Prompt or reconcile explicit relay synchronization.
@@ -991,6 +1029,10 @@ pub enum SnapshotItem {
         device: Id32,
         /// Stable membership state name.
         state: String,
+        /// Complete causal-maximal grant/accept/revoke frontier.
+        frontier: Vec<Id32>,
+        /// Complete creator-issued grant history.
+        grants: Vec<DeviceGrantDto>,
         /// Exact active acceptance authorities.
         active_acceptances: Vec<Id32>,
     },
@@ -1164,6 +1206,28 @@ pub enum SnapshotItem {
         /// Structured authoritative progress.
         progress: Box<RemoteCommandProgressDto>,
     },
+}
+
+/// Passive creator-issued human-device grant history.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceGrantDto {
+    /// Stable grant identity.
+    pub grant_id: Id32,
+    /// Exact signed grant fact.
+    pub grant_fact: Id32,
+    /// Invited installation.
+    pub device: Id32,
+    /// Exact invited signing key.
+    pub signing_key: Id32,
+    /// Optional signed label.
+    pub label: Option<String>,
+    /// Signed non-authority relay hints.
+    pub relay_hints: Vec<ResourceLocatorDto>,
+    /// Whether this grant is currently causal-maximal membership history.
+    pub frontier_member: bool,
+    /// Whether a current active acceptance cites this grant identity.
+    pub active: bool,
 }
 
 /// Complete revisioned client-facing authoritative snapshot.
@@ -1401,6 +1465,10 @@ pub enum ResponseResult {
     ConversationPage(ConversationPageDto),
     /// Retry-safe mutation attempt.
     Mutation(MutationAttemptDto),
+    /// Bounded exact canonical evidence closure.
+    CanonicalEvidence(Vec<CanonicalEvidenceDto>),
+    /// Per-fact idempotent evidence import outcomes.
+    EvidenceIngest(Vec<EvidenceIngestOutcomeDto>),
     /// Relay configuration or synchronization effect outcome.
     EmptyEffect(EffectOutcomeDto<()>),
     /// Named-agent session effect outcome.
@@ -1623,6 +1691,13 @@ impl WireMessage {
             Self::Request(envelope) => match &envelope.request {
                 Request::ConversationPage(request) => request.validate(),
                 Request::Mutation(request) => request.validate(),
+                Request::CanonicalEvidence(request) => {
+                    if request.roots.is_empty() {
+                        return Err(ValueError::TooManyItems);
+                    }
+                    validate_id_set(&request.roots, MAX_CANONICAL_EVIDENCE_ITEMS)
+                }
+                Request::IngestCanonicalEvidence(evidence) => validate_evidence(evidence),
                 Request::Subscribe(request) => validate_topics(&request.topics),
                 Request::ConfigureRelay(request) => validate_locator(&request.body.endpoint),
                 Request::Synchronize(request) => match &request.body {
@@ -1686,6 +1761,22 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         }
         Response::Success(ResponseResult::ConversationPage(page)) => validate_page(page),
         Response::Success(ResponseResult::Mutation(attempt)) => validate_mutation_attempt(attempt),
+        Response::Success(ResponseResult::CanonicalEvidence(evidence)) => {
+            validate_evidence(evidence)
+        }
+        Response::Success(ResponseResult::EvidenceIngest(outcomes)) => {
+            if outcomes.is_empty() || outcomes.len() > MAX_CANONICAL_EVIDENCE_ITEMS {
+                return Err(ValueError::TooManyItems);
+            }
+            let mut previous = None;
+            for outcome in outcomes {
+                if outcome.revision == 0 || previous.is_some_and(|value| value >= outcome.fact_id) {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                previous = Some(outcome.fact_id);
+            }
+            Ok(())
+        }
         Response::Success(ResponseResult::EmptyEffect(outcome)) => {
             validate_effect_outcome(outcome, |()| Ok(()))
         }
@@ -1725,6 +1816,27 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
             Ok(())
         }
     }
+}
+
+fn validate_evidence(evidence: &[CanonicalEvidenceDto]) -> Result<(), ValueError> {
+    if evidence.is_empty() || evidence.len() > MAX_CANONICAL_EVIDENCE_ITEMS {
+        return Err(ValueError::TooManyItems);
+    }
+    let mut total = 0_usize;
+    let mut previous = None;
+    for item in evidence {
+        if item.exact_event.is_empty() || previous.is_some_and(|value| value >= item.fact_id) {
+            return Err(ValueError::InvalidValueCombination);
+        }
+        total = total
+            .checked_add(item.exact_event.len())
+            .ok_or(ValueError::TooManyItems)?;
+        if total > MAX_CANONICAL_EVIDENCE_BYTES {
+            return Err(ValueError::TooManyItems);
+        }
+        previous = Some(item.fact_id);
+    }
+    Ok(())
 }
 
 fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), ValueError> {
@@ -1859,7 +1971,9 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
             SnapshotItem::PeerRoute {
                 state, frontier, ..
             } => {
-                validate_text(state, SHORT_TEXT_MAX_BYTES)?;
+                if !matches!(state.as_str(), "routable" | "blocked" | "conflicted") {
+                    return Err(ValueError::InvalidValueCombination);
+                }
                 validate_id_set(frontier, 64)?;
             }
             SnapshotItem::MailboxCapability { .. } => {}
@@ -1880,10 +1994,43 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
             }
             SnapshotItem::Membership {
                 state,
+                frontier,
+                grants,
                 active_acceptances,
                 ..
             } => {
-                validate_text(state, SHORT_TEXT_MAX_BYTES)?;
+                if !matches!(state.as_str(), "pending" | "active" | "revoked") {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                validate_id_set(frontier, 64)?;
+                if grants.len() > 64 {
+                    return Err(ValueError::TooManyItems);
+                }
+                if grants
+                    .windows(2)
+                    .any(|pair| pair[0].grant_id >= pair[1].grant_id)
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                for grant in grants {
+                    if let Some(label) = &grant.label {
+                        validate_text(label, SHORT_TEXT_MAX_BYTES)?;
+                    }
+                    if grant.relay_hints.len() > hq_domain::MAX_RELAY_HINTS
+                        || grant.relay_hints.windows(2).any(|pair| pair[0] >= pair[1])
+                    {
+                        return Err(ValueError::InvalidValueCombination);
+                    }
+                    for locator in &grant.relay_hints {
+                        validate_locator(locator)?;
+                    }
+                }
+                let has_active_grant = grants.iter().any(|grant| grant.active);
+                if (state == "active") != has_active_grant
+                    || (state == "pending" && !grants.iter().any(|grant| grant.frontier_member))
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
                 validate_id_set(active_acceptances, 64)?;
             }
             SnapshotItem::Agent {

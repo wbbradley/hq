@@ -1,15 +1,16 @@
 //! Component lifecycle ownership and normative node startup/shutdown order.
 
-use std::{error::Error, fmt, num::NonZeroUsize};
+use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroUsize};
 
 use hq_application::{
-    AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts, CommitFacts,
-    ConfigureRelays, ControlHarness, ControlProjects, EffectOutcome, EffectRequest, FactMutation,
-    InspectResource, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
-    ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
+    AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts, CanonicalEvidence,
+    CommitFacts, ConfigureRelays, ControlHarness, ControlProjects, EffectOutcome, EffectRequest,
+    EvidenceIngestOutcome, FactMutation, InspectResource, MutationAttempt, ObserveRevisions,
+    ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration,
+    ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest,
+    SynchronizationRequest, WakeDisposition,
 };
-use hq_domain::{Page, PageCursor, Revision};
+use hq_domain::{FactId, Page, PageCursor, Revision};
 use hq_local_api::RevisionHub;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use hq_local_api::protocol::v1::{BuildMetadata, Id32, LifecycleState, LifecycleStatus};
@@ -181,11 +182,28 @@ impl<R, H, P> QueryDomain for NodeApplicationPorts<'_, R, H, P> {
     ) -> Result<Page<hq_application::ConversationEntry>, ApplicationError> {
         self.store.conversation_entries(key, limit, cursor)
     }
+
+    fn canonical_evidence(
+        &self,
+        roots: &BTreeSet<FactId>,
+        maximum_facts: usize,
+        maximum_bytes: usize,
+    ) -> Result<Vec<CanonicalEvidence>, ApplicationError> {
+        self.store
+            .canonical_evidence(roots, maximum_facts, maximum_bytes)
+    }
 }
 
 impl<R, H, P> CommitFacts for NodeApplicationPorts<'_, R, H, P> {
     fn commit_facts(&self, request: FactMutation) -> Result<MutationAttempt, ApplicationError> {
         self.store.commit_facts(request)
+    }
+
+    fn ingest_canonical_evidence(
+        &self,
+        evidence: &[CanonicalEvidence],
+    ) -> Result<Vec<EvidenceIngestOutcome>, ApplicationError> {
+        self.store.ingest_canonical_evidence(evidence)
     }
 }
 

@@ -7,9 +7,10 @@ use std::{
 
 use hq_domain::{
     AccountId, AgentId, CommandDigest, CommandId, ContentText, DispatchId, EncryptionPublicKey,
-    FactId, GrantId, InstallationId, MailboxAddress, MailboxKind, MessageId, ProjectId, ProviderId,
-    ProviderSessionId, RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator, Revision,
-    RuntimeObservation, ShortText, SigningPublicKey, Timestamp,
+    FactId, GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxKind, MessageId,
+    ProjectId, ProviderId, ProviderSessionId, RelayHints, RemoteCommandResult, ResourceHealth,
+    ResourceId, ResourceLocator, Revision, RuntimeObservation, ShortText, SigningPublicKey,
+    Timestamp,
 };
 use hq_reducer::{
     ActivityView, AgentAggregateKey, AgentLifecycle, AgentProjection, AgentProjectionKey,
@@ -254,6 +255,20 @@ impl DomainSnapshot {
                         MembershipState::Active => ClientMembershipState::Active,
                         MembershipState::Revoked => ClientMembershipState::Revoked,
                     },
+                    frontier: view.frontier.clone(),
+                    grants: view
+                        .grants
+                        .iter()
+                        .map(|(grant_id, grant)| ClientDeviceGrant {
+                            grant_id: *grant_id,
+                            grant_fact: grant.grant_fact,
+                            device: grant.device,
+                            label: grant.label.clone(),
+                            relay_hints: grant.relay_hints.clone(),
+                            frontier_member: view.frontier.contains(&grant.grant_fact),
+                            active: view.active_grants.contains(grant_id),
+                        })
+                        .collect(),
                     active_acceptances: view.active_acceptances.clone(),
                 },
                 (
@@ -470,6 +485,25 @@ pub enum ClientMembershipState {
     Active,
     Revoked,
 }
+
+/// Passive creator-issued device grant history for local clients.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientDeviceGrant {
+    /// Stable grant identity.
+    pub grant_id: GrantId,
+    /// Exact signed grant fact.
+    pub grant_fact: FactId,
+    /// Invited installation and signing key.
+    pub device: InstallationAddress,
+    /// Optional signed device label.
+    pub label: Option<ShortText>,
+    /// Signed non-authority relay hints.
+    pub relay_hints: RelayHints,
+    /// Whether this grant is currently causal-maximal membership history.
+    pub frontier_member: bool,
+    /// Whether one current active acceptance cites this exact grant identity.
+    pub active: bool,
+}
 /// Stable client presentation of named-agent lifecycle.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -555,6 +589,8 @@ pub enum ClientProjection {
         account_id: AccountId,
         device: InstallationId,
         state: ClientMembershipState,
+        frontier: BTreeSet<FactId>,
+        grants: Vec<ClientDeviceGrant>,
         active_acceptances: BTreeSet<FactId>,
     },
     AccountSelection {

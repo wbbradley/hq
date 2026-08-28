@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Export and join offline-verifiable human pairing invitations** — Add bounded signed
-  invite export and guarded join through pure application plans and the canonical protocol. An
-  invitation carries the complete account creator/grant/regrant authority needed for offline target
-  verification plus exact target installation/key and bounded relay hints; it contains no root
-  secret or local operational state. Join verifies canonical bytes, signatures, target binding,
-  lineage, expiry policy if specified, and changed reuse before accepting and selecting membership.
-  Test tampering, wrong target/key/account, missing history, duplicate replay, concurrent revoke,
-  restart, unsafe paths, and deterministic human/JSON rendering.
-
 - **[cli/high] Inspect and revoke human account devices** — Add typed device listing and
   creator-only revoke through authoritative snapshots and pure application plans. Preserve every
   maximal acceptance/revoke, require exact grant attribution, fan revocation out to the named device

@@ -1,6 +1,6 @@
 //! Authority race matrix for installation, peer, capability, and human-account reduction.
 
-use std::{error::Error, num::NonZeroU64};
+use std::{collections::BTreeSet, error::Error, num::NonZeroU64};
 
 use hq_domain::{
     AccountId, ActivityKind, AuthorityReference, AuthorityRole, BoundedVec, ContentText, Fact,
@@ -1056,7 +1056,9 @@ fn account_device_requires_exact_acceptance_and_remove_wins_revocation()
             account: account_id,
             device: device.installation_id(),
         }],
-        AuthorityProjection::Membership(ref view) if view.state() == MembershipState::Active
+        AuthorityProjection::Membership(ref view)
+            if view.state() == MembershipState::Active
+                && view.active_grants == BTreeSet::from([grant_id])
     ));
     assert_eq!(
         active.decisions()[&changed_acceptance.id()].status(),
@@ -1088,7 +1090,8 @@ fn account_device_requires_exact_acceptance_and_remove_wins_revocation()
             account: account_id,
             device: device.installation_id(),
         }],
-        AuthorityProjection::Membership(ref view) if view.state() == MembershipState::Revoked
+        AuthorityProjection::Membership(ref view)
+            if view.state() == MembershipState::Revoked && view.active_grants.is_empty()
     ));
 
     let missing_grant = hq_domain::FactId::from_bytes([99; 32]);

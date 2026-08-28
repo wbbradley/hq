@@ -1,7 +1,8 @@
 //! Executable consistency checks between local API v1 code and its normative specification.
 
 use hq_local_api::protocol::v1::{
-    MAX_BUFFERED_BYTES, MAX_BUILD_FIELD_BYTES, MAX_CURSOR_BYTES, MAX_FRAME_BYTES, MAX_PAGE_ITEMS,
+    MAX_BUFFERED_BYTES, MAX_BUILD_FIELD_BYTES, MAX_CANONICAL_EVIDENCE_BYTES,
+    MAX_CANONICAL_EVIDENCE_ITEMS, MAX_CURSOR_BYTES, MAX_FRAME_BYTES, MAX_PAGE_ITEMS,
     MAX_SNAPSHOT_ITEMS, MAX_TOPICS, V1,
 };
 
@@ -18,6 +19,8 @@ fn normative_spec_names_the_independent_version_and_every_local_bound() {
         MAX_CURSOR_BYTES.to_string(),
         MAX_TOPICS.to_string(),
         MAX_SNAPSHOT_ITEMS.to_string(),
+        MAX_CANONICAL_EVIDENCE_ITEMS.to_string(),
+        MAX_CANONICAL_EVIDENCE_BYTES.to_string(),
     ] {
         assert!(
             SPEC.replace(',', "").contains(&expected),

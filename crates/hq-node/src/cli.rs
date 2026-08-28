@@ -7,28 +7,37 @@ use std::{
     fmt::{self, Write as _},
     io::Read,
     num::NonZeroUsize,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
 use hq_application::{
-    ApplicationError, LocalFactInputs, LocalInstallationAuthority, plan_human_account_creation,
-    plan_human_account_selection, plan_human_mailbox_creation,
+    ApplicationError, HumanDeviceGrantRequest, LocalFactInputs, LocalInstallationAuthority,
+    plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
+    plan_human_device_grant, plan_human_mailbox_creation,
 };
 use hq_domain::{
-    AccountId, CommandId, FactId, InstallationId, ProviderId, ShortText, SigningPublicKey,
-    Timestamp,
+    AccountId, BoundedText, CommandId, FactId, GrantId, InstallationAddress, InstallationId,
+    ProviderId, RESOURCE_LOCATOR_MAX_BYTES, RelayHints, ResourceLocator, ResourceScheme, ShortText,
+    SigningPublicKey, Timestamp,
 };
 use hq_local_api::{
     ClientEvent, InitialView,
     protocol::v1::{
-        AuthoritativeSnapshotDto, BuildMetadata, LifecycleRequest, LifecycleState,
-        MutationAttemptDto, MutationOutcomeDto, MutationRequest, SnapshotItem,
+        AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto,
+        DeviceGrantDto, Id32, LifecycleRequest, LifecycleState, MutationAttemptDto,
+        MutationOutcomeDto, MutationRequest, Request, ResourceSchemeDto, ResponseResult,
+        SnapshotItem,
     },
+};
+use hq_protocol::VerifiedPairingInvitation;
+use hq_reducer::{
+    AuthorityPolicy, AuthorityProjectionKey, AuthorityReducer, DecisionStatus, reduce_complete,
 };
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::pairing_file::{read_pairing_file, write_new_pairing_file};
 use crate::{
     BackupPassword, ForegroundNodeConfig, ForegroundNodeError, IdentityError, LifecycleClient,
     LifecycleClientConfig, LifecycleClientError, LifecycleObservation, LocalConfiguration,
@@ -113,6 +122,37 @@ pub enum HumanCommand {
         /// Exact account identity to select.
         account_id: AccountId,
     },
+    /// Create one signed, offline-verifiable invitation for an exact installation address.
+    Invite {
+        /// Exact invited installation.
+        installation_id: InstallationId,
+        /// Exact invited signing key.
+        signing_key: SigningPublicKey,
+        /// New absolute invitation destination.
+        destination: PathBuf,
+        /// Optional signed device label.
+        label: Option<ShortText>,
+        /// Signed non-authority relay hints.
+        relay_hints: RelayHints,
+    },
+    /// Verify and join one existing invitation addressed to this installation.
+    Join {
+        /// Existing absolute invitation source.
+        source: PathBuf,
+    },
+}
+
+/// Passive pairing operation result safe for human and machine output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HumanPairingView {
+    /// Completed operation name.
+    pub operation: &'static str,
+    /// Joined or inviting account.
+    pub account_id: AccountId,
+    /// Exact creator-issued grant identity.
+    pub grant_id: GrantId,
+    /// Invited installation.
+    pub device: InstallationId,
 }
 
 /// Passive human-account presentation data.
@@ -263,6 +303,8 @@ pub enum CliError {
     Application(ApplicationError),
     /// Authoritative human-account state was absent, ambiguous, stale, or inconsistent.
     HumanState,
+    /// Pairing evidence or its filesystem location failed strict validation.
+    PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
     SecretInput,
 }
@@ -287,6 +329,7 @@ impl fmt::Display for CliError {
             Self::HumanState => {
                 formatter.write_str("human account state is unavailable or ambiguous")
             }
+            Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
         }
     }
@@ -368,6 +411,11 @@ impl CliError {
             Self::Application(_) | Self::HumanState => (
                 "human.state_unavailable",
                 "human account authority is absent, stale, ambiguous, or inconsistent",
+                CliExitClass::Failure,
+            ),
+            Self::PairingArtifact => (
+                "human.pairing_invalid",
+                "the pairing invitation or its file location is invalid",
                 CliExitClass::Failure,
             ),
             Self::SecretInput => (
@@ -570,12 +618,64 @@ fn parse_human(
         [action, account] if action == "select" => HumanCommand::Select {
             account_id: AccountId::from_bytes(parse_hex32(account)?),
         },
+        [action, installation, signing_key, destination, options @ ..] if action == "invite" => {
+            let (label, relay_hints) = parse_pairing_options(options)?;
+            HumanCommand::Invite {
+                installation_id: InstallationId::from_bytes(parse_hex32(installation)?),
+                signing_key: SigningPublicKey::from_bytes(parse_hex32(signing_key)?),
+                destination: absolute_path(destination)?,
+                label,
+                relay_hints,
+            }
+        }
+        [action, source] if action == "join" => HumanCommand::Join {
+            source: absolute_path(source)?,
+        },
         _ => return Err(CliError::Arguments),
     };
     Ok(CliCommand::Human {
         action,
         state: parsed_state(state_root)?,
     })
+}
+
+fn parse_pairing_options(
+    options: &[OsString],
+) -> Result<(Option<ShortText>, RelayHints), CliError> {
+    let mut label = None;
+    let mut relays = Vec::new();
+    let mut index = 0;
+    while index < options.len() {
+        match options[index].to_str() {
+            Some("--label") if label.is_none() => {
+                let value = options.get(index + 1).ok_or(CliError::Arguments)?;
+                label = Some(
+                    value
+                        .to_str()
+                        .ok_or(CliError::Arguments)
+                        .and_then(|value| ShortText::new(value).map_err(|_| CliError::Arguments))?,
+                );
+                index += 2;
+            }
+            Some("--relay") => {
+                let value = options
+                    .get(index + 1)
+                    .and_then(|value| value.to_str())
+                    .ok_or(CliError::Arguments)?;
+                let value = BoundedText::<RESOURCE_LOCATOR_MAX_BYTES>::new(value)
+                    .map_err(|_| CliError::Arguments)?;
+                relays.push(ResourceLocator::new(ResourceScheme::Opaque, value));
+                index += 2;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    relays.sort();
+    if relays.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(CliError::Arguments);
+    }
+    let relays = RelayHints::new(relays).map_err(|_| CliError::Arguments)?;
+    Ok((label, relays))
 }
 
 fn parse_relay(value: &OsString) -> Result<RelayEndpoint, CliError> {
@@ -826,6 +926,422 @@ fn run_human(action: &HumanCommand, state: &StatePaths) -> Result<CliResult, Cli
             let snapshot = client.snapshot()?;
             Ok(CliResult::Human(Box::new(human_view(&snapshot, local)?)))
         }
+        HumanCommand::Invite {
+            installation_id,
+            signing_key,
+            destination,
+            label,
+            relay_hints,
+        } => create_pairing_invitation(
+            &mut client,
+            local,
+            InstallationAddress::new(*installation_id, *signing_key),
+            destination,
+            label.as_ref(),
+            relay_hints,
+        ),
+        HumanCommand::Join { source } => join_pairing_invitation(&mut client, local, source),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MembershipRecord {
+    state: String,
+    frontier: BTreeSet<FactId>,
+    grants: Vec<DeviceGrantDto>,
+    active_acceptances: BTreeSet<FactId>,
+}
+
+fn create_pairing_invitation(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    device: InstallationAddress,
+    destination: &Path,
+    label: Option<&ShortText>,
+    relay_hints: &RelayHints,
+) -> Result<CliResult, CliError> {
+    if device.installation_id() == local {
+        return Err(CliError::HumanState);
+    }
+    let snapshot = client.snapshot()?;
+    let authority = local_authority(&snapshot, local)?;
+    let selection = local_selection(&snapshot, local)?;
+    let account_id = selection.active.ok_or(CliError::HumanState)?;
+    let (account_root, creator, _, _) =
+        account_item(&snapshot, account_id).ok_or(CliError::HumanState)?;
+    if creator != local {
+        return Err(CliError::HumanState);
+    }
+    let history = membership_record(&snapshot, account_id, device.installation_id())?;
+    let frontier = history
+        .as_ref()
+        .map_or_else(BTreeSet::new, |history| history.frontier.clone());
+    let reusable = reusable_pairing_grant(history.as_ref(), device, label, relay_hints)?;
+    let (grant_id, grant_fact) = if let Some(reusable) = reusable {
+        reusable
+    } else {
+        let grant_id = pairing_grant_id(account_id, device, label, relay_hints, &frontier);
+        if history.as_ref().is_some_and(|history| {
+            history.grants.iter().any(|grant| {
+                grant.grant_id.bytes() == *grant_id.as_bytes()
+                    && !device_grant_matches(grant, device, label, relay_hints)
+            })
+        }) {
+            return Err(CliError::HumanState);
+        }
+        let request = HumanDeviceGrantRequest {
+            account_id,
+            account_root,
+            grant_id,
+            device,
+            label: label.cloned(),
+            relay_hints: relay_hints.clone(),
+            membership_frontier: frontier,
+        };
+        let grant_fact = author_pairing_grant(client, authority, request)?;
+        (grant_id, grant_fact)
+    };
+    let evidence = load_pairing_evidence(client, grant_fact)?;
+    let invitation = VerifiedPairingInvitation::from_evidence(
+        grant_fact,
+        evidence
+            .iter()
+            .map(|item| item.exact_event.as_bytes().to_vec()),
+    )
+    .map_err(|_| CliError::PairingArtifact)?;
+    verify_pairing_authority(&invitation, local)?;
+    write_new_pairing_file(destination, invitation.canonical_bytes())
+        .map_err(|_| CliError::PairingArtifact)?;
+    Ok(CliResult::HumanPairing(HumanPairingView {
+        operation: "invite",
+        account_id,
+        grant_id,
+        device: device.installation_id(),
+    }))
+}
+
+fn reusable_pairing_grant(
+    history: Option<&MembershipRecord>,
+    device: InstallationAddress,
+    label: Option<&ShortText>,
+    relay_hints: &RelayHints,
+) -> Result<Option<(GrantId, FactId)>, CliError> {
+    let Some(history) = history else {
+        return Ok(None);
+    };
+    let candidates = history
+        .grants
+        .iter()
+        .filter(|grant| {
+            device_grant_matches(grant, device, label, relay_hints)
+                && (grant.active || (history.state == "pending" && grant.frontier_member))
+        })
+        .map(|grant| {
+            (
+                GrantId::from_bytes(grant.grant_id.bytes()),
+                FactId::from_bytes(grant.grant_fact.bytes()),
+            )
+        })
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [candidate] => Ok(Some(*candidate)),
+        [_, _, ..] => Err(CliError::HumanState),
+    }
+}
+
+fn author_pairing_grant(
+    client: &mut LocalNodeClient,
+    authority: LocalInstallationAuthority,
+    request: HumanDeviceGrantRequest,
+) -> Result<FactId, CliError> {
+    let account_id = request.account_id;
+    let grant_id = request.grant_id;
+    let device = request.device;
+    let label = request.label.clone();
+    let relay_hints = request.relay_hints.clone();
+    let plan = plan_human_device_grant(authority, stable_inputs(), request)?;
+    submit_human_plan(client, plan)?;
+    let refreshed = client.snapshot()?;
+    let refreshed = membership_record(&refreshed, account_id, device.installation_id())?
+        .ok_or(CliError::HumanState)?;
+    let grant = refreshed
+        .grants
+        .iter()
+        .find(|grant| grant.grant_id.bytes() == *grant_id.as_bytes())
+        .ok_or(CliError::HumanState)?;
+    if !device_grant_matches(grant, device, label.as_ref(), &relay_hints) {
+        return Err(CliError::HumanState);
+    }
+    Ok(FactId::from_bytes(grant.grant_fact.bytes()))
+}
+
+fn join_pairing_invitation(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    source: &Path,
+) -> Result<CliResult, CliError> {
+    let bytes = read_pairing_file(source).map_err(|_| CliError::PairingArtifact)?;
+    let invitation =
+        VerifiedPairingInvitation::decode(&bytes).map_err(|_| CliError::PairingArtifact)?;
+    let snapshot = client.snapshot()?;
+    let authority = local_authority(&snapshot, local)?;
+    let grant = invitation.grant();
+    if grant.device != InstallationAddress::new(authority.installation_id, authority.signing_key) {
+        return Err(CliError::PairingArtifact);
+    }
+    verify_pairing_authority(&invitation, local)?;
+    reconcile_human_mailbox(client, local)?;
+    ingest_pairing_evidence(client, &invitation)?;
+
+    let snapshot = client.snapshot()?;
+    account_item(&snapshot, grant.account_id).ok_or(CliError::HumanState)?;
+    let membership =
+        membership_record(&snapshot, grant.account_id, local)?.ok_or(CliError::HumanState)?;
+    let projected_grant = membership
+        .grants
+        .iter()
+        .find(|candidate| candidate.grant_fact.bytes() == *grant.fact_id.as_bytes())
+        .ok_or(CliError::HumanState)?;
+    if !device_grant_matches(
+        projected_grant,
+        grant.device,
+        grant.label.as_ref(),
+        &grant.relay_hints,
+    ) {
+        return Err(CliError::HumanState);
+    }
+    if membership.state != "active" || membership.active_acceptances.is_empty() {
+        let plan = plan_human_device_acceptance(
+            authority,
+            stable_inputs(),
+            grant.account_id,
+            grant.grant_id,
+            grant.fact_id,
+        )?;
+        submit_human_plan(client, plan)?;
+    }
+    select_human_account(client, local, grant.account_id)?;
+    Ok(CliResult::HumanPairing(HumanPairingView {
+        operation: "join",
+        account_id: grant.account_id,
+        grant_id: grant.grant_id,
+        device: local,
+    }))
+}
+
+fn membership_record(
+    snapshot: &AuthoritativeSnapshotDto,
+    account: AccountId,
+    device: InstallationId,
+) -> Result<Option<MembershipRecord>, CliError> {
+    let matches = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::Membership {
+            account_id,
+            device: candidate,
+            state,
+            frontier,
+            grants,
+            active_acceptances,
+        } if account_id.bytes() == *account.as_bytes()
+            && candidate.bytes() == *device.as_bytes() =>
+        {
+            Some(MembershipRecord {
+                state: state.clone(),
+                frontier: frontier
+                    .iter()
+                    .map(|fact| FactId::from_bytes(fact.bytes()))
+                    .collect(),
+                grants: grants.clone(),
+                active_acceptances: active_acceptances
+                    .iter()
+                    .map(|fact| FactId::from_bytes(fact.bytes()))
+                    .collect(),
+            })
+        }
+        _ => None,
+    });
+    let matches = matches.collect::<Vec<_>>();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => Err(CliError::HumanState),
+    }
+}
+
+fn device_grant_matches(
+    grant: &DeviceGrantDto,
+    device: InstallationAddress,
+    label: Option<&ShortText>,
+    relay_hints: &RelayHints,
+) -> bool {
+    grant.device.bytes() == *device.installation_id().as_bytes()
+        && grant.signing_key.bytes() == *device.signing_key().as_bytes()
+        && grant.label.as_deref() == label.map(ShortText::as_str)
+        && grant.relay_hints.len() == relay_hints.as_slice().len()
+        && grant
+            .relay_hints
+            .iter()
+            .zip(relay_hints.as_slice())
+            .all(|(actual, expected)| {
+                actual.value == expected.value()
+                    && actual.scheme
+                        == match expected.scheme() {
+                            ResourceScheme::GitRepository => ResourceSchemeDto::GitRepository,
+                            ResourceScheme::WorkingTree => ResourceSchemeDto::WorkingTree,
+                            ResourceScheme::Container => ResourceSchemeDto::Container,
+                            ResourceScheme::Opaque => ResourceSchemeDto::Opaque,
+                        }
+            })
+}
+
+fn pairing_grant_id(
+    account_id: AccountId,
+    device: InstallationAddress,
+    label: Option<&ShortText>,
+    relay_hints: &RelayHints,
+    frontier: &BTreeSet<FactId>,
+) -> GrantId {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-human-device-grant-v1\0");
+    digest.update(account_id.as_bytes());
+    digest.update(device.installation_id().as_bytes());
+    digest.update(device.signing_key().as_bytes());
+    match label {
+        Some(label) => {
+            digest.update([1]);
+            update_digest_text(&mut digest, label.as_str());
+        }
+        None => digest.update([0]),
+    }
+    digest.update(
+        u64::try_from(relay_hints.as_slice().len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for locator in relay_hints.as_slice() {
+        digest.update([match locator.scheme() {
+            ResourceScheme::GitRepository => 1,
+            ResourceScheme::WorkingTree => 2,
+            ResourceScheme::Container => 3,
+            ResourceScheme::Opaque => 4,
+        }]);
+        update_digest_text(&mut digest, locator.value());
+    }
+    digest.update(
+        u64::try_from(frontier.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for fact_id in frontier {
+        digest.update(fact_id.as_bytes());
+    }
+    GrantId::from_bytes(digest.finalize().into())
+}
+
+fn update_digest_text(digest: &mut Sha256, value: &str) {
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(value.as_bytes());
+}
+
+fn load_pairing_evidence(
+    client: &mut LocalNodeClient,
+    grant_fact: FactId,
+) -> Result<Vec<CanonicalEvidenceDto>, CliError> {
+    let request = || {
+        Request::CanonicalEvidence(CanonicalEvidenceRequestDto {
+            roots: vec![Id32::new(*grant_fact.as_bytes())],
+        })
+    };
+    for _ in 0..2 {
+        match client.request(request())? {
+            ClientEvent::Response {
+                result: ResponseResult::CanonicalEvidence(evidence),
+                ..
+            } if evidence
+                .iter()
+                .any(|item| item.fact_id.bytes() == *grant_fact.as_bytes()) =>
+            {
+                return Ok(evidence);
+            }
+            ClientEvent::RequestLost(_) => {}
+            _ => return Err(CliError::HumanState),
+        }
+    }
+    Err(CliError::HumanState)
+}
+
+fn ingest_pairing_evidence(
+    client: &mut LocalNodeClient,
+    invitation: &VerifiedPairingInvitation,
+) -> Result<(), CliError> {
+    let evidence = invitation
+        .facts()
+        .map(|fact| {
+            std::str::from_utf8(fact.verified_event().exact_event_bytes())
+                .map(|exact_event| CanonicalEvidenceDto {
+                    fact_id: Id32::new(*fact.fact().id().as_bytes()),
+                    exact_event: exact_event.to_owned(),
+                })
+                .map_err(|_| CliError::PairingArtifact)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = evidence
+        .iter()
+        .map(|item| item.fact_id)
+        .collect::<BTreeSet<_>>();
+    for _ in 0..2 {
+        match client.request(Request::IngestCanonicalEvidence(evidence.clone()))? {
+            ClientEvent::Response {
+                result: ResponseResult::EvidenceIngest(outcomes),
+                ..
+            } if outcomes
+                .iter()
+                .map(|outcome| outcome.fact_id)
+                .collect::<BTreeSet<_>>()
+                == expected
+                && outcomes.len() == evidence.len() =>
+            {
+                return Ok(());
+            }
+            ClientEvent::RequestLost(_) => {}
+            _ => return Err(CliError::HumanState),
+        }
+    }
+    Err(CliError::HumanState)
+}
+
+fn verify_pairing_authority(
+    invitation: &VerifiedPairingInvitation,
+    local: InstallationId,
+) -> Result<(), CliError> {
+    let grant = invitation.grant();
+    let report = reduce_complete(
+        invitation.facts().map(|fact| fact.fact().clone()),
+        &AuthorityReducer::new(AuthorityPolicy::new(
+            local,
+            crate::foreground::reserved_human_mailbox(),
+        )),
+    )
+    .map_err(|_| CliError::PairingArtifact)?;
+    let projected_grant = report
+        .decisions()
+        .get(&grant.fact_id)
+        .is_some_and(|decision| decision.status() == DecisionStatus::Projected);
+    let projected_account = report
+        .projections()
+        .contains_key(&AuthorityProjectionKey::Account(grant.account_id));
+    let projected_membership =
+        report
+            .projections()
+            .contains_key(&AuthorityProjectionKey::Membership {
+                account: grant.account_id,
+                device: grant.device.installation_id(),
+            });
+    if projected_grant && projected_account && projected_membership {
+        Ok(())
+    } else {
+        Err(CliError::PairingArtifact)
     }
 }
 
@@ -948,6 +1464,7 @@ fn active_membership_fact(
                 device,
                 state,
                 active_acceptances,
+                ..
             } if account_id.bytes() == *account.as_bytes()
                 && device.bytes() == *local.as_bytes()
                 && state == "active" =>
@@ -1193,6 +1710,7 @@ enum CliResult {
     Identity(Box<PublicIdentity>),
     Configuration(Box<LocalConfiguration>),
     Human(Box<HumanView>),
+    HumanPairing(HumanPairingView),
     Completed {
         operation: &'static str,
     },
@@ -1226,6 +1744,13 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 .join(","),
         )),
         (CliOutputFormat::Human, CliResult::Human(view)) => render_human_view(view),
+        (CliOutputFormat::Human, CliResult::HumanPairing(view)) => Ok(format!(
+            "completed operation={} account={} grant={} device={}\n",
+            view.operation,
+            crate::identity::encode_hex(view.account_id.as_bytes()),
+            crate::identity::encode_hex(view.grant_id.as_bytes()),
+            crate::identity::encode_hex(view.device.as_bytes()),
+        )),
         (CliOutputFormat::Human, CliResult::Completed { operation }) => {
             Ok(format!("completed operation={operation}\n"))
         }
@@ -1268,6 +1793,15 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 "active_account": view.active_account.map(|account| crate::identity::encode_hex(account.as_bytes())),
                 "installation_id": crate::identity::encode_hex(view.installation_id.as_bytes()),
                 "selection_candidates": view.selection_candidates.iter().map(|account| crate::identity::encode_hex(account.as_bytes())).collect::<Vec<_>>(),
+            }),
+        ),
+        (CliOutputFormat::Json, CliResult::HumanPairing(view)) => machine_record(
+            "human_pairing",
+            &serde_json::json!({
+                "account_id": crate::identity::encode_hex(view.account_id.as_bytes()),
+                "device": crate::identity::encode_hex(view.device.as_bytes()),
+                "grant_id": crate::identity::encode_hex(view.grant_id.as_bytes()),
+                "operation": view.operation,
             }),
         ),
         (CliOutputFormat::Json, CliResult::Completed { operation }) => {
@@ -1366,6 +1900,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [command] if command == "human" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] human <COMMAND>\n\n\
              Commands:\n  create [LABEL]                         Create/reconcile and select the local creator account\n  show                                   Show authoritative account and selection state\n  select ACCOUNT_ID                      Select one actively authorized account\n\n\
+             invite INSTALLATION_ID SIGNING_KEY ABSOLUTE_PATH [--label LABEL] [--relay URL]...\n                                          Export one new signed invitation\n  join ABSOLUTE_PATH                     Verify, import, accept, and select one invitation\n\n\
              Human commands start or connect to the local node and author only through application plans.\n",
         ),
         [command] if command == "daemon" => Some(
@@ -1380,7 +1915,11 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                 ))
                 || (command == "identity" && matches!(action.as_str(), "init" | "show"))
                 || (command == "config" && action == "get")
-                || (command == "human" && action == "show") =>
+                || (command == "human"
+                    && matches!(
+                        action.as_str(),
+                        "show" | "create" | "select" | "invite" | "join"
+                    )) =>
         {
             match command.as_str() {
                 "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
@@ -1472,13 +2011,16 @@ fn format_observation(label: &str, observation: &LifecycleObservation) -> String
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::ffi::OsString;
+    use std::{collections::BTreeSet, ffi::OsString};
 
     use super::{
         CliCommand, CliError, CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand,
-        IdentityCommand, execute_cli, human_view, parse_cli, read_password, run_cli,
+        IdentityCommand, execute_cli, human_view, pairing_grant_id, parse_cli, read_password,
+        run_cli,
     };
-    use hq_domain::InstallationId;
+    use hq_domain::{
+        AccountId, FactId, InstallationAddress, InstallationId, RelayHints, SigningPublicKey,
+    };
     use hq_local_api::protocol::v1::{AuthoritativeSnapshotDto, Id32, SnapshotItem};
 
     #[test]
@@ -1596,6 +2138,43 @@ mod tests {
             ]),
             Err(CliError::Arguments)
         );
+
+        let invitation = std::env::temp_dir().join("hq-pairing-invitation.json");
+        let invite = parse_cli([
+            OsString::from("human"),
+            OsString::from("invite"),
+            OsString::from("11".repeat(32)),
+            OsString::from("22".repeat(32)),
+            invitation.clone().into_os_string(),
+            OsString::from("--relay"),
+            OsString::from("wss://relay.example"),
+            OsString::from("--label"),
+            OsString::from("laptop"),
+        ])
+        .expect("pairing invitation parses");
+        assert!(matches!(invite.command, CliCommand::Human {
+            action: HumanCommand::Invite {
+                installation_id,
+                signing_key,
+                destination,
+                label: Some(label),
+                relay_hints,
+            },
+            ..
+        } if installation_id.as_bytes() == &[0x11; 32]
+            && signing_key.as_bytes() == &[0x22; 32]
+            && destination == invitation
+            && label.as_str() == "laptop"
+            && relay_hints.as_slice().len() == 1));
+
+        assert_eq!(
+            parse_cli([
+                OsString::from("human"),
+                OsString::from("join"),
+                OsString::from("relative-invitation.json"),
+            ]),
+            Err(CliError::Arguments)
+        );
     }
 
     #[test]
@@ -1626,6 +2205,27 @@ mod tests {
         assert_eq!(view.active_account, None);
         assert_eq!(view.accounts.len(), 1);
         assert!(!view.accounts[0].selected);
+    }
+
+    #[test]
+    fn pairing_grant_identity_is_stable_and_frontier_sensitive() {
+        let account = AccountId::from_bytes([1; 32]);
+        let device = InstallationAddress::new(
+            InstallationId::from_bytes([2; 32]),
+            SigningPublicKey::from_bytes([3; 32]),
+        );
+        let relays = RelayHints::new([]).expect("empty relay hints");
+        let empty = pairing_grant_id(account, device, None, &relays, &BTreeSet::new());
+        let repeated = pairing_grant_id(account, device, None, &relays, &BTreeSet::new());
+        let regrant = pairing_grant_id(
+            account,
+            device,
+            None,
+            &relays,
+            &BTreeSet::from([FactId::from_bytes([4; 32])]),
+        );
+        assert_eq!(empty, repeated);
+        assert_ne!(empty, regrant);
     }
 
     #[test]

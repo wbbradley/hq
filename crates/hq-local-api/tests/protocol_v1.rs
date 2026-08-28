@@ -10,13 +10,14 @@ use hq_domain::{
 use hq_local_api::project_command_from_v1;
 use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
-    ClientHello, ConversationKeyDto, ConversationPageDto, ConversationPageRequest, DecodeError,
-    DomainErrorDto, EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass, ErrorResponse,
-    FrameDecoder, Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
-    MAX_FRAME_BYTES, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
-    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto,
-    RelayAuthenticationDto, RelayConfigurationDto, RemoteCommandProgressDto, Request,
-    RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
+    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationKeyDto,
+    ConversationPageDto, ConversationPageRequest, DecodeError, DeviceGrantDto, DomainErrorDto,
+    EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass, ErrorResponse,
+    EvidenceIngestOutcomeDto, FrameDecoder, Id32, InvalidationTopic, LifecycleRequest,
+    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MutationAttemptDto, MutationOutcomeDto,
+    MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
+    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RemoteCommandProgressDto,
+    Request, RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
     ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope,
     ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto, SnapshotItem,
     SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
@@ -286,6 +287,13 @@ fn every_request_notification_and_negotiation_family_interoperates() {
         Request::Mutation(
             MutationRequest::from_plan(CommandId::from_bytes([3; 32]), plan()).expect("mutation"),
         ),
+        Request::CanonicalEvidence(CanonicalEvidenceRequestDto {
+            roots: vec![Id32::new([8; 32])],
+        }),
+        Request::IngestCanonicalEvidence(vec![CanonicalEvidenceDto {
+            fact_id: Id32::new([8; 32]),
+            exact_event: "{}".to_owned(),
+        }]),
         Request::ConfigureRelay(effect(RelayConfigurationDto::new(
             locator(),
             RelayAccessDto::ReadWrite,
@@ -371,6 +379,15 @@ fn every_success_and_error_response_family_interoperates() {
             revision: 4,
             outcome: MutationOutcomeDto::Committed,
         }),
+        ResponseResult::CanonicalEvidence(vec![CanonicalEvidenceDto {
+            fact_id: Id32::new([8; 32]),
+            exact_event: "{}".to_owned(),
+        }]),
+        ResponseResult::EvidenceIngest(vec![EvidenceIngestOutcomeDto {
+            fact_id: Id32::new([8; 32]),
+            revision: 5,
+            inserted: true,
+        }]),
         ResponseResult::EmptyEffect(EffectOutcomeDto::Accepted(())),
         ResponseResult::AgentSession(EffectOutcomeDto::Accepted(AgentSessionResultDto::Ready(
             "session-1".to_owned(),
@@ -570,6 +587,17 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             account_id: id(5),
             device: id(6),
             state: "active".to_owned(),
+            frontier: vec![id(9), id(10)],
+            grants: vec![DeviceGrantDto {
+                grant_id: id(9),
+                grant_fact: id(33),
+                device: id(6),
+                signing_key: id(34),
+                label: Some("laptop".to_owned()),
+                relay_hints: vec![],
+                frontier_member: false,
+                active: true,
+            }],
             active_acceptances: vec![id(10)],
         },
         SnapshotItem::AccountSelection {

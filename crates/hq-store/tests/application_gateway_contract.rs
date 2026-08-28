@@ -3,6 +3,7 @@
 #![allow(clippy::expect_used)]
 
 use std::{
+    collections::BTreeSet,
     error::Error,
     sync::{
         Arc,
@@ -11,10 +12,12 @@ use std::{
 };
 
 use hq_application::{
-    ApplicationErrorClass, CommitFacts, FactMutation, FactPlan, MutationAttempt, MutationDecision,
-    MutationOutcome, QueryDomain,
+    ApplicationErrorClass, CanonicalEvidence, CommitFacts, FactMutation, FactPlan, MutationAttempt,
+    MutationDecision, MutationOutcome, QueryDomain,
 };
-use hq_domain::{CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, Revision};
+use hq_domain::{
+    CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, FactId, Revision,
+};
 use hq_store::StoreGateway;
 use rusqlite::Connection;
 
@@ -152,5 +155,121 @@ fn gateway_rejects_noncanonical_retained_application_result() -> Result<(), Box<
         }))
         .expect_err("invalid application result rejects");
     assert_eq!(error.class(), ApplicationErrorClass::CorruptState);
+    Ok(())
+}
+
+#[test]
+fn canonical_evidence_query_returns_the_exact_bounded_transitive_closure()
+-> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let root = verified_fact();
+    let root_id = root.fact().id();
+    let root_exact = root.verified_event().exact_event_bytes().to_vec();
+    let child = verified_child(root.verified_event().event_id());
+    let child_id = child.fact().id();
+    let child_exact = child.verified_event().exact_event_bytes().to_vec();
+    store.append_verified(root)?;
+    store.append_verified(child)?;
+    let gateway = StoreGateway::new(&store, authority_policy(), Arc::new(signer(1)));
+
+    let evidence = gateway.canonical_evidence(
+        &BTreeSet::from([child_id]),
+        2,
+        root_exact.len() + child_exact.len(),
+    )?;
+
+    let mut expected = vec![(root_id, root_exact), (child_id, child_exact)];
+    expected.sort_by_key(|(fact_id, _)| *fact_id);
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|item| (item.fact_id, item.exact_event.clone()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        gateway
+            .canonical_evidence(&BTreeSet::from([child_id]), 1, usize::MAX)
+            .expect_err("fact limit is strict")
+            .class(),
+        ApplicationErrorClass::InvalidInput
+    );
+    assert_eq!(
+        gateway
+            .canonical_evidence(&BTreeSet::from([child_id]), 2, 1)
+            .expect_err("byte limit is strict")
+            .class(),
+        ApplicationErrorClass::InvalidInput
+    );
+    assert_eq!(
+        gateway
+            .canonical_evidence(
+                &BTreeSet::from([FactId::from_bytes([0xff; 32])]),
+                2,
+                usize::MAX,
+            )
+            .expect_err("unknown roots are rejected")
+            .class(),
+        ApplicationErrorClass::InvalidInput
+    );
+    Ok(())
+}
+
+#[test]
+fn evidence_import_reverifies_the_whole_batch_and_is_idempotent() -> Result<(), Box<dyn Error>> {
+    let source_directory = TestDirectory::new();
+    let source = open_store(&source_directory.database_path());
+    let root = verified_fact();
+    let root_id = root.fact().id();
+    let root_exact = root.verified_event().exact_event_bytes().to_vec();
+    let child = verified_child(root.verified_event().event_id());
+    let child_id = child.fact().id();
+    let child_exact = child.verified_event().exact_event_bytes().to_vec();
+    source.append_verified(root)?;
+    source.append_verified(child)?;
+    let source_gateway = StoreGateway::new(&source, authority_policy(), Arc::new(signer(1)));
+    let evidence = source_gateway.canonical_evidence(
+        &BTreeSet::from([child_id]),
+        2,
+        root_exact.len() + child_exact.len(),
+    )?;
+
+    let destination_directory = TestDirectory::new();
+    let destination = open_store(&destination_directory.database_path());
+    let destination_gateway =
+        StoreGateway::new(&destination, authority_policy(), Arc::new(signer(1)));
+    let first = destination_gateway.ingest_canonical_evidence(&evidence)?;
+    assert_eq!(first.len(), 2);
+    assert!(first.iter().all(|outcome| outcome.inserted));
+    assert_eq!(destination.load_corpus()?.len(), 2);
+
+    let second = destination_gateway.ingest_canonical_evidence(&evidence)?;
+    assert_eq!(second.len(), 2);
+    assert!(second.iter().all(|outcome| !outcome.inserted));
+    assert_eq!(destination.load_corpus()?.len(), 2);
+
+    let invalid_directory = TestDirectory::new();
+    let invalid_destination = open_store(&invalid_directory.database_path());
+    let invalid_gateway = StoreGateway::new(
+        &invalid_destination,
+        authority_policy(),
+        Arc::new(signer(1)),
+    );
+    let mut invalid = evidence.clone();
+    invalid[1] = CanonicalEvidence {
+        fact_id: invalid[1].fact_id,
+        exact_event: b"{}".to_vec(),
+    };
+    assert_eq!(
+        invalid_gateway
+            .ingest_canonical_evidence(&invalid)
+            .expect_err("one invalid event rejects the whole batch before insertion")
+            .class(),
+        ApplicationErrorClass::InvalidInput
+    );
+    assert!(invalid_destination.load_corpus()?.is_empty());
+
+    assert!(evidence.iter().any(|item| item.fact_id == root_id));
     Ok(())
 }

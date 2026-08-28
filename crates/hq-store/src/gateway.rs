@@ -1,26 +1,27 @@
 //! Adapter from consumer-owned application ports to the store actor.
 
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use hq_application::{
-    ApplicationError, ApplicationErrorCode, CommitFacts, DomainSnapshot, FactMutation,
-    MutationAttempt, MutationDecision, MutationOutcome,
+    ApplicationError, ApplicationErrorCode, CanonicalEvidence, CommitFacts, DomainSnapshot,
+    EvidenceIngestOutcome, FactMutation, MutationAttempt, MutationDecision, MutationOutcome,
     MutationReceipt as ApplicationMutationReceipt, QueryDomain, decode_mutation_outcome,
     encode_mutation_outcome,
 };
-use hq_domain::{Page, PageCursor};
-use hq_protocol::{Bip340Signer, CanonicalEventPlan};
+use hq_domain::{FactId, Page, PageCursor};
+use hq_protocol::{Bip340Signer, CanonicalEventPlan, decode_semantic_event};
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 
 use crate::{
-    ApplicationStateHandle, LocalMutationDecision, LocalMutationRequest, MutationResultBytes,
-    MutationResultKind, Store, StoreError, StoreErrorClass,
+    ApplicationStateHandle, IngestOutcome, LocalMutationDecision, LocalMutationRequest,
+    MutationResultBytes, MutationResultKind, ReplicationHandle, Store, StoreError, StoreErrorClass,
 };
 
 /// Application-facing store adapter configured with explicit local authoring capabilities.
 #[derive(Clone)]
 pub struct StoreGateway {
     store: ApplicationStateHandle,
+    replication: ReplicationHandle,
     policy: AuthorityPolicy,
     signer: Arc<Bip340Signer>,
 }
@@ -30,6 +31,7 @@ impl StoreGateway {
     pub fn new(store: &Store, policy: AuthorityPolicy, signer: Arc<Bip340Signer>) -> Self {
         Self {
             store: store.application_state_handle(),
+            replication: store.replication_handle(),
             policy,
             signer,
         }
@@ -60,6 +62,17 @@ impl QueryDomain for StoreGateway {
     ) -> Result<Page<hq_application::ConversationEntry>, ApplicationError> {
         self.store
             .load_conversation_entries(key, limit, cursor)
+            .map_err(map_store_error)
+    }
+
+    fn canonical_evidence(
+        &self,
+        roots: &BTreeSet<FactId>,
+        maximum_facts: usize,
+        maximum_bytes: usize,
+    ) -> Result<Vec<CanonicalEvidence>, ApplicationError> {
+        self.store
+            .canonical_evidence(roots, maximum_facts, maximum_bytes)
             .map_err(map_store_error)
     }
 }
@@ -116,6 +129,38 @@ impl CommitFacts for StoreGateway {
             }
             Err(error) => Err(map_store_error(error)),
         }
+    }
+
+    fn ingest_canonical_evidence(
+        &self,
+        evidence: &[CanonicalEvidence],
+    ) -> Result<Vec<EvidenceIngestOutcome>, ApplicationError> {
+        let verified = evidence
+            .iter()
+            .map(|evidence| {
+                let fact = decode_semantic_event(evidence.exact_event.clone())
+                    .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?
+                    .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?;
+                if fact.fact().id() != evidence.fact_id {
+                    return Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest));
+                }
+                Ok(fact)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        verified
+            .into_iter()
+            .map(|fact| {
+                let fact_id = fact.fact().id();
+                self.replication
+                    .ingest_verified(fact, self.policy)
+                    .map(|outcome| EvidenceIngestOutcome {
+                        fact_id,
+                        revision: outcome.revision(),
+                        inserted: matches!(outcome, IngestOutcome::Inserted(_)),
+                    })
+                    .map_err(map_store_error)
+            })
+            .collect()
     }
 }
 

@@ -17,8 +17,9 @@ pub use error::{
     ApplicationError, ApplicationErrorClass, ApplicationErrorCode, ApplicationValueError,
 };
 pub use human::{
-    LocalFactInputs, LocalInstallationAuthority, plan_human_account_creation,
-    plan_human_account_selection, plan_human_mailbox_creation,
+    HumanDeviceGrantRequest, LocalFactInputs, LocalInstallationAuthority,
+    plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
+    plan_human_device_grant, plan_human_mailbox_creation,
 };
 pub use mutation::{
     FactMutation, FactPlan, MAX_ENCODED_MUTATION_RESULT_BYTES, MutationAttempt, MutationDecision,
@@ -26,11 +27,12 @@ pub use mutation::{
     decode_mutation_outcome, encode_mutation_outcome,
 };
 pub use ports::{
-    AgentSessionRequest, AgentSessionResult, ApplicationPorts, CommitFacts, ConfigureRelays,
-    ControlHarness, EffectOutcome, EffectRequest, InspectResource, MAX_SUBSCRIPTION_TOPICS,
-    ObserveRevisions, PublishWake, QueryDomain, RelayAccess, RelayAuthentication,
-    RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult, SessionControl,
-    SubscriptionRequest, SubscriptionTopic, SynchronizationRequest, WakeDisposition,
+    AgentSessionRequest, AgentSessionResult, ApplicationPorts, CanonicalEvidence, CommitFacts,
+    ConfigureRelays, ControlHarness, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
+    InspectResource, MAX_SUBSCRIPTION_TOPICS, ObserveRevisions, PublishWake, QueryDomain,
+    RelayAccess, RelayAuthentication, RelayConfiguration, ResourceInspectionRequest,
+    ResourceInspectionResult, SessionControl, SubscriptionRequest, SubscriptionTopic,
+    SynchronizationRequest, WakeDisposition,
 };
 pub use project::{
     ControlProjects, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
@@ -39,10 +41,10 @@ pub use project::{
 pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot,
-    ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState, ClientProjectLifecycle,
-    ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
-    ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot, ProjectProjectionSnapshot,
-    ProjectionSnapshot,
+    ClientAgentLifecycle, ClientDeviceGrant, ClientMembershipState, ClientPeerRouteState,
+    ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage,
+    ConversationEntry, ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot,
+    ProjectProjectionSnapshot, ProjectionSnapshot,
 };
 
 /// Minimal in-memory use-case host for the workspace walking skeleton.

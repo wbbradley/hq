@@ -824,6 +824,8 @@ impl ReconnectingClient {
                 }
                 ResponseResult::Lifecycle(_)
                 | ResponseResult::ConversationPage(_)
+                | ResponseResult::CanonicalEvidence(_)
+                | ResponseResult::EvidenceIngest(_)
                 | ResponseResult::EmptyEffect(_)
                 | ResponseResult::AgentSession(_)
                 | ResponseResult::ResourceInspection(_)

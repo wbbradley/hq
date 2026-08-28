@@ -306,8 +306,9 @@ other application capabilities remain outside persistence ownership.
 
 Authority values are not serialized Rust structs. Dedicated strict tables and normalized child rows
 store each projection variant: route candidates, blocks, relay locators and frontiers; capability
-revoke and observed-action facts; membership grants, relay locators, acceptances, revokes and
-frontiers; selection candidates; aggregate frontiers; and projection support. Private exhaustive
+revoke and observed-action facts; membership grants with derived active attribution, relay
+locators, acceptances, revokes and frontiers; selection candidates; aggregate frontiers; and
+projection support. Private exhaustive
 codecs map every key, state, address, public key, bounded label/error code, relay scheme/value, and
 child relation. Loading reconstructs values through typed constructors, enforces fixed widths,
 bounds, ordinals, key/value pairing, parent/child ownership and row-count limits, and verifies a

@@ -3,9 +3,30 @@
 use std::collections::BTreeSet;
 
 use hq_domain::{
-    AgentId, CommandDigest, ContentText, OperationId, Page, PageCursor, ProjectId, ProviderId,
-    ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, Revision, Timestamp,
+    AgentId, CommandDigest, ContentText, FactId, OperationId, Page, PageCursor, ProjectId,
+    ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, Revision,
+    Timestamp,
 };
+
+/// Passive exact canonical evidence crossing an adapter boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CanonicalEvidence {
+    /// Verified canonical fact identity.
+    pub fact_id: FactId,
+    /// Exact signed outer event bytes.
+    pub exact_event: Vec<u8>,
+}
+
+/// Passive result of one reverified idempotent evidence import.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EvidenceIngestOutcome {
+    /// Verified canonical fact identity.
+    pub fact_id: FactId,
+    /// Original canonical commit revision.
+    pub revision: Revision,
+    /// Whether this call inserted previously unknown evidence.
+    pub inserted: bool,
+}
 use hq_reducer::ConversationKey;
 
 use crate::{
@@ -25,12 +46,34 @@ pub trait QueryDomain {
         limit: usize,
         cursor: Option<&PageCursor>,
     ) -> Result<Page<ConversationEntry>, ApplicationError>;
+
+    /// Loads the exact transitive canonical ancestry of bounded root facts.
+    fn canonical_evidence(
+        &self,
+        _roots: &BTreeSet<FactId>,
+        _maximum_facts: usize,
+        _maximum_bytes: usize,
+    ) -> Result<Vec<CanonicalEvidence>, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 }
 
 /// Atomic retryable canonical-fact commit capability.
 pub trait CommitFacts {
     /// Executes or reconciles one stable fact-backed mutation.
     fn commit_facts(&self, request: FactMutation) -> Result<MutationAttempt, ApplicationError>;
+
+    /// Reverifies and idempotently ingests bounded exact canonical evidence.
+    fn ingest_canonical_evidence(
+        &self,
+        _evidence: &[CanonicalEvidence],
+    ) -> Result<Vec<EvidenceIngestOutcome>, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 }
 
 /// Disposition of a non-blocking post-commit work notification.

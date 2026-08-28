@@ -559,6 +559,184 @@ fn human_account_creation_reconciles_concurrent_callers_and_survives_restart() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn human_pairing_is_target_bound_replay_safe_and_survives_restart() {
+    let directory = TestDirectory::new();
+    let creator_root = directory.path().join("creator");
+    let device_root = directory.path().join("device");
+    let _creator_identity = initialize_identity(&creator_root);
+    let device_identity = initialize_identity(&device_root);
+    let device_id = device_identity["data"]["installation_id"]
+        .as_str()
+        .expect("device installation");
+    let device_key = device_identity["data"]["signing_public_key"]
+        .as_str()
+        .expect("device signing key");
+    let created = human_output(&creator_root, &["create", "Personal"]);
+    assert!(
+        created.status.success(),
+        "create stderr: {:?}",
+        created.stderr
+    );
+    let created: serde_json::Value = serde_json::from_slice(&created.stdout).expect("creator JSON");
+    let account = created["data"]["active_account"]
+        .as_str()
+        .expect("creator account")
+        .to_owned();
+    let invitation = directory.path().join("pairing-invitation.json");
+
+    let invited = offline_output(
+        &creator_root,
+        [
+            OsString::from("human"),
+            OsString::from("invite"),
+            OsString::from(device_id),
+            OsString::from(device_key),
+            invitation.clone().into_os_string(),
+            OsString::from("--label"),
+            OsString::from("laptop"),
+            OsString::from("--relay"),
+            OsString::from("wss://relay.example"),
+        ],
+        None,
+    );
+    assert!(
+        invited.status.success(),
+        "invite stderr: {:?}",
+        invited.stderr
+    );
+    let invited_json: serde_json::Value =
+        serde_json::from_slice(&invited.stdout).expect("invite JSON");
+    assert_eq!(invited_json["kind"], "human_pairing");
+    assert_eq!(invited_json["data"]["operation"], "invite");
+    assert_eq!(invited_json["data"]["account_id"], account);
+    assert_eq!(invited_json["data"]["device"], device_id);
+    assert!(
+        !String::from_utf8_lossy(&invited.stdout).contains(&invitation.display().to_string()),
+        "output must not disclose the caller-selected path"
+    );
+
+    let creator_state = StatePaths::new(creator_root.clone()).expect("creator state");
+    let mut creator_client = local_client(creator_state, InitialView::OnDemand);
+    let invite_revision = creator_client.snapshot().expect("invite snapshot").revision;
+    let repeated_invitation = directory.path().join("repeated-pairing-invitation.json");
+    let repeated_invite = offline_output(
+        &creator_root,
+        [
+            OsString::from("human"),
+            OsString::from("invite"),
+            OsString::from(device_id),
+            OsString::from(device_key),
+            repeated_invitation.clone().into_os_string(),
+            OsString::from("--label"),
+            OsString::from("laptop"),
+            OsString::from("--relay"),
+            OsString::from("wss://relay.example"),
+        ],
+        None,
+    );
+    assert!(
+        repeated_invite.status.success(),
+        "repeat invite stderr: {:?}",
+        repeated_invite.stderr
+    );
+    assert_eq!(
+        creator_client
+            .snapshot()
+            .expect("snapshot after repeat invite")
+            .revision,
+        invite_revision,
+        "an unrevoked current grant is reused"
+    );
+    assert_eq!(
+        fs::read(&repeated_invitation).expect("repeated invitation reads"),
+        fs::read(&invitation).expect("original invitation reads")
+    );
+
+    let wrong_target = human_output(
+        &creator_root,
+        &["join", invitation.to_str().expect("UTF-8 path")],
+    );
+    assert!(!wrong_target.status.success());
+    let wrong_error: serde_json::Value =
+        serde_json::from_slice(&wrong_target.stderr).expect("wrong-target error JSON");
+    assert_eq!(wrong_error["data"]["code"], "human.pairing_invalid");
+
+    let joined = human_output(
+        &device_root,
+        &["join", invitation.to_str().expect("UTF-8 path")],
+    );
+    assert!(joined.status.success(), "join stderr: {:?}", joined.stderr);
+    let joined_json: serde_json::Value = serde_json::from_slice(&joined.stdout).expect("join JSON");
+    assert_eq!(joined_json["data"]["operation"], "join");
+    assert_eq!(joined_json["data"]["account_id"], account);
+    assert_eq!(joined_json["data"]["device"], device_id);
+
+    let device_state = StatePaths::new(device_root.clone()).expect("device state");
+    let mut device_client = local_client(device_state, InitialView::OnDemand);
+    let joined_revision = device_client.snapshot().expect("joined snapshot").revision;
+    let repeated = human_output(
+        &device_root,
+        &["join", invitation.to_str().expect("UTF-8 path")],
+    );
+    assert!(
+        repeated.status.success(),
+        "repeat join stderr: {:?}",
+        repeated.stderr
+    );
+    assert_eq!(
+        device_client
+            .snapshot()
+            .expect("snapshot after repeated join")
+            .revision,
+        joined_revision,
+        "byte-identical evidence, acceptance, and selection are no-ops"
+    );
+
+    let tampered_path = directory.path().join("tampered-invitation.json");
+    let mut tampered = fs::read(&invitation).expect("invitation reads");
+    let byte = tampered
+        .iter_mut()
+        .find(|byte| **byte == b'a')
+        .expect("fixture contains a mutable byte");
+    *byte = b'b';
+    fs::write(&tampered_path, tampered).expect("tampered fixture writes");
+    let rejected = human_output(
+        &device_root,
+        &["join", tampered_path.to_str().expect("UTF-8 path")],
+    );
+    assert!(!rejected.status.success());
+    assert_eq!(
+        device_client
+            .snapshot()
+            .expect("snapshot after tamper")
+            .revision,
+        joined_revision
+    );
+
+    let restarted = output("restart", &device_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let shown = human_output(&device_root, &["show"]);
+    assert!(shown.status.success(), "show stderr: {:?}", shown.stderr);
+    let shown: serde_json::Value =
+        serde_json::from_slice(&shown.stdout).expect("joined human JSON");
+    assert_eq!(shown["data"]["active_account"], account);
+
+    for root in [&creator_root, &device_root] {
+        let stopped = output("stop", root);
+        assert!(
+            stopped.status.success(),
+            "stop stderr: {:?}",
+            stopped.stderr
+        );
+    }
+}
+
+#[test]
 fn startup_refuses_a_persisted_root_that_disagrees_with_the_owned_identity() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");

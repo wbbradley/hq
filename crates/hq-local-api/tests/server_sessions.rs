@@ -2,29 +2,31 @@
 
 #![allow(clippy::expect_used)]
 
-use std::cell::RefCell;
+use std::{cell::RefCell, collections::BTreeSet};
 
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationPorts,
-    AuthoritativeSnapshot, CommitFacts, ConfigureRelays, ConversationKey, DomainSnapshot,
-    EffectOutcome, EffectRequest, FactMutation, InspectResource, MutationAttempt, ObserveRevisions,
-    ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration,
-    ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest, SubscriptionTopic,
-    SynchronizationRequest, WakeDisposition,
+    AuthoritativeSnapshot, CanonicalEvidence, CommitFacts, ConfigureRelays, ConversationKey,
+    DomainSnapshot, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation,
+    InspectResource, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
+    ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, ResourceInspectionRequest,
+    ResourceInspectionResult, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    WakeDisposition,
 };
 use hq_domain::{
-    BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactScope, MAX_FACT_AUTHORITIES,
-    MAX_FACT_PARENTS, OperationId, Page, PageCursor, ResourceHealth, Revision, SemanticPayload,
-    ShortText, SigningPublicKey, Timestamp,
+    BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactId, FactScope,
+    MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, OperationId, Page, PageCursor, ResourceHealth,
+    Revision, SemanticPayload, ShortText, SigningPublicKey, Timestamp,
 };
 use hq_local_api::protocol::v1::{
-    AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata, ClientHello,
-    ConversationKeyDto, ConversationPageRequest, EffectRequestDto, Id32, InvalidationTopic,
-    LifecycleRequest, LifecycleState, LifecycleStatus, MutationRequest, ProjectCommandActionDto,
-    ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
-    Request, RequestEnvelope, RequestId, ResourceInspectionRequestDto, ResourceLocatorDto,
-    ResourceSchemeDto, Response, ResponseResult, SessionControlDto, SubscriptionRequestDto,
-    SynchronizationRequestDto, V1, VersionRange, WireMessage,
+    AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto,
+    CanonicalEvidenceRequestDto, ClientHello, ConversationKeyDto, ConversationPageRequest,
+    EffectRequestDto, Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
+    MutationRequest, ProjectCommandActionDto, ProjectCommandRequestDto, RelayAccessDto,
+    RelayAuthenticationDto, RelayConfigurationDto, Request, RequestEnvelope, RequestId,
+    ResourceInspectionRequestDto, ResourceLocatorDto, ResourceSchemeDto, Response, ResponseResult,
+    SessionControlDto, SubscriptionRequestDto, SynchronizationRequestDto, V1, VersionRange,
+    WireMessage,
 };
 use hq_local_api::{
     LifecycleControl, RevisionHub, ServerSession, ServerSessionError, ServerWriteDisposition,
@@ -62,6 +64,22 @@ impl QueryDomain for Ports {
         self.trace.borrow_mut().push("page");
         Ok(Page::new(Vec::new(), None))
     }
+
+    fn canonical_evidence(
+        &self,
+        roots: &BTreeSet<FactId>,
+        _maximum_facts: usize,
+        _maximum_bytes: usize,
+    ) -> Result<Vec<CanonicalEvidence>, ApplicationError> {
+        self.trace.borrow_mut().push("evidence");
+        Ok(roots
+            .iter()
+            .map(|fact_id| CanonicalEvidence {
+                fact_id: *fact_id,
+                exact_event: b"{}".to_vec(),
+            })
+            .collect())
+    }
 }
 
 impl CommitFacts for Ports {
@@ -72,6 +90,21 @@ impl CommitFacts for Ports {
             command_id,
             request_digest,
         })
+    }
+
+    fn ingest_canonical_evidence(
+        &self,
+        evidence: &[CanonicalEvidence],
+    ) -> Result<Vec<EvidenceIngestOutcome>, ApplicationError> {
+        self.trace.borrow_mut().push("ingest_evidence");
+        Ok(evidence
+            .iter()
+            .map(|item| EvidenceIngestOutcome {
+                fact_id: item.fact_id,
+                revision: Revision::new(8),
+                inserted: true,
+            })
+            .collect())
     }
 }
 
@@ -384,6 +417,13 @@ fn every_typed_request_family_routes_without_storage_types() {
         Request::Mutation(
             MutationRequest::from_plan(CommandId::from_bytes([11; 32]), plan()).expect("mutation"),
         ),
+        Request::CanonicalEvidence(CanonicalEvidenceRequestDto {
+            roots: vec![Id32::new([12; 32])],
+        }),
+        Request::IngestCanonicalEvidence(vec![CanonicalEvidenceDto {
+            fact_id: Id32::new([12; 32]),
+            exact_event: "{}".to_owned(),
+        }]),
         Request::ConfigureRelay(effect(RelayConfigurationDto::new(
             locator(),
             RelayAccessDto::ReadWrite,

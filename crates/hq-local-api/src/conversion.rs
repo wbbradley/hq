@@ -1,33 +1,110 @@
 //! Exhaustive local API v1 conversion boundary.
 
 use crate::protocol::v1::{
-    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, ConversationEntryDto,
-    ConversationKeyDto, ConversationPageDto, ConversationPageRequest, DomainErrorDto,
-    EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse, Id32, InvalidationTopic,
-    MutationAttemptDto, MutationOutcomeDto, MutationRequest, ProjectCommandActionDto,
-    ProjectCommandOutcomeDto, ProjectCommandRequestDto, ProjectCommandStageDto, ProjectResourceDto,
-    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RemoteCommandProgressDto,
-    RemoteCommandResultDto, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, RuntimeObservationDto,
-    SessionControlDto, SnapshotItem, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
+    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto,
+    ConversationEntryDto, ConversationKeyDto, ConversationPageDto, ConversationPageRequest,
+    DeviceGrantDto, DomainErrorDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
+    EvidenceIngestOutcomeDto, Id32, InvalidationTopic, MAX_CANONICAL_EVIDENCE_BYTES,
+    MAX_CANONICAL_EVIDENCE_ITEMS, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
+    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
+    ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto, RelayAuthenticationDto,
+    RelayConfigurationDto, RemoteCommandProgressDto, RemoteCommandResultDto, ResourceHealthDto,
+    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
+    ResourceSchemeDto, RuntimeObservationDto, SessionControlDto, SnapshotItem,
+    SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorClass,
-    AuthoritativeSnapshot, ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState,
-    ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage,
-    ConversationEntry, ConversationKey, EffectOutcome, EffectRequest, FactMutation,
-    MutationAttempt, MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
-    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, RelayAccess,
-    RelayAuthentication, RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult,
-    SessionControl, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
-    WorktreeProvisioningRequest,
+    AuthoritativeSnapshot, CanonicalEvidence, ClientAgentLifecycle, ClientMembershipState,
+    ClientPeerRouteState, ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection,
+    ClientRemoteCommandStage, ConversationEntry, ConversationKey, EffectOutcome, EffectRequest,
+    EvidenceIngestOutcome, FactMutation, MutationAttempt, MutationDecision, MutationOutcome,
+    MutationReceipt, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
+    ProjectCommandStage, RelayAccess, RelayAuthentication, RelayConfiguration,
+    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, SubscriptionRequest,
+    SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
 };
 use hq_domain::{
-    ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, MailboxAddress,
-    MailboxId, OperationId, Page, PageCursor, ProjectId, ProjectResource, ProviderId,
-    ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult, ResourceHealth, ResourceId,
-    ResourceLocator, ResourceScheme, Revision, RuntimeObservation, ShortText, ThreadId, Timestamp,
+    ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
+    MailboxAddress, MailboxId, OperationId, Page, PageCursor, ProjectId, ProjectResource,
+    ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult, ResourceHealth,
+    ResourceId, ResourceLocator, ResourceScheme, Revision, RuntimeObservation, ShortText, ThreadId,
+    Timestamp,
 };
+
+/// Converts bounded exact canonical evidence into its wire representation.
+pub fn canonical_evidence_to_v1(
+    evidence: &[CanonicalEvidence],
+) -> Result<Vec<CanonicalEvidenceDto>, ValueError> {
+    if evidence.is_empty() || evidence.len() > MAX_CANONICAL_EVIDENCE_ITEMS {
+        return Err(ValueError::TooManyItems);
+    }
+    let mut total = 0_usize;
+    let mut previous = None;
+    evidence
+        .iter()
+        .map(|item| {
+            if previous.is_some_and(|value| value >= item.fact_id) {
+                return Err(ValueError::InvalidValueCombination);
+            }
+            total = total
+                .checked_add(item.exact_event.len())
+                .ok_or(ValueError::TooManyItems)?;
+            if total > MAX_CANONICAL_EVIDENCE_BYTES {
+                return Err(ValueError::TooManyItems);
+            }
+            previous = Some(item.fact_id);
+            Ok(CanonicalEvidenceDto {
+                fact_id: id32(item.fact_id.as_bytes()),
+                exact_event: String::from_utf8(item.exact_event.clone())
+                    .map_err(|_| ValueError::InvalidText)?,
+            })
+        })
+        .collect()
+}
+
+/// Converts bounded wire evidence into passive application values for re-verification.
+pub fn canonical_evidence_from_v1(
+    evidence: Vec<CanonicalEvidenceDto>,
+) -> Result<Vec<CanonicalEvidence>, ValueError> {
+    if evidence.is_empty() || evidence.len() > MAX_CANONICAL_EVIDENCE_ITEMS {
+        return Err(ValueError::TooManyItems);
+    }
+    let mut total = 0_usize;
+    let mut previous = None;
+    evidence
+        .into_iter()
+        .map(|item| {
+            let fact_id = FactId::from_bytes(item.fact_id.bytes());
+            if previous.is_some_and(|value| value >= fact_id) || item.exact_event.is_empty() {
+                return Err(ValueError::InvalidValueCombination);
+            }
+            total = total
+                .checked_add(item.exact_event.len())
+                .ok_or(ValueError::TooManyItems)?;
+            if total > MAX_CANONICAL_EVIDENCE_BYTES {
+                return Err(ValueError::TooManyItems);
+            }
+            previous = Some(fact_id);
+            Ok(CanonicalEvidence {
+                fact_id,
+                exact_event: item.exact_event.into_bytes(),
+            })
+        })
+        .collect()
+}
+
+/// Converts passive evidence-import outcomes to local API v1.
+pub fn evidence_ingest_to_v1(outcomes: &[EvidenceIngestOutcome]) -> Vec<EvidenceIngestOutcomeDto> {
+    outcomes
+        .iter()
+        .map(|outcome| EvidenceIngestOutcomeDto {
+            fact_id: id32(outcome.fact_id.as_bytes()),
+            revision: outcome.revision.value(),
+            inserted: outcome.inserted,
+        })
+        .collect()
+}
 
 /// Converts one complete normalized application snapshot into bounded local API v1 items.
 #[allow(clippy::too_many_lines)]
@@ -114,6 +191,8 @@ pub fn snapshot_to_v1(
                 account_id,
                 device,
                 state,
+                frontier,
+                grants,
                 active_acceptances,
             } => SnapshotItem::Membership {
                 account_id: id32(account_id.as_bytes()),
@@ -124,6 +203,25 @@ pub fn snapshot_to_v1(
                     ClientMembershipState::Revoked => "revoked",
                 }
                 .to_owned(),
+                frontier: frontier.iter().map(|fact| id32(fact.as_bytes())).collect(),
+                grants: grants
+                    .iter()
+                    .map(|grant| DeviceGrantDto {
+                        grant_id: id32(grant.grant_id.as_bytes()),
+                        grant_fact: id32(grant.grant_fact.as_bytes()),
+                        device: id32(grant.device.installation_id().as_bytes()),
+                        signing_key: id32(grant.device.signing_key().as_bytes()),
+                        label: grant.label.as_ref().map(|label| label.as_str().to_owned()),
+                        relay_hints: grant
+                            .relay_hints
+                            .as_slice()
+                            .iter()
+                            .map(locator_to_v1)
+                            .collect(),
+                        frontier_member: grant.frontier_member,
+                        active: grant.active,
+                    })
+                    .collect(),
                 active_acceptances: active_acceptances
                     .iter()
                     .map(|fact| id32(fact.as_bytes()))

@@ -268,10 +268,11 @@ fn insert_projection(
             for (grant, value) in &view.grants {
                 transaction.execute(
                     "INSERT INTO authority_membership_grants(account_id, device_id, grant_id, grant_fact, granted_installation, \
-                         granted_signing_key, label) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                         granted_signing_key, label, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![account.as_bytes().as_slice(), device.as_bytes().as_slice(), grant.as_bytes().as_slice(),
                         value.grant_fact.as_bytes().as_slice(), value.device.installation_id().as_bytes().as_slice(),
-                        value.device.signing_key().as_bytes().as_slice(), optional_text(value.label.as_ref())],
+                        value.device.signing_key().as_bytes().as_slice(), optional_text(value.label.as_ref()),
+                        i64::from(view.active_grants.contains(grant))],
                 ).map_err(database)?;
                 insert_relays(
                     transaction,
@@ -752,7 +753,7 @@ fn load_memberships(
         let account = AccountId::from_bytes(fixed(account)?);
         let device = InstallationId::from_bytes(fixed(device)?);
         let facts = load_membership_facts(connection, account, device)?;
-        let grants = load_membership_grants(connection, account, device)?;
+        let (grants, active_grants) = load_membership_grants(connection, account, device)?;
         let view = MembershipView::from_parts(
             decode_membership_state(state).ok_or_else(corrupt)?,
             facts[0].clone(),
@@ -760,6 +761,7 @@ fn load_memberships(
             facts[1].clone(),
             facts[2].clone(),
             facts[3].clone(),
+            active_grants,
         )
         .ok_or_else(corrupt)?;
         insert_loaded(
@@ -802,10 +804,11 @@ fn load_membership_grants(
     connection: &Connection,
     account: AccountId,
     device: InstallationId,
-) -> Result<BTreeMap<GrantId, DeviceGrantView>, StoreError> {
+) -> Result<(BTreeMap<GrantId, DeviceGrantView>, BTreeSet<GrantId>), StoreError> {
     let mut output = BTreeMap::new();
+    let mut active = BTreeSet::new();
     let mut statement = connection.prepare(
-        "SELECT grant_id, grant_fact, granted_installation, granted_signing_key, label \
+        "SELECT grant_id, grant_fact, granted_installation, granted_signing_key, label, active \
          FROM authority_membership_grants WHERE account_id = ?1 AND device_id = ?2 ORDER BY grant_id",
     ).map_err(database)?;
     let rows = statement
@@ -818,13 +821,19 @@ fn load_membership_grants(
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, Vec<u8>>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )
         .map_err(database)?;
     for row in rows {
-        let (grant, fact, installation, signing, label) = row.map_err(database)?;
+        let (grant, fact, installation, signing, label, is_active) = row.map_err(database)?;
         let grant = GrantId::from_bytes(fixed(grant)?);
+        match is_active {
+            0 => {}
+            1 if active.insert(grant) => {}
+            _ => return Err(corrupt()),
+        }
         let value = DeviceGrantView {
             grant_fact: FactId::from_bytes(fixed(fact)?),
             device: InstallationAddress::new(
@@ -841,7 +850,7 @@ fn load_membership_grants(
             return Err(corrupt());
         }
     }
-    Ok(output)
+    Ok((output, active))
 }
 
 fn load_relays(connection: &Connection, owner: RelayOwner) -> Result<RelayHints, StoreError> {
@@ -1352,7 +1361,7 @@ const DIGEST_QUERIES: &[(&str, &str)] = &[
     ),
     (
         "membership-grants",
-        "SELECT quote(account_id)||'|'||quote(device_id)||'|'||quote(grant_id)||'|'||quote(grant_fact)||'|'||quote(granted_installation)||'|'||quote(granted_signing_key)||'|'||ifnull(quote(label),'NULL') FROM authority_membership_grants ORDER BY account_id,device_id,grant_id",
+        "SELECT quote(account_id)||'|'||quote(device_id)||'|'||quote(grant_id)||'|'||quote(grant_fact)||'|'||quote(granted_installation)||'|'||quote(granted_signing_key)||'|'||ifnull(quote(label),'NULL')||'|'||quote(active) FROM authority_membership_grants ORDER BY account_id,device_id,grant_id",
     ),
     (
         "membership-relays",
@@ -1571,6 +1580,7 @@ mod tests {
                         BTreeSet::from([id(11)]),
                         BTreeSet::from([id(12)]),
                         BTreeSet::from([id(11)]),
+                        BTreeSet::from([GrantId::from_bytes([0x77; 32])]),
                     )
                     .expect("membership view is coherent"),
                 ),

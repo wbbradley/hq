@@ -294,6 +294,8 @@ pub struct MembershipView {
     pub revokes: BTreeSet<FactId>,
     /// Exact active acceptance authorities.
     pub active_acceptances: BTreeSet<FactId>,
+    /// Grant identities cited by current active acceptances.
+    pub active_grants: BTreeSet<GrantId>,
 }
 
 impl MembershipView {
@@ -305,6 +307,7 @@ impl MembershipView {
         acceptances: BTreeSet<FactId>,
         revokes: BTreeSet<FactId>,
         active_acceptances: BTreeSet<FactId>,
+        active_grants: BTreeSet<GrantId>,
     ) -> Option<Self> {
         let grant_facts = grants
             .values()
@@ -328,6 +331,8 @@ impl MembershipView {
             && acceptances.is_disjoint(&revokes);
         (state == expected
             && active_acceptances.is_subset(&acceptances)
+            && active_grants.is_subset(&grants.keys().copied().collect())
+            && active_acceptances.is_empty() == active_grants.is_empty()
             && histories_are_disjoint
             && frontier.is_subset(&retained))
         .then_some(Self {
@@ -337,6 +342,7 @@ impl MembershipView {
             acceptances,
             revokes,
             active_acceptances,
+            active_grants,
         })
     }
 
@@ -1538,6 +1544,7 @@ fn membership_projections(
                     ) && active_acceptance(*fact_id, account, device, context)
                 })
                 .collect::<BTreeSet<_>>();
+            let active_grants = active_membership_grants(&active_acceptances, context);
             let has_revoke = members.iter().any(|fact_id| {
                 matches!(
                     context.facts().get(*fact_id).map(Fact::payload),
@@ -1560,10 +1567,26 @@ fn membership_projections(
                     acceptances,
                     revokes,
                     active_acceptances,
+                    active_grants,
                 }),
                 members,
             )
         })
+        .collect()
+}
+
+fn active_membership_grants(
+    acceptances: &BTreeSet<FactId>,
+    context: &ReductionContext<'_, impl Sized>,
+) -> BTreeSet<GrantId> {
+    acceptances
+        .iter()
+        .filter_map(
+            |fact_id| match context.facts().get(*fact_id).map(Fact::payload) {
+                Some(SemanticPayload::HumanDeviceAccepted { grant_id, .. }) => Some(*grant_id),
+                _ => None,
+            },
+        )
         .collect()
 }
 

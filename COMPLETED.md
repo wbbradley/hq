@@ -7245,3 +7245,39 @@ only the existing locked yanked `chacha20 0.10.1` warning.
     same canonical fact rather than conflicting roots.
   - Exact-fact convergence required no schema change: canonical evidence was already idempotent;
     the local mutation transaction now retains the second command receipt at the original revision.
+
+## 2026-08-28 — Offline-verifiable human pairing invitations
+
+Added `human invite` and `human join` to the installed executable. The canonical protocol now owns
+a strict bounded invitation containing exactly one creator-signed device grant and its complete
+transitive signed ancestry. It rejects noncanonical, tampered, missing, duplicate, unsupported, and
+extraneous evidence, contains no secret or operational state, and has an explicit no-expiry v1
+policy: creator revocation is cancellation.
+
+Pure application planners author frontier-complete grants and exact target-key acceptance from
+public-field request records. The clean local API v1 snapshot exposes complete membership frontiers
+and creator grant history, while new bounded evidence methods export exact causal closure and
+reverify idempotent imports. The clean rebuildable authority schema now retains derived active-grant
+attribution in place so repeated export reuses an unrevoked grant; no migration, compatibility
+reader, or storage-version change was added.
+
+Invitation files are absolute, bounded, non-symlink regular files created without overwrite behind
+a node-owned filesystem adapter. Join verifies the artifact and ordinary authority reduction before
+any import, requires the exact local installation and signing key, reconciles the human mailbox,
+accepts, and selects. A real two-installation binary test covers wrong target, tamper, duplicate
+replay without revision growth, restart, deterministic JSON, and path redaction; protocol, planner,
+store, local API, unsafe-path, and existing concurrent revoke/full-regrant reducer tests cover the
+remaining boundaries. Full locked workspace tests/build, strict Clippy, architecture, protocol,
+causal, behavior-ledger, and dependency gates pass; dependency policy reports only the existing
+allowed yanked `chacha20 0.10.1` warning.
+
+### Original plan entry
+
+- **[cli/high] Export and join offline-verifiable human pairing invitations** — Add bounded signed
+  invite export and guarded join through pure application plans and the canonical protocol. An
+  invitation carries the complete account creator/grant/regrant authority needed for offline target
+  verification plus exact target installation/key and bounded relay hints; it contains no root
+  secret or local operational state. Join verifies canonical bytes, signatures, target binding,
+  lineage, expiry policy if specified, and changed reuse before accepting and selecting membership.
+  Test tampering, wrong target/key/account, missing history, duplicate replay, concurrent revoke,
+  restart, unsafe paths, and deterministic human/JSON rendering.

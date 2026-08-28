@@ -16,8 +16,9 @@ use crate::protocol::v1::{
     VersionRange, VersionRejected, WireMessage, negotiate,
 };
 use crate::{
-    RevisionHub, application_error_to_v1, mutation_from_v1, mutation_to_v1, page_request_from_v1,
-    page_to_v1, snapshot_to_v1, subscription_from_v1, topic_to_v1,
+    RevisionHub, application_error_to_v1, canonical_evidence_from_v1, canonical_evidence_to_v1,
+    evidence_ingest_to_v1, mutation_from_v1, mutation_to_v1, page_request_from_v1, page_to_v1,
+    snapshot_to_v1, subscription_from_v1, topic_to_v1,
 };
 
 /// Node-owned lifecycle capability supplied by the later composition root.
@@ -306,6 +307,27 @@ impl ServerSession {
                 .map_err(|_| invalid_request_error())
                 .and_then(|request| application.execute_mutation(request))
                 .map(|completion| ResponseResult::Mutation(mutation_to_v1(completion.attempt()))),
+            Request::CanonicalEvidence(request) => {
+                let roots = request
+                    .roots
+                    .into_iter()
+                    .map(|root| hq_domain::FactId::from_bytes(root.bytes()))
+                    .collect::<BTreeSet<_>>();
+                application
+                    .canonical_evidence(
+                        &roots,
+                        crate::protocol::v1::MAX_CANONICAL_EVIDENCE_ITEMS,
+                        crate::protocol::v1::MAX_CANONICAL_EVIDENCE_BYTES,
+                    )
+                    .and_then(|evidence| {
+                        canonical_evidence_to_v1(&evidence).map_err(|_| internal_conversion_error())
+                    })
+                    .map(ResponseResult::CanonicalEvidence)
+            }
+            Request::IngestCanonicalEvidence(evidence) => canonical_evidence_from_v1(evidence)
+                .map_err(|_| invalid_request_error())
+                .and_then(|evidence| application.ingest_canonical_evidence(&evidence))
+                .map(|outcomes| ResponseResult::EvidenceIngest(evidence_ingest_to_v1(&outcomes))),
             Request::ConfigureRelay(request) => relay_effect_from_v1(&request)
                 .map_err(|_| invalid_request_error())
                 .and_then(|request| application.configure_relay(&request))
