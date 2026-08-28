@@ -1,5 +1,37 @@
 # Completed
 
+## 2026-08-28 — Authoritative project catalog CLI
+
+Added local-API-only `project list` and `project show PROJECT_ID` commands to the installed Rust
+executable. Each command autostarts or connects to the node, reads one fresh complete authoritative
+snapshot, and produces passive public-field project records in stable identity order. Human and
+`hq-cli-output-v1` JSON output expose immutable home, lifecycle/archive state, head and input
+sequence, desired resources, health, primary and active-claim state, every claim conflict, accepted
+input/dispatch/output attribution, and structured remote-command receipt, result, and runtime
+checkpoints.
+
+The projection joins dispatches only through exact accepted-message identity and outputs only
+through exact dispatch identity. Missing attribution is counted explicitly; duplicated identities
+and project-owned rows without a project fail closed. Conflicted lifecycle, claims, dispatches,
+outputs, and remote progress remain visible without selecting a winner. No storage or local API
+version, migration, compatibility accessor, or parallel persistence record was added.
+
+Strict parser/help, deterministic rendering, heterogeneous incomplete/conflicted projection, exact
+show failure, architecture, and real foreground restart tests pass. Full locked workspace tests,
+build/check, formatting, strict Clippy, architecture, behavior/causal/protocol specifications,
+dependency policy, four portable targets, both bounded fuzz smokes, and frozen Go build/vet/tests
+pass. The dependency audit retains only the existing yanked `chacha20 0.10.1` warning, and the
+post-suite process table contains no HQ daemon.
+
+### Original plan entry
+
+- **[cli/high] Expose the authoritative project catalog and remote progress** — Add local-API-only
+  `project list/show` commands over the complete snapshot. Present lifecycle, archive state, head,
+  input sequence, resources, primary/active claims, conflicts, input/dispatch/output attribution,
+  and structured remote-command checkpoints without choosing through inconsistent state. Test
+  parsing, deterministic human/JSON output, incomplete/conflicted projections, restart, and
+  architecture isolation.
+
 ## 2026-08-28 — Managed harness CLI workflow
 
 Added explicit provider-neutral `harness start`, exact `resume`, and `stop` commands to the installed

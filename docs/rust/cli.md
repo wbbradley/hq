@@ -11,7 +11,7 @@ The installed commands currently include `help`, `version`, `agents`, `identity`
 `peer add|list|distrust`, `mailbox list|grant|revoke`, and
 `relay add|list|remove|sync|status|repair`,
 `agent list|show|create|current|select|rename|retire`, and
-`harness start|resume|stop`, the agent-side
+`harness start|resume|stop`, `project list|show`, the agent-side
 `ask|send|wait|poll`, human-side `get|list|answer|cancel|archive|restore`, `mailboxes`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
@@ -146,6 +146,18 @@ the reconnecting client replays the exact framed request after response loss. Ou
 public-field view with `ready`, `stopped`, `rejected`, or `uncertain` status. Rejection exits 1;
 uncertainty exits 3 and exposes both operation and reconciliation identities without launch inputs.
 
+`project list` and `project show PROJECT_ID` start or connect to the node and derive their complete
+result from one fresh authoritative local-API snapshot. Projects are ordered by identity and expose
+their immutable home, lifecycle, archive state, canonical head, accepted input sequence, desired
+resources, resource health, primary flag, advisory claims, and every overlapping project. Accepted
+inputs join dispatches by message identity, and dispatches join retained outputs by dispatch
+identity; records with unavailable attribution are counted explicitly instead of being assigned to
+a guessed project. Changed duplicate identities and project-owned records without a project fail
+closed. Remote commands retain their command/request/operation attribution and structured queued,
+received, terminal, or conflicted progress, including receipt/head/outcome facts, committed or
+rejected result, and exact runtime success/failure/uncertainty. Both human and JSON output are
+deterministic, and the same catalog survives a node restart without a separate CLI cache.
+
 `agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
 for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert
 dependency-incomplete history, and the boundary that humans own identity, authority, durable
@@ -156,7 +168,7 @@ Configuration output has the optional provider and the complete canonical relay 
 passive data with public fields. Configuration setters replace one complete typed field, rebuild
 the validated value, and the persistence adapter revalidates public fields again immediately before
 the atomic write. Human, peer, mailbox, relay/health, route-history, capability-history,
-named-agent, and session presentation records are also passive public-field values; command enums
+named-agent, session, and project-catalog presentation records are also passive public-field values; command enums
 and the live client capability remain closed behavioral types. The clean unshipped local API v1
 contract carries exact agent claims, mailboxes, immutable binding facts, and selection/rename
 candidates and frontiers in place; there is no compatibility accessor, migration, or version bump.

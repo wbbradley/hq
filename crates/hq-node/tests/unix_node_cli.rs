@@ -18,10 +18,11 @@ use std::{
 
 use hq_application::FactPlan;
 use hq_domain::{
-    AuthorityReference, AuthorityRole, BoundedSet, BoundedText, CausalReferences, CommandId,
-    FactId, FactScope, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxId, MailboxKind, ProviderId,
-    ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RepositoryContext, ResourceLocator,
-    ResourceScheme, SemanticPayload, Timestamp,
+    AccountId, AuthorityReference, AuthorityRole, BoundedSet, BoundedText, BoundedVec,
+    CausalReferences, CommandId, ContentText, FactId, FactScope, InitialProjectState,
+    MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxId, MailboxKind, ProjectId, ProjectResource,
+    ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RepositoryContext, ResourceHealth,
+    ResourceId, ResourceLocator, ResourceScheme, SemanticPayload, ShortText, Timestamp,
 };
 use hq_local_api::{
     ClientEvent, InitialView,
@@ -222,6 +223,10 @@ fn agent_json(state_root: &Path, arguments: &[&str]) -> serde_json::Value {
 
 fn harness_output(state_root: &Path, arguments: &[&str]) -> Output {
     admin_output(state_root, "harness", arguments)
+}
+
+fn project_json(state_root: &Path, arguments: &[&str]) -> serde_json::Value {
+    admin_json(state_root, "project", arguments)
 }
 
 fn encode_hex(bytes: [u8; 32]) -> String {
@@ -584,6 +589,130 @@ fn idle_named_agent_retirement_is_explicit_and_survives_restart() {
             .expect("UTF-8 diagnostic")
             .contains("agent.state_unavailable")
     );
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "complete real-node project fixture")]
+fn project_catalog_reads_authoritative_state_and_survives_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+
+    let state = StatePaths::new(state_root.clone()).expect("state paths");
+    let mut client = local_client(state, InitialView::OnDemand);
+    let local = client.installation_id();
+    let snapshot = client.snapshot().expect("human snapshot");
+    let root_fact = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Installation {
+                installation_id,
+                root_fact,
+                ..
+            } if installation_id.bytes() == *local.as_bytes() => {
+                Some(FactId::from_bytes(root_fact.bytes()))
+            }
+            _ => None,
+        })
+        .expect("installation root");
+    let (account_id, active_human) = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Account {
+                account_id,
+                root_fact,
+                selected: true,
+                ..
+            } => Some((
+                AccountId::from_bytes(account_id.bytes()),
+                FactId::from_bytes(root_fact.bytes()),
+            )),
+            _ => None,
+        })
+        .expect("selected account");
+    let project_id = ProjectId::from_bytes([0xd1; 32]);
+    let resource_id = ResourceId::from_bytes([0xd2; 32]);
+    let locator = ResourceLocator::new(
+        ResourceScheme::WorkingTree,
+        BoundedText::new("/workspace/catalog".to_owned()).expect("resource locator"),
+    );
+    let project = ProjectResource {
+        resource_id,
+        display_locator: locator.clone(),
+        canonical_locator: locator,
+        health: ResourceHealth::Healthy,
+    };
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new([root_fact, active_human]).expect("project parents"),
+        [
+            AuthorityReference::new(AuthorityRole::ProjectHome, root_fact),
+            AuthorityReference::new(AuthorityRole::AccountMembership, active_human),
+            AuthorityReference::new(AuthorityRole::ActiveHuman, active_human),
+        ],
+    )
+    .expect("project authority");
+    commit_plan(
+        &mut client,
+        0xd1,
+        FactPlan::new(
+            local,
+            Timestamp::from_unix_millis(100),
+            FactScope::AccountAddressed(account_id),
+            causal,
+            SemanticPayload::ProjectCreated {
+                project_id,
+                mailbox_id: MailboxId::from_bytes([0xd3; 32]),
+                home: local,
+                name: ShortText::new("Catalog E2E").expect("project name"),
+                brief: Some(ContentText::new("restart-safe catalog").expect("brief")),
+                predecessor: None,
+                resources: BoundedVec::new([project]).expect("project resources"),
+                primary: Some(resource_id),
+                initial_state: InitialProjectState::Open,
+            },
+            [0xd1; 32],
+        ),
+    );
+
+    let listed = project_json(&state_root, &["list"]);
+    assert_eq!(listed["kind"], "project_catalog");
+    assert_eq!(listed["data"]["operation"], "list");
+    assert_eq!(listed["data"]["projects"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed["data"]["projects"][0]["name"], "Catalog E2E");
+    assert_eq!(listed["data"]["projects"][0]["lifecycle"], "open");
+    assert_eq!(
+        listed["data"]["projects"][0]["resources"][0]["health"],
+        "healthy"
+    );
+    assert_eq!(
+        listed["data"]["projects"][0]["resources"][0]["primary"],
+        true
+    );
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let shown = project_json(&state_root, &["show", &encode_hex([0xd1; 32])]);
+    assert_eq!(shown["data"]["operation"], "show");
+    assert_eq!(
+        shown["data"]["projects"][0]["project_id"],
+        encode_hex([0xd1; 32])
+    );
+    assert_eq!(shown["data"]["projects"][0]["name"], "Catalog E2E");
+
     let stopped = output("stop", &state_root);
     assert!(
         stopped.status.success(),

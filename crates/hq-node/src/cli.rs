@@ -1,7 +1,7 @@
 //! Minimal single-binary lifecycle roles for the Rust node.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     ffi::OsString,
     fmt::{self, Write as _},
@@ -42,9 +42,10 @@ use hq_local_api::{
         EffectRequestDto, HealthDomainDto, Id32, LaunchEnvironmentDto, LifecycleRequest,
         LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
         PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, RelayAccessDto,
-        RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request, ResourceLocatorDto,
-        ResourceSchemeDto, ResponseResult, RuntimeObservationDto, SessionControlDto, SnapshotItem,
-        StateHealthDto, SynchronizationRequestDto, agent_session_request_digest,
+        RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request, ResourceHealthDto,
+        ResourceLocatorDto, ResourceSchemeDto, ResponseResult, RuntimeObservationDto,
+        SessionControlDto, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
+        agent_session_request_digest,
     },
 };
 use hq_projects::agent_retirement_request_digest;
@@ -415,6 +416,160 @@ pub struct HarnessSessionView {
     pub error_code: Option<String>,
     /// Reconciliation identity returned for an uncertain operation.
     pub reconciliation_id: Option<[u8; 32]>,
+}
+
+/// Read-only authoritative project catalog behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectCatalogCommand {
+    /// List every projected project in stable identity order.
+    List,
+    /// Show one exact project identity.
+    Show(ProjectId),
+}
+
+/// Passive desired-resource and advisory-claim presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectResourceView {
+    /// Stable resource identity.
+    pub resource_id: hq_domain::ResourceId,
+    /// Normalized caller-facing spelling.
+    pub display_locator: ResourceLocatorDto,
+    /// Immutable home-local claim identity.
+    pub canonical_locator: ResourceLocatorDto,
+    /// Stable unknown, healthy, degraded, or unavailable health.
+    pub health: &'static str,
+    /// Whether this is the explicit launch primary.
+    pub primary: bool,
+    /// Whether the advisory claim is active and conflict-free.
+    pub active_claim: bool,
+    /// Every overlapping project in stable order.
+    pub conflicting_projects: Vec<ProjectId>,
+}
+
+/// Passive accepted project-input attribution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProjectInputView {
+    /// Stable input message identity.
+    pub message_id: MessageId,
+    /// Home-assigned contiguous sequence.
+    pub sequence: u64,
+    /// Exact input-acceptance fact.
+    pub accepted_fact: FactId,
+}
+
+/// Passive at-most-once dispatch attribution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProjectDispatchView {
+    /// Stable dispatch identity.
+    pub dispatch_id: hq_domain::DispatchId,
+    /// Accepted input message identity.
+    pub message_id: MessageId,
+    /// Home input sequence.
+    pub sequence: u64,
+    /// Exact dispatch fact.
+    pub fact_id: FactId,
+    /// Whether changed duplicates make the attribution unusable.
+    pub conflicted: bool,
+}
+
+/// Passive retained project-output attribution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectOutputView {
+    /// Stable output message identity.
+    pub output_id: MessageId,
+    /// Originating dispatch identity.
+    pub dispatch_id: hq_domain::DispatchId,
+    /// Stable current, late, or conflicted status.
+    pub status: String,
+    /// Bounded canonical output content.
+    pub content: String,
+}
+
+/// Passive structured remote project-command checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteProjectCommandView {
+    /// Stable routed command identity.
+    pub command_id: CommandId,
+    /// Exact request digest.
+    pub request_digest: hq_domain::CommandDigest,
+    /// Authorizing account.
+    pub account_id: AccountId,
+    /// Immutable target home.
+    pub target_home: InstallationId,
+    /// Caller-observed project head.
+    pub expected_head: FactId,
+    /// Stable workflow operation identity.
+    pub operation_id: OperationId,
+    /// Provider namespace retained for durable routing correlation.
+    pub operation_provider: String,
+    /// Provider session retained for durable routing correlation.
+    pub operation_session: String,
+    /// Request semantic time.
+    pub issued_at_unix_millis: i64,
+    /// Exact request fact.
+    pub request_fact: FactId,
+    /// Stable queued, received, terminal, or conflicted state.
+    pub progress: &'static str,
+    /// Home receipt fact, when received.
+    pub receipt_fact: Option<FactId>,
+    /// Home-observed head, when received.
+    pub received_head: Option<FactId>,
+    /// Receipt semantic time, when received.
+    pub received_at_unix_millis: Option<i64>,
+    /// Terminal outcome fact, when terminal.
+    pub outcome_fact: Option<FactId>,
+    /// Stable committed or rejected result state.
+    pub result_state: Option<&'static str>,
+    /// Committed head or rejection code, when terminal.
+    pub result_value: Option<String>,
+    /// Stable succeeded, failed, or uncertain runtime state.
+    pub runtime_state: Option<&'static str>,
+    /// Runtime failure or uncertainty code, when present.
+    pub runtime_code: Option<String>,
+}
+
+/// Passive complete presentation for one authoritative project.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectView {
+    /// Stable project identity.
+    pub project_id: ProjectId,
+    /// Immutable authoritative installation.
+    pub home: InstallationId,
+    /// Human-visible display name.
+    pub name: String,
+    /// Stable open, closing, closed, or conflicted lifecycle.
+    pub lifecycle: String,
+    /// Whether the project is hidden from ordinary active views.
+    pub archived: bool,
+    /// Whether every desired advisory claim is currently available.
+    pub claimable: bool,
+    /// Last unique canonical project head.
+    pub head: FactId,
+    /// Last accepted contiguous input sequence.
+    pub input_sequence: u64,
+    /// Complete desired resources.
+    pub resources: Vec<ProjectResourceView>,
+    /// Complete accepted input attribution.
+    pub inputs: Vec<ProjectInputView>,
+    /// Complete dispatch attribution joined through accepted inputs.
+    pub dispatches: Vec<ProjectDispatchView>,
+    /// Complete retained output attribution joined through dispatches.
+    pub outputs: Vec<ProjectOutputView>,
+    /// Complete remote control history for this project.
+    pub remote_commands: Vec<RemoteProjectCommandView>,
+}
+
+/// Passive project catalog result with explicit unjoinable-history diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCatalogView {
+    /// Stable list or show operation label.
+    pub operation: &'static str,
+    /// Complete or selected projects.
+    pub projects: Vec<ProjectView>,
+    /// Dispatch projections whose project input is unavailable.
+    pub unattributed_dispatches: usize,
+    /// Output projections whose dispatch is unavailable.
+    pub unattributed_outputs: usize,
 }
 
 /// Passive exact provider-session identity shown by catalog commands.
@@ -974,6 +1129,13 @@ pub enum CliCommand {
         /// Validated installation state layout.
         state: StatePaths,
     },
+    /// Inspect authoritative project and remote-command state through the local API.
+    ProjectCatalog {
+        /// Requested read-only catalog behavior.
+        action: ProjectCatalogCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
     /// Execute one agent-side ask, send, wait, or poll operation.
     AgentMessage {
         /// Requested agent mailbox behavior.
@@ -1110,6 +1272,8 @@ pub enum CliError {
     AgentState,
     /// Managed-session launch inputs or response state were invalid or inconsistent.
     HarnessState,
+    /// Project state was absent, duplicated, or internally inconsistent.
+    ProjectState,
     /// Pairing evidence or its filesystem location failed strict validation.
     PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
@@ -1121,7 +1285,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|agents|agent|harness|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
+                 <help|version|agents|agent|harness|project|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
             ),
             Self::StatePath => formatter.write_str("node state path is unavailable or invalid"),
             Self::RuntimePath => formatter.write_str("node runtime path is unavailable or invalid"),
@@ -1151,6 +1315,9 @@ impl fmt::Display for CliError {
             Self::HarnessState => {
                 formatter.write_str("managed harness request or response state is invalid")
             }
+            Self::ProjectState => {
+                formatter.write_str("project state is unavailable or inconsistent")
+            }
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
         }
@@ -1160,6 +1327,7 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 impl CliError {
+    #[allow(clippy::too_many_lines, reason = "closed public diagnostic mapping")]
     const fn diagnostic(&self) -> (&'static str, &'static str, CliExitClass) {
         match self {
             Self::Arguments => (
@@ -1254,6 +1422,11 @@ impl CliError {
             Self::HarnessState => (
                 "harness.state_invalid",
                 "managed harness launch inputs or response state are invalid or inconsistent",
+                CliExitClass::Failure,
+            ),
+            Self::ProjectState => (
+                "project.state_unavailable",
+                "project state is absent, duplicated, conflicted, or inconsistent",
                 CliExitClass::Failure,
             ),
             Self::PairingArtifact | Self::SecretInput => input_diagnostic(self),
@@ -1361,6 +1534,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 | CliCommand::Relay { .. }
                 | CliCommand::NamedAgent { .. }
                 | CliCommand::Harness { .. }
+                | CliCommand::ProjectCatalog { .. }
                 | CliCommand::AgentMessage { .. }
                 | CliCommand::GetMessage { .. }
                 | CliCommand::DiscoverMailboxes { .. }
@@ -1403,6 +1577,10 @@ fn parse_top_level_command(
             topic: vec!["harness".to_owned()],
         },
         Some("harness") => parse_harness(rest, state_root)?,
+        Some("project") if rest == [OsString::from("--help")] => CliCommand::Help {
+            topic: vec!["project".to_owned()],
+        },
+        Some("project") => parse_project_catalog(rest, state_root)?,
         Some("ask") => parse_agent_message("ask", rest, state_root)?,
         Some("send") => parse_agent_message("send", rest, state_root)?,
         Some("wait") => parse_agent_message("wait", rest, state_root)?,
@@ -1443,6 +1621,23 @@ fn parse_top_level_command(
             CliCommand::Daemon { action, state }
         }
         _ => return Err(CliError::Arguments),
+    })
+}
+
+fn parse_project_catalog(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match arguments {
+        [action] if action == "list" => ProjectCatalogCommand::List,
+        [action, project_id] if action == "show" => {
+            ProjectCatalogCommand::Show(ProjectId::from_bytes(parse_hex32(project_id)?))
+        }
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::ProjectCatalog {
+        action,
+        state: parsed_state(state_root)?,
     })
 }
 
@@ -2293,6 +2488,9 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
         CliCommand::Relay { action, state } => return run_relay(action, state),
         CliCommand::NamedAgent { action, state } => return run_named_agent(action, state),
         CliCommand::Harness { action, state } => return run_harness(action, state),
+        CliCommand::ProjectCatalog { action, state } => {
+            return run_project_catalog(*action, state);
+        }
         CliCommand::AgentMessage { action, state } => {
             return run_agent_message(action, state, input);
         }
@@ -2324,6 +2522,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
             | CliCommand::Relay { .. }
             | CliCommand::NamedAgent { .. }
             | CliCommand::Harness { .. }
+            | CliCommand::ProjectCatalog { .. }
             | CliCommand::AgentMessage { .. }
             | CliCommand::GetMessage { .. }
             | CliCommand::DiscoverMailboxes { .. }
@@ -2380,6 +2579,405 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
         }
     };
     Ok(output)
+}
+
+fn run_project_catalog(
+    action: ProjectCatalogCommand,
+    state: &StatePaths,
+) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let snapshot = client.snapshot()?;
+    project_catalog_view(&snapshot, action).map(|view| CliResult::ProjectCatalog(Box::new(view)))
+}
+
+fn project_catalog_view(
+    snapshot: &AuthoritativeSnapshotDto,
+    action: ProjectCatalogCommand,
+) -> Result<ProjectCatalogView, CliError> {
+    let mut projects = project_rows(snapshot)?;
+    add_project_resources(snapshot, &mut projects)?;
+    let message_projects = add_project_inputs(snapshot, &mut projects)?;
+    add_remote_project_commands(snapshot, &mut projects)?;
+    let (dispatch_projects, unattributed_dispatches) =
+        add_project_dispatches(snapshot, &message_projects, &mut projects)?;
+    let unattributed_outputs = add_project_outputs(snapshot, &dispatch_projects, &mut projects)?;
+    sort_project_rows(&mut projects);
+
+    let projects = match action {
+        ProjectCatalogCommand::List => projects.into_values().collect(),
+        ProjectCatalogCommand::Show(project_id) => {
+            vec![projects.remove(&project_id).ok_or(CliError::ProjectState)?]
+        }
+    };
+    Ok(ProjectCatalogView {
+        operation: match action {
+            ProjectCatalogCommand::List => "list",
+            ProjectCatalogCommand::Show(_) => "show",
+        },
+        projects,
+        unattributed_dispatches,
+        unattributed_outputs,
+    })
+}
+
+fn project_rows(
+    snapshot: &AuthoritativeSnapshotDto,
+) -> Result<BTreeMap<ProjectId, ProjectView>, CliError> {
+    let mut projects = BTreeMap::new();
+    for item in &snapshot.items {
+        let SnapshotItem::Project {
+            project_id,
+            home,
+            name,
+            lifecycle,
+            archived,
+            claimable,
+            head,
+            input_sequence,
+        } = item
+        else {
+            continue;
+        };
+        let project_id = ProjectId::from_bytes(project_id.bytes());
+        let replaced = projects.insert(
+            project_id,
+            ProjectView {
+                project_id,
+                home: InstallationId::from_bytes(home.bytes()),
+                name: name.clone(),
+                lifecycle: lifecycle.clone(),
+                archived: *archived,
+                claimable: *claimable,
+                head: FactId::from_bytes(head.bytes()),
+                input_sequence: *input_sequence,
+                resources: Vec::new(),
+                inputs: Vec::new(),
+                dispatches: Vec::new(),
+                outputs: Vec::new(),
+                remote_commands: Vec::new(),
+            },
+        );
+        if replaced.is_some() {
+            return Err(CliError::ProjectState);
+        }
+    }
+    Ok(projects)
+}
+
+fn add_project_resources(
+    snapshot: &AuthoritativeSnapshotDto,
+    projects: &mut BTreeMap<ProjectId, ProjectView>,
+) -> Result<(), CliError> {
+    for item in &snapshot.items {
+        let SnapshotItem::ProjectResource {
+            project_id,
+            resource_id,
+            display_locator,
+            canonical_locator,
+            health,
+            primary,
+            active_claim,
+            conflicting_projects,
+        } = item
+        else {
+            continue;
+        };
+        let project = projects
+            .get_mut(&ProjectId::from_bytes(project_id.bytes()))
+            .ok_or(CliError::ProjectState)?;
+        let mut conflicts = conflicting_projects
+            .iter()
+            .map(|id| ProjectId::from_bytes(id.bytes()))
+            .collect::<Vec<_>>();
+        conflicts.sort_unstable();
+        project.resources.push(ProjectResourceView {
+            resource_id: hq_domain::ResourceId::from_bytes(resource_id.bytes()),
+            display_locator: display_locator.clone(),
+            canonical_locator: canonical_locator.clone(),
+            health: resource_health_label(*health),
+            primary: *primary,
+            active_claim: *active_claim,
+            conflicting_projects: conflicts,
+        });
+    }
+    Ok(())
+}
+
+fn add_project_inputs(
+    snapshot: &AuthoritativeSnapshotDto,
+    projects: &mut BTreeMap<ProjectId, ProjectView>,
+) -> Result<BTreeMap<MessageId, ProjectId>, CliError> {
+    let mut message_projects = BTreeMap::new();
+    for item in &snapshot.items {
+        let SnapshotItem::ProjectInput {
+            project_id,
+            message_id,
+            sequence,
+            accepted_fact,
+        } = item
+        else {
+            continue;
+        };
+        let project_id = ProjectId::from_bytes(project_id.bytes());
+        let project = projects
+            .get_mut(&project_id)
+            .ok_or(CliError::ProjectState)?;
+        let message_id = MessageId::from_bytes(message_id.bytes());
+        if message_projects.insert(message_id, project_id).is_some() {
+            return Err(CliError::ProjectState);
+        }
+        project.inputs.push(ProjectInputView {
+            message_id,
+            sequence: *sequence,
+            accepted_fact: FactId::from_bytes(accepted_fact.bytes()),
+        });
+    }
+    Ok(message_projects)
+}
+
+fn add_remote_project_commands(
+    snapshot: &AuthoritativeSnapshotDto,
+    projects: &mut BTreeMap<ProjectId, ProjectView>,
+) -> Result<(), CliError> {
+    for item in &snapshot.items {
+        let SnapshotItem::RemoteCommand {
+            command_id,
+            request_digest,
+            account_id,
+            project_id,
+            target_home,
+            expected_head,
+            operation_provider,
+            operation_session,
+            operation_id,
+            issued_at_unix_millis,
+            request_fact,
+            progress,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        projects
+            .get_mut(&ProjectId::from_bytes(project_id.bytes()))
+            .ok_or(CliError::ProjectState)?
+            .remote_commands
+            .push(remote_project_command_view(
+                command_id,
+                request_digest,
+                account_id,
+                target_home,
+                expected_head,
+                operation_provider,
+                operation_session,
+                operation_id,
+                *issued_at_unix_millis,
+                request_fact,
+                progress,
+            ));
+    }
+    Ok(())
+}
+
+fn add_project_dispatches(
+    snapshot: &AuthoritativeSnapshotDto,
+    message_projects: &BTreeMap<MessageId, ProjectId>,
+    projects: &mut BTreeMap<ProjectId, ProjectView>,
+) -> Result<(BTreeMap<hq_domain::DispatchId, ProjectId>, usize), CliError> {
+    let mut dispatch_projects = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut unattributed = 0;
+    for item in &snapshot.items {
+        let SnapshotItem::ProjectDispatch {
+            dispatch_id,
+            message_id,
+            sequence,
+            fact_id,
+            conflicted,
+        } = item
+        else {
+            continue;
+        };
+        let dispatch_id = hq_domain::DispatchId::from_bytes(dispatch_id.bytes());
+        if !seen.insert(dispatch_id) {
+            return Err(CliError::ProjectState);
+        }
+        let message_id = MessageId::from_bytes(message_id.bytes());
+        let Some(project_id) = message_projects.get(&message_id).copied() else {
+            unattributed += 1;
+            continue;
+        };
+        dispatch_projects.insert(dispatch_id, project_id);
+        projects
+            .get_mut(&project_id)
+            .ok_or(CliError::ProjectState)?
+            .dispatches
+            .push(ProjectDispatchView {
+                dispatch_id,
+                message_id,
+                sequence: *sequence,
+                fact_id: FactId::from_bytes(fact_id.bytes()),
+                conflicted: *conflicted,
+            });
+    }
+    Ok((dispatch_projects, unattributed))
+}
+
+fn add_project_outputs(
+    snapshot: &AuthoritativeSnapshotDto,
+    dispatch_projects: &BTreeMap<hq_domain::DispatchId, ProjectId>,
+    projects: &mut BTreeMap<ProjectId, ProjectView>,
+) -> Result<usize, CliError> {
+    let mut seen = BTreeSet::new();
+    let mut unattributed = 0;
+    for item in &snapshot.items {
+        let SnapshotItem::ProjectOutput {
+            output_id,
+            dispatch_id,
+            status,
+            content,
+        } = item
+        else {
+            continue;
+        };
+        let output_id = MessageId::from_bytes(output_id.bytes());
+        if !seen.insert(output_id) {
+            return Err(CliError::ProjectState);
+        }
+        let dispatch_id = hq_domain::DispatchId::from_bytes(dispatch_id.bytes());
+        let Some(project_id) = dispatch_projects.get(&dispatch_id).copied() else {
+            unattributed += 1;
+            continue;
+        };
+        projects
+            .get_mut(&project_id)
+            .ok_or(CliError::ProjectState)?
+            .outputs
+            .push(ProjectOutputView {
+                output_id,
+                dispatch_id,
+                status: status.clone(),
+                content: content.clone(),
+            });
+    }
+    Ok(unattributed)
+}
+
+fn sort_project_rows(projects: &mut BTreeMap<ProjectId, ProjectView>) {
+    for project in projects.values_mut() {
+        project
+            .resources
+            .sort_by_key(|resource| resource.resource_id);
+        project
+            .inputs
+            .sort_by_key(|input| (input.sequence, input.message_id));
+        project
+            .dispatches
+            .sort_by_key(|dispatch| (dispatch.sequence, dispatch.dispatch_id));
+        project.outputs.sort_by_key(|output| output.output_id);
+        project
+            .remote_commands
+            .sort_by_key(|command| command.command_id);
+    }
+}
+
+const fn resource_health_label(health: ResourceHealthDto) -> &'static str {
+    match health {
+        ResourceHealthDto::Unknown => "unknown",
+        ResourceHealthDto::Healthy => "healthy",
+        ResourceHealthDto::Degraded => "degraded",
+        ResourceHealthDto::Unavailable => "unavailable",
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors one closed snapshot record"
+)]
+fn remote_project_command_view(
+    command_id: &Id32,
+    request_digest: &Id32,
+    account_id: &Id32,
+    target_home: &Id32,
+    expected_head: &Id32,
+    operation_provider: &str,
+    operation_session: &str,
+    operation_id: &Id32,
+    issued_at_unix_millis: i64,
+    request_fact: &Id32,
+    progress: &hq_local_api::protocol::v1::RemoteCommandProgressDto,
+) -> RemoteProjectCommandView {
+    use hq_local_api::protocol::v1::{RemoteCommandProgressDto, RemoteCommandResultDto};
+
+    let mut view = RemoteProjectCommandView {
+        command_id: CommandId::from_bytes(command_id.bytes()),
+        request_digest: hq_domain::CommandDigest::from_bytes(request_digest.bytes()),
+        account_id: AccountId::from_bytes(account_id.bytes()),
+        target_home: InstallationId::from_bytes(target_home.bytes()),
+        expected_head: FactId::from_bytes(expected_head.bytes()),
+        operation_id: OperationId::from_bytes(operation_id.bytes()),
+        operation_provider: operation_provider.to_owned(),
+        operation_session: operation_session.to_owned(),
+        issued_at_unix_millis,
+        request_fact: FactId::from_bytes(request_fact.bytes()),
+        progress: "queued",
+        receipt_fact: None,
+        received_head: None,
+        received_at_unix_millis: None,
+        outcome_fact: None,
+        result_state: None,
+        result_value: None,
+        runtime_state: None,
+        runtime_code: None,
+    };
+    match progress {
+        RemoteCommandProgressDto::Queued => {}
+        RemoteCommandProgressDto::Received {
+            receipt_fact,
+            received_head,
+            received_at_unix_millis,
+        } => {
+            view.progress = "received";
+            view.receipt_fact = Some(FactId::from_bytes(receipt_fact.bytes()));
+            view.received_head = Some(FactId::from_bytes(received_head.bytes()));
+            view.received_at_unix_millis = Some(*received_at_unix_millis);
+        }
+        RemoteCommandProgressDto::Terminal {
+            receipt_fact,
+            received_head,
+            received_at_unix_millis,
+            outcome_fact,
+            result,
+            runtime,
+        } => {
+            view.progress = "terminal";
+            view.receipt_fact = Some(FactId::from_bytes(receipt_fact.bytes()));
+            view.received_head = Some(FactId::from_bytes(received_head.bytes()));
+            view.received_at_unix_millis = Some(*received_at_unix_millis);
+            view.outcome_fact = Some(FactId::from_bytes(outcome_fact.bytes()));
+            match result {
+                RemoteCommandResultDto::Committed(head) => {
+                    view.result_state = Some("committed");
+                    view.result_value = Some(encode_id(&head.bytes()));
+                }
+                RemoteCommandResultDto::Rejected(code) => {
+                    view.result_state = Some("rejected");
+                    view.result_value = Some(code.clone());
+                }
+            }
+            if let Some(runtime) = runtime {
+                let (state, code) = match runtime {
+                    RuntimeObservationDto::Succeeded => ("succeeded", None),
+                    RuntimeObservationDto::Failed(code) => ("failed", Some(code.clone())),
+                    RuntimeObservationDto::Uncertain(code) => ("uncertain", Some(code.clone())),
+                };
+                view.runtime_state = Some(state);
+                view.runtime_code = code;
+            }
+        }
+        RemoteCommandProgressDto::Conflicted => view.progress = "conflicted",
+    }
+    view
 }
 
 fn run_identity(
@@ -6172,6 +6770,7 @@ enum CliResult {
     NamedAgentCatalog(Box<NamedAgentCatalogView>),
     NamedAgentRetirement(NamedAgentRetirementView),
     HarnessSession(HarnessSessionView),
+    ProjectCatalog(Box<ProjectCatalogView>),
     Completed {
         operation: &'static str,
     },
@@ -6272,6 +6871,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         (format, CliResult::AuthorityAdmin(view)) => render_authority_admin_result(format, view),
         (format, CliResult::RelayAdmin(view)) => render_relay_admin_result(format, view),
         (format, CliResult::HarnessSession(view)) => render_harness_session(format, view),
+        (format, CliResult::ProjectCatalog(view)) => render_project_catalog(format, view),
         (
             _,
             CliResult::AgentGuidance(_)
@@ -6281,6 +6881,207 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             | CliResult::Stopped { .. },
         ) => unreachable!(),
     }
+}
+
+fn render_project_catalog(
+    format: CliOutputFormat,
+    view: &ProjectCatalogView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => render_project_catalog_human(view),
+        CliOutputFormat::Json => machine_record(
+            "project_catalog",
+            &serde_json::json!({
+                "operation": view.operation,
+                "projects": view.projects.iter().map(project_json).collect::<Vec<_>>(),
+                "unattributed_dispatches": view.unattributed_dispatches,
+                "unattributed_outputs": view.unattributed_outputs,
+            }),
+        ),
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "complete line-oriented catalog presentation"
+)]
+fn render_project_catalog_human(view: &ProjectCatalogView) -> Result<String, CliError> {
+    let mut output = format!(
+        "project_catalog operation={} projects={} unattributed_dispatches={} unattributed_outputs={}\n",
+        view.operation,
+        view.projects.len(),
+        view.unattributed_dispatches,
+        view.unattributed_outputs,
+    );
+    for project in &view.projects {
+        let project_id = encode_id(project.project_id.as_bytes());
+        writeln!(
+            output,
+            "project id={} home={} name={:?} lifecycle={} archived={} claimable={} head={} input_sequence={}",
+            project_id,
+            encode_id(project.home.as_bytes()),
+            project.name,
+            project.lifecycle,
+            project.archived,
+            project.claimable,
+            encode_id(project.head.as_bytes()),
+            project.input_sequence,
+        )
+        .map_err(|_| CliError::Runtime)?;
+        for resource in &project.resources {
+            writeln!(
+                output,
+                "resource project={} id={} display={}:{} canonical={}:{} health={} primary={} active_claim={} conflicts={}",
+                project_id,
+                encode_id(resource.resource_id.as_bytes()),
+                resource_scheme_label(resource.display_locator.scheme),
+                resource.display_locator.value,
+                resource_scheme_label(resource.canonical_locator.scheme),
+                resource.canonical_locator.value,
+                resource.health,
+                resource.primary,
+                resource.active_claim,
+                resource
+                    .conflicting_projects
+                    .iter()
+                    .map(|id| encode_id(id.as_bytes()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+            .map_err(|_| CliError::Runtime)?;
+        }
+        for input in &project.inputs {
+            writeln!(
+                output,
+                "input project={} sequence={} message={} accepted_fact={}",
+                project_id,
+                input.sequence,
+                encode_id(input.message_id.as_bytes()),
+                encode_id(input.accepted_fact.as_bytes()),
+            )
+            .map_err(|_| CliError::Runtime)?;
+        }
+        for dispatch in &project.dispatches {
+            writeln!(
+                output,
+                "dispatch project={} sequence={} id={} message={} fact={} conflicted={}",
+                project_id,
+                dispatch.sequence,
+                encode_id(dispatch.dispatch_id.as_bytes()),
+                encode_id(dispatch.message_id.as_bytes()),
+                encode_id(dispatch.fact_id.as_bytes()),
+                dispatch.conflicted,
+            )
+            .map_err(|_| CliError::Runtime)?;
+        }
+        for item in &project.outputs {
+            writeln!(
+                output,
+                "output project={} id={} dispatch={} status={} content={:?}",
+                project_id,
+                encode_id(item.output_id.as_bytes()),
+                encode_id(item.dispatch_id.as_bytes()),
+                item.status,
+                item.content,
+            )
+            .map_err(|_| CliError::Runtime)?;
+        }
+        for command in &project.remote_commands {
+            writeln!(
+                output,
+                "remote_command project={} id={} progress={} target_home={} expected_head={} operation_id={} provider={} session={} issued_at_unix_millis={} request_fact={} receipt_fact={} received_head={} received_at_unix_millis={} outcome_fact={} result_state={} result_value={} runtime_state={} runtime_code={}",
+                project_id,
+                encode_id(command.command_id.as_bytes()),
+                command.progress,
+                encode_id(command.target_home.as_bytes()),
+                encode_id(command.expected_head.as_bytes()),
+                encode_id(command.operation_id.as_bytes()),
+                command.operation_provider,
+                command.operation_session,
+                command.issued_at_unix_millis,
+                encode_id(command.request_fact.as_bytes()),
+                optional_id(command.receipt_fact.as_ref()),
+                optional_id(command.received_head.as_ref()),
+                command.received_at_unix_millis.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                optional_id(command.outcome_fact.as_ref()),
+                command.result_state.unwrap_or("none"),
+                command.result_value.as_deref().unwrap_or("none"),
+                command.runtime_state.unwrap_or("none"),
+                command.runtime_code.as_deref().unwrap_or("none"),
+            )
+            .map_err(|_| CliError::Runtime)?;
+        }
+    }
+    Ok(output)
+}
+
+fn optional_id(id: Option<&FactId>) -> String {
+    id.map_or_else(|| "none".to_owned(), |id| encode_id(id.as_bytes()))
+}
+
+fn project_json(project: &ProjectView) -> serde_json::Value {
+    serde_json::json!({
+        "archived": project.archived,
+        "claimable": project.claimable,
+        "dispatches": project.dispatches.iter().map(|item| serde_json::json!({
+            "conflicted": item.conflicted,
+            "dispatch_id": encode_id(item.dispatch_id.as_bytes()),
+            "fact_id": encode_id(item.fact_id.as_bytes()),
+            "message_id": encode_id(item.message_id.as_bytes()),
+            "sequence": item.sequence,
+        })).collect::<Vec<_>>(),
+        "head": encode_id(project.head.as_bytes()),
+        "home": encode_id(project.home.as_bytes()),
+        "input_sequence": project.input_sequence,
+        "inputs": project.inputs.iter().map(|item| serde_json::json!({
+            "accepted_fact": encode_id(item.accepted_fact.as_bytes()),
+            "message_id": encode_id(item.message_id.as_bytes()),
+            "sequence": item.sequence,
+        })).collect::<Vec<_>>(),
+        "lifecycle": project.lifecycle,
+        "name": project.name,
+        "outputs": project.outputs.iter().map(|item| serde_json::json!({
+            "content": item.content,
+            "dispatch_id": encode_id(item.dispatch_id.as_bytes()),
+            "output_id": encode_id(item.output_id.as_bytes()),
+            "status": item.status,
+        })).collect::<Vec<_>>(),
+        "project_id": encode_id(project.project_id.as_bytes()),
+        "remote_commands": project.remote_commands.iter().map(remote_project_command_json).collect::<Vec<_>>(),
+        "resources": project.resources.iter().map(|resource| serde_json::json!({
+            "active_claim": resource.active_claim,
+            "canonical_locator": resource.canonical_locator,
+            "conflicting_projects": resource.conflicting_projects.iter().map(|id| encode_id(id.as_bytes())).collect::<Vec<_>>(),
+            "display_locator": resource.display_locator,
+            "health": resource.health,
+            "primary": resource.primary,
+            "resource_id": encode_id(resource.resource_id.as_bytes()),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn remote_project_command_json(command: &RemoteProjectCommandView) -> serde_json::Value {
+    serde_json::json!({
+        "account_id": encode_id(command.account_id.as_bytes()),
+        "command_id": encode_id(command.command_id.as_bytes()),
+        "expected_head": encode_id(command.expected_head.as_bytes()),
+        "issued_at_unix_millis": command.issued_at_unix_millis,
+        "operation_id": encode_id(command.operation_id.as_bytes()),
+        "operation_provider": command.operation_provider,
+        "operation_session": command.operation_session,
+        "outcome_fact": command.outcome_fact.map(|id| encode_id(id.as_bytes())),
+        "progress": command.progress,
+        "receipt_fact": command.receipt_fact.map(|id| encode_id(id.as_bytes())),
+        "received_at_unix_millis": command.received_at_unix_millis,
+        "received_head": command.received_head.map(|id| encode_id(id.as_bytes())),
+        "request_digest": encode_id(command.request_digest.as_bytes()),
+        "request_fact": encode_id(command.request_fact.as_bytes()),
+        "result_state": command.result_state,
+        "result_value": command.result_value,
+        "runtime_code": command.runtime_code,
+        "runtime_state": command.runtime_state,
+        "target_home": encode_id(command.target_home.as_bytes()),
+    })
 }
 
 fn render_harness_session(
@@ -7055,6 +7856,10 @@ fn render_help(format: CliOutputFormat, topic: &[String]) -> Result<String, CliE
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "closed installed command help matrix"
+)]
 fn help_text(topic: &[String]) -> Option<&'static str> {
     if let Some(text) = short_help_text(topic) {
         return Some(text);
@@ -7063,7 +7868,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  project          Inspect authoritative projects and remote progress\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
         ),
         [command] if matches!(command.as_str(), "ask" | "send" | "wait" | "poll") => Some(
@@ -7139,7 +7944,8 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                         "add" | "list" | "remove" | "sync" | "status" | "repair"
                     ))
                 || (command == "harness"
-                    && matches!(action.as_str(), "start" | "resume" | "stop")) =>
+                    && matches!(action.as_str(), "start" | "resume" | "stop"))
+                || (command == "project" && matches!(action.as_str(), "list" | "show")) =>
         {
             match command.as_str() {
                 "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
@@ -7150,6 +7956,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                 "mailbox" => Some("Use `hq help mailbox` for mailbox command details.\n"),
                 "relay" => Some("Use `hq help relay` for relay command details.\n"),
                 "harness" => Some("Use `hq help harness` for harness command details.\n"),
+                "project" => Some("Use `hq help project` for project command details.\n"),
                 _ => None,
             }
         }
@@ -7174,6 +7981,11 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] harness <COMMAND>\n\n\
              Commands:\n  start --agent NAME|AGENT_ID --provider PROVIDER [--dir PATH]\n  resume --agent NAME|AGENT_ID --provider PROVIDER --session SESSION [--dir PATH]\n  stop --agent NAME|AGENT_ID --provider PROVIDER\n\n\
              start and resume resolve the launch directory to an absolute path and copy the caller environment at the local API boundary. resume never falls back to a new session. Rejected operations exit 1; uncertain operations print their exact operation identity and exit 3 for reconciliation.\n",
+        ),
+        [command] if command == "project" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
+             Commands:\n  list               Show every authoritative project\n  show PROJECT_ID    Show one exact project\n\n\
+             Project inspection starts or connects to the local node and reads one complete authoritative snapshot. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit; the CLI never chooses a historical winner.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
@@ -7271,22 +8083,24 @@ mod tests {
         CliOutputFormat, ConfigurationCommand, DaemonCommand, HarnessCommand, HarnessSessionView,
         HumanCommand, HumanDeviceState, HumanMessageCommand, HumanMessageFilters, IdentityCommand,
         MailboxCommand, MessageCommandView, NamedAgentCommand, NamedAgentSelector, PeerCommand,
-        RelayCommand, completion_for, copy_launch_environment, effect_outcome, execute_cli,
-        harness_request, human_devices_view, human_view, mailbox_discovery_view, message_body,
-        named_agent_catalog_view, pairing_grant_id, parse_cli, read_password, render_result,
+        ProjectCatalogCommand, RelayCommand, completion_for, copy_launch_environment,
+        effect_outcome, execute_cli, harness_request, human_devices_view, human_view,
+        mailbox_discovery_view, message_body, named_agent_catalog_view, pairing_grant_id,
+        parse_cli, project_catalog_view, read_password, render_project_catalog, render_result,
         resolve_environment_session, resolve_named_agent_id, run_cli, session_binding_fact,
         session_context, stable_relay_effect, stable_repair_operation, successful_result_exit_code,
     };
     use hq_domain::{
         AccountId, AgentId, FactId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
-        MessageId, OperationId, ProviderId, ProviderSessionId, RelayHints, SigningPublicKey,
-        ThreadId,
+        MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, RelayHints,
+        SigningPublicKey, ThreadId,
     };
     use hq_local_api::protocol::v1::{
         AgentLaunchContextDto, AgentSessionBindingDto, AuthoritativeSnapshotDto, DeviceGrantDto,
         EffectOutcomeDto, Id32, MailboxAddressDto, MessagePurposeDto, PresentationKindDto,
-        RelayAccessDto, RelayAuthenticationDto, RepositoryContextDto, ResourceLocatorDto,
-        ResourceSchemeDto, SnapshotItem, SynchronizationRequestDto,
+        RelayAccessDto, RelayAuthenticationDto, RemoteCommandProgressDto, RemoteCommandResultDto,
+        RepositoryContextDto, ResourceHealthDto, ResourceLocatorDto, ResourceSchemeDto,
+        RuntimeObservationDto, SnapshotItem, SynchronizationRequestDto,
     };
 
     #[test]
@@ -7353,6 +8167,211 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parser_accepts_only_read_only_project_catalog_commands_in_this_slice() {
+        let listed = parse_cli([OsString::from("project"), OsString::from("list")])
+            .expect("project list parses");
+        assert!(matches!(
+            listed.command,
+            CliCommand::ProjectCatalog {
+                action: ProjectCatalogCommand::List,
+                ..
+            }
+        ));
+        let shown = parse_cli([
+            OsString::from("project"),
+            OsString::from("show"),
+            OsString::from("22".repeat(32)),
+        ])
+        .expect("project show parses");
+        assert!(matches!(
+            shown.command,
+            CliCommand::ProjectCatalog {
+                action: ProjectCatalogCommand::Show(project_id),
+                ..
+            } if project_id.as_bytes() == &[0x22; 32]
+        ));
+        for arguments in [
+            vec!["project"],
+            vec!["project", "show"],
+            vec!["project", "list", "extra"],
+            vec!["project", "show", "not-an-id"],
+            vec!["project", "create", "later"],
+        ] {
+            assert_eq!(
+                parse_cli(arguments.into_iter().map(OsString::from)),
+                Err(CliError::Arguments)
+            );
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "complete heterogeneous snapshot fixture"
+    )]
+    fn project_catalog_preserves_conflicts_attribution_and_remote_checkpoints() {
+        let snapshot = AuthoritativeSnapshotDto {
+            revision: 19,
+            items: vec![
+                SnapshotItem::Project {
+                    project_id: Id32::new([2; 32]),
+                    home: Id32::new([12; 32]),
+                    name: "second".to_owned(),
+                    lifecycle: "closed".to_owned(),
+                    archived: true,
+                    claimable: true,
+                    head: Id32::new([22; 32]),
+                    input_sequence: 0,
+                },
+                SnapshotItem::Project {
+                    project_id: Id32::new([1; 32]),
+                    home: Id32::new([11; 32]),
+                    name: "first project".to_owned(),
+                    lifecycle: "conflicted".to_owned(),
+                    archived: false,
+                    claimable: false,
+                    head: Id32::new([21; 32]),
+                    input_sequence: 7,
+                },
+                SnapshotItem::ProjectResource {
+                    project_id: Id32::new([1; 32]),
+                    resource_id: Id32::new([31; 32]),
+                    display_locator: ResourceLocatorDto::new(
+                        ResourceSchemeDto::WorkingTree,
+                        "./work".to_owned(),
+                    )
+                    .expect("display locator"),
+                    canonical_locator: ResourceLocatorDto::new(
+                        ResourceSchemeDto::WorkingTree,
+                        "/repo/work".to_owned(),
+                    )
+                    .expect("canonical locator"),
+                    health: ResourceHealthDto::Degraded,
+                    primary: true,
+                    active_claim: false,
+                    conflicting_projects: vec![Id32::new([2; 32])],
+                },
+                SnapshotItem::ProjectInput {
+                    project_id: Id32::new([1; 32]),
+                    message_id: Id32::new([41; 32]),
+                    sequence: 7,
+                    accepted_fact: Id32::new([42; 32]),
+                },
+                SnapshotItem::ProjectDispatch {
+                    dispatch_id: Id32::new([51; 32]),
+                    message_id: Id32::new([41; 32]),
+                    sequence: 7,
+                    fact_id: Id32::new([52; 32]),
+                    conflicted: true,
+                },
+                SnapshotItem::ProjectDispatch {
+                    dispatch_id: Id32::new([53; 32]),
+                    message_id: Id32::new([99; 32]),
+                    sequence: 8,
+                    fact_id: Id32::new([54; 32]),
+                    conflicted: false,
+                },
+                SnapshotItem::ProjectOutput {
+                    output_id: Id32::new([61; 32]),
+                    dispatch_id: Id32::new([51; 32]),
+                    status: "conflicted".to_owned(),
+                    content: "retained output".to_owned(),
+                },
+                SnapshotItem::ProjectOutput {
+                    output_id: Id32::new([62; 32]),
+                    dispatch_id: Id32::new([98; 32]),
+                    status: "late".to_owned(),
+                    content: "unjoinable".to_owned(),
+                },
+                SnapshotItem::RemoteCommand {
+                    command_id: Id32::new([71; 32]),
+                    request_digest: Id32::new([72; 32]),
+                    account_id: Id32::new([73; 32]),
+                    project_id: Id32::new([1; 32]),
+                    target_home: Id32::new([11; 32]),
+                    expected_head: Id32::new([21; 32]),
+                    operation_provider: "codex".to_owned(),
+                    operation_session: "session-7".to_owned(),
+                    operation_id: Id32::new([74; 32]),
+                    body: "{\"version\":1}".to_owned(),
+                    issued_at_unix_millis: 1_700_000_000_000,
+                    request_fact: Id32::new([75; 32]),
+                    progress: Box::new(RemoteCommandProgressDto::Terminal {
+                        receipt_fact: Id32::new([76; 32]),
+                        received_head: Id32::new([21; 32]),
+                        received_at_unix_millis: 1_700_000_000_001,
+                        outcome_fact: Id32::new([77; 32]),
+                        result: RemoteCommandResultDto::Rejected("stale_head".to_owned()),
+                        runtime: Some(RuntimeObservationDto::Uncertain("runtime_lost".to_owned())),
+                    }),
+                },
+            ],
+        };
+
+        let view = project_catalog_view(&snapshot, ProjectCatalogCommand::List).expect("catalog");
+        assert_eq!(
+            view.projects
+                .iter()
+                .map(|project| project.project_id)
+                .collect::<Vec<_>>(),
+            [
+                ProjectId::from_bytes([1; 32]),
+                ProjectId::from_bytes([2; 32])
+            ]
+        );
+        assert_eq!(view.unattributed_dispatches, 1);
+        assert_eq!(view.unattributed_outputs, 1);
+        let first = &view.projects[0];
+        assert_eq!(first.lifecycle, "conflicted");
+        assert_eq!(first.resources[0].health, "degraded");
+        assert_eq!(
+            first.resources[0].conflicting_projects,
+            [ProjectId::from_bytes([2; 32])]
+        );
+        assert!(first.dispatches[0].conflicted);
+        assert_eq!(first.outputs[0].status, "conflicted");
+        assert_eq!(first.remote_commands[0].progress, "terminal");
+        assert_eq!(first.remote_commands[0].result_state, Some("rejected"));
+        assert_eq!(
+            first.remote_commands[0].result_value.as_deref(),
+            Some("stale_head")
+        );
+        assert_eq!(first.remote_commands[0].runtime_state, Some("uncertain"));
+
+        let human = render_project_catalog(CliOutputFormat::Human, &view).expect("human catalog");
+        assert!(human.contains("lifecycle=conflicted"));
+        assert!(human.contains("active_claim=false"));
+        assert!(human.contains("runtime_state=uncertain"));
+        let json = render_project_catalog(CliOutputFormat::Json, &view).expect("JSON catalog");
+        assert_eq!(
+            json,
+            render_project_catalog(CliOutputFormat::Json, &view).expect("stable JSON catalog")
+        );
+        let record: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(record["kind"], "project_catalog");
+        assert_eq!(record["data"]["unattributed_dispatches"], 1);
+        assert_eq!(
+            record["data"]["projects"][0]["remote_commands"][0]["runtime_code"],
+            "runtime_lost"
+        );
+
+        let shown = project_catalog_view(
+            &snapshot,
+            ProjectCatalogCommand::Show(ProjectId::from_bytes([2; 32])),
+        )
+        .expect("exact project");
+        assert_eq!(shown.projects.len(), 1);
+        assert_eq!(shown.projects[0].name, "second");
+        assert_eq!(
+            project_catalog_view(
+                &snapshot,
+                ProjectCatalogCommand::Show(ProjectId::from_bytes([9; 32])),
+            ),
+            Err(CliError::ProjectState)
+        );
     }
 
     #[test]
@@ -8401,7 +9420,7 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  project          Inspect authoritative projects and remote progress\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
         let ask = run_cli(
@@ -8424,6 +9443,13 @@ mod tests {
         .expect("harness help");
         assert!(harness.contains("resume --agent NAME|AGENT_ID"));
         assert!(harness.contains("never falls back to a new session"));
+        let project = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("project")])
+                .expect("project help parses"),
+        )
+        .expect("project help");
+        assert!(project.contains("show PROJECT_ID"));
+        assert!(project.contains("never chooses a historical winner"));
         let guidance = run_cli(
             &parse_cli([OsString::from("agents"), OsString::from("delivery")])
                 .expect("delivery guidance parses"),

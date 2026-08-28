@@ -252,6 +252,10 @@ grep -Fq 'fn run_harness(' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "the installed CLI must expose managed harness workflows"
 grep -Fq 'client.agent_session(' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "managed harness clients must cross the typed local API client"
+grep -Fq 'fn run_project_catalog(' "$repository_root/crates/hq-node/src/cli.rs" ||
+  fail "the installed CLI must expose the authoritative project catalog"
+grep -Fq 'project_catalog_view(&snapshot, action)' "$repository_root/crates/hq-node/src/cli.rs" ||
+  fail "project catalog clients must derive only from a fresh local API snapshot"
 if grep -Eq '(CodexHarness|CodexSession|CodexProcess|CodexProtocol)' \
   "$repository_root/crates/hq-node/src/cli.rs" \
   "$repository_root/crates/hq-node/src/local_client.rs"; then

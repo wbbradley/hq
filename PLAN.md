@@ -54,13 +54,32 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Implement project/resource/worktree commands and audit non-TUI parity** — Expose
-  project list/show/create/send/open/activate/handoff/close/archive/unarchive, desired-resource
-  add/remove/replace/check, remote-command progress, and recoverable worktree provisioning through
-  the existing project and inspection ports. Render checkpoints, conflicts, runtime uncertainty,
-  claims, and orphaned external-state warnings explicitly. Add parser, response-loss, restart,
-  stale-head, force-confirmation, fake-node, and real foreground end-to-end tests, then audit every
-  retained non-TUI behavior-ledger workflow and close any remaining CLI gap.
+- **[cli/high] Add project creation and project-addressed messaging** — Add project creation over an
+  exactly identified existing resource through the project workflow port, including local or
+  selected remote home, deterministic mailbox/project identity, and exact no-head replay. Add
+  project-addressed human `send` through the ordinary application message planner so closed or
+  unassigned work remains pending. Test response loss, concurrent or changed creation, stale home
+  authority, restart, message sequencing, stdin, and machine output.
+
+- **[cli/high] Add project lifecycle and assignment commands** — Expose open, activate,
+  exact-session/thread resume, pending dispatch, handoff, close, archive, and unarchive through one
+  stable project-command builder. Resolve active human, expected head, named agent, provider,
+  launch directory, and force confirmations from authoritative state; render every workflow stage,
+  rejection, runtime failure/uncertainty, and reconcilable operation. Test stale heads, response
+  loss, restart repair, takeover/close confirmation, and real foreground execution.
+
+- **[cli/high] Add desired-resource inspection and mutation commands** — Expose resource add,
+  remove, replace, primary selection, and check through the project and read-only inspection ports.
+  Identify display/canonical locators at the boundary, preserve stable resource identities, and
+  show health, conflicting projects, dirty/unknown release gates, and explicit force semantics.
+  Test symlink/path changes, overlap conflicts, stale heads, response loss, restart, and no external
+  deletion or mutation on close/archive/remove.
+
+- **[cli/high] Add recoverable worktree provisioning and audit non-TUI parity** — Expose exact Git
+  worktree provisioning with destination reservation, source/base/branch validation, optional
+  branch creation, local or remote home, durable progress, reconciliation, and orphaned external
+  state warnings. Add fake-node and real-Git response-loss/restart tests, then audit every retained
+  non-TUI behavior-ledger workflow and close any remaining CLI gap.
 
 - **[tui/high] Build the pure Ratatui application architecture and terminal shell** — Implement
   `UiModel`, the closed `UiEvent` enum, pure update transitions, explicit `UiEffect` values, stale
