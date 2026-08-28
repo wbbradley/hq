@@ -649,7 +649,9 @@ object!(ProjectResourceHealthObservedDto {
 });
 object!(ProjectAssignmentConfiguringDto {
     project: Hex32,
-    binding: BindingDto,
+    assignment: Hex32,
+    agent: Hex32,
+    provider: ProviderText,
 });
 object!(ProjectAssignmentRunnableDto {
     project: Hex32,

@@ -45,7 +45,7 @@ use crate::{
 
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 13;
-const SCHEMA_MARKER: &str = "hq-store-v13-project-sagas-2026-08-27";
+const SCHEMA_MARKER: &str = "hq-store-v13-project-activation-2026-08-27";
 const SCHEMA_TABLES: [&str; 116] = [
     "storage_metadata",
     "canonical_facts",
@@ -964,7 +964,7 @@ CREATE TABLE project_assignments (
     assignment_id BLOB NOT NULL CHECK(typeof(assignment_id) = 'blob' AND length(assignment_id) = 32),
     agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
     provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) BETWEEN 1 AND 64),
-    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) BETWEEN 1 AND 256),
+    session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) <= 256),
     phase INTEGER NOT NULL CHECK(phase BETWEEN 1 AND 3),
     thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
     launch_scheme INTEGER NOT NULL CHECK(launch_scheme BETWEEN 0 AND 4),
@@ -1285,6 +1285,20 @@ CREATE TABLE project_sagas (
     runtime_error_code TEXT CHECK(runtime_error_code IS NULL OR
         (typeof(runtime_error_code) = 'text' AND
          length(CAST(runtime_error_code AS BLOB)) BETWEEN 1 AND 96)),
+    runtime_session TEXT CHECK(runtime_session IS NULL OR
+        (typeof(runtime_session) = 'text' AND
+         length(CAST(runtime_session AS BLOB)) BETWEEN 1 AND 256)),
+    selected_thread BLOB CHECK(selected_thread IS NULL OR
+        (typeof(selected_thread) = 'blob' AND length(selected_thread) = 32)),
+    opened_by_workflow INTEGER NOT NULL CHECK(opened_by_workflow IN (0, 1)),
+    failure_category INTEGER
+        CHECK(failure_category IS NULL OR failure_category BETWEEN 1 AND 6),
+    failure_code TEXT CHECK(failure_code IS NULL OR
+        (typeof(failure_code) = 'text' AND
+         length(CAST(failure_code AS BLOB)) BETWEEN 1 AND 96)),
+    pending_canonical_mutation BLOB CHECK(pending_canonical_mutation IS NULL OR
+        (typeof(pending_canonical_mutation) = 'blob' AND
+         length(pending_canonical_mutation) BETWEEN 1 AND 65536)),
     dispatch_operation_id BLOB CHECK(dispatch_operation_id IS NULL OR
         (typeof(dispatch_operation_id) = 'blob' AND length(dispatch_operation_id) = 32)),
     dispatch_effect INTEGER NOT NULL CHECK(dispatch_effect BETWEEN 1 AND 5),
@@ -1321,6 +1335,7 @@ CREATE TABLE project_sagas (
     CHECK((state_kind IN (3, 4)) = (error_code IS NOT NULL)),
     CHECK((runtime_effect IN (4, 5)) = (runtime_error_category IS NOT NULL)),
     CHECK((runtime_effect IN (4, 5)) = (runtime_error_code IS NOT NULL)),
+    CHECK((failure_category IS NULL) = (failure_code IS NULL)),
     CHECK((dispatch_effect IN (4, 5)) = (dispatch_error_category IS NOT NULL)),
     CHECK((dispatch_effect IN (4, 5)) = (dispatch_error_code IS NOT NULL)),
     CHECK((git_effect IN (4, 5)) = (git_error_category IS NOT NULL)),

@@ -471,6 +471,15 @@ impl HarnessSupervisor {
         reconcile_delivery(&self.dependencies, worker, &delivery)
     }
 
+    /// Loads one exact durable delivery disposition without creating a second queue.
+    pub fn delivery(
+        &self,
+        agent_id: AgentId,
+        submission_id: MessageId,
+    ) -> Result<Option<HarnessDeliveryRecord>, HarnessError> {
+        self.dependencies.state.delivery(agent_id, submission_id)
+    }
+
     /// Reconciles all bounded pending/uncertain work for currently live exact workers.
     pub fn wake(&self) -> Result<usize, HarnessError> {
         let agents: Vec<_> = self.lock_workers()?.keys().copied().collect();

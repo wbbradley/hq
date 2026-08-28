@@ -5,7 +5,8 @@
 use hq_application::ProjectCommandStage;
 use hq_domain::{
     AccountId, BoundedText, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode,
-    FactId, InstallationId, OperationId, ProjectId, ResourceLocator, ResourceScheme, Timestamp,
+    FactId, InstallationId, OperationId, ProjectId, ProviderSessionId, ResourceLocator,
+    ResourceScheme, ThreadId, Timestamp,
 };
 use hq_store::{
     StoreErrorClass, StoredProjectEffectState, StoredProjectSaga, StoredProjectSagaBegin,
@@ -37,6 +38,11 @@ fn saga(operation: u8, digest: u8, project: u8) -> StoredProjectSaga {
         state: StoredProjectSagaState::Running(ProjectCommandStage::Accepted),
         runtime_operation_id: None,
         runtime_effect: StoredProjectEffectState::NotStarted,
+        runtime_session: None,
+        selected_thread: None,
+        opened_by_workflow: false,
+        failure: None,
+        pending_canonical_mutation: None,
         dispatch_operation_id: None,
         dispatch_effect: StoredProjectEffectState::NotStarted,
         git_operation_id: None,
@@ -119,6 +125,14 @@ fn checkpoints_are_monotonic_bounded_and_restart_durable() {
         ErrorCode::new("runtime_acceptance_unknown").expect("error code validates"),
     );
     record.runtime_effect = StoredProjectEffectState::Uncertain(uncertain.clone());
+    record.runtime_session = Some(ProviderSessionId::new("session-ready").expect("session"));
+    record.selected_thread = Some(ThreadId::from_bytes([41; 32]));
+    record.opened_by_workflow = true;
+    record.failure = Some(DomainError::new(
+        ErrorCategory::Unresolved,
+        ErrorCode::new("activation_failed").expect("error code validates"),
+    ));
+    record.pending_canonical_mutation = Some(b"canonical-mutation-v1".to_vec());
     record.state = StoredProjectSagaState::Reconcilable {
         stage: ProjectCommandStage::ReconciliationRequired,
         error: uncertain,

@@ -148,7 +148,12 @@ pub fn valid_bodies() -> [(u64, String); 48] {
                 r#"{{"project":"{C}","resource":"{B}","health":"healthy","details":null,"checked_at":0}}"#
             ),
         ),
-        (39, format!(r#"{{"project":"{C}","binding":{binding}}}"#)),
+        (
+            39,
+            format!(
+                r#"{{"project":"{C}","assignment":"{B}","agent":"{C}","provider":"provider"}}"#
+            ),
+        ),
         (
             40,
             format!(

@@ -9,10 +9,13 @@ use hq_application::{
 };
 use hq_domain::{
     AccountId, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, FactId,
-    InstallationId, OperationId, ProjectId, Timestamp,
+    InstallationId, OperationId, ProjectId, ProviderSessionId, ThreadId, Timestamp,
 };
 use hq_node::ProjectSagaStoreAdapter;
-use hq_projects::{ProjectSagaManager, ProjectSagaState, ProjectSagaStore, SagaEffectState};
+use hq_projects::{
+    CanonicalProjectMutation, CanonicalProjectMutationAction, ProjectSagaManager, ProjectSagaState,
+    ProjectSagaStore, SagaEffectState,
+};
 use hq_store::Store;
 
 mod support;
@@ -49,6 +52,23 @@ fn exact_command_checkpoint_survives_store_and_adapter_restart() {
     );
     checkpoint.runtime_operation_id = Some(OperationId::from_bytes([9; 32]));
     checkpoint.runtime_effect = SagaEffectState::Uncertain(uncertain.clone());
+    checkpoint.runtime_session = Some(ProviderSessionId::new("session-ready").expect("session"));
+    checkpoint.selected_thread = Some(ThreadId::from_bytes([10; 32]));
+    checkpoint.opened_by_workflow = true;
+    checkpoint.failure = Some(DomainError::new(
+        ErrorCategory::Unresolved,
+        ErrorCode::new("activation_failed").expect("error code validates"),
+    ));
+    checkpoint.pending_canonical_mutation = Some(CanonicalProjectMutation {
+        command_id: CommandId::from_bytes([11; 32]),
+        request_digest: CommandDigest::from_bytes([12; 32]),
+        account_id: checkpoint.account_id,
+        project_id: checkpoint.project_id,
+        home: checkpoint.home,
+        expected_head: checkpoint.expected_head,
+        issued_at: checkpoint.issued_at,
+        action: CanonicalProjectMutationAction::Open,
+    });
     checkpoint.state = ProjectSagaState::Reconcilable {
         stage: ProjectCommandStage::ReconciliationRequired,
         error: uncertain,

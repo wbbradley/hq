@@ -3,7 +3,7 @@
 use hq_application::ProjectCommandStage;
 use hq_domain::{
     AccountId, CommandDigest, CommandId, DomainError, FactId, InstallationId, OperationId,
-    ProjectId, ResourceLocator, Timestamp,
+    ProjectId, ProviderSessionId, ResourceLocator, ThreadId, Timestamp,
 };
 
 /// Maximum opaque canonical project-command body bytes retained per saga.
@@ -71,6 +71,16 @@ pub struct StoredProjectSaga {
     pub runtime_operation_id: Option<OperationId>,
     /// Runtime boundary disposition.
     pub runtime_effect: StoredProjectEffectState,
+    /// Exact acknowledged runtime session, when ready.
+    pub runtime_session: Option<ProviderSessionId>,
+    /// Exact selected project thread, when known.
+    pub selected_thread: Option<ThreadId>,
+    /// Whether this workflow conditionally opened the project.
+    pub opened_by_workflow: bool,
+    /// Original definite failure retained while compensation reconciles.
+    pub failure: Option<DomainError>,
+    /// Strict workflow-owned encoding of an in-flight canonical compare-and-swap.
+    pub pending_canonical_mutation: Option<Vec<u8>>,
     /// Stable provider-delivery correlation, when derived.
     pub dispatch_operation_id: Option<OperationId>,
     /// Provider-delivery boundary disposition.

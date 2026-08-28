@@ -3,13 +3,13 @@
 use std::{error::Error, num::NonZeroU64};
 
 use hq_domain::{
-    AccountId, AgentId, AssignmentBinding, AssignmentId, AuthorityReference, AuthorityRole,
-    BoundedVec, CommandDigest, CommandId, DispatchId, Fact, FactId, FactScope, InitialProjectState,
-    InstallationAddress, InstallationId, MailboxAddress, MailboxId, MessageContent, MessageId,
-    MessagePurpose, OperationCorrelation, OperationId, PresentationKind, ProjectId,
-    ProjectResource, ProviderId, ProviderSessionId, RemoteCommandResult, RepositoryContext,
-    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, RuntimeObservation,
-    SemanticPayload, ShortText, SigningPublicKey, ThreadId, Timestamp,
+    AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, AuthorityReference,
+    AuthorityRole, BoundedVec, CommandDigest, CommandId, DispatchId, Fact, FactId, FactScope,
+    InitialProjectState, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
+    MessageContent, MessageId, MessagePurpose, OperationCorrelation, OperationId, PresentationKind,
+    ProjectId, ProjectResource, ProviderId, ProviderSessionId, RemoteCommandResult,
+    RepositoryContext, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme,
+    RuntimeObservation, SemanticPayload, ShortText, SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_reducer::{
     AuthorityPolicy, DecisionStatus, ProjectAssignmentPhase, ProjectLifecycle, ProjectOutputStatus,
@@ -303,6 +303,14 @@ fn assignment_binding(value: u8) -> Result<AssignmentBinding, Box<dyn Error>> {
         provider: ProviderId::new("codex")?,
         session: ProviderSessionId::new(format!("session-{value}"))?,
     })
+}
+
+fn assignment_intent(binding: &AssignmentBinding) -> AssignmentIntent {
+    AssignmentIntent {
+        assignment_id: binding.assignment_id,
+        agent_id: binding.agent_id,
+        provider: binding.provider.clone(),
+    }
 }
 
 #[derive(Clone)]
@@ -670,7 +678,7 @@ fn lifecycle_resource_health_replacement_close_archive_and_restore_follow_explic
 }
 
 #[test]
-fn assignment_requires_an_exact_active_agent_claim_and_selected_provider_session()
+fn configuring_assignment_requires_an_active_local_agent_but_not_a_provider_session()
 -> Result<(), Box<dyn Error>> {
     let mut values = DeterministicValues::new(75);
     let world = project_world(&mut values)?;
@@ -685,13 +693,18 @@ fn assignment_requires_an_exact_active_agent_claim_and_selected_provider_session
         InitialProjectState::Open,
     )?;
     let binding = assignment_binding(75)?;
+    let intent = AssignmentIntent {
+        assignment_id: binding.assignment_id,
+        agent_id: binding.agent_id,
+        provider: binding.provider.clone(),
+    };
     let unsupported = project_transition(
         &mut values,
         &world,
         &create,
         SemanticPayload::ProjectAssignmentConfiguring {
             project_id,
-            binding,
+            intent: intent.clone(),
         },
     )?;
     let report = reduce_complete(
@@ -715,6 +728,36 @@ fn assignment_requires_an_exact_active_agent_claim_and_selected_provider_session
     };
     assert_eq!(view.head, create.id());
     assert!(view.assignment.is_none());
+
+    let agent = agent_support(&mut values, &world, 75, &binding)?;
+    let configuring = project_transition_with_parents(
+        &mut values,
+        &world,
+        &create,
+        [agent.claim.id()],
+        SemanticPayload::ProjectAssignmentConfiguring {
+            project_id,
+            intent: intent.clone(),
+        },
+    )?;
+    let configured = reduce_complete(
+        world
+            .base()
+            .into_iter()
+            .chain(agent.facts)
+            .chain([create, configuring]),
+        &world.reducer(),
+    )?;
+    let Some(ProjectProjection::Project(view)) = configured
+        .projections()
+        .get(&ProjectProjectionKey::Project(project_id))
+    else {
+        return Err("missing configuring project".into());
+    };
+    let assignment = view.assignment.as_ref().ok_or("missing assignment")?;
+    assert_eq!(assignment.intent, intent);
+    assert!(assignment.binding.is_none());
+    assert_eq!(assignment.phase, ProjectAssignmentPhase::Configuring);
     Ok(())
 }
 
@@ -759,7 +802,7 @@ fn assignment_cardinality_conflict_retracts_and_resolves_when_one_epoch_ends()
         [agent.claim.id(), agent.selection.id()],
         SemanticPayload::ProjectAssignmentConfiguring {
             project_id: first_id,
-            binding: first_binding.clone(),
+            intent: assignment_intent(&first_binding),
         },
     )?;
     let second_assignment = project_transition_with_parents(
@@ -769,7 +812,7 @@ fn assignment_cardinality_conflict_retracts_and_resolves_when_one_epoch_ends()
         [agent.claim.id(), agent.selection.id()],
         SemanticPayload::ProjectAssignmentConfiguring {
             project_id: second_id,
-            binding: second_binding.clone(),
+            intent: assignment_intent(&second_binding),
         },
     )?;
     let conflicted = reduce_complete(
@@ -864,7 +907,7 @@ fn input_dispatch_and_output_keep_exact_provenance_and_late_output_is_inert()
         [agent.claim.id(), agent.selection.id()],
         SemanticPayload::ProjectAssignmentConfiguring {
             project_id,
-            binding: binding.clone(),
+            intent: assignment_intent(&binding),
         },
     )?;
     let input_id = MessageId::from_bytes([101; 32]);

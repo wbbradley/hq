@@ -259,7 +259,11 @@ impl FactBuilder {
             },
             SemanticPayload::ProjectAssignmentConfiguring {
                 project_id,
-                binding: assignment.clone(),
+                intent: hq_domain::AssignmentIntent {
+                    assignment_id: assignment.assignment_id,
+                    agent_id: assignment.agent_id,
+                    provider: assignment.provider.clone(),
+                },
             },
             SemanticPayload::ProjectAssignmentRunnable {
                 project_id,

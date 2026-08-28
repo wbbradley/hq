@@ -272,6 +272,10 @@ an execution thread scoped to that project and agent. Assigning a different agen
 new thread. Reassigning an earlier agent may explicitly resume one of that pair's historical threads
 or start fresh.
 
+The configuring fact records only the assignment epoch, agent, and provider intent. A fresh
+provider session does not exist before runtime readiness, so its exact identity is bound by the
+runnable fact rather than guessed or hidden behind a provisional session value.
+
 Project messages remain queued until the assignment is runnable. Once runnable, pending messages
 dispatch automatically in the project's authoritative order, each as a distinct runtime input.
 HQ does not concatenate the backlog into a synthetic prompt.

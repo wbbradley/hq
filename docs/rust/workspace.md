@@ -59,10 +59,12 @@ keeps home qualification explicit, and returns closed health/release evidence wi
 file names, contents, stderr, environment, or operating-system diagnostics.
 
 `hq-projects` owns passive public command/checkpoint records, a strict canonical versioned command
-body codec, exact-replay intake, and the workflow persistence capability. It does not own SQLite,
-provider processes, or canonical fact authority. `hq-node` maps that capability to store-owned v13
-records; explicit workflow handlers inject canonical, runtime, resource, and Git capabilities
-without reversing dependencies.
+body codec, exact-replay intake, transaction-consistent canonical project mutation decisions,
+session-free configuring intent, activation/compensation, and at-most-once pending-input dispatch.
+It does not own SQLite or provider processes. `hq-node` maps its checkpoint capability to
+store-owned v13 records and maps project runtime operations to the neutral harness supervisor's
+sole durable delivery ledger; explicit workflow handlers inject canonical, runtime, resource, and
+Git capabilities without reversing dependencies.
 
 The in-memory composition path remains intentionally non-normative at the protocol boundary: it
 validates a small frame in `hq-protocol`, constructs an `hq-domain` fact, and submits it through

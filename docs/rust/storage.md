@@ -251,10 +251,18 @@ sessions, deliveries, and partial event checkpoints without ever persisting envi
 The same clean-sheet v13 schema includes `project_sagas` and `project_saga_reservations` without a
 storage-version increment. A saga row binds stable operation and command identities to the exact
 request digest, active account, project/home, expected head, strict versioned command body,
-monotonic checkpoint, external operation correlations and dispositions, optional destination
-reservation, typed terminal or reconcilable result, and injected recovery ordering key. Exact
+monotonic checkpoint, external operation correlations and dispositions, exact acknowledged runtime
+session and selected thread, whether the workflow conditionally opened the project, the original
+typed failure retained through compensation, the strict workflow-owned encoding of any in-flight
+canonical compare-and-swap, optional destination reservation, typed terminal or reconcilable
+result, and injected recovery ordering key. Exact
 replay returns retained state; changed operation or command identity fails closed. A partial unique
 index permits at most one running or reconcilable state-changing command per project.
+
+Rebuildable `project_assignments` rows retain a session-free assignment intent while configuring.
+The session column is empty in that phase and becomes a validated provider-session identity only
+after runtime readiness and the canonical runnable transition. This is a clean-sheet v13 shape
+change in place, not a migration or storage-version increment.
 
 Reservations are home-qualified normalized locators. A competing operation cannot reserve the
 same destination, and accepted or uncertain Git work marks the reservation as protecting external

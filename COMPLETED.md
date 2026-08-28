@@ -2763,6 +2763,7 @@ and backup decisions. The unchanged Go baseline passes build, vet, cached tests,
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
 
+
 ## 2026-08-27 — Causal fact algebra and semantic fact catalog
 
 Specified an implementation-independent causal algebra with structural and usable reachability,
@@ -6445,3 +6446,113 @@ specification, fuzz, whitespace, and unchanged-Go gates pass.
   2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
 
   If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.
+
+
+## 2026-08-27 — Project activation and at-most-once dispatch
+
+Implemented transaction-consistent canonical project mutations plus a durable activation,
+compensation, and ordered dispatch workflow. Configuring assignments now carry public session-free
+intent and bind an acknowledged provider session only at runnable readiness. Every canonical
+compare-and-swap is checkpointed exactly before commit for restart-safe reconciliation; resource,
+runtime, launch, delivery, and compensation uncertainty remain bounded and replayable. Pending
+inputs drain separately in authoritative sequence through the harness supervisor's sole durable
+ledger, with complete attribution, changed-input collision rejection, and dispatch facts only after
+definite acceptance. Storage v13 was updated in place without a migration or version bump. Full
+workspace, strict Clippy, four-target, architecture, dependency, specification, fuzz, whitespace,
+and unchanged-Go gates pass.
+
+### Original plan entry
+
+- **[projects/high] Implement activation and at-most-once project dispatch** — Add the
+  transaction-consistent canonical project mutation capability and explicit activation workflow:
+  expected-head/home/active-human validation, resource observation and claim preview, conditional
+  open, configuring assignment, project-bound start or exact resume, launch-directory validation,
+  thread selection from the first pending project message or explicit historical resume, runnable
+  transition, and compensation to the documented prior stable state. Drain accepted inputs in home
+  sequence through the harness supervisor's sole durable delivery ledger, reconcile before retry,
+  and author dispatch only after definite acceptance. Test every crash and definite/unknown failure
+  boundary, stale heads, claim/agent conflicts, launch failure, pending-message preservation,
+  accepted-response loss, changed input, restart repair, late output, and complete attribution.
+
+  **Implementation plan**
+
+  - Correct the clean-sheet assignment model so a configuring epoch carries only the stable
+    assignment identity, agent, and provider. Bind the provider session only after exact runtime
+    readiness, at the runnable transition. Update semantic DTOs, reducer projections, application
+    snapshots, and storage v13 in place without compatibility branches, migrations, or a version
+    bump. Keep these passive Rust values public.
+  - Add an outward transaction-consistent canonical project mutation capability. Every activation
+    transition derives a stable per-boundary command identity, validates the exact home, active
+    human authority, expected current head, project lifecycle, claimability, and agent cardinality
+    inside the commit snapshot, and authors one typed fact or a stable typed rejection. Canonical
+    project facts remain the only project authority; saga rows retain coordination checkpoints.
+  - Implement the closed activation state machine: observe all desired resources, conditionally
+    open a previously closed project, author the configuring assignment, start or exactly resume a
+    project-bound runtime, revalidate the explicit launch directory, choose an explicit historical
+    thread or the first pending project input, and author the runnable binding. Persist the exact
+    acknowledged session and selected thread before later boundaries. On definite failure, end the
+    configuring assignment and return to the prior open/closed stable state; on uncertainty,
+    require exact lookup and retain the pending human message.
+  - Route pending inputs in authoritative home sequence through the harness supervisor's existing
+    durable delivery ledger. Derive stable submission/dispatch identities from exact immutable
+    input attribution, reconcile pending or uncertain provider acceptance before retry, and author
+    `ProjectInputDispatched` only after definite acceptance. Never concatenate backlog input or add
+    a competing queue. Re-read canonical assignment and dispatch state before every delivery so
+    late output remains attributable but cannot grant current authority.
+  - Build deterministic failpoint and restart contracts for every canonical, resource, runtime,
+    launch, delivery, and dispatch boundary; stale heads; inactive humans; claim and assignment
+    conflicts; start/resume mismatch; first-pending and explicit-thread selection; definite and
+    unknown failures; changed stable inputs; accepted-response loss; compensation; bounded repair;
+    ordered draining; and complete binding/thread attribution. Run all locked workspace,
+    supported-target, architecture, dependency, specification, fuzz, shell, whitespace, and
+    unchanged-Go gates.
+
+  **Risks and decisions**
+
+  - A fresh provider session cannot truthfully appear in a canonical configuring fact before the
+    provider creates it. The configuring fact therefore records session-free intent; runnable is
+    the first canonical state containing the acknowledged session. The durable saga owns the
+    interval and compensation stops or releases any runtime that never becomes runnable.
+  - Provider acceptance and canonical dispatch cannot share a transaction. The supervisor's
+    durable exact-delivery record is the sole bridge: uncertain delivery is reconciled by stable
+    identity and digest, and only its accepted state permits the canonical dispatch fact.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely
+  from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any
+  other marker. The task and its related subsections should no longer appear in the plan file at
+  all. The plan file should not have any sort of "Done" section. Then append a new entry to the
+  completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to
+     preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update
+  those. If new future work items were discovered, add them. If the plan file or completed file is
+  outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
+  other changes.

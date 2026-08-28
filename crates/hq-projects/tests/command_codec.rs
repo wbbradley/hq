@@ -2,9 +2,19 @@
 
 #![allow(clippy::expect_used)]
 
+use std::num::NonZeroU64;
+
 use hq_application::ProjectCommandAction;
-use hq_domain::{AgentId, BoundedText, ProviderId, ResourceLocator, ResourceScheme, ThreadId};
-use hq_projects::{decode_project_command_action, encode_project_command_action};
+use hq_domain::{
+    AccountId, AgentId, AssignmentBinding, AssignmentId, BoundedText, CommandDigest, CommandId,
+    ContentText, DispatchId, FactId, InstallationId, MessageId, ProjectId, ProviderId,
+    ProviderSessionId, ResourceLocator, ResourceScheme, ThreadId, Timestamp,
+};
+use hq_projects::{
+    CanonicalProjectMutation, CanonicalProjectMutationAction, PendingProjectInput,
+    decode_canonical_project_mutation, decode_project_command_action,
+    encode_canonical_project_mutation, encode_project_command_action,
+};
 
 fn locator(path: &str) -> ResourceLocator {
     ResourceLocator::new(
@@ -49,4 +59,44 @@ fn unknown_version_and_noncanonical_json_are_rejected() {
     )
     .expect("bounded noncanonical body");
     assert!(decode_project_command_action(&noncanonical).is_err());
+}
+
+#[test]
+fn in_flight_canonical_mutation_round_trips_with_complete_dispatch_attribution() {
+    let mutation = CanonicalProjectMutation {
+        command_id: CommandId::from_bytes([10; 32]),
+        request_digest: CommandDigest::from_bytes([11; 32]),
+        account_id: AccountId::from_bytes([12; 32]),
+        project_id: ProjectId::from_bytes([13; 32]),
+        home: InstallationId::from_bytes([14; 32]),
+        expected_head: FactId::from_bytes([15; 32]),
+        issued_at: Timestamp::from_unix_millis(16),
+        action: CanonicalProjectMutationAction::RecordDispatch {
+            input: PendingProjectInput {
+                message_id: MessageId::from_bytes([17; 32]),
+                input_fact_id: FactId::from_bytes([18; 32]),
+                accepted_fact: FactId::from_bytes([19; 32]),
+                sequence: NonZeroU64::new(20).expect("nonzero"),
+                thread_id: ThreadId::from_bytes([21; 32]),
+                body: ContentText::new("exact body").expect("body"),
+            },
+            dispatch_id: DispatchId::from_bytes([22; 32]),
+            binding: AssignmentBinding {
+                assignment_id: AssignmentId::from_bytes([23; 32]),
+                agent_id: AgentId::from_bytes([24; 32]),
+                provider: ProviderId::new("provider").expect("provider"),
+                session: ProviderSessionId::new("session").expect("session"),
+            },
+            thread_id: ThreadId::from_bytes([25; 32]),
+        },
+    };
+
+    let encoded = encode_canonical_project_mutation(&mutation).expect("mutation encodes");
+    assert_eq!(
+        decode_canonical_project_mutation(&encoded).expect("mutation decodes"),
+        mutation
+    );
+    let mut changed = encoded;
+    changed.push(b' ');
+    assert!(decode_canonical_project_mutation(&changed).is_err());
 }

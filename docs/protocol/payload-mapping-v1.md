@@ -109,7 +109,7 @@ semantic catalog and reducer; the protocol accepts only role names applicable to
 | FCT-036 | 36 | ProjectResourceReplaced | hq/canonical | `{"project":hex,"old_resource":hex,"resource":resource}` | project, old resource ID, and complete new resource DTO |
 | FCT-037 | 37 | ProjectPrimaryResourceChanged | hq/canonical | `{"project":hex,"resource":hex}` | project and selected desired resource IDs |
 | FCT-038 | 38 | ProjectResourceHealthObserved | hq/canonical | `{"project":hex,"resource":hex,"health":health,"details":optional-content,"checked_at":milliseconds}` | exact project/resource, typed health, optional details, observation time |
-| FCT-039 | 39 | ProjectAssignmentConfiguring | hq/canonical | `{"project":hex,"binding":binding}` | project and complete immutable assignment binding |
+| FCT-039 | 39 | ProjectAssignmentConfiguring | hq/canonical | `{"project":hex,"assignment":hex,"agent":hex,"provider":text}` | project and session-free assignment intent |
 | FCT-040 | 40 | ProjectAssignmentRunnable | hq/canonical | `{"project":hex,"binding":binding,"thread":hex,"launch_directory":locator,"activation":operation}` | project/binding/thread, working directory, and exact activation correlation |
 | FCT-041 | 41 | ProjectAssignmentBlocked | hq/canonical | `{"project":hex,"assignment":hex,"cause":short}` | project/assignment and stable blocked error code |
 | FCT-042 | 42 | ProjectAssignmentEnded | hq/canonical | `{"project":hex,"assignment":hex,"forced":boolean,"runtime":optional-runtime}` | project/assignment, force evidence, optional runtime observation |

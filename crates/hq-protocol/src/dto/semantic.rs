@@ -454,7 +454,11 @@ fn payload(
         model::BodyDto::ProjectAssignmentConfiguring(value) => {
             Output::ProjectAssignmentConfiguring {
                 project_id: project(value.project),
-                binding: binding(&value.binding)?,
+                intent: domain::AssignmentIntent {
+                    assignment_id: domain::AssignmentId::from_bytes(value.assignment.0),
+                    agent_id: domain::AgentId::from_bytes(value.agent.0),
+                    provider: provider(&value.provider)?,
+                },
             }
         }
         model::BodyDto::ProjectAssignmentRunnable(value) => Output::ProjectAssignmentRunnable {

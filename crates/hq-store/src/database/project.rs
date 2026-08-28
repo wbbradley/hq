@@ -3,11 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
-    AgentId, AssignmentBinding, AssignmentId, BoundedText, CommandDigest, CommandId, ContentText,
-    DispatchId, ErrorCode, FactId, InstallationId, MailboxAddress, MailboxId, MessageContent,
-    MessageId, MessagePurpose, OperationCorrelation, OperationId, PresentationKind, ProjectId,
-    ProjectResource, ProviderId, ProviderSessionId, RemoteCommandResult, ResourceHealth,
-    ResourceId, ResourceLocator, ResourceScheme, RuntimeObservation, ShortText, ThreadId,
+    AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText, CommandDigest,
+    CommandId, ContentText, DispatchId, ErrorCode, FactId, InstallationId, MailboxAddress,
+    MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation, OperationId,
+    PresentationKind, ProjectId, ProjectResource, ProviderId, ProviderSessionId,
+    RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme,
+    RuntimeObservation, ShortText, ThreadId,
 };
 use hq_reducer::{
     ProjectAggregateKey, ProjectAssignmentPhase, ProjectAssignmentView, ProjectDispatchView,
@@ -811,6 +812,19 @@ fn insert_assignment(
         ),
         ProjectAssignmentPhase::Blocked(error) => (3, ZERO, 0, "", error.as_str()),
     };
+    let session = view
+        .binding
+        .as_ref()
+        .map_or("", |binding| binding.session.as_str());
+    if view.binding.as_ref().is_some_and(|binding| {
+        binding.assignment_id != view.intent.assignment_id
+            || binding.agent_id != view.intent.agent_id
+            || binding.provider != view.intent.provider
+    }) || (matches!(view.phase, ProjectAssignmentPhase::Runnable { .. })
+        && view.binding.is_none())
+    {
+        return Err(corrupt());
+    }
     transaction
         .execute(
             "INSERT INTO project_assignments( \
@@ -819,10 +833,10 @@ fn insert_assignment(
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 digest.as_slice(),
-                view.binding.assignment_id.as_bytes().as_slice(),
-                view.binding.agent_id.as_bytes().as_slice(),
-                view.binding.provider.as_str(),
-                view.binding.session.as_str(),
+                view.intent.assignment_id.as_bytes().as_slice(),
+                view.intent.agent_id.as_bytes().as_slice(),
+                view.intent.provider.as_str(),
+                session,
                 phase,
                 thread.as_slice(),
                 scheme,
@@ -886,8 +900,27 @@ fn load_assignment(
         }
         _ => return Err(corrupt()),
     };
+    let intent = AssignmentIntent {
+        assignment_id: AssignmentId::from_bytes(fixed(row.0)?),
+        agent_id: AgentId::from_bytes(fixed(row.1)?),
+        provider: ProviderId::new(row.2.clone()).map_err(|_| corrupt())?,
+    };
+    let binding = if row.3.is_empty() {
+        None
+    } else {
+        Some(AssignmentBinding {
+            assignment_id: intent.assignment_id,
+            agent_id: intent.agent_id,
+            provider: intent.provider.clone(),
+            session: ProviderSessionId::new(row.3).map_err(|_| corrupt())?,
+        })
+    };
+    if matches!(phase, ProjectAssignmentPhase::Runnable { .. }) && binding.is_none() {
+        return Err(corrupt());
+    }
     Ok(ProjectAssignmentView {
-        binding: decode_binding(row.0, row.1, row.2, row.3)?,
+        intent,
+        binding,
         phase,
         cardinality_conflicted: decode_bool(row.9)?,
         runnable: decode_bool(row.10)?,
@@ -2022,7 +2055,12 @@ mod tests {
         );
         let binding = assignment(0x51, 0x52, "provider-one", "session-one");
         let runnable = ProjectAssignmentView {
-            binding: binding.clone(),
+            intent: AssignmentIntent {
+                assignment_id: binding.assignment_id,
+                agent_id: binding.agent_id,
+                provider: binding.provider.clone(),
+            },
+            binding: Some(binding.clone()),
             phase: ProjectAssignmentPhase::Runnable {
                 thread_id: ThreadId::from_bytes([0x53; 32]),
                 launch_directory: locator(ResourceScheme::WorkingTree, "/workspace/one"),
@@ -2031,15 +2069,27 @@ mod tests {
             runnable: true,
             support: set([id(9), id(10)]),
         };
+        let blocked_binding = assignment(0x54, 0x55, "provider-two", "session-two");
         let blocked = ProjectAssignmentView {
-            binding: assignment(0x54, 0x55, "provider-two", "session-two"),
+            intent: AssignmentIntent {
+                assignment_id: blocked_binding.assignment_id,
+                agent_id: blocked_binding.agent_id,
+                provider: blocked_binding.provider.clone(),
+            },
+            binding: Some(blocked_binding),
             phase: ProjectAssignmentPhase::Blocked(error("blocked")),
             cardinality_conflicted: true,
             runnable: false,
             support: set([id(11)]),
         };
+        let configuring_binding = assignment(0x56, 0x57, "provider-three", "session-three");
         let configuring = ProjectAssignmentView {
-            binding: assignment(0x56, 0x57, "provider-three", "session-three"),
+            intent: AssignmentIntent {
+                assignment_id: configuring_binding.assignment_id,
+                agent_id: configuring_binding.agent_id,
+                provider: configuring_binding.provider,
+            },
+            binding: None,
             phase: ProjectAssignmentPhase::Configuring,
             cardinality_conflicted: false,
             runnable: false,

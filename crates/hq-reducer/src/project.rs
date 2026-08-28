@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
-    AgentId, AssignmentBinding, AuthorityRole, CommandDigest, CommandId, ContentText, DispatchId,
-    ErrorCode, Fact, FactId, FactScope, InitialProjectState, InstallationId, MailboxAddress,
-    MailboxId, MessageContent, MessageId, ProjectId, ProjectResource, RemoteCommandResult,
-    ResourceId, ResourceLocator, ResourceScheme, RuntimeObservation, SemanticPayload, ShortText,
-    ThreadId,
+    AgentId, AssignmentBinding, AssignmentIntent, AuthorityRole, CommandDigest, CommandId,
+    ContentText, DispatchId, ErrorCode, Fact, FactId, FactScope, InitialProjectState,
+    InstallationId, MailboxAddress, MailboxId, MessageContent, MessageId, ProjectId,
+    ProjectResource, RemoteCommandResult, ResourceId, ResourceLocator, ResourceScheme,
+    RuntimeObservation, SemanticPayload, ShortText, ThreadId,
 };
 
 use crate::{
@@ -43,8 +43,10 @@ pub enum ProjectAssignmentPhase {
 /// One current assignment epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectAssignmentView {
-    /// Exact immutable binding.
-    pub binding: AssignmentBinding,
+    /// Exact immutable intent recorded before runtime startup.
+    pub intent: AssignmentIntent,
+    /// Acknowledged runtime binding, present only after startup reached runnable.
+    pub binding: Option<AssignmentBinding>,
     /// Current phase.
     pub phase: ProjectAssignmentPhase,
     /// Whether global project/agent cardinality is singular.
@@ -441,7 +443,8 @@ fn invalid(reason: ProjectReason) -> ClassificationError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InternalAssignment {
-    binding: AssignmentBinding,
+    intent: AssignmentIntent,
+    binding: Option<AssignmentBinding>,
     phase: ProjectAssignmentPhase,
     support: BTreeSet<FactId>,
 }
@@ -932,16 +935,17 @@ fn apply_payload(
             };
             resource.health = *health;
         }
-        SemanticPayload::ProjectAssignmentConfiguring { binding, .. } => {
+        SemanticPayload::ProjectAssignmentConfiguring { intent, .. } => {
             require_active_human(fact, context)?;
             if state.lifecycle != ProjectLifecycle::Open || state.assignment.is_some() {
                 return Err(invalid(ProjectReason::InvalidTransition));
             }
-            if !valid_agent_binding_parent(fact, binding, state.home, context) {
+            if !valid_agent_parent(fact, intent.agent_id, state.home, context) {
                 return Err(invalid(ProjectReason::AssignmentBindingMismatch));
             }
             state.assignment = Some(InternalAssignment {
-                binding: binding.clone(),
+                intent: intent.clone(),
+                binding: None,
                 phase: ProjectAssignmentPhase::Configuring,
                 support: BTreeSet::from([fact.id()]),
             });
@@ -963,16 +967,19 @@ fn apply_payload(
             let Some(assignment) = state.assignment.as_mut() else {
                 return Err(invalid(ProjectReason::AssignmentBindingMismatch));
             };
-            if assignment.binding != *binding
+            if assignment.intent.assignment_id != binding.assignment_id
+                || assignment.intent.agent_id != binding.agent_id
+                || assignment.intent.provider != binding.provider
                 || !matches!(
                     assignment.phase,
                     ProjectAssignmentPhase::Configuring | ProjectAssignmentPhase::Blocked(_)
                 )
-                || !valid_agent_binding_parent(fact, binding, state.home, context)
+                || !valid_agent_parent(fact, binding.agent_id, state.home, context)
                 || !valid_thread
             {
                 return Err(invalid(ProjectReason::AssignmentBindingMismatch));
             }
+            assignment.binding = Some(binding.clone());
             assignment.phase = ProjectAssignmentPhase::Runnable {
                 thread_id: *thread_id,
                 launch_directory: launch_directory.clone(),
@@ -987,7 +994,7 @@ fn apply_payload(
             let Some(assignment) = state.assignment.as_mut() else {
                 return Err(invalid(ProjectReason::AssignmentBindingMismatch));
             };
-            if assignment.binding.assignment_id != *assignment_id {
+            if assignment.intent.assignment_id != *assignment_id {
                 return Err(invalid(ProjectReason::AssignmentBindingMismatch));
             }
             assignment.phase = ProjectAssignmentPhase::Blocked(cause.clone());
@@ -1004,7 +1011,7 @@ fn apply_payload(
             if state
                 .assignment
                 .as_ref()
-                .is_none_or(|assignment| assignment.binding.assignment_id != *assignment_id)
+                .is_none_or(|assignment| assignment.intent.assignment_id != *assignment_id)
             {
                 return Err(invalid(ProjectReason::AssignmentBindingMismatch));
             }
@@ -1042,7 +1049,7 @@ fn apply_payload(
                 return Err(invalid(ProjectReason::AssignmentBindingMismatch));
             };
             if state.lifecycle != ProjectLifecycle::Open
-                || assignment.binding != *binding
+                || assignment.binding.as_ref() != Some(binding)
                 || !matches!(assignment.phase, ProjectAssignmentPhase::Runnable { thread_id: active, .. } if active == *thread_id)
                 || !valid_acceptance_parent(fact, *message_id, sequence.get(), context)
             {
@@ -1084,57 +1091,28 @@ fn valid_absolute_path(value: &str) -> bool {
             .any(|component| matches!(component, "." | ".."))
 }
 
-fn valid_agent_binding_parent(
+fn valid_agent_parent(
     fact: &Fact,
-    binding: &AssignmentBinding,
+    requested_agent: AgentId,
     home: InstallationId,
     context: &ReductionContext<'_, ProjectReason>,
 ) -> bool {
-    let Some(mailbox) = unique_agent_mailbox(binding.agent_id, home, context) else {
+    let Some(mailbox) = unique_agent_mailbox(requested_agent, home, context) else {
         return false;
     };
-    let claim_cited = fact.causal().parents().iter().any(|parent| {
+    fact.causal().parents().iter().any(|parent| {
         context.facts().get(*parent).is_some_and(|candidate| {
             context.is_projected(candidate.id())
                 && matches!(candidate.payload(), SemanticPayload::AgentNameClaimed { agent_id, mailbox_id, .. }
-                    if *agent_id == binding.agent_id && *mailbox_id == mailbox.mailbox_id())
+                    if *agent_id == requested_agent && *mailbox_id == mailbox.mailbox_id())
         })
-    });
-    let selection_cited = fact.causal().parents().iter().any(|parent| {
-        context.facts().get(*parent).is_some_and(|candidate| {
-            context.is_projected(candidate.id())
-                && matches!(candidate.payload(), SemanticPayload::ProviderSessionSelected {
-                    agent_id,
-                    mailbox_id,
-                    provider,
-                    session,
-                    ..
-                } if *agent_id == binding.agent_id
-                    && *mailbox_id == mailbox.mailbox_id()
-                    && *provider == binding.provider
-                    && *session == binding.session)
-        })
-    });
-    let retired = projected_facts(context).any(|candidate| {
-        matches!(candidate.payload(), SemanticPayload::AgentRetired { agent_id, .. }
-            if *agent_id == binding.agent_id)
+    }) && !projected_facts(context).any(|candidate| {
+        matches!(candidate.payload(), SemanticPayload::AgentRetired { agent_id: retired, .. }
+            if *retired == requested_agent)
             && !context
                 .graph()
                 .structurally_reaches(fact.id(), candidate.id())
-    });
-    let session_mailboxes = projected_facts(context)
-        .filter_map(|candidate| match candidate.payload() {
-            SemanticPayload::MailboxSessionBound {
-                mailbox_id,
-                provider,
-                session,
-            } if *provider == binding.provider && *session == binding.session => Some(
-                MailboxAddress::new(candidate.author().installation_id(), *mailbox_id),
-            ),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    claim_cited && selection_cited && !retired && session_mailboxes == BTreeSet::from([mailbox])
+    })
 }
 
 fn unique_agent_mailbox(
@@ -1366,11 +1344,14 @@ fn aggregate_keys(fact: &Fact) -> Vec<ProjectAggregateKey> {
             }
             keys
         }
-        SemanticPayload::ProjectAssignmentConfiguring {
-            project_id,
-            binding,
-        }
-        | SemanticPayload::ProjectAssignmentRunnable {
+        SemanticPayload::ProjectAssignmentConfiguring { project_id, intent } => vec![
+            ProjectAggregateKey::Project(*project_id),
+            ProjectAggregateKey::AgentAssignment {
+                home: fact.author().installation_id(),
+                agent: intent.agent_id,
+            },
+        ],
+        SemanticPayload::ProjectAssignmentRunnable {
             project_id,
             binding,
             ..
@@ -1445,9 +1426,10 @@ fn derive_projections<P: ResourceConflictPolicy>(
             };
             let assignment = state.assignment.as_ref().map(|assignment| {
                 let cardinality_conflicted = assignment_conflicts
-                    .get(&(state.home, assignment.binding.agent_id))
+                    .get(&(state.home, assignment.intent.agent_id))
                     .is_some_and(|projects| projects.len() > 1);
                 ProjectAssignmentView {
+                    intent: assignment.intent.clone(),
                     binding: assignment.binding.clone(),
                     phase: assignment.phase.clone(),
                     cardinality_conflicted,
@@ -1466,7 +1448,7 @@ fn derive_projections<P: ResourceConflictPolicy>(
             }
             if let Some(assignment) = &state.assignment
                 && let Some(conflicting_projects) =
-                    assignment_conflicts.get(&(state.home, assignment.binding.agent_id))
+                    assignment_conflicts.get(&(state.home, assignment.intent.agent_id))
             {
                 support.extend(
                     conflicting_projects
@@ -1677,7 +1659,7 @@ fn assignment_conflict_map(
     for state in states.values() {
         if let Some(assignment) = &state.assignment {
             assignments
-                .entry((state.home, assignment.binding.agent_id))
+                .entry((state.home, assignment.intent.agent_id))
                 .or_default()
                 .insert(state.project_id);
         }

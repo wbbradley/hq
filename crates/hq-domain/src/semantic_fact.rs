@@ -180,6 +180,17 @@ pub enum ResourceHealth {
 
 /// Immutable identity of a project assignment epoch.
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignmentIntent {
+    /// Assignment epoch identity allocated before runtime startup.
+    pub assignment_id: AssignmentId,
+    /// Assigned durable agent.
+    pub agent_id: AgentId,
+    /// Provider namespace selected for startup or exact resume.
+    pub provider: ProviderId,
+}
+
+/// Immutable runtime binding of a runnable project assignment epoch.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignmentBinding {
     /// Assignment epoch identity.
     pub assignment_id: AssignmentId,
@@ -426,7 +437,7 @@ pub enum SemanticPayload {
     /// FCT-039.
     ProjectAssignmentConfiguring {
         project_id: ProjectId,
-        binding: AssignmentBinding,
+        intent: AssignmentIntent,
     },
     /// FCT-040.
     ProjectAssignmentRunnable {

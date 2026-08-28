@@ -420,8 +420,10 @@ dependencies = [
  "base64",
  "hq-application",
  "hq-domain",
+ "hq-reducer",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

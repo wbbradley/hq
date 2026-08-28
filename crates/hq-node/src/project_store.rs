@@ -75,6 +75,16 @@ fn encode_record(record: ProjectSagaRecord) -> Result<StoredProjectSaga, SagaSto
         state: encode_state(record.state),
         runtime_operation_id: record.runtime_operation_id,
         runtime_effect: encode_effect(&record.runtime_effect),
+        runtime_session: record.runtime_session,
+        selected_thread: record.selected_thread,
+        opened_by_workflow: record.opened_by_workflow,
+        failure: record.failure,
+        pending_canonical_mutation: record
+            .pending_canonical_mutation
+            .as_ref()
+            .map(hq_projects::encode_canonical_project_mutation)
+            .transpose()
+            .map_err(|_| SagaStoreError::Corrupt)?,
         dispatch_operation_id: record.dispatch_operation_id,
         dispatch_effect: encode_effect(&record.dispatch_effect),
         git_operation_id: record.git_operation_id,
@@ -106,6 +116,16 @@ fn decode_record(record: StoredProjectSaga) -> Result<ProjectSagaRecord, SagaSto
         state: decode_state(record.state),
         runtime_operation_id: record.runtime_operation_id,
         runtime_effect: decode_effect(record.runtime_effect),
+        runtime_session: record.runtime_session,
+        selected_thread: record.selected_thread,
+        opened_by_workflow: record.opened_by_workflow,
+        failure: record.failure,
+        pending_canonical_mutation: record
+            .pending_canonical_mutation
+            .as_deref()
+            .map(hq_projects::decode_canonical_project_mutation)
+            .transpose()
+            .map_err(|_| SagaStoreError::Corrupt)?,
         dispatch_operation_id: record.dispatch_operation_id,
         dispatch_effect: decode_effect(record.dispatch_effect),
         git_operation_id: record.git_operation_id,

@@ -54,17 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[projects/high] Implement activation and at-most-once project dispatch** — Add the
-  transaction-consistent canonical project mutation capability and explicit activation workflow:
-  expected-head/home/active-human validation, resource observation and claim preview, conditional
-  open, configuring assignment, project-bound start or exact resume, launch-directory validation,
-  thread selection from the first pending project message or explicit historical resume, runnable
-  transition, and compensation to the documented prior stable state. Drain accepted inputs in home
-  sequence through the harness supervisor's sole durable delivery ledger, reconcile before retry,
-  and author dispatch only after definite acceptance. Test every crash and definite/unknown failure
-  boundary, stale heads, claim/agent conflicts, launch failure, pending-message preservation,
-  accepted-response loss, changed input, restart repair, late output, and complete attribution.
-
 - **[projects/high] Implement project lifecycle, resource, handoff, and retirement workflows** —
   Implement open/archive, resource add/remove/replace, release assessment, graceful and forced
   close, graceful handoff and forced takeover, and retirement over explicit durable checkpoints.

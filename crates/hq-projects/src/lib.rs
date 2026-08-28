@@ -3,7 +3,9 @@
 //! Canonical project facts remain authoritative. Records in this crate only retain enough
 //! coordination state to decide whether an external effect is safe to start, retry, or reconcile.
 
+mod canonical;
 mod command_codec;
+mod workflow;
 
 use hq_application::{
     ApplicationError, ApplicationErrorCode, ProjectCommandAction, ProjectCommandOutcome,
@@ -11,12 +13,15 @@ use hq_application::{
 };
 use hq_domain::{
     AccountId, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, FactId,
-    InstallationId, OperationId, ProjectId, Timestamp,
+    InstallationId, OperationId, ProjectId, ProviderSessionId, ThreadId, Timestamp,
 };
 
+pub use canonical::ApplicationCanonicalProjectPort;
 pub use command_codec::{
-    ProjectCommandCodecError, decode_project_command_action, encode_project_command_action,
+    ProjectCommandCodecError, decode_canonical_project_mutation, decode_project_command_action,
+    encode_canonical_project_mutation, encode_project_command_action,
 };
+pub use workflow::*;
 
 /// Maximum records returned by one startup recovery scan.
 pub const MAX_RUNNABLE_SAGAS: usize = 1_024;
@@ -91,6 +96,16 @@ pub struct ProjectSagaRecord {
     pub runtime_operation_id: Option<OperationId>,
     /// Runtime start/resume/stop boundary state.
     pub runtime_effect: SagaEffectState,
+    /// Exact provider session acknowledged by runtime readiness.
+    pub runtime_session: Option<ProviderSessionId>,
+    /// Exact project thread selected before the runnable transition.
+    pub selected_thread: Option<ThreadId>,
+    /// Whether this workflow opened a project that was closed at intake.
+    pub opened_by_workflow: bool,
+    /// Original definite activation failure retained across compensation retries.
+    pub failure: Option<DomainError>,
+    /// Exact in-flight canonical compare-and-swap retained until its result is definite.
+    pub pending_canonical_mutation: Option<CanonicalProjectMutation>,
     /// Provider submission boundary state.
     pub dispatch_operation_id: Option<OperationId>,
     /// Provider submission boundary state.
@@ -131,6 +146,11 @@ impl ProjectSagaRecord {
             state: ProjectSagaState::Running(ProjectCommandStage::Accepted),
             runtime_operation_id: None,
             runtime_effect: SagaEffectState::NotStarted,
+            runtime_session: None,
+            selected_thread: None,
+            opened_by_workflow: false,
+            failure: None,
+            pending_canonical_mutation: None,
             dispatch_operation_id: None,
             dispatch_effect: SagaEffectState::NotStarted,
             git_operation_id: None,

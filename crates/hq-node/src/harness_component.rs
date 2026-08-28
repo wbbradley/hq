@@ -10,10 +10,12 @@ use hq_application::{
     EffectRequest, SessionControl,
 };
 use hq_harness::{
-    HarnessClock, HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessLaunchRequest,
-    HarnessPersistencePort, HarnessRegistry, HarnessSessionRequest, HarnessSupervisor,
-    HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource,
+    HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment, HarnessError,
+    HarnessErrorClass, HarnessLaunchRequest, HarnessPersistencePort, HarnessRegistry,
+    HarnessSessionRequest, HarnessSubmission, HarnessSupervisor, HarnessSupervisorConfig,
+    HarnessSupervisorDependencies, HarnessTokenSource,
 };
+use hq_projects::{ProjectRuntimeDelivery, ProjectRuntimePort, ProjectRuntimeRequest};
 use hq_store::Store;
 
 use crate::{
@@ -176,6 +178,122 @@ impl ControlHarness for HarnessNodeComponent {
     }
 }
 
+impl ProjectRuntimePort for HarnessNodeComponent {
+    fn start_or_resume(
+        &self,
+        request: &EffectRequest<ProjectRuntimeRequest>,
+    ) -> Result<EffectOutcome<hq_domain::ProviderSessionId>, ApplicationError> {
+        self.with_supervisor(|supervisor| {
+            let launch = HarnessLaunchRequest {
+                agent_id: request.body.agent_id,
+                project_id: Some(request.body.project_id),
+                provider_id: request.body.provider.clone(),
+                session: request.body.resume_session.as_ref().map_or(
+                    HarnessSessionRequest::Start,
+                    |session| HarnessSessionRequest::Resume {
+                        session_id: session.clone(),
+                    },
+                ),
+                environment: HarnessEnvironment::default(),
+            };
+            if request.body.resume_session.is_some() {
+                supervisor.recover(launch)
+            } else {
+                supervisor.launch(launch)
+            }
+            .map(EffectOutcome::Accepted)
+        })
+    }
+
+    fn deliver(
+        &self,
+        request: &EffectRequest<ProjectRuntimeDelivery>,
+    ) -> Result<EffectOutcome<()>, ApplicationError> {
+        self.with_supervisor(|supervisor| {
+            let delivery = HarnessDeliveryRecord {
+                agent_id: request.body.binding.agent_id,
+                provider_id: request.body.binding.provider.clone(),
+                session_id: request.body.binding.session.clone(),
+                submission: HarnessSubmission {
+                    submission_id: request.body.submission_id,
+                    digest: request.request_digest,
+                    operation_id: request.operation_id,
+                    body: request.body.body.clone(),
+                },
+                queued_at_millis: 0,
+                state: HarnessDeliveryState::Pending,
+            };
+            let attempt = supervisor.deliver(delivery);
+            if attempt.as_ref().is_err_and(|error| {
+                matches!(
+                    error.class,
+                    HarnessErrorClass::SubmissionIdentityConflict
+                        | HarnessErrorClass::PersistenceCollision
+                )
+            }) {
+                return Ok(EffectOutcome::Rejected(harness_domain_error(
+                    "project_delivery_identity_conflict",
+                )));
+            }
+            let retained =
+                supervisor.delivery(request.body.binding.agent_id, request.body.submission_id)?;
+            if retained
+                .as_ref()
+                .is_some_and(|delivery| !same_project_delivery(request, delivery))
+            {
+                return Ok(EffectOutcome::Rejected(harness_domain_error(
+                    "project_delivery_identity_conflict",
+                )));
+            }
+            match retained.map(|delivery| delivery.state) {
+                Some(HarnessDeliveryState::Accepted) => Ok(EffectOutcome::Accepted(())),
+                Some(HarnessDeliveryState::Rejected) => Ok(EffectOutcome::Rejected(
+                    harness_domain_error("project_delivery_rejected"),
+                )),
+                Some(HarnessDeliveryState::Pending | HarnessDeliveryState::Uncertain) => {
+                    Ok(EffectOutcome::Uncertain(request.operation_id))
+                }
+                None => attempt.map(|()| EffectOutcome::Uncertain(request.operation_id)),
+            }
+        })
+    }
+
+    fn stop(
+        &self,
+        request: &EffectRequest<ProjectRuntimeRequest>,
+    ) -> Result<EffectOutcome<()>, ApplicationError> {
+        self.with_supervisor(|supervisor| {
+            supervisor
+                .stop(request.body.agent_id)
+                .map(|_| EffectOutcome::Accepted(()))
+        })
+    }
+}
+
+fn same_project_delivery(
+    request: &EffectRequest<ProjectRuntimeDelivery>,
+    delivery: &HarnessDeliveryRecord,
+) -> bool {
+    delivery.agent_id == request.body.binding.agent_id
+        && delivery.provider_id == request.body.binding.provider
+        && delivery.session_id == request.body.binding.session
+        && delivery.submission.submission_id == request.body.submission_id
+        && delivery.submission.digest == request.request_digest
+        && delivery.submission.operation_id == request.operation_id
+        && delivery.submission.body == request.body.body
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "all callers pass reviewed static error codes"
+)]
+fn harness_domain_error(code: &'static str) -> hq_domain::DomainError {
+    hq_domain::DomainError::new(
+        hq_domain::ErrorCategory::Unresolved,
+        hq_domain::ErrorCode::new(code).expect("static harness project error code"),
+    )
+}
+
 const fn map_harness_error(error: HarnessError) -> ApplicationError {
     let code = match error.class {
         HarnessErrorClass::InvalidInput
@@ -202,4 +320,64 @@ const fn map_harness_error(error: HarnessError) -> ApplicationError {
         | HarnessErrorClass::CleanupFailed => ApplicationErrorCode::AdapterUnavailable,
     };
     ApplicationError::new(code)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use std::num::NonZeroU64;
+
+    use hq_domain::{
+        AgentId, AssignmentBinding, AssignmentId, CommandDigest, ContentText, MessageId,
+        OperationId, ProjectId, ProviderId, ProviderSessionId, ThreadId, Timestamp,
+    };
+
+    use super::*;
+
+    #[test]
+    fn retained_project_delivery_must_match_the_exact_current_request() {
+        let request = delivery_request();
+        let mut retained = HarnessDeliveryRecord {
+            agent_id: request.body.binding.agent_id,
+            provider_id: request.body.binding.provider.clone(),
+            session_id: request.body.binding.session.clone(),
+            submission: HarnessSubmission {
+                submission_id: request.body.submission_id,
+                digest: request.request_digest,
+                operation_id: request.operation_id,
+                body: request.body.body.clone(),
+            },
+            queued_at_millis: 42,
+            state: HarnessDeliveryState::Accepted,
+        };
+        assert!(same_project_delivery(&request, &retained));
+
+        retained.submission.digest = CommandDigest::from_bytes([99; 32]);
+        assert!(!same_project_delivery(&request, &retained));
+        retained.submission.digest = request.request_digest;
+        retained.submission.body = ContentText::new("changed").expect("body");
+        assert!(!same_project_delivery(&request, &retained));
+    }
+
+    fn delivery_request() -> EffectRequest<ProjectRuntimeDelivery> {
+        EffectRequest {
+            operation_id: OperationId::from_bytes([1; 32]),
+            request_digest: CommandDigest::from_bytes([2; 32]),
+            issued_at: Timestamp::from_unix_millis(3),
+            body: ProjectRuntimeDelivery {
+                project_id: ProjectId::from_bytes([4; 32]),
+                binding: AssignmentBinding {
+                    assignment_id: AssignmentId::from_bytes([5; 32]),
+                    agent_id: AgentId::from_bytes([6; 32]),
+                    provider: ProviderId::new("provider").expect("provider"),
+                    session: ProviderSessionId::new("session").expect("session"),
+                },
+                thread_id: ThreadId::from_bytes([7; 32]),
+                submission_id: MessageId::from_bytes([8; 32]),
+                sequence: NonZeroU64::new(9).expect("nonzero"),
+                body: ContentText::new("body").expect("body"),
+            },
+        }
+    }
 }

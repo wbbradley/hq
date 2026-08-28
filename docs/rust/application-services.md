@@ -82,8 +82,32 @@ policy. It contains no credentials or client-library values. Session control nam
 neutral provider namespace, and start/exact-resume/stop action. Resource inspection names the
 project, resource, display locator, and recorded canonical locator. It returns only bounded inert
 details, typed health, an optional newly observed canonical locator, and an explicit observation
-time. These passive request/result values expose fields directly. Later workflow owners turn
-accepted observations into canonical facts.
+time. These passive request/result values expose fields directly. Observation alone grants no
+project authority; workflow owners turn accepted observations into canonical decisions.
+
+## Project activation and dispatch
+
+`hq-projects` composes four narrow capabilities: durable saga checkpoints, transaction-consistent
+canonical project compare-and-swap, read-only resource observation, and project-bound runtime
+control. Passive snapshots, mutation requests, resource reports, runtime requests, and delivery
+records expose public fields. The managers remain opaque because they own checkpoint order,
+bounded recovery, compensation, and exact retry.
+
+A configuring assignment contains only assignment, agent, and provider intent. A fresh provider
+session cannot be known before runtime readiness, so the exact session is bound only by the
+canonical runnable transition. Activation validates expected head, immutable home, active human,
+claimability, agent cardinality, desired resources, and launch directory around the external start
+or exact-resume boundary. A definite failure ends the configuring assignment and restores a
+workflow-opened project to closed; uncertainty retains the original typed failure and resumes by
+stable identity. The exact pending canonical mutation is checkpointed before commit, so a restart
+replays the original expected head, action, and attribution instead of inferring success from a
+similar-looking later snapshot.
+
+Pending project inputs remain separate and ordered by their home acceptance sequence. Each exact
+input is submitted through the harness supervisor's existing durable delivery ledger. The workflow
+reconciles an uncertain submission before retry and authors `ProjectInputDispatched` only after
+that ledger reports definite acceptance. The workflow adds no second provider queue and never
+concatenates backlog messages.
 
 Project workflow intake uses one public passive `ProjectCommandRequest` with stable command and
 operation identities, an exact digest, account/project/home identities, expected project head,

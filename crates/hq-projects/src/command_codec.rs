@@ -1,16 +1,22 @@
 //! Strict canonical remote-control body encoding.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, num::NonZeroU64};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hq_application::{ProjectCommandAction, WorktreeProvisioningRequest};
 use hq_domain::{
-    AgentId, BoundedText, ContentText, ProjectResource, ProviderId, ProviderSessionId,
-    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, ShortText, ThreadId,
+    AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText,
+    CommandDigest, CommandId, ContentText, DispatchId, FactId, InstallationId, MessageId,
+    OperationCorrelation, OperationId, ProjectId, ProjectResource, ProviderId, ProviderSessionId,
+    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, ShortText, ThreadId, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::{CanonicalProjectMutation, CanonicalProjectMutationAction, PendingProjectInput};
+
 const PREFIX: &str = "hq-project-command-v1:";
+const CANONICAL_MUTATION_PREFIX: &str = "hq-project-canonical-mutation-v1:";
+const MAX_CANONICAL_MUTATION_BYTES: usize = 65_536;
 
 /// Failure to encode or strictly decode a remote project command body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -420,6 +426,295 @@ impl TryFrom<WireProvisioning> for WorktreeProvisioningRequest {
             destination: request.destination.try_into()?,
             branch: ShortText::new(request.branch).map_err(|_| Self::Error::Invalid)?,
             create_branch: request.create_branch,
+        })
+    }
+}
+
+/// Encodes one exact in-flight canonical mutation for durable saga reconciliation.
+pub fn encode_canonical_project_mutation(
+    mutation: &CanonicalProjectMutation,
+) -> Result<Vec<u8>, ProjectCommandCodecError> {
+    let json = serde_json::to_string(&WireCanonicalMutation::from(mutation))
+        .map_err(|_| ProjectCommandCodecError::Invalid)?;
+    let encoded = format!("{CANONICAL_MUTATION_PREFIX}{json}").into_bytes();
+    if encoded.len() > MAX_CANONICAL_MUTATION_BYTES {
+        return Err(ProjectCommandCodecError::TooLarge);
+    }
+    Ok(encoded)
+}
+
+/// Strictly decodes one exact in-flight canonical mutation after restart.
+pub fn decode_canonical_project_mutation(
+    encoded: &[u8],
+) -> Result<CanonicalProjectMutation, ProjectCommandCodecError> {
+    let text = std::str::from_utf8(encoded).map_err(|_| ProjectCommandCodecError::Invalid)?;
+    let Some(json) = text.strip_prefix(CANONICAL_MUTATION_PREFIX) else {
+        return Err(ProjectCommandCodecError::UnsupportedVersion);
+    };
+    let wire: WireCanonicalMutation =
+        serde_json::from_str(json).map_err(|_| ProjectCommandCodecError::Invalid)?;
+    if serde_json::to_string(&wire).map_err(|_| ProjectCommandCodecError::Invalid)? != json {
+        return Err(ProjectCommandCodecError::Invalid);
+    }
+    wire.try_into()
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireCanonicalMutation {
+    command_id: String,
+    request_digest: String,
+    account_id: String,
+    project_id: String,
+    home: String,
+    expected_head: String,
+    issued_at: i64,
+    action: WireCanonicalAction,
+}
+
+impl From<&CanonicalProjectMutation> for WireCanonicalMutation {
+    fn from(mutation: &CanonicalProjectMutation) -> Self {
+        Self {
+            command_id: id_text(mutation.command_id.as_bytes()),
+            request_digest: id_text(mutation.request_digest.as_bytes()),
+            account_id: id_text(mutation.account_id.as_bytes()),
+            project_id: id_text(mutation.project_id.as_bytes()),
+            home: id_text(mutation.home.as_bytes()),
+            expected_head: id_text(mutation.expected_head.as_bytes()),
+            issued_at: mutation.issued_at.as_unix_millis(),
+            action: WireCanonicalAction::from(&mutation.action),
+        }
+    }
+}
+
+impl TryFrom<WireCanonicalMutation> for CanonicalProjectMutation {
+    type Error = ProjectCommandCodecError;
+
+    fn try_from(mutation: WireCanonicalMutation) -> Result<Self, Self::Error> {
+        Ok(Self {
+            command_id: CommandId::from_bytes(parse_id(&mutation.command_id)?),
+            request_digest: CommandDigest::from_bytes(parse_id(&mutation.request_digest)?),
+            account_id: AccountId::from_bytes(parse_id(&mutation.account_id)?),
+            project_id: ProjectId::from_bytes(parse_id(&mutation.project_id)?),
+            home: InstallationId::from_bytes(parse_id(&mutation.home)?),
+            expected_head: FactId::from_bytes(parse_id(&mutation.expected_head)?),
+            issued_at: Timestamp::from_unix_millis(mutation.issued_at),
+            action: mutation.action.try_into()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum WireCanonicalAction {
+    Open,
+    Configure {
+        assignment: String,
+        agent: String,
+        provider: String,
+    },
+    MakeRunnable {
+        binding: WireBinding,
+        thread: String,
+        launch_directory: WireLocator,
+        activation: WireCorrelation,
+    },
+    EndAssignment {
+        assignment: String,
+    },
+    BeginClosing,
+    FinishClosing,
+    RecordDispatch {
+        input: WirePendingInput,
+        dispatch: String,
+        binding: WireBinding,
+        thread: String,
+    },
+}
+
+impl From<&CanonicalProjectMutationAction> for WireCanonicalAction {
+    fn from(action: &CanonicalProjectMutationAction) -> Self {
+        match action {
+            CanonicalProjectMutationAction::Open => Self::Open,
+            CanonicalProjectMutationAction::Configure(intent) => Self::Configure {
+                assignment: id_text(intent.assignment_id.as_bytes()),
+                agent: id_text(intent.agent_id.as_bytes()),
+                provider: intent.provider.as_str().to_owned(),
+            },
+            CanonicalProjectMutationAction::MakeRunnable {
+                binding,
+                thread_id,
+                launch_directory,
+                activation,
+            } => Self::MakeRunnable {
+                binding: WireBinding::from(binding),
+                thread: id_text(thread_id.as_bytes()),
+                launch_directory: WireLocator::from(launch_directory),
+                activation: WireCorrelation::from(activation),
+            },
+            CanonicalProjectMutationAction::EndAssignment { assignment_id } => {
+                Self::EndAssignment {
+                    assignment: id_text(assignment_id.as_bytes()),
+                }
+            }
+            CanonicalProjectMutationAction::BeginClosing => Self::BeginClosing,
+            CanonicalProjectMutationAction::FinishClosing => Self::FinishClosing,
+            CanonicalProjectMutationAction::RecordDispatch {
+                input,
+                dispatch_id,
+                binding,
+                thread_id,
+            } => Self::RecordDispatch {
+                input: WirePendingInput::from(input),
+                dispatch: id_text(dispatch_id.as_bytes()),
+                binding: WireBinding::from(binding),
+                thread: id_text(thread_id.as_bytes()),
+            },
+        }
+    }
+}
+
+impl TryFrom<WireCanonicalAction> for CanonicalProjectMutationAction {
+    type Error = ProjectCommandCodecError;
+
+    fn try_from(action: WireCanonicalAction) -> Result<Self, Self::Error> {
+        Ok(match action {
+            WireCanonicalAction::Open => Self::Open,
+            WireCanonicalAction::Configure {
+                assignment,
+                agent,
+                provider,
+            } => Self::Configure(AssignmentIntent {
+                assignment_id: AssignmentId::from_bytes(parse_id(&assignment)?),
+                agent_id: AgentId::from_bytes(parse_id(&agent)?),
+                provider: ProviderId::new(provider).map_err(|_| Self::Error::Invalid)?,
+            }),
+            WireCanonicalAction::MakeRunnable {
+                binding,
+                thread,
+                launch_directory,
+                activation,
+            } => Self::MakeRunnable {
+                binding: binding.try_into()?,
+                thread_id: ThreadId::from_bytes(parse_id(&thread)?),
+                launch_directory: launch_directory.try_into()?,
+                activation: activation.try_into()?,
+            },
+            WireCanonicalAction::EndAssignment { assignment } => Self::EndAssignment {
+                assignment_id: AssignmentId::from_bytes(parse_id(&assignment)?),
+            },
+            WireCanonicalAction::BeginClosing => Self::BeginClosing,
+            WireCanonicalAction::FinishClosing => Self::FinishClosing,
+            WireCanonicalAction::RecordDispatch {
+                input,
+                dispatch,
+                binding,
+                thread,
+            } => Self::RecordDispatch {
+                input: input.try_into()?,
+                dispatch_id: DispatchId::from_bytes(parse_id(&dispatch)?),
+                binding: binding.try_into()?,
+                thread_id: ThreadId::from_bytes(parse_id(&thread)?),
+            },
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireBinding {
+    assignment: String,
+    agent: String,
+    provider: String,
+    session: String,
+}
+
+impl From<&AssignmentBinding> for WireBinding {
+    fn from(binding: &AssignmentBinding) -> Self {
+        Self {
+            assignment: id_text(binding.assignment_id.as_bytes()),
+            agent: id_text(binding.agent_id.as_bytes()),
+            provider: binding.provider.as_str().to_owned(),
+            session: binding.session.as_str().to_owned(),
+        }
+    }
+}
+
+impl TryFrom<WireBinding> for AssignmentBinding {
+    type Error = ProjectCommandCodecError;
+    fn try_from(binding: WireBinding) -> Result<Self, Self::Error> {
+        Ok(Self {
+            assignment_id: AssignmentId::from_bytes(parse_id(&binding.assignment)?),
+            agent_id: AgentId::from_bytes(parse_id(&binding.agent)?),
+            provider: ProviderId::new(binding.provider).map_err(|_| Self::Error::Invalid)?,
+            session: ProviderSessionId::new(binding.session).map_err(|_| Self::Error::Invalid)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireCorrelation {
+    provider: String,
+    session: String,
+    operation: String,
+}
+
+impl From<&OperationCorrelation> for WireCorrelation {
+    fn from(value: &OperationCorrelation) -> Self {
+        Self {
+            provider: value.provider().as_str().to_owned(),
+            session: value.session().as_str().to_owned(),
+            operation: id_text(value.operation().as_bytes()),
+        }
+    }
+}
+
+impl TryFrom<WireCorrelation> for OperationCorrelation {
+    type Error = ProjectCommandCodecError;
+    fn try_from(value: WireCorrelation) -> Result<Self, Self::Error> {
+        Ok(Self::new(
+            ProviderId::new(value.provider).map_err(|_| Self::Error::Invalid)?,
+            ProviderSessionId::new(value.session).map_err(|_| Self::Error::Invalid)?,
+            OperationId::from_bytes(parse_id(&value.operation)?),
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WirePendingInput {
+    message: String,
+    input_fact: String,
+    accepted_fact: String,
+    sequence: u64,
+    thread: String,
+    body: String,
+}
+
+impl From<&PendingProjectInput> for WirePendingInput {
+    fn from(input: &PendingProjectInput) -> Self {
+        Self {
+            message: id_text(input.message_id.as_bytes()),
+            input_fact: id_text(input.input_fact_id.as_bytes()),
+            accepted_fact: id_text(input.accepted_fact.as_bytes()),
+            sequence: input.sequence.get(),
+            thread: id_text(input.thread_id.as_bytes()),
+            body: input.body.as_str().to_owned(),
+        }
+    }
+}
+
+impl TryFrom<WirePendingInput> for PendingProjectInput {
+    type Error = ProjectCommandCodecError;
+    fn try_from(input: WirePendingInput) -> Result<Self, Self::Error> {
+        Ok(Self {
+            message_id: MessageId::from_bytes(parse_id(&input.message)?),
+            input_fact_id: FactId::from_bytes(parse_id(&input.input_fact)?),
+            accepted_fact: FactId::from_bytes(parse_id(&input.accepted_fact)?),
+            sequence: NonZeroU64::new(input.sequence).ok_or(Self::Error::Invalid)?,
+            thread_id: ThreadId::from_bytes(parse_id(&input.thread)?),
+            body: ContentText::new(input.body).map_err(|_| Self::Error::Invalid)?,
         })
     }
 }

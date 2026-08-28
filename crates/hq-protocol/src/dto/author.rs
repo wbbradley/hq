@@ -489,13 +489,14 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             details: optional_content(details.as_ref()),
             checked_at: milliseconds(*checked_at),
         }),
-        Input::ProjectAssignmentConfiguring {
-            project_id,
-            binding: value,
-        } => Output::ProjectAssignmentConfiguring(model::ProjectAssignmentConfiguringDto {
-            project: id(project_id),
-            binding: binding(value),
-        }),
+        Input::ProjectAssignmentConfiguring { project_id, intent } => {
+            Output::ProjectAssignmentConfiguring(model::ProjectAssignmentConfiguringDto {
+                project: id(project_id),
+                assignment: id(&intent.assignment_id),
+                agent: id(&intent.agent_id),
+                provider: provider_text(&intent.provider),
+            })
+        }
         Input::ProjectAssignmentRunnable {
             project_id,
             binding: value,

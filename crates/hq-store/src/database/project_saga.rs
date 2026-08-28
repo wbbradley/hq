@@ -3,7 +3,8 @@
 use hq_application::ProjectCommandStage;
 use hq_domain::{
     AccountId, BoundedText, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode,
-    FactId, InstallationId, OperationId, ProjectId, ResourceLocator, ResourceScheme, Timestamp,
+    FactId, InstallationId, OperationId, ProjectId, ProviderSessionId, ResourceLocator,
+    ResourceScheme, ThreadId, Timestamp,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 
@@ -71,6 +72,13 @@ pub(super) fn replace(
             existing.resource_operation_id,
             proposed.resource_operation_id,
         )
+        || !optional_session_advances(
+            existing.runtime_session.as_ref(),
+            proposed.runtime_session.as_ref(),
+        )
+        || !optional_thread_advances(existing.selected_thread, proposed.selected_thread)
+        || (existing.opened_by_workflow && !proposed.opened_by_workflow)
+        || !optional_error_advances(existing.failure.as_ref(), proposed.failure.as_ref())
         || !optional_reservation_advances(
             existing.reservation.as_ref(),
             proposed.reservation.as_ref(),
@@ -94,6 +102,13 @@ pub(super) fn replace(
         .map_or((None, None), |locator| {
             (Some(encode_scheme(locator.scheme())), Some(locator.value()))
         });
+    let (failure_category, failure_code) =
+        proposed.failure.as_ref().map_or((None, None), |error| {
+            (
+                Some(encode_error_category(error.category())),
+                Some(error.code().as_str()),
+            )
+        });
     transaction
         .execute(
             "UPDATE project_sagas SET state_kind = ?2, stage = ?3, project_head = ?4, \
@@ -105,7 +120,9 @@ pub(super) fn replace(
              git_error_code = ?18, resource_operation_id = ?19, resource_effect = ?20, \
              resource_error_category = ?21, resource_error_code = ?22, \
              reservation_scheme = ?23, reservation_value = ?24, \
-             updated_at_millis = ?25 WHERE operation_id = ?1",
+             updated_at_millis = ?25, runtime_session = ?26, selected_thread = ?27, \
+             opened_by_workflow = ?28, failure_category = ?29, \
+             failure_code = ?30, pending_canonical_mutation = ?31 WHERE operation_id = ?1",
             params![
                 proposed.operation_id.as_bytes().as_slice(),
                 state_kind,
@@ -134,6 +151,18 @@ pub(super) fn replace(
                 reservation_scheme,
                 reservation_value,
                 proposed.updated_at_millis.to_be_bytes().as_slice(),
+                proposed
+                    .runtime_session
+                    .as_ref()
+                    .map(ProviderSessionId::as_str),
+                proposed
+                    .selected_thread
+                    .as_ref()
+                    .map(|value| value.as_bytes().as_slice()),
+                i64::from(proposed.opened_by_workflow),
+                failure_category,
+                failure_code,
+                proposed.pending_canonical_mutation.as_deref(),
             ],
         )
         .map_err(database)?;
@@ -168,7 +197,9 @@ pub(super) fn load_runnable(
              dispatch_error_category, dispatch_error_code, git_operation_id, git_effect, \
              git_error_category, git_error_code, resource_operation_id, resource_effect, \
              resource_error_category, resource_error_code, reservation_scheme, reservation_value, \
-             updated_at_millis FROM project_sagas WHERE state_kind IN (1, 4) \
+             updated_at_millis, runtime_session, selected_thread, opened_by_workflow, \
+             failure_category, failure_code, pending_canonical_mutation \
+             FROM project_sagas WHERE state_kind IN (1, 4) \
              ORDER BY updated_at_millis, operation_id LIMIT ?1",
         )
         .map_err(database)?;
@@ -198,6 +229,12 @@ fn insert_record(
         record.reservation.as_ref().map_or((None, None), |locator| {
             (Some(encode_scheme(locator.scheme())), Some(locator.value()))
         });
+    let (failure_category, failure_code) = record.failure.as_ref().map_or((None, None), |error| {
+        (
+            Some(encode_error_category(error.category())),
+            Some(error.code().as_str()),
+        )
+    });
     transaction
         .execute(
             "INSERT INTO project_sagas(operation_id, command_id, request_digest, account_id, \
@@ -207,9 +244,11 @@ fn insert_record(
              dispatch_error_category, dispatch_error_code, git_operation_id, git_effect, \
              git_error_category, git_error_code, resource_operation_id, resource_effect, \
              resource_error_category, resource_error_code, reservation_scheme, reservation_value, \
-             updated_at_millis) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, \
+             updated_at_millis, runtime_session, selected_thread, opened_by_workflow, \
+             failure_category, failure_code, pending_canonical_mutation) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, \
              ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, \
-             ?29, ?30, ?31, ?32, ?33)",
+             ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)",
             params![
                 record.operation_id.as_bytes().as_slice(),
                 record.command_id.as_bytes().as_slice(),
@@ -246,6 +285,18 @@ fn insert_record(
                 reservation_scheme,
                 reservation_value,
                 record.updated_at_millis.to_be_bytes().as_slice(),
+                record
+                    .runtime_session
+                    .as_ref()
+                    .map(ProviderSessionId::as_str),
+                record
+                    .selected_thread
+                    .as_ref()
+                    .map(|value| value.as_bytes().as_slice()),
+                i64::from(record.opened_by_workflow),
+                failure_category,
+                failure_code,
+                record.pending_canonical_mutation.as_deref(),
             ],
         )
         .map_err(database)?;
@@ -265,7 +316,9 @@ fn load_operation(
              dispatch_error_category, dispatch_error_code, git_operation_id, git_effect, \
              git_error_category, git_error_code, resource_operation_id, resource_effect, \
              resource_error_category, resource_error_code, reservation_scheme, reservation_value, \
-             updated_at_millis FROM project_sagas WHERE operation_id = ?1",
+             updated_at_millis, runtime_session, selected_thread, opened_by_workflow, \
+             failure_category, failure_code, pending_canonical_mutation \
+             FROM project_sagas WHERE operation_id = ?1",
             [operation_id.as_bytes().as_slice()],
             decode_record,
         )
@@ -302,6 +355,25 @@ fn decode_record(row: &Row<'_>) -> rusqlite::Result<StoredProjectSaga> {
     let reservation_value = row.get::<_, Option<String>>(31)?;
     let reservation = decode_reservation(reservation_scheme, reservation_value)?;
     let updated_at_millis = u64::from_be_bytes(blob8(row.get(32)?)?);
+    let runtime_session = row
+        .get::<_, Option<String>>(33)?
+        .map(ProviderSessionId::new)
+        .transpose()
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let selected_thread = optional_blob32(row.get(34)?)?.map(ThreadId::from_bytes);
+    let opened_by_workflow = match row.get::<_, i64>(35)? {
+        0 => false,
+        1 => true,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    let failure_category = row.get::<_, Option<i64>>(36)?;
+    let failure_code = row.get::<_, Option<String>>(37)?;
+    let failure = match (failure_category, failure_code) {
+        (Some(category), Some(code)) => Some(decode_domain_error(category, code)?),
+        (None, None) => None,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    let pending_canonical_mutation = row.get::<_, Option<Vec<u8>>>(38)?;
     Ok(StoredProjectSaga {
         operation_id,
         command_id,
@@ -315,6 +387,11 @@ fn decode_record(row: &Row<'_>) -> rusqlite::Result<StoredProjectSaga> {
         state: workflow_state,
         runtime_operation_id,
         runtime_effect,
+        runtime_session,
+        selected_thread,
+        opened_by_workflow,
+        failure,
+        pending_canonical_mutation,
         dispatch_operation_id,
         dispatch_effect,
         git_operation_id,
@@ -421,6 +498,10 @@ fn project_is_busy(connection: &Connection, project_id: ProjectId) -> Result<boo
 fn validate_record(record: &StoredProjectSaga) -> Result<(), StoreError> {
     if record.command_body.is_empty()
         || record.command_body.len() > MAX_PROJECT_COMMAND_BODY_BYTES
+        || record
+            .pending_canonical_mutation
+            .as_ref()
+            .is_some_and(|body| body.is_empty() || body.len() > MAX_PROJECT_COMMAND_BODY_BYTES)
         || operation_state_mismatch(record.runtime_operation_id, &record.runtime_effect)
         || operation_state_mismatch(record.dispatch_operation_id, &record.dispatch_effect)
         || operation_state_mismatch(record.git_operation_id, &record.git_effect)
@@ -458,6 +539,10 @@ fn state_advances(old: &StoredProjectSagaState, new: &StoredProjectSagaState) ->
         (
             StoredProjectSagaState::Reconcilable { stage: old, .. },
             StoredProjectSagaState::Reconcilable { stage: new, .. },
+        )
+        | (
+            StoredProjectSagaState::Reconcilable { stage: old, .. },
+            StoredProjectSagaState::Running(new),
         ) => encode_stage(*new) >= encode_stage(*old),
         (
             StoredProjectSagaState::Running(_) | StoredProjectSagaState::Reconcilable { .. },
@@ -491,6 +576,21 @@ fn effect_advances(old: &StoredProjectEffectState, new: &StoredProjectEffectStat
 }
 
 fn optional_identity_advances(old: Option<OperationId>, new: Option<OperationId>) -> bool {
+    old.is_none() || old == new
+}
+
+fn optional_session_advances(
+    old: Option<&ProviderSessionId>,
+    new: Option<&ProviderSessionId>,
+) -> bool {
+    old.is_none() || old == new
+}
+
+fn optional_thread_advances(old: Option<ThreadId>, new: Option<ThreadId>) -> bool {
+    old.is_none() || old == new
+}
+
+fn optional_error_advances(old: Option<&DomainError>, new: Option<&DomainError>) -> bool {
     old.is_none() || old == new
 }
 
