@@ -2,9 +2,19 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {
-    use std::io::Write as _;
+    use std::io::{IsTerminal as _, Write as _};
 
-    let execution = hq_node::execute_cli(std::env::args_os().skip(1));
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let stdin = std::io::stdin();
+    let execution = if stdin.is_terminal()
+        && arguments
+            .iter()
+            .any(|argument| argument == "--password-stdin")
+    {
+        hq_node::execute_cli(arguments)
+    } else {
+        hq_node::execute_cli_with_input(arguments, &mut stdin.lock())
+    };
     if std::io::stdout()
         .write_all(execution.stdout.as_bytes())
         .is_err()

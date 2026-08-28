@@ -386,7 +386,7 @@ fn transient_application_ports_delegate_store_revision_and_owned_effect_capabili
 
     let directory = TestDirectory::new();
     let (foundation, _state) = foundation(&directory);
-    let installation = foundation.public_identity().installation_id();
+    let installation = foundation.public_identity().installation_id;
     let trace = Arc::new(Mutex::new(Vec::new()));
     let components = NodeComponents::new(
         FakeComponent::new(ComponentKind::LocalSessions, Arc::clone(&trace)),

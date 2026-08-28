@@ -14,8 +14,10 @@ pub(super) const MAX_CONFIGURATION_BYTES: u64 = 65_536;
 /// Versioned unsigned installation-local defaults.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalConfiguration {
-    relays: Vec<RelayUrl>,
-    default_provider: Option<ProviderId>,
+    /// Relay endpoints in canonical order.
+    pub relays: Vec<RelayUrl>,
+    /// Optional provider default.
+    pub default_provider: Option<ProviderId>,
 }
 
 impl LocalConfiguration {
@@ -36,16 +38,6 @@ impl LocalConfiguration {
             relays: unique.into_iter().collect(),
             default_provider,
         })
-    }
-
-    /// Returns relay endpoints in canonical order.
-    pub fn relays(&self) -> &[RelayUrl] {
-        &self.relays
-    }
-
-    /// Returns the optional provider default.
-    pub const fn default_provider(&self) -> Option<&ProviderId> {
-        self.default_provider.as_ref()
     }
 }
 

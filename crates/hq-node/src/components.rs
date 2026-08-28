@@ -403,7 +403,7 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
             .ok_or_else(RuntimeArtifactError::from_shutdown_state)?;
         let record = ready_record(
             build,
-            foundation.public_identity().installation_id(),
+            foundation.public_identity().installation_id,
             revision,
             boot_nonce,
         )?;

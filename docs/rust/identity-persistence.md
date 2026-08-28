@@ -46,6 +46,12 @@ returns only the installation identity, public key, and the first eight public-k
 lowercase hexadecimal fingerprint. The identity owner is non-cloneable and non-serializable; its
 secret and intermediate plaintext buffers are zeroized on drop.
 
+The safe `PublicIdentity` value exposes those three passive fields directly. Root identity,
+password, signer, and state-ownership types remain opaque because they hold secrets or enforce live
+capability invariants. The offline CLI acquires exclusive state ownership for every identity
+operation; export/import require explicit bounded password input from stdin and never accept the
+password in argv.
+
 ## Encrypted backup package v1
 
 An export is exact canonical JSON in this member order:
@@ -81,3 +87,21 @@ is exact canonical JSON in this member order:
 most 16 nonempty ASCII `ws://` or `wss://` endpoints, each at most 2048 bytes. The optional provider
 uses the domain's nonempty 64-byte `ProviderId` bound. Configuration has no conversion into a
 semantic payload and is replaced independently from identity and canonical history.
+
+`LocalConfiguration` is passive DTO data, so its relay and provider fields are public. Construction
+canonicalizes and validates the value, and persistence reconstructs it through the same validator;
+direct caller mutation therefore cannot persist duplicates, excess entries, or noncanonical order.
+
+## First-start declaration
+
+Identity creation and canonical installation declaration are separate durable boundaries. Before
+any foreground component starts or readiness is published, the exclusively owning node checks the
+authoritative store. An empty clean store is given exactly one `InstallationDeclared` fact through
+the ordinary application mutation and store-signing path. Its stable command identity makes the
+commit replay-safe. A reopened store must already project the owned installation with exactly the
+derived signing and encryption keys; absence or disagreement fails startup without replacing
+either identity.
+
+This is reconciliation of a new installation, not schema evolution. HQ has no shipped Rust release
+or standing installations, so this work changes no schema, migration path, legacy reader, or
+storage version.

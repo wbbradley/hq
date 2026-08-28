@@ -46,7 +46,7 @@ fn one_shot_client_negotiates_status_and_preserves_the_stop_acknowledgement() {
             ))
             .expect("foundation");
             let policy = AuthorityPolicy::new(
-                foundation.public_identity().installation_id(),
+                foundation.public_identity().installation_id,
                 MailboxId::from_bytes([61; 32]),
             );
             let owner = NodeOwner::start(

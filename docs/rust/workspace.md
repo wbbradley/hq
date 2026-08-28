@@ -110,7 +110,9 @@ exposing typed request, mutation, and project operations; see `docs/rust/cli.md`
 `hq-node` owns the secure lifecycle foundation specified in `docs/rust/node-lifecycle.md`. It
 derives or accepts a private runtime namespace, enforces the portable Unix socket pathname ceiling,
 and composes the state lock, identity/configuration, runtime directory, and bounded store actor in
-one RAII owner. Its pure lifecycle closes mutation and launch admission at drain entry, retains
+one RAII owner. Before component startup it reconciles one canonical installation root through the
+application/store gateway, and rejects a nonempty store whose projected root disagrees with the
+owned identity. Its pure lifecycle closes mutation and launch admission at drain entry, retains
 explicit stop/restart intent, and publishes readiness only with a serialized store revision.
 Startup failures carry closed component/cause/action values and selected paths without retaining
 secret, SQLite, or operating-system diagnostics. The node now also owns the four-slot component

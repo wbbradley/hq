@@ -258,7 +258,10 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   connection-attempt and wall-time exhaustion, semantic error correlation, optional initial
   snapshots, non-replayed ordinary response loss, real-node command execution, and coordinator-first
   readiness. CLI fixtures cover complete help, build metadata, stable human/JSON records, typed exit
-  classes, closed stdin, and redacted invalid input.
+  classes, closed stdin, and redacted invalid input. Offline administration fixtures additionally
+  cover identity initialization/inspection, encrypted backup/import and wrong passwords, explicit
+  bounded password stdin, overwrite and active-owner refusal, canonical configuration replacement,
+  public-field persistence revalidation, and exclusion of configuration from identity backup.
 - Client subscription contracts cover per-server-session registration identities, early and
   coalesced invalidations, acknowledgement snapshots as fresh bases, repeated full refresh while a
   returned revision is behind, resubscription after acknowledgement loss, and two independent
@@ -277,7 +280,9 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Foundation contracts cover two concurrent state owners, missing identity, unsafe runtime,
   store-open failure, reverse-order startup rollback, checked store close, redacted structured
   component/cause/action diagnostics, and immediate state-lock/store reacquisition after clean or
-  failed startup.
+  failed startup. Foreground contracts bootstrap exactly one application-authored installation root
+  before revision-one readiness, retain that revision across restart/reopen, make a fresh
+  authoritative snapshot available, and reject an identity/store-root mismatch without disclosure.
 - Component-owner contracts fail startup independently at all four acknowledgement positions,
   force-stop a partially started owner, roll earlier owners back in reverse, and release the store
   and state lock for immediate reacquisition.

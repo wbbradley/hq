@@ -7127,3 +7127,75 @@ and frozen-Go build/vet/tests pass. Dependency policy retains the existing locke
   - The client runner may block for an explicit workflow deadline, but every socket operation,
     queue, frame, retry delay, and retained identity set remains bounded. Ask/wait semantics that
     intentionally have no routine overall timeout belong to the later messaging slice.
+
+## 2026-08-28 — Installation identity bootstrap and typed local configuration
+
+Added offline `identity init/show/export/import` and typed `config get/set` commands to the one
+installed executable. Identity/configuration commands acquire exclusive state ownership and refuse
+a live node. Backup export/import requires an absolute path plus explicit `--password-stdin`,
+rejects terminal, closed, multiline, malformed, and oversized input, and never accepts or echoes a
+password argument. Encrypted import/export remains guarded, atomic, private, redacted, and excludes
+history and configuration.
+
+Replaced accessor layers on safe passive `PublicIdentity` and `LocalConfiguration` data with public
+fields. Validated relay/provider scalar values and secret/capability owners remain opaque, while the
+persistence boundary reconstructs and revalidates caller-mutated configuration before atomic
+replacement. Deterministic human and `hq-cli-output-v1` JSON records expose only safe public fields.
+
+Foreground startup now authors exactly one matching `InstallationDeclared` root through the normal
+application mutation and store-signing gateway before components or readiness. The mutation uses a
+stable command identity and secure auxiliary signing randomness; restart/reopen retains revision
+one, fresh snapshot clients work immediately, and an identity/database-root disagreement fails
+closed without rewrite or disclosure. No storage schema, migration, legacy reader, or storage
+version changed because HQ has no shipped release or standing installations.
+
+Strict node Clippy and all node targets pass. The workspace suite passes with the previously known
+relay-package harness hang excluded; architecture, behavior-ledger, causal-spec, protocol-spec, and
+dependency gates pass, with only the existing locked yanked `chacha20 0.10.1` warning.
+
+### Original plan entry
+
+- **[cli/high] Bootstrap installation identity and expose typed local configuration** — Add
+  `identity init/show/export/import` and typed `config get/set` commands without carrying forward
+  routine recursive reset. Ensure the first node startup authors exactly one canonical
+  `InstallationDeclared` fact through the application mutation path before publishing readiness, so
+  a fresh authoritative snapshot is available. Keep root secrets and backup passwords out of
+  arguments, output, RPC, facts, logs, and retained diagnostics; refuse active ownership,
+  overwrite, ambiguous stdin, unsafe paths, and noncanonical configuration. Represent safe passive
+  public identity/configuration/output data with public fields rather than accessor layers. Test
+  first-run/restart bootstrap, encrypted export/import, wrong passwords, pipes/closed stdin,
+  deterministic human/JSON output, redaction, configuration replacement, and clean-schema behavior
+  with no migration or storage-version bump.
+
+  **Implementation plan**
+
+  - Refine the installed command tree with offline identity and configuration roles. Initialization
+    and guarded import acquire exclusive state ownership; show/export/configuration operations
+    refuse a live owner rather than reading behind it. Backup passwords come only from an explicit
+    bounded input source, are normalized into `BackupPassword`, and are zeroized without entering a
+    command argument or diagnostic. Identity output contains only installation ID, signing public
+    key, and fingerprint.
+  - Make `PublicIdentity` and passive local configuration data idiomatic public-field Rust values.
+    Revalidate every caller-constructed configuration at the persistence boundary, retain canonical
+    ordering and exact bounds, and keep secret-bearing identity, signer, password, state owner, and
+    validated relay/provider scalar values opaque.
+  - Before foreground readiness, inspect the authoritative local projection and, only when the
+    installation declaration is absent, submit one pure `FactPlan` through the ordinary application
+    mutation/store signing path. Bind the fact to the loaded installation and public keys, use no
+    direct CLI signer/store access, and make crash/restart convergence return the existing fact
+    without duplicate roots or magic compatibility state.
+  - Add parser/help/output fixtures, identity/configuration adapter tests, startup bootstrap
+    failpoint/reopen tests, real CLI initialization/show/export/import/configuration tests, secret
+    redaction and permission adversarial cases, and architecture checks. Update identity, CLI,
+    lifecycle, behavior-ledger, and acceptance specifications and run all proportional gates.
+
+  **Risks and decisions**
+
+  - Identity creation and canonical declaration are separate durable boundaries. The identity file
+    is authoritative for local root capability; startup reconciles the missing fact under exclusive
+    state ownership and does not rewrite or replace an unequal declared installation.
+  - Backup passwords must not be accepted as ordinary argv values. A closed or noninteractive input
+    fails explicitly rather than prompting forever; later UI integration may supply a separate
+    secret-input adapter.
+  - All Rust storage contracts remain unshipped. Any clean-schema adjustment is made in place with
+    no migration, legacy read path, storage-version bump, or standing-installation compatibility.

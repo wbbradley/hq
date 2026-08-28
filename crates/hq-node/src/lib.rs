@@ -39,7 +39,8 @@ mod unix_frame;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use cli::{
     CliCommand, CliError, CliExecution, CliExitClass, CliInvocation, CliOutputFormat,
-    DaemonCommand, execute_cli, parse_cli, run_cli,
+    ConfigurationCommand, DaemonCommand, IdentityCommand, execute_cli, execute_cli_with_input,
+    parse_cli, run_cli, run_cli_with_input,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use foreground::{

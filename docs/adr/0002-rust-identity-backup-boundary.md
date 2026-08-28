@@ -29,6 +29,8 @@ export, and guarded import.
 - Import strictly decodes and decrypts the package, validates that the public key and installation
   UUID are well formed, refuses an existing identity or active node ownership, writes atomically
   with restricted permissions, and never opens or alters a Go key or database.
+- Export and import require an explicit `--password-stdin` source. HQ consumes exactly one bounded
+  UTF-8 line, zeroizes it, never accepts a password argument, and does not prompt on closed input.
 - Public inspection exposes only the installation UUID, public key, and safe fingerprint/encoding.
   Secrets must not enter SQLite, canonical facts, local API results, diagnostics, logs, crash
   reports, or command history emitted by HQ.
@@ -56,3 +58,5 @@ compatibility.
   active ownership, round trips, and redaction.
 - Operators get a safer explicit archival procedure instead of a product command that recursively
   removes identity and state.
+- This pre-release implementation requires no migration or storage-version bump: no Rust release or
+  standing installation exists, and clean schema definitions may be changed in place.

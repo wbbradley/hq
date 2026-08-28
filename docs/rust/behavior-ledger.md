@@ -119,13 +119,13 @@ constants remain evidence only unless a row below explicitly adopts the underlyi
 
 | ID | Classification | Release | Capability or behavior | Rust contract | Evidence and downstream owner |
 | --- | --- | --- | --- | --- | --- |
-| IDN-001 | redesign | required | Installation initialization | Generate one stable UUID and root key with secure atomic persistence and explicit randomness. | `docs/design.md`; identity package |
-| IDN-002 | retain | required | Public identity inspection | Show installation UUID and public key without exposing the secret. | README; ADR 0002; identity/CLI packages |
-| IDN-003 | redesign | required | Encrypted identity export/import | Preserve UUID and root authority in a new guarded Rust backup package. | ADR 0002; identity package |
+| IDN-001 | redesign | required | Installation initialization | Generate one stable UUID and root key with secure atomic persistence and explicit randomness; first foreground startup authors exactly one matching installation root before readiness. | `docs/rust/identity-persistence.md`; identity/node CLI tests |
+| IDN-002 | retain | required | Public identity inspection | Show installation UUID and public key without exposing the secret. | ADR 0002; offline identity CLI tests |
+| IDN-003 | redesign | required | Encrypted identity export/import | Preserve UUID and root authority in a new guarded Rust backup package using explicit secret stdin and no overwrite. | ADR 0002; identity persistence and real CLI round-trip tests |
 | IDN-004 | drop | excluded | Routine recursive identity reset command | Identity retirement/removal belongs to an explicit operator archival procedure. | ADR 0002; cutover package |
 | IDN-005 | retain | required | Secret exclusion | Root secrets never enter SQLite, facts, RPC results, logs, diagnostics, or ordinary crash reports. | Rewrite invariant; identity/security packages |
 | IDN-006 | retain | required | Duplicate identity prohibition | Refuse overwrite and concurrent local ownership; warn against multiple active restored hosts. | `docs/design.md`; identity/node packages |
-| IDN-007 | redesign | required | Installation-local configuration | Relay and provider defaults are typed unsigned local configuration, not signed domain state. | Rewrite design; identity/node packages |
+| IDN-007 | redesign | required | Installation-local configuration | Relay and provider defaults are typed unsigned local configuration, not signed domain state; passive fields are public and persistence revalidates them. | `docs/rust/identity-persistence.md`; identity/config CLI tests |
 | IDN-008 | retain | required | Full mailbox address | Routing and authority use installation plus mailbox identity; a bare mailbox ID grants nothing. | `docs/events.md`; domain package |
 | IDN-009 | redesign | required | Directional peer binding | Bind installation UUID, root key, label, and relay hints for routing without granting mailbox authority. | `docs/design.md`; authority package |
 | IDN-010 | retain | required | Explicit mailbox access grant/revoke/observation | Owner-signed capabilities and receiver observations preserve seen history and fail closed for concurrent/later use. | `docs/events.md`; authority package |
@@ -260,7 +260,7 @@ constants remain evidence only unless a row below explicitly adopts the underlyi
 | CLI-007 | redesign | required | Current-session mailbox discovery | Detect Codex/Claude Code/Pi context or explicit custom identity without ambiguous multi-provider routing. | README and `internal/cli/app.go`; CLI/domain packages |
 | CLI-008 | redesign | required | Known-message inspection | Typed direct-ID inspection is non-consuming and does not become an authority bypass. | README and agent help; application/CLI packages |
 | CLI-009 | redesign | required | Human list/answer/cancel/restore workflows | Expose typed filtering, reply, archive/cancel, restore, delivery, and causal state through application services. | README and CLI dispatcher; CLI/application packages |
-| CLI-010 | redesign | required | Administrative workflows | Identity, human, peer, capability, relay, sync, status, repair, node, agent/session, and configuration operations have client commands. | README command summary; CLI/application packages |
+| CLI-010 | redesign | required | Administrative workflows | Identity, human, peer, capability, relay, sync, status, repair, node, agent/session, and configuration operations have client commands. Identity/configuration are implemented as exclusive offline commands; remaining administration uses the local API. | `docs/rust/cli.md`; CLI/application packages |
 | CLI-011 | redesign | required | Project workflows | Expose every required project/resource/worktree/remote-result operation from ADR 0003. | `docs/projects.md`; CLI/application packages |
 | CLI-012 | redesign | required | Machine-readable automation | Supported commands emit stable typed Rust-era data and errors without preserving Go JSON. | `docs/rust/cli.md`; CLI machine-output and redaction fixtures |
 | CLI-013 | redesign | required | Pure Ratatui state/effect architecture | `UiModel + UiEvent` produces effects; renderer performs no I/O or mutation and stale completions carry identity. | Rewrite design; TUI package |

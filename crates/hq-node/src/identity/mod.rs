@@ -8,7 +8,7 @@ mod paths;
 
 use std::{fmt, fs::File, io::Read, path::Path, sync::Arc};
 
-use hq_domain::{InstallationId, SigningPublicKey};
+use hq_domain::InstallationId;
 use hq_protocol::Bip340Signer;
 use zeroize::Zeroizing;
 
@@ -29,31 +29,12 @@ const IDENTITY_MAX_BYTES: u64 = IDENTITY_BYTES as u64;
 /// Public identity metadata safe for diagnostics and client inspection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublicIdentity {
-    installation_id: InstallationId,
-    signing_public_key: [u8; 32],
-    fingerprint: String,
-}
-
-impl PublicIdentity {
-    /// Returns the stable installation identity.
-    pub const fn installation_id(&self) -> InstallationId {
-        self.installation_id
-    }
-
-    /// Returns the x-only secp256k1 public key.
-    pub const fn signing_public_key(&self) -> [u8; 32] {
-        self.signing_public_key
-    }
-
-    /// Returns a short public-key fingerprint for safe display.
-    pub fn fingerprint(&self) -> &str {
-        &self.fingerprint
-    }
-
-    /// Returns the typed signing public key used by semantic facts.
-    pub const fn typed_signing_public_key(&self) -> SigningPublicKey {
-        SigningPublicKey::from_bytes(self.signing_public_key)
-    }
+    /// Stable installation identity.
+    pub installation_id: InstallationId,
+    /// X-only secp256k1 public key.
+    pub signing_public_key: [u8; 32],
+    /// Short safe public-key fingerprint.
+    pub fingerprint: String,
 }
 
 /// Non-cloneable root identity with zeroizing secret ownership and signer access.
@@ -205,7 +186,11 @@ impl StateDirectoryOwner {
         configuration: &LocalConfiguration,
     ) -> Result<(), IdentityError> {
         reject_symlink(self.paths.configuration_file())?;
-        let bytes = config::encode(configuration)?;
+        let validated = LocalConfiguration::new(
+            configuration.relays.clone(),
+            configuration.default_provider.clone(),
+        )?;
+        let bytes = config::encode(&validated)?;
         atomic_write(self.paths.configuration_file(), &bytes, WriteMode::Replace)
     }
 }
@@ -286,7 +271,7 @@ fn read_private_bounded(
     Ok(bytes)
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {

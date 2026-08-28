@@ -73,8 +73,8 @@ pub(super) fn export(
     let dto = BackupDto {
         format: "hq-identity-backup".to_owned(),
         version: 1,
-        installation: encode_hex(public.installation_id().as_bytes()),
-        public_key: encode_hex(&public.signing_public_key()),
+        installation: encode_hex(public.installation_id.as_bytes()),
+        public_key: encode_hex(&public.signing_public_key),
         ncryptsec: encrypted,
     };
     let encoded = serde_json::to_vec(&dto)
@@ -105,7 +105,7 @@ pub(super) fn import(
     let expected_public = decode_hex(&dto.public_key, IdentityErrorClass::BackupMalformed)?;
     let secret = nip49_decrypt(&dto.ncryptsec, password)?;
     let identity = InstallationIdentity::from_parts(installation, *secret)?;
-    if identity.public_identity().signing_public_key() != expected_public {
+    if identity.public_identity().signing_public_key != expected_public {
         return Err(IdentityError::new(IdentityErrorClass::BackupMalformed));
     }
     Ok(identity)

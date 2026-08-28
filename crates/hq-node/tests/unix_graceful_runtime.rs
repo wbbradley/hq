@@ -64,7 +64,7 @@ fn foundation(directory: &TestDirectory) -> (NodeFoundation, RuntimePaths, Autho
     ))
     .expect("foundation opens");
     let policy = AuthorityPolicy::new(
-        foundation.public_identity().installation_id(),
+        foundation.public_identity().installation_id,
         MailboxId::from_bytes([44; 32]),
     );
     (foundation, runtime, policy)

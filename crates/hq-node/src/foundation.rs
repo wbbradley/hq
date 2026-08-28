@@ -2,10 +2,18 @@
 
 use std::{error::Error, fmt, num::NonZeroUsize, sync::Arc};
 
+use hq_application::{
+    CommitFacts, FactMutation, FactPlan, MutationAttempt, MutationDecision, MutationOutcome,
+    QueryDomain,
+};
+use hq_domain::{
+    BoundedSet, CausalReferences, CommandDigest, CommandId, EncryptionPublicKey, FactScope,
+    MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, SemanticPayload, SigningPublicKey, Timestamp,
+};
 use hq_protocol::Bip340Signer;
-use hq_reducer::AuthorityPolicy;
+use hq_reducer::{AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey};
 use hq_relay::RelayConnector;
-use hq_store::{Store, StoreErrorClass};
+use hq_store::{Store, StoreErrorClass, StoreGateway};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::{
@@ -227,7 +235,7 @@ impl NodeFoundation {
             config,
             store,
             envelope,
-            self.identity.public_identity().installation_id(),
+            self.identity.public_identity().installation_id,
             authority_policy,
             connector,
         ))
@@ -235,6 +243,66 @@ impl NodeFoundation {
 
     pub(crate) fn signer_handle(&self) -> std::sync::Arc<Bip340Signer> {
         self.identity.signer_handle()
+    }
+
+    /// Reconciles the one canonical root fact for the exclusively owned installation.
+    pub(crate) fn bootstrap_installation(
+        &self,
+        policy: AuthorityPolicy,
+    ) -> Result<(), NodeStartupError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| self.store_diagnostic(StartupCause::Unavailable))?;
+        let revision = store
+            .current_revision()
+            .map_err(|error| self.store_diagnostic(store_cause(error.class())))?;
+        let public = self.public_identity();
+        let gateway = StoreGateway::new(store, policy, self.signer_handle());
+        if revision.value() > 0 {
+            return verify_installation_projection(&gateway, &public)
+                .map_err(|cause| self.store_diagnostic(cause));
+        }
+
+        let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+            BoundedSet::new([]).map_err(|_| self.store_diagnostic(StartupCause::Malformed))?,
+            [],
+        )
+        .map_err(|_| self.store_diagnostic(StartupCause::Malformed))?;
+        let mut auxiliary_randomness = [0_u8; 32];
+        getrandom::fill(&mut auxiliary_randomness)
+            .map_err(|_| self.store_diagnostic(StartupCause::Unavailable))?;
+        let installation = public.installation_id;
+        let signing_key = SigningPublicKey::from_bytes(public.signing_public_key);
+        let plan = FactPlan::new(
+            installation,
+            Timestamp::from_unix_millis(0),
+            FactScope::InstallationPrivate(installation),
+            causal,
+            SemanticPayload::InstallationDeclared {
+                installation_id: installation,
+                signing_key,
+                encryption_key: EncryptionPublicKey::from_bytes(public.signing_public_key),
+                label: None,
+            },
+            auxiliary_randomness,
+        );
+        let attempt = gateway
+            .commit_facts(FactMutation::new(
+                CommandId::from_bytes(*installation.as_bytes()),
+                CommandDigest::from_bytes(public.signing_public_key),
+                move |_| MutationDecision::commit(plan),
+            ))
+            .map_err(|error| self.store_diagnostic(application_cause(error.class())))?;
+        if !matches!(
+            attempt,
+            MutationAttempt::Completed(ref receipt)
+                if matches!(receipt.outcome(), MutationOutcome::Committed)
+        ) {
+            return Err(self.store_diagnostic(StartupCause::Unavailable));
+        }
+        verify_installation_projection(&gateway, &public)
+            .map_err(|cause| self.store_diagnostic(cause))
     }
 
     /// Binds and retains the private nonblocking local listener while state ownership is live.
@@ -339,6 +407,17 @@ impl NodeFoundation {
             ),
         }
     }
+
+    fn store_diagnostic(&self, cause: StartupCause) -> NodeStartupError {
+        NodeStartupError {
+            diagnostic: StartupDiagnostic::new(
+                StartupComponent::Store,
+                cause,
+                self.state.paths().root().to_path_buf(),
+                self.runtime.paths().root().to_path_buf(),
+            ),
+        }
+    }
 }
 
 impl Drop for NodeFoundation {
@@ -418,5 +497,51 @@ const fn store_cause(class: StoreErrorClass) -> StartupCause {
         | StoreErrorClass::ActorClosed
         | StoreErrorClass::WorkerStopped
         | StoreErrorClass::DatabaseUnavailable => StartupCause::Unavailable,
+    }
+}
+
+fn verify_installation_projection(
+    gateway: &StoreGateway,
+    public: &crate::PublicIdentity,
+) -> Result<(), StartupCause> {
+    let snapshot = gateway
+        .authoritative_snapshot()
+        .map_err(|error| application_cause(error.class()))?;
+    match snapshot
+        .domain()
+        .authority()
+        .projection(AuthorityProjectionKey::Installation(public.installation_id))
+    {
+        Some(AuthorityProjection::Installation(view))
+            if view.signing_key == SigningPublicKey::from_bytes(public.signing_public_key)
+                && view.encryption_key
+                    == EncryptionPublicKey::from_bytes(public.signing_public_key) =>
+        {
+            Ok(())
+        }
+        Some(
+            AuthorityProjection::Installation(_)
+            | AuthorityProjection::Mailbox(_)
+            | AuthorityProjection::PeerRoute(_)
+            | AuthorityProjection::MailboxCapability(_)
+            | AuthorityProjection::Account { .. }
+            | AuthorityProjection::Membership(_)
+            | AuthorityProjection::AccountSelection { .. },
+        )
+        | None => Err(StartupCause::Malformed),
+    }
+}
+
+const fn application_cause(class: hq_application::ApplicationErrorClass) -> StartupCause {
+    match class {
+        hq_application::ApplicationErrorClass::Unavailable
+        | hq_application::ApplicationErrorClass::Capacity => StartupCause::Unavailable,
+        hq_application::ApplicationErrorClass::InvalidInput
+        | hq_application::ApplicationErrorClass::Conflict
+        | hq_application::ApplicationErrorClass::Unauthorized
+        | hq_application::ApplicationErrorClass::Unresolved
+        | hq_application::ApplicationErrorClass::NotFound
+        | hq_application::ApplicationErrorClass::CorruptState
+        | hq_application::ApplicationErrorClass::InvariantViolation => StartupCause::Malformed,
     }
 }

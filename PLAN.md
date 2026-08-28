@@ -54,13 +54,27 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Implement identity, peer, relay, and configuration administration** — Add local API
-  use cases and client commands for installation/account inspection, human invite/join/device
-  management, directional peer trust, mailbox capability grant/revoke, relay policy, explicit
-  synchronization, health/status/repair, and typed local configuration. Author every fact through
-  application mutation plans and perform every observation through authoritative snapshots or
-  explicit local effects; never expose signer or storage access to the CLI. Add authorization,
-  replay, stale-frontier, offline, rendering, and end-to-end fake-node coverage.
+- **[cli/high] Implement human account pairing and device administration** — Add account inspection,
+  creator bootstrap/selection, bounded signed invite export, offline-verifiable join, device list,
+  and creator-only revoke through application plans and authoritative snapshots. Preserve maximal
+  membership frontiers, regrant-after-revoke ancestry, device fanout, stable replay identities, and
+  explicit stale/incomplete authority diagnostics. Test offline bundles, tampering, changed reuse,
+  concurrent grants/revokes, non-creator rejection, restart, and human/JSON rendering.
+
+- **[cli/high] Implement directional peers and mailbox capabilities** — Add peer add/list/distrust
+  and mailbox grant/revoke/inspection commands over exact application plans and authoritative
+  snapshots. Keep route trust directional and distinct from mailbox authority; preserve historical
+  observations, revoke-before-block delivery ordering, full installation-qualified addresses, and
+  fail-closed concurrent/later authorization. Test stale frontiers, replay, block recovery, relay
+  hints as non-authority, and local-API-only architecture.
+
+- **[cli/high] Implement relay policy, synchronization, health, and repair administration** — Add
+  relay add/list/remove, explicit sync, domain/delivery health status, and explicit repair commands
+  over typed local effects and authoritative observations. Preserve stable effect identities,
+  accepted/rejected/uncertain reconciliation, bounded relay policy, offline queues, prompt-wake
+  semantics, and repair as an explicit audited operation. Test response loss, restart, disabled and
+  incompatible relays, stale revisions, offline rendering, redaction, and end-to-end fake-node
+  coverage.
 
 - **[cli/high] Implement mailbox messaging and repository-aware discovery** — Add `ask`, `send`,
   `wait`, `poll`, `get`, human list/filter, answer, cancel/archive, restore, and repository-aware

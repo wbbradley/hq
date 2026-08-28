@@ -17,6 +17,13 @@ store before the runtime, identity, and state-lock owners are dropped. `Drop` re
 idempotent best-effort containment for panic and early-return paths; callers use checked shutdown
 when failure reporting matters.
 
+After these foundations open but before any component starts or readiness is published, foreground
+startup reconciles the owned identity with canonical authority. An empty clean store authors one
+`InstallationDeclared` root through `StoreGateway` and the normal application mutation path. A
+nonempty store must project the same installation and derived signing/encryption keys. Restart
+reuses the retained mutation and remains at the existing revision; unequal identity/database roots
+fail closed. No CLI signer or direct database path participates.
+
 ## Runtime namespace
 
 The runtime namespace is distinct from durable identity and storage. `RuntimePaths::new` accepts an
@@ -70,7 +77,9 @@ separately; signer secret bytes have no diagnostic path.
 portable length rejection, private modes, symbolic links, non-destructive stale artifacts, every
 lifecycle admission transition, out-of-order restart/readiness, concurrent state ownership,
 missing identity, unsafe runtime, store-open rollback, mutation rejection during drain, checked
-store close, immediate lock reacquisition, and redacted debug surfaces.
+store close, immediate lock reacquisition, and redacted debug surfaces. Foreground CLI contracts
+add first-start revision-one bootstrap, restart without a duplicate root, authoritative snapshots
+on a fresh installation, and redacted rejection when the persisted root disagrees with identity.
 
 ## Component ownership and drain
 

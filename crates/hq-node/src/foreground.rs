@@ -147,9 +147,10 @@ fn open_generation(
         config.store_capacity,
     ))?;
     let policy = AuthorityPolicy::new(
-        foundation.public_identity().installation_id(),
+        foundation.public_identity().installation_id,
         reserved_human_mailbox(),
     );
+    foundation.bootstrap_installation(policy)?;
     let relay = foundation.compose_relay(
         RelayNodeConfig::default(),
         policy,
@@ -165,7 +166,7 @@ fn open_generation(
         store,
         policy,
         foundation.signer_handle(),
-        foundation.public_identity().installation_id(),
+        foundation.public_identity().installation_id,
         harness.clone(),
         relay.clone(),
     );

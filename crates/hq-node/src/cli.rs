@@ -1,13 +1,18 @@
 //! Minimal single-binary lifecycle roles for the Rust node.
 
-use std::{error::Error, ffi::OsString, fmt, num::NonZeroUsize, path::PathBuf, time::Duration};
+use std::{
+    error::Error, ffi::OsString, fmt, io::Read, num::NonZeroUsize, path::PathBuf, time::Duration,
+};
 
+use hq_domain::ProviderId;
 use hq_local_api::protocol::v1::{BuildMetadata, LifecycleRequest, LifecycleState};
+use zeroize::Zeroizing;
 
 use crate::{
-    ForegroundNodeConfig, ForegroundNodeError, LifecycleClient, LifecycleClientConfig,
-    LifecycleClientError, LifecycleObservation, NodeClientCoordinator, NodeCoordinatorConfig,
-    NodeCoordinatorError, ProcessNodeLauncher, RuntimePathError, RuntimePaths, StatePaths,
+    BackupPassword, ForegroundNodeConfig, ForegroundNodeError, IdentityError, LifecycleClient,
+    LifecycleClientConfig, LifecycleClientError, LifecycleObservation, LocalConfiguration,
+    NodeClientCoordinator, NodeCoordinatorConfig, NodeCoordinatorError, ProcessNodeLauncher,
+    PublicIdentity, RelayEndpoint, RuntimePathError, RuntimePaths, StateDirectoryOwner, StatePaths,
     run_foreground,
 };
 
@@ -36,6 +41,42 @@ pub enum DaemonCommand {
     Restart,
 }
 
+/// Closed installation-identity administration behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IdentityCommand {
+    /// Create one new installation identity without overwrite.
+    Init,
+    /// Inspect safe public identity metadata.
+    Show,
+    /// Export encrypted authority to one new absolute path using an explicit stdin password.
+    Export {
+        /// Absolute new backup destination.
+        destination: PathBuf,
+    },
+    /// Import encrypted authority from one absolute path using an explicit stdin password.
+    Import {
+        /// Absolute existing backup source.
+        source: PathBuf,
+    },
+}
+
+/// Closed unsigned installation-local configuration behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigurationCommand {
+    /// Inspect all typed local defaults.
+    Get,
+    /// Replace the optional default provider.
+    SetDefaultProvider {
+        /// Replacement provider, or `None` to clear the default.
+        provider: Option<ProviderId>,
+    },
+    /// Replace the complete canonical relay-default set.
+    SetRelays {
+        /// Complete replacement relay set.
+        relays: Vec<RelayEndpoint>,
+    },
+}
+
 /// Closed command tree shared by the installed executable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliCommand {
@@ -46,6 +87,20 @@ pub enum CliCommand {
     },
     /// Print executable and protocol build metadata.
     Version,
+    /// Execute one offline installation-identity operation under exclusive state ownership.
+    Identity {
+        /// Requested identity behavior.
+        action: IdentityCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
+    /// Execute one offline typed local-configuration operation.
+    Configuration {
+        /// Requested configuration behavior.
+        action: ConfigurationCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
     /// Execute one daemon lifecycle command against an explicit installation layout.
     Daemon {
         /// Requested lifecycle behavior.
@@ -123,6 +178,10 @@ pub enum CliError {
     Foreground(ForegroundNodeError),
     /// The async runtime or current executable was unavailable.
     Runtime,
+    /// Secure identity ownership, persistence, backup, or configuration failed.
+    Identity(IdentityError),
+    /// Backup password input was absent, oversized, malformed, or unreadable.
+    SecretInput,
 }
 
 impl fmt::Display for CliError {
@@ -130,7 +189,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|daemon>",
+                 <help|version|identity|config|daemon>",
             ),
             Self::StatePath => formatter.write_str("node state path is unavailable or invalid"),
             Self::RuntimePath => formatter.write_str("node runtime path is unavailable or invalid"),
@@ -139,6 +198,8 @@ impl fmt::Display for CliError {
             Self::Coordinator(error) => error.fmt(formatter),
             Self::Foreground(error) => error.fmt(formatter),
             Self::Runtime => formatter.write_str("node process runtime is unavailable"),
+            Self::Identity(error) => error.fmt(formatter),
+            Self::SecretInput => formatter.write_str("backup password input is invalid"),
         }
     }
 }
@@ -206,6 +267,16 @@ impl CliError {
                 "the command runtime is unavailable",
                 CliExitClass::Failure,
             ),
+            Self::Identity(_) => (
+                "identity.operation_failed",
+                "the identity or local configuration operation failed",
+                CliExitClass::Failure,
+            ),
+            Self::SecretInput => (
+                "identity.secret_input",
+                "provide exactly one bounded UTF-8 backup password on stdin",
+                CliExitClass::Usage,
+            ),
         }
     }
 }
@@ -225,6 +296,12 @@ impl From<NodeCoordinatorError> for CliError {
 impl From<ForegroundNodeError> for CliError {
     fn from(error: ForegroundNodeError) -> Self {
         Self::Foreground(error)
+    }
+}
+
+impl From<IdentityError> for CliError {
+    fn from(error: IdentityError) -> Self {
+        Self::Identity(error)
     }
 }
 
@@ -263,6 +340,8 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 .collect::<Result<Vec<_>, _>>()?,
         },
         Some("version" | "--version") if rest.is_empty() => CliCommand::Version,
+        Some("identity") => parse_identity(&rest, state_root.as_ref())?,
+        Some("config") => parse_configuration(&rest, state_root.as_ref())?,
         Some("daemon") if rest.as_slice() == [OsString::from("--help")] => CliCommand::Help {
             topic: vec!["daemon".to_owned()],
         },
@@ -278,25 +357,125 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 Some("restart") => DaemonCommand::Restart,
                 _ => return Err(CliError::Arguments),
             };
-            let state = state_root
-                .clone()
-                .map_or_else(StatePaths::from_environment, StatePaths::new)
-                .map_err(|_| CliError::StatePath)?;
+            let state = parsed_state(state_root.as_ref())?;
             CliCommand::Daemon { action, state }
         }
         _ => return Err(CliError::Arguments),
     };
-    if state_root.is_some() && !matches!(command, CliCommand::Daemon { .. }) {
+    if state_root.is_some()
+        && !matches!(
+            command,
+            CliCommand::Daemon { .. }
+                | CliCommand::Identity { .. }
+                | CliCommand::Configuration { .. }
+        )
+    {
         return Err(CliError::Arguments);
     }
     Ok(CliInvocation { output, command })
 }
 
+fn parse_identity(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match arguments {
+        [action] if action == "init" => IdentityCommand::Init,
+        [action] if action == "show" => IdentityCommand::Show,
+        [action, path, password_source]
+            if action == "export" && password_source == "--password-stdin" =>
+        {
+            IdentityCommand::Export {
+                destination: absolute_path(path)?,
+            }
+        }
+        [action, path, password_source]
+            if action == "import" && password_source == "--password-stdin" =>
+        {
+            IdentityCommand::Import {
+                source: absolute_path(path)?,
+            }
+        }
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::Identity {
+        action,
+        state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_configuration(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match arguments {
+        [action] if action == "get" => ConfigurationCommand::Get,
+        [set, key, provider] if set == "set" && key == "default-provider" => {
+            ConfigurationCommand::SetDefaultProvider {
+                provider: match provider.to_str() {
+                    Some("none") => None,
+                    Some(provider) => {
+                        Some(ProviderId::new(provider).map_err(|_| CliError::Arguments)?)
+                    }
+                    None => return Err(CliError::Arguments),
+                },
+            }
+        }
+        [set, key, values @ ..] if set == "set" && key == "relays" => {
+            let relays = if values == [OsString::from("none")] {
+                Vec::new()
+            } else {
+                values
+                    .iter()
+                    .map(parse_relay)
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            ConfigurationCommand::SetRelays { relays }
+        }
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::Configuration {
+        action,
+        state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_relay(value: &OsString) -> Result<RelayEndpoint, CliError> {
+    value
+        .to_str()
+        .ok_or(CliError::Arguments)
+        .and_then(|value| RelayEndpoint::new(value.to_owned()).map_err(|_| CliError::Arguments))
+}
+
+fn parsed_state(state_root: Option<&PathBuf>) -> Result<StatePaths, CliError> {
+    state_root
+        .cloned()
+        .map_or_else(StatePaths::from_environment, StatePaths::new)
+        .map_err(|_| CliError::StatePath)
+}
+
+fn absolute_path(value: &OsString) -> Result<PathBuf, CliError> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(CliError::Arguments)
+    }
+}
+
 /// Parses and executes one complete invocation with deterministic stream and exit selection.
 pub fn execute_cli(arguments: impl IntoIterator<Item = OsString>) -> CliExecution {
+    execute_cli_with_input(arguments, &mut std::io::empty())
+}
+
+/// Executes one complete invocation with an explicit bounded secret-input source.
+pub fn execute_cli_with_input(
+    arguments: impl IntoIterator<Item = OsString>,
+    input: &mut dyn Read,
+) -> CliExecution {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
     let format = output_hint(&arguments);
-    match parse_cli(arguments).and_then(|invocation| run_cli(&invocation)) {
+    match parse_cli(arguments).and_then(|invocation| run_cli_with_input(&invocation, input)) {
         Ok(stdout) => CliExecution {
             stdout,
             stderr: String::new(),
@@ -315,11 +494,30 @@ pub fn execute_cli(arguments: impl IntoIterator<Item = OsString>) -> CliExecutio
 
 /// Executes one parsed invocation and returns its complete stdout record.
 pub fn run_cli(invocation: &CliInvocation) -> Result<String, CliError> {
+    run_cli_with_input(invocation, &mut std::io::empty())
+}
+
+/// Executes one parsed invocation with an explicit bounded secret-input source.
+pub fn run_cli_with_input(
+    invocation: &CliInvocation,
+    input: &mut dyn Read,
+) -> Result<String, CliError> {
+    match &invocation.command {
+        CliCommand::Identity { action, state } => {
+            return render_result(invocation.output, &run_identity(action, state, input)?);
+        }
+        CliCommand::Configuration { action, state } => {
+            return render_result(invocation.output, &run_configuration(action, state)?);
+        }
+        CliCommand::Help { .. } | CliCommand::Version | CliCommand::Daemon { .. } => {}
+    }
     let CliCommand::Daemon { action, state } = &invocation.command else {
         return match &invocation.command {
             CliCommand::Help { topic } => render_help(invocation.output, topic),
             CliCommand::Version => render_version(invocation.output),
-            CliCommand::Daemon { .. } => unreachable!(),
+            CliCommand::Daemon { .. }
+            | CliCommand::Identity { .. }
+            | CliCommand::Configuration { .. } => unreachable!(),
         };
     };
     let runtime = RuntimePaths::new(state.root().join("runtime"))
@@ -372,6 +570,89 @@ pub fn run_cli(invocation: &CliInvocation) -> Result<String, CliError> {
         }
     };
     render_result(invocation.output, &output)
+}
+
+fn run_identity(
+    action: &IdentityCommand,
+    state: &StatePaths,
+    input: &mut dyn Read,
+) -> Result<CliResult, CliError> {
+    let owner = StateDirectoryOwner::acquire(state.clone())?;
+    match action {
+        IdentityCommand::Init => Ok(CliResult::Identity(Box::new(
+            owner.initialize()?.public_identity(),
+        ))),
+        IdentityCommand::Show => Ok(CliResult::Identity(Box::new(
+            owner.load_identity()?.public_identity(),
+        ))),
+        IdentityCommand::Export { destination } => {
+            let password = read_password(input)?;
+            let identity = owner.load_identity()?;
+            owner.export_identity(&identity, &password, destination)?;
+            Ok(CliResult::Completed {
+                operation: "identity_export",
+            })
+        }
+        IdentityCommand::Import { source } => {
+            let password = read_password(input)?;
+            Ok(CliResult::Identity(Box::new(
+                owner.import_identity(source, &password)?.public_identity(),
+            )))
+        }
+    }
+}
+
+fn run_configuration(
+    action: &ConfigurationCommand,
+    state: &StatePaths,
+) -> Result<CliResult, CliError> {
+    let owner = StateDirectoryOwner::acquire(state.clone())?;
+    let mut configuration = owner.load_configuration()?;
+    match action {
+        ConfigurationCommand::Get => Ok(CliResult::Configuration(Box::new(configuration))),
+        ConfigurationCommand::SetDefaultProvider { provider } => {
+            configuration.default_provider.clone_from(provider);
+            let configuration =
+                LocalConfiguration::new(configuration.relays, configuration.default_provider)?;
+            owner.store_configuration(&configuration)?;
+            Ok(CliResult::Configuration(Box::new(configuration)))
+        }
+        ConfigurationCommand::SetRelays { relays } => {
+            configuration.relays.clone_from(relays);
+            let configuration =
+                LocalConfiguration::new(configuration.relays, configuration.default_provider)?;
+            owner.store_configuration(&configuration)?;
+            Ok(CliResult::Configuration(Box::new(configuration)))
+        }
+    }
+}
+
+fn read_password(input: &mut dyn Read) -> Result<BackupPassword, CliError> {
+    const MAX_INPUT_BYTES: u64 = 1_027;
+    let mut bytes = Zeroizing::new(Vec::new());
+    input
+        .take(MAX_INPUT_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CliError::SecretInput)?;
+    if bytes.len() >= usize::try_from(MAX_INPUT_BYTES).unwrap_or(usize::MAX) {
+        return Err(CliError::SecretInput);
+    }
+    if bytes.last() == Some(&b'\n') {
+        let _ = bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            let _ = bytes.pop();
+        }
+    }
+    if bytes.contains(&b'\n') || bytes.contains(&b'\r') {
+        return Err(CliError::SecretInput);
+    }
+    if bytes.is_empty() {
+        return Err(CliError::SecretInput);
+    }
+    let password = std::str::from_utf8(&bytes)
+        .map(str::to_owned)
+        .map_err(|_| CliError::SecretInput)?;
+    BackupPassword::new(password).map_err(|_| CliError::SecretInput)
 }
 
 fn build() -> Result<BuildMetadata, CliError> {
@@ -448,6 +729,11 @@ enum CliResult {
     Stopped {
         intent: String,
     },
+    Identity(Box<PublicIdentity>),
+    Configuration(Box<LocalConfiguration>),
+    Completed {
+        operation: &'static str,
+    },
 }
 
 fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, CliError> {
@@ -457,6 +743,28 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         }
         (CliOutputFormat::Human, CliResult::Stopped { intent }) => {
             Ok(format!("stopped intent={intent}\n"))
+        }
+        (CliOutputFormat::Human, CliResult::Identity(identity)) => Ok(format!(
+            "installation={} public_key={} fingerprint={}\n",
+            crate::identity::encode_hex(identity.installation_id.as_bytes()),
+            crate::identity::encode_hex(&identity.signing_public_key),
+            identity.fingerprint,
+        )),
+        (CliOutputFormat::Human, CliResult::Configuration(configuration)) => Ok(format!(
+            "default_provider={} relays={}\n",
+            configuration
+                .default_provider
+                .as_ref()
+                .map_or("none", ProviderId::as_str),
+            configuration
+                .relays
+                .iter()
+                .map(RelayEndpoint::as_str)
+                .collect::<Vec<_>>()
+                .join(","),
+        )),
+        (CliOutputFormat::Human, CliResult::Completed { operation }) => {
+            Ok(format!("completed operation={operation}\n"))
         }
         (CliOutputFormat::Json, CliResult::Lifecycle { label, observation }) => machine_record(
             "lifecycle",
@@ -469,6 +777,24 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         ),
         (CliOutputFormat::Json, CliResult::Stopped { intent }) => {
             machine_record("stopped", &serde_json::json!({ "intent": intent }))
+        }
+        (CliOutputFormat::Json, CliResult::Identity(identity)) => machine_record(
+            "identity",
+            &serde_json::json!({
+                "fingerprint": identity.fingerprint,
+                "installation_id": crate::identity::encode_hex(identity.installation_id.as_bytes()),
+                "signing_public_key": crate::identity::encode_hex(&identity.signing_public_key),
+            }),
+        ),
+        (CliOutputFormat::Json, CliResult::Configuration(configuration)) => machine_record(
+            "configuration",
+            &serde_json::json!({
+                "default_provider": configuration.default_provider.as_ref().map(ProviderId::as_str),
+                "relays": configuration.relays.iter().map(RelayEndpoint::as_str).collect::<Vec<_>>(),
+            }),
+        ),
+        (CliOutputFormat::Json, CliResult::Completed { operation }) => {
+            machine_record("completed", &serde_json::json!({ "operation": operation }))
         }
     }
 }
@@ -511,24 +837,41 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  daemon          Manage the local node lifecycle\n\n\
-             Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root for daemon commands\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  daemon          Manage the local node lifecycle\n\n\
+             Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
         ),
         [command] if command == "version" => Some(
             "Usage: hq [--output human|json] version\n\nShow executable version, local protocol version, and build commit metadata.\n",
+        ),
+        [command] if command == "identity" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] identity <COMMAND>\n\n\
+             Commands:\n  init                                      Create identity without overwrite\n  show                                      Show safe public identity metadata\n  export ABSOLUTE_PATH --password-stdin     Export an encrypted backup without overwrite\n  import ABSOLUTE_PATH --password-stdin     Import an encrypted backup without overwrite\n\n\
+             Identity commands require exclusive offline ownership. Password input is one bounded UTF-8 line on stdin and is never accepted as an argument.\n",
+        ),
+        [command] if command == "config" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] config <COMMAND>\n\n\
+             Commands:\n  get                                      Show all local defaults\n  set default-provider PROVIDER|none       Replace the provider default\n  set relays URL...|none                   Replace the complete relay set\n\n\
+             Configuration commands require exclusive offline ownership.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
              Commands:\n  run        Own the node in the foreground\n  status     Probe without starting a node\n  readiness  Return a ready node, starting one when absent\n  stop       Converge the node to absence\n  restart    Converge on a fresh ready generation\n",
         ),
         [command, action]
-            if command == "daemon"
+            if (command == "daemon"
                 && matches!(
                     action.as_str(),
                     "run" | "status" | "readiness" | "stop" | "restart"
-                ) =>
+                ))
+                || (command == "identity" && matches!(action.as_str(), "init" | "show"))
+                || (command == "config" && action == "get") =>
         {
-            Some("Use `hq help daemon` for daemon command details.\n")
+            match command.as_str() {
+                "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
+                "identity" => Some("Use `hq help identity` for identity command details.\n"),
+                "config" => Some("Use `hq help config` for configuration command details.\n"),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -615,7 +958,8 @@ mod tests {
     use std::ffi::OsString;
 
     use super::{
-        CliCommand, CliError, CliOutputFormat, DaemonCommand, execute_cli, parse_cli, run_cli,
+        CliCommand, CliError, CliOutputFormat, ConfigurationCommand, DaemonCommand,
+        IdentityCommand, execute_cli, parse_cli, read_password, run_cli,
     };
 
     #[test]
@@ -654,6 +998,61 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_typed_offline_administration_and_requires_explicit_secret_input() {
+        let root = std::env::temp_dir().join("hq-cli-admin-parser");
+        let backup = std::env::temp_dir().join("hq-cli-admin-backup.json");
+        let identity = parse_cli([
+            OsString::from("--state-root"),
+            root.clone().into_os_string(),
+            OsString::from("identity"),
+            OsString::from("export"),
+            backup.clone().into_os_string(),
+            OsString::from("--password-stdin"),
+        ])
+        .expect("offline export parses");
+        assert!(matches!(identity.command, CliCommand::Identity {
+            action: IdentityCommand::Export { destination },
+            state,
+        } if state.root() == root && destination == backup));
+
+        let config = parse_cli([
+            OsString::from("--state-root"),
+            root.clone().into_os_string(),
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("default-provider"),
+            OsString::from("codex"),
+        ])
+        .expect("typed configuration parses");
+        assert!(matches!(config.command, CliCommand::Configuration {
+            action: ConfigurationCommand::SetDefaultProvider { provider: Some(provider) },
+            state,
+        } if state.root() == root && provider.as_str() == "codex"));
+
+        assert_eq!(
+            parse_cli([
+                OsString::from("--state-root"),
+                root.clone().into_os_string(),
+                OsString::from("identity"),
+                OsString::from("export"),
+                backup.into_os_string(),
+            ]),
+            Err(CliError::Arguments)
+        );
+        assert_eq!(
+            parse_cli([
+                OsString::from("--state-root"),
+                root.into_os_string(),
+                OsString::from("identity"),
+                OsString::from("import"),
+                OsString::from("relative.json"),
+                OsString::from("--password-stdin"),
+            ]),
+            Err(CliError::Arguments)
+        );
+    }
+
+    #[test]
     fn help_and_version_have_stable_human_and_machine_records() {
         let help = parse_cli([]).expect("bare invocation renders help");
         assert!(
@@ -684,9 +1083,22 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  daemon          Manage the local node lifecycle\n\n\
-             Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root for daemon commands\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  daemon          Manage the local node lifecycle\n\n\
+             Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
+        let identity = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("identity")])
+                .expect("identity help parses"),
+        )
+        .expect("identity help");
+        assert!(identity.contains("--password-stdin"));
+        assert!(!identity.contains("PASSWORD"));
+        let config = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("config")])
+                .expect("config help parses"),
+        )
+        .expect("config help");
+        assert!(config.contains("set relays URL...|none"));
         let daemon = run_cli(
             &parse_cli([OsString::from("daemon"), OsString::from("--help")])
                 .expect("daemon help parses"),
@@ -723,5 +1135,22 @@ mod tests {
         assert_eq!(value["kind"], "error");
         assert_eq!(value["data"]["class"], "usage");
         assert_eq!(value["data"]["code"], "cli.state_path");
+    }
+
+    #[test]
+    fn secret_input_accepts_one_bounded_line_and_rejects_ambiguous_streams() {
+        assert!(read_password(&mut b"correct horse battery staple\r\n".as_slice()).is_ok());
+        assert!(matches!(
+            read_password(&mut b"first line\nsecond line\n".as_slice()),
+            Err(CliError::SecretInput)
+        ));
+        assert!(matches!(
+            read_password(&mut vec![b'x'; 1_025].as_slice()),
+            Err(CliError::SecretInput)
+        ));
+        assert!(matches!(
+            read_password(&mut std::io::empty()),
+            Err(CliError::SecretInput)
+        ));
     }
 }

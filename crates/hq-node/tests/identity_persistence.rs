@@ -64,11 +64,11 @@ fn initialization_is_atomic_stable_redacted_and_exclusively_owned() {
 
     let identity = owner.initialize().expect("fresh identity initializes");
     let public = identity.public_identity();
-    assert_eq!(identity.signer().public_key(), public.signing_public_key());
-    assert_eq!(public.installation_id().as_bytes().len(), 32);
-    assert!(!public.fingerprint().is_empty());
+    assert_eq!(identity.signer().public_key(), public.signing_public_key);
+    assert_eq!(public.installation_id.as_bytes().len(), 32);
+    assert!(!public.fingerprint.is_empty());
     let debug = format!("{identity:?}");
-    assert!(debug.contains(public.fingerprint()));
+    assert!(debug.contains(&public.fingerprint));
     assert!(!debug.contains("secret"));
 
     let reopened = owner.load_identity().expect("identity reopens");
@@ -177,6 +177,26 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
         .expect("configuration replaces atomically");
     assert_eq!(
         owner.load_configuration().expect("replacement loads"),
+        replacement
+    );
+
+    let duplicate =
+        RelayEndpoint::new("wss://duplicate.example".to_owned()).expect("relay is valid");
+    let invalid = LocalConfiguration {
+        relays: vec![duplicate.clone(), duplicate],
+        default_provider: None,
+    };
+    assert_eq!(
+        owner
+            .store_configuration(&invalid)
+            .expect_err("public fields are revalidated before persistence")
+            .class(),
+        IdentityErrorClass::ConfigurationInvalid
+    );
+    assert_eq!(
+        owner
+            .load_configuration()
+            .expect("invalid replacement leaves prior value intact"),
         replacement
     );
 }
