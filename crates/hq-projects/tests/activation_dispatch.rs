@@ -16,17 +16,18 @@ use hq_domain::{
     AccountId, AgentId, AssignmentBinding, BoundedText, CommandDigest, CommandId, DomainError,
     ErrorCategory, ErrorCode, FactId, InstallationId, MessageId, OperationId, ProjectId,
     ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator,
-    ResourceScheme, ThreadId, Timestamp,
+    ResourceScheme, RuntimeObservation, ThreadId, Timestamp,
 };
 use hq_projects::{
     BeginSagaOutcome, CanonicalProjectAssignment, CanonicalProjectLifecycle,
     CanonicalProjectMutation, CanonicalProjectMutationAction, CanonicalProjectMutationOutcome,
     CanonicalProjectPort, PendingProjectInput, ProjectLaunchObservation,
-    ProjectLaunchValidationRequest, ProjectResourceObservation, ProjectResourcePort,
-    ProjectResourceValidationRequest, ProjectRuntimeDelivery, ProjectRuntimePort,
-    ProjectRuntimeRequest, ProjectSagaRecord, ProjectSagaStore, ProjectWorkflowManager,
-    ProjectWorkflowSnapshot, SagaStoreError,
+    ProjectLaunchValidationRequest, ProjectReleaseAssessmentRequest, ProjectResourceObservation,
+    ProjectResourcePort, ProjectResourceValidationRequest, ProjectRuntimeDelivery,
+    ProjectRuntimePort, ProjectRuntimeRequest, ProjectSagaRecord, ProjectSagaStore,
+    ProjectWorkflowManager, ProjectWorkflowSnapshot, SagaStoreError,
 };
+use hq_resources::{PathReleaseAssessment, PathReleaseState};
 
 #[derive(Clone, Default)]
 struct MemorySagaStore(Arc<Mutex<Option<ProjectSagaRecord>>>);
@@ -90,6 +91,10 @@ enum MutationBoundary {
     Configure,
     MakeRunnable,
     BeginClosing,
+    EndAssignment,
+    FinishClosing,
+    Archive,
+    Unarchive,
     RecordDispatch,
 }
 
@@ -212,9 +217,11 @@ impl CanonicalProjectPort for ScriptedCanonical {
             CanonicalProjectMutationAction::BeginClosing => {
                 state.snapshot.lifecycle = CanonicalProjectLifecycle::Closing;
             }
-            CanonicalProjectMutationAction::FinishClosing => {
+            CanonicalProjectMutationAction::FinishClosing { .. } => {
                 state.snapshot.lifecycle = CanonicalProjectLifecycle::Closed;
             }
+            CanonicalProjectMutationAction::Archive => state.snapshot.archived = true,
+            CanonicalProjectMutationAction::Unarchive => state.snapshot.archived = false,
             CanonicalProjectMutationAction::RecordDispatch { input, .. } => {
                 state
                     .snapshot
@@ -238,12 +245,18 @@ impl CanonicalProjectPort for ScriptedCanonical {
                 Some(MutationBoundary::MakeRunnable)
             }
             CanonicalProjectMutationAction::BeginClosing => Some(MutationBoundary::BeginClosing),
+            CanonicalProjectMutationAction::EndAssignment { .. } => {
+                Some(MutationBoundary::EndAssignment)
+            }
+            CanonicalProjectMutationAction::FinishClosing { .. } => {
+                Some(MutationBoundary::FinishClosing)
+            }
+            CanonicalProjectMutationAction::Archive => Some(MutationBoundary::Archive),
+            CanonicalProjectMutationAction::Unarchive => Some(MutationBoundary::Unarchive),
             CanonicalProjectMutationAction::RecordDispatch { .. } => {
                 Some(MutationBoundary::RecordDispatch)
             }
-            CanonicalProjectMutationAction::RemoveResource { .. }
-            | CanonicalProjectMutationAction::EndAssignment { .. }
-            | CanonicalProjectMutationAction::FinishClosing => None,
+            CanonicalProjectMutationAction::RemoveResource { .. } => None,
         };
         if boundary.is_some() && state.uncertain_once == boundary {
             state.uncertain_once = None;
@@ -287,6 +300,28 @@ impl ProjectResourcePort for HealthyResources {
         ))
     }
 
+    fn assess_release(
+        &self,
+        request: &EffectRequest<ProjectReleaseAssessmentRequest>,
+    ) -> Result<EffectOutcome<Vec<PathReleaseAssessment>>, ApplicationError> {
+        Ok(EffectOutcome::Accepted(
+            request
+                .body
+                .resources
+                .iter()
+                .map(|resource| PathReleaseAssessment {
+                    home: request.body.home,
+                    resource_id: resource.resource_id,
+                    state: PathReleaseState::NotApplicable,
+                    worktree_identity: None,
+                    common_git_directory: None,
+                    changes: BTreeSet::new(),
+                    changed_entries: 0,
+                })
+                .collect(),
+        ))
+    }
+
     fn validate_launch_directory(
         &self,
         request: &EffectRequest<ProjectLaunchValidationRequest>,
@@ -305,6 +340,11 @@ enum ResourceBehavior {
     ChangedResource,
     UncertainLaunch,
     RejectLaunch,
+    DirtyRelease,
+    UnknownRelease,
+    RejectRelease,
+    UncertainRelease,
+    ChangedRelease,
 }
 
 #[derive(Clone)]
@@ -354,6 +394,41 @@ impl ProjectResourcePort for ScriptedResources {
         HealthyResources.validate_resources(request)
     }
 
+    fn assess_release(
+        &self,
+        request: &EffectRequest<ProjectReleaseAssessmentRequest>,
+    ) -> Result<EffectOutcome<Vec<PathReleaseAssessment>>, ApplicationError> {
+        if matches!(self.behavior, ResourceBehavior::RejectRelease) {
+            return Ok(EffectOutcome::Rejected(domain_error(
+                ErrorCategory::Unresolved,
+                "release-rejected",
+            )));
+        }
+        if matches!(self.behavior, ResourceBehavior::UncertainRelease) && self.take_first_call() {
+            return Ok(EffectOutcome::Uncertain(request.operation_id));
+        }
+        let mut outcome = HealthyResources.assess_release(request)?;
+        let EffectOutcome::Accepted(assessments) = &mut outcome else {
+            return Ok(outcome);
+        };
+        if let Some(first) = assessments.first_mut() {
+            match self.behavior {
+                ResourceBehavior::DirtyRelease => first.state = PathReleaseState::Dirty,
+                ResourceBehavior::UnknownRelease => first.state = PathReleaseState::Unknown,
+                ResourceBehavior::ChangedRelease => {
+                    first.home = InstallationId::from_bytes([99; 32]);
+                }
+                ResourceBehavior::UncertainResources
+                | ResourceBehavior::ChangedResource
+                | ResourceBehavior::UncertainLaunch
+                | ResourceBehavior::RejectLaunch
+                | ResourceBehavior::RejectRelease
+                | ResourceBehavior::UncertainRelease => {}
+            }
+        }
+        Ok(outcome)
+    }
+
     fn validate_launch_directory(
         &self,
         request: &EffectRequest<ProjectLaunchValidationRequest>,
@@ -375,10 +450,16 @@ impl ProjectResourcePort for ScriptedResources {
 struct ScriptedRuntime(Arc<Mutex<RuntimeState>>);
 
 #[derive(Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent one-shot failure switches keep this workflow fake explicit"
+)]
 struct RuntimeState {
     reject_start: bool,
     uncertain_start_once: bool,
     uncertain_delivery_once: bool,
+    reject_stop: bool,
+    uncertain_stop_once: bool,
     deliveries: BTreeMap<MessageId, CommandDigest>,
     delivery_order: Vec<MessageId>,
     delivery_calls: usize,
@@ -406,6 +487,18 @@ impl ScriptedRuntime {
     fn uncertain_start_once() -> Self {
         let runtime = Self::default();
         runtime.0.lock().expect("runtime lock").uncertain_start_once = true;
+        runtime
+    }
+
+    fn rejecting_stop() -> Self {
+        let runtime = Self::default();
+        runtime.0.lock().expect("runtime lock").reject_stop = true;
+        runtime
+    }
+
+    fn uncertain_stop_once() -> Self {
+        let runtime = Self::default();
+        runtime.0.lock().expect("runtime lock").uncertain_stop_once = true;
         runtime
     }
 }
@@ -459,10 +552,21 @@ impl ProjectRuntimePort for ScriptedRuntime {
 
     fn stop(
         &self,
-        _request: &EffectRequest<ProjectRuntimeRequest>,
+        request: &EffectRequest<ProjectRuntimeRequest>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
-        self.0.lock().expect("runtime lock").stops += 1;
-        Ok(EffectOutcome::Accepted(()))
+        let mut state = self.0.lock().expect("runtime lock");
+        state.stops += 1;
+        if state.reject_stop {
+            Ok(EffectOutcome::Rejected(domain_error(
+                ErrorCategory::Unresolved,
+                "stop-rejected",
+            )))
+        } else if state.uncertain_stop_once {
+            state.uncertain_stop_once = false;
+            Ok(EffectOutcome::Uncertain(request.operation_id))
+        } else {
+            Ok(EffectOutcome::Accepted(()))
+        }
     }
 }
 
@@ -571,7 +675,7 @@ fn failed_start_compensates_assignment_and_newly_acquired_open_state() {
             CanonicalProjectMutationAction::Configure(_),
             CanonicalProjectMutationAction::EndAssignment { .. },
             CanonicalProjectMutationAction::BeginClosing,
-            CanonicalProjectMutationAction::FinishClosing
+            CanonicalProjectMutationAction::FinishClosing { .. }
         ]
     ));
 }
@@ -1183,6 +1287,480 @@ fn resource_and_commit_uncertainty_repair_without_duplicate_mutation() {
     assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
     assert_eq!(canonical.mutations().len(), 1);
     assert_eq!(canonical.snapshot_value().resources, vec![replacement]);
+}
+
+#[test]
+fn graceful_close_quiesces_assignment_before_releasing_claims() {
+    let initial = runnable_snapshot();
+    let pending = initial.pending_inputs.clone();
+    let resources = initial.resources.clone();
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::default();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::Close { force: false }))
+    .expect("graceful close");
+
+    assert!(matches!(outcome, ProjectCommandOutcome::Completed { .. }));
+    let closed = canonical.snapshot_value();
+    assert_eq!(closed.lifecycle, CanonicalProjectLifecycle::Closed);
+    assert!(closed.assignment.is_none());
+    assert_eq!(closed.resources, resources);
+    assert_eq!(closed.pending_inputs, pending);
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+}
+
+#[test]
+fn dirty_or_unknown_release_requires_force_before_closing() {
+    for behavior in [
+        ResourceBehavior::DirtyRelease,
+        ResourceBehavior::UnknownRelease,
+    ] {
+        let initial = runnable_snapshot();
+        let canonical = ScriptedCanonical::new(initial.clone());
+        let runtime = ScriptedRuntime::default();
+        let rejected = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            runtime.clone(),
+            ScriptedResources::new(behavior),
+        )
+        .control(request_for(ProjectCommandAction::Close { force: false }))
+        .expect("graceful release refusal");
+
+        let ProjectCommandOutcome::Rejected { error, .. } = rejected else {
+            panic!("expected force requirement, got {rejected:?}");
+        };
+        assert_eq!(error.code().as_str(), "project_release_force_required");
+        assert_eq!(canonical.snapshot_value(), initial);
+        assert!(canonical.mutations().is_empty());
+        assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
+
+        let forced_canonical = ScriptedCanonical::new(runnable_snapshot());
+        let forced = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            forced_canonical.clone(),
+            ScriptedRuntime::default(),
+            ScriptedResources::new(behavior),
+        )
+        .control(request_for(ProjectCommandAction::Close { force: true }))
+        .expect("forced release");
+        assert!(matches!(forced, ProjectCommandOutcome::Completed { .. }));
+        assert_eq!(
+            forced_canonical.snapshot_value().lifecycle,
+            CanonicalProjectLifecycle::Closed
+        );
+        assert!(matches!(
+            forced_canonical.mutations().last(),
+            Some(CanonicalProjectMutationAction::FinishClosing {
+                forced: true,
+                runtime: Some(RuntimeObservation::Succeeded),
+            })
+        ));
+    }
+}
+
+#[test]
+fn failed_or_unknown_release_can_only_be_overridden_by_force() {
+    let rejected_canonical = ScriptedCanonical::new(runnable_snapshot());
+    let rejected = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        rejected_canonical.clone(),
+        ScriptedRuntime::default(),
+        ScriptedResources::new(ResourceBehavior::RejectRelease),
+    )
+    .control(request_for(ProjectCommandAction::Close { force: false }))
+    .expect("release rejection");
+    assert!(matches!(rejected, ProjectCommandOutcome::Rejected { .. }));
+    assert!(rejected_canonical.mutations().is_empty());
+
+    let uncertain_store = MemorySagaStore::default();
+    let uncertain_canonical = ScriptedCanonical::new(runnable_snapshot());
+    let uncertain_resources = ScriptedResources::new(ResourceBehavior::UncertainRelease);
+    let request = request_for(ProjectCommandAction::Close { force: false });
+    let uncertain = ProjectWorkflowManager::new(
+        uncertain_store.clone(),
+        uncertain_canonical.clone(),
+        ScriptedRuntime::default(),
+        uncertain_resources.clone(),
+    )
+    .control(request.clone())
+    .expect("unknown release");
+    assert!(matches!(
+        uncertain,
+        ProjectCommandOutcome::Reconcilable { .. }
+    ));
+    assert!(uncertain_canonical.mutations().is_empty());
+
+    let repaired = ProjectWorkflowManager::new(
+        uncertain_store,
+        uncertain_canonical.clone(),
+        ScriptedRuntime::default(),
+        uncertain_resources,
+    )
+    .control(request)
+    .expect("release repair");
+    assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
+
+    for behavior in [
+        ResourceBehavior::RejectRelease,
+        ResourceBehavior::UncertainRelease,
+    ] {
+        let canonical = ScriptedCanonical::new(runnable_snapshot());
+        let forced = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            ScriptedRuntime::default(),
+            ScriptedResources::new(behavior),
+        )
+        .control(request_for(ProjectCommandAction::Close { force: true }))
+        .expect("forced release override");
+        assert!(matches!(forced, ProjectCommandOutcome::Completed { .. }));
+        assert_eq!(
+            canonical.snapshot_value().lifecycle,
+            CanonicalProjectLifecycle::Closed
+        );
+    }
+}
+
+#[test]
+fn changed_release_assessment_identity_is_a_definite_conflict_even_with_force() {
+    for force in [false, true] {
+        let canonical = ScriptedCanonical::new(runnable_snapshot());
+        let outcome = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            ScriptedRuntime::default(),
+            ScriptedResources::new(ResourceBehavior::ChangedRelease),
+        )
+        .control(request_for(ProjectCommandAction::Close { force }))
+        .expect("changed release assessment");
+        let ProjectCommandOutcome::Rejected { error, .. } = outcome else {
+            panic!("expected rejection, got {outcome:?}");
+        };
+        assert_eq!(error.code().as_str(), "project_release_assessment_changed");
+        assert!(canonical.mutations().is_empty());
+    }
+}
+
+#[test]
+fn runtime_stop_failure_retains_assignment_until_a_forced_retry() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::rejecting_stop();
+    let rejected = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::Close { force: false }))
+    .expect("runtime stop rejection");
+    assert!(matches!(rejected, ProjectCommandOutcome::Rejected { .. }));
+    let retained = canonical.snapshot_value();
+    assert_eq!(retained.lifecycle, CanonicalProjectLifecycle::Closing);
+    assert!(retained.assignment.is_some());
+    assert!(matches!(
+        canonical.mutations().as_slice(),
+        [CanonicalProjectMutationAction::BeginClosing]
+    ));
+
+    let mut request = request_for(ProjectCommandAction::Close { force: true });
+    request.expected_head = retained.head;
+    let forced = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime,
+        HealthyResources,
+    )
+    .control(request)
+    .expect("forced runtime stop override");
+    assert!(matches!(forced, ProjectCommandOutcome::Completed { .. }));
+    assert!(matches!(
+        canonical.mutations().as_slice(),
+        [
+            CanonicalProjectMutationAction::BeginClosing,
+            CanonicalProjectMutationAction::EndAssignment {
+                forced: true,
+                runtime: Some(RuntimeObservation::Failed(code)),
+                ..
+            },
+            CanonicalProjectMutationAction::FinishClosing {
+                forced: true,
+                runtime: Some(RuntimeObservation::Failed(finish_code)),
+            }
+        ] if code.as_str() == "stop-rejected" && finish_code.as_str() == "stop-rejected"
+    ));
+}
+
+#[test]
+fn uncertain_runtime_stop_repairs_or_records_a_truthful_forced_close() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::uncertain_stop_once();
+    let store = MemorySagaStore::default();
+    let request = request_for(ProjectCommandAction::Close { force: false });
+    let manager =
+        ProjectWorkflowManager::new(store, canonical.clone(), runtime.clone(), HealthyResources);
+    let first = manager.control(request.clone()).expect("unknown stop");
+    assert!(matches!(first, ProjectCommandOutcome::Reconcilable { .. }));
+    assert_eq!(
+        canonical.snapshot_value().lifecycle,
+        CanonicalProjectLifecycle::Closing
+    );
+    assert!(canonical.snapshot_value().assignment.is_some());
+    let repaired = manager.control(request).expect("stop repair");
+    assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 2);
+    assert_eq!(
+        canonical
+            .mutations()
+            .iter()
+            .filter(|mutation| matches!(mutation, CanonicalProjectMutationAction::BeginClosing))
+            .count(),
+        1
+    );
+
+    let forced_canonical = ScriptedCanonical::new(runnable_snapshot());
+    let forced = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        forced_canonical.clone(),
+        ScriptedRuntime::uncertain_stop_once(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::Close { force: true }))
+    .expect("forced unknown stop");
+    assert!(matches!(forced, ProjectCommandOutcome::Completed { .. }));
+    assert!(matches!(
+        forced_canonical.mutations().as_slice(),
+        [
+            CanonicalProjectMutationAction::BeginClosing,
+            CanonicalProjectMutationAction::EndAssignment {
+                forced: true,
+                runtime: Some(RuntimeObservation::Uncertain(code)),
+                ..
+            },
+            CanonicalProjectMutationAction::FinishClosing {
+                forced: true,
+                runtime: Some(RuntimeObservation::Uncertain(finish_code)),
+            }
+        ] if code.as_str() == "project_runtime_stop_unknown"
+            && finish_code.as_str() == "project_runtime_stop_unknown"
+    ));
+}
+
+#[test]
+fn close_response_loss_replays_each_canonical_boundary_exactly_once() {
+    for boundary in [
+        MutationBoundary::BeginClosing,
+        MutationBoundary::EndAssignment,
+        MutationBoundary::FinishClosing,
+    ] {
+        let canonical = ScriptedCanonical::uncertain_once(runnable_snapshot(), boundary);
+        let runtime = ScriptedRuntime::default();
+        let manager = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        );
+        let request = request_for(ProjectCommandAction::Close { force: false });
+
+        let first = manager
+            .control(request.clone())
+            .expect("lost close response");
+        assert!(
+            matches!(first, ProjectCommandOutcome::Reconcilable { .. }),
+            "boundary {boundary:?} returned {first:?}"
+        );
+        let replay = manager.control(request).expect("close reconciliation");
+        assert!(
+            matches!(replay, ProjectCommandOutcome::Completed { .. }),
+            "boundary {boundary:?} returned {replay:?}"
+        );
+        assert_eq!(
+            canonical.snapshot_value().lifecycle,
+            CanonicalProjectLifecycle::Closed
+        );
+        assert_eq!(canonical.mutations().len(), 3);
+        assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+    }
+}
+
+#[test]
+fn open_project_archive_gracefully_closes_then_hides_without_data_loss() {
+    let initial = runnable_snapshot();
+    let resources = initial.resources.clone();
+    let pending = initial.pending_inputs.clone();
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::default();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::SetArchived {
+        archived: true,
+    }))
+    .expect("open archive");
+
+    assert!(matches!(outcome, ProjectCommandOutcome::Completed { .. }));
+    let archived = canonical.snapshot_value();
+    assert_eq!(archived.lifecycle, CanonicalProjectLifecycle::Closed);
+    assert!(archived.archived);
+    assert!(archived.assignment.is_none());
+    assert_eq!(archived.resources, resources);
+    assert_eq!(archived.pending_inputs, pending);
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+    assert!(matches!(
+        canonical.mutations().as_slice(),
+        [
+            CanonicalProjectMutationAction::BeginClosing,
+            CanonicalProjectMutationAction::EndAssignment { .. },
+            CanonicalProjectMutationAction::FinishClosing { forced: false, .. },
+            CanonicalProjectMutationAction::Archive,
+        ]
+    ));
+}
+
+#[test]
+fn archive_and_unarchive_response_loss_reconcile_exactly_once() {
+    let canonical = ScriptedCanonical::uncertain_once(
+        snapshot(CanonicalProjectLifecycle::Closed),
+        MutationBoundary::Archive,
+    );
+    let store = MemorySagaStore::default();
+    let manager = ProjectWorkflowManager::new(
+        store,
+        canonical.clone(),
+        ScriptedRuntime::default(),
+        HealthyResources,
+    );
+    let request = request_for(ProjectCommandAction::SetArchived { archived: true });
+    let first = manager
+        .control(request.clone())
+        .expect("lost archive response");
+    assert!(matches!(first, ProjectCommandOutcome::Reconcilable { .. }));
+    let repaired = manager.control(request).expect("archive repair");
+    assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
+    assert_eq!(
+        canonical.mutations(),
+        vec![CanonicalProjectMutationAction::Archive]
+    );
+
+    let mut archived = snapshot(CanonicalProjectLifecycle::Closed);
+    archived.archived = true;
+    let canonical = ScriptedCanonical::uncertain_once(archived, MutationBoundary::Unarchive);
+    let manager = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        ScriptedRuntime::default(),
+        HealthyResources,
+    );
+    let request = request_for(ProjectCommandAction::SetArchived { archived: false });
+    let first = manager
+        .control(request.clone())
+        .expect("lost unarchive response");
+    assert!(matches!(first, ProjectCommandOutcome::Reconcilable { .. }));
+    let repaired = manager.control(request).expect("unarchive repair");
+    assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
+    assert_eq!(
+        canonical.mutations(),
+        vec![CanonicalProjectMutationAction::Unarchive]
+    );
+}
+
+#[test]
+fn close_and_archive_preconditions_reject_before_external_effects() {
+    let mut stale = request_for(ProjectCommandAction::Close { force: false });
+    stale.expected_head = FactId::from_bytes([99; 32]);
+    let mut inactive = snapshot(CanonicalProjectLifecycle::Open);
+    inactive.active_human = false;
+    let mut archived = snapshot(CanonicalProjectLifecycle::Closed);
+    archived.archived = true;
+
+    for (initial, request, expected_code) in [
+        (
+            snapshot(CanonicalProjectLifecycle::Open),
+            stale,
+            "project_stale_head",
+        ),
+        (
+            inactive,
+            request_for(ProjectCommandAction::Close { force: false }),
+            "project_inactive_human",
+        ),
+        (
+            snapshot(CanonicalProjectLifecycle::Closed),
+            request_for(ProjectCommandAction::Close { force: false }),
+            "project_invalid_transition",
+        ),
+        (
+            archived,
+            request_for(ProjectCommandAction::SetArchived { archived: true }),
+            "project_archived",
+        ),
+    ] {
+        let canonical = ScriptedCanonical::new(initial);
+        let runtime = ScriptedRuntime::default();
+        let outcome = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        )
+        .control(request)
+        .expect("precondition rejection");
+        let ProjectCommandOutcome::Rejected { error, .. } = outcome else {
+            panic!("expected rejection, got {outcome:?}");
+        };
+        assert_eq!(error.code().as_str(), expected_code);
+        assert!(canonical.mutations().is_empty());
+        assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
+    }
+}
+
+#[test]
+fn closed_archive_and_unarchive_do_not_touch_runtime_or_resources() {
+    let initial = snapshot(CanonicalProjectLifecycle::Closed);
+    let resources = initial.resources.clone();
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::default();
+    let archived = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::SetArchived {
+        archived: true,
+    }))
+    .expect("archive");
+    assert!(matches!(archived, ProjectCommandOutcome::Completed { .. }));
+    assert!(canonical.snapshot_value().archived);
+
+    let mut unarchive_request = request_for(ProjectCommandAction::SetArchived { archived: false });
+    unarchive_request.expected_head = canonical.snapshot_value().head;
+    let unarchived = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(unarchive_request)
+    .expect("unarchive");
+    assert!(matches!(
+        unarchived,
+        ProjectCommandOutcome::Completed { .. }
+    ));
+    let restored = canonical.snapshot_value();
+    assert!(!restored.archived);
+    assert_eq!(restored.lifecycle, CanonicalProjectLifecycle::Closed);
+    assert_eq!(restored.resources, resources);
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
 }
 
 fn activation_request() -> ProjectCommandRequest {

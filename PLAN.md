@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[projects/high] Implement graceful/forced close and archival workflows** — Add durable release
-  assessment, graceful runtime quiescence, assignment end, claim-preserving closing, final close,
-  archive-after-close, and closed unarchive workflows. Dirty or unknown resources require force;
-  graceful close retains claims until runtime quiescence, while force revokes only HQ authority and
-  records stopped/still-running/unknown observation without claiming external cessation. Test every
-  definite/unknown filesystem, runtime, and canonical boundary, restart repair, pending-input
-  preservation, stale commands, competing devices, and no implicit resource deletion.
-
 - **[projects/high] Implement handoff, forced takeover, and agent retirement workflows** — Quiesce
   and end the old assignment before activating the requested idle agent and exact historical
   thread. A failed graceful handoff becomes canonically blocked; explicit takeover may revoke only

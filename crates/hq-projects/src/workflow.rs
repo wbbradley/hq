@@ -10,9 +10,10 @@ use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, CommandDigest,
     CommandId, ContentText, DispatchId, DomainError, ErrorCategory, ErrorCode, FactId,
     InstallationId, MessageId, OperationCorrelation, OperationId, ProjectId, ProjectResource,
-    ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, ThreadId,
-    Timestamp,
+    ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, RuntimeObservation,
+    ThreadId, Timestamp,
 };
+use hq_resources::{PathReleaseAssessment, ReleaseDecision, decide_release};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -140,11 +141,24 @@ pub enum CanonicalProjectMutationAction {
     EndAssignment {
         /// Assignment epoch to end.
         assignment_id: AssignmentId,
+        /// Whether HQ authority was explicitly revoked without clean external proof.
+        forced: bool,
+        /// Typed runtime observation, when this transition follows quiescence.
+        runtime: Option<RuntimeObservation>,
     },
-    /// Enter canonical closing during compensation.
+    /// Enter canonical closing while retaining the current assignment and claims.
     BeginClosing,
-    /// Restore a project opened by this workflow to closed.
-    FinishClosing,
+    /// Finish canonical close after the assignment has ended.
+    FinishClosing {
+        /// Whether release proceeded under explicit force policy.
+        forced: bool,
+        /// Last truthful runtime observation, when a runtime was assigned.
+        runtime: Option<RuntimeObservation>,
+    },
+    /// Hide one closed project without deleting history.
+    Archive,
+    /// Restore one archived project as visible and closed.
+    Unarchive,
     /// Author immutable attribution after definite provider acceptance.
     RecordDispatch {
         /// Accepted input.
@@ -221,6 +235,17 @@ pub struct ProjectResourceValidationRequest {
     pub resources: Vec<ProjectResource>,
 }
 
+/// Batched read-only release assessment request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectReleaseAssessmentRequest {
+    /// Immutable home namespace.
+    pub home: InstallationId,
+    /// Target project.
+    pub project_id: ProjectId,
+    /// Exact desired resources to assess without modifying them.
+    pub resources: Vec<ProjectResource>,
+}
+
 /// One exact resource observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectResourceObservation {
@@ -263,6 +288,12 @@ pub trait ProjectResourcePort {
         &self,
         request: &EffectRequest<ProjectResourceValidationRequest>,
     ) -> Result<EffectOutcome<Vec<ProjectResourceObservation>>, hq_application::ApplicationError>;
+
+    /// Assesses whether desired resources can release advisory claims gracefully.
+    fn assess_release(
+        &self,
+        request: &EffectRequest<ProjectReleaseAssessmentRequest>,
+    ) -> Result<EffectOutcome<Vec<PathReleaseAssessment>>, hq_application::ApplicationError>;
 
     /// Revalidates the exact launch directory after runtime readiness.
     fn validate_launch_directory(
@@ -420,6 +451,15 @@ where
                     launch_directory,
                 )?,
                 ProjectCommandAction::DispatchPending => self.advance_dispatch(&mut record)?,
+                ProjectCommandAction::Close { force } => {
+                    self.advance_close(&mut record, force, false)?;
+                }
+                ProjectCommandAction::SetArchived { archived: true } => {
+                    self.advance_close(&mut record, false, true)?;
+                }
+                ProjectCommandAction::SetArchived { archived: false } => {
+                    self.advance_unarchive(&mut record)?;
+                }
                 _ => reject(
                     &self.store,
                     &mut record,
@@ -437,6 +477,418 @@ where
             }
         }
         Ok(progress_outcome(&record))
+    }
+
+    fn advance_close(
+        &self,
+        record: &mut ProjectSagaRecord,
+        force: bool,
+        archive_after_close: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let snapshot = self
+            .canonical
+            .snapshot(record.project_id, record.account_id, None)?;
+        if snapshot.home != record.home || snapshot.project_id != record.project_id {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Unauthorized, "project_wrong_home"),
+            );
+        }
+        let stage = current_stage(record);
+        if let Some(pending) = record.pending_canonical_mutation.clone() {
+            return match self.replay_canonical_mutation(record)? {
+                CanonicalProjectMutationOutcome::Committed { project_head } => self
+                    .advance_after_close_mutation(
+                        record,
+                        &pending.action,
+                        project_head,
+                        archive_after_close,
+                    ),
+                CanonicalProjectMutationOutcome::Rejected(error) => {
+                    reject(&self.store, record, error)
+                }
+                CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                    &self.store,
+                    record,
+                    stage,
+                    effect_error("project_canonical_commit_unknown"),
+                    EffectKind::None,
+                ),
+            };
+        }
+        match stage {
+            ProjectCommandStage::Accepted => {
+                self.accept_close(record, &snapshot, archive_after_close)
+            }
+            ProjectCommandStage::AssessingRelease => {
+                self.assess_close_release(record, &snapshot, force)
+            }
+            ProjectCommandStage::QuiescingRuntime => {
+                self.quiesce_close_runtime(record, &snapshot, force)
+            }
+            ProjectCommandStage::Closing => {
+                let action = CanonicalProjectMutationAction::FinishClosing {
+                    forced: force,
+                    runtime: close_runtime_observation(&record.runtime_effect)?,
+                };
+                match self.mutate(record, snapshot.head, b"finish-close", action.clone())? {
+                    CanonicalProjectMutationOutcome::Committed { project_head } => self
+                        .advance_after_close_mutation(
+                            record,
+                            &action,
+                            project_head,
+                            archive_after_close,
+                        ),
+                    CanonicalProjectMutationOutcome::Rejected(error) => {
+                        reject(&self.store, record, error)
+                    }
+                    CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                        &self.store,
+                        record,
+                        stage,
+                        effect_error("project_close_commit_unknown"),
+                        EffectKind::None,
+                    ),
+                }
+            }
+            ProjectCommandStage::UpdatingProject if archive_after_close => self
+                .commit_terminal_mutation(
+                    record,
+                    snapshot.head,
+                    b"archive",
+                    CanonicalProjectMutationAction::Archive,
+                ),
+            _ => reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_invalid_transition"),
+            ),
+        }
+    }
+
+    fn accept_close(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        archive_after_close: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        if snapshot.head != record.expected_head {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_stale_head"),
+            );
+        }
+        if !snapshot.active_human {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Unauthorized, "project_inactive_human"),
+            );
+        }
+        if snapshot.archived {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_archived"),
+            );
+        }
+        match snapshot.lifecycle {
+            CanonicalProjectLifecycle::Closed if archive_after_close => {
+                checkpoint(&self.store, record, ProjectCommandStage::UpdatingProject)
+            }
+            CanonicalProjectLifecycle::Open | CanonicalProjectLifecycle::Closing => {
+                checkpoint(&self.store, record, ProjectCommandStage::AssessingRelease)
+            }
+            CanonicalProjectLifecycle::Closed => reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_invalid_transition"),
+            ),
+        }
+    }
+
+    fn assess_close_release(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        force: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let operation = derived_operation(record.operation_id, b"release-assessment", &[]);
+        record.resource_operation_id = Some(operation);
+        if matches!(record.resource_effect, SagaEffectState::NotStarted) {
+            record.resource_effect = SagaEffectState::Pending;
+            persist(&self.store, record)?;
+        }
+        let request = EffectRequest {
+            operation_id: operation,
+            request_digest: release_assessment_digest(record, &snapshot.resources),
+            issued_at: record.issued_at,
+            body: ProjectReleaseAssessmentRequest {
+                home: record.home,
+                project_id: record.project_id,
+                resources: snapshot.resources.clone(),
+            },
+        };
+        match self.resources.assess_release(&request)? {
+            EffectOutcome::Accepted(assessments)
+                if release_assessments_match(record.home, &snapshot.resources, &assessments) =>
+            {
+                match decide_release(&assessments, force) {
+                    ReleaseDecision::Proceed | ReleaseDecision::Forced { .. } => {
+                        record.resource_effect = SagaEffectState::Accepted;
+                        persist(&self.store, record)?;
+                        self.begin_or_resume_closing(record, snapshot)
+                    }
+                    ReleaseDecision::ForceRequired { .. } => reject(
+                        &self.store,
+                        record,
+                        error(ErrorCategory::Conflict, "project_release_force_required"),
+                    ),
+                }
+            }
+            EffectOutcome::Accepted(_) => reject(
+                &self.store,
+                record,
+                error(
+                    ErrorCategory::Conflict,
+                    "project_release_assessment_changed",
+                ),
+            ),
+            EffectOutcome::Rejected(error) if force => {
+                record.resource_effect = SagaEffectState::Rejected(error);
+                persist(&self.store, record)?;
+                self.begin_or_resume_closing(record, snapshot)
+            }
+            EffectOutcome::Rejected(error) => reject(&self.store, record, error),
+            EffectOutcome::Uncertain(_) if force => {
+                record.resource_effect =
+                    SagaEffectState::Uncertain(effect_error("project_release_assessment_unknown"));
+                persist(&self.store, record)?;
+                self.begin_or_resume_closing(record, snapshot)
+            }
+            EffectOutcome::Uncertain(_) => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::AssessingRelease,
+                effect_error("project_release_assessment_unknown"),
+                EffectKind::Resource,
+            ),
+        }
+    }
+
+    fn begin_or_resume_closing(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+    ) -> Result<(), hq_application::ApplicationError> {
+        if snapshot.lifecycle == CanonicalProjectLifecycle::Closing {
+            return checkpoint(&self.store, record, ProjectCommandStage::QuiescingRuntime);
+        }
+        match self.mutate(
+            record,
+            snapshot.head,
+            b"begin-close",
+            CanonicalProjectMutationAction::BeginClosing,
+        )? {
+            CanonicalProjectMutationOutcome::Committed { .. } => {
+                checkpoint(&self.store, record, ProjectCommandStage::QuiescingRuntime)
+            }
+            CanonicalProjectMutationOutcome::Rejected(error) => reject(&self.store, record, error),
+            CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::AssessingRelease,
+                effect_error("project_begin_close_unknown"),
+                EffectKind::None,
+            ),
+        }
+    }
+
+    fn quiesce_close_runtime(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        force: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        if snapshot.lifecycle != CanonicalProjectLifecycle::Closing {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_invalid_transition"),
+            );
+        }
+        let Some(assignment) = snapshot.assignment.as_ref() else {
+            return checkpoint(&self.store, record, ProjectCommandStage::Closing);
+        };
+        let operation = derived_operation(record.operation_id, b"close-runtime", &[]);
+        record.runtime_operation_id = Some(operation);
+        if matches!(record.runtime_effect, SagaEffectState::NotStarted) {
+            record.runtime_effect = SagaEffectState::Pending;
+            persist(&self.store, record)?;
+        }
+        let request = EffectRequest {
+            operation_id: operation,
+            request_digest: close_runtime_digest(record.project_id, assignment),
+            issued_at: record.issued_at,
+            body: ProjectRuntimeRequest {
+                project_id: record.project_id,
+                agent_id: assignment.intent.agent_id,
+                provider: assignment.intent.provider.clone(),
+                resume_session: assignment
+                    .binding
+                    .as_ref()
+                    .map(|binding| binding.session.clone()),
+            },
+        };
+        let (runtime, forced) = match self.runtime.stop(&request)? {
+            EffectOutcome::Accepted(()) => {
+                record.runtime_effect = SagaEffectState::Accepted;
+                (RuntimeObservation::Succeeded, false)
+            }
+            EffectOutcome::Rejected(error) if force => {
+                let runtime = RuntimeObservation::Failed(error.code().clone());
+                record.runtime_effect = SagaEffectState::Rejected(error);
+                (runtime, true)
+            }
+            EffectOutcome::Rejected(error) => return reject(&self.store, record, error),
+            EffectOutcome::Uncertain(_) if force => {
+                let error = effect_error("project_runtime_stop_unknown");
+                let runtime = RuntimeObservation::Uncertain(error.code().clone());
+                record.runtime_effect = SagaEffectState::Uncertain(error);
+                (runtime, true)
+            }
+            EffectOutcome::Uncertain(_) => {
+                return reconcile(
+                    &self.store,
+                    record,
+                    ProjectCommandStage::QuiescingRuntime,
+                    effect_error("project_runtime_stop_unknown"),
+                    EffectKind::Runtime,
+                );
+            }
+        };
+        persist(&self.store, record)?;
+        match self.mutate(
+            record,
+            snapshot.head,
+            b"close-end-assignment",
+            CanonicalProjectMutationAction::EndAssignment {
+                assignment_id: assignment.intent.assignment_id,
+                forced,
+                runtime: Some(runtime),
+            },
+        )? {
+            CanonicalProjectMutationOutcome::Committed { .. } => {
+                checkpoint(&self.store, record, ProjectCommandStage::Closing)
+            }
+            CanonicalProjectMutationOutcome::Rejected(error) => reject(&self.store, record, error),
+            CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::QuiescingRuntime,
+                effect_error("project_assignment_end_unknown"),
+                EffectKind::None,
+            ),
+        }
+    }
+
+    fn advance_after_close_mutation(
+        &self,
+        record: &mut ProjectSagaRecord,
+        action: &CanonicalProjectMutationAction,
+        project_head: FactId,
+        archive_after_close: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        match action {
+            CanonicalProjectMutationAction::BeginClosing => {
+                checkpoint(&self.store, record, ProjectCommandStage::QuiescingRuntime)
+            }
+            CanonicalProjectMutationAction::EndAssignment { .. } => {
+                checkpoint(&self.store, record, ProjectCommandStage::Closing)
+            }
+            CanonicalProjectMutationAction::FinishClosing { .. } if archive_after_close => {
+                checkpoint(&self.store, record, ProjectCommandStage::UpdatingProject)
+            }
+            CanonicalProjectMutationAction::FinishClosing { .. }
+            | CanonicalProjectMutationAction::Archive => {
+                record.state = ProjectSagaState::Completed { project_head };
+                persist(&self.store, record)
+            }
+            _ => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
+    }
+
+    fn advance_unarchive(
+        &self,
+        record: &mut ProjectSagaRecord,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let snapshot = self
+            .canonical
+            .snapshot(record.project_id, record.account_id, None)?;
+        if snapshot.home != record.home || snapshot.project_id != record.project_id {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Unauthorized, "project_wrong_home"),
+            );
+        }
+        if current_stage(record) == ProjectCommandStage::Accepted {
+            if snapshot.head != record.expected_head {
+                return reject(
+                    &self.store,
+                    record,
+                    error(ErrorCategory::Conflict, "project_stale_head"),
+                );
+            }
+            if !snapshot.active_human {
+                return reject(
+                    &self.store,
+                    record,
+                    error(ErrorCategory::Unauthorized, "project_inactive_human"),
+                );
+            }
+            checkpoint(&self.store, record, ProjectCommandStage::UpdatingProject)?;
+            return Ok(());
+        }
+        self.commit_terminal_mutation(
+            record,
+            snapshot.head,
+            b"unarchive",
+            CanonicalProjectMutationAction::Unarchive,
+        )
+    }
+
+    fn commit_terminal_mutation(
+        &self,
+        record: &mut ProjectSagaRecord,
+        expected_head: FactId,
+        tag: &[u8],
+        action: CanonicalProjectMutationAction,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let stage = current_stage(record);
+        let outcome = if record.pending_canonical_mutation.is_some() {
+            self.replay_canonical_mutation(record)?
+        } else {
+            self.mutate(record, expected_head, tag, action)?
+        };
+        match outcome {
+            CanonicalProjectMutationOutcome::Committed { project_head } => {
+                record.state = ProjectSagaState::Completed { project_head };
+                persist(&self.store, record)
+            }
+            CanonicalProjectMutationOutcome::Rejected(error) => reject(&self.store, record, error),
+            CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                &self.store,
+                record,
+                stage,
+                effect_error("project_archive_commit_unknown"),
+                EffectKind::None,
+            ),
+        }
     }
 
     fn advance_resource_mutation(
@@ -1203,6 +1655,8 @@ where
                     b"compensate-assignment".as_slice(),
                     CanonicalProjectMutationAction::EndAssignment {
                         assignment_id: assignment.intent.assignment_id,
+                        forced: false,
+                        runtime: None,
                     },
                 ))
             } else if record.opened_by_workflow {
@@ -1213,7 +1667,10 @@ where
                     )),
                     CanonicalProjectLifecycle::Closing => Some((
                         b"compensate-finish-closing".as_slice(),
-                        CanonicalProjectMutationAction::FinishClosing,
+                        CanonicalProjectMutationAction::FinishClosing {
+                            forced: false,
+                            runtime: None,
+                        },
                     )),
                     CanonicalProjectLifecycle::Closed => None,
                 }
@@ -1409,6 +1866,19 @@ fn resources_match_observations(
         })
 }
 
+fn release_assessments_match(
+    home: InstallationId,
+    resources: &[ProjectResource],
+    assessments: &[PathReleaseAssessment],
+) -> bool {
+    resources.len() == assessments.len()
+        && resources.iter().all(|resource| {
+            assessments.iter().any(|assessment| {
+                assessment.home == home && assessment.resource_id == resource.resource_id
+            })
+        })
+}
+
 fn resource_validation_digest(
     record: &ProjectSagaRecord,
     resources: &[ProjectResource],
@@ -1420,6 +1890,53 @@ fn resource_validation_digest(
         put_resource(&mut digest, resource);
     }
     CommandDigest::from_bytes(digest.finalize().into())
+}
+
+fn release_assessment_digest(
+    record: &ProjectSagaRecord,
+    resources: &[ProjectResource],
+) -> CommandDigest {
+    let mut digest = Sha256::new();
+    put(&mut digest, b"hq-project-release-assessment-v1");
+    put(&mut digest, record.operation_id.as_bytes());
+    for resource in resources {
+        put_resource(&mut digest, resource);
+    }
+    CommandDigest::from_bytes(digest.finalize().into())
+}
+
+fn close_runtime_digest(
+    project_id: ProjectId,
+    assignment: &CanonicalProjectAssignment,
+) -> CommandDigest {
+    let mut digest = Sha256::new();
+    put(&mut digest, b"hq-project-close-runtime-v1");
+    put(&mut digest, project_id.as_bytes());
+    put(&mut digest, assignment.intent.assignment_id.as_bytes());
+    put(&mut digest, assignment.intent.agent_id.as_bytes());
+    put(&mut digest, assignment.intent.provider.as_str().as_bytes());
+    if let Some(binding) = &assignment.binding {
+        put_binding(&mut digest, binding);
+    }
+    CommandDigest::from_bytes(digest.finalize().into())
+}
+
+fn close_runtime_observation(
+    effect: &SagaEffectState,
+) -> Result<Option<RuntimeObservation>, hq_application::ApplicationError> {
+    match effect {
+        SagaEffectState::NotStarted => Ok(None),
+        SagaEffectState::Accepted => Ok(Some(RuntimeObservation::Succeeded)),
+        SagaEffectState::Rejected(error) => {
+            Ok(Some(RuntimeObservation::Failed(error.code().clone())))
+        }
+        SagaEffectState::Uncertain(error) => {
+            Ok(Some(RuntimeObservation::Uncertain(error.code().clone())))
+        }
+        SagaEffectState::Pending => Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::StateCorrupt,
+        )),
+    }
 }
 
 fn select_thread(
@@ -1644,12 +2161,24 @@ fn mutation_digest(
             put(&mut digest, activation.session().as_str().as_bytes());
             put(&mut digest, activation.operation().as_bytes());
         }
-        CanonicalProjectMutationAction::EndAssignment { assignment_id } => {
+        CanonicalProjectMutationAction::EndAssignment {
+            assignment_id,
+            forced,
+            runtime,
+        } => {
             put(&mut digest, b"end-assignment");
             put(&mut digest, assignment_id.as_bytes());
+            put(&mut digest, &[u8::from(*forced)]);
+            put_runtime_observation(&mut digest, runtime.as_ref());
         }
         CanonicalProjectMutationAction::BeginClosing => put(&mut digest, b"begin-closing"),
-        CanonicalProjectMutationAction::FinishClosing => put(&mut digest, b"finish-closing"),
+        CanonicalProjectMutationAction::FinishClosing { forced, runtime } => {
+            put(&mut digest, b"finish-closing");
+            put(&mut digest, &[u8::from(*forced)]);
+            put_runtime_observation(&mut digest, runtime.as_ref());
+        }
+        CanonicalProjectMutationAction::Archive => put(&mut digest, b"archive"),
+        CanonicalProjectMutationAction::Unarchive => put(&mut digest, b"unarchive"),
         CanonicalProjectMutationAction::RecordDispatch {
             input,
             dispatch_id,
@@ -1700,6 +2229,21 @@ fn put_resource(digest: &mut Sha256, resource: &ProjectResource) {
         ResourceHealth::Unavailable => 4,
     };
     put(digest, &[health]);
+}
+
+fn put_runtime_observation(digest: &mut Sha256, observation: Option<&RuntimeObservation>) {
+    match observation {
+        None => put(digest, &[0]),
+        Some(RuntimeObservation::Succeeded) => put(digest, &[1]),
+        Some(RuntimeObservation::Failed(code)) => {
+            put(digest, &[2]);
+            put(digest, code.as_str().as_bytes());
+        }
+        Some(RuntimeObservation::Uncertain(code)) => {
+            put(digest, &[3]);
+            put(digest, code.as_str().as_bytes());
+        }
+    }
 }
 
 fn put(digest: &mut Sha256, value: &[u8]) {

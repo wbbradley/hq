@@ -312,7 +312,11 @@ fn payload(
                 activation: activation.clone(),
             })
         }
-        CanonicalProjectMutationAction::EndAssignment { assignment_id }
+        CanonicalProjectMutationAction::EndAssignment {
+            assignment_id,
+            forced,
+            runtime,
+        }
             if view.assignment.as_ref().is_some_and(|assignment| {
                 assignment.intent.assignment_id == *assignment_id
             }) =>
@@ -320,24 +324,40 @@ fn payload(
             Ok(SemanticPayload::ProjectAssignmentEnded {
                 project_id: mutation.project_id,
                 assignment_id: *assignment_id,
-                forced: false,
-                runtime: None,
+                forced: *forced,
+                runtime: runtime.clone(),
             })
         }
         CanonicalProjectMutationAction::BeginClosing
-            if view.lifecycle == ProjectLifecycle::Open && view.assignment.is_none() =>
+            if view.lifecycle == ProjectLifecycle::Open =>
         {
             Ok(SemanticPayload::ProjectClosingStarted {
                 project_id: mutation.project_id,
             })
         }
-        CanonicalProjectMutationAction::FinishClosing
+        CanonicalProjectMutationAction::FinishClosing { forced, runtime }
             if view.lifecycle == ProjectLifecycle::Closing && view.assignment.is_none() =>
         {
             Ok(SemanticPayload::ProjectClosed {
                 project_id: mutation.project_id,
-                forced: false,
-                runtime: None,
+                forced: *forced,
+                runtime: runtime.clone(),
+            })
+        }
+        CanonicalProjectMutationAction::Archive
+            if view.lifecycle == ProjectLifecycle::Closed
+                && !view.archived
+                && view.assignment.is_none() =>
+        {
+            Ok(SemanticPayload::ProjectArchived {
+                project_id: mutation.project_id,
+            })
+        }
+        CanonicalProjectMutationAction::Unarchive
+            if view.lifecycle == ProjectLifecycle::Closed && view.archived =>
+        {
+            Ok(SemanticPayload::ProjectUnarchived {
+                project_id: mutation.project_id,
             })
         }
         CanonicalProjectMutationAction::RecordDispatch {

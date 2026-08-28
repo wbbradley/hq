@@ -111,6 +111,23 @@ mutating an open project may not acquire a conflicting active claim. Remove requ
 force while assigned, and replace authors one atomic fact. These commands only change HQ's desired
 membership and advisory claims; they never mutate Git or filesystem state.
 
+Close begins with one stable, batched, read-only release assessment. Clean and non-Git resources
+may proceed gracefully; dirty or unknown observations require explicit force. A graceful close
+authors `ProjectClosingStarted` before asking the exact assigned runtime to stop, so dispatch is
+disabled while the assignment and every active claim remain authoritative. Definite runtime
+failure or an unresolved stop response leaves that closing state intact. Explicit force may end HQ
+authority after a failed or uncertain stop, but the assignment-end and closed facts retain the
+typed runtime observation and do not assert that an external process stopped. Final close releases
+advisory claims without invoking any mutating resource capability and preserves desired resources,
+pending inputs, threads, and history.
+
+Archive has no implicit force. An open archive request uses the same graceful close path and only
+authors `ProjectArchived` after the project is closed and unassigned. Archive and unarchive on an
+already closed project call neither runtime nor resource capabilities; unarchive remains closed and
+claim-free. Every release, runtime, assignment-end, close, archive, and unarchive boundary uses the
+existing saga effect and pending-canonical-mutation checkpoints, so response-loss repair needs no
+additional storage field or compatibility migration.
+
 Pending project inputs remain separate and ordered by their home acceptance sequence. Each exact
 input is submitted through the harness supervisor's existing durable delivery ledger. The workflow
 reconciles an uncertain submission before retry and authors `ProjectInputDispatched` only after

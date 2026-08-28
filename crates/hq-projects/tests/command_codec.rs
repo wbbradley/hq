@@ -7,9 +7,9 @@ use std::num::NonZeroU64;
 use hq_application::ProjectCommandAction;
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, BoundedText, CommandDigest, CommandId,
-    ContentText, DispatchId, FactId, InstallationId, MessageId, ProjectId, ProjectResource,
-    ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme,
-    ThreadId, Timestamp,
+    ContentText, DispatchId, ErrorCode, FactId, InstallationId, MessageId, ProjectId,
+    ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator,
+    ResourceScheme, RuntimeObservation, ThreadId, Timestamp,
 };
 use hq_projects::{
     CanonicalProjectMutation, CanonicalProjectMutationAction, PendingProjectInput,
@@ -132,6 +132,41 @@ fn in_flight_resource_mutations_round_trip_exactly() {
             home: InstallationId::from_bytes([37; 32]),
             expected_head: FactId::from_bytes([38; 32]),
             issued_at: Timestamp::from_unix_millis(39),
+            action,
+        };
+        let encoded = encode_canonical_project_mutation(&mutation).expect("mutation encodes");
+        assert_eq!(
+            decode_canonical_project_mutation(&encoded).expect("mutation decodes"),
+            mutation
+        );
+    }
+}
+
+#[test]
+fn in_flight_close_and_archive_mutations_round_trip_exactly() {
+    let failure = ErrorCode::new("runtime-stop-failed").expect("error code");
+    let uncertain = ErrorCode::new("runtime-stop-unknown").expect("error code");
+    for action in [
+        CanonicalProjectMutationAction::EndAssignment {
+            assignment_id: AssignmentId::from_bytes([41; 32]),
+            forced: true,
+            runtime: Some(RuntimeObservation::Failed(failure)),
+        },
+        CanonicalProjectMutationAction::FinishClosing {
+            forced: true,
+            runtime: Some(RuntimeObservation::Uncertain(uncertain)),
+        },
+        CanonicalProjectMutationAction::Archive,
+        CanonicalProjectMutationAction::Unarchive,
+    ] {
+        let mutation = CanonicalProjectMutation {
+            command_id: CommandId::from_bytes([42; 32]),
+            request_digest: CommandDigest::from_bytes([43; 32]),
+            account_id: AccountId::from_bytes([44; 32]),
+            project_id: ProjectId::from_bytes([45; 32]),
+            home: InstallationId::from_bytes([46; 32]),
+            expected_head: FactId::from_bytes([47; 32]),
+            issued_at: Timestamp::from_unix_millis(48),
             action,
         };
         let encoded = encode_canonical_project_mutation(&mutation).expect("mutation encodes");

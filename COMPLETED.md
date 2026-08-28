@@ -6556,8 +6556,6 @@ and unchanged-Go gates pass.
   those. If new future work items were discovered, add them. If the plan file or completed file is
   outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
   other changes.
-
-
 ## 2026-08-28 — Project open and resource mutation workflows
 
 Implemented durable direct open, resource add, forced/unforced remove, and atomic replace workflows
@@ -6613,6 +6611,103 @@ four-target, fuzz, whitespace, and unchanged-Go gates pass.
   - Closed projects may retain overlapping desired resources because they hold no active claims.
     Opening or mutating an open project must be globally claimable. No resource command changes
     external filesystem or Git state.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely
+  from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any
+  other marker. The task and its related subsections should no longer appear in the plan file at
+  all. The plan file should not have any sort of "Done" section. Then append a new entry to the
+  completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to
+     preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update
+  those. If new future work items were discovered, add them. If the plan file or completed file is
+  outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
+  other changes.
+
+
+## 2026-08-28 — Graceful/forced project close and archival workflows
+
+Implemented durable project close, force-close, archive-after-close, and closed unarchive workflows
+over the existing saga record and transaction-consistent canonical port. One stable batched,
+read-only release assessment applies the shared resource force policy; graceful close enters a
+claim-preserving closing state before exact runtime quiescence, while force can revoke HQ authority
+after failed or uncertain observations and records that truth in both assignment-end and close
+facts. Archive has no implicit force, open archive uses the graceful close path, and closed archive
+or unarchive invokes no resource or runtime capability. Exact pending canonical mutations repair
+response loss at every boundary without duplicate facts, desired resources and pending inputs are
+preserved, and no resource mutation or deletion capability exists in the workflow. The clean-sheet
+storage schema remains v13 with no new field, migration, or version bump. All locked workspace,
+strict Clippy, documentation, architecture, dependency, four-target, fuzz, whitespace, and frozen
+Go gates pass.
+
+### Original plan entry
+
+- **[projects/high] Implement graceful/forced close and archival workflows** — Add durable release
+  assessment, graceful runtime quiescence, assignment end, claim-preserving closing, final close,
+  archive-after-close, and closed unarchive workflows. Dirty or unknown resources require force;
+  graceful close retains claims until runtime quiescence, while force revokes only HQ authority and
+  records stopped/still-running/unknown observation without claiming external cessation. Test every
+  definite/unknown filesystem, runtime, and canonical boundary, restart repair, pending-input
+  preservation, stale commands, competing devices, and no implicit resource deletion.
+
+  **Implementation plan**
+
+  - Extend the read-only project resource capability with one stable batched release assessment and
+    apply `hq-resources` pure force policy without interpreting Git-specific evidence in the saga.
+    Clean and not-applicable resources may close gracefully; dirty, adapter-unknown, rejected, or
+    response-unknown assessment requires explicit force. Assessment never mutates a path or Git.
+  - Extend canonical mutations with forced/runtime-attributed assignment end and final close plus
+    archive and unarchive actions. Validate immutable home, active-human authority, exact head, and
+    lifecycle inside each serialized callback. Entering closing retains the current assignment and
+    active claims; only the final closed fact follows assignment end and releases claims.
+  - Implement `Close` and `SetArchived` in the bounded saga manager. Graceful close assesses
+    release, enters closing, quiesces an assigned runtime by stable identity, ends the exact
+    assignment, and closes. Force may continue after rejected or unknown assessment/runtime
+    outcomes while recording a truthful typed runtime observation. Archiving an open project uses
+    this same graceful path before one archive fact; unarchive remains closed and claim-free.
+  - Reuse existing durable effect state and the exact pending-canonical-mutation codec for restart
+    repair; do not add a storage field, version, or migration. Preserve accepted pending inputs,
+    desired resources, threads, and history throughout. Add deterministic contracts for every
+    release/runtime/canonical outcome, response loss, restart point, stale or competing command,
+    force gate, archive transition, and zero external deletion, then run every repository gate.
+
+  **Risks and decisions**
+
+  - Runtime quiescence and canonical revocation cannot share a transaction. Graceful close remains
+    in claim-preserving closing on definite failure or unresolved response; explicit force may
+    revoke HQ authority but records failed/uncertain external observation and never claims the
+    process or arbitrary filesystem access stopped.
+  - Archive has no force flag. An open archive request performs ordinary graceful close and may
+    require the human to force-close separately before retrying archive. Closed archive/unarchive
+    never acquires claims or invokes resource/runtime capabilities.
 
   ## Post-Plan Execution Steps
 

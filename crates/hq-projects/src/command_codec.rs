@@ -8,7 +8,8 @@ use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText,
     CommandDigest, CommandId, ContentText, DispatchId, FactId, InstallationId, MessageId,
     OperationCorrelation, OperationId, ProjectId, ProjectResource, ProviderId, ProviderSessionId,
-    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, ShortText, ThreadId, Timestamp,
+    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, RuntimeObservation, ShortText,
+    ThreadId, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
@@ -533,9 +534,16 @@ enum WireCanonicalAction {
     },
     EndAssignment {
         assignment: String,
+        forced: bool,
+        runtime: Option<WireRuntimeObservation>,
     },
     BeginClosing,
-    FinishClosing,
+    FinishClosing {
+        forced: bool,
+        runtime: Option<WireRuntimeObservation>,
+    },
+    Archive,
+    Unarchive,
     RecordDispatch {
         input: WirePendingInput,
         dispatch: String,
@@ -584,13 +592,24 @@ impl From<&CanonicalProjectMutationAction> for WireCanonicalAction {
                 launch_directory: WireLocator::from(launch_directory),
                 activation: WireCorrelation::from(activation),
             },
-            CanonicalProjectMutationAction::EndAssignment { assignment_id } => {
-                Self::EndAssignment {
-                    assignment: id_text(assignment_id.as_bytes()),
+            CanonicalProjectMutationAction::EndAssignment {
+                assignment_id,
+                forced,
+                runtime,
+            } => Self::EndAssignment {
+                assignment: id_text(assignment_id.as_bytes()),
+                forced: *forced,
+                runtime: runtime.as_ref().map(WireRuntimeObservation::from),
+            },
+            CanonicalProjectMutationAction::BeginClosing => Self::BeginClosing,
+            CanonicalProjectMutationAction::FinishClosing { forced, runtime } => {
+                Self::FinishClosing {
+                    forced: *forced,
+                    runtime: runtime.as_ref().map(WireRuntimeObservation::from),
                 }
             }
-            CanonicalProjectMutationAction::BeginClosing => Self::BeginClosing,
-            CanonicalProjectMutationAction::FinishClosing => Self::FinishClosing,
+            CanonicalProjectMutationAction::Archive => Self::Archive,
+            CanonicalProjectMutationAction::Unarchive => Self::Unarchive,
             CanonicalProjectMutationAction::RecordDispatch {
                 input,
                 dispatch_id,
@@ -650,11 +669,22 @@ impl TryFrom<WireCanonicalAction> for CanonicalProjectMutationAction {
                 launch_directory: launch_directory.try_into()?,
                 activation: activation.try_into()?,
             },
-            WireCanonicalAction::EndAssignment { assignment } => Self::EndAssignment {
+            WireCanonicalAction::EndAssignment {
+                assignment,
+                forced,
+                runtime,
+            } => Self::EndAssignment {
                 assignment_id: AssignmentId::from_bytes(parse_id(&assignment)?),
+                forced,
+                runtime: runtime.map(RuntimeObservation::try_from).transpose()?,
             },
             WireCanonicalAction::BeginClosing => Self::BeginClosing,
-            WireCanonicalAction::FinishClosing => Self::FinishClosing,
+            WireCanonicalAction::FinishClosing { forced, runtime } => Self::FinishClosing {
+                forced,
+                runtime: runtime.map(RuntimeObservation::try_from).transpose()?,
+            },
+            WireCanonicalAction::Archive => Self::Archive,
+            WireCanonicalAction::Unarchive => Self::Unarchive,
             WireCanonicalAction::RecordDispatch {
                 input,
                 dispatch,
@@ -666,6 +696,44 @@ impl TryFrom<WireCanonicalAction> for CanonicalProjectMutationAction {
                 binding: binding.try_into()?,
                 thread_id: ThreadId::from_bytes(parse_id(&thread)?),
             },
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum WireRuntimeObservation {
+    Succeeded,
+    Failed { code: String },
+    Uncertain { code: String },
+}
+
+impl From<&RuntimeObservation> for WireRuntimeObservation {
+    fn from(observation: &RuntimeObservation) -> Self {
+        match observation {
+            RuntimeObservation::Succeeded => Self::Succeeded,
+            RuntimeObservation::Failed(code) => Self::Failed {
+                code: code.as_str().to_owned(),
+            },
+            RuntimeObservation::Uncertain(code) => Self::Uncertain {
+                code: code.as_str().to_owned(),
+            },
+        }
+    }
+}
+
+impl TryFrom<WireRuntimeObservation> for RuntimeObservation {
+    type Error = ProjectCommandCodecError;
+
+    fn try_from(observation: WireRuntimeObservation) -> Result<Self, Self::Error> {
+        Ok(match observation {
+            WireRuntimeObservation::Succeeded => Self::Succeeded,
+            WireRuntimeObservation::Failed { code } => Self::Failed(
+                hq_domain::ErrorCode::new(code).map_err(|_| ProjectCommandCodecError::Invalid)?,
+            ),
+            WireRuntimeObservation::Uncertain { code } => Self::Uncertain(
+                hq_domain::ErrorCode::new(code).map_err(|_| ProjectCommandCodecError::Invalid)?,
+            ),
         })
     }
 }
