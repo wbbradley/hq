@@ -3,7 +3,11 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Condvar, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread::ThreadId,
 };
 
 use hq_application::{
@@ -20,7 +24,62 @@ use hq_local_api::{
 };
 use hq_node::{CancellationToken, ComponentDrain, ComponentError, NodeComponent};
 
-pub struct TestDirectory(PathBuf);
+pub struct TestDirectory {
+    path: PathBuf,
+    _process_lease: ProcessTestLease,
+}
+
+struct ProcessTestLease {
+    owner: ThreadId,
+}
+
+#[derive(Default)]
+struct ProcessTestLeaseState {
+    owner: Option<ThreadId>,
+    depth: usize,
+}
+
+fn process_test_lease() -> &'static (Mutex<ProcessTestLeaseState>, Condvar) {
+    static LEASE: OnceLock<(Mutex<ProcessTestLeaseState>, Condvar)> = OnceLock::new();
+    LEASE.get_or_init(|| (Mutex::new(ProcessTestLeaseState::default()), Condvar::new()))
+}
+
+impl ProcessTestLease {
+    fn acquire() -> Self {
+        let owner = std::thread::current().id();
+        let (state, released) = process_test_lease();
+        let mut state = state.lock().expect("process test lease locks");
+        loop {
+            match state.owner {
+                None => {
+                    state.owner = Some(owner);
+                    state.depth = 1;
+                    return Self { owner };
+                }
+                Some(current) if current == owner => {
+                    state.depth = state.depth.checked_add(1).expect("lease depth is bounded");
+                    return Self { owner };
+                }
+                Some(_) => {
+                    state = released.wait(state).expect("process test lease waits");
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ProcessTestLease {
+    fn drop(&mut self) {
+        let (state, released) = process_test_lease();
+        let mut state = state.lock().expect("process test lease locks");
+        assert_eq!(state.owner, Some(self.owner));
+        state.depth = state.depth.checked_sub(1).expect("lease depth is positive");
+        if state.depth == 0 {
+            state.owner = None;
+            released.notify_all();
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct UnavailableNodeComponent;
@@ -246,20 +305,24 @@ impl LifecycleControl for UnavailableLifecycle {
 impl TestDirectory {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
+        let process_lease = ProcessTestLease::acquire();
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("hq-{}-{unique}", std::process::id()));
         fs::create_dir(&path).expect("test directory creates");
-        Self(path)
+        Self {
+            path,
+            _process_lease: process_lease,
+        }
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 }
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.path);
     }
 }
 

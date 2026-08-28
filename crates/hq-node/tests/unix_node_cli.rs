@@ -2326,6 +2326,33 @@ fn startup_refuses_a_persisted_root_that_disagrees_with_the_owned_identity() {
 }
 
 #[test]
+fn process_owning_test_directories_serialize_across_test_threads() {
+    let first = TestDirectory::new();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+    let contender = std::thread::spawn(move || {
+        started_tx.send(()).expect("start signal");
+        let second = TestDirectory::new();
+        acquired_tx.send(()).expect("acquired signal");
+        drop(second);
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("contender starts");
+    assert!(
+        acquired_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err(),
+        "another process-owning fixture must wait"
+    );
+    drop(first);
+    acquired_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("contender acquires after release");
+    contender.join().expect("contender exits");
+}
+
+#[test]
 fn concurrent_readiness_callers_spawn_candidates_but_converge_on_one_owner() {
     let directory = TestDirectory::new();
     let (state, runtime) = initialize(&directory);

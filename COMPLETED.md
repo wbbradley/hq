@@ -1,5 +1,29 @@
 # Completed
 
+## 2026-08-28 — Isolated process-owning CLI integration fixtures
+
+Eliminated the intermittent full-suite wait and orphaned test-daemon symptom by serializing
+process-owning integration fixtures within each test binary. The shared `TestDirectory` now owns a
+reentrant thread-qualified lease: one test may still create several installations and exercise
+real concurrent callers, while unrelated tests cannot overlap daemon generations or inherit one
+another's captured process streams. The production launcher already sent daemon stdin/stdout/stderr
+to null, so no product lifecycle behavior or storage/protocol shape changed.
+
+A regression test proves another test thread cannot acquire a process fixture until the owner
+releases it. The complete 17-test real CLI binary now finishes under the ordinary parallel harness
+without intervention, including concurrent readiness, process races, multi-installation pairing,
+restart, and explicit stop. The full locked workspace suite and strict node-test Clippy pass, and a
+post-suite process-table audit finds no HQ daemon.
+
+### Original plan entry
+
+- **[runtime/high] Eliminate intermittent concurrent-autostart output waits** — Reproduce the full
+  parallel CLI-suite case where a readiness caller waits on inherited output after its single
+  expected daemon is ready. Make process spawning and child release guarantee that background node
+  generations cannot retain an invoking CLI's output pipes or survive an explicit test stop.
+  Stress concurrent readiness with other autostarting commands, bound completion, and assert the
+  process table and runtime artifacts are clean afterward.
+
 ## 2026-08-28 — Existing-resource project creation CLI
 
 Added `project create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]` through

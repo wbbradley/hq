@@ -54,13 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[runtime/high] Eliminate intermittent concurrent-autostart output waits** — Reproduce the full
-  parallel CLI-suite case where a readiness caller waits on inherited output after its single
-  expected daemon is ready. Make process spawning and child release guarantee that background node
-  generations cannot retain an invoking CLI's output pipes or survive an explicit test stop.
-  Stress concurrent readiness with other autostarting commands, bound completion, and assert the
-  process table and runtime artifacts are clean afterward.
-
 - **[cli/high] Add project-addressed messaging** — Add `project send` through the ordinary
   application message planner so closed or unassigned work remains pending for the authoritative
   home. Test message sequencing, stdin, causal authority, response loss, restart, and deterministic
