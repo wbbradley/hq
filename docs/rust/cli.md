@@ -121,8 +121,17 @@ redacted diagnostic. `agent select NAME|AGENT_ID [--provider PROVIDER --session 
 complete prior selection frontier. `agent rename NAME|AGENT_ID DISPLAY_NAME` and `--clear` cite the
 exact claim/binding and complete rename frontier; rename never selects or starts a runtime. Without
 an explicit pair, selection uses the one current provider environment, while rename may use that
-environment or the unique durable selection. Safe retirement and managed runtime start/resume/stop
-remain separate node-owned workflows.
+environment or the unique durable selection.
+
+`agent retire NAME|AGENT_ID --yes [--force]` is a node-owned local API workflow. It binds the exact
+active claim and rejects stale, conflicted, retired, wrong-home, inactive-human, or multiply
+assigned state. An idle agent commits one transaction-consistent installation-private retirement.
+An assigned agent instead enters the owning project's durable saga, quiesces its runtime, ends the
+assignment, and only then retires. Definite or uncertain graceful-stop failure keeps the assignment
+blocked and HQ authority intact; only an explicit `--force` retry may revoke it, and output exposes
+`failed` or `uncertain` runtime truth and its stable code. Exact command frames replay across local
+response loss, nonterminal sagas repair after restart, and catalog history retains the retired name.
+Managed runtime start/resume/stop remains a separate node-owned workflow.
 
 `agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
 for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert
@@ -157,9 +166,9 @@ The reusable command client first crosses `NodeClientCoordinator` for bounded re
 one Unix transport and `hq-local-api::ReconnectingClient`. The transport performs bounded strict
 length-prefixed reads and complete writes. The runner allows one response-producing write at a
 time, renegotiates each connection, caps attempts and wall time, and correlates errors with their
-semantic operation. Ordinary requests are never replayed after response loss. Exact mutation and
-project command frames retain their stable identities and replay byte-for-byte until a definite
-typed result or the explicit bound is reached. Snapshot-oriented clients may request a fresh view
+semantic operation. Ordinary requests are never replayed after response loss. Exact mutation,
+project-command, and named-agent-retirement frames retain their stable identities and replay
+byte-for-byte until a definite typed result or the explicit bound is reached. Snapshot-oriented clients may request a fresh view
 after negotiation; command-only clients do not issue an unsolicited snapshot.
 
 CLI production code has no canonical storage, signer, relay, resource, harness-provider, or SQLite

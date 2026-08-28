@@ -9,10 +9,11 @@ use std::{
 };
 
 use hq_application::{
-    ApplicationError, ApplicationErrorCode, AuthoritativeSnapshot, CommitFacts, ControlProjects,
-    EffectOutcome, EffectRequest, FactMutation, InspectResource, MutationAttempt, MutationOutcome,
-    ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain,
-    ResourceInspectionRequest, ResourceInspectionResult,
+    AgentRetirementOutcome, AgentRetirementRequest, ApplicationError, ApplicationErrorCode,
+    AuthoritativeSnapshot, CommitFacts, ControlProjects, EffectOutcome, EffectRequest,
+    FactMutation, InspectResource, MutationAttempt, MutationOutcome, ProjectCommandOutcome,
+    ProjectCommandRequest, PublishWake, QueryDomain, ResourceInspectionRequest,
+    ResourceInspectionResult, RetireAgents,
 };
 use hq_domain::{Page, PageCursor, Timestamp};
 use hq_projects::{
@@ -203,6 +204,16 @@ impl<W: ProjectWorkerPort, F> ControlProjects for ProjectNodeComponent<W, F> {
     ) -> Result<ProjectCommandOutcome, ApplicationError> {
         self.ensure_accepting()?;
         self.worker.control_project(request)
+    }
+}
+
+impl<W: ProjectWorkerPort + RetireAgents, F> RetireAgents for ProjectNodeComponent<W, F> {
+    fn retire_agent(
+        &self,
+        request: AgentRetirementRequest,
+    ) -> Result<AgentRetirementOutcome, ApplicationError> {
+        self.ensure_accepting()?;
+        self.worker.retire_agent(request)
     }
 }
 

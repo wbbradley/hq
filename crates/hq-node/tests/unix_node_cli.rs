@@ -516,6 +516,67 @@ fn named_agent_catalog_reconciles_create_adopt_selection_and_rename_across_resta
 }
 
 #[test]
+fn idle_named_agent_retirement_is_explicit_and_survives_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let human = human_output(&state_root, &["create"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+
+    let created = agent_json(&state_root, &["create", "finished-agent"]);
+    let agent_id = created["data"]["agents"][0]["agent_id"]
+        .as_str()
+        .expect("created agent identity")
+        .to_owned();
+
+    let unconfirmed = agent_output(&state_root, &["retire", "finished-agent"]);
+    assert!(!unconfirmed.status.success());
+    assert!(
+        String::from_utf8(unconfirmed.stderr)
+            .expect("UTF-8 diagnostic")
+            .contains("usage")
+    );
+
+    let retired = agent_json(&state_root, &["retire", "finished-agent", "--yes"]);
+    assert_eq!(retired["kind"], "named_agent_retirement");
+    assert_eq!(retired["data"]["agent_id"], agent_id);
+    assert_eq!(retired["data"]["force"], false);
+    assert!(retired["data"]["project_id"].is_null());
+    assert!(retired["data"]["runtime"].is_null());
+    assert!(retired["data"]["runtime_code"].is_null());
+
+    let listed = agent_json(&state_root, &["list"]);
+    assert!(listed["data"]["agents"].as_array().is_some_and(|agents| {
+        agents
+            .iter()
+            .any(|agent| agent["agent_id"] == agent_id && agent["lifecycle"] == "retired")
+    }));
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let after_restart = agent_json(&state_root, &["list"]);
+    assert!(
+        after_restart["data"]["agents"]
+            .as_array()
+            .is_some_and(|agents| agents
+                .iter()
+                .any(|agent| { agent["agent_id"] == agent_id && agent["lifecycle"] == "retired" }))
+    );
+
+    let repeated = agent_output(&state_root, &["retire", &agent_id, "--yes"]);
+    assert!(!repeated.status.success());
+    assert!(
+        String::from_utf8(repeated.stderr)
+            .expect("UTF-8 diagnostic")
+            .contains("agent.state_unavailable")
+    );
+}
+
+#[test]
 fn named_agent_current_rejects_ambiguous_provider_environment_without_echoing_sessions() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");

@@ -31,6 +31,7 @@ store-owned cursor.
 | `ConfigureRelays` | Stable relay-policy and explicit synchronization operations plus bounded durable relay/delivery status |
 | `ControlHarness` | Neutral named-agent start, exact resume, and stop operations |
 | `ControlProjects` | Local execution or durable routing of one exact project command |
+| `RetireAgents` | Route exact named-agent retirement through idle commit or the owning project saga |
 | `InspectResource` | Typed external observation without claiming a durable state transition |
 | `ObserveRevisions` | Pending registration, later activation, and idempotent cancellation |
 
@@ -98,6 +99,14 @@ does not select or start a runtime. The authoritative client projection exposes 
 mailbox, binding, candidate, and frontier evidence directly. Because HQ has not shipped, local API
 v1 was evolved in place without compatibility accessors or a version bump.
 
+Retirement planning is also pure: its passive request carries the exact claim, mailbox, and
+complete agent-selection frontier and yields one installation-private `AgentRetired` plan. The
+behavioral `RetireAgents` capability is deliberately separate. Its coordinator rechecks the active
+human and global assignment set, commits an idle retirement transactionally, or delegates an
+assigned agent to the one owning project saga. A stale claim, fork, wrong home, changed command
+identity, or multiple assignment fails closed. No caller may author retirement directly from an
+external stop result.
+
 ## External operations
 
 `EffectRequest<T>` carries a stable `OperationId`, exact request digest, explicit issue time, and
@@ -137,6 +146,14 @@ workflow-opened project to closed; uncertainty retains the original typed failur
 stable identity. The exact pending canonical mutation is checkpointed before commit, so a restart
 replays the original expected head, action, and attribution instead of inferring success from a
 similar-looking later snapshot.
+
+Assigned-agent retirement reuses this durable checkpoint machinery. Graceful stop failure or
+uncertainty blocks the assignment; explicit force is required before ending it and authoring the
+absorbing retirement fact. Startup repair and response-loss replay retain the exact operation,
+request digest, expected project head, action, and runtime observation. Idle retirement needs no
+saga row and is validated again in the fact commit transaction. The existing unshipped storage v13
+schema and local API v1 were extended in place: there is no migration, compatibility facade, or
+version bump.
 
 Explicit open and resource add/replace commands re-observe the exact desired display/canonical
 identity before commit. The serialized canonical callback then repeats lifecycle, authority,

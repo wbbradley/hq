@@ -127,6 +127,68 @@ pub struct ProjectCommandRequest {
     pub action: ProjectCommandAction,
 }
 
+/// Stable exact request for node-owned named-agent retirement coordination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentRetirementRequest {
+    /// Stable command identity used by fact and project-saga replay.
+    pub command_id: CommandId,
+    /// Stable external workflow identity.
+    pub operation_id: OperationId,
+    /// Digest of every caller-controlled request field.
+    pub request_digest: CommandDigest,
+    /// Active human account authorizing retirement.
+    pub account_id: AccountId,
+    /// Durable named agent being retired.
+    pub agent_id: AgentId,
+    /// Exact active name claim selected by the caller.
+    pub expected_claim: FactId,
+    /// Installation that owns the agent and retirement workflow.
+    pub home: InstallationId,
+    /// Caller-supplied semantic time.
+    pub issued_at: Timestamp,
+    /// Whether failed or uncertain runtime cessation may revoke HQ authority.
+    pub force: bool,
+}
+
+/// Typed result of node-owned idle or assigned named-agent retirement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentRetirementOutcome {
+    /// Bounded execution made progress but has not reached a terminal state.
+    Running {
+        /// Stable workflow identity.
+        operation_id: OperationId,
+        /// Current durable project-workflow checkpoint.
+        stage: ProjectCommandStage,
+    },
+    /// Retirement reached a stable canonical state.
+    Completed {
+        /// Stable workflow identity.
+        operation_id: OperationId,
+        /// Project whose assignment was quiesced, absent for an idle agent.
+        project_id: Option<ProjectId>,
+        /// Definite or uncertain runtime truth retained by a forced assigned retirement.
+        runtime: Option<RuntimeObservation>,
+    },
+    /// Retirement was definitely rejected before an unknown unrecorded effect.
+    Rejected {
+        /// Stable workflow identity.
+        operation_id: OperationId,
+        /// Stable typed reason.
+        error: DomainError,
+        /// Definite or uncertain runtime truth observed before rejection.
+        runtime: Option<RuntimeObservation>,
+    },
+    /// External or commit truth is unknown and exact replay remains safe.
+    Reconcilable {
+        /// Stable workflow identity.
+        operation_id: OperationId,
+        /// Durable checkpoint at which replay resumes.
+        stage: ProjectCommandStage,
+        /// Stable typed reason.
+        error: DomainError,
+    },
+}
+
 /// Durable externally visible project workflow checkpoint.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ProjectCommandStage {
@@ -231,4 +293,13 @@ pub trait ControlProjects {
         &self,
         request: ProjectCommandRequest,
     ) -> Result<ProjectCommandOutcome, ApplicationError>;
+}
+
+/// Node-owned coordinator for safe named-agent retirement.
+pub trait RetireAgents {
+    /// Executes or reconciles one exact idle or assigned retirement request.
+    fn retire_agent(
+        &self,
+        request: AgentRetirementRequest,
+    ) -> Result<AgentRetirementOutcome, ApplicationError>;
 }

@@ -182,6 +182,17 @@ impl hq_application::ControlProjects for FakeComponent {
     }
 }
 
+impl hq_application::RetireAgents for FakeComponent {
+    fn retire_agent(
+        &self,
+        _request: hq_application::AgentRetirementRequest,
+    ) -> Result<hq_application::AgentRetirementOutcome, ApplicationError> {
+        Err(ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 fn foundation(directory: &TestDirectory) -> (NodeFoundation, StatePaths) {
     let state = StatePaths::new(directory.path().join("state")).expect("state paths");
     let owner = StateDirectoryOwner::acquire(state.clone()).expect("state owner");

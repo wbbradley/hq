@@ -31,6 +31,16 @@ use hq_resources::PathReleaseAssessment;
 struct MemoryStore(Arc<Mutex<BTreeMap<OperationId, ProjectSagaRecord>>>);
 
 impl ProjectSagaStore for MemoryStore {
+    fn find(&self, operation_id: OperationId) -> Result<Option<ProjectSagaRecord>, SagaStoreError> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| SagaStoreError::Unavailable)?
+            .values()
+            .find(|record| record.operation_id == operation_id)
+            .cloned())
+    }
+
     fn begin(&self, record: ProjectSagaRecord) -> Result<BeginSagaOutcome, SagaStoreError> {
         let mut records = self.0.lock().expect("store lock");
         if let Some(existing) = records.get(&record.operation_id) {

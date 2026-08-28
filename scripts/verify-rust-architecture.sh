@@ -230,6 +230,13 @@ if grep -Eq '(StoreGateway|Bip340Signer|FactMutation|SemanticPayload::(AgentName
 fi
 grep -Fq 'fn run_named_agent(' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "the installed CLI must expose named-agent catalog workflows"
+grep -Fq 'client.agent_retirement(' "$repository_root/crates/hq-node/src/cli.rs" ||
+  fail "named-agent retirement must cross the typed local API client"
+if grep -Eq '(ProjectWorkflowManager|CanonicalProjectPort|retire_idle_agent)' \
+  "$repository_root/crates/hq-node/src/cli.rs" \
+  "$repository_root/crates/hq-node/src/local_client.rs"; then
+  fail "named-agent clients must not invoke project or canonical retirement adapters directly"
+fi
 grep -Fq 'MutationRequest::from_plan' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "canonical CLI administration must cross the local mutation boundary"
 grep -Fq 'hq_node::execute_cli' "$repository_root/crates/hq-node/src/bin/hq.rs" ||

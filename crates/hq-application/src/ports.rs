@@ -496,6 +496,7 @@ pub trait ApplicationPorts:
     + ConfigureRelays
     + ControlHarness
     + crate::ControlProjects
+    + crate::RetireAgents
     + InspectResource
     + ObserveRevisions
 {

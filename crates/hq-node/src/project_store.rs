@@ -23,6 +23,17 @@ impl ProjectSagaStoreAdapter {
 }
 
 impl ProjectSagaStore for ProjectSagaStoreAdapter {
+    fn find(
+        &self,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<Option<ProjectSagaRecord>, SagaStoreError> {
+        self.state
+            .load(operation_id)
+            .map_err(map_store_error)?
+            .map(decode_record)
+            .transpose()
+    }
+
     fn begin(&self, record: ProjectSagaRecord) -> Result<BeginSagaOutcome, SagaStoreError> {
         match self
             .state

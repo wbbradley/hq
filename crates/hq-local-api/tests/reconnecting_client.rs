@@ -10,11 +10,12 @@ use hq_domain::{
     Timestamp,
 };
 use hq_local_api::protocol::v1::{
-    AuthoritativeSnapshotDto, BuildMetadata, ClientHello, ErrorClass, ErrorResponse, Id32,
-    InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus, MutationAttemptDto,
-    MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
-    Request, RequestId, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
-    SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
+    AgentRetirementOutcomeDto, AgentRetirementRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
+    ClientHello, ErrorClass, ErrorResponse, Id32, InvalidationTopic, LifecycleRequest,
+    LifecycleState, LifecycleStatus, MutationAttemptDto, MutationRequest, ProjectCommandActionDto,
+    ProjectCommandOutcomeDto, ProjectCommandRequestDto, Request, RequestId, ResponseEnvelope,
+    ResponseResult, RevisionInvalidation, ServerHello, SubscriptionAcknowledgement, V1,
+    VersionRange, VersionRejected, WireMessage,
 };
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientAction, ClientError,
@@ -133,6 +134,20 @@ fn project_command(command: u8, digest: u8) -> ProjectCommandRequestDto {
         expected_head: Some(Id32::new([6; 32])),
         issued_at_unix_millis: 1_700_000_000_000,
         action: ProjectCommandActionDto::Open,
+    }
+}
+
+fn agent_retirement(command: u8, digest: u8) -> AgentRetirementRequestDto {
+    AgentRetirementRequestDto {
+        command_id: Id32::new([command; 32]),
+        operation_id: Id32::new([command.wrapping_add(1); 32]),
+        request_digest: Id32::new([digest; 32]),
+        account_id: Id32::new([3; 32]),
+        agent_id: Id32::new([4; 32]),
+        expected_claim: Id32::new([5; 32]),
+        home: Id32::new([6; 32]),
+        issued_at_unix_millis: 1_700_000_000_000,
+        force: false,
     }
 }
 
@@ -332,6 +347,98 @@ fn lost_project_response_replays_exact_frame_and_terminal_identity_is_retained()
     changed.request_digest = Id32::new([86; 32]);
     assert_eq!(
         client.submit_project_command(changed),
+        Err(ClientError::ChangedCommandIdentity)
+    );
+}
+
+#[test]
+fn lost_agent_retirement_response_replays_exact_frame_and_retains_terminal_identity() {
+    let mut client = client();
+    let request = agent_retirement(91, 92);
+    assert!(
+        client
+            .submit_agent_retirement(request)
+            .expect("queue agent retirement")
+            .actions
+            .is_empty()
+    );
+    let (first, _) = only_connect(&client.start().expect("start").actions);
+    let _ = client.connected(first).expect("connect");
+    let negotiated = client
+        .receive_frame(
+            first,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([93; 32])))
+                .encode_frame()
+                .expect("hello frame"),
+        )
+        .expect("negotiates");
+    let original = negotiated
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientAction::Write { frame, .. }
+                if matches!(
+                    WireMessage::decode_frame(frame),
+                    Ok(WireMessage::Request(envelope))
+                        if matches!(envelope.request, Request::RetireAgent(_))
+                ) =>
+            {
+                Some(frame.clone())
+            }
+            _ => None,
+        })
+        .expect("agent retirement frame");
+
+    let (second, _) = only_connect(&client.disconnected(first).expect("lost response").actions);
+    let _ = client.connected(second).expect("reconnect");
+    let replay = client
+        .receive_frame(
+            second,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([94; 32])))
+                .encode_frame()
+                .expect("hello frame"),
+        )
+        .expect("renegotiates");
+    assert!(
+        replay.actions.iter().any(
+            |action| matches!(action, ClientAction::Write { frame, .. } if frame == &original)
+        )
+    );
+
+    let WireMessage::Request(envelope) = WireMessage::decode_frame(&original).expect("request")
+    else {
+        panic!("expected agent retirement request")
+    };
+    let completed = WireMessage::Response(ResponseEnvelope::success(
+        envelope.id,
+        ResponseResult::AgentRetirement(AgentRetirementOutcomeDto::Completed {
+            operation_id: request.operation_id,
+            project_id: None,
+            runtime: None,
+        }),
+    ))
+    .encode_frame()
+    .expect("completion frame");
+    let transition = client
+        .receive_frame(second, &completed)
+        .expect("completion accepted");
+    assert!(matches!(
+        transition.events.as_slice(),
+        [ClientEvent::AgentRetirement { command_id, outcome: AgentRetirementOutcomeDto::Completed { .. } }]
+            if *command_id == CommandId::from_bytes([91; 32])
+    ));
+    assert_eq!(client.completed_identity_count(), 1);
+    assert!(
+        client
+            .submit_agent_retirement(request)
+            .expect("terminal replay is local")
+            .actions
+            .is_empty()
+    );
+    let mut changed = request;
+    changed.request_digest = Id32::new([95; 32]);
+    assert_eq!(
+        client.submit_agent_retirement(changed),
         Err(ClientError::ChangedCommandIdentity)
     );
 }

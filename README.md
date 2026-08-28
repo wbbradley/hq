@@ -92,12 +92,18 @@ hq agent show jane
 hq agent current
 hq agent select jane --provider codex --session SESSION_ID --dir .
 hq agent rename jane "review work" --provider codex --session SESSION_ID
+hq agent retire jane --yes
+# Only after a graceful stop failed or remained uncertain:
+hq agent retire jane --yes --force
 ```
 
 Creation is restart-safe and reconciles a partially created mailbox. Selection and rename require
 the exact immutable session binding and complete causal register frontier; they reject stale,
-conflicted, or ambiguous metadata. Rename changes display metadata only. Safe retirement and
-managed provider start/exact-resume/stop are separate node-owned workflows.
+conflicted, or ambiguous metadata. Rename changes display metadata only. Retirement requires an
+active local human and `--yes`. An idle agent retires atomically without a runtime call; an assigned
+agent is quiesced through its owning project workflow. A failed or uncertain stop retains HQ
+authority until the caller repeats the command with `--force`, and the result reports the truthful
+runtime state. Managed provider start/exact-resume/stop is a separate node-owned workflow.
 
 ## Harness runtime and Codex adapter
 

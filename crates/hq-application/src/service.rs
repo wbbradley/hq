@@ -6,12 +6,12 @@ use hq_domain::{FactId, OperationId, Page, PageCursor};
 use hq_reducer::ConversationKey;
 
 use crate::{
-    AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts,
-    AuthoritativeSnapshot, CanonicalEvidence, ConversationEntry, EffectOutcome, EffectRequest,
-    EvidenceIngestOutcome, FactMutation, MutationAttempt, MutationOutcome, ProjectCommandOutcome,
-    ProjectCommandRequest, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
-    ResourceInspectionResult, StateHealth, StateRepairReport, SubscriptionRequest,
-    SynchronizationRequest, WakeDisposition,
+    AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest, AgentSessionResult,
+    ApplicationError, ApplicationPorts, AuthoritativeSnapshot, CanonicalEvidence,
+    ConversationEntry, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation,
+    MutationAttempt, MutationOutcome, ProjectCommandOutcome, ProjectCommandRequest,
+    RelayConfiguration, RelayStatus, ResourceInspectionRequest, ResourceInspectionResult,
+    StateHealth, StateRepairReport, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
 };
 
 /// Durable mutation attempt plus separate post-commit scheduling evidence.
@@ -114,6 +114,14 @@ where
         request: ProjectCommandRequest,
     ) -> Result<ProjectCommandOutcome, ApplicationError> {
         self.ports.control_project(request)
+    }
+
+    /// Executes or reconciles one exact node-owned named-agent retirement.
+    pub fn retire_agent(
+        &self,
+        request: AgentRetirementRequest,
+    ) -> Result<AgentRetirementOutcome, ApplicationError> {
+        self.ports.retire_agent(request)
     }
 
     /// Loads one indexed conversation page without a complete-history scan or sort.

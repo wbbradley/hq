@@ -301,3 +301,12 @@ impl hq_application::ControlProjects for DormantNodeComponent {
         unavailable()
     }
 }
+
+impl hq_application::RetireAgents for DormantNodeComponent {
+    fn retire_agent(
+        &self,
+        _request: hq_application::AgentRetirementRequest,
+    ) -> Result<hq_application::AgentRetirementOutcome, ApplicationError> {
+        unavailable()
+    }
+}

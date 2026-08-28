@@ -204,6 +204,17 @@ impl hq_application::ControlProjects for ScriptedPorts {
     }
 }
 
+impl hq_application::RetireAgents for ScriptedPorts {
+    fn retire_agent(
+        &self,
+        _request: hq_application::AgentRetirementRequest,
+    ) -> Result<hq_application::AgentRetirementOutcome, ApplicationError> {
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 impl ObserveRevisions for ScriptedPorts {
     fn register_subscription(
         &self,

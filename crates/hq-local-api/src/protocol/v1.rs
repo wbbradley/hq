@@ -825,6 +825,22 @@ pub struct ProjectCommandRequestDto {
     pub action: ProjectCommandActionDto,
 }
 
+/// Stable exact node-owned named-agent retirement request.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRetirementRequestDto {
+    pub command_id: Id32,
+    pub operation_id: Id32,
+    pub request_digest: Id32,
+    pub account_id: Id32,
+    pub agent_id: Id32,
+    pub expected_claim: Id32,
+    pub home: Id32,
+    pub issued_at_unix_millis: i64,
+    pub force: bool,
+}
+
 /// Durable project workflow checkpoint.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -881,6 +897,32 @@ pub enum ProjectCommandOutcomeDto {
     Completed {
         operation_id: Id32,
         project_head: Id32,
+        runtime: Option<RuntimeObservationDto>,
+    },
+    Rejected {
+        operation_id: Id32,
+        error: DomainErrorDto,
+        runtime: Option<RuntimeObservationDto>,
+    },
+    Reconcilable {
+        operation_id: Id32,
+        stage: ProjectCommandStageDto,
+        error: DomainErrorDto,
+    },
+}
+
+/// Typed node-owned named-agent retirement progress or terminal result.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum AgentRetirementOutcomeDto {
+    Running {
+        operation_id: Id32,
+        stage: ProjectCommandStageDto,
+    },
+    Completed {
+        operation_id: Id32,
+        project_id: Option<Id32>,
         runtime: Option<RuntimeObservationDto>,
     },
     Rejected {
@@ -991,6 +1033,8 @@ pub enum Request {
     InspectResource(EffectRequestDto<ResourceInspectionRequestDto>),
     /// Execute, route, or reconcile one exact project command.
     ControlProject(Box<ProjectCommandRequestDto>),
+    /// Execute or reconcile one exact node-owned named-agent retirement.
+    RetireAgent(Box<AgentRetirementRequestDto>),
     /// Register a revision invalidation subscription.
     Subscribe(SubscriptionRequestDto),
     /// Cancel one pending or active subscription idempotently.
@@ -1843,6 +1887,8 @@ pub enum ResponseResult {
     ResourceInspection(EffectOutcomeDto<ResourceInspectionResultDto>),
     /// Project command submission or durable progress.
     ProjectCommand(ProjectCommandOutcomeDto),
+    /// Named-agent retirement progress or terminal result.
+    AgentRetirement(AgentRetirementOutcomeDto),
     /// Pending subscription acknowledgement.
     Subscription(SubscriptionAcknowledgement),
     /// Successful operation without a value.
@@ -2087,7 +2133,8 @@ impl WireMessage {
                     Ok(())
                 }
                 Request::ControlProject(request) => validate_project_request(request),
-                Request::Lifecycle(_)
+                Request::RetireAgent(_)
+                | Request::Lifecycle(_)
                 | Request::AuthoritativeSnapshot
                 | Request::RelayStatus
                 | Request::StateHealth
@@ -2185,6 +2232,9 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         }
         Response::Success(ResponseResult::ProjectCommand(outcome)) => {
             validate_project_outcome(outcome)
+        }
+        Response::Success(ResponseResult::AgentRetirement(outcome)) => {
+            validate_agent_retirement_outcome(outcome)
         }
         Response::Success(ResponseResult::Empty) => Ok(()),
         Response::Success(ResponseResult::ResourceInspection(outcome)) => match outcome {
@@ -2325,6 +2375,22 @@ fn validate_project_outcome(outcome: &ProjectCommandOutcomeDto) -> Result<(), Va
             runtime.as_ref().map_or(Ok(()), validate_runtime)
         }
         ProjectCommandOutcomeDto::Reconcilable { error, .. } => validate_domain_error(error),
+    }
+}
+
+fn validate_agent_retirement_outcome(
+    outcome: &AgentRetirementOutcomeDto,
+) -> Result<(), ValueError> {
+    match outcome {
+        AgentRetirementOutcomeDto::Running { .. } => Ok(()),
+        AgentRetirementOutcomeDto::Completed { runtime, .. } => {
+            runtime.as_ref().map_or(Ok(()), validate_runtime)
+        }
+        AgentRetirementOutcomeDto::Rejected { error, runtime, .. } => {
+            validate_domain_error(error)?;
+            runtime.as_ref().map_or(Ok(()), validate_runtime)
+        }
+        AgentRetirementOutcomeDto::Reconcilable { error, .. } => validate_domain_error(error),
     }
 }
 

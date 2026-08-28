@@ -12,16 +12,16 @@ use std::{
 };
 
 use hq_application::{
-    AgentNameClaimRequest, AgentSessionRenameRequest, AgentSessionSelectionRequest,
-    ApplicationError, HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs,
-    LocalInstallationAuthority, MailboxGrantRequest, MailboxRevokeRequest,
-    MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest, PeerRouteRequest,
-    ReplyRequest, ThreadCancellationRequest, plan_agent_mailbox_creation, plan_agent_name_claim,
-    plan_agent_session_rename, plan_agent_session_selection, plan_asynchronous_message,
-    plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
-    plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
-    plan_mailbox_grant, plan_mailbox_revoke, plan_message_archive, plan_message_restore,
-    plan_peer_route_block, plan_peer_route_set, plan_question, plan_reply,
+    AgentNameClaimRequest, AgentRetirementRequest, AgentSessionRenameRequest,
+    AgentSessionSelectionRequest, ApplicationError, HumanDeviceGrantRequest,
+    HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority, MailboxGrantRequest,
+    MailboxRevokeRequest, MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest,
+    PeerRouteRequest, ReplyRequest, ThreadCancellationRequest, plan_agent_mailbox_creation,
+    plan_agent_name_claim, plan_agent_session_rename, plan_agent_session_selection,
+    plan_asynchronous_message, plan_human_account_creation, plan_human_account_selection,
+    plan_human_device_acceptance, plan_human_device_grant, plan_human_device_revoke,
+    plan_human_mailbox_creation, plan_mailbox_grant, plan_mailbox_revoke, plan_message_archive,
+    plan_message_restore, plan_peer_route_block, plan_peer_route_set, plan_question, plan_reply,
     plan_thread_cancellation,
 };
 use hq_domain::{
@@ -35,15 +35,18 @@ use hq_domain::{
 use hq_local_api::{
     ClientEvent, InitialView,
     protocol::v1::{
-        AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto,
-        ConversationEntryDto, ConversationMessageDto, ConversationPageRequest, DeviceGrantDto,
-        EffectOutcomeDto, EffectRequestDto, HealthDomainDto, Id32, LifecycleRequest,
-        LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
+        AgentRetirementOutcomeDto, AgentRetirementRequestDto, AuthoritativeSnapshotDto,
+        BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ConversationEntryDto,
+        ConversationMessageDto, ConversationPageRequest, DeviceGrantDto, EffectOutcomeDto,
+        EffectRequestDto, HealthDomainDto, Id32, LifecycleRequest, LifecycleState,
+        MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
         PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, RelayAccessDto,
         RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request, ResourceLocatorDto,
-        ResourceSchemeDto, ResponseResult, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
+        ResourceSchemeDto, ResponseResult, RuntimeObservationDto, SnapshotItem, StateHealthDto,
+        SynchronizationRequestDto,
     },
 };
+use hq_projects::agent_retirement_request_digest;
 use hq_protocol::VerifiedPairingInvitation;
 use hq_reducer::{
     AuthorityPolicy, AuthorityProjectionKey, AuthorityReducer, DecisionStatus, reduce_complete,
@@ -345,6 +348,13 @@ pub enum NamedAgentCommand {
         /// Replacement display name, or `None` for an explicit clear.
         display_name: Option<ShortText>,
     },
+    /// Permanently retire one exact named agent after explicit human confirmation.
+    Retire {
+        /// Permanent name or stable identity.
+        agent: NamedAgentSelector,
+        /// Whether failed or uncertain runtime cessation may revoke HQ authority.
+        force: bool,
+    },
 }
 
 /// Passive exact provider-session identity shown by catalog commands.
@@ -392,6 +402,21 @@ pub struct NamedAgentCatalogView {
     pub agents: Vec<NamedAgentView>,
     /// Current provider-session identity when requested and resolved.
     pub current: Option<(String, String, MailboxAddress, Option<AgentId>)>,
+}
+
+/// Passive completed named-agent retirement result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedAgentRetirementView {
+    /// Retired durable named-agent identity.
+    pub agent_id: AgentId,
+    /// Whether the caller explicitly authorized forced authority revocation.
+    pub force: bool,
+    /// Project whose assignment was quiesced, absent for an idle agent.
+    pub project_id: Option<ProjectId>,
+    /// Stable observed runtime state, absent for an idle agent.
+    pub runtime: Option<String>,
+    /// Stable runtime diagnostic code for failed or uncertain cessation.
+    pub runtime_code: Option<String>,
 }
 
 /// Closed agent-side mailbox messaging behavior.
@@ -1352,6 +1377,7 @@ fn parse_named_agent(
         Some("current") if arguments.len() == 1 => NamedAgentCommand::Current,
         Some("select") => parse_named_agent_select(&arguments[1..])?,
         Some("rename") => parse_named_agent_rename(&arguments[1..])?,
+        Some("retire") => parse_named_agent_retire(&arguments[1..])?,
         _ => return Err(CliError::Arguments),
     };
     Ok(CliCommand::NamedAgent {
@@ -1462,6 +1488,23 @@ fn parse_named_agent_rename(arguments: &[OsString]) -> Result<NamedAgentCommand,
         session,
         display_name,
     })
+}
+
+fn parse_named_agent_retire(arguments: &[OsString]) -> Result<NamedAgentCommand, CliError> {
+    let agent = parse_named_agent_selector(arguments.first().ok_or(CliError::Arguments)?)?;
+    let mut confirmed = false;
+    let mut force = false;
+    for argument in &arguments[1..] {
+        match argument.to_str() {
+            Some("--yes") if !confirmed => confirmed = true,
+            Some("--force") if !force => force = true,
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    if !confirmed {
+        return Err(CliError::Arguments);
+    }
+    Ok(NamedAgentCommand::Retire { agent, force })
 }
 
 fn parse_named_agent_selector(value: &OsString) -> Result<NamedAgentSelector, CliError> {
@@ -2476,6 +2519,9 @@ fn run_named_agent(action: &NamedAgentCommand, state: &StatePaths) -> Result<Cli
             )?;
             "agent_rename"
         }
+        NamedAgentCommand::Retire { agent, force } => {
+            return retire_named_agent(&mut client, &snapshot, local, agent, *force);
+        }
     };
     snapshot = client.snapshot()?;
     let selected = match action {
@@ -2485,13 +2531,132 @@ fn run_named_agent(action: &NamedAgentCommand, state: &StatePaths) -> Result<Cli
         NamedAgentCommand::Select { agent, .. } | NamedAgentCommand::Rename { agent, .. } => {
             Some(resolve_named_agent(&snapshot, agent)?.agent_id)
         }
-        NamedAgentCommand::List | NamedAgentCommand::Show { .. } | NamedAgentCommand::Current => {
-            None
-        }
+        NamedAgentCommand::List
+        | NamedAgentCommand::Show { .. }
+        | NamedAgentCommand::Current
+        | NamedAgentCommand::Retire { .. } => None,
     };
     Ok(CliResult::NamedAgentCatalog(Box::new(
         named_agent_catalog_view(&snapshot, operation, selected, None),
     )))
+}
+
+fn retire_named_agent(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    selector: &NamedAgentSelector,
+    force: bool,
+) -> Result<CliResult, CliError> {
+    let agent = resolve_named_agent(snapshot, selector)?;
+    let account_id = local_selection(snapshot, local)
+        .map_err(|_| CliError::AgentState)?
+        .active
+        .ok_or(CliError::AgentState)?;
+    let command_id = random_command_id()?;
+    let operation_id = agent_retirement_operation_id(command_id);
+    let mut request = AgentRetirementRequest {
+        command_id,
+        operation_id,
+        request_digest: hq_domain::CommandDigest::from_bytes([0; 32]),
+        account_id,
+        agent_id: agent.agent_id,
+        expected_claim: agent.claim_fact,
+        home: local,
+        issued_at: Timestamp::from_unix_millis(0),
+        force,
+    };
+    request.request_digest = agent_retirement_request_digest(&request);
+    let wire = AgentRetirementRequestDto {
+        command_id: Id32::new(*request.command_id.as_bytes()),
+        operation_id: Id32::new(*request.operation_id.as_bytes()),
+        request_digest: Id32::new(*request.request_digest.as_bytes()),
+        account_id: Id32::new(*request.account_id.as_bytes()),
+        agent_id: Id32::new(*request.agent_id.as_bytes()),
+        expected_claim: Id32::new(*request.expected_claim.as_bytes()),
+        home: Id32::new(*request.home.as_bytes()),
+        issued_at_unix_millis: request.issued_at.as_unix_millis(),
+        force: request.force,
+    };
+    for _ in 0..16 {
+        match client.agent_retirement(wire)? {
+            ClientEvent::AgentRetirement {
+                outcome:
+                    AgentRetirementOutcomeDto::Completed {
+                        project_id,
+                        runtime,
+                        ..
+                    },
+                ..
+            } => {
+                verify_agent_retired(client, request.agent_id, request.expected_claim)?;
+                let (runtime, runtime_code) = retirement_runtime(runtime.as_ref());
+                return Ok(CliResult::NamedAgentRetirement(NamedAgentRetirementView {
+                    agent_id: request.agent_id,
+                    force,
+                    project_id: project_id.map(|value| ProjectId::from_bytes(value.bytes())),
+                    runtime: runtime.map(str::to_owned),
+                    runtime_code,
+                }));
+            }
+            ClientEvent::AgentRetirement {
+                outcome:
+                    AgentRetirementOutcomeDto::Running { .. }
+                    | AgentRetirementOutcomeDto::Reconcilable { .. },
+                ..
+            } => {}
+            _ => return Err(CliError::AgentState),
+        }
+    }
+    Err(CliError::AgentState)
+}
+
+fn verify_agent_retired(
+    client: &mut LocalNodeClient,
+    agent_id: AgentId,
+    claim_fact: FactId,
+) -> Result<(), CliError> {
+    let snapshot = client.snapshot()?;
+    snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Agent {
+                agent_id: candidate,
+                claims,
+                retirements,
+                lifecycle,
+                ..
+            } if candidate.bytes() == *agent_id.as_bytes()
+                && lifecycle == "retired"
+                && claims
+                    .iter()
+                    .any(|claim| claim.bytes() == *claim_fact.as_bytes())
+                && !retirements.is_empty() =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .ok_or(CliError::AgentState)
+}
+
+fn retirement_runtime(
+    runtime: Option<&RuntimeObservationDto>,
+) -> (Option<&'static str>, Option<String>) {
+    match runtime {
+        None => (None, None),
+        Some(RuntimeObservationDto::Succeeded) => (Some("succeeded"), None),
+        Some(RuntimeObservationDto::Failed(code)) => (Some("failed"), Some(code.clone())),
+        Some(RuntimeObservationDto::Uncertain(code)) => (Some("uncertain"), Some(code.clone())),
+    }
+}
+
+fn agent_retirement_operation_id(command_id: CommandId) -> OperationId {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-agent-retirement-operation-v1\0");
+    digest.update(command_id.as_bytes());
+    OperationId::from_bytes(digest.finalize().into())
 }
 
 #[derive(Clone, Copy)]
@@ -5682,11 +5847,13 @@ enum CliResult {
     Messages(Box<MessageCommandView>),
     MailboxDiscovery(Box<MailboxDiscoveryView>),
     NamedAgentCatalog(Box<NamedAgentCatalogView>),
+    NamedAgentRetirement(NamedAgentRetirementView),
     Completed {
         operation: &'static str,
     },
 }
 
+#[allow(clippy::too_many_lines, reason = "closed CLI result rendering matrix")]
 fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, CliError> {
     if let Some(rendered) = render_agent_result(format, result) {
         return rendered;
@@ -5784,6 +5951,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             _,
             CliResult::AgentGuidance(_)
             | CliResult::NamedAgentCatalog(_)
+            | CliResult::NamedAgentRetirement(_)
             | CliResult::Completed { .. }
             | CliResult::Stopped { .. },
         ) => unreachable!(),
@@ -5805,6 +5973,27 @@ fn render_agent_result(
         (format, CliResult::NamedAgentCatalog(view)) => {
             Some(render_named_agent_catalog(format, view))
         }
+        (CliOutputFormat::Human, CliResult::NamedAgentRetirement(view)) => Some(Ok(format!(
+            "retired agent={} force={} project={} runtime={} runtime_code={}\n",
+            encode_id(view.agent_id.as_bytes()),
+            view.force,
+            view.project_id.map_or_else(
+                || "none".to_owned(),
+                |project| encode_id(project.as_bytes())
+            ),
+            view.runtime.as_deref().unwrap_or("none"),
+            view.runtime_code.as_deref().unwrap_or("none"),
+        ))),
+        (CliOutputFormat::Json, CliResult::NamedAgentRetirement(view)) => Some(machine_record(
+            "named_agent_retirement",
+            &serde_json::json!({
+                "agent_id": encode_id(view.agent_id.as_bytes()),
+                "force": view.force,
+                "project_id": view.project_id.map(|project| encode_id(project.as_bytes())),
+                "runtime": view.runtime,
+                "runtime_code": view.runtime_code,
+            }),
+        )),
         (CliOutputFormat::Human, CliResult::Completed { operation }) => {
             Some(Ok(format!("completed operation={operation}\n")))
         }
@@ -6615,8 +6804,8 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
         ),
         [command] if command == "agent" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] agent <COMMAND>\n\n\
-             Commands:\n  list\n  show NAME|AGENT_ID\n  create NAME [--mailbox MAILBOX_ID]\n  current\n  select NAME|AGENT_ID [--provider PROVIDER --session SESSION] [--dir PATH]\n  rename NAME|AGENT_ID DISPLAY_NAME [--provider PROVIDER --session SESSION]\n  rename NAME|AGENT_ID --clear [--provider PROVIDER --session SESSION]\n\n\
-             Names are permanent lowercase installation-local slugs. create without --mailbox allocates a deterministic local agent mailbox; --mailbox adopts one existing local agent mailbox. current, select, and rename reject ambiguous provider environments and stale or conflicted session metadata. Retirement is a separate safe workflow.\n",
+             Commands:\n  list\n  show NAME|AGENT_ID\n  create NAME [--mailbox MAILBOX_ID]\n  current\n  select NAME|AGENT_ID [--provider PROVIDER --session SESSION] [--dir PATH]\n  rename NAME|AGENT_ID DISPLAY_NAME [--provider PROVIDER --session SESSION]\n  rename NAME|AGENT_ID --clear [--provider PROVIDER --session SESSION]\n  retire NAME|AGENT_ID --yes [--force]\n\n\
+             Names are permanent lowercase installation-local slugs. create without --mailbox allocates a deterministic local agent mailbox; --mailbox adopts one existing local agent mailbox. current, select, and rename reject ambiguous provider environments and stale or conflicted session metadata. retire is absorbing, requires --yes, and only --force may revoke HQ authority after failed or uncertain runtime cessation.\n",
         ),
         _ => None,
     }
@@ -7208,6 +7397,33 @@ mod tests {
                 OsString::from("build-agent"),
                 OsString::from("--provider"),
                 OsString::from("codex"),
+            ]),
+            Err(CliError::Arguments)
+        );
+    }
+
+    #[test]
+    fn parser_requires_explicit_named_agent_retirement_confirmation() {
+        let retired = parse_cli([
+            OsString::from("agent"),
+            OsString::from("retire"),
+            OsString::from("build-agent"),
+            OsString::from("--yes"),
+            OsString::from("--force"),
+        ])
+        .expect("confirmed forced retirement parses");
+        assert!(matches!(
+            retired.command,
+            CliCommand::NamedAgent {
+                action: NamedAgentCommand::Retire { force: true, .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_cli([
+                OsString::from("agent"),
+                OsString::from("retire"),
+                OsString::from("build-agent"),
             ]),
             Err(CliError::Arguments)
         );

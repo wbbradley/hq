@@ -21,9 +21,9 @@ use hq_domain::{
 
 pub use canonical::ApplicationCanonicalProjectPort;
 pub use command_codec::{
-    ProjectCommandCodecError, decode_canonical_project_mutation, decode_project_command_action,
-    encode_canonical_project_mutation, encode_project_command_action,
-    project_command_request_digest,
+    ProjectCommandCodecError, agent_retirement_request_digest, decode_canonical_project_mutation,
+    decode_project_command_action, encode_canonical_project_mutation,
+    encode_project_command_action, project_command_request_digest,
 };
 pub use git_worktree::{GitWorktreeAdapter, GitWorktreeAdapterConfig};
 pub use remote::*;
@@ -213,6 +213,9 @@ pub enum SagaStoreError {
 
 /// Durable exact-replay project workflow state capability.
 pub trait ProjectSagaStore {
+    /// Loads one exact retained workflow by its stable operation identity.
+    fn find(&self, operation_id: OperationId) -> Result<Option<ProjectSagaRecord>, SagaStoreError>;
+
     /// Inserts one command atomically or returns its exact retained disposition.
     fn begin(&self, record: ProjectSagaRecord) -> Result<BeginSagaOutcome, SagaStoreError>;
 

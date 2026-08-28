@@ -9,21 +9,22 @@ use hq_domain::{
 };
 use hq_local_api::project_command_from_v1;
 use hq_local_api::protocol::v1::{
-    AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
-    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
-    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationEntryDto,
-    ConversationKeyDto, ConversationMessageDto, ConversationPageDto, ConversationPageRequest,
-    DecodeError, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
-    EffectRequestDto, EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto,
-    FrameDecoder, HealthDomainDto, Id32, InvalidationTopic, LifecycleRequest, LifecycleState,
-    LifecycleStatus, MAX_FRAME_BYTES, MailboxAddressDto, MessagePurposeDto, MutationAttemptDto,
-    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
-    PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
-    RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request, RequestEnvelope,
-    RequestId, ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
-    ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation,
-    ServerHello, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
+    AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSelectionCandidateDto,
+    AgentSessionBindingDto, AgentSessionNameCandidateDto, AgentSessionRequestDto,
+    AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto,
+    CanonicalEvidenceRequestDto, ClientHello, ConversationEntryDto, ConversationKeyDto,
+    ConversationMessageDto, ConversationPageDto, ConversationPageRequest, DecodeError,
+    DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
+    EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder,
+    HealthDomainDto, Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
+    MAX_FRAME_BYTES, MailboxAddressDto, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto,
+    MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto,
+    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto,
+    RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto,
+    RemoteCommandProgressDto, Request, RequestEnvelope, RequestId, ResourceHealthDto,
+    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
+    ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
+    SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
     SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
     VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto, negotiate,
 };
@@ -309,6 +310,10 @@ fn relay_status_result() -> ResponseResult {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "closed protocol family interoperability matrix"
+)]
 fn every_request_notification_and_negotiation_family_interoperates() {
     let mut messages = vec![
         hello(),
@@ -379,6 +384,17 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             expected_head: Some(Id32::new([46; 32])),
             issued_at_unix_millis: 1_700_000_000_000,
             action: ProjectCommandActionDto::Open,
+        })),
+        Request::RetireAgent(Box::new(AgentRetirementRequestDto {
+            command_id: Id32::new([48; 32]),
+            operation_id: Id32::new([49; 32]),
+            request_digest: Id32::new([50; 32]),
+            account_id: Id32::new([43; 32]),
+            agent_id: Id32::new([12; 32]),
+            expected_claim: Id32::new([35; 32]),
+            home: Id32::new([45; 32]),
+            issued_at_unix_millis: 1_700_000_000_000,
+            force: true,
         })),
         Request::Subscribe(
             SubscriptionRequestDto::new(
@@ -471,6 +487,15 @@ fn every_success_and_error_response_family_interoperates() {
             operation_id: Id32::new([41; 32]),
             project_head: Id32::new([47; 32]),
             runtime: None,
+        }),
+        ResponseResult::AgentRetirement(AgentRetirementOutcomeDto::Completed {
+            operation_id: Id32::new([49; 32]),
+            project_id: Some(Id32::new([44; 32])),
+            runtime: Some(
+                hq_local_api::protocol::v1::RuntimeObservationDto::Uncertain(
+                    "project_runtime_stop_unknown".to_owned(),
+                ),
+            ),
         }),
         ResponseResult::Subscription(SubscriptionAcknowledgement::new(
             Id32::new([7; 32]),

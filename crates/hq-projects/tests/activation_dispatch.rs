@@ -9,36 +9,50 @@ use std::{
 };
 
 use hq_application::{
-    ApplicationError, EffectOutcome, EffectRequest, ProjectCommandAction, ProjectCommandOutcome,
+    AgentRetirementOutcome, AgentRetirementRequest, ApplicationError, EffectOutcome, EffectRequest,
+    MutationAttempt, MutationOutcome, MutationReceipt, ProjectCommandAction, ProjectCommandOutcome,
     ProjectCommandRequest,
 };
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, BoundedText, CommandDigest, CommandId, DomainError,
     ErrorCategory, ErrorCode, FactId, InstallationId, MessageId, OperationId, ProjectId,
     ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator,
-    ResourceScheme, RuntimeObservation, ThreadId, Timestamp,
+    ResourceScheme, Revision, RuntimeObservation, ThreadId, Timestamp,
 };
 use hq_projects::{
-    BeginSagaOutcome, CanonicalProjectAssignment, CanonicalProjectLifecycle,
-    CanonicalProjectMutation, CanonicalProjectMutationAction, CanonicalProjectMutationOutcome,
-    CanonicalProjectPort, PendingProjectInput, ProjectLaunchObservation,
-    ProjectLaunchValidationRequest, ProjectReleaseAssessmentRequest, ProjectResourceObservation,
-    ProjectResourcePort, ProjectResourceValidationRequest, ProjectRuntimeDelivery,
-    ProjectRuntimePort, ProjectRuntimeRequest, ProjectSagaRecord, ProjectSagaStore,
-    ProjectWorkflowManager, ProjectWorkflowSnapshot, SagaStoreError,
+    AgentRetirementAssignment, AgentRetirementSnapshot, BeginSagaOutcome,
+    CanonicalProjectAssignment, CanonicalProjectLifecycle, CanonicalProjectMutation,
+    CanonicalProjectMutationAction, CanonicalProjectMutationOutcome, CanonicalProjectPort,
+    PendingProjectInput, ProjectLaunchObservation, ProjectLaunchValidationRequest,
+    ProjectReleaseAssessmentRequest, ProjectResourceObservation, ProjectResourcePort,
+    ProjectResourceValidationRequest, ProjectRuntimeDelivery, ProjectRuntimePort,
+    ProjectRuntimeRequest, ProjectSagaRecord, ProjectSagaStore, ProjectWorkflowManager,
+    ProjectWorkflowSnapshot, SagaStoreError, agent_retirement_request_digest,
 };
 use hq_resources::{PathReleaseAssessment, PathReleaseState};
 
 #[derive(Clone, Default)]
-struct MemorySagaStore(Arc<Mutex<Option<ProjectSagaRecord>>>);
+struct MemorySagaStore(Arc<Mutex<Vec<ProjectSagaRecord>>>);
 
 impl ProjectSagaStore for MemorySagaStore {
+    fn find(&self, operation_id: OperationId) -> Result<Option<ProjectSagaRecord>, SagaStoreError> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| SagaStoreError::Unavailable)?
+            .iter()
+            .find(|record| record.operation_id == operation_id)
+            .cloned())
+    }
+
     fn begin(&self, record: ProjectSagaRecord) -> Result<BeginSagaOutcome, SagaStoreError> {
         let mut retained = self.0.lock().map_err(|_| SagaStoreError::Unavailable)?;
-        if let Some(existing) = retained.as_ref() {
+        if let Some(existing) = retained
+            .iter()
+            .find(|existing| existing.operation_id == record.operation_id)
+        {
             return Ok(
-                if existing.operation_id == record.operation_id
-                    && existing.command_id == record.command_id
+                if existing.command_id == record.command_id
                     && existing.request_digest == record.request_digest
                     && existing.action == record.action
                 {
@@ -48,12 +62,22 @@ impl ProjectSagaStore for MemorySagaStore {
                 },
             );
         }
-        *retained = Some(record.clone());
+        if retained.iter().any(|existing| {
+            existing.project_id == record.project_id && !existing.state.is_terminal()
+        }) {
+            return Ok(BeginSagaOutcome::ProjectBusy);
+        }
+        retained.push(record.clone());
         Ok(BeginSagaOutcome::Inserted(record))
     }
 
     fn replace(&self, record: ProjectSagaRecord) -> Result<(), SagaStoreError> {
-        *self.0.lock().map_err(|_| SagaStoreError::Unavailable)? = Some(record);
+        let mut retained = self.0.lock().map_err(|_| SagaStoreError::Unavailable)?;
+        let existing = retained
+            .iter_mut()
+            .find(|existing| existing.operation_id == record.operation_id)
+            .ok_or(SagaStoreError::Conflict)?;
+        *existing = record;
         Ok(())
     }
 
@@ -133,6 +157,56 @@ impl ScriptedCanonical {
 }
 
 impl CanonicalProjectPort for ScriptedCanonical {
+    fn agent_retirement_snapshot(
+        &self,
+        request: &AgentRetirementRequest,
+    ) -> Result<AgentRetirementSnapshot, ApplicationError> {
+        let state = self.0.lock().expect("canonical lock");
+        let retired = state.retired_agents.contains(&request.agent_id);
+        let assignments = state
+            .snapshot
+            .assignment
+            .as_ref()
+            .filter(|assignment| assignment.intent.agent_id == request.agent_id)
+            .map(|_| AgentRetirementAssignment {
+                project_id: state.snapshot.project_id,
+                project_head: state.snapshot.head,
+            })
+            .into_iter()
+            .collect();
+        Ok(AgentRetirementSnapshot {
+            active_human: state.snapshot.active_human,
+            agent_active: !retired,
+            claim_fact: (!retired).then_some(FactId::from_bytes([71; 32])),
+            conflicted: false,
+            assignments,
+        })
+    }
+
+    fn retire_idle_agent(
+        &self,
+        request: &AgentRetirementRequest,
+    ) -> Result<MutationAttempt, ApplicationError> {
+        let mut state = self.0.lock().expect("canonical lock");
+        let outcome = if state.snapshot.assignment.is_none()
+            && !state.retired_agents.contains(&request.agent_id)
+        {
+            state.retired_agents.insert(request.agent_id);
+            MutationOutcome::Committed
+        } else {
+            MutationOutcome::Rejected(domain_error(
+                ErrorCategory::Conflict,
+                "agent-retirement-state-changed",
+            ))
+        };
+        Ok(MutationAttempt::Completed(MutationReceipt::new(
+            request.command_id,
+            request.request_digest,
+            Revision::new(1),
+            outcome,
+        )))
+    }
+
     fn snapshot(
         &self,
         _project_id: ProjectId,
@@ -2141,6 +2215,141 @@ fn assigned_agent_retirement_quiesces_without_closing_or_releasing_claims() {
 }
 
 #[test]
+fn retirement_coordinator_routes_assigned_and_idle_agents_through_the_safe_owner() {
+    let assigned = runnable_snapshot();
+    let assigned_agent = assigned
+        .assignment
+        .as_ref()
+        .expect("assignment")
+        .intent
+        .agent_id;
+    let canonical = ScriptedCanonical::new(assigned);
+    let runtime = ScriptedRuntime::default();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical,
+        runtime.clone(),
+        HealthyResources,
+    )
+    .retire_agent(agent_retirement_request(assigned_agent, false))
+    .expect("assigned coordinator retirement");
+    assert!(matches!(
+        outcome,
+        AgentRetirementOutcome::Completed {
+            project_id: Some(project_id),
+            ..
+        } if project_id == ProjectId::from_bytes([5; 32])
+    ));
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+
+    let idle_agent = AgentId::from_bytes([52; 32]);
+    let runtime = ScriptedRuntime::default();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        ScriptedCanonical::new(snapshot(CanonicalProjectLifecycle::Open)),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .retire_agent(agent_retirement_request(idle_agent, false))
+    .expect("idle coordinator retirement");
+    assert!(matches!(
+        outcome,
+        AgentRetirementOutcome::Completed {
+            project_id: None,
+            runtime: None,
+            ..
+        }
+    ));
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
+}
+
+#[test]
+fn retirement_coordinator_rejects_stale_claim_and_changed_operation_reuse() {
+    let initial = runnable_snapshot();
+    let agent_id = initial
+        .assignment
+        .as_ref()
+        .expect("assignment")
+        .intent
+        .agent_id;
+    let canonical = ScriptedCanonical::new(initial);
+    let store = MemorySagaStore::default();
+    let manager = ProjectWorkflowManager::new(
+        store,
+        canonical,
+        ScriptedRuntime::default(),
+        HealthyResources,
+    );
+    let mut stale = agent_retirement_request(agent_id, false);
+    stale.expected_claim = FactId::from_bytes([72; 32]);
+    stale.request_digest = agent_retirement_request_digest(&stale);
+    let rejected = manager.retire_agent(stale).expect("stale claim retirement");
+    assert!(matches!(rejected, AgentRetirementOutcome::Rejected { .. }));
+
+    let request = agent_retirement_request(agent_id, false);
+    let completed = manager.retire_agent(request).expect("initial retirement");
+    assert!(matches!(
+        completed,
+        AgentRetirementOutcome::Completed { .. }
+    ));
+    let mut changed = request;
+    changed.force = true;
+    changed.request_digest = agent_retirement_request_digest(&changed);
+    let conflict = manager
+        .retire_agent(changed)
+        .expect("changed operation reuse");
+    assert!(matches!(conflict, AgentRetirementOutcome::Rejected { .. }));
+}
+
+#[test]
+fn retirement_coordinator_requires_a_new_explicit_force_operation_after_blocking() {
+    let initial = runnable_snapshot();
+    let agent_id = initial
+        .assignment
+        .as_ref()
+        .expect("assignment")
+        .intent
+        .agent_id;
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::rejecting_stop();
+    let manager = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+
+    let rejected = manager
+        .retire_agent(agent_retirement_request(agent_id, false))
+        .expect("graceful coordinator retirement");
+    assert!(matches!(rejected, AgentRetirementOutcome::Rejected { .. }));
+    assert!(
+        canonical
+            .snapshot_value()
+            .assignment
+            .expect("blocked assignment")
+            .blocked
+    );
+
+    let mut forced = agent_retirement_request(agent_id, true);
+    forced.command_id = CommandId::from_bytes([63; 32]);
+    forced.operation_id = OperationId::from_bytes([64; 32]);
+    forced.request_digest = agent_retirement_request_digest(&forced);
+    let completed = manager
+        .retire_agent(forced)
+        .expect("explicit forced coordinator retirement");
+    assert!(matches!(
+        completed,
+        AgentRetirementOutcome::Completed {
+            project_id: Some(_),
+            runtime: Some(RuntimeObservation::Failed(_)),
+            ..
+        }
+    ));
+    assert!(canonical.snapshot_value().assignment.is_none());
+}
+
+#[test]
 fn idle_retirement_skips_runtime_and_is_absorbing_for_future_selection() {
     let initial = snapshot(CanonicalProjectLifecycle::Open);
     let retiring_agent = AgentId::from_bytes([52; 32]);
@@ -2284,25 +2493,31 @@ fn retirement_response_loss_replays_assignment_end_and_retirement_once() {
             .agent_id;
         let canonical = ScriptedCanonical::uncertain_once(initial, boundary);
         let runtime = ScriptedRuntime::default();
+        let store = MemorySagaStore::default();
         let manager = ProjectWorkflowManager::new(
-            MemorySagaStore::default(),
+            store.clone(),
             canonical.clone(),
             runtime.clone(),
             HealthyResources,
         );
-        let request = request_for(ProjectCommandAction::RetireAgent {
-            agent_id,
-            force: false,
-        });
+        let request = agent_retirement_request(agent_id, false);
         let first = manager
-            .control(request.clone())
+            .retire_agent(request)
             .expect("lost retirement response");
         assert!(
-            matches!(first, ProjectCommandOutcome::Reconcilable { .. }),
+            matches!(first, AgentRetirementOutcome::Reconcilable { .. }),
             "boundary {boundary:?} returned {first:?}"
         );
-        let repaired = manager.control(request).expect("retirement repair");
-        assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
+        drop(manager);
+        let repaired = ProjectWorkflowManager::new(
+            store,
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        )
+        .retire_agent(request)
+        .expect("retirement repair after manager restart");
+        assert!(matches!(repaired, AgentRetirementOutcome::Completed { .. }));
         assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
         assert_eq!(
             canonical
@@ -2450,6 +2665,22 @@ fn dispatch_request() -> ProjectCommandRequest {
 fn request_for(action: ProjectCommandAction) -> ProjectCommandRequest {
     let mut request = activation_request();
     request.action = action;
+    request
+}
+
+fn agent_retirement_request(agent_id: AgentId, force: bool) -> AgentRetirementRequest {
+    let mut request = AgentRetirementRequest {
+        command_id: CommandId::from_bytes([61; 32]),
+        operation_id: OperationId::from_bytes([62; 32]),
+        request_digest: CommandDigest::from_bytes([0; 32]),
+        account_id: AccountId::from_bytes([4; 32]),
+        agent_id,
+        expected_claim: FactId::from_bytes([71; 32]),
+        home: InstallationId::from_bytes([6; 32]),
+        issued_at: Timestamp::from_unix_millis(8),
+        force,
+    };
+    request.request_digest = agent_retirement_request_digest(&request);
     request
 }
 

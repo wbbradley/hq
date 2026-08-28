@@ -3,9 +3,10 @@
 use std::collections::BTreeSet;
 
 use hq_application::{
-    AgentNameClaimRequest, AgentSessionRenameRequest, AgentSessionSelectionRequest,
-    LocalFactInputs, LocalInstallationAuthority, plan_agent_mailbox_creation,
-    plan_agent_name_claim, plan_agent_session_rename, plan_agent_session_selection,
+    AgentNameClaimRequest, AgentRetirementPlanRequest, AgentSessionRenameRequest,
+    AgentSessionSelectionRequest, LocalFactInputs, LocalInstallationAuthority,
+    plan_agent_mailbox_creation, plan_agent_name_claim, plan_agent_retirement,
+    plan_agent_session_rename, plan_agent_session_selection,
 };
 use hq_domain::{
     AgentId, AuthorityRole, BoundedText, FactId, FactScope, InstallationId, MailboxAddress,
@@ -198,5 +199,40 @@ fn agent_planners_reject_nonlocal_mailboxes() -> Result<(), Box<dyn std::error::
         error.code(),
         hq_application::ApplicationErrorCode::InvalidRequest
     );
+    Ok(())
+}
+
+#[test]
+fn retirement_plan_binds_the_exact_claim_and_complete_agent_frontier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority();
+    let agent_id = AgentId::from_bytes(id(8));
+    let mailbox_id = MailboxId::from_bytes(id(6));
+    let claim_fact = FactId::from_bytes(id(9));
+    let agent_frontier = BTreeSet::from([FactId::from_bytes(id(12)), FactId::from_bytes(id(13))]);
+    let plan = plan_agent_retirement(
+        authority,
+        inputs(),
+        AgentRetirementPlanRequest {
+            agent_id,
+            mailbox: MailboxAddress::new(authority.installation_id, mailbox_id),
+            claim_fact,
+            agent_frontier: agent_frontier.clone(),
+        },
+    )?;
+
+    assert_eq!(
+        plan.payload(),
+        &SemanticPayload::AgentRetired {
+            agent_id,
+            mailbox_id,
+        }
+    );
+    for parent in [authority.root_fact, claim_fact]
+        .into_iter()
+        .chain(agent_frontier)
+    {
+        assert!(plan.causal().parents().contains(&parent));
+    }
     Ok(())
 }

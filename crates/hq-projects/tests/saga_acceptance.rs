@@ -21,6 +21,15 @@ struct MemoryStore {
 }
 
 impl ProjectSagaStore for MemoryStore {
+    fn find(&self, operation_id: OperationId) -> Result<Option<ProjectSagaRecord>, SagaStoreError> {
+        Ok(self
+            .records
+            .borrow()
+            .values()
+            .find(|record| record.operation_id == operation_id)
+            .cloned())
+    }
+
     fn begin(&self, record: ProjectSagaRecord) -> Result<BeginSagaOutcome, SagaStoreError> {
         let mut records = self.records.borrow_mut();
         if let Some(existing) = records.get(&record.operation_id) {

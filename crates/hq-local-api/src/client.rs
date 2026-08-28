@@ -12,10 +12,10 @@ use hq_domain::{CommandDigest, CommandId};
 use sha2::{Digest, Sha256};
 
 use crate::protocol::v1::{
-    AuthoritativeSnapshotDto, BuildMetadata, ClientHello, DecodeError, ErrorResponse, Id32,
-    InvalidationTopic, MutationAttemptDto, MutationRequest, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, Request, RequestEnvelope, RequestId, Response, ResponseResult,
-    SubscriptionRequestDto, V1, VersionRange, WireMessage,
+    AgentRetirementOutcomeDto, AgentRetirementRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
+    ClientHello, DecodeError, ErrorResponse, Id32, InvalidationTopic, MutationAttemptDto,
+    MutationRequest, ProjectCommandOutcomeDto, ProjectCommandRequestDto, Request, RequestEnvelope,
+    RequestId, Response, ResponseResult, SubscriptionRequestDto, V1, VersionRange, WireMessage,
 };
 
 /// Maximum simultaneous exact retryable frames retained for response-loss replay.
@@ -179,6 +179,13 @@ pub enum ClientEvent {
         /// Typed workflow result or checkpoint.
         outcome: ProjectCommandOutcomeDto,
     },
+    /// A retry-safe named-agent retirement returned typed durable progress.
+    AgentRetirement {
+        /// Stable command identity from the submitted request.
+        command_id: CommandId,
+        /// Typed workflow result or checkpoint.
+        outcome: AgentRetirementOutcomeDto,
+    },
     /// A correlated ordinary request completed successfully.
     Response {
         /// Original request correlation identity.
@@ -214,6 +221,8 @@ pub enum ClientOperation {
     Mutation(CommandId),
     /// Retry-safe durable project command.
     Project(CommandId),
+    /// Retry-safe node-owned named-agent retirement.
+    AgentRetirement(CommandId),
 }
 
 /// Pure actions and semantic events produced by one state transition.
@@ -275,6 +284,13 @@ struct PendingProjectCommand {
 }
 
 #[derive(Clone, Debug)]
+struct PendingAgentRetirement {
+    request_id: RequestId,
+    digest: CommandDigest,
+    frame: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
 struct SubscriptionIntent {
     seed: Id32,
     topics: Vec<InvalidationTopic>,
@@ -307,6 +323,7 @@ pub struct ReconnectingClient {
     next_request_id: u64,
     pending_mutations: BTreeMap<CommandId, PendingMutation>,
     pending_project_commands: BTreeMap<CommandId, PendingProjectCommand>,
+    pending_agent_retirements: BTreeMap<CommandId, PendingAgentRetirement>,
     completed_digests: BTreeMap<CommandId, CommandDigest>,
     completed_order: VecDeque<CommandId>,
     completed_capacity: usize,
@@ -340,6 +357,7 @@ impl ReconnectingClient {
             next_request_id: 1,
             pending_mutations: BTreeMap::new(),
             pending_project_commands: BTreeMap::new(),
+            pending_agent_retirements: BTreeMap::new(),
             completed_digests: BTreeMap::new(),
             completed_order: VecDeque::new(),
             completed_capacity: completed_identity_capacity,
@@ -452,30 +470,10 @@ impl ReconnectingClient {
     ) -> Result<ClientTransition, ClientError> {
         let command_id = request.command_id();
         let digest = request.request_digest();
-        if self
-            .pending_mutations
-            .get(&command_id)
-            .is_some_and(|pending| pending.digest != digest)
-            || self
-                .pending_project_commands
-                .get(&command_id)
-                .is_some_and(|pending| pending.digest != digest)
-            || self
-                .completed_digests
-                .get(&command_id)
-                .is_some_and(|completed| *completed != digest)
-        {
-            return Err(ClientError::ChangedCommandIdentity);
-        }
-        if self.pending_mutations.contains_key(&command_id)
-            || self.pending_project_commands.contains_key(&command_id)
-            || self.completed_digests.contains_key(&command_id)
-        {
+        if self.retryable_identity_exists(command_id, digest)? {
             return Ok(ClientTransition::default());
         }
-        if self.pending_mutations.len() + self.pending_project_commands.len()
-            >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS
-        {
+        if self.retryable_command_count() >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS {
             return Err(ClientError::RetryableCommandCapacity);
         }
         let request_id = self.allocate_request_id()?;
@@ -509,30 +507,10 @@ impl ReconnectingClient {
     ) -> Result<ClientTransition, ClientError> {
         let command_id = CommandId::from_bytes(request.command_id.bytes());
         let digest = CommandDigest::from_bytes(request.request_digest.bytes());
-        if self
-            .pending_project_commands
-            .get(&command_id)
-            .is_some_and(|pending| pending.digest != digest)
-            || self
-                .pending_mutations
-                .get(&command_id)
-                .is_some_and(|pending| pending.digest != digest)
-            || self
-                .completed_digests
-                .get(&command_id)
-                .is_some_and(|completed| *completed != digest)
-        {
-            return Err(ClientError::ChangedCommandIdentity);
-        }
-        if self.pending_project_commands.contains_key(&command_id)
-            || self.pending_mutations.contains_key(&command_id)
-            || self.completed_digests.contains_key(&command_id)
-        {
+        if self.retryable_identity_exists(command_id, digest)? {
             return Ok(ClientTransition::default());
         }
-        if self.pending_project_commands.len() + self.pending_mutations.len()
-            >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS
-        {
+        if self.retryable_command_count() >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS {
             return Err(ClientError::RetryableCommandCapacity);
         }
         let request_id = self.allocate_request_id()?;
@@ -556,12 +534,83 @@ impl ReconnectingClient {
         })
     }
 
+    /// Queues or sends one exact named-agent retirement and retains its frame across response loss.
+    pub fn submit_agent_retirement(
+        &mut self,
+        request: AgentRetirementRequestDto,
+    ) -> Result<ClientTransition, ClientError> {
+        let command_id = CommandId::from_bytes(request.command_id.bytes());
+        let digest = CommandDigest::from_bytes(request.request_digest.bytes());
+        if self.retryable_identity_exists(command_id, digest)? {
+            return Ok(ClientTransition::default());
+        }
+        if self.retryable_command_count() >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS {
+            return Err(ClientError::RetryableCommandCapacity);
+        }
+        let request_id = self.allocate_request_id()?;
+        let frame = request_frame(request_id, Request::RetireAgent(Box::new(request)))?;
+        self.pending_agent_retirements.insert(
+            command_id,
+            PendingAgentRetirement {
+                request_id,
+                digest,
+                frame: frame.clone(),
+            },
+        );
+        let actions = self
+            .active_generation()
+            .map_or_else(Vec::new, |generation| {
+                vec![ClientAction::Write { generation, frame }]
+            });
+        Ok(ClientTransition {
+            actions,
+            events: Vec::new(),
+        })
+    }
+
+    fn retryable_identity_exists(
+        &self,
+        command_id: CommandId,
+        digest: CommandDigest,
+    ) -> Result<bool, ClientError> {
+        let pending_digest = self
+            .pending_mutations
+            .get(&command_id)
+            .map(|pending| pending.digest)
+            .or_else(|| {
+                self.pending_project_commands
+                    .get(&command_id)
+                    .map(|pending| pending.digest)
+            })
+            .or_else(|| {
+                self.pending_agent_retirements
+                    .get(&command_id)
+                    .map(|pending| pending.digest)
+            });
+        let completed_digest = self.completed_digests.get(&command_id).copied();
+        if pending_digest
+            .into_iter()
+            .chain(completed_digest)
+            .any(|existing| existing != digest)
+        {
+            return Err(ClientError::ChangedCommandIdentity);
+        }
+        Ok(pending_digest.is_some() || completed_digest.is_some())
+    }
+
+    fn retryable_command_count(&self) -> usize {
+        self.pending_mutations.len()
+            + self.pending_project_commands.len()
+            + self.pending_agent_retirements.len()
+    }
+
     /// Sends one ordinary typed request through the shared correlation and loss path.
     pub fn submit_request(&mut self, request: Request) -> Result<ClientTransition, ClientError> {
         if matches!(
             request,
             Request::Mutation(_)
                 | Request::ControlProject(_)
+                | Request::RetireAgent(_)
                 | Request::Subscribe(_)
                 | Request::AuthoritativeSnapshot
         ) {
@@ -670,6 +719,14 @@ impl ReconnectingClient {
                             frame: pending.frame.clone(),
                         }
                     }));
+                transition
+                    .actions
+                    .extend(self.pending_agent_retirements.values().map(|pending| {
+                        ClientAction::Write {
+                            generation,
+                            frame: pending.frame.clone(),
+                        }
+                    }));
                 Ok(transition)
             }
             WireMessage::VersionRejected(_) => {
@@ -741,6 +798,12 @@ impl ReconnectingClient {
                 .find_map(|(command_id, pending)| {
                     (pending.request_id == response.id).then_some(*command_id)
                 });
+        let retirement_command =
+            self.pending_agent_retirements
+                .iter()
+                .find_map(|(command_id, pending)| {
+                    (pending.request_id == response.id).then_some(*command_id)
+                });
         match response.response {
             Response::Error(error) => self.handle_error_response(
                 generation,
@@ -748,6 +811,7 @@ impl ReconnectingClient {
                 error,
                 mutation_command,
                 project_command,
+                retirement_command,
             ),
             Response::Success(result) => match result {
                 ResponseResult::Mutation(attempt) => {
@@ -822,6 +886,25 @@ impl ReconnectingClient {
                         }],
                     })
                 }
+                ResponseResult::AgentRetirement(outcome) => {
+                    let Some(command_id) = retirement_command else {
+                        return Err(ClientError::ProtocolOrder);
+                    };
+                    let pending = self
+                        .pending_agent_retirements
+                        .remove(&command_id)
+                        .ok_or(ClientError::ProtocolOrder)?;
+                    if agent_retirement_is_terminal(&outcome) {
+                        self.remember_completed(command_id, pending.digest);
+                    }
+                    Ok(ClientTransition {
+                        actions: Vec::new(),
+                        events: vec![ClientEvent::AgentRetirement {
+                            command_id,
+                            outcome,
+                        }],
+                    })
+                }
                 ResponseResult::Lifecycle(_)
                 | ResponseResult::ConversationPage(_)
                 | ResponseResult::CanonicalEvidence(_)
@@ -856,6 +939,7 @@ impl ReconnectingClient {
         error: ErrorResponse,
         mutation_command: Option<CommandId>,
         project_command: Option<CommandId>,
+        retirement_command: Option<CommandId>,
     ) -> Result<ClientTransition, ClientError> {
         if let Some(command_id) = mutation_command {
             if let Some(pending) = self.pending_mutations.remove(&command_id) {
@@ -875,6 +959,17 @@ impl ReconnectingClient {
             return Ok(error_transition(
                 request_id,
                 ClientOperation::Project(command_id),
+                error,
+            ));
+        }
+
+        if let Some(command_id) = retirement_command {
+            self.pending_agent_retirements
+                .remove(&command_id)
+                .ok_or(ClientError::ProtocolOrder)?;
+            return Ok(error_transition(
+                request_id,
+                ClientOperation::AgentRetirement(command_id),
                 error,
             ));
         }
@@ -1065,6 +1160,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     ClientEvent::Snapshot(_)
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },
@@ -1093,6 +1189,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 Some(
                     ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },
@@ -1141,6 +1238,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     )
                     | ClientEvent::Snapshot(_)
                     | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },
@@ -1185,6 +1283,52 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     ClientEvent::Snapshot(_)
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_)
+                    | ClientEvent::Error { .. },
+                )
+                | None => {}
+            }
+        }
+    }
+
+    /// Executes or replays one named-agent retirement through its next durable outcome.
+    pub fn agent_retirement(
+        &mut self,
+        request: AgentRetirementRequestDto,
+    ) -> Result<ClientEvent, BlockingClientError> {
+        let deadline = self.execution_deadline();
+        let command_id = CommandId::from_bytes(request.command_id.bytes());
+        self.begin_execution();
+        let transition = self
+            .client
+            .submit_agent_retirement(request)
+            .map_err(BlockingClientError::Client)?;
+        self.enqueue(transition);
+        self.ensure_started()?;
+        loop {
+            match self.step(deadline)? {
+                Some(
+                    event @ ClientEvent::AgentRetirement {
+                        command_id: completed,
+                        ..
+                    },
+                ) if completed == command_id => return Ok(event),
+                Some(
+                    event @ ClientEvent::Error {
+                        operation: ClientOperation::AgentRetirement(failed),
+                        ..
+                    },
+                ) if failed == command_id => return Ok(event),
+                Some(ClientEvent::IncompatibleVersion) => {
+                    return Err(BlockingClientError::Incompatible);
+                }
+                Some(
+                    ClientEvent::Snapshot(_)
+                    | ClientEvent::Mutation(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },
@@ -1452,6 +1596,13 @@ const fn project_outcome_is_terminal(outcome: &ProjectCommandOutcomeDto) -> bool
     matches!(
         outcome,
         ProjectCommandOutcomeDto::Completed { .. } | ProjectCommandOutcomeDto::Rejected { .. }
+    )
+}
+
+const fn agent_retirement_is_terminal(outcome: &AgentRetirementOutcomeDto) -> bool {
+    matches!(
+        outcome,
+        AgentRetirementOutcomeDto::Completed { .. } | AgentRetirementOutcomeDto::Rejected { .. }
     )
 }
 

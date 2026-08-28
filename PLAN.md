@@ -54,12 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Implement safe named-agent retirement workflows** — Add named-agent retirement
-  through a node-owned workflow that transactionally rejects stale or conflicting state, quiesces
-  an assigned runtime through the owning project workflow, and requires explicit force before HQ
-  authority can outlive an uncertain stop. Test idle and assigned agents, project races, stale
-  heads, response loss, restart repair, runtime uncertainty, and local API-only architecture.
-
 - **[runtime/high] Compose managed named-agent provider sessions** — Add neutral start,
   exact-resume, and stop commands over the local API; securely copy the caller environment and
   launch directory only at the control boundary; register the Codex adapter in the foreground

@@ -25,6 +25,19 @@ pub struct AgentNameClaimRequest {
     pub name: ShortText,
 }
 
+/// Passive complete evidence for one installation-local absorbing agent retirement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentRetirementPlanRequest {
+    /// Stable named-agent identity.
+    pub agent_id: AgentId,
+    /// Exact installation-qualified agent mailbox.
+    pub mailbox: MailboxAddress,
+    /// Exact compatible permanent name claim.
+    pub claim_fact: FactId,
+    /// Complete causal-maximal agent/session lifecycle frontier observed before retirement.
+    pub agent_frontier: BTreeSet<FactId>,
+}
+
 /// Passive complete intent for one exact durable provider-session selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentSessionSelectionRequest {
@@ -112,6 +125,30 @@ pub fn plan_agent_name_claim(
             agent_id: request.agent_id,
             mailbox_id: request.mailbox.mailbox_id(),
             name: request.name,
+        },
+        inputs.auxiliary_randomness,
+    ))
+}
+
+/// Plans one frontier-complete absorbing installation-local agent retirement.
+pub fn plan_agent_retirement(
+    authority: LocalInstallationAuthority,
+    inputs: LocalFactInputs,
+    request: AgentRetirementPlanRequest,
+) -> Result<FactPlan, ApplicationError> {
+    if request.mailbox.installation_id() != authority.installation_id {
+        return Err(invalid_request());
+    }
+    let mut parents = request.agent_frontier;
+    parents.insert(request.claim_fact);
+    Ok(FactPlan::new(
+        authority.installation_id,
+        inputs.authored_at,
+        FactScope::InstallationPrivate(authority.installation_id),
+        local_causal(authority, parents)?,
+        SemanticPayload::AgentRetired {
+            agent_id: request.agent_id,
+            mailbox_id: request.mailbox.mailbox_id(),
         },
         inputs.auxiliary_randomness,
     ))

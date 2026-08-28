@@ -99,6 +99,7 @@ Request methods are closed and typed:
 - relay configuration and explicit synchronization effects, bounded relay/delivery status, domain
   health, and explicit repair;
 - provider-neutral named-agent session control;
+- exact node-owned named-agent retirement;
 - read-only resource inspection;
 - exact typed project control, including remote-home routing;
 - subscription registration; and
@@ -107,13 +108,21 @@ Request methods are closed and typed:
 Successful response families are lifecycle status, authoritative snapshot, conversation page,
 mutation attempt, canonical evidence, evidence-ingest outcomes, empty external effect,
 relay status, four-domain state health, explicit repair report, agent-session effect,
-resource-inspection effect, typed
-project-command progress, subscription acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
+resource-inspection effect, typed project-command progress, named-agent-retirement progress,
+subscription acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
 and optional bounded inert detail. Machine behavior depends on class/code, never detail text.
 
 External effects retain their stable operation ID, exact request digest, issue time, and typed body.
 Their result is `accepted`, `rejected`, or `uncertain`. An uncertain effect must be reconciled under
 the same operation ID before retry; it is not silently translated into success or failure.
+
+Named-agent retirement is an exact retryable request family rather than a generic effect or a
+client-authored mutation. It carries command and operation identities, exact request digest,
+authorizing account, agent, expected claim, immutable home, issue time, and explicit force policy.
+Results are running, completed, rejected, or reconcilable; completion identifies an owning project
+when assigned and retains optional succeeded, failed, or uncertain runtime truth. The reconnecting
+client retains and replays the original encoded frame byte-for-byte and rejects changed reuse of a
+command identity.
 
 Relay status carries sorted current policies with access, authentication, enabled state, and
 positive generation plus bounded delivery-state counts and an explicit truncation bit. State health

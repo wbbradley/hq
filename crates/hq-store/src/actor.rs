@@ -14,7 +14,9 @@ use std::{
 };
 
 use hq_application::CanonicalEvidence;
-use hq_domain::{AgentId, CommandId, FactId, InstallationId, Page, PageCursor, Revision};
+use hq_domain::{
+    AgentId, CommandId, FactId, InstallationId, OperationId, Page, PageCursor, Revision,
+};
 use hq_protocol::VerifiedSemanticFact;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 
@@ -321,6 +323,10 @@ enum HarnessRequest {
 }
 
 enum ProjectSagaRequest {
+    Load {
+        operation_id: OperationId,
+        reply: SyncSender<Result<Option<StoredProjectSaga>, StoreError>>,
+    },
     Begin {
         record: Box<StoredProjectSaga>,
         reply: SyncSender<Result<StoredProjectSagaBegin, StoreError>>,
@@ -703,6 +709,20 @@ impl fmt::Debug for HarnessStateHandle {
 }
 
 impl ProjectSagaStateHandle {
+    /// Loads one exact retained project workflow by stable operation identity.
+    pub fn load(&self, operation_id: OperationId) -> Result<Option<StoredProjectSaga>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectSaga(Box::new(ProjectSagaRequest::Load {
+                operation_id,
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Atomically begins one exact project workflow.
     pub fn begin(&self, record: StoredProjectSaga) -> Result<StoredProjectSagaBegin, StoreError> {
         let (reply, response) = mpsc::sync_channel(1);
@@ -1295,6 +1315,12 @@ fn canonical_evidence_closure(
 
 fn handle_project_saga_request(database: &mut Database, request: ProjectSagaRequest) {
     match request {
+        ProjectSagaRequest::Load {
+            operation_id,
+            reply,
+        } => {
+            let _ = reply.send(database.load_project_saga(operation_id));
+        }
         ProjectSagaRequest::Begin { record, reply } => {
             let _ = reply.send(database.begin_project_saga(&record));
         }

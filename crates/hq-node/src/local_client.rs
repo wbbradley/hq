@@ -7,7 +7,8 @@ use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientEvent, ClientTransport,
     InitialView, ReconnectPolicy, ReconnectingClient,
     protocol::v1::{
-        AuthoritativeSnapshotDto, BuildMetadata, MutationRequest, ProjectCommandRequestDto, Request,
+        AgentRetirementRequestDto, AuthoritativeSnapshotDto, BuildMetadata, MutationRequest,
+        ProjectCommandRequestDto, Request,
     },
 };
 
@@ -210,6 +211,16 @@ impl LocalNodeClient {
     ) -> Result<ClientEvent, LocalNodeClientError> {
         self.runner
             .project(request)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Executes or reconciles one retry-safe node-owned named-agent retirement.
+    pub fn agent_retirement(
+        &mut self,
+        request: AgentRetirementRequestDto,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .agent_retirement(request)
             .map_err(LocalNodeClientError::Execution)
     }
 }

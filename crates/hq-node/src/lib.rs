@@ -50,10 +50,10 @@ pub use cli::{
     HumanDeviceState, HumanDeviceView, HumanDevicesView, HumanMessageCommand, HumanMessageFilters,
     HumanRelayHintView, HumanView, IdentityCommand, MailboxCapabilityView, MailboxCommand,
     MailboxDiscoveryCandidate, MailboxDiscoveryView, MailboxView, NamedAgentCatalogView,
-    NamedAgentCommand, NamedAgentSelector, NamedAgentSessionView, NamedAgentView, PeerCommand,
-    PeerRouteBlockView, PeerRouteCandidateView, PeerRouteView, RelayAdminView, RelayCommand,
-    RelayPolicyView, complete_cli_delivery, execute_cli, execute_cli_with_input, parse_cli,
-    run_cli, run_cli_with_input,
+    NamedAgentCommand, NamedAgentRetirementView, NamedAgentSelector, NamedAgentSessionView,
+    NamedAgentView, PeerCommand, PeerRouteBlockView, PeerRouteCandidateView, PeerRouteView,
+    RelayAdminView, RelayCommand, RelayPolicyView, complete_cli_delivery, execute_cli,
+    execute_cli_with_input, parse_cli, run_cli, run_cli_with_input,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use foreground::{

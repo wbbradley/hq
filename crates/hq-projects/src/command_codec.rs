@@ -3,7 +3,10 @@
 use std::{error::Error, fmt, num::NonZeroU64};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use hq_application::{ProjectCommandAction, ProjectCommandRequest, WorktreeProvisioningRequest};
+use hq_application::{
+    AgentRetirementRequest, ProjectCommandAction, ProjectCommandRequest,
+    WorktreeProvisioningRequest,
+};
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText,
     CommandDigest, CommandId, ContentText, DispatchId, FactId, InstallationId, MessageId,
@@ -100,6 +103,21 @@ pub fn project_command_request_digest(
     );
     digest.update(body_bytes);
     Ok(CommandDigest::from_bytes(digest.finalize().into()))
+}
+
+/// Derives the exact digest for one node-owned named-agent retirement request.
+pub fn agent_retirement_request_digest(request: &AgentRetirementRequest) -> CommandDigest {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-agent-retirement-request-v1\0");
+    digest.update(request.command_id.as_bytes());
+    digest.update(request.operation_id.as_bytes());
+    digest.update(request.account_id.as_bytes());
+    digest.update(request.agent_id.as_bytes());
+    digest.update(request.expected_claim.as_bytes());
+    digest.update(request.home.as_bytes());
+    digest.update(request.issued_at.as_unix_millis().to_be_bytes());
+    digest.update([u8::from(request.force)]);
+    CommandDigest::from_bytes(digest.finalize().into())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

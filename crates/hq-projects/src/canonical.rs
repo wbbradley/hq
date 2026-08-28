@@ -3,8 +3,10 @@
 use std::collections::{BTreeSet, HashSet};
 
 use hq_application::{
-    ApplicationError, ApplicationErrorCode, CommitFacts, DomainSnapshot, FactMutation, FactPlan,
-    MutationAttempt, MutationDecision, MutationOutcome, QueryDomain,
+    AgentRetirementPlanRequest, AgentRetirementRequest, ApplicationError, ApplicationErrorCode,
+    CommitFacts, DomainSnapshot, FactMutation, FactPlan, LocalFactInputs,
+    LocalInstallationAuthority, MutationAttempt, MutationDecision, MutationOutcome, QueryDomain,
+    plan_agent_retirement,
 };
 use hq_domain::{
     AgentId, AuthorityReference, AuthorityRole, BoundedSet, BoundedVec, CausalReferences,
@@ -21,9 +23,10 @@ use hq_reducer::{
 use hq_resources::{PathClaim, claim_conflict, valid_path_resource};
 
 use crate::{
-    CanonicalProjectAssignment, CanonicalProjectLifecycle, CanonicalProjectMutation,
-    CanonicalProjectMutationAction, CanonicalProjectMutationOutcome, CanonicalProjectPort,
-    PendingProjectInput, ProjectWorkflowSnapshot,
+    AgentRetirementAssignment, AgentRetirementSnapshot, CanonicalProjectAssignment,
+    CanonicalProjectLifecycle, CanonicalProjectMutation, CanonicalProjectMutationAction,
+    CanonicalProjectMutationOutcome, CanonicalProjectPort, PendingProjectInput,
+    ProjectWorkflowSnapshot,
 };
 
 /// Concrete transaction-consistent project adapter over query and canonical-commit capabilities.
@@ -47,6 +50,33 @@ impl<P> CanonicalProjectPort for ApplicationCanonicalProjectPort<P>
 where
     P: QueryDomain + CommitFacts,
 {
+    fn agent_retirement_snapshot(
+        &self,
+        request: &AgentRetirementRequest,
+    ) -> Result<AgentRetirementSnapshot, ApplicationError> {
+        Ok(retirement_snapshot(
+            self.ports.authoritative_snapshot()?.domain(),
+            request,
+        ))
+    }
+
+    fn retire_idle_agent(
+        &self,
+        request: &AgentRetirementRequest,
+    ) -> Result<MutationAttempt, ApplicationError> {
+        let request = *request;
+        let command_id = request.command_id;
+        let request_digest = request.request_digest;
+        self.ports.commit_facts(FactMutation::new(
+            command_id,
+            request_digest,
+            move |snapshot| match build_idle_retirement_plan(snapshot, &request) {
+                Ok(plan) => MutationDecision::commit(plan),
+                Err(error) => MutationDecision::reject(error),
+            },
+        ))
+    }
+
     fn snapshot(
         &self,
         project_id: ProjectId,
@@ -171,12 +201,7 @@ fn workflow_snapshot(
         }
     });
     let requested_agent_available = requested_agent.is_none_or(|agent_id| {
-        active_local_agent(snapshot, view.home, agent_id)
-            && snapshot.project().projections().values().all(|projection| {
-                !matches!(projection, ProjectProjection::Project(project)
-                    if project.assignment.as_ref().is_some_and(|assignment|
-                        assignment.intent.agent_id == agent_id))
-            })
+        agent_available_to_project(snapshot, project_id, view.home, agent_id)
     });
     Ok(ProjectWorkflowSnapshot {
         project_id,
@@ -195,6 +220,159 @@ fn workflow_snapshot(
         requested_agent_available,
         pending_inputs,
         historical_threads,
+    })
+}
+
+fn agent_available_to_project(
+    snapshot: &DomainSnapshot,
+    project_id: ProjectId,
+    home: InstallationId,
+    agent_id: AgentId,
+) -> bool {
+    active_local_agent(snapshot, home, agent_id)
+        && snapshot
+            .project()
+            .projections()
+            .iter()
+            .all(|(key, projection)| {
+                !matches!(projection, ProjectProjection::Project(project)
+                    if project.assignment.as_ref().is_some_and(|assignment|
+                        assignment.intent.agent_id == agent_id)
+                        && *key != ProjectProjectionKey::Project(project_id))
+            })
+}
+
+fn retirement_snapshot(
+    snapshot: &DomainSnapshot,
+    request: &AgentRetirementRequest,
+) -> AgentRetirementSnapshot {
+    let agent = match snapshot
+        .agent()
+        .projection(AgentProjectionKey::Agent(request.agent_id))
+    {
+        Some(AgentProjection::Agent(agent)) => Some(agent.as_ref()),
+        _ => None,
+    };
+    let agent_active = agent.is_some_and(|agent| {
+        agent.lifecycle == AgentLifecycle::Active
+            && agent.claims.len() == 1
+            && agent.mailboxes.len() == 1
+            && agent
+                .mailboxes
+                .iter()
+                .all(|mailbox| mailbox.installation_id() == request.home)
+    });
+    let claim_fact = agent
+        .filter(|_| agent_active)
+        .and_then(|agent| agent.claims.iter().next().copied());
+    let mut conflicted = false;
+    let assignments = snapshot
+        .project()
+        .projections()
+        .iter()
+        .filter_map(|(key, projection)| match (key, projection) {
+            (ProjectProjectionKey::Project(project_id), ProjectProjection::Project(project))
+                if project
+                    .assignment
+                    .as_ref()
+                    .is_some_and(|assignment| assignment.intent.agent_id == request.agent_id) =>
+            {
+                conflicted |= !project.fork_participants.is_empty() || project.home != request.home;
+                Some(AgentRetirementAssignment {
+                    project_id: *project_id,
+                    project_head: project.head,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    conflicted |= assignments.len() > 1;
+    AgentRetirementSnapshot {
+        active_human: active_human_authority(snapshot, request.account_id, request.home).is_some(),
+        agent_active,
+        claim_fact,
+        conflicted,
+        assignments,
+    }
+}
+
+fn build_idle_retirement_plan(
+    snapshot: &DomainSnapshot,
+    request: &AgentRetirementRequest,
+) -> Result<FactPlan, DomainError> {
+    let observed = retirement_snapshot(snapshot, request);
+    if !observed.active_human {
+        return Err(domain_error(
+            ErrorCategory::Unauthorized,
+            "agent_retirement_inactive_human",
+        ));
+    }
+    if observed.conflicted
+        || !observed.assignments.is_empty()
+        || !observed.agent_active
+        || observed.claim_fact != Some(request.expected_claim)
+    {
+        return Err(domain_error(
+            ErrorCategory::Conflict,
+            "agent_retirement_state_changed",
+        ));
+    }
+    let authority = match snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::Installation(request.home))
+    {
+        Some(AuthorityProjection::Installation(installation)) => LocalInstallationAuthority {
+            installation_id: request.home,
+            signing_key: installation.signing_key,
+            root_fact: installation.root_fact,
+        },
+        _ => {
+            return Err(domain_error(
+                ErrorCategory::Unauthorized,
+                "agent_retirement_home_missing",
+            ));
+        }
+    };
+    let Some(AgentProjection::Agent(agent)) = snapshot
+        .agent()
+        .projection(AgentProjectionKey::Agent(request.agent_id))
+    else {
+        return Err(domain_error(
+            ErrorCategory::Conflict,
+            "agent_retirement_agent_unavailable",
+        ));
+    };
+    let mailbox = agent.mailboxes.iter().next().copied().ok_or_else(|| {
+        domain_error(
+            ErrorCategory::Conflict,
+            "agent_retirement_agent_unavailable",
+        )
+    })?;
+    let agent_frontier = match snapshot
+        .agent()
+        .projection(AgentProjectionKey::Selection(request.agent_id))
+    {
+        Some(AgentProjection::Selection(selection)) => selection.frontier.clone(),
+        _ => BTreeSet::new(),
+    };
+    plan_agent_retirement(
+        authority,
+        LocalFactInputs {
+            authored_at: request.issued_at,
+            auxiliary_randomness: *request.request_digest.as_bytes(),
+        },
+        AgentRetirementPlanRequest {
+            agent_id: request.agent_id,
+            mailbox,
+            claim_fact: request.expected_claim,
+            agent_frontier,
+        },
+    )
+    .map_err(|_| {
+        domain_error(
+            ErrorCategory::InvariantViolation,
+            "agent_retirement_plan_invalid",
+        )
     })
 }
 
@@ -971,7 +1149,7 @@ mod tests {
 
     use super::{
         CanonicalProjectMutation, CanonicalProjectMutationAction, build_creation_plan,
-        build_retirement_plan, payload, resource_payload,
+        build_retirement_plan, payload, resource_payload, workflow_snapshot,
     };
 
     #[test]
@@ -1155,6 +1333,46 @@ mod tests {
         let error = build_retirement_plan(&assigned, &mutation, root, agent_id)
             .expect_err("assigned retirement must fail");
         assert_eq!(error.code().as_str(), "project_agent_assigned");
+    }
+
+    #[test]
+    fn assigned_agent_remains_available_to_its_own_project_retirement_workflow() {
+        let project_id = ProjectId::from_bytes([1; 32]);
+        let account_id = AccountId::from_bytes([2; 32]);
+        let agent_id = AgentId::from_bytes([3; 32]);
+        let home = InstallationId::from_bytes([3; 32]);
+        let mailbox = MailboxAddress::new(home, MailboxId::from_bytes([4; 32]));
+        let mut project = view(project_id, ProjectLifecycle::Open, []);
+        project.assignment = Some(ProjectAssignmentView {
+            intent: AssignmentIntent {
+                assignment_id: AssignmentId::from_bytes([8; 32]),
+                agent_id,
+                provider: ProviderId::new("provider").expect("provider"),
+            },
+            binding: None,
+            phase: ProjectAssignmentPhase::Configuring,
+            cardinality_conflicted: false,
+            runnable: false,
+            support: BTreeSet::new(),
+        });
+        let snapshot = retirement_snapshot(
+            project_id,
+            project,
+            agent_id,
+            mailbox,
+            FactId::from_bytes([5; 32]),
+            FactId::from_bytes([6; 32]),
+        );
+
+        let observed = workflow_snapshot(&snapshot, project_id, account_id, Some(agent_id))
+            .expect("target project snapshot");
+        assert!(observed.requested_agent_available);
+        assert_eq!(
+            observed
+                .assignment
+                .map(|assignment| assignment.intent.agent_id),
+            Some(agent_id)
+        );
     }
 
     fn retirement_snapshot(

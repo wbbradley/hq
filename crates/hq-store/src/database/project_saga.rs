@@ -357,7 +357,7 @@ fn insert_record(
     Ok(())
 }
 
-fn load_operation(
+pub(super) fn load_operation(
     connection: &Connection,
     operation_id: OperationId,
 ) -> Result<Option<StoredProjectSaga>, StoreError> {

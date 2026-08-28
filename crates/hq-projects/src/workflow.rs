@@ -3,8 +3,9 @@
 use std::{collections::BTreeSet, num::NonZeroU64, path::Path};
 
 use hq_application::{
-    EffectOutcome, EffectRequest, ProjectCommandAction, ProjectCommandOutcome,
-    ProjectCommandRequest, ProjectCommandStage, WorktreeProvisioningRequest,
+    AgentRetirementOutcome, AgentRetirementRequest, EffectOutcome, EffectRequest, MutationAttempt,
+    MutationOutcome, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
+    ProjectCommandStage, WorktreeProvisioningRequest,
 };
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, CommandDigest,
@@ -100,6 +101,30 @@ pub struct ProjectWorkflowSnapshot {
     pub pending_inputs: Vec<PendingProjectInput>,
     /// Historical project threads that may be explicitly resumed.
     pub historical_threads: BTreeSet<ThreadId>,
+}
+
+/// One current project assignment found while coordinating a named-agent retirement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentRetirementAssignment {
+    /// Owning project.
+    pub project_id: ProjectId,
+    /// Exact project head that still contains the assignment.
+    pub project_head: FactId,
+}
+
+/// One serialized global observation used to choose the safe retirement path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentRetirementSnapshot {
+    /// Whether the requested account is currently active at this installation.
+    pub active_human: bool,
+    /// Whether the named agent is uniquely active and installation-local.
+    pub agent_active: bool,
+    /// Unique compatible permanent claim when active.
+    pub claim_fact: Option<FactId>,
+    /// Whether project assignment state is globally inconsistent or forked.
+    pub conflicted: bool,
+    /// Every current assignment for the agent; more than one is a conflict.
+    pub assignments: Vec<AgentRetirementAssignment>,
 }
 
 /// Closed canonical project mutations used by this workflow package.
@@ -236,6 +261,26 @@ pub enum CanonicalProjectMutationOutcome {
 
 /// Canonical project snapshot and compare-and-swap mutation capability.
 pub trait CanonicalProjectPort {
+    /// Loads one serialized global agent/assignment observation for retirement routing.
+    fn agent_retirement_snapshot(
+        &self,
+        _request: &AgentRetirementRequest,
+    ) -> Result<AgentRetirementSnapshot, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    /// Atomically validates and retires an agent that remains globally unassigned.
+    fn retire_idle_agent(
+        &self,
+        _request: &AgentRetirementRequest,
+    ) -> Result<MutationAttempt, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
     /// Loads one complete serialized workflow view.
     fn snapshot(
         &self,
@@ -547,6 +592,76 @@ where
             }
         };
         self.run(record)
+    }
+
+    /// Coordinates one exact idle or assigned named-agent retirement.
+    pub fn retire_agent(
+        &self,
+        request: AgentRetirementRequest,
+    ) -> Result<AgentRetirementOutcome, hq_application::ApplicationError> {
+        if crate::agent_retirement_request_digest(&request) != request.request_digest {
+            return Ok(retirement_rejected(
+                request.operation_id,
+                "agent_retirement_digest_mismatch",
+            ));
+        }
+        if let Some(existing) = self.store.find(request.operation_id).map_err(store_error)? {
+            if !retirement_record_matches(&existing, &request) {
+                return Ok(retirement_rejected(
+                    request.operation_id,
+                    "agent_retirement_identity_conflict",
+                ));
+            }
+            let project_id = existing.project_id;
+            return self
+                .run(existing)
+                .map(|outcome| retirement_from_project(outcome, project_id));
+        }
+
+        let snapshot = self.canonical.agent_retirement_snapshot(&request)?;
+        if !snapshot.active_human {
+            return Ok(retirement_rejected(
+                request.operation_id,
+                "agent_retirement_inactive_human",
+            ));
+        }
+        if snapshot.conflicted
+            || !snapshot.agent_active
+            || snapshot.claim_fact != Some(request.expected_claim)
+        {
+            return Ok(retirement_rejected(
+                request.operation_id,
+                "agent_retirement_agent_unavailable",
+            ));
+        }
+        match snapshot.assignments.as_slice() {
+            [] => self
+                .canonical
+                .retire_idle_agent(&request)
+                .map(|attempt| retirement_from_mutation(&request, attempt)),
+            [assignment] => {
+                let project_id = assignment.project_id;
+                self.control(ProjectCommandRequest {
+                    command_id: request.command_id,
+                    operation_id: request.operation_id,
+                    request_digest: request.request_digest,
+                    account_id: request.account_id,
+                    project_id,
+                    home: request.home,
+                    expected_head: Some(assignment.project_head),
+                    issued_at: request.issued_at,
+                    action: ProjectCommandAction::RetireAgent {
+                        agent_id: request.agent_id,
+                        force: request.force,
+                    },
+                })
+                .map(|outcome| retirement_from_project(outcome, project_id))
+            }
+            [_, _, ..] => Ok(retirement_rejected(
+                request.operation_id,
+                "agent_retirement_assignment_conflict",
+            )),
+        }
     }
 
     /// Repairs one bounded deterministic set of nonterminal workflows.
@@ -2656,6 +2771,115 @@ where
         request: ProjectCommandRequest,
     ) -> Result<ProjectCommandOutcome, hq_application::ApplicationError> {
         self.control(request)
+    }
+}
+
+impl<S, C, R, F, G> hq_application::RetireAgents for ProjectWorkflowManager<S, C, R, F, G>
+where
+    S: ProjectSagaStore,
+    C: CanonicalProjectPort,
+    R: ProjectRuntimePort,
+    F: ProjectResourcePort,
+    G: GitWorktreePort,
+{
+    fn retire_agent(
+        &self,
+        request: AgentRetirementRequest,
+    ) -> Result<AgentRetirementOutcome, hq_application::ApplicationError> {
+        ProjectWorkflowManager::retire_agent(self, request)
+    }
+}
+
+fn retirement_record_matches(record: &ProjectSagaRecord, request: &AgentRetirementRequest) -> bool {
+    record.command_id == request.command_id
+        && record.operation_id == request.operation_id
+        && record.request_digest == request.request_digest
+        && record.account_id == request.account_id
+        && record.home == request.home
+        && record.issued_at == request.issued_at
+        && record.action
+            == (ProjectCommandAction::RetireAgent {
+                agent_id: request.agent_id,
+                force: request.force,
+            })
+}
+
+fn retirement_from_project(
+    outcome: ProjectCommandOutcome,
+    project_id: ProjectId,
+) -> AgentRetirementOutcome {
+    match outcome {
+        ProjectCommandOutcome::Accepted {
+            operation_id,
+            stage,
+        }
+        | ProjectCommandOutcome::Running {
+            operation_id,
+            stage,
+        } => AgentRetirementOutcome::Running {
+            operation_id,
+            stage,
+        },
+        ProjectCommandOutcome::Completed {
+            operation_id,
+            runtime,
+            ..
+        } => AgentRetirementOutcome::Completed {
+            operation_id,
+            project_id: Some(project_id),
+            runtime,
+        },
+        ProjectCommandOutcome::Rejected {
+            operation_id,
+            error,
+            runtime,
+        } => AgentRetirementOutcome::Rejected {
+            operation_id,
+            error,
+            runtime,
+        },
+        ProjectCommandOutcome::Reconcilable {
+            operation_id,
+            stage,
+            error,
+        } => AgentRetirementOutcome::Reconcilable {
+            operation_id,
+            stage,
+            error,
+        },
+    }
+}
+
+fn retirement_from_mutation(
+    request: &AgentRetirementRequest,
+    attempt: MutationAttempt,
+) -> AgentRetirementOutcome {
+    match attempt {
+        MutationAttempt::Completed(receipt) => match receipt.outcome() {
+            MutationOutcome::Committed => AgentRetirementOutcome::Completed {
+                operation_id: request.operation_id,
+                project_id: None,
+                runtime: None,
+            },
+            MutationOutcome::Rejected(error) => AgentRetirementOutcome::Rejected {
+                operation_id: request.operation_id,
+                error: error.clone(),
+                runtime: None,
+            },
+        },
+        MutationAttempt::Uncertain { .. } => AgentRetirementOutcome::Reconcilable {
+            operation_id: request.operation_id,
+            stage: ProjectCommandStage::ReconciliationRequired,
+            error: effect_error("agent_retirement_commit_unknown"),
+        },
+    }
+}
+
+fn retirement_rejected(operation_id: OperationId, code: &'static str) -> AgentRetirementOutcome {
+    AgentRetirementOutcome::Rejected {
+        operation_id,
+        error: error(ErrorCategory::Conflict, code),
+        runtime: None,
     }
 }
 

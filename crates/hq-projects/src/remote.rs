@@ -1,8 +1,9 @@
 //! Durable control-plane routing around the home-authoritative project workflow.
 
 use hq_application::{
-    ApplicationError, ApplicationErrorCode, ControlProjects, ProjectCommandOutcome,
-    ProjectCommandRequest, ProjectCommandStage,
+    AgentRetirementOutcome, AgentRetirementRequest, ApplicationError, ApplicationErrorCode,
+    ControlProjects, ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage,
+    RetireAgents,
 };
 use hq_domain::{
     CommandId, DomainError, ErrorCategory, ErrorCode, FactId, InstallationId, RemoteCommandResult,
@@ -272,6 +273,28 @@ where
                 "project_remote_request_unknown",
             )),
         }
+    }
+}
+
+impl<L, R> RetireAgents for ProjectCommandRouter<L, R>
+where
+    L: RetireAgents,
+{
+    fn retire_agent(
+        &self,
+        request: AgentRetirementRequest,
+    ) -> Result<AgentRetirementOutcome, ApplicationError> {
+        if request.home != self.local_installation {
+            return Ok(AgentRetirementOutcome::Rejected {
+                operation_id: request.operation_id,
+                error: DomainError::new(
+                    ErrorCategory::Unauthorized,
+                    stable_code("agent_retirement_wrong_home"),
+                ),
+                runtime: None,
+            });
+        }
+        self.local.retire_agent(request)
     }
 }
 

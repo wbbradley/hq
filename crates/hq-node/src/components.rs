@@ -3,11 +3,12 @@
 use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroUsize};
 
 use hq_application::{
-    AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts, CanonicalEvidence,
-    CommitFacts, ConfigureRelays, ControlHarness, ControlProjects, EffectOutcome, EffectRequest,
-    EvidenceIngestOutcome, FactMutation, InspectResource, MutationAttempt, ObserveRevisions,
-    ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration,
-    RelayStatus, ResourceInspectionRequest, ResourceInspectionResult, StateHealth,
+    AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest, AgentSessionResult,
+    ApplicationError, ApplicationPorts, CanonicalEvidence, CommitFacts, ConfigureRelays,
+    ControlHarness, ControlProjects, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
+    FactMutation, InspectResource, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
+    ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, RelayStatus,
+    ResourceInspectionRequest, ResourceInspectionResult, RetireAgents, StateHealth,
     StateRepairReport, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{FactId, Page, PageCursor, Revision};
@@ -271,6 +272,15 @@ impl<R, H, P: ControlProjects> ControlProjects for NodeApplicationPorts<'_, R, H
     }
 }
 
+impl<R, H, P: RetireAgents> RetireAgents for NodeApplicationPorts<'_, R, H, P> {
+    fn retire_agent(
+        &self,
+        request: AgentRetirementRequest,
+    ) -> Result<AgentRetirementOutcome, ApplicationError> {
+        self.project.retire_agent(request)
+    }
+}
+
 impl<R, H, P> ObserveRevisions for NodeApplicationPorts<'_, R, H, P> {
     fn register_subscription(&self, request: &SubscriptionRequest) -> Result<(), ApplicationError> {
         self.revisions.register_subscription(request)
@@ -295,7 +305,7 @@ impl<R, H, P> ApplicationPorts for NodeApplicationPorts<'_, R, H, P>
 where
     R: PublishWake + ConfigureRelays,
     H: ControlHarness,
-    P: InspectResource + ControlProjects,
+    P: InspectResource + ControlProjects + RetireAgents,
 {
 }
 
@@ -384,7 +394,7 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
     where
         R: PublishWake + ConfigureRelays,
         H: ControlHarness,
-        P: InspectResource + ControlProjects,
+        P: InspectResource + ControlProjects + RetireAgents,
     {
         let foundation = self.foundation.as_ref()?;
         let components = self.components.as_ref()?;

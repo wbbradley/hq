@@ -4,7 +4,7 @@ use std::{cell::Cell, error::Error, fmt, future::Future, time::Duration};
 
 use hq_application::{
     Application, ApplicationError, ApplicationErrorCode, ConfigureRelays, ControlHarness,
-    ControlProjects, InspectResource, PublishWake,
+    ControlProjects, InspectResource, PublishWake, RetireAgents,
 };
 use hq_local_api::{
     LifecycleControl,
@@ -99,7 +99,7 @@ where
     L: NodeComponent,
     R: NodeComponent + PublishWake + ConfigureRelays,
     H: NodeComponent + ControlHarness,
-    P: NodeComponent + InspectResource + ControlProjects,
+    P: NodeComponent + InspectResource + ControlProjects + RetireAgents,
 {
     /// Opens runtime artifacts for one already-ready node owner.
     pub fn start(

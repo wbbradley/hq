@@ -1707,6 +1707,13 @@ impl Database {
         project_saga::replace(&mut self.connection, record)
     }
 
+    pub(super) fn load_project_saga(
+        &self,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<Option<crate::StoredProjectSaga>, StoreError> {
+        project_saga::load_operation(&self.connection, operation_id)
+    }
+
     pub(super) fn load_runnable_project_sagas(
         &self,
         limit: usize,

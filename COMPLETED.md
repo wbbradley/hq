@@ -7445,3 +7445,35 @@ reports only the existing allowed yanked `chacha20 0.10.1` warning.
   ship concise installed guidance for messaging, retry, synchronization, delivery identity, causal
   incompleteness, and human-owned administrative boundaries. Test name and session conflicts,
   provider ambiguity, stale metadata, generated help, and local API-only architecture.
+
+## 2026-08-28 — Safe named-agent retirement workflows
+
+Added `agent retire NAME|AGENT_ID --yes [--force]` through a typed node-owned application
+capability and local API request family. The coordinator binds the exact active claim and human
+authority, observes the global assignment set, atomically retires an idle agent, or routes an
+assigned agent through its owning project's durable saga. Same-project assignment remains eligible
+while wrong-home, forked, multiply assigned, stale-claim, changed-identity, and retired state fail
+closed.
+
+Assigned retirement reuses project quiescence, block, force, and canonical compare-and-swap
+boundaries. Failed or uncertain graceful stops retain the blocked assignment and HQ authority; a
+new explicitly forced operation may end it while preserving truthful failed or uncertain runtime
+state. Exact operation lookup and byte-identical local request replay make response loss and
+coordinator restart repair safe. CLI output verifies the absorbing retirement projection and
+reports the owning project and runtime truth when applicable.
+
+Planner, coordinator, force escalation, project-race, stale-head, response-loss, restart-repair,
+runtime-uncertainty, protocol, reconnect, parser/help, durable-store lookup, architecture, and real
+idle foreground/restart tests pass. Full workspace tests, formatting, strict Clippy, architecture,
+protocol, causal, behavior-ledger, and dependency gates pass. The clean unshipped storage remains
+v13 and local API remains v1, evolved in place with public passive records and no migration,
+compatibility reader, accessor facade, version bump, or dependency change. Dependency policy
+reports only the existing allowed yanked `chacha20 0.10.1` warning.
+
+### Original plan entry
+
+- **[cli/high] Implement safe named-agent retirement workflows** — Add named-agent retirement
+  through a node-owned workflow that transactionally rejects stale or conflicting state, quiesces
+  an assigned runtime through the owning project workflow, and requires explicit force before HQ
+  authority can outlive an uncertain stop. Test idle and assigned agents, project races, stale
+  heads, response loss, restart repair, runtime uncertainty, and local API-only architecture.

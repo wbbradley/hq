@@ -81,9 +81,14 @@ fn exact_command_checkpoint_survives_store_and_adapter_restart() {
     store.close().expect("store closes");
 
     let reopened = Store::open(&database, NonZeroUsize::MIN).expect("store reopens");
-    let recovered = ProjectSagaManager::new(ProjectSagaStoreAdapter::new(
-        reopened.project_saga_state_handle(),
-    ));
+    let reopened_adapter = ProjectSagaStoreAdapter::new(reopened.project_saga_state_handle());
+    assert_eq!(
+        reopened_adapter
+            .find(checkpoint.operation_id)
+            .expect("exact checkpoint lookup"),
+        Some(checkpoint.clone())
+    );
+    let recovered = ProjectSagaManager::new(reopened_adapter);
     assert!(matches!(
         recovered.accept(request()).expect("exact command replays"),
         ProjectCommandOutcome::Reconcilable {

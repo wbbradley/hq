@@ -92,6 +92,15 @@ impl hq_application::ControlProjects for UnavailableNodeComponent {
     }
 }
 
+impl hq_application::RetireAgents for UnavailableNodeComponent {
+    fn retire_agent(
+        &self,
+        _request: hq_application::AgentRetirementRequest,
+    ) -> Result<hq_application::AgentRetirementOutcome, ApplicationError> {
+        unavailable()
+    }
+}
+
 #[derive(Clone)]
 pub struct UnavailableApplicationPorts {
     hub: RevisionHub,
@@ -186,6 +195,15 @@ impl hq_application::ControlProjects for UnavailableApplicationPorts {
         &self,
         _request: hq_application::ProjectCommandRequest,
     ) -> Result<hq_application::ProjectCommandOutcome, ApplicationError> {
+        unavailable()
+    }
+}
+
+impl hq_application::RetireAgents for UnavailableApplicationPorts {
+    fn retire_agent(
+        &self,
+        _request: hq_application::AgentRetirementRequest,
+    ) -> Result<hq_application::AgentRetirementOutcome, ApplicationError> {
         unavailable()
     }
 }

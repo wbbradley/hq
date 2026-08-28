@@ -1,11 +1,12 @@
 //! Exhaustive local API v1 conversion boundary.
 
 use crate::protocol::v1::{
-    AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
-    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto,
-    ConversationEntryDto, ConversationKeyDto, ConversationPageDto, ConversationPageRequest,
-    DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
-    ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
+    AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSelectionCandidateDto,
+    AgentSessionBindingDto, AgentSessionNameCandidateDto, AgentSessionRequestDto,
+    AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto, ConversationEntryDto,
+    ConversationKeyDto, ConversationPageDto, ConversationPageRequest, DeviceGrantDto,
+    DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
+    EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
     MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
@@ -17,16 +18,17 @@ use crate::protocol::v1::{
     StateRepairReportDto, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
-    AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorClass,
-    AuthoritativeSnapshot, CanonicalEvidence, ClientAgentLifecycle, ClientMembershipState,
-    ClientPeerRouteState, ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection,
-    ClientRemoteCommandStage, ConversationEntry, ConversationKey, DomainHealth, EffectOutcome,
-    EffectRequest, EvidenceIngestOutcome, FactMutation, HealthDomain, MutationAttempt,
-    MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
-    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, RelayAccess,
-    RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
-    ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
-    SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
+    AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest, AgentSessionResult,
+    ApplicationError, ApplicationErrorClass, AuthoritativeSnapshot, CanonicalEvidence,
+    ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState, ClientProjectLifecycle,
+    ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
+    ConversationKey, DomainHealth, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
+    FactMutation, HealthDomain, MutationAttempt, MutationDecision, MutationOutcome,
+    MutationReceipt, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
+    ProjectCommandStage, RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus,
+    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
+    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    WorktreeProvisioningRequest,
 };
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
@@ -938,6 +940,61 @@ pub fn project_command_to_v1(outcome: &ProjectCommandOutcome) -> ProjectCommandO
             stage,
             error,
         } => ProjectCommandOutcomeDto::Reconcilable {
+            operation_id: id32(operation_id.as_bytes()),
+            stage: project_stage_to_v1(*stage),
+            error: domain_error_to_v1(error),
+        },
+    }
+}
+
+/// Converts one strict local API retirement request into its application value.
+pub fn agent_retirement_from_v1(request: AgentRetirementRequestDto) -> AgentRetirementRequest {
+    AgentRetirementRequest {
+        command_id: CommandId::from_bytes(request.command_id.bytes()),
+        operation_id: OperationId::from_bytes(request.operation_id.bytes()),
+        request_digest: CommandDigest::from_bytes(request.request_digest.bytes()),
+        account_id: hq_domain::AccountId::from_bytes(request.account_id.bytes()),
+        agent_id: AgentId::from_bytes(request.agent_id.bytes()),
+        expected_claim: FactId::from_bytes(request.expected_claim.bytes()),
+        home: hq_domain::InstallationId::from_bytes(request.home.bytes()),
+        issued_at: hq_domain::Timestamp::from_unix_millis(request.issued_at_unix_millis),
+        force: request.force,
+    }
+}
+
+/// Converts one typed named-agent retirement result into local API v1.
+pub fn agent_retirement_to_v1(outcome: &AgentRetirementOutcome) -> AgentRetirementOutcomeDto {
+    match outcome {
+        AgentRetirementOutcome::Running {
+            operation_id,
+            stage,
+        } => AgentRetirementOutcomeDto::Running {
+            operation_id: id32(operation_id.as_bytes()),
+            stage: project_stage_to_v1(*stage),
+        },
+        AgentRetirementOutcome::Completed {
+            operation_id,
+            project_id,
+            runtime,
+        } => AgentRetirementOutcomeDto::Completed {
+            operation_id: id32(operation_id.as_bytes()),
+            project_id: project_id.map(|value| id32(value.as_bytes())),
+            runtime: runtime.as_ref().map(runtime_to_v1),
+        },
+        AgentRetirementOutcome::Rejected {
+            operation_id,
+            error,
+            runtime,
+        } => AgentRetirementOutcomeDto::Rejected {
+            operation_id: id32(operation_id.as_bytes()),
+            error: domain_error_to_v1(error),
+            runtime: runtime.as_ref().map(runtime_to_v1),
+        },
+        AgentRetirementOutcome::Reconcilable {
+            operation_id,
+            stage,
+            error,
+        } => AgentRetirementOutcomeDto::Reconcilable {
             operation_id: id32(operation_id.as_bytes()),
             stage: project_stage_to_v1(*stage),
             error: domain_error_to_v1(error),

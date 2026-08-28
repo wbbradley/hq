@@ -17,9 +17,9 @@ use hq_reducer::{GraphOnlyReducer, GraphReductionReport, ReduceError, reduce_com
 pub use hq_reducer::ConversationKey;
 
 pub use agent_admin::{
-    AgentNameClaimRequest, AgentSessionRenameRequest, AgentSessionSelectionRequest,
-    plan_agent_mailbox_creation, plan_agent_name_claim, plan_agent_session_rename,
-    plan_agent_session_selection,
+    AgentNameClaimRequest, AgentRetirementPlanRequest, AgentSessionRenameRequest,
+    AgentSessionSelectionRequest, plan_agent_mailbox_creation, plan_agent_name_claim,
+    plan_agent_retirement, plan_agent_session_rename, plan_agent_session_selection,
 };
 pub use authority_admin::{
     MailboxGrantRequest, MailboxRevokeRequest, PeerRouteRequest, plan_mailbox_grant,
@@ -54,8 +54,9 @@ pub use ports::{
     WakeDisposition,
 };
 pub use project::{
-    ControlProjects, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
-    ProjectCommandStage, WorktreeProvisioningRequest,
+    AgentRetirementOutcome, AgentRetirementRequest, ControlProjects, ProjectCommandAction,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, RetireAgents,
+    WorktreeProvisioningRequest,
 };
 pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{

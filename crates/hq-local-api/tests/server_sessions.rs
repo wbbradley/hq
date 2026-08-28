@@ -226,6 +226,20 @@ impl hq_application::ControlProjects for Ports {
     }
 }
 
+impl hq_application::RetireAgents for Ports {
+    fn retire_agent(
+        &self,
+        request: hq_application::AgentRetirementRequest,
+    ) -> Result<hq_application::AgentRetirementOutcome, ApplicationError> {
+        self.trace.borrow_mut().push("retire_agent");
+        Ok(hq_application::AgentRetirementOutcome::Completed {
+            operation_id: request.operation_id,
+            project_id: None,
+            runtime: None,
+        })
+    }
+}
+
 impl ObserveRevisions for Ports {
     fn register_subscription(&self, request: &SubscriptionRequest) -> Result<(), ApplicationError> {
         self.hub.register_subscription(request)
