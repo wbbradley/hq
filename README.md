@@ -46,12 +46,15 @@ Run `hq agents` to print the short agent workflow:
 hq agents
 ```
 
-HQ embeds [the agent instruction source](internal/agenthelp/instructions.md) in the binary. Focused topics keep rare details out of the default agent context:
+HQ embeds concise Rust guidance in the binary. Focused topics keep rare details out of the default agent context:
 
 ```sh
-hq agents commands
-hq agents sync-semantics
-hq agents delivery-semantics
+hq agents messaging
+hq agents retry
+hq agents synchronization
+hq agents delivery
+hq agents causality
+hq agents administration
 ```
 
 HQ detects `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`, or `PI_SESSION_ID` and binds one private mailbox to that namespaced harness session. Agents do not need to manage a session ID. HQ stops with an error if more than one built-in harness ID is present because silent routing could select the wrong mailbox.
@@ -84,9 +87,17 @@ Durable installation-local agent names can be created or can adopt an existing u
 ```sh
 hq agent create fred
 hq agent create jane --mailbox MAILBOX_ID
-hq agent list --json
-hq agent retire fred --yes
+hq --output json agent list
+hq agent show jane
+hq agent current
+hq agent select jane --provider codex --session SESSION_ID --dir .
+hq agent rename jane "review work" --provider codex --session SESSION_ID
 ```
+
+Creation is restart-safe and reconciles a partially created mailbox. Selection and rename require
+the exact immutable session binding and complete causal register frontier; they reject stale,
+conflicted, or ambiguous metadata. Rename changes display metadata only. Safe retirement and
+managed provider start/exact-resume/stop are separate node-owned workflows.
 
 ## Harness runtime and Codex adapter
 
@@ -309,9 +320,14 @@ hq cancel MESSAGE_ID
 hq archive MESSAGE_ID
 hq restore MESSAGE_ID
 hq [--output human|json] mailboxes [--dir PATH]
+hq agents [messaging|retry|synchronization|delivery|causality|administration]
 hq agent create NAME [--mailbox MAILBOX_ID]
-hq agent list [--json]
-hq agent retire NAME --yes
+hq agent list
+hq agent show NAME|AGENT_ID
+hq agent current
+hq agent select NAME|AGENT_ID [--provider PROVIDER --session SESSION] [--dir PATH]
+hq agent rename NAME|AGENT_ID DISPLAY_NAME [--provider PROVIDER --session SESSION]
+hq agent rename NAME|AGENT_ID --clear [--provider PROVIDER --session SESSION]
 hq identity init
 hq identity show [--json]
 hq identity export BACKUP_PATH

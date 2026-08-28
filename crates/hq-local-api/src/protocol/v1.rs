@@ -1228,8 +1228,14 @@ pub enum SnapshotItem {
     Agent {
         /// Agent identity.
         agent_id: Id32,
+        /// Exact compatible permanent-name claim facts.
+        claims: Vec<Id32>,
         /// Candidate permanent names.
         names: Vec<String>,
+        /// Candidate installation-qualified agent mailboxes.
+        mailboxes: Vec<MailboxAddressDto>,
+        /// Absorbing retirement facts.
+        retirements: Vec<Id32>,
         /// Stable lifecycle name.
         lifecycle: String,
         /// Whether the agent is presently runnable.
@@ -1241,6 +1247,8 @@ pub enum SnapshotItem {
         provider: String,
         /// Provider-scoped session identity.
         session: String,
+        /// Exact immutable binding facts and their candidate mailboxes.
+        bindings: Vec<AgentSessionBindingDto>,
         /// Unique bound mailbox installation, when unconflicted.
         mailbox_installation: Option<Id32>,
         /// Unique bound mailbox identity, when unconflicted.
@@ -1252,10 +1260,14 @@ pub enum SnapshotItem {
     AgentSelection {
         /// Named-agent identity.
         agent_id: Id32,
+        /// Causal-maximal candidate values and their exact facts.
+        candidates: Vec<AgentSelectionCandidateDto>,
         /// Selected provider, when resolved.
         provider: Option<String>,
         /// Selected provider session, when resolved.
         session: Option<String>,
+        /// Exact causal-maximal selection facts.
+        frontier: Vec<Id32>,
         /// Whether distinct causal maxima remain.
         conflicted: bool,
     },
@@ -1267,6 +1279,10 @@ pub enum SnapshotItem {
         provider: String,
         /// Provider-scoped session identity.
         session: String,
+        /// Causal-maximal display-name candidates and their exact facts.
+        candidates: Vec<AgentSessionNameCandidateDto>,
+        /// Exact causal-maximal rename facts.
+        frontier: Vec<Id32>,
         /// Whether the register has one resolved value.
         resolved: bool,
         /// Resolved display name or explicit clear.
@@ -1416,6 +1432,48 @@ pub struct RepositoryContextDto {
     pub worktree: Option<ResourceLocatorDto>,
     /// Optional bounded display branch.
     pub branch: Option<String>,
+}
+
+/// Passive installation-qualified mailbox identity inside an administrative projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxAddressDto {
+    /// Owning installation.
+    pub installation_id: Id32,
+    /// Mailbox identity.
+    pub mailbox_id: Id32,
+}
+
+/// One causal-maximal durable provider-session selection candidate.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSelectionCandidateDto {
+    /// Exact selection fact.
+    pub fact_id: Id32,
+    /// Neutral provider namespace.
+    pub provider: String,
+    /// Exact provider-scoped session.
+    pub session: String,
+}
+
+/// One exact immutable provider-session binding candidate.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionBindingDto {
+    /// Exact binding fact.
+    pub fact_id: Id32,
+    /// Candidate installation-qualified mailbox.
+    pub mailbox: MailboxAddressDto,
+}
+
+/// One causal-maximal provider-session display-name candidate.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionNameCandidateDto {
+    /// Exact rename fact.
+    pub fact_id: Id32,
+    /// Candidate display name, or `None` for an explicit clear.
+    pub display_name: Option<String>,
 }
 
 /// Passive creator-issued human-device grant history.
@@ -2484,8 +2542,14 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 }
             }
             SnapshotItem::Agent {
-                names, lifecycle, ..
+                claims,
+                names,
+                mailboxes,
+                retirements,
+                lifecycle,
+                ..
             } => {
+                validate_id_set(claims, 64)?;
                 if names.len() > 64 {
                     return Err(ValueError::TooManyItems);
                 }
@@ -2495,24 +2559,76 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 if names.windows(2).any(|pair| pair[0] >= pair[1]) {
                     return Err(ValueError::InvalidValueCombination);
                 }
+                if mailboxes.len() > 64
+                    || mailboxes.windows(2).any(|pair| {
+                        (&pair[0].installation_id, &pair[0].mailbox_id)
+                            >= (&pair[1].installation_id, &pair[1].mailbox_id)
+                    })
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                validate_id_set(retirements, 64)?;
                 validate_text(lifecycle, SHORT_TEXT_MAX_BYTES)?;
             }
             SnapshotItem::AgentSession {
                 provider,
                 session,
+                bindings,
                 mailbox_installation,
                 mailbox_id,
-                ..
+                conflicted,
             } => {
                 validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
                 validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+                if bindings.is_empty()
+                    || bindings.len() > 64
+                    || bindings
+                        .windows(2)
+                        .any(|pair| pair[0].fact_id >= pair[1].fact_id)
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
                 if mailbox_installation.is_some() != mailbox_id.is_some() {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                if *conflicted != mailbox_id.is_none() {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                if let (Some(installation), Some(mailbox_id)) = (mailbox_installation, mailbox_id)
+                    && bindings.iter().any(|binding| {
+                        binding.mailbox.installation_id != *installation
+                            || binding.mailbox.mailbox_id != *mailbox_id
+                    })
+                {
                     return Err(ValueError::InvalidValueCombination);
                 }
             }
             SnapshotItem::AgentSelection {
-                provider, session, ..
+                candidates,
+                provider,
+                session,
+                frontier,
+                ..
             } => {
+                if candidates.len() > 64
+                    || candidates
+                        .windows(2)
+                        .any(|pair| pair[0].fact_id >= pair[1].fact_id)
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                for candidate in candidates {
+                    validate_text(&candidate.provider, PROVIDER_ID_MAX_BYTES)?;
+                    validate_text(&candidate.session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+                }
+                validate_id_set(frontier, 64)?;
+                if frontier.iter().any(|fact_id| {
+                    !candidates
+                        .iter()
+                        .any(|candidate| candidate.fact_id == *fact_id)
+                }) {
+                    return Err(ValueError::InvalidValueCombination);
+                }
                 if let Some(provider) = provider {
                     validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
                 }
@@ -2526,12 +2642,34 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
             SnapshotItem::AgentSessionName {
                 provider,
                 session,
+                candidates,
+                frontier,
                 resolved,
                 display_name,
                 ..
             } => {
                 validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
                 validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+                if candidates.len() > 64
+                    || candidates
+                        .windows(2)
+                        .any(|pair| pair[0].fact_id >= pair[1].fact_id)
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                for candidate in candidates {
+                    if let Some(display_name) = &candidate.display_name {
+                        validate_text(display_name, SHORT_TEXT_MAX_BYTES)?;
+                    }
+                }
+                validate_id_set(frontier, 64)?;
+                if frontier.iter().any(|fact_id| {
+                    !candidates
+                        .iter()
+                        .any(|candidate| candidate.fact_id == *fact_id)
+                }) {
+                    return Err(ValueError::InvalidValueCombination);
+                }
                 if let Some(display_name) = display_name {
                     validate_text(display_name, SHORT_TEXT_MAX_BYTES)?;
                 }

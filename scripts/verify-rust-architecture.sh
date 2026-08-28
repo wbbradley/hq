@@ -223,6 +223,15 @@ if grep -Eq '(hq_store|hq_relay|hq_codex|hq_resources|rusqlite|std::fs)' \
   "$repository_root/crates/hq-node/src/local_client.rs"; then
   fail "the CLI/local client may cross only node coordination and hq-local-api boundaries"
 fi
+if grep -Eq '(StoreGateway|Bip340Signer|FactMutation|SemanticPayload::(AgentNameClaimed|ProviderSessionSelected|ProviderSessionRenamed))' \
+  "$repository_root/crates/hq-node/src/cli.rs" \
+  "$repository_root/crates/hq-node/src/local_client.rs"; then
+  fail "named-agent clients must use pure application planners and local API mutation DTOs"
+fi
+grep -Fq 'fn run_named_agent(' "$repository_root/crates/hq-node/src/cli.rs" ||
+  fail "the installed CLI must expose named-agent catalog workflows"
+grep -Fq 'MutationRequest::from_plan' "$repository_root/crates/hq-node/src/cli.rs" ||
+  fail "canonical CLI administration must cross the local mutation boundary"
 grep -Fq 'hq_node::execute_cli' "$repository_root/crates/hq-node/src/bin/hq.rs" ||
   fail "the installed binary must delegate to the typed CLI composition root"
 

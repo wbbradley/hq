@@ -6,10 +6,12 @@ HQ installs one `hq` executable. Global options precede the command:
 hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>
 ```
 
-The installed commands currently include `help`, `version`, `identity`, `config`,
+The installed commands currently include `help`, `version`, `agents`, `identity`, `config`,
 `human create|show|select|invite|join|devices|revoke`,
 `peer add|list|distrust`, `mailbox list|grant|revoke`, and
 `relay add|list|remove|sync|status|repair`, and
+`agent list|show|create|current|select|rename`, the agent-side
+`ask|send|wait|poll`, human-side `get|list|answer|cancel|archive|restore`, `mailboxes`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
 autostart and service managers. `daemon status` never starts a process; `readiness` may start one
@@ -103,13 +105,39 @@ Policy and sync effects preserve exact operation/request identities across respo
 loss is first reconciled from status before an exact retry. Repair retries the same idempotent
 operation identity.
 
+`agent create NAME [--mailbox MAILBOX_ID]` creates one deterministic installation-local agent
+mailbox or adopts one existing local agent mailbox, then authors the permanent lowercase name
+claim through pure application planners. Repeating the command after success, response loss, or a
+partial mailbox-only commit converges from a fresh authoritative snapshot. A conflicting or retired
+reservation, remote mailbox, non-agent mailbox, or incompatible partial state fails closed.
+`agent list` retains active, conflicted, and retired catalog rows; `agent show NAME|AGENT_ID`
+requires one unambiguous identity.
+
+`agent current` resolves exactly one Codex, Claude Code, Pi, or explicit
+`HQ_PROVIDER`/`HQ_SESSION` environment identity to its immutable local mailbox binding. Built-in
+and custom identities are one combined ambiguity set: multiple or partial sources fail with a
+redacted diagnostic. `agent select NAME|AGENT_ID [--provider PROVIDER --session SESSION]
+[--dir PATH]` cites the exact name claim, immutable binding, matching typed repository context, and
+complete prior selection frontier. `agent rename NAME|AGENT_ID DISPLAY_NAME` and `--clear` cite the
+exact claim/binding and complete rename frontier; rename never selects or starts a runtime. Without
+an explicit pair, selection uses the one current provider environment, while rename may use that
+environment or the unique durable selection. Safe retirement and managed runtime start/resume/stop
+remain separate node-owned workflows.
+
+`agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
+for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert
+dependency-incomplete history, and the boundary that humans own identity, authority, durable
+selection, and retirement administration.
+
 Identity output has only the installation ID, signing public key, and public fingerprint.
 Configuration output has the optional provider and the complete canonical relay list. Both are
 passive data with public fields. Configuration setters replace one complete typed field, rebuild
 the validated value, and the persistence adapter revalidates public fields again immediately before
-the atomic write. Human, peer, mailbox, relay/health, route-history, and capability-history presentation records
-are also passive public-field values; command enums and the live client capability remain closed
-behavioral types.
+the atomic write. Human, peer, mailbox, relay/health, route-history, capability-history,
+named-agent, and session presentation records are also passive public-field values; command enums
+and the live client capability remain closed behavioral types. The clean unshipped local API v1
+contract carries exact agent claims, mailboxes, immutable binding facts, and selection/rename
+candidates and frontiers in place; there is no compatibility accessor, migration, or version bump.
 
 Human output is concise newline-terminated text. JSON output is exactly one newline-terminated
 object with schema `hq-cli-output-v1`, an `ok` boolean, a stable `kind`, and typed `data`. Errors use
@@ -137,7 +165,8 @@ after negotiation; command-only clients do not issue an unsolicited snapshot.
 CLI production code has no canonical storage, signer, relay, resource, harness-provider, or SQLite
 access. The identity/configuration commands cross only the private state-ownership and identity
 persistence adapter because they must operate while the node is absent. Canonical administration,
-including human account bootstrap, peer routes, mailbox capabilities, and relay health/repair, uses fresh snapshots plus
+including human account bootstrap, peer routes, mailbox capabilities, named-agent catalog/session
+metadata, and relay health/repair, uses fresh snapshots plus
 the reusable request,
 mutation, and project methods rather than
 opening implementation adapters directly.

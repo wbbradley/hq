@@ -54,12 +54,18 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/medium] Implement named-agent sessions and embedded agent guidance** — Add named-agent
-  list/show/create/rename/retire and neutral start/exact-resume/stop workflows plus current-session
-  discovery for supported provider environments. Ship concise installed guidance for messaging,
-  retry, synchronization, delivery identity, causal incompleteness, and human-owned administrative
-  boundaries. Test provider ambiguity, stale sessions, resume mismatch, runtime uncertainty,
-  redacted diagnostics, generated help, and local API-only architecture.
+- **[cli/high] Implement safe named-agent retirement workflows** — Add named-agent retirement
+  through a node-owned workflow that transactionally rejects stale or conflicting state, quiesces
+  an assigned runtime through the owning project workflow, and requires explicit force before HQ
+  authority can outlive an uncertain stop. Test idle and assigned agents, project races, stale
+  heads, response loss, restart repair, runtime uncertainty, and local API-only architecture.
+
+- **[runtime/high] Compose managed named-agent provider sessions** — Add neutral start,
+  exact-resume, and stop commands over the local API; securely copy the caller environment and
+  launch directory only at the control boundary; register the Codex adapter in the foreground
+  node; durably reconcile provider output/activity; and bind, contextualize, and select the exact
+  ready session. Test stale sessions, resume mismatch, runtime uncertainty, redacted diagnostics,
+  restart recovery, and local API-only architecture.
 
 - **[cli/high] Implement project/resource/worktree commands and audit non-TUI parity** — Expose
   project list/show/create/send/open/activate/handoff/close/archive/unarchive, desired-resource

@@ -1,12 +1,13 @@
 //! Exhaustive local API v1 conversion boundary.
 
 use crate::protocol::v1::{
+    AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto,
     ConversationEntryDto, ConversationKeyDto, ConversationPageDto, ConversationPageRequest,
     DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
     ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
-    MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MessagePurposeDto,
-    MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
+    MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto,
+    MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto,
     RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto,
@@ -353,12 +354,27 @@ pub fn snapshot_to_v1(
             }
             ClientProjection::Agent {
                 agent_id,
+                claims,
                 names,
+                mailboxes,
+                retirements,
                 lifecycle,
                 runnable,
             } => SnapshotItem::Agent {
                 agent_id: id32(agent_id.as_bytes()),
+                claims: claims.iter().map(|fact| id32(fact.as_bytes())).collect(),
                 names: names.iter().map(|name| name.as_str().to_owned()).collect(),
+                mailboxes: mailboxes
+                    .iter()
+                    .map(|mailbox| MailboxAddressDto {
+                        installation_id: id32(mailbox.installation_id().as_bytes()),
+                        mailbox_id: id32(mailbox.mailbox_id().as_bytes()),
+                    })
+                    .collect(),
+                retirements: retirements
+                    .iter()
+                    .map(|fact| id32(fact.as_bytes()))
+                    .collect(),
                 lifecycle: match lifecycle {
                     ClientAgentLifecycle::Active => "active",
                     ClientAgentLifecycle::Conflicted => "conflicted",
@@ -370,11 +386,22 @@ pub fn snapshot_to_v1(
             ClientProjection::AgentSession {
                 provider,
                 session,
+                bindings,
                 mailbox,
                 conflicted,
             } => SnapshotItem::AgentSession {
                 provider: provider.as_str().to_owned(),
                 session: session.as_str().to_owned(),
+                bindings: bindings
+                    .into_iter()
+                    .map(|(fact_id, mailbox)| AgentSessionBindingDto {
+                        fact_id: id32(fact_id.as_bytes()),
+                        mailbox: MailboxAddressDto {
+                            installation_id: id32(mailbox.installation_id().as_bytes()),
+                            mailbox_id: id32(mailbox.mailbox_id().as_bytes()),
+                        },
+                    })
+                    .collect(),
                 mailbox_installation: mailbox
                     .map(|address| id32(address.installation_id().as_bytes())),
                 mailbox_id: mailbox.map(|address| id32(address.mailbox_id().as_bytes())),
@@ -382,7 +409,9 @@ pub fn snapshot_to_v1(
             },
             ClientProjection::AgentSelection {
                 agent_id,
+                candidates,
                 selected,
+                frontier,
                 conflicted,
             } => {
                 let (provider, session) = selected.map_or((None, None), |(provider, session)| {
@@ -393,8 +422,17 @@ pub fn snapshot_to_v1(
                 });
                 SnapshotItem::AgentSelection {
                     agent_id: id32(agent_id.as_bytes()),
+                    candidates: candidates
+                        .into_iter()
+                        .map(|(fact_id, provider, session)| AgentSelectionCandidateDto {
+                            fact_id: id32(fact_id.as_bytes()),
+                            provider: provider.as_str().to_owned(),
+                            session: session.as_str().to_owned(),
+                        })
+                        .collect(),
                     provider,
                     session,
+                    frontier: frontier.iter().map(|fact| id32(fact.as_bytes())).collect(),
                     conflicted,
                 }
             }
@@ -402,12 +440,22 @@ pub fn snapshot_to_v1(
                 agent_id,
                 provider,
                 session,
+                candidates,
+                frontier,
                 resolved,
                 display_name,
             } => SnapshotItem::AgentSessionName {
                 agent_id: id32(agent_id.as_bytes()),
                 provider: provider.as_str().to_owned(),
                 session: session.as_str().to_owned(),
+                candidates: candidates
+                    .into_iter()
+                    .map(|(fact_id, display_name)| AgentSessionNameCandidateDto {
+                        fact_id: id32(fact_id.as_bytes()),
+                        display_name: display_name.map(|name| name.as_str().to_owned()),
+                    })
+                    .collect(),
+                frontier: frontier.iter().map(|fact| id32(fact.as_bytes())).collect(),
                 resolved,
                 display_name: display_name.map(|name| name.as_str().to_owned()),
             },

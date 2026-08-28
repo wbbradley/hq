@@ -212,6 +212,14 @@ fn admin_json(state_root: &Path, command: &str, arguments: &[&str]) -> serde_jso
     serde_json::from_slice(&output.stdout).expect("admin JSON")
 }
 
+fn agent_output(state_root: &Path, arguments: &[&str]) -> Output {
+    admin_output(state_root, "agent", arguments)
+}
+
+fn agent_json(state_root: &Path, arguments: &[&str]) -> serde_json::Value {
+    admin_json(state_root, "agent", arguments)
+}
+
 fn encode_hex(bytes: [u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     bytes
@@ -375,6 +383,162 @@ fn setup_direct_agent_session(
         ),
     );
     (agent_mailbox, provider, session)
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn named_agent_catalog_reconciles_create_adopt_selection_and_rename_across_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+
+    let created = agent_json(&state_root, &["create", "build-agent"]);
+    assert_eq!(created["kind"], "named_agents");
+    assert_eq!(created["data"]["operation"], "agent_create");
+    assert_eq!(created["data"]["agents"][0]["names"][0], "build-agent");
+    let created_agent = created["data"]["agents"][0]["agent_id"]
+        .as_str()
+        .expect("created agent identity")
+        .to_owned();
+    let created_mailbox = created["data"]["agents"][0]["mailboxes"][0]["mailbox_id"]
+        .as_str()
+        .expect("created mailbox identity")
+        .to_owned();
+
+    let replayed = agent_json(&state_root, &["create", "build-agent"]);
+    assert_eq!(replayed["data"]["agents"][0]["agent_id"], created_agent);
+    assert_eq!(
+        replayed["data"]["agents"][0]["mailboxes"][0]["mailbox_id"],
+        created_mailbox
+    );
+    let shown = agent_json(&state_root, &["show", "build-agent"]);
+    assert_eq!(shown["data"]["agents"].as_array().map(Vec::len), Some(1));
+
+    let state = StatePaths::new(state_root.clone()).expect("state paths");
+    let mut seed = local_client(state, InitialView::Snapshot);
+    let (mailbox, provider, session) = setup_direct_agent_session(&mut seed, directory.path());
+    drop(seed);
+    let mailbox = encode_hex(*mailbox.as_bytes());
+    let adopted = agent_json(
+        &state_root,
+        &["create", "review-agent", "--mailbox", &mailbox],
+    );
+    assert_eq!(adopted["data"]["agents"][0]["names"][0], "review-agent");
+    assert_eq!(
+        adopted["data"]["agents"][0]["mailboxes"][0]["mailbox_id"],
+        mailbox
+    );
+
+    let canonical_directory = fs::canonicalize(directory.path()).expect("canonical test path");
+    let selected = agent_output(
+        &state_root,
+        &[
+            "select",
+            "review-agent",
+            "--provider",
+            provider.as_str(),
+            "--session",
+            session.as_str(),
+            "--dir",
+            canonical_directory.to_str().expect("UTF-8 path"),
+        ],
+    );
+    assert!(
+        selected.status.success(),
+        "agent select stderr: {:?}",
+        selected.stderr
+    );
+    let renamed = agent_output(
+        &state_root,
+        &[
+            "rename",
+            "review-agent",
+            "review work",
+            "--provider",
+            provider.as_str(),
+            "--session",
+            session.as_str(),
+        ],
+    );
+    assert!(
+        renamed.status.success(),
+        "agent rename stderr: {:?}",
+        renamed.stderr
+    );
+    let renamed: serde_json::Value = serde_json::from_slice(&renamed.stdout).expect("rename JSON");
+    assert_eq!(renamed["data"]["agents"][0]["runnable"], true);
+    assert_eq!(
+        renamed["data"]["agents"][0]["sessions"][0]["display_name"],
+        "review work"
+    );
+    assert_eq!(
+        renamed["data"]["agents"][0]["sessions"][0]["selected"],
+        true
+    );
+
+    let mut current = Command::new(env!("CARGO_BIN_EXE_hq"));
+    current
+        .arg("--output")
+        .arg("json")
+        .arg("--state-root")
+        .arg(&state_root)
+        .arg("agent")
+        .arg("current")
+        .env("CODEX_THREAD_ID", session.as_str())
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("PI_SESSION_ID")
+        .env_remove("HQ_PROVIDER")
+        .env_remove("HQ_SESSION");
+    let current = current.output().expect("current command runs");
+    assert!(
+        current.status.success(),
+        "agent current stderr: {:?}",
+        current.stderr
+    );
+    let current: serde_json::Value = serde_json::from_slice(&current.stdout).expect("current JSON");
+    assert_eq!(current["data"]["current"]["provider"], "codex");
+    assert_eq!(current["data"]["current"]["session"], session.as_str());
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let listed = agent_json(&state_root, &["list"]);
+    assert_eq!(listed["data"]["agents"].as_array().map(Vec::len), Some(2));
+    assert!(listed["data"]["agents"].as_array().is_some_and(|agents| {
+        agents.iter().any(|agent| {
+            agent["names"][0] == "review-agent"
+                && agent["sessions"][0]["display_name"] == "review work"
+        })
+    }));
+}
+
+#[test]
+fn named_agent_current_rejects_ambiguous_provider_environment_without_echoing_sessions() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let output = Command::new(env!("CARGO_BIN_EXE_hq"))
+        .arg("--output")
+        .arg("json")
+        .arg("--state-root")
+        .arg(&state_root)
+        .arg("agent")
+        .arg("current")
+        .env("CODEX_THREAD_ID", "secret-codex-session")
+        .env("PI_SESSION_ID", "secret-pi-session")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("HQ_PROVIDER")
+        .env_remove("HQ_SESSION")
+        .output()
+        .expect("ambiguous current command runs");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.contains("state_unavailable"));
+    assert!(!stderr.contains("secret-codex-session"));
+    assert!(!stderr.contains("secret-pi-session"));
 }
 
 #[test]

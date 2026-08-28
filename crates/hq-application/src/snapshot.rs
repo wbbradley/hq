@@ -337,7 +337,10 @@ impl DomainSnapshot {
                 (AgentProjectionKey::Agent(agent_id), AgentProjection::Agent(view)) => {
                     items.push(ClientProjection::Agent {
                         agent_id: *agent_id,
+                        claims: view.claims.clone(),
                         names: view.names.clone(),
+                        mailboxes: view.mailboxes.clone(),
+                        retirements: view.retirements.clone(),
                         lifecycle: match view.lifecycle {
                             AgentLifecycle::Active => ClientAgentLifecycle::Active,
                             AgentLifecycle::Conflicted => ClientAgentLifecycle::Conflicted,
@@ -350,6 +353,11 @@ impl DomainSnapshot {
                     items.push(ClientProjection::AgentSession {
                         provider: session.provider.clone(),
                         session: session.session.clone(),
+                        bindings: view
+                            .bindings
+                            .iter()
+                            .map(|(fact_id, mailbox)| (*fact_id, *mailbox))
+                            .collect(),
                         mailbox: view.mailbox,
                         conflicted: view.conflicted,
                     });
@@ -357,12 +365,24 @@ impl DomainSnapshot {
                 (AgentProjectionKey::Selection(agent_id), AgentProjection::Selection(view)) => {
                     items.push(ClientProjection::AgentSelection {
                         agent_id: *agent_id,
+                        candidates: view
+                            .candidates
+                            .iter()
+                            .map(|(fact_id, candidate)| {
+                                (
+                                    *fact_id,
+                                    candidate.session.provider.clone(),
+                                    candidate.session.session.clone(),
+                                )
+                            })
+                            .collect(),
                         selected: view.active.as_ref().map(|active| {
                             (
                                 active.session.provider.clone(),
                                 active.session.session.clone(),
                             )
                         }),
+                        frontier: view.frontier.clone(),
                         conflicted: view.conflicted,
                     });
                 }
@@ -371,6 +391,12 @@ impl DomainSnapshot {
                         agent_id: *agent,
                         provider: session.provider.clone(),
                         session: session.session.clone(),
+                        candidates: view
+                            .candidates
+                            .iter()
+                            .map(|(fact_id, name)| (*fact_id, name.clone()))
+                            .collect(),
+                        frontier: view.frontier.clone(),
                         resolved: view.resolved,
                         display_name: view.display_name.clone(),
                     });
@@ -701,25 +727,33 @@ pub enum ClientProjection {
     IncompleteMessagesTruncated,
     Agent {
         agent_id: AgentId,
+        claims: BTreeSet<FactId>,
         names: BTreeSet<ShortText>,
+        mailboxes: BTreeSet<MailboxAddress>,
+        retirements: BTreeSet<FactId>,
         lifecycle: ClientAgentLifecycle,
         runnable: bool,
     },
     AgentSession {
         provider: ProviderId,
         session: ProviderSessionId,
+        bindings: Vec<(FactId, MailboxAddress)>,
         mailbox: Option<MailboxAddress>,
         conflicted: bool,
     },
     AgentSelection {
         agent_id: AgentId,
+        candidates: Vec<(FactId, ProviderId, ProviderSessionId)>,
         selected: Option<(ProviderId, ProviderSessionId)>,
+        frontier: BTreeSet<FactId>,
         conflicted: bool,
     },
     AgentSessionName {
         agent_id: AgentId,
         provider: ProviderId,
         session: ProviderSessionId,
+        candidates: Vec<(FactId, Option<ShortText>)>,
+        frontier: BTreeSet<FactId>,
         resolved: bool,
         display_name: Option<ShortText>,
     },

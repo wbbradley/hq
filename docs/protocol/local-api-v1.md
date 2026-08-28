@@ -145,6 +145,13 @@ selection frontier. These are public fact identities, not signing capability. Be
 not shipped and has no standing installations, this is the clean v1 snapshot shape; it introduces
 no compatibility branch or protocol-version bump.
 
+Named-agent projections expose the same planning-grade public evidence without a signer or storage
+handle. Agent items carry exact name-claim facts, candidate mailboxes, and retirement facts;
+provider-session items carry every immutable binding fact; selection and display-name items carry
+their causal-maximal candidates and complete frontiers. Context history retains each exact context
+fact and typed value. These fields let a local client construct claim, exact selection, and
+rename/clear plans while preserving conflicts instead of choosing by arrival or display order.
+
 Membership items additionally carry their complete causal-maximal grant/accept/revoke frontier and
 the complete creator-issued grant, usable acceptance, usable revoke, and active-acceptance history.
 Each grant names its stable ID, exact signed fact, target installation and signing key, optional

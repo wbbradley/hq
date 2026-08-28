@@ -1,5 +1,6 @@
 //! Application use cases and inward-facing ports.
 
+mod agent_admin;
 mod authority_admin;
 mod error;
 mod human;
@@ -15,6 +16,11 @@ use hq_reducer::{GraphOnlyReducer, GraphReductionReport, ReduceError, reduce_com
 
 pub use hq_reducer::ConversationKey;
 
+pub use agent_admin::{
+    AgentNameClaimRequest, AgentSessionRenameRequest, AgentSessionSelectionRequest,
+    plan_agent_mailbox_creation, plan_agent_name_claim, plan_agent_session_rename,
+    plan_agent_session_selection,
+};
 pub use authority_admin::{
     MailboxGrantRequest, MailboxRevokeRequest, PeerRouteRequest, plan_mailbox_grant,
     plan_mailbox_revoke, plan_peer_route_block, plan_peer_route_set,

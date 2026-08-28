@@ -89,6 +89,15 @@ self-grants, nonlocal mailbox ownership, oversized support, and incomplete typed
 returning an ordinary `FactPlan`. Route trust remains directional and distinct from mailbox access;
 relay hints and encryption keys never become authority.
 
+Named-agent catalog administration likewise uses pure planners with public passive records. Agent
+mailbox creation and permanent name claims bind the local installation root and exact projected
+agent-mailbox root. Durable session selection additionally cites the exact compatible name claim,
+immutable binding, matching typed context fact, and complete prior selection frontier. Display
+rename/clear cites the exact claim and binding plus the complete independent rename frontier; it
+does not select or start a runtime. The authoritative client projection exposes the required claim,
+mailbox, binding, candidate, and frontier evidence directly. Because HQ has not shipped, local API
+v1 was evolved in place without compatibility accessors or a version bump.
+
 ## External operations
 
 `EffectRequest<T>` carries a stable `OperationId`, exact request digest, explicit issue time, and

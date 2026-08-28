@@ -7416,3 +7416,32 @@ policy reports only the existing allowed yanked `chacha20 0.10.1` warning.
   before route blocking, and expose pending/active/revoked/conflicted or incomplete states without a
   chosen historical winner. Test non-creator rejection, stale/incomplete frontiers, concurrent
   acceptance/revoke, regrant ancestry, response loss, restart, fanout, and human/JSON rendering.
+## 2026-08-28 — Named-agent catalog and embedded guidance
+
+Added `agent list`, `agent show`, `agent create`, `agent current`, `agent select`, and `agent rename`
+through pure application planners and the local API. Catalog presentation preserves active,
+retired, incomplete, and conflicted facts without inventing a winner; create reconciles partial
+mailbox/name state and can adopt an existing local agent mailbox; session selection and display
+rename bind the exact active claim, immutable provider session, project context, and complete prior
+register frontier.
+
+Current-session discovery combines supported built-in and custom provider environments into one
+fail-closed ambiguity set, and diagnostics do not echo provider session values. Installed `agents`
+guidance now covers messaging, retries, synchronization, delivery identity, causal incompleteness,
+and human-owned administration. The local API v1 snapshot was enriched in place with the evidence
+needed for safe planning and presentation; because HQ has never shipped, storage remains v13 and
+the API remains v1 with no migration, compatibility reader, or accessor facade.
+
+Planner, protocol, parser/help, conflict, ambiguity, stale-context, architecture, and real
+foreground restart tests pass. The full workspace test suite, formatting check, strict Clippy,
+architecture, protocol, causal, behavior-ledger, and dependency gates pass; dependency policy
+reports only the existing allowed yanked `chacha20 0.10.1` warning.
+
+### Original plan entry
+
+- **[cli/medium] Implement the named-agent catalog and embedded agent guidance** — Add named-agent
+  list/show/create/adopt plus durable session selection and display rename through pure application
+  planners and the local API. Discover the current session from supported provider environments and
+  ship concise installed guidance for messaging, retry, synchronization, delivery identity, causal
+  incompleteness, and human-owned administrative boundaries. Test name and session conflicts,
+  provider ambiguity, stale metadata, generated help, and local API-only architecture.

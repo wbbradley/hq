@@ -1,6 +1,8 @@
 //! Composition root and runtime ownership boundary.
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod agent_guidance;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod cli;
 mod components;
 mod coordination;
@@ -39,14 +41,19 @@ mod session_registry;
 mod unix_frame;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use agent_guidance::AgentGuidanceTopic;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use cli::{
-    AuthorityAdminView, CliCommand, CliCompletion, CliError, CliExecution, CliExitClass,
-    CliInvocation, CliOutputFormat, ConfigurationCommand, DaemonCommand, DomainHealthView,
-    HumanAccountView, HumanCommand, HumanDeviceGrantView, HumanDeviceState, HumanDeviceView,
-    HumanDevicesView, HumanRelayHintView, HumanView, IdentityCommand, MailboxCapabilityView,
-    MailboxCommand, MailboxView, PeerCommand, PeerRouteBlockView, PeerRouteCandidateView,
-    PeerRouteView, RelayAdminView, RelayCommand, RelayPolicyView, complete_cli_delivery,
-    execute_cli, execute_cli_with_input, parse_cli, run_cli, run_cli_with_input,
+    AgentMailboxSelection, AgentMessageCommand, AuthorityAdminView, CliCommand, CliCompletion,
+    CliError, CliExecution, CliExitClass, CliInvocation, CliOutputFormat, ConfigurationCommand,
+    DaemonCommand, DomainHealthView, HumanAccountView, HumanCommand, HumanDeviceGrantView,
+    HumanDeviceState, HumanDeviceView, HumanDevicesView, HumanMessageCommand, HumanMessageFilters,
+    HumanRelayHintView, HumanView, IdentityCommand, MailboxCapabilityView, MailboxCommand,
+    MailboxDiscoveryCandidate, MailboxDiscoveryView, MailboxView, NamedAgentCatalogView,
+    NamedAgentCommand, NamedAgentSelector, NamedAgentSessionView, NamedAgentView, PeerCommand,
+    PeerRouteBlockView, PeerRouteCandidateView, PeerRouteView, RelayAdminView, RelayCommand,
+    RelayPolicyView, complete_cli_delivery, execute_cli, execute_cli_with_input, parse_cli,
+    run_cli, run_cli_with_input,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use foreground::{

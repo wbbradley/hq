@@ -12,10 +12,12 @@ use std::{
 };
 
 use hq_application::{
+    AgentNameClaimRequest, AgentSessionRenameRequest, AgentSessionSelectionRequest,
     ApplicationError, HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs,
     LocalInstallationAuthority, MailboxGrantRequest, MailboxRevokeRequest,
     MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest, PeerRouteRequest,
-    ReplyRequest, ThreadCancellationRequest, plan_asynchronous_message,
+    ReplyRequest, ThreadCancellationRequest, plan_agent_mailbox_creation, plan_agent_name_claim,
+    plan_agent_session_rename, plan_agent_session_selection, plan_asynchronous_message,
     plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
     plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
     plan_mailbox_grant, plan_mailbox_revoke, plan_message_archive, plan_message_restore,
@@ -23,11 +25,12 @@ use hq_application::{
     plan_thread_cancellation,
 };
 use hq_domain::{
-    AccountId, AuthorityReference, AuthorityRole, BoundedText, CommandId, EncryptionPublicKey,
-    ErrorCode, FactId, FactScope, GrantId, InstallationAddress, InstallationId, MailboxAddress,
-    MailboxId, MessageId, MessagePurpose, OperationCorrelation, OperationId, PresentationKind,
-    ProjectId, ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RelayHints,
-    ResourceLocator, ResourceScheme, ShortText, SigningPublicKey, ThreadId, Timestamp,
+    AccountId, AgentId, AuthorityReference, AuthorityRole, BoundedText, CommandId,
+    EncryptionPublicKey, ErrorCode, FactId, FactScope, GrantId, InstallationAddress,
+    InstallationId, MailboxAddress, MailboxId, MessageId, MessagePurpose, OperationCorrelation,
+    OperationId, PresentationKind, ProjectId, ProviderId, ProviderSessionId,
+    RESOURCE_LOCATOR_MAX_BYTES, RelayHints, ResourceLocator, ResourceScheme, ShortText,
+    SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_local_api::{
     ClientEvent, InitialView,
@@ -54,7 +57,8 @@ use crate::{
     LifecycleClientConfig, LifecycleClientError, LifecycleObservation, LocalConfiguration,
     LocalNodeClient, LocalNodeClientConfig, LocalNodeClientError, NodeClientCoordinator,
     NodeCoordinatorConfig, NodeCoordinatorError, ProcessNodeLauncher, PublicIdentity,
-    RelayEndpoint, RuntimePathError, RuntimePaths, StateDirectoryOwner, StatePaths, run_foreground,
+    RelayEndpoint, RuntimePathError, RuntimePaths, StateDirectoryOwner, StatePaths,
+    agent_guidance::AgentGuidanceTopic, run_foreground,
 };
 
 /// Stable output representation selected for one invocation.
@@ -295,6 +299,101 @@ pub struct AgentMailboxSelection {
     pub directory: Option<PathBuf>,
 }
 
+/// Stable user-facing selector for one durable named agent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NamedAgentSelector {
+    /// Exact permanent lowercase name.
+    Name(ShortText),
+    /// Exact stable agent identity.
+    Id(AgentId),
+}
+
+/// Closed named-agent catalog and durable session-metadata behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NamedAgentCommand {
+    /// List every projected named agent, including conflicts and retirement history.
+    List,
+    /// Show one exact unambiguous named agent.
+    Show {
+        /// Permanent name or stable identity.
+        agent: NamedAgentSelector,
+    },
+    /// Create a fresh agent mailbox or adopt one existing local agent mailbox.
+    Create {
+        /// Permanent lowercase installation-local name.
+        name: ShortText,
+        /// Existing mailbox to adopt; absence creates a deterministic mailbox.
+        mailbox_id: Option<MailboxId>,
+    },
+    /// Resolve the current provider environment to one durable session binding.
+    Current,
+    /// Select one exact durable provider session and repository context.
+    Select {
+        /// Permanent name or stable identity.
+        agent: NamedAgentSelector,
+        /// Explicit or environment-discovered provider/session pair.
+        mailbox: AgentMailboxSelection,
+    },
+    /// Rename or explicitly clear one exact provider-session display name.
+    Rename {
+        /// Permanent name or stable identity.
+        agent: NamedAgentSelector,
+        /// Explicit provider, paired with `session`.
+        provider: Option<ProviderId>,
+        /// Explicit provider session, paired with `provider`.
+        session: Option<ProviderSessionId>,
+        /// Replacement display name, or `None` for an explicit clear.
+        display_name: Option<ShortText>,
+    },
+}
+
+/// Passive exact provider-session identity shown by catalog commands.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedAgentSessionView {
+    /// Neutral provider namespace.
+    pub provider: String,
+    /// Exact provider-scoped session.
+    pub session: String,
+    /// Unique bound mailbox, when unconflicted.
+    pub mailbox: Option<MailboxAddress>,
+    /// Whether incompatible immutable bindings exist.
+    pub conflicted: bool,
+    /// Whether this is the agent's resolved durable selection.
+    pub selected: bool,
+    /// Whether the display-name register is resolved.
+    pub name_resolved: bool,
+    /// Resolved display name or explicit clear.
+    pub display_name: Option<String>,
+}
+
+/// Passive named-agent catalog record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedAgentView {
+    /// Stable agent identity.
+    pub agent_id: AgentId,
+    /// Candidate permanent names in stable order.
+    pub names: Vec<String>,
+    /// Candidate local mailboxes in stable order.
+    pub mailboxes: Vec<MailboxAddress>,
+    /// Stable active, conflicted, or retired lifecycle.
+    pub lifecycle: String,
+    /// Whether one durable session is selected without conflict.
+    pub runnable: bool,
+    /// Durable provider sessions compatible with this agent.
+    pub sessions: Vec<NamedAgentSessionView>,
+}
+
+/// Passive named-agent catalog command result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamedAgentCatalogView {
+    /// Stable operation label.
+    pub operation: &'static str,
+    /// Complete or selected agent records.
+    pub agents: Vec<NamedAgentView>,
+    /// Current provider-session identity when requested and resolved.
+    pub current: Option<(String, String, MailboxAddress, Option<AgentId>)>,
+}
+
 /// Closed agent-side mailbox messaging behavior.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentMessageCommand {
@@ -448,6 +547,8 @@ pub struct MailboxDiscoveryCandidate {
     pub session: String,
     /// Exact bound mailbox.
     pub mailbox: MailboxAddress,
+    /// Unique compatible named agent when present.
+    pub named_agent: Option<AgentId>,
     /// Whether incompatible history blocks selection.
     pub conflicted: bool,
     /// Whether at least one recorded directory matches the requested directory.
@@ -727,6 +828,11 @@ pub enum CliCommand {
     },
     /// Print executable and protocol build metadata.
     Version,
+    /// Render concise installed guidance for agents.
+    AgentGuidance {
+        /// Requested guidance topic.
+        topic: AgentGuidanceTopic,
+    },
     /// Execute one offline installation-identity operation under exclusive state ownership.
     Identity {
         /// Requested identity behavior.
@@ -766,6 +872,13 @@ pub enum CliCommand {
     Relay {
         /// Requested relay behavior.
         action: RelayCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
+    /// Execute one named-agent catalog or durable session-metadata operation.
+    NamedAgent {
+        /// Requested catalog behavior.
+        action: NamedAgentCommand,
         /// Validated installation state layout.
         state: StatePaths,
     },
@@ -901,6 +1014,8 @@ pub enum CliError {
     RelayState,
     /// Mailbox selection, message state, or causal authority was unavailable or inconsistent.
     MessagingState,
+    /// Named-agent catalog or session metadata was absent, stale, ambiguous, or inconsistent.
+    AgentState,
     /// Pairing evidence or its filesystem location failed strict validation.
     PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
@@ -912,7 +1027,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
+                 <help|version|agents|agent|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
             ),
             Self::StatePath => formatter.write_str("node state path is unavailable or invalid"),
             Self::RuntimePath => formatter.write_str("node runtime path is unavailable or invalid"),
@@ -935,6 +1050,9 @@ impl fmt::Display for CliError {
             }
             Self::MessagingState => {
                 formatter.write_str("mailbox or message state is unavailable or ambiguous")
+            }
+            Self::AgentState => {
+                formatter.write_str("named-agent or session state is unavailable or ambiguous")
             }
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
@@ -1035,17 +1153,33 @@ impl CliError {
                 "mailbox selection or causal message state is absent, stale, ambiguous, or inconsistent",
                 CliExitClass::Failure,
             ),
-            Self::PairingArtifact => (
-                "human.pairing_invalid",
-                "the pairing invitation or its file location is invalid",
-                CliExitClass::Failure,
-            ),
-            Self::SecretInput => (
-                "identity.secret_input",
-                "provide exactly one bounded UTF-8 backup password on stdin",
-                CliExitClass::Usage,
-            ),
+            Self::AgentState => agent_state_diagnostic(),
+            Self::PairingArtifact | Self::SecretInput => input_diagnostic(self),
         }
+    }
+}
+
+const fn agent_state_diagnostic() -> (&'static str, &'static str, CliExitClass) {
+    (
+        "agent.state_unavailable",
+        "named-agent or session state is absent, stale, ambiguous, conflicted, or retired",
+        CliExitClass::Failure,
+    )
+}
+
+const fn input_diagnostic(error: &CliError) -> (&'static str, &'static str, CliExitClass) {
+    match error {
+        CliError::PairingArtifact => (
+            "human.pairing_invalid",
+            "the pairing invitation or its file location is invalid",
+            CliExitClass::Failure,
+        ),
+        CliError::SecretInput => (
+            "identity.secret_input",
+            "provide exactly one bounded UTF-8 backup password on stdin",
+            CliExitClass::Usage,
+        ),
+        _ => unreachable!(),
     }
 }
 
@@ -1112,62 +1246,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
     }
     let command = arguments.next();
     let rest = arguments.collect::<Vec<_>>();
-    let command = match command.as_ref().and_then(|value| value.to_str()) {
-        None | Some("help" | "--help") => CliCommand::Help {
-            topic: rest
-                .iter()
-                .map(|value| value.to_str().map(str::to_owned).ok_or(CliError::Arguments))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        Some("version" | "--version") if rest.is_empty() => CliCommand::Version,
-        Some("identity") => parse_identity(&rest, state_root.as_ref())?,
-        Some("config") => parse_configuration(&rest, state_root.as_ref())?,
-        Some("human") => parse_human(&rest, state_root.as_ref())?,
-        Some("peer") => parse_peer(&rest, state_root.as_ref())?,
-        Some("mailbox") => parse_mailbox(&rest, state_root.as_ref())?,
-        Some("relay") => parse_relay_command(&rest, state_root.as_ref())?,
-        Some("ask") => parse_agent_message("ask", &rest, state_root.as_ref())?,
-        Some("send") => parse_agent_message("send", &rest, state_root.as_ref())?,
-        Some("wait") => parse_agent_message("wait", &rest, state_root.as_ref())?,
-        Some("poll") => parse_agent_message("poll", &rest, state_root.as_ref())?,
-        Some("get") => {
-            let [message_id] = rest.as_slice() else {
-                return Err(CliError::Arguments);
-            };
-            CliCommand::GetMessage {
-                message_id: hq_domain::MessageId::from_bytes(parse_hex32(message_id)?),
-                state: parsed_state(state_root.as_ref())?,
-            }
-        }
-        Some("mailboxes") => parse_mailbox_discovery(&rest, state_root.as_ref())?,
-        Some("list" | "answer" | "cancel" | "archive" | "restore") => parse_human_message(
-            command
-                .as_ref()
-                .and_then(|value| value.to_str())
-                .ok_or(CliError::Arguments)?,
-            &rest,
-            state_root.as_ref(),
-        )?,
-        Some("daemon") if rest.as_slice() == [OsString::from("--help")] => CliCommand::Help {
-            topic: vec!["daemon".to_owned()],
-        },
-        Some("daemon") => {
-            let [action] = rest.as_slice() else {
-                return Err(CliError::Arguments);
-            };
-            let action = match action.to_str() {
-                Some("run") => DaemonCommand::Run,
-                Some("status") => DaemonCommand::Status,
-                Some("readiness") => DaemonCommand::Readiness,
-                Some("stop") => DaemonCommand::Stop,
-                Some("restart") => DaemonCommand::Restart,
-                _ => return Err(CliError::Arguments),
-            };
-            let state = parsed_state(state_root.as_ref())?;
-            CliCommand::Daemon { action, state }
-        }
-        _ => return Err(CliError::Arguments),
-    };
+    let command = parse_top_level_command(command.as_ref(), &rest, state_root.as_ref())?;
     if state_root.is_some()
         && !matches!(
             command,
@@ -1178,6 +1257,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 | CliCommand::Peer { .. }
                 | CliCommand::Mailbox { .. }
                 | CliCommand::Relay { .. }
+                | CliCommand::NamedAgent { .. }
                 | CliCommand::AgentMessage { .. }
                 | CliCommand::GetMessage { .. }
                 | CliCommand::DiscoverMailboxes { .. }
@@ -1187,6 +1267,226 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
         return Err(CliError::Arguments);
     }
     Ok(CliInvocation { output, command })
+}
+
+fn parse_top_level_command(
+    command: Option<&OsString>,
+    rest: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    Ok(match command.and_then(|value| value.to_str()) {
+        None | Some("help" | "--help") => CliCommand::Help {
+            topic: rest
+                .iter()
+                .map(|value| value.to_str().map(str::to_owned).ok_or(CliError::Arguments))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        Some("version" | "--version") if rest.is_empty() => CliCommand::Version,
+        Some("agents") if rest.len() <= 1 => CliCommand::AgentGuidance {
+            topic: AgentGuidanceTopic::parse(rest.first().and_then(|value| value.to_str()))
+                .ok_or(CliError::Arguments)?,
+        },
+        Some("identity") => parse_identity(rest, state_root)?,
+        Some("config") => parse_configuration(rest, state_root)?,
+        Some("human") => parse_human(rest, state_root)?,
+        Some("peer") => parse_peer(rest, state_root)?,
+        Some("mailbox") => parse_mailbox(rest, state_root)?,
+        Some("relay") => parse_relay_command(rest, state_root)?,
+        Some("agent") if rest == [OsString::from("--help")] => CliCommand::Help {
+            topic: vec!["agent".to_owned()],
+        },
+        Some("agent") => parse_named_agent(rest, state_root)?,
+        Some("ask") => parse_agent_message("ask", rest, state_root)?,
+        Some("send") => parse_agent_message("send", rest, state_root)?,
+        Some("wait") => parse_agent_message("wait", rest, state_root)?,
+        Some("poll") => parse_agent_message("poll", rest, state_root)?,
+        Some("get") => {
+            let [message_id] = rest else {
+                return Err(CliError::Arguments);
+            };
+            CliCommand::GetMessage {
+                message_id: hq_domain::MessageId::from_bytes(parse_hex32(message_id)?),
+                state: parsed_state(state_root)?,
+            }
+        }
+        Some("mailboxes") => parse_mailbox_discovery(rest, state_root)?,
+        Some("list" | "answer" | "cancel" | "archive" | "restore") => parse_human_message(
+            command
+                .and_then(|value| value.to_str())
+                .ok_or(CliError::Arguments)?,
+            rest,
+            state_root,
+        )?,
+        Some("daemon") if rest == [OsString::from("--help")] => CliCommand::Help {
+            topic: vec!["daemon".to_owned()],
+        },
+        Some("daemon") => {
+            let [action] = rest else {
+                return Err(CliError::Arguments);
+            };
+            let action = match action.to_str() {
+                Some("run") => DaemonCommand::Run,
+                Some("status") => DaemonCommand::Status,
+                Some("readiness") => DaemonCommand::Readiness,
+                Some("stop") => DaemonCommand::Stop,
+                Some("restart") => DaemonCommand::Restart,
+                _ => return Err(CliError::Arguments),
+            };
+            let state = parsed_state(state_root)?;
+            CliCommand::Daemon { action, state }
+        }
+        _ => return Err(CliError::Arguments),
+    })
+}
+
+fn parse_named_agent(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match arguments.first().and_then(|value| value.to_str()) {
+        Some("list") if arguments.len() == 1 => NamedAgentCommand::List,
+        Some("show") if arguments.len() == 2 => NamedAgentCommand::Show {
+            agent: parse_named_agent_selector(&arguments[1])?,
+        },
+        Some("create") => parse_named_agent_create(&arguments[1..])?,
+        Some("current") if arguments.len() == 1 => NamedAgentCommand::Current,
+        Some("select") => parse_named_agent_select(&arguments[1..])?,
+        Some("rename") => parse_named_agent_rename(&arguments[1..])?,
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::NamedAgent {
+        action,
+        state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_named_agent_create(arguments: &[OsString]) -> Result<NamedAgentCommand, CliError> {
+    let name = arguments.first().ok_or(CliError::Arguments)?;
+    let mailbox_id = match &arguments[1..] {
+        [] => None,
+        [flag, mailbox] if flag == "--mailbox" => {
+            Some(MailboxId::from_bytes(parse_hex32(mailbox)?))
+        }
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(NamedAgentCommand::Create {
+        name: parse_agent_name(name)?,
+        mailbox_id,
+    })
+}
+
+fn parse_named_agent_select(arguments: &[OsString]) -> Result<NamedAgentCommand, CliError> {
+    let agent = parse_named_agent_selector(arguments.first().ok_or(CliError::Arguments)?)?;
+    let mut provider = None;
+    let mut session = None;
+    let mut directory = None;
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--provider") if provider.is_none() => {
+                provider = Some(
+                    ProviderId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--session") if session.is_none() => {
+                session = Some(
+                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--dir") if directory.is_none() => {
+                directory = Some(PathBuf::from(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                ));
+                index += 2;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    if provider.is_some() != session.is_some() {
+        return Err(CliError::Arguments);
+    }
+    Ok(NamedAgentCommand::Select {
+        agent,
+        mailbox: AgentMailboxSelection {
+            provider,
+            session,
+            directory,
+        },
+    })
+}
+
+fn parse_named_agent_rename(arguments: &[OsString]) -> Result<NamedAgentCommand, CliError> {
+    let agent = parse_named_agent_selector(arguments.first().ok_or(CliError::Arguments)?)?;
+    let mut provider = None;
+    let mut session = None;
+    let mut display_name = None;
+    let mut clear = false;
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--provider") if provider.is_none() => {
+                provider = Some(
+                    ProviderId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--session") if session.is_none() => {
+                session = Some(
+                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--clear") if !clear && display_name.is_none() => {
+                clear = true;
+                index += 1;
+            }
+            Some(value) if !value.starts_with('-') && !clear && display_name.is_none() => {
+                display_name = Some(ShortText::new(value).map_err(|_| CliError::Arguments)?);
+                index += 1;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    if provider.is_some() != session.is_some() || (display_name.is_none() && !clear) {
+        return Err(CliError::Arguments);
+    }
+    Ok(NamedAgentCommand::Rename {
+        agent,
+        provider,
+        session,
+        display_name,
+    })
+}
+
+fn parse_named_agent_selector(value: &OsString) -> Result<NamedAgentSelector, CliError> {
+    let text = argument_text(Some(value))?;
+    if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(NamedAgentSelector::Id(AgentId::from_bytes(parse_hex32(
+            value,
+        )?)));
+    }
+    Ok(NamedAgentSelector::Name(parse_agent_name(value)?))
+}
+
+fn parse_agent_name(value: &OsString) -> Result<ShortText, CliError> {
+    let value = argument_text(Some(value))?;
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || !bytes[0].is_ascii_lowercase()
+        || !bytes[bytes.len() - 1].is_ascii_alphanumeric()
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    {
+        return Err(CliError::Arguments);
+    }
+    ShortText::new(value).map_err(|_| CliError::Arguments)
 }
 
 fn parse_agent_message(
@@ -1782,6 +2082,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
         CliCommand::Peer { action, state } => return run_peer(action, state),
         CliCommand::Mailbox { action, state } => return run_mailbox(action, state),
         CliCommand::Relay { action, state } => return run_relay(action, state),
+        CliCommand::NamedAgent { action, state } => return run_named_agent(action, state),
         CliCommand::AgentMessage { action, state } => {
             return run_agent_message(action, state, input);
         }
@@ -1792,7 +2093,10 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
         CliCommand::HumanMessage { action, state } => {
             return run_human_message(action, state, input);
         }
-        CliCommand::Help { .. } | CliCommand::Version | CliCommand::Daemon { .. } => {}
+        CliCommand::Help { .. }
+        | CliCommand::Version
+        | CliCommand::AgentGuidance { .. }
+        | CliCommand::Daemon { .. } => {}
     }
     let CliCommand::Daemon { action, state } = &invocation.command else {
         return match &invocation.command {
@@ -1800,6 +2104,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
                 render_help(invocation.output, topic).map(CliResult::Rendered)
             }
             CliCommand::Version => render_version(invocation.output).map(CliResult::Rendered),
+            CliCommand::AgentGuidance { topic } => Ok(CliResult::AgentGuidance(*topic)),
             CliCommand::Daemon { .. }
             | CliCommand::Identity { .. }
             | CliCommand::Configuration { .. }
@@ -1807,6 +2112,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
             | CliCommand::Peer { .. }
             | CliCommand::Mailbox { .. }
             | CliCommand::Relay { .. }
+            | CliCommand::NamedAgent { .. }
             | CliCommand::AgentMessage { .. }
             | CliCommand::GetMessage { .. }
             | CliCommand::DiscoverMailboxes { .. }
@@ -2125,6 +2431,704 @@ fn run_relay(action: &RelayCommand, state: &StatePaths) -> Result<CliResult, Cli
         status,
         health,
     ))))
+}
+
+fn run_named_agent(action: &NamedAgentCommand, state: &StatePaths) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let local = client.installation_id();
+    let mut snapshot = client.snapshot()?;
+    let operation = match action {
+        NamedAgentCommand::List => "agent_list",
+        NamedAgentCommand::Show { agent } => {
+            let selected = resolve_named_agent_id(&snapshot, agent)?;
+            return Ok(CliResult::NamedAgentCatalog(Box::new(
+                named_agent_catalog_view(&snapshot, "agent_show", Some(selected), None),
+            )));
+        }
+        NamedAgentCommand::Current => {
+            let current = resolve_current_session(&snapshot, local)?;
+            return Ok(CliResult::NamedAgentCatalog(Box::new(
+                named_agent_catalog_view(&snapshot, "agent_current", current.3, Some(current)),
+            )));
+        }
+        NamedAgentCommand::Create { name, mailbox_id } => {
+            reconcile_named_agent(&mut client, &mut snapshot, local, name, *mailbox_id)?;
+            "agent_create"
+        }
+        NamedAgentCommand::Select { agent, mailbox } => {
+            select_named_agent_session(&mut client, &snapshot, local, agent, mailbox)?;
+            "agent_select"
+        }
+        NamedAgentCommand::Rename {
+            agent,
+            provider,
+            session,
+            display_name,
+        } => {
+            rename_named_agent_session(
+                &mut client,
+                &snapshot,
+                local,
+                agent,
+                provider.as_ref(),
+                session.as_ref(),
+                display_name.clone(),
+            )?;
+            "agent_rename"
+        }
+    };
+    snapshot = client.snapshot()?;
+    let selected = match action {
+        NamedAgentCommand::Create { name, .. } => {
+            Some(resolve_named_agent(&snapshot, &NamedAgentSelector::Name(name.clone()))?.agent_id)
+        }
+        NamedAgentCommand::Select { agent, .. } | NamedAgentCommand::Rename { agent, .. } => {
+            Some(resolve_named_agent(&snapshot, agent)?.agent_id)
+        }
+        NamedAgentCommand::List | NamedAgentCommand::Show { .. } | NamedAgentCommand::Current => {
+            None
+        }
+    };
+    Ok(CliResult::NamedAgentCatalog(Box::new(
+        named_agent_catalog_view(&snapshot, operation, selected, None),
+    )))
+}
+
+#[derive(Clone, Copy)]
+struct NamedAgentEvidence {
+    agent_id: AgentId,
+    claim_fact: FactId,
+    mailbox: MailboxAddress,
+}
+
+fn resolve_named_agent_id(
+    snapshot: &AuthoritativeSnapshotDto,
+    selector: &NamedAgentSelector,
+) -> Result<AgentId, CliError> {
+    let matches = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::Agent {
+            agent_id, names, ..
+        } if match selector {
+            NamedAgentSelector::Name(name) => names.iter().any(|value| value == name.as_str()),
+            NamedAgentSelector::Id(expected) => agent_id.bytes() == *expected.as_bytes(),
+        } =>
+        {
+            Some(AgentId::from_bytes(agent_id.bytes()))
+        }
+        _ => None,
+    });
+    let values = matches.collect::<Vec<_>>();
+    match values.as_slice() {
+        [agent_id] => Ok(*agent_id),
+        [] | [_, _, ..] => Err(CliError::AgentState),
+    }
+}
+
+fn resolve_named_agent(
+    snapshot: &AuthoritativeSnapshotDto,
+    selector: &NamedAgentSelector,
+) -> Result<NamedAgentEvidence, CliError> {
+    let matches = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Agent {
+                agent_id,
+                claims,
+                names,
+                mailboxes,
+                lifecycle,
+                ..
+            } if match selector {
+                NamedAgentSelector::Name(name) => names.iter().any(|value| value == name.as_str()),
+                NamedAgentSelector::Id(expected) => agent_id.bytes() == *expected.as_bytes(),
+            } =>
+            {
+                Some((agent_id, claims, mailboxes, lifecycle))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(agent_id, claims, mailboxes, lifecycle)] = matches.as_slice() else {
+        return Err(CliError::AgentState);
+    };
+    let ([claim_fact], [mailbox]) = (claims.as_slice(), mailboxes.as_slice()) else {
+        return Err(CliError::AgentState);
+    };
+    if *lifecycle != "active" {
+        return Err(CliError::AgentState);
+    }
+    Ok(NamedAgentEvidence {
+        agent_id: AgentId::from_bytes(agent_id.bytes()),
+        claim_fact: FactId::from_bytes(claim_fact.bytes()),
+        mailbox: MailboxAddress::new(
+            InstallationId::from_bytes(mailbox.installation_id.bytes()),
+            MailboxId::from_bytes(mailbox.mailbox_id.bytes()),
+        ),
+    })
+}
+
+fn reconcile_named_agent(
+    client: &mut LocalNodeClient,
+    snapshot: &mut AuthoritativeSnapshotDto,
+    local: InstallationId,
+    name: &ShortText,
+    requested_mailbox: Option<MailboxId>,
+) -> Result<(), CliError> {
+    let agent_id = stable_named_agent_id(local, name);
+    let mailbox_id = requested_mailbox.unwrap_or_else(|| stable_named_agent_mailbox(local, name));
+    let selector = NamedAgentSelector::Name(name.clone());
+    let matching = snapshot.items.iter().any(|item| match item {
+        SnapshotItem::Agent { names, .. } => names.iter().any(|value| value == name.as_str()),
+        _ => false,
+    });
+    if matching {
+        let existing = resolve_named_agent(snapshot, &selector)?;
+        if existing.agent_id == agent_id && existing.mailbox.mailbox_id() == mailbox_id {
+            return Ok(());
+        }
+        return Err(CliError::AgentState);
+    }
+
+    let mailbox_root = agent_mailbox_root(snapshot, local, mailbox_id)?;
+    let mailbox_root = match mailbox_root {
+        Some(root) => root,
+        None if requested_mailbox.is_some() => return Err(CliError::AgentState),
+        None => {
+            let plan = plan_agent_mailbox_creation(
+                local_authority(snapshot, local).map_err(|_| CliError::AgentState)?,
+                stable_inputs(),
+                mailbox_id,
+                Some(name.clone()),
+            )?;
+            submit_agent_plan(client, plan)?;
+            *snapshot = client.snapshot()?;
+            agent_mailbox_root(snapshot, local, mailbox_id)?.ok_or(CliError::AgentState)?
+        }
+    };
+    let plan = plan_agent_name_claim(
+        local_authority(snapshot, local).map_err(|_| CliError::AgentState)?,
+        stable_inputs(),
+        AgentNameClaimRequest {
+            agent_id,
+            mailbox: MailboxAddress::new(local, mailbox_id),
+            mailbox_root,
+            name: name.clone(),
+        },
+    )?;
+    submit_agent_plan(client, plan)?;
+    let reconciled = client.snapshot()?;
+    let created = resolve_named_agent(&reconciled, &selector)?;
+    if created.agent_id != agent_id || created.mailbox.mailbox_id() != mailbox_id {
+        return Err(CliError::AgentState);
+    }
+    *snapshot = reconciled;
+    Ok(())
+}
+
+fn agent_mailbox_root(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    mailbox_id: MailboxId,
+) -> Result<Option<FactId>, CliError> {
+    let matches = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Mailbox {
+                installation_id,
+                mailbox_id: candidate,
+                create_fact,
+                mailbox_kind,
+                ..
+            } if installation_id.bytes() == *local.as_bytes()
+                && candidate.bytes() == *mailbox_id.as_bytes() =>
+            {
+                Some((create_fact, mailbox_kind))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [(fact, kind)] if *kind == "agent" => Ok(Some(FactId::from_bytes(fact.bytes()))),
+        [_] | [_, _, ..] => Err(CliError::AgentState),
+    }
+}
+
+fn stable_named_agent_id(local: InstallationId, name: &ShortText) -> AgentId {
+    AgentId::from_bytes(stable_named_agent_value(
+        b"hq-named-agent-id-v1\0",
+        local,
+        name,
+    ))
+}
+
+fn stable_named_agent_mailbox(local: InstallationId, name: &ShortText) -> MailboxId {
+    MailboxId::from_bytes(stable_named_agent_value(
+        b"hq-named-agent-mailbox-v1\0",
+        local,
+        name,
+    ))
+}
+
+fn stable_named_agent_value(domain: &[u8], local: InstallationId, name: &ShortText) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(local.as_bytes());
+    digest.update(name.as_str().as_bytes());
+    digest.finalize().into()
+}
+
+fn select_named_agent_session(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    selector: &NamedAgentSelector,
+    requested: &AgentMailboxSelection,
+) -> Result<(), CliError> {
+    let agent = resolve_named_agent(snapshot, selector)?;
+    if agent.mailbox.installation_id() != local {
+        return Err(CliError::AgentState);
+    }
+    let (provider, session) = requested_session_identity(requested)?;
+    let binding_fact = session_binding_fact(snapshot, agent.mailbox, &provider, &session)?;
+    let directory = discovery_directory(requested.directory.as_deref())?;
+    let (context_fact, context) = session_context(snapshot, agent.mailbox, &directory)?;
+    let selection_frontier = agent_selection_frontier(snapshot, agent.agent_id)?;
+    let plan = plan_agent_session_selection(
+        local_authority(snapshot, local).map_err(|_| CliError::AgentState)?,
+        stable_inputs(),
+        AgentSessionSelectionRequest {
+            agent_id: agent.agent_id,
+            mailbox: agent.mailbox,
+            claim_fact: agent.claim_fact,
+            provider,
+            session,
+            binding_fact,
+            context_fact,
+            context,
+            selection_frontier,
+        },
+    )?;
+    submit_agent_plan(client, plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rename_named_agent_session(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    selector: &NamedAgentSelector,
+    explicit_provider: Option<&ProviderId>,
+    explicit_session: Option<&ProviderSessionId>,
+    display_name: Option<ShortText>,
+) -> Result<(), CliError> {
+    let agent = resolve_named_agent(snapshot, selector)?;
+    if agent.mailbox.installation_id() != local {
+        return Err(CliError::AgentState);
+    }
+    let (provider, session) = rename_session_identity(
+        snapshot,
+        agent.agent_id,
+        explicit_provider,
+        explicit_session,
+    )?;
+    let binding_fact = session_binding_fact(snapshot, agent.mailbox, &provider, &session)?;
+    let rename_frontier = agent_rename_frontier(snapshot, agent.agent_id, &provider, &session)?;
+    let plan = plan_agent_session_rename(
+        local_authority(snapshot, local).map_err(|_| CliError::AgentState)?,
+        stable_inputs(),
+        AgentSessionRenameRequest {
+            agent_id: agent.agent_id,
+            mailbox: agent.mailbox,
+            claim_fact: agent.claim_fact,
+            provider,
+            session,
+            binding_fact,
+            display_name,
+            rename_frontier,
+        },
+    )?;
+    submit_agent_plan(client, plan)
+}
+
+fn requested_session_identity(
+    requested: &AgentMailboxSelection,
+) -> Result<(ProviderId, ProviderSessionId), CliError> {
+    match (&requested.provider, &requested.session) {
+        (Some(provider), Some(session)) => Ok((provider.clone(), session.clone())),
+        (None, None) => {
+            let (provider, session) =
+                environment_session_identity()?.ok_or(CliError::AgentState)?;
+            Ok((
+                ProviderId::new(provider).map_err(|_| CliError::AgentState)?,
+                ProviderSessionId::new(session).map_err(|_| CliError::AgentState)?,
+            ))
+        }
+        _ => Err(CliError::AgentState),
+    }
+}
+
+fn rename_session_identity(
+    snapshot: &AuthoritativeSnapshotDto,
+    agent_id: AgentId,
+    explicit_provider: Option<&ProviderId>,
+    explicit_session: Option<&ProviderSessionId>,
+) -> Result<(ProviderId, ProviderSessionId), CliError> {
+    match (explicit_provider, explicit_session) {
+        (Some(provider), Some(session)) => return Ok((provider.clone(), session.clone())),
+        (None, None) => {}
+        _ => return Err(CliError::AgentState),
+    }
+    if let Some((provider, session)) = environment_session_identity()? {
+        return Ok((
+            ProviderId::new(provider).map_err(|_| CliError::AgentState)?,
+            ProviderSessionId::new(session).map_err(|_| CliError::AgentState)?,
+        ));
+    }
+    let (provider, session) = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::AgentSelection {
+                agent_id: candidate,
+                provider: Some(provider),
+                session: Some(session),
+                conflicted: false,
+                ..
+            } if candidate.bytes() == *agent_id.as_bytes() => Some((provider, session)),
+            _ => None,
+        })
+        .ok_or(CliError::AgentState)?;
+    Ok((
+        ProviderId::new(provider.clone()).map_err(|_| CliError::AgentState)?,
+        ProviderSessionId::new(session.clone()).map_err(|_| CliError::AgentState)?,
+    ))
+}
+
+fn session_binding_fact(
+    snapshot: &AuthoritativeSnapshotDto,
+    mailbox: MailboxAddress,
+    provider: &ProviderId,
+    session: &ProviderSessionId,
+) -> Result<FactId, CliError> {
+    let matches = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::AgentSession {
+            provider: candidate_provider,
+            session: candidate_session,
+            bindings,
+            mailbox_installation: Some(installation),
+            mailbox_id: Some(mailbox_id),
+            conflicted: false,
+        } if candidate_provider == provider.as_str()
+            && candidate_session == session.as_str()
+            && installation.bytes() == *mailbox.installation_id().as_bytes()
+            && mailbox_id.bytes() == *mailbox.mailbox_id().as_bytes() =>
+        {
+            bindings
+                .iter()
+                .find(|binding| {
+                    binding.mailbox.installation_id.bytes() == *mailbox.installation_id().as_bytes()
+                        && binding.mailbox.mailbox_id.bytes() == *mailbox.mailbox_id().as_bytes()
+                })
+                .map(|binding| &binding.fact_id)
+        }
+        _ => None,
+    });
+    let values = matches.collect::<Vec<_>>();
+    match values.as_slice() {
+        [fact] => Ok(FactId::from_bytes(fact.bytes())),
+        [] | [_, _, ..] => Err(CliError::AgentState),
+    }
+}
+
+fn session_context(
+    snapshot: &AuthoritativeSnapshotDto,
+    mailbox: MailboxAddress,
+    directory: &Path,
+) -> Result<(FactId, hq_domain::RepositoryContext), CliError> {
+    let requested = directory.to_string_lossy();
+    let matches = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::AgentContext {
+                mailbox_installation,
+                mailbox_id,
+                history,
+                ..
+            } if mailbox_installation.bytes() == *mailbox.installation_id().as_bytes()
+                && mailbox_id.bytes() == *mailbox.mailbox_id().as_bytes() =>
+            {
+                Some(history)
+            }
+            _ => None,
+        })
+        .flatten()
+        .filter(|context| context.directory.value == requested.as_ref())
+        .map(|context| {
+            Ok((
+                FactId::from_bytes(context.fact_id.bytes()),
+                repository_context_from_v1(context)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    let Some((first_fact, first_context)) = matches.first() else {
+        return Err(CliError::AgentState);
+    };
+    if matches.iter().any(|(_, context)| context != first_context) {
+        return Err(CliError::AgentState);
+    }
+    Ok((*first_fact, first_context.clone()))
+}
+
+fn repository_context_from_v1(
+    context: &hq_local_api::protocol::v1::RepositoryContextDto,
+) -> Result<hq_domain::RepositoryContext, CliError> {
+    Ok(hq_domain::RepositoryContext {
+        directory: locator_from_v1(&context.directory)?,
+        repository: context
+            .repository
+            .as_ref()
+            .map(locator_from_v1)
+            .transpose()?,
+        worktree: context.worktree.as_ref().map(locator_from_v1).transpose()?,
+        branch: context
+            .branch
+            .as_ref()
+            .map(|branch| ShortText::new(branch.clone()).map_err(|_| CliError::AgentState))
+            .transpose()?,
+    })
+}
+
+fn locator_from_v1(locator: &ResourceLocatorDto) -> Result<ResourceLocator, CliError> {
+    Ok(ResourceLocator::new(
+        match locator.scheme {
+            ResourceSchemeDto::GitRepository => ResourceScheme::GitRepository,
+            ResourceSchemeDto::WorkingTree => ResourceScheme::WorkingTree,
+            ResourceSchemeDto::Container => ResourceScheme::Container,
+            ResourceSchemeDto::Opaque => ResourceScheme::Opaque,
+        },
+        BoundedText::new(locator.value.clone()).map_err(|_| CliError::AgentState)?,
+    ))
+}
+
+fn agent_selection_frontier(
+    snapshot: &AuthoritativeSnapshotDto,
+    agent_id: AgentId,
+) -> Result<BTreeSet<FactId>, CliError> {
+    let matches = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::AgentSelection {
+            agent_id: candidate,
+            frontier,
+            ..
+        } if candidate.bytes() == *agent_id.as_bytes() => Some(frontier),
+        _ => None,
+    });
+    let values = matches.collect::<Vec<_>>();
+    match values.as_slice() {
+        [] => Ok(BTreeSet::new()),
+        [frontier] => Ok(frontier
+            .iter()
+            .map(|fact| FactId::from_bytes(fact.bytes()))
+            .collect()),
+        [_, _, ..] => Err(CliError::AgentState),
+    }
+}
+
+fn agent_rename_frontier(
+    snapshot: &AuthoritativeSnapshotDto,
+    agent_id: AgentId,
+    provider: &ProviderId,
+    session: &ProviderSessionId,
+) -> Result<BTreeSet<FactId>, CliError> {
+    let matches = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::AgentSessionName {
+            agent_id: candidate,
+            provider: candidate_provider,
+            session: candidate_session,
+            frontier,
+            ..
+        } if candidate.bytes() == *agent_id.as_bytes()
+            && candidate_provider == provider.as_str()
+            && candidate_session == session.as_str() =>
+        {
+            Some(frontier)
+        }
+        _ => None,
+    });
+    let values = matches.collect::<Vec<_>>();
+    match values.as_slice() {
+        [] => Ok(BTreeSet::new()),
+        [frontier] => Ok(frontier
+            .iter()
+            .map(|fact| FactId::from_bytes(fact.bytes()))
+            .collect()),
+        [_, _, ..] => Err(CliError::AgentState),
+    }
+}
+
+fn submit_agent_plan(
+    client: &mut LocalNodeClient,
+    plan: hq_application::FactPlan,
+) -> Result<(), CliError> {
+    let request =
+        MutationRequest::from_plan(random_command_id()?, plan).map_err(|_| CliError::AgentState)?;
+    match client.mutation(request)? {
+        ClientEvent::Mutation(MutationAttemptDto::Completed {
+            outcome: MutationOutcomeDto::Committed,
+            ..
+        }) => Ok(()),
+        _ => Err(CliError::AgentState),
+    }
+}
+
+fn resolve_current_session(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+) -> Result<(String, String, MailboxAddress, Option<AgentId>), CliError> {
+    let (provider, session) = environment_session_identity()?.ok_or(CliError::AgentState)?;
+    let matches = direct_session_candidates(snapshot, local)
+        .into_iter()
+        .filter(|candidate| {
+            candidate.provider == provider && candidate.session == session && !candidate.conflicted
+        })
+        .collect::<Vec<_>>();
+    let [candidate] = matches.as_slice() else {
+        return Err(CliError::AgentState);
+    };
+    Ok((provider, session, candidate.mailbox, candidate.named_agent))
+}
+
+fn named_agent_catalog_view(
+    snapshot: &AuthoritativeSnapshotDto,
+    operation: &'static str,
+    selected_agent: Option<AgentId>,
+    current: Option<(String, String, MailboxAddress, Option<AgentId>)>,
+) -> NamedAgentCatalogView {
+    let mut agents = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Agent {
+                agent_id,
+                names,
+                mailboxes,
+                lifecycle,
+                runnable,
+                ..
+            } => {
+                let agent_id = AgentId::from_bytes(agent_id.bytes());
+                selected_agent
+                    .is_none_or(|selected| selected == agent_id)
+                    .then(|| NamedAgentView {
+                        agent_id,
+                        names: names.clone(),
+                        mailboxes: mailboxes
+                            .iter()
+                            .map(|mailbox| {
+                                MailboxAddress::new(
+                                    InstallationId::from_bytes(mailbox.installation_id.bytes()),
+                                    MailboxId::from_bytes(mailbox.mailbox_id.bytes()),
+                                )
+                            })
+                            .collect(),
+                        lifecycle: lifecycle.clone(),
+                        runnable: *runnable,
+                        sessions: named_agent_session_views(snapshot, agent_id, mailboxes),
+                    })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    agents.sort_by(|left, right| (&left.names, left.agent_id).cmp(&(&right.names, right.agent_id)));
+    NamedAgentCatalogView {
+        operation,
+        agents,
+        current,
+    }
+}
+
+fn named_agent_session_views(
+    snapshot: &AuthoritativeSnapshotDto,
+    agent_id: AgentId,
+    mailboxes: &[hq_local_api::protocol::v1::MailboxAddressDto],
+) -> Vec<NamedAgentSessionView> {
+    let selected = snapshot.items.iter().find_map(|item| match item {
+        SnapshotItem::AgentSelection {
+            agent_id: candidate,
+            provider,
+            session,
+            conflicted: false,
+            ..
+        } if candidate.bytes() == *agent_id.as_bytes() => provider.as_ref().zip(session.as_ref()),
+        _ => None,
+    });
+    let mut sessions = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::AgentSession {
+                provider,
+                session,
+                bindings,
+                mailbox_installation,
+                mailbox_id,
+                conflicted,
+            } => {
+                let mailbox =
+                    mailbox_installation
+                        .zip(*mailbox_id)
+                        .map(|(installation, mailbox)| {
+                            MailboxAddress::new(
+                                InstallationId::from_bytes(installation.bytes()),
+                                MailboxId::from_bytes(mailbox.bytes()),
+                            )
+                        });
+                let compatible = bindings.iter().any(|binding| {
+                    mailboxes.iter().any(|candidate| {
+                        candidate.installation_id == binding.mailbox.installation_id
+                            && candidate.mailbox_id == binding.mailbox.mailbox_id
+                    })
+                });
+                compatible.then(|| {
+                    let display = snapshot.items.iter().find_map(|item| match item {
+                        SnapshotItem::AgentSessionName {
+                            agent_id: candidate,
+                            provider: candidate_provider,
+                            session: candidate_session,
+                            resolved,
+                            display_name,
+                            ..
+                        } if candidate.bytes() == *agent_id.as_bytes()
+                            && candidate_provider == provider
+                            && candidate_session == session =>
+                        {
+                            Some((*resolved, display_name.clone()))
+                        }
+                        _ => None,
+                    });
+                    NamedAgentSessionView {
+                        provider: provider.clone(),
+                        session: session.clone(),
+                        mailbox,
+                        conflicted: *conflicted,
+                        selected: selected.is_some_and(|(selected_provider, selected_session)| {
+                            selected_provider == provider && selected_session == session
+                        }),
+                        name_resolved: display.as_ref().is_none_or(|(resolved, _)| *resolved),
+                        display_name: display.and_then(|(_, name)| name),
+                    }
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| {
+        (&left.provider, &left.session).cmp(&(&right.provider, &right.session))
+    });
+    sessions
 }
 
 fn run_agent_message(
@@ -2475,24 +3479,31 @@ fn environment_session_identity() -> Result<Option<(String, String)>, CliError> 
             .map(|session| (provider.to_owned(), session))
     })
     .collect::<Vec<_>>();
-    if builtins.len() > 1 {
-        return Err(CliError::MessagingState);
-    }
-    if let Some(identity) = builtins.into_iter().next() {
-        return Ok(Some(identity));
-    }
-    match (
+    resolve_environment_session(
+        builtins,
         std::env::var("HQ_PROVIDER").ok(),
         std::env::var("HQ_SESSION").ok(),
-    ) {
-        (None, None) => Ok(None),
+    )
+}
+
+fn resolve_environment_session(
+    mut builtins: Vec<(String, String)>,
+    custom_provider: Option<String>,
+    custom_session: Option<String>,
+) -> Result<Option<(String, String)>, CliError> {
+    match (custom_provider, custom_session) {
+        (None, None) => {}
         (Some(provider), Some(session)) if !provider.is_empty() && !session.is_empty() => {
             ProviderId::new(provider.clone()).map_err(|_| CliError::MessagingState)?;
-            hq_domain::ProviderSessionId::new(session.clone())
-                .map_err(|_| CliError::MessagingState)?;
-            Ok(Some((provider, session)))
+            ProviderSessionId::new(session.clone()).map_err(|_| CliError::MessagingState)?;
+            builtins.push((provider, session));
         }
-        _ => Err(CliError::MessagingState),
+        _ => return Err(CliError::MessagingState),
+    }
+    match builtins.as_slice() {
+        [] => Ok(None),
+        [identity] => Ok(Some(identity.clone())),
+        [_, _, ..] => Err(CliError::MessagingState),
     }
 }
 
@@ -2546,14 +3557,15 @@ fn direct_session_candidates(
                 session,
                 mailbox_installation,
                 mailbox_id,
+                named_agent,
                 conflicted,
-                ..
             } if mailbox_installation.bytes() == *local.as_bytes() => {
                 let mailbox = MailboxAddress::new(local, MailboxId::from_bytes(mailbox_id.bytes()));
                 Some(MailboxDiscoveryCandidate {
                     provider: provider.clone(),
                     session: session.clone(),
                     mailbox,
+                    named_agent: named_agent.map(|agent| AgentId::from_bytes(agent.bytes())),
                     conflicted: *conflicted,
                     directory_match: false,
                     directories: contexts
@@ -4652,6 +5664,7 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 
 enum CliResult {
     Rendered(String),
+    AgentGuidance(AgentGuidanceTopic),
     Lifecycle {
         label: &'static str,
         observation: Box<LifecycleObservation>,
@@ -4668,19 +5681,20 @@ enum CliResult {
     RelayAdmin(Box<RelayAdminView>),
     Messages(Box<MessageCommandView>),
     MailboxDiscovery(Box<MailboxDiscoveryView>),
+    NamedAgentCatalog(Box<NamedAgentCatalogView>),
     Completed {
         operation: &'static str,
     },
 }
 
 fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, CliError> {
+    if let Some(rendered) = render_agent_result(format, result) {
+        return rendered;
+    }
     match (format, result) {
         (_, CliResult::Rendered(output)) => Ok(output.clone()),
         (CliOutputFormat::Human, CliResult::Lifecycle { label, observation }) => {
             Ok(format_observation(label, observation))
-        }
-        (CliOutputFormat::Human, CliResult::Stopped { intent }) => {
-            Ok(format!("stopped intent={intent}\n"))
         }
         (CliOutputFormat::Human, CliResult::Identity(identity)) => Ok(format!(
             "installation={} public_key={} fingerprint={}\n",
@@ -4704,9 +5718,6 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         (CliOutputFormat::Human, CliResult::Human(view)) => render_human_view(view),
         (CliOutputFormat::Human, CliResult::HumanDevices(view)) => render_human_devices(view),
         (CliOutputFormat::Human, CliResult::HumanPairing(view)) => Ok(render_human_pairing(view)),
-        (CliOutputFormat::Human, CliResult::Completed { operation }) => {
-            Ok(format!("completed operation={operation}\n"))
-        }
         (format, CliResult::Messages(view)) => render_message_result(format, view),
         (format, CliResult::MailboxDiscovery(view)) => render_mailbox_discovery(format, view),
         (CliOutputFormat::Json, CliResult::Lifecycle { label, observation }) => machine_record(
@@ -4769,9 +5780,42 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         ),
         (format, CliResult::AuthorityAdmin(view)) => render_authority_admin_result(format, view),
         (format, CliResult::RelayAdmin(view)) => render_relay_admin_result(format, view),
-        (CliOutputFormat::Json, CliResult::Completed { operation }) => {
-            machine_record("completed", &serde_json::json!({ "operation": operation }))
+        (
+            _,
+            CliResult::AgentGuidance(_)
+            | CliResult::NamedAgentCatalog(_)
+            | CliResult::Completed { .. }
+            | CliResult::Stopped { .. },
+        ) => unreachable!(),
+    }
+}
+
+fn render_agent_result(
+    format: CliOutputFormat,
+    result: &CliResult,
+) -> Option<Result<String, CliError>> {
+    match (format, result) {
+        (CliOutputFormat::Human, CliResult::AgentGuidance(topic)) => {
+            Some(Ok(topic.text().to_owned()))
         }
+        (CliOutputFormat::Json, CliResult::AgentGuidance(topic)) => Some(machine_record(
+            "agent_guidance",
+            &serde_json::json!({ "text": topic.text().trim_end(), "topic": topic.label() }),
+        )),
+        (format, CliResult::NamedAgentCatalog(view)) => {
+            Some(render_named_agent_catalog(format, view))
+        }
+        (CliOutputFormat::Human, CliResult::Completed { operation }) => {
+            Some(Ok(format!("completed operation={operation}\n")))
+        }
+        (CliOutputFormat::Json, CliResult::Completed { operation }) => Some(machine_record(
+            "completed",
+            &serde_json::json!({ "operation": operation }),
+        )),
+        (CliOutputFormat::Human, CliResult::Stopped { intent }) => {
+            Some(Ok(format!("stopped intent={intent}\n")))
+        }
+        _ => None,
     }
 }
 
@@ -4934,6 +5978,100 @@ fn render_mailbox_discovery(
                     "worktrees": candidate.worktrees,
                 })).collect::<Vec<_>>(),
                 "directory": view.directory,
+            }),
+        ),
+    }
+}
+
+fn render_named_agent_catalog(
+    format: CliOutputFormat,
+    view: &NamedAgentCatalogView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => {
+            let mut output = String::new();
+            if let Some((provider, session, mailbox, agent_id)) = &view.current {
+                writeln!(
+                    output,
+                    "current provider={} session={} mailbox={}:{} agent={}",
+                    provider,
+                    session,
+                    encode_id(mailbox.installation_id().as_bytes()),
+                    encode_id(mailbox.mailbox_id().as_bytes()),
+                    agent_id.map_or_else(|| "none".to_owned(), |agent| encode_id(agent.as_bytes())),
+                )
+                .map_err(|_| CliError::Runtime)?;
+            }
+            for agent in &view.agents {
+                writeln!(
+                    output,
+                    "agent={} names={} mailboxes={} lifecycle={} runnable={}",
+                    encode_id(agent.agent_id.as_bytes()),
+                    agent.names.join(","),
+                    agent
+                        .mailboxes
+                        .iter()
+                        .map(|mailbox| format!(
+                            "{}:{}",
+                            encode_id(mailbox.installation_id().as_bytes()),
+                            encode_id(mailbox.mailbox_id().as_bytes())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    agent.lifecycle,
+                    agent.runnable,
+                )
+                .map_err(|_| CliError::Runtime)?;
+                for session in &agent.sessions {
+                    writeln!(
+                        output,
+                        "  session provider={} id={} mailbox={} selected={} conflicted={} name_resolved={} display_name={}",
+                        session.provider,
+                        session.session,
+                        session.mailbox.map_or_else(
+                            || "none".to_owned(),
+                            |mailbox| format!(
+                                "{}:{}",
+                                encode_id(mailbox.installation_id().as_bytes()),
+                                encode_id(mailbox.mailbox_id().as_bytes())
+                            )
+                        ),
+                        session.selected,
+                        session.conflicted,
+                        session.name_resolved,
+                        session.display_name.as_deref().unwrap_or("none"),
+                    )
+                    .map_err(|_| CliError::Runtime)?;
+                }
+            }
+            Ok(output)
+        }
+        CliOutputFormat::Json => machine_record(
+            "named_agents",
+            &serde_json::json!({
+                "agents": view.agents.iter().map(|agent| serde_json::json!({
+                    "agent_id": encode_id(agent.agent_id.as_bytes()),
+                    "lifecycle": agent.lifecycle,
+                    "mailboxes": agent.mailboxes.iter().copied().map(mailbox_json).collect::<Vec<_>>(),
+                    "names": agent.names,
+                    "runnable": agent.runnable,
+                    "sessions": agent.sessions.iter().map(|session| serde_json::json!({
+                        "conflicted": session.conflicted,
+                        "display_name": session.display_name,
+                        "mailbox": session.mailbox.map(mailbox_json),
+                        "name_resolved": session.name_resolved,
+                        "provider": session.provider,
+                        "selected": session.selected,
+                        "session": session.session,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "current": view.current.as_ref().map(|(provider, session, mailbox, agent)| serde_json::json!({
+                    "agent_id": agent.map(|agent| encode_id(agent.as_bytes())),
+                    "mailbox": mailbox_json(*mailbox),
+                    "provider": provider,
+                    "session": session,
+                })),
+                "operation": view.operation,
             }),
         ),
     }
@@ -5365,15 +6503,15 @@ fn render_help(format: CliOutputFormat, topic: &[String]) -> Result<String, CliE
 }
 
 fn help_text(topic: &[String]) -> Option<&'static str> {
+    if let Some(text) = short_help_text(topic) {
+        return Some(text);
+    }
     match topic {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
-        ),
-        [command] if command == "version" => Some(
-            "Usage: hq [--output human|json] version\n\nShow executable version, local protocol version, and build commit metadata.\n",
         ),
         [command] if matches!(command.as_str(), "ask" | "send" | "wait" | "poll") => Some(
             "Agent mailbox messaging\n\n\
@@ -5467,6 +6605,23 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
     }
 }
 
+fn short_help_text(topic: &[String]) -> Option<&'static str> {
+    match topic {
+        [command] if command == "version" => Some(
+            "Usage: hq [--output human|json] version\n\nShow executable version, local protocol version, and build commit metadata.\n",
+        ),
+        [command] if command == "agents" => Some(
+            "Usage: hq [--output human|json] agents [messaging|retry|synchronization|delivery|causality|administration]\n\nShow concise installed guidance for agents without exposing installation or authority internals.\n",
+        ),
+        [command] if command == "agent" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] agent <COMMAND>\n\n\
+             Commands:\n  list\n  show NAME|AGENT_ID\n  create NAME [--mailbox MAILBOX_ID]\n  current\n  select NAME|AGENT_ID [--provider PROVIDER --session SESSION] [--dir PATH]\n  rename NAME|AGENT_ID DISPLAY_NAME [--provider PROVIDER --session SESSION]\n  rename NAME|AGENT_ID --clear [--provider PROVIDER --session SESSION]\n\n\
+             Names are permanent lowercase installation-local slugs. create without --mailbox allocates a deterministic local agent mailbox; --mailbox adopts one existing local agent mailbox. current, select, and rename reject ambiguous provider environments and stale or conflicted session metadata. Retirement is a separate safe workflow.\n",
+        ),
+        _ => None,
+    }
+}
+
 fn output_hint(arguments: &[OsString]) -> CliOutputFormat {
     arguments
         .windows(2)
@@ -5545,25 +6700,28 @@ fn format_observation(label: &str, observation: &LifecycleObservation) -> String
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::{collections::BTreeSet, ffi::OsString, time::Duration};
+    use std::{collections::BTreeSet, ffi::OsString, path::Path, time::Duration};
 
     use super::{
         AgentMailboxSelection, AgentMessageCommand, CliCommand, CliError, CliMessageView,
         CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand, HumanDeviceState,
         HumanMessageCommand, HumanMessageFilters, IdentityCommand, MailboxCommand,
-        MessageCommandView, PeerCommand, RelayCommand, completion_for, effect_outcome, execute_cli,
-        human_devices_view, human_view, mailbox_discovery_view, message_body, pairing_grant_id,
-        parse_cli, read_password, render_result, run_cli, stable_relay_effect,
-        stable_repair_operation,
+        MessageCommandView, NamedAgentCommand, NamedAgentSelector, PeerCommand, RelayCommand,
+        completion_for, effect_outcome, execute_cli, human_devices_view, human_view,
+        mailbox_discovery_view, message_body, named_agent_catalog_view, pairing_grant_id,
+        parse_cli, read_password, render_result, resolve_environment_session,
+        resolve_named_agent_id, run_cli, session_binding_fact, session_context,
+        stable_relay_effect, stable_repair_operation,
     };
     use hq_domain::{
         AccountId, FactId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
         MessageId, RelayHints, SigningPublicKey, ThreadId,
     };
     use hq_local_api::protocol::v1::{
-        AuthoritativeSnapshotDto, DeviceGrantDto, EffectOutcomeDto, Id32, MessagePurposeDto,
-        PresentationKindDto, RelayAccessDto, RelayAuthenticationDto, RepositoryContextDto,
-        ResourceLocatorDto, ResourceSchemeDto, SnapshotItem, SynchronizationRequestDto,
+        AgentSessionBindingDto, AuthoritativeSnapshotDto, DeviceGrantDto, EffectOutcomeDto, Id32,
+        MailboxAddressDto, MessagePurposeDto, PresentationKindDto, RelayAccessDto,
+        RelayAuthenticationDto, RepositoryContextDto, ResourceLocatorDto, ResourceSchemeDto,
+        SnapshotItem, SynchronizationRequestDto,
     };
 
     #[test]
@@ -5967,6 +7125,216 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_named_agent_catalog_and_guidance_commands() {
+        let root = std::env::temp_dir().join("hq-cli-agent-catalog-parser");
+        let mailbox = "11".repeat(32);
+        let created = parse_cli([
+            OsString::from("--state-root"),
+            root.clone().into_os_string(),
+            OsString::from("agent"),
+            OsString::from("create"),
+            OsString::from("build-agent"),
+            OsString::from("--mailbox"),
+            OsString::from(mailbox),
+        ])
+        .expect("agent adoption parses");
+        assert!(matches!(
+            created.command,
+            CliCommand::NamedAgent {
+                action: NamedAgentCommand::Create {
+                    name,
+                    mailbox_id: Some(_),
+                },
+                state,
+            } if name.as_str() == "build-agent" && state.root() == root
+        ));
+
+        let selected = parse_cli([
+            OsString::from("agent"),
+            OsString::from("select"),
+            OsString::from("build-agent"),
+            OsString::from("--provider"),
+            OsString::from("codex"),
+            OsString::from("--session"),
+            OsString::from("thread-1"),
+            OsString::from("--dir"),
+            OsString::from("/work/repo"),
+        ])
+        .expect("exact selection parses");
+        assert!(matches!(
+            selected.command,
+            CliCommand::NamedAgent {
+                action: NamedAgentCommand::Select {
+                    agent: NamedAgentSelector::Name(_),
+                    mailbox: AgentMailboxSelection {
+                        provider: Some(_),
+                        session: Some(_),
+                        directory: Some(_),
+                    },
+                },
+                ..
+            }
+        ));
+
+        let renamed = parse_cli([
+            OsString::from("agent"),
+            OsString::from("rename"),
+            OsString::from("build-agent"),
+            OsString::from("--clear"),
+        ])
+        .expect("explicit clear parses");
+        assert!(matches!(
+            renamed.command,
+            CliCommand::NamedAgent {
+                action: NamedAgentCommand::Rename {
+                    display_name: None,
+                    provider: None,
+                    session: None,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        let guidance = parse_cli([OsString::from("agents"), OsString::from("retry")])
+            .expect("guidance topic parses");
+        assert!(
+            matches!(guidance.command, CliCommand::AgentGuidance { topic } if topic.label() == "retry")
+        );
+        assert_eq!(
+            parse_cli([
+                OsString::from("agent"),
+                OsString::from("select"),
+                OsString::from("build-agent"),
+                OsString::from("--provider"),
+                OsString::from("codex"),
+            ]),
+            Err(CliError::Arguments)
+        );
+    }
+
+    #[test]
+    fn provider_environment_discovery_rejects_every_ambiguous_or_partial_source() {
+        assert_eq!(
+            resolve_environment_session(
+                vec![("codex".to_owned(), "thread-1".to_owned())],
+                None,
+                None,
+            )
+            .expect("one provider"),
+            Some(("codex".to_owned(), "thread-1".to_owned()))
+        );
+        assert_eq!(
+            resolve_environment_session(
+                vec![
+                    ("codex".to_owned(), "thread-1".to_owned()),
+                    ("pi".to_owned(), "session-2".to_owned()),
+                ],
+                None,
+                None,
+            ),
+            Err(CliError::MessagingState)
+        );
+        assert_eq!(
+            resolve_environment_session(
+                vec![("codex".to_owned(), "thread-1".to_owned())],
+                Some("custom".to_owned()),
+                Some("session-3".to_owned()),
+            ),
+            Err(CliError::MessagingState)
+        );
+        assert_eq!(
+            resolve_environment_session(vec![], Some("custom".to_owned()), None),
+            Err(CliError::MessagingState)
+        );
+    }
+
+    #[test]
+    fn catalog_session_planning_rejects_conflicted_bindings_and_stale_context() {
+        let local = InstallationId::from_bytes([1; 32]);
+        let mailbox = MailboxAddress::new(local, MailboxId::from_bytes([2; 32]));
+        let provider = hq_domain::ProviderId::new("codex").expect("provider");
+        let session = hq_domain::ProviderSessionId::new("thread-1").expect("session");
+        let conflicted = AuthoritativeSnapshotDto::new(
+            1,
+            vec![SnapshotItem::AgentSession {
+                provider: provider.as_str().to_owned(),
+                session: session.as_str().to_owned(),
+                bindings: vec![AgentSessionBindingDto {
+                    fact_id: Id32::new([3; 32]),
+                    mailbox: MailboxAddressDto {
+                        installation_id: Id32::new(*local.as_bytes()),
+                        mailbox_id: Id32::new(*mailbox.mailbox_id().as_bytes()),
+                    },
+                }],
+                mailbox_installation: None,
+                mailbox_id: None,
+                conflicted: true,
+            }],
+        )
+        .expect("conflicted snapshot");
+        assert_eq!(
+            session_binding_fact(&conflicted, mailbox, &provider, &session),
+            Err(CliError::AgentState)
+        );
+
+        let stale = AuthoritativeSnapshotDto::new(1, Vec::new()).expect("empty snapshot");
+        assert_eq!(
+            session_context(&stale, mailbox, Path::new("/work/repo")),
+            Err(CliError::AgentState)
+        );
+
+        let mut conflict_items = [4_u8, 5_u8]
+            .into_iter()
+            .map(|byte| SnapshotItem::Agent {
+                agent_id: Id32::new([byte; 32]),
+                claims: vec![Id32::new([byte + 10; 32])],
+                names: vec!["shared-name".to_owned()],
+                mailboxes: vec![MailboxAddressDto {
+                    installation_id: Id32::new(*local.as_bytes()),
+                    mailbox_id: Id32::new([byte + 20; 32]),
+                }],
+                retirements: Vec::new(),
+                lifecycle: "conflicted".to_owned(),
+                runnable: false,
+            })
+            .collect::<Vec<_>>();
+        conflict_items.push(SnapshotItem::AgentSession {
+            provider: provider.as_str().to_owned(),
+            session: session.as_str().to_owned(),
+            bindings: [4_u8, 5_u8]
+                .into_iter()
+                .map(|byte| AgentSessionBindingDto {
+                    fact_id: Id32::new([byte + 30; 32]),
+                    mailbox: MailboxAddressDto {
+                        installation_id: Id32::new(*local.as_bytes()),
+                        mailbox_id: Id32::new([byte + 20; 32]),
+                    },
+                })
+                .collect(),
+            mailbox_installation: None,
+            mailbox_id: None,
+            conflicted: true,
+        });
+        let conflicting_name =
+            AuthoritativeSnapshotDto::new(1, conflict_items).expect("name-conflict snapshot");
+        assert_eq!(
+            resolve_named_agent_id(
+                &conflicting_name,
+                &NamedAgentSelector::Name(hq_domain::ShortText::new("shared-name").expect("name"))
+            ),
+            Err(CliError::AgentState)
+        );
+        let view = named_agent_catalog_view(&conflicting_name, "agent_list", None, None);
+        assert_eq!(view.agents.len(), 2);
+        assert!(view.agents.iter().all(|agent| {
+            agent.sessions.len() == 1
+                && agent.sessions[0].conflicted
+                && agent.sessions[0].mailbox.is_none()
+        }));
+    }
+
+    #[test]
     fn parser_accepts_non_consuming_get_discovery_and_human_mailbox_actions() {
         let id = "11".repeat(32);
         assert!(matches!(
@@ -6229,7 +7597,7 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
         let ask = run_cli(
@@ -6238,6 +7606,20 @@ mod tests {
         .expect("ask help");
         assert!(ask.contains("intentionally unbounded"));
         assert!(ask.contains("stable message IDs"));
+        let agent = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("agent")])
+                .expect("agent help parses"),
+        )
+        .expect("agent help");
+        assert!(agent.contains("create NAME [--mailbox MAILBOX_ID]"));
+        assert!(agent.contains("reject ambiguous provider environments"));
+        let guidance = run_cli(
+            &parse_cli([OsString::from("agents"), OsString::from("delivery")])
+                .expect("delivery guidance parses"),
+        )
+        .expect("delivery guidance");
+        assert!(guidance.contains("at least once"));
+        assert!(guidance.contains("stable message identity"));
         let get = run_cli(
             &parse_cli([OsString::from("help"), OsString::from("get")]).expect("get help parses"),
         )
