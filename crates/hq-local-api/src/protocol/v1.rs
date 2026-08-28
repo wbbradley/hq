@@ -924,6 +924,8 @@ pub enum SnapshotItem {
     Installation {
         /// Installation identity.
         installation_id: Id32,
+        /// Exact unique installation-root fact.
+        root_fact: Id32,
         /// Installation signing key.
         signing_key: Id32,
         /// Installation encryption key.
@@ -937,6 +939,8 @@ pub enum SnapshotItem {
         installation_id: Id32,
         /// Mailbox identity.
         mailbox_id: Id32,
+        /// Exact mailbox creation fact.
+        create_fact: Id32,
         /// Stable mailbox kind name.
         mailbox_kind: String,
         /// Optional bounded display label.
@@ -946,6 +950,8 @@ pub enum SnapshotItem {
     Account {
         /// Account identity.
         account_id: Id32,
+        /// Exact unique account-root fact.
+        root_fact: Id32,
         /// Creator installation.
         creator_installation: Id32,
         /// Optional display label.
@@ -996,6 +1002,8 @@ pub enum SnapshotItem {
         candidates: Vec<Id32>,
         /// Unique active account when resolved.
         active: Option<Id32>,
+        /// Complete causal-maximal selection fact frontier.
+        frontier: Vec<Id32>,
     },
     /// Conversation discovery and unread/open summary; entries are loaded by bounded page query.
     Conversation {
@@ -1855,8 +1863,13 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 validate_id_set(frontier, 64)?;
             }
             SnapshotItem::MailboxCapability { .. } => {}
-            SnapshotItem::AccountSelection { candidates, .. } => {
+            SnapshotItem::AccountSelection {
+                candidates,
+                frontier,
+                ..
+            } => {
                 validate_id_set(candidates, 64)?;
+                validate_id_set(frontier, 64)?;
             }
             SnapshotItem::Conversation { key, .. } => validate_conversation_key(key)?,
             SnapshotItem::ProjectInput { sequence, .. }

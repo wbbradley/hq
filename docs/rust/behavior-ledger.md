@@ -138,7 +138,7 @@ constants remain evidence only unless a row below explicitly adopts the underlyi
 | IDN-017 | drop | excluded | Hostname, IP, port, or relay-presence identity | Network location and presence never prove identity or authority. | `docs/lan.md`; authority/relay packages |
 | IDN-018 | drop | excluded | Same-user process security boundary | Permissions reduce accidents/other-user access but do not claim protection from the same OS user. | `docs/design.md`; security documentation |
 | IDN-019 | redesign | required | Local peer blocking | Stop new transport only after deliverable revocation work while retaining previously authorized history. | `docs/events.md`; authority/application packages |
-| IDN-020 | redesign | required | Default human-account selection | Installation-local signed selection cites that installation's active membership and does not grant membership. | `docs/events.md`; authority/application packages |
+| IDN-020 | redesign | required | Default human-account selection | Installation-local signed selection cites that installation's active membership and does not grant membership. Creator bootstrap/show/select reconcile through authoritative local-API snapshots and pure plans. | `docs/events.md`; application planners and real CLI race/restart tests |
 
 ## Messaging, conversations, activity, and delivery
 

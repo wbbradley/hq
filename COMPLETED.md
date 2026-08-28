@@ -7199,3 +7199,49 @@ dependency gates pass, with only the existing locked yanked `chacha20 0.10.1` wa
     secret-input adapter.
   - All Rust storage contracts remain unshipped. Any clean-schema adjustment is made in place with
     no migration, legacy read path, storage-version bump, or standing-installation compatibility.
+
+## 2026-08-28 — Local human account bootstrap and selection
+
+Added `human create/show/select` to the installed executable. Creator bootstrap reconciles the
+reserved human mailbox, a deterministic separately namespaced creator-account identity, and the
+frontier-complete local selection through pure application plans and authenticated local-API
+mutations. The CLI never receives the root signer or store. Public passive authority inputs and
+human presentation records expose fields directly; validated identities and live capabilities
+remain opaque.
+
+The clean unshipped local API v1 snapshot now exposes exact installation, mailbox, account, and
+selection evidence needed for safe planning, without a protocol or storage version bump. Explicit
+snapshot refresh coalesces an in-flight initial view and otherwise loads a fresh complete snapshot.
+Local mutation storage now treats a distinct command that authors a byte-identical admitted fact as
+a committed semantic no-op at the original revision, retaining its receipt without a false
+invalidation.
+
+Two concurrent real CLI creator processes converge on exactly four facts; repeated create remains
+at revision four, changed immutable labels and unknown selections add nothing, and restart preserves
+the exact human/JSON view. Pure planner, snapshot codec/refresh, mutation receipt, parser/help,
+redaction, real-process race/restart, strict Clippy, the workspace suite excluding the known relay
+test-harness hang, architecture, behavior-ledger, causal-spec, protocol-spec, and dependency gates pass. Dependency policy retains
+only the existing locked yanked `chacha20 0.10.1` warning.
+
+### Original plan entry
+
+- **[cli/high] Bootstrap, inspect, and select a local human account** — Add `human create/show/select`
+  over authoritative snapshots and pure application fact plans. Creator bootstrap creates the
+  reserved local human mailbox when absent, authors one unique creator account, and selects it
+  through exact local-installation and membership authority without CLI signer/store access. Expose
+  the exact projection support needed for safe client planning in the unshipped clean local API
+  shape, with public passive fields and no protocol/storage version bump. Reconcile partial
+  bootstrap and response loss from fresh snapshots; reject ambiguous creator roots, stale selection
+  frontiers, inactive membership, changed reuse, and identity/key mismatches. Test restart,
+  concurrent create/select, deterministic human/JSON output, redaction, and local-API-only
+  architecture.
+
+  **Implementation notes**
+
+  - The creator account ID is SHA-256 domain-derived from the installation ID. It is stable across
+    partial bootstrap and response loss but remains a separate raw identity from the installation.
+  - Replay-stable creator facts use timestamp zero and the BIP-340 all-zero auxiliary input. Exact
+    content still determines the signer nonce; independently racing clients therefore author the
+    same canonical fact rather than conflicting roots.
+  - Exact-fact convergence required no schema change: canonical evidence was already idempotent;
+    the local mutation transaction now retains the second command receipt at the original revision.

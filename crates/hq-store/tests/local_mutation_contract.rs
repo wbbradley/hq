@@ -60,6 +60,25 @@ fn committed_retry_conflict_and_remote_ingest_share_one_canonical_engine() {
     assert_eq!(local.current_revision(), Ok(Revision::new(1)));
     assert_eq!(invalidations.try_revision(), None);
 
+    let converged = local
+        .execute_local_mutation(committed_request(
+            [0x42; 32],
+            [0x53; 32],
+            Arc::clone(&calls),
+        ))
+        .expect("distinct command for exact fact converges");
+    assert_eq!(converged.command_id(), CommandId::from_bytes([0x42; 32]));
+    assert_eq!(converged.result_kind(), MutationResultKind::Committed);
+    assert_eq!(converged.result().as_bytes(), b"created");
+    assert_eq!(converged.revision(), Revision::new(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(local.current_revision(), Ok(Revision::new(1)));
+    assert_eq!(invalidations.try_revision(), None);
+    assert_eq!(
+        local.load_mutation_receipt(CommandId::from_bytes([0x42; 32])),
+        Ok(Some(converged))
+    );
+
     let conflict = local
         .execute_local_mutation(committed_request(
             [0x41; 32],
@@ -68,7 +87,7 @@ fn committed_retry_conflict_and_remote_ingest_share_one_canonical_engine() {
         ))
         .expect_err("changed input under one ID conflicts");
     assert_eq!(conflict.class(), StoreErrorClass::MutationConflict);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     local.repair(authority_policy()).expect("repair succeeds");
     assert_eq!(

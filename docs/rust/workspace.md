@@ -103,9 +103,11 @@ bounds, and distinguishes command-only from snapshot-oriented initial views. It 
 connection, replays retained mutation and project-command frames byte-for-byte,
 reports lost ordinary requests without replaying them, derives a fresh subscription registration
 per server session, and treats revision notices only as wakes for complete authoritative refreshes.
-All retained mutation and completed-identity state is explicitly bounded. `hq-node` supplies the
-bounded Unix adapter and the reusable command seam that converges coordinator readiness before
-exposing typed request, mutation, and project operations; see `docs/rust/cli.md`.
+An explicit snapshot call coalesces with an in-flight initial refresh and otherwise requests a new
+complete view. All retained mutation and completed-identity state is explicitly bounded. `hq-node`
+supplies the bounded Unix adapter and the reusable command seam that converges coordinator readiness
+before exposing the authenticated installation identity plus typed snapshot, request, mutation, and
+project operations; see `docs/rust/cli.md`.
 
 `hq-node` owns the secure lifecycle foundation specified in `docs/rust/node-lifecycle.md`. It
 derives or accepts a private runtime namespace, enforces the portable Unix socket pathname ceiling,

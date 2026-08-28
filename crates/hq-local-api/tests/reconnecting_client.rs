@@ -790,6 +790,39 @@ fn blocking_runner_replays_mutation_bytes_after_response_loss() {
 }
 
 #[test]
+fn blocking_runner_returns_the_in_flight_initial_snapshot_then_refreshes_again() {
+    let hello = WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([90; 32])))
+        .encode_frame()
+        .expect("hello frame");
+    let transport = ScriptedTransport {
+        reads: VecDeque::from([
+            Ok(hello),
+            Ok(snapshot_response(1, 17)),
+            Ok(snapshot_response(2, 18)),
+        ]),
+        writes: Vec::new(),
+        connects: 0,
+        failed_connects_remaining: 0,
+        closes: 0,
+    };
+    let mut runner = BlockingClientRunner::new(
+        BlockingClientConfig {
+            deadline: Duration::from_secs(1),
+            max_connection_attempts: NonZeroUsize::new(2).expect("nonzero"),
+        },
+        client(),
+        transport,
+    )
+    .expect("runner config");
+
+    assert_eq!(runner.snapshot().expect("initial snapshot").revision, 17);
+    assert_eq!(runner.snapshot().expect("explicit refresh").revision, 18);
+    let transport = runner.into_transport();
+    assert_eq!(transport.connects, 1);
+    assert_eq!(transport.writes.len(), 3);
+}
+
+#[test]
 fn blocking_runner_never_replays_an_ordinary_request_after_response_loss() {
     let hello = WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([93; 32])))
         .encode_frame()

@@ -1,19 +1,40 @@
 //! Minimal single-binary lifecycle roles for the Rust node.
 
 use std::{
-    error::Error, ffi::OsString, fmt, io::Read, num::NonZeroUsize, path::PathBuf, time::Duration,
+    collections::BTreeSet,
+    error::Error,
+    ffi::OsString,
+    fmt::{self, Write as _},
+    io::Read,
+    num::NonZeroUsize,
+    path::PathBuf,
+    time::Duration,
 };
 
-use hq_domain::ProviderId;
-use hq_local_api::protocol::v1::{BuildMetadata, LifecycleRequest, LifecycleState};
+use hq_application::{
+    ApplicationError, LocalFactInputs, LocalInstallationAuthority, plan_human_account_creation,
+    plan_human_account_selection, plan_human_mailbox_creation,
+};
+use hq_domain::{
+    AccountId, CommandId, FactId, InstallationId, ProviderId, ShortText, SigningPublicKey,
+    Timestamp,
+};
+use hq_local_api::{
+    ClientEvent, InitialView,
+    protocol::v1::{
+        AuthoritativeSnapshotDto, BuildMetadata, LifecycleRequest, LifecycleState,
+        MutationAttemptDto, MutationOutcomeDto, MutationRequest, SnapshotItem,
+    },
+};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::{
     BackupPassword, ForegroundNodeConfig, ForegroundNodeError, IdentityError, LifecycleClient,
     LifecycleClientConfig, LifecycleClientError, LifecycleObservation, LocalConfiguration,
-    NodeClientCoordinator, NodeCoordinatorConfig, NodeCoordinatorError, ProcessNodeLauncher,
-    PublicIdentity, RelayEndpoint, RuntimePathError, RuntimePaths, StateDirectoryOwner, StatePaths,
-    run_foreground,
+    LocalNodeClient, LocalNodeClientConfig, LocalNodeClientError, NodeClientCoordinator,
+    NodeCoordinatorConfig, NodeCoordinatorError, ProcessNodeLauncher, PublicIdentity,
+    RelayEndpoint, RuntimePathError, RuntimePaths, StateDirectoryOwner, StatePaths, run_foreground,
 };
 
 /// Stable output representation selected for one invocation.
@@ -77,6 +98,55 @@ pub enum ConfigurationCommand {
     },
 }
 
+/// Closed local human-account administration behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HumanCommand {
+    /// Create or reconcile the one local creator account and select it.
+    Create {
+        /// Optional immutable account label.
+        label: Option<ShortText>,
+    },
+    /// Inspect local account and selection state.
+    Show,
+    /// Select one account for which this installation has active authority.
+    Select {
+        /// Exact account identity to select.
+        account_id: AccountId,
+    },
+}
+
+/// Passive human-account presentation data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanAccountView {
+    /// Stable account identity.
+    pub account_id: AccountId,
+    /// Permanent creator installation.
+    pub creator_installation: InstallationId,
+    /// Optional immutable account label.
+    pub label: Option<String>,
+    /// Whether this account is the unique active local selection.
+    pub selected: bool,
+}
+
+/// Passive local account-selection presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanView {
+    /// Installation whose local view is represented.
+    pub installation_id: InstallationId,
+    /// Accounts visible in the authoritative snapshot.
+    pub accounts: Vec<HumanAccountView>,
+    /// Causal-maximal local selection candidates.
+    pub selection_candidates: Vec<AccountId>,
+    /// Unique active local account, when resolved.
+    pub active_account: Option<AccountId>,
+}
+
+struct LocalSelection {
+    candidates: Vec<AccountId>,
+    active: Option<AccountId>,
+    frontier: BTreeSet<FactId>,
+}
+
 /// Closed command tree shared by the installed executable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CliCommand {
@@ -98,6 +168,13 @@ pub enum CliCommand {
     Configuration {
         /// Requested configuration behavior.
         action: ConfigurationCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
+    /// Execute one human-account operation through the authenticated local API.
+    Human {
+        /// Requested human-account behavior.
+        action: HumanCommand,
         /// Validated installation state layout.
         state: StatePaths,
     },
@@ -180,6 +257,12 @@ pub enum CliError {
     Runtime,
     /// Secure identity ownership, persistence, backup, or configuration failed.
     Identity(IdentityError),
+    /// Authenticated local command execution failed.
+    LocalNode(LocalNodeClientError),
+    /// Pure application planning rejected incomplete or invalid authority inputs.
+    Application(ApplicationError),
+    /// Authoritative human-account state was absent, ambiguous, stale, or inconsistent.
+    HumanState,
     /// Backup password input was absent, oversized, malformed, or unreadable.
     SecretInput,
 }
@@ -189,7 +272,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|identity|config|daemon>",
+                 <help|version|identity|config|human|daemon>",
             ),
             Self::StatePath => formatter.write_str("node state path is unavailable or invalid"),
             Self::RuntimePath => formatter.write_str("node runtime path is unavailable or invalid"),
@@ -199,6 +282,11 @@ impl fmt::Display for CliError {
             Self::Foreground(error) => error.fmt(formatter),
             Self::Runtime => formatter.write_str("node process runtime is unavailable"),
             Self::Identity(error) => error.fmt(formatter),
+            Self::LocalNode(error) => error.fmt(formatter),
+            Self::Application(error) => error.fmt(formatter),
+            Self::HumanState => {
+                formatter.write_str("human account state is unavailable or ambiguous")
+            }
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
         }
     }
@@ -272,6 +360,16 @@ impl CliError {
                 "the identity or local configuration operation failed",
                 CliExitClass::Failure,
             ),
+            Self::LocalNode(_) => (
+                "node.command_failed",
+                "the authenticated local node command failed",
+                CliExitClass::Failure,
+            ),
+            Self::Application(_) | Self::HumanState => (
+                "human.state_unavailable",
+                "human account authority is absent, stale, ambiguous, or inconsistent",
+                CliExitClass::Failure,
+            ),
             Self::SecretInput => (
                 "identity.secret_input",
                 "provide exactly one bounded UTF-8 backup password on stdin",
@@ -302,6 +400,18 @@ impl From<ForegroundNodeError> for CliError {
 impl From<IdentityError> for CliError {
     fn from(error: IdentityError) -> Self {
         Self::Identity(error)
+    }
+}
+
+impl From<LocalNodeClientError> for CliError {
+    fn from(error: LocalNodeClientError) -> Self {
+        Self::LocalNode(error)
+    }
+}
+
+impl From<ApplicationError> for CliError {
+    fn from(error: ApplicationError) -> Self {
+        Self::Application(error)
     }
 }
 
@@ -342,6 +452,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
         Some("version" | "--version") if rest.is_empty() => CliCommand::Version,
         Some("identity") => parse_identity(&rest, state_root.as_ref())?,
         Some("config") => parse_configuration(&rest, state_root.as_ref())?,
+        Some("human") => parse_human(&rest, state_root.as_ref())?,
         Some("daemon") if rest.as_slice() == [OsString::from("--help")] => CliCommand::Help {
             topic: vec!["daemon".to_owned()],
         },
@@ -368,6 +479,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
             CliCommand::Daemon { .. }
                 | CliCommand::Identity { .. }
                 | CliCommand::Configuration { .. }
+                | CliCommand::Human { .. }
         )
     {
         return Err(CliError::Arguments);
@@ -440,6 +552,32 @@ fn parse_configuration(
     })
 }
 
+fn parse_human(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match arguments {
+        [action] if action == "create" => HumanCommand::Create { label: None },
+        [action, label] if action == "create" => HumanCommand::Create {
+            label: Some(
+                label
+                    .to_str()
+                    .ok_or(CliError::Arguments)
+                    .and_then(|label| ShortText::new(label).map_err(|_| CliError::Arguments))?,
+            ),
+        },
+        [action] if action == "show" => HumanCommand::Show,
+        [action, account] if action == "select" => HumanCommand::Select {
+            account_id: AccountId::from_bytes(parse_hex32(account)?),
+        },
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::Human {
+        action,
+        state: parsed_state(state_root)?,
+    })
+}
+
 fn parse_relay(value: &OsString) -> Result<RelayEndpoint, CliError> {
     value
         .to_str()
@@ -460,6 +598,26 @@ fn absolute_path(value: &OsString) -> Result<PathBuf, CliError> {
         Ok(path)
     } else {
         Err(CliError::Arguments)
+    }
+}
+
+fn parse_hex32(value: &OsString) -> Result<[u8; 32], CliError> {
+    let value = value.to_str().ok_or(CliError::Arguments)?.as_bytes();
+    if value.len() != 64 {
+        return Err(CliError::Arguments);
+    }
+    let mut output = [0_u8; 32];
+    for (index, pair) in value.as_chunks::<2>().0.iter().enumerate() {
+        output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Ok(output)
+}
+
+const fn hex_nibble(value: u8) -> Result<u8, CliError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(CliError::Arguments),
     }
 }
 
@@ -509,6 +667,9 @@ pub fn run_cli_with_input(
         CliCommand::Configuration { action, state } => {
             return render_result(invocation.output, &run_configuration(action, state)?);
         }
+        CliCommand::Human { action, state } => {
+            return render_result(invocation.output, &run_human(action, state)?);
+        }
         CliCommand::Help { .. } | CliCommand::Version | CliCommand::Daemon { .. } => {}
     }
     let CliCommand::Daemon { action, state } = &invocation.command else {
@@ -517,7 +678,8 @@ pub fn run_cli_with_input(
             CliCommand::Version => render_version(invocation.output),
             CliCommand::Daemon { .. }
             | CliCommand::Identity { .. }
-            | CliCommand::Configuration { .. } => unreachable!(),
+            | CliCommand::Configuration { .. }
+            | CliCommand::Human { .. } => unreachable!(),
         };
     };
     let runtime = RuntimePaths::new(state.root().join("runtime"))
@@ -627,6 +789,305 @@ fn run_configuration(
     }
 }
 
+fn run_human(action: &HumanCommand, state: &StatePaths) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let local = client.installation_id();
+    match action {
+        HumanCommand::Show => {
+            let snapshot = client.snapshot()?;
+            Ok(CliResult::Human(Box::new(human_view(&snapshot, local)?)))
+        }
+        HumanCommand::Create { label } => {
+            reconcile_human_mailbox(&mut client, local)?;
+            let snapshot = client.snapshot()?;
+            let authority = local_authority(&snapshot, local)?;
+            let account_id = creator_account_id(local);
+            match account_item(&snapshot, account_id) {
+                Some((_, creator, existing_label, _))
+                    if creator == local
+                        && existing_label.as_deref() == label.as_ref().map(ShortText::as_str) => {}
+                Some(_) => return Err(CliError::HumanState),
+                None => {
+                    let plan = plan_human_account_creation(
+                        authority,
+                        stable_inputs(),
+                        account_id,
+                        label.clone(),
+                    )?;
+                    submit_human_plan(&mut client, plan)?;
+                }
+            }
+            select_human_account(&mut client, local, account_id)?;
+            let snapshot = client.snapshot()?;
+            Ok(CliResult::Human(Box::new(human_view(&snapshot, local)?)))
+        }
+        HumanCommand::Select { account_id } => {
+            select_human_account(&mut client, local, *account_id)?;
+            let snapshot = client.snapshot()?;
+            Ok(CliResult::Human(Box::new(human_view(&snapshot, local)?)))
+        }
+    }
+}
+
+fn reconcile_human_mailbox(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+) -> Result<(), CliError> {
+    let snapshot = client.snapshot()?;
+    let authority = local_authority(&snapshot, local)?;
+    let mailbox = crate::foreground::reserved_human_mailbox();
+    let matching = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::Mailbox {
+            installation_id,
+            mailbox_id,
+            mailbox_kind,
+            ..
+        } if installation_id.bytes() == *local.as_bytes()
+            && mailbox_id.bytes() == *mailbox.as_bytes() =>
+        {
+            Some(mailbox_kind.as_str())
+        }
+        _ => None,
+    });
+    let kinds = matching.collect::<Vec<_>>();
+    match kinds.as_slice() {
+        ["human"] => Ok(()),
+        [] => {
+            let plan = plan_human_mailbox_creation(authority, stable_inputs(), mailbox, None)?;
+            submit_human_plan(client, plan)
+        }
+        [_] | [_, ..] => Err(CliError::HumanState),
+    }
+}
+
+fn select_human_account(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    account_id: AccountId,
+) -> Result<(), CliError> {
+    let snapshot = client.snapshot()?;
+    let view = human_view(&snapshot, local)?;
+    if view.active_account == Some(account_id) {
+        return Ok(());
+    }
+    let authority = local_authority(&snapshot, local)?;
+    let (root_fact, creator, _, _) =
+        account_item(&snapshot, account_id).ok_or(CliError::HumanState)?;
+    let membership_fact = if creator == local {
+        root_fact
+    } else {
+        active_membership_fact(&snapshot, local, account_id)?
+    };
+    let frontier = local_selection(&snapshot, local)?.frontier;
+    let plan = plan_human_account_selection(
+        authority,
+        stable_inputs(),
+        account_id,
+        membership_fact,
+        frontier,
+    )?;
+    submit_human_plan(client, plan)
+}
+
+fn local_authority(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+) -> Result<LocalInstallationAuthority, CliError> {
+    let matches = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::Installation {
+            installation_id,
+            root_fact,
+            signing_key,
+            ..
+        } if installation_id.bytes() == *local.as_bytes() => Some(LocalInstallationAuthority {
+            installation_id: local,
+            signing_key: SigningPublicKey::from_bytes(signing_key.bytes()),
+            root_fact: FactId::from_bytes(root_fact.bytes()),
+        }),
+        _ => None,
+    });
+    let values = matches.collect::<Vec<_>>();
+    match values.as_slice() {
+        [authority] => Ok(*authority),
+        [] | [_, _, ..] => Err(CliError::HumanState),
+    }
+}
+
+fn account_item(
+    snapshot: &AuthoritativeSnapshotDto,
+    target: AccountId,
+) -> Option<(FactId, InstallationId, Option<String>, bool)> {
+    snapshot.items.iter().find_map(|item| match item {
+        SnapshotItem::Account {
+            account_id,
+            root_fact,
+            creator_installation,
+            label,
+            selected,
+        } if account_id.bytes() == *target.as_bytes() => Some((
+            FactId::from_bytes(root_fact.bytes()),
+            InstallationId::from_bytes(creator_installation.bytes()),
+            label.clone(),
+            *selected,
+        )),
+        _ => None,
+    })
+}
+
+fn active_membership_fact(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    account: AccountId,
+) -> Result<FactId, CliError> {
+    snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Membership {
+                account_id,
+                device,
+                state,
+                active_acceptances,
+            } if account_id.bytes() == *account.as_bytes()
+                && device.bytes() == *local.as_bytes()
+                && state == "active" =>
+            {
+                active_acceptances
+                    .first()
+                    .map(|fact| FactId::from_bytes(fact.bytes()))
+            }
+            _ => None,
+        })
+        .ok_or(CliError::HumanState)
+}
+
+fn local_selection(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+) -> Result<LocalSelection, CliError> {
+    let matches = snapshot.items.iter().filter_map(|item| match item {
+        SnapshotItem::AccountSelection {
+            installation_id,
+            candidates,
+            active,
+            frontier,
+        } if installation_id.bytes() == *local.as_bytes() => Some(LocalSelection {
+            candidates: candidates
+                .iter()
+                .map(|account| AccountId::from_bytes(account.bytes()))
+                .collect(),
+            active: active.map(|account| AccountId::from_bytes(account.bytes())),
+            frontier: frontier
+                .iter()
+                .map(|fact| FactId::from_bytes(fact.bytes()))
+                .collect(),
+        }),
+        _ => None,
+    });
+    let values = matches.collect::<Vec<_>>();
+    match values.len() {
+        0 => Ok(LocalSelection {
+            candidates: Vec::new(),
+            active: None,
+            frontier: BTreeSet::new(),
+        }),
+        1 => values.into_iter().next().ok_or(CliError::HumanState),
+        _ => Err(CliError::HumanState),
+    }
+}
+
+fn human_view(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+) -> Result<HumanView, CliError> {
+    let selection = local_selection(snapshot, local)?;
+    let mut accounts = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Account {
+                account_id,
+                creator_installation,
+                label,
+                ..
+            } => {
+                let account_id = AccountId::from_bytes(account_id.bytes());
+                Some(HumanAccountView {
+                    selected: selection.active == Some(account_id),
+                    account_id,
+                    creator_installation: InstallationId::from_bytes(creator_installation.bytes()),
+                    label: label.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    accounts.sort_by_key(|account| account.account_id);
+    Ok(HumanView {
+        installation_id: local,
+        accounts,
+        selection_candidates: selection.candidates,
+        active_account: selection.active,
+    })
+}
+
+fn creator_account_id(local: InstallationId) -> AccountId {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-human-creator-account-v1\0");
+    digest.update(local.as_bytes());
+    AccountId::from_bytes(digest.finalize().into())
+}
+
+fn stable_inputs() -> LocalFactInputs {
+    LocalFactInputs {
+        authored_at: Timestamp::from_unix_millis(0),
+        auxiliary_randomness: [0; 32],
+    }
+}
+
+fn submit_human_plan(
+    client: &mut LocalNodeClient,
+    plan: hq_application::FactPlan,
+) -> Result<(), CliError> {
+    let request =
+        MutationRequest::from_plan(random_command_id()?, plan).map_err(|_| CliError::HumanState)?;
+    match client.mutation(request)? {
+        ClientEvent::Mutation(MutationAttemptDto::Completed {
+            outcome: MutationOutcomeDto::Committed,
+            ..
+        }) => Ok(()),
+        _ => Err(CliError::HumanState),
+    }
+}
+
+fn random_command_id() -> Result<CommandId, CliError> {
+    for _ in 0..16 {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|_| CliError::Runtime)?;
+        if bytes != [0; 32] {
+            return Ok(CommandId::from_bytes(bytes));
+        }
+    }
+    Err(CliError::Runtime)
+}
+
+fn command_client(state: &StatePaths) -> Result<LocalNodeClient, CliError> {
+    LocalNodeClient::connect(LocalNodeClientConfig {
+        state: state.clone(),
+        build: build()?,
+        initial_view: InitialView::OnDemand,
+        io_timeout: Duration::from_secs(2),
+        command_deadline: Duration::from_secs(10),
+        max_connection_attempts: nonzero(8),
+        readiness_timeout: Duration::from_secs(10),
+        readiness_retry_interval: Duration::from_millis(25),
+        reconnect_initial: Duration::from_millis(25),
+        reconnect_maximum: Duration::from_millis(250),
+        completed_identity_capacity: nonzero(64),
+    })
+    .map_err(Into::into)
+}
+
 fn read_password(input: &mut dyn Read) -> Result<BackupPassword, CliError> {
     const MAX_INPUT_BYTES: u64 = 1_027;
     let mut bytes = Zeroizing::new(Vec::new());
@@ -731,6 +1192,7 @@ enum CliResult {
     },
     Identity(Box<PublicIdentity>),
     Configuration(Box<LocalConfiguration>),
+    Human(Box<HumanView>),
     Completed {
         operation: &'static str,
     },
@@ -763,6 +1225,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 .collect::<Vec<_>>()
                 .join(","),
         )),
+        (CliOutputFormat::Human, CliResult::Human(view)) => render_human_view(view),
         (CliOutputFormat::Human, CliResult::Completed { operation }) => {
             Ok(format!("completed operation={operation}\n"))
         }
@@ -793,10 +1256,57 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 "relays": configuration.relays.iter().map(RelayEndpoint::as_str).collect::<Vec<_>>(),
             }),
         ),
+        (CliOutputFormat::Json, CliResult::Human(view)) => machine_record(
+            "human",
+            &serde_json::json!({
+                "accounts": view.accounts.iter().map(|account| serde_json::json!({
+                    "account_id": crate::identity::encode_hex(account.account_id.as_bytes()),
+                    "creator_installation": crate::identity::encode_hex(account.creator_installation.as_bytes()),
+                    "label": account.label,
+                    "selected": account.selected,
+                })).collect::<Vec<_>>(),
+                "active_account": view.active_account.map(|account| crate::identity::encode_hex(account.as_bytes())),
+                "installation_id": crate::identity::encode_hex(view.installation_id.as_bytes()),
+                "selection_candidates": view.selection_candidates.iter().map(|account| crate::identity::encode_hex(account.as_bytes())).collect::<Vec<_>>(),
+            }),
+        ),
         (CliOutputFormat::Json, CliResult::Completed { operation }) => {
             machine_record("completed", &serde_json::json!({ "operation": operation }))
         }
     }
+}
+
+fn render_human_view(view: &HumanView) -> Result<String, CliError> {
+    let active = view.active_account.map_or_else(
+        || "none".to_owned(),
+        |account| crate::identity::encode_hex(account.as_bytes()),
+    );
+    let candidates = view
+        .selection_candidates
+        .iter()
+        .map(|account| crate::identity::encode_hex(account.as_bytes()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut output = format!(
+        "installation={} active_account={} selection_candidates={} accounts={}\n",
+        crate::identity::encode_hex(view.installation_id.as_bytes()),
+        active,
+        candidates,
+        view.accounts.len(),
+    );
+    for account in &view.accounts {
+        let label = serde_json::to_string(&account.label).map_err(|_| CliError::Runtime)?;
+        writeln!(
+            output,
+            "account={} creator={} selected={} label={}",
+            crate::identity::encode_hex(account.account_id.as_bytes()),
+            crate::identity::encode_hex(account.creator_installation.as_bytes()),
+            account.selected,
+            label,
+        )
+        .map_err(|_| CliError::Runtime)?;
+    }
+    Ok(output)
 }
 
 fn render_version(format: CliOutputFormat) -> Result<String, CliError> {
@@ -837,7 +1347,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  daemon          Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  daemon          Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
         ),
         [command] if command == "version" => Some(
@@ -853,6 +1363,11 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
              Commands:\n  get                                      Show all local defaults\n  set default-provider PROVIDER|none       Replace the provider default\n  set relays URL...|none                   Replace the complete relay set\n\n\
              Configuration commands require exclusive offline ownership.\n",
         ),
+        [command] if command == "human" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] human <COMMAND>\n\n\
+             Commands:\n  create [LABEL]                         Create/reconcile and select the local creator account\n  show                                   Show authoritative account and selection state\n  select ACCOUNT_ID                      Select one actively authorized account\n\n\
+             Human commands start or connect to the local node and author only through application plans.\n",
+        ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
              Commands:\n  run        Own the node in the foreground\n  status     Probe without starting a node\n  readiness  Return a ready node, starting one when absent\n  stop       Converge the node to absence\n  restart    Converge on a fresh ready generation\n",
@@ -864,12 +1379,14 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                     "run" | "status" | "readiness" | "stop" | "restart"
                 ))
                 || (command == "identity" && matches!(action.as_str(), "init" | "show"))
-                || (command == "config" && action == "get") =>
+                || (command == "config" && action == "get")
+                || (command == "human" && action == "show") =>
         {
             match command.as_str() {
                 "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
                 "identity" => Some("Use `hq help identity` for identity command details.\n"),
                 "config" => Some("Use `hq help config` for configuration command details.\n"),
+                "human" => Some("Use `hq help human` for human command details.\n"),
                 _ => None,
             }
         }
@@ -958,9 +1475,11 @@ mod tests {
     use std::ffi::OsString;
 
     use super::{
-        CliCommand, CliError, CliOutputFormat, ConfigurationCommand, DaemonCommand,
-        IdentityCommand, execute_cli, parse_cli, read_password, run_cli,
+        CliCommand, CliError, CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand,
+        IdentityCommand, execute_cli, human_view, parse_cli, read_password, run_cli,
     };
+    use hq_domain::InstallationId;
+    use hq_local_api::protocol::v1::{AuthoritativeSnapshotDto, Id32, SnapshotItem};
 
     #[test]
     fn parser_accepts_global_output_and_explicit_daemon_roles() {
@@ -1053,6 +1572,63 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_typed_human_administration_and_rejects_noncanonical_ids() {
+        let root = std::env::temp_dir().join("hq-cli-human-parser");
+        let account = "ab".repeat(32);
+        let parsed = parse_cli([
+            OsString::from("--state-root"),
+            root.clone().into_os_string(),
+            OsString::from("human"),
+            OsString::from("select"),
+            OsString::from(&account),
+        ])
+        .expect("human selection parses");
+        assert!(matches!(parsed.command, CliCommand::Human {
+            action: HumanCommand::Select { account_id },
+            state,
+        } if state.root() == root && account_id.as_bytes() == &[0xab; 32]));
+
+        assert_eq!(
+            parse_cli([
+                OsString::from("human"),
+                OsString::from("select"),
+                OsString::from(account.to_uppercase()),
+            ]),
+            Err(CliError::Arguments)
+        );
+    }
+
+    #[test]
+    fn human_view_derives_selection_from_only_the_local_installation() {
+        let local = InstallationId::from_bytes([1; 32]);
+        let account = Id32::new([2; 32]);
+        let snapshot = AuthoritativeSnapshotDto::new(
+            1,
+            vec![
+                SnapshotItem::Account {
+                    account_id: account,
+                    root_fact: Id32::new([3; 32]),
+                    creator_installation: Id32::new([4; 32]),
+                    label: None,
+                    selected: true,
+                },
+                SnapshotItem::AccountSelection {
+                    installation_id: Id32::new(*local.as_bytes()),
+                    candidates: Vec::new(),
+                    active: None,
+                    frontier: Vec::new(),
+                },
+            ],
+        )
+        .expect("snapshot");
+
+        let view = human_view(&snapshot, local).expect("human view");
+        assert_eq!(view.active_account, None);
+        assert_eq!(view.accounts.len(), 1);
+        assert!(!view.accounts[0].selected);
+    }
+
+    #[test]
     fn help_and_version_have_stable_human_and_machine_records() {
         let help = parse_cli([]).expect("bare invocation renders help");
         assert!(
@@ -1083,7 +1659,7 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  daemon          Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  daemon          Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
         let identity = run_cli(
@@ -1099,6 +1675,12 @@ mod tests {
         )
         .expect("config help");
         assert!(config.contains("set relays URL...|none"));
+        let human = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("human")])
+                .expect("human help parses"),
+        )
+        .expect("human help");
+        assert!(human.contains("select ACCOUNT_ID"));
         let daemon = run_cli(
             &parse_cli([OsString::from("daemon"), OsString::from("--help")])
                 .expect("daemon help parses"),

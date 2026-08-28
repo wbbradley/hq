@@ -124,6 +124,13 @@ canonical locators, health, primary/active-claim flags, and bounded conflicting-
 a client query representation, not the reducer's Rust layout or
 the store's normalized row schema.
 
+Authority projections expose the exact public evidence needed for safe client-side planning:
+installation items name their unique root fact, mailbox items name their creation fact, account
+items name their unique creator root, and account-selection items name the complete causal-maximal
+selection frontier. These are public fact identities, not signing capability. Because HQ v1 has
+not shipped and has no standing installations, this is the clean v1 snapshot shape; it introduces
+no compatibility branch or protocol-version bump.
+
 Conversation bodies and activity are loaded through the bounded page method using a typed thread or
 provider-session conversation key. The continuation cursor is opaque, belongs to this query, and is
 never interpreted by a client. Page order is the reducer's canonical presentation order.
@@ -160,6 +167,11 @@ before transport. Completed command IDs and digests are retained in a configured
 oldest-first window; in-flight mutations are never evicted. A result is either a completed
 committed/rejected receipt or explicit uncertainty; post-commit relay-wake failure does not change a
 committed receipt.
+
+A different command ID that authors the byte-identical canonical fact is a committed semantic
+no-op. Its receipt names the fact's original revision, no new canonical revision or invalidation is
+published, and later replay of that command returns its retained receipt. This permits independent
+clients to race a deterministic reconciliation plan safely.
 
 Project control uses a separate closed action DTO and the same stable command/digest discipline.
 The request carries account, project, immutable home, expected head, operation, issue time, and the

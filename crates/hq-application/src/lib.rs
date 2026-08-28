@@ -1,6 +1,7 @@
 //! Application use cases and inward-facing ports.
 
 mod error;
+mod human;
 mod mutation;
 mod ports;
 mod project;
@@ -14,6 +15,10 @@ pub use hq_reducer::ConversationKey;
 
 pub use error::{
     ApplicationError, ApplicationErrorClass, ApplicationErrorCode, ApplicationValueError,
+};
+pub use human::{
+    LocalFactInputs, LocalInstallationAuthority, plan_human_account_creation,
+    plan_human_account_selection, plan_human_mailbox_creation,
 };
 pub use mutation::{
     FactMutation, FactPlan, MAX_ENCODED_MUTATION_RESULT_BYTES, MutationAttempt, MutationDecision,

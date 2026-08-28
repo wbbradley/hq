@@ -575,6 +575,19 @@ impl ReconnectingClient {
         Ok(write_transition(generation, frame))
     }
 
+    /// Requests one complete authoritative refresh on the current generation.
+    pub fn refresh_snapshot(&mut self) -> Result<ClientTransition, ClientError> {
+        let generation = self.active_generation().ok_or(ClientError::NotConnected)?;
+        if self.refresh_in_flight {
+            return Ok(ClientTransition::default());
+        }
+        self.view_current = false;
+        Ok(ClientTransition {
+            actions: vec![self.begin_snapshot_refresh(generation)?],
+            events: Vec::new(),
+        })
+    }
+
     /// Returns the currently scheduled or connected generation.
     pub const fn current_generation(&self) -> Option<ConnectionGeneration> {
         match self.phase {
@@ -1046,6 +1059,34 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 Some(
                     ClientEvent::Snapshot(_)
                     | ClientEvent::Mutation(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_)
+                    | ClientEvent::Error { .. },
+                )
+                | None => {}
+            }
+        }
+    }
+
+    /// Loads one fresh complete authoritative snapshot.
+    pub fn snapshot(&mut self) -> Result<AuthoritativeSnapshotDto, BlockingClientError> {
+        let deadline = self.execution_deadline();
+        self.begin_execution();
+        self.ensure_connected(deadline)?;
+        let transition = self
+            .client
+            .refresh_snapshot()
+            .map_err(BlockingClientError::Client)?;
+        self.enqueue(transition);
+        loop {
+            match self.step(deadline)? {
+                Some(ClientEvent::Snapshot(snapshot)) => return Ok(snapshot),
+                Some(ClientEvent::IncompatibleVersion) => {
+                    return Err(BlockingClientError::Incompatible);
+                }
+                Some(
+                    ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)

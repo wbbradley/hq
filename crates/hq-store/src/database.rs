@@ -2147,7 +2147,7 @@ fn execute_local_mutation_with_failpoint(
     let facts = load_facts(&transaction)?;
     let snapshot = build_complete_snapshot(&facts, policy)?;
     fail_local_at(failpoint, LocalMutationFailpoint::AfterSnapshot)?;
-    let (kind, result, revision) = match decide(&snapshot).into_parts() {
+    let (kind, result, revision, changed) = match decide(&snapshot).into_parts() {
         LocalMutationDecisionParts::Commit(commit) => {
             fail_local_at(failpoint, LocalMutationFailpoint::AfterDecision)?;
             let fact = commit
@@ -2160,21 +2160,26 @@ fn execute_local_mutation_with_failpoint(
                 LocalMutationFailpoint::Ingest(value) => value,
                 _ => IngestFailpoint::Never,
             };
-            let IngestOutcome::Inserted(revision) =
-                ingest_in_transaction(&transaction, &fact, policy, ingest_failpoint)?
-            else {
-                return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+            let outcome = ingest_in_transaction(&transaction, &fact, policy, ingest_failpoint)?;
+            let (revision, changed) = match outcome {
+                IngestOutcome::Inserted(revision) => (revision, true),
+                IngestOutcome::AlreadyPresent(revision) => (revision, false),
             };
             if !fact_is_admitted(&repair::load(&transaction)?, fact_id) {
                 return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
             }
-            (MutationResultKind::Committed, commit.result, revision)
+            (
+                MutationResultKind::Committed,
+                commit.result,
+                revision,
+                changed,
+            )
         }
         LocalMutationDecisionParts::Reject(result) => {
             fail_local_at(failpoint, LocalMutationFailpoint::AfterDecision)?;
             let revision = operational::allocate_revision(&transaction)?;
             fail_local_at(failpoint, LocalMutationFailpoint::AfterRejectedRevision)?;
-            (MutationResultKind::Rejected, result, revision)
+            (MutationResultKind::Rejected, result, revision, true)
         }
     };
     let receipt = MutationReceipt::new(command_id, request_digest, kind, result, revision);
@@ -2185,7 +2190,7 @@ fn execute_local_mutation_with_failpoint(
     fail_local_at(failpoint, LocalMutationFailpoint::BeforeCommit)?;
     transaction.commit().map_err(sql_error)?;
     fail_local_at(failpoint, LocalMutationFailpoint::AfterCommit)?;
-    Ok((receipt, true))
+    Ok((receipt, changed))
 }
 
 fn fact_is_admitted(index: &ReductionIndexSnapshot, fact_id: FactId) -> bool {

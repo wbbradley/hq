@@ -6,8 +6,9 @@ HQ installs one `hq` executable. Global options precede the command:
 hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>
 ```
 
-The installed commands currently include `help`, `version`, `identity`, `config`, and `daemon
-run|status|readiness|stop|restart`. `daemon run` is the internal foreground ownership role used by
+The installed commands currently include `help`, `version`, `identity`, `config`,
+`human create|show|select`, and `daemon run|status|readiness|stop|restart`. `daemon run` is the
+internal foreground ownership role used by
 autostart and service managers. `daemon status` never starts a process; `readiness` may start one
 candidate and waits for all concurrent candidates to converge on the sole state-directory owner.
 These commands never inspect terminal state or prompt.
@@ -20,11 +21,21 @@ is then consumed from stdin, normalized and zeroized. The secret is never accept
 retained in a diagnostic, or sent over the local API. A closed, oversized, malformed, or multiline
 input fails explicitly. Other commands do not read stdin.
 
+`human create [LABEL]` starts or connects to the node, reconciles the reserved human mailbox,
+authors the installation's deterministic but separately namespaced creator-account identity when
+absent, and selects it. Repeating the command, racing an identical creator command, losing a
+response, or restarting converges from a fresh authoritative snapshot without another fact.
+Changed immutable creator data, conflicting roots, or ambiguous authority fail closed. `human show`
+renders all projected accounts plus the complete local selection candidates and unique active
+selection. `human select ACCOUNT_ID` requires the exact creator root or one currently active
+membership acceptance and cites the complete prior selection frontier.
+
 Identity output has only the installation ID, signing public key, and public fingerprint.
 Configuration output has the optional provider and the complete canonical relay list. Both are
 passive data with public fields. Configuration setters replace one complete typed field, rebuild
 the validated value, and the persistence adapter revalidates public fields again immediately before
-the atomic write.
+the atomic write. Human presentation records are also passive public-field values; command enums
+and the live client capability remain closed behavioral types.
 
 Human output is concise newline-terminated text. JSON output is exactly one newline-terminated
 object with schema `hq-cli-output-v1`, an `ok` boolean, a stable `kind`, and typed `data`. Errors use
@@ -51,6 +62,7 @@ after negotiation; command-only clients do not issue an unsolicited snapshot.
 
 CLI production code has no canonical storage, signer, relay, resource, harness-provider, or SQLite
 access. The identity/configuration commands cross only the private state-ownership and identity
-persistence adapter because they must operate while the node is absent. Canonical administration
-and later command families use the reusable request, mutation, and project methods rather than
+persistence adapter because they must operate while the node is absent. Canonical administration,
+including human account bootstrap and selection, uses fresh snapshots plus the reusable request,
+mutation, and project methods rather than
 opening implementation adapters directly.

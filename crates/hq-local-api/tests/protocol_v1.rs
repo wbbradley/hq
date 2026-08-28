@@ -534,6 +534,7 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
     let items = vec![
         SnapshotItem::Installation {
             installation_id: id(1),
+            root_fact: id(31),
             signing_key: id(2),
             encryption_key: id(3),
             label: Some("home".to_owned()),
@@ -541,11 +542,13 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
         SnapshotItem::Mailbox {
             installation_id: id(1),
             mailbox_id: id(4),
+            create_fact: id(32),
             mailbox_kind: "human".to_owned(),
             label: Some("inbox".to_owned()),
         },
         SnapshotItem::Account {
             account_id: id(5),
+            root_fact: id(33),
             creator_installation: id(1),
             label: None,
             selected: true,
@@ -573,6 +576,7 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             installation_id: id(1),
             candidates: vec![id(5)],
             active: Some(id(5)),
+            frontier: vec![id(34)],
         },
         SnapshotItem::Conversation {
             key: conversation,

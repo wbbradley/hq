@@ -69,6 +69,13 @@ returned `MutationCompletion` keeps the receipt authoritative and reports schedu
 failure and cannot justify retrying it under a new identity. Rejections and uncertain attempts do
 not schedule work.
 
+Human-account administration uses pure planners in this crate. Each planner accepts public passive
+`LocalInstallationAuthority` and `LocalFactInputs` records and returns an ordinary `FactPlan` for
+reserved human-mailbox creation, creator-account creation, or frontier-complete account selection.
+The records expose fields directly; they contain no secret or mutable capability. The CLI supplies
+only exact roots and frontiers from an authoritative snapshot, while the node-owned gateway remains
+the sole signer and commit capability.
+
 ## External operations
 
 `EffectRequest<T>` carries a stable `OperationId`, exact request digest, explicit issue time, and

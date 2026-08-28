@@ -42,22 +42,26 @@ pub fn snapshot_to_v1(
         .map(|projection| match projection {
             ClientProjection::Installation {
                 installation_id,
+                root_fact,
                 signing_key,
                 encryption_key,
                 label,
             } => SnapshotItem::Installation {
                 installation_id: id32(installation_id.as_bytes()),
+                root_fact: id32(root_fact.as_bytes()),
                 signing_key: id32(signing_key.as_bytes()),
                 encryption_key: id32(encryption_key.as_bytes()),
                 label: label.map(|value| value.as_str().to_owned()),
             },
             ClientProjection::Mailbox {
                 address,
+                create_fact,
                 kind,
                 label,
             } => SnapshotItem::Mailbox {
                 installation_id: id32(address.installation_id().as_bytes()),
                 mailbox_id: id32(address.mailbox_id().as_bytes()),
+                create_fact: id32(create_fact.as_bytes()),
                 mailbox_kind: match kind {
                     hq_domain::MailboxKind::Human => "human",
                     hq_domain::MailboxKind::Agent => "agent",
@@ -67,11 +71,13 @@ pub fn snapshot_to_v1(
             },
             ClientProjection::Account {
                 account_id,
+                root_fact,
                 creator_installation,
                 label,
                 selected,
             } => SnapshotItem::Account {
                 account_id: id32(account_id.as_bytes()),
+                root_fact: id32(root_fact.as_bytes()),
                 creator_installation: id32(creator_installation.as_bytes()),
                 label: label.map(|value| value.as_str().to_owned()),
                 selected,
@@ -127,6 +133,7 @@ pub fn snapshot_to_v1(
                 installation_id,
                 candidates,
                 active,
+                frontier,
             } => SnapshotItem::AccountSelection {
                 installation_id: id32(installation_id.as_bytes()),
                 candidates: candidates
@@ -134,6 +141,7 @@ pub fn snapshot_to_v1(
                     .map(|account| id32(account.as_bytes()))
                     .collect(),
                 active: active.map(|account| id32(account.as_bytes())),
+                frontier: frontier.iter().map(|fact| id32(fact.as_bytes())).collect(),
             },
             ClientProjection::Conversation {
                 key,

@@ -130,6 +130,35 @@ fn initialize_identity(state_root: &Path) -> serde_json::Value {
     value
 }
 
+fn human_output(state_root: &Path, arguments: &[&str]) -> Output {
+    offline_output(
+        state_root,
+        std::iter::once(OsString::from("human"))
+            .chain(arguments.iter().copied().map(OsString::from)),
+        None,
+    )
+}
+
+fn local_client(state: StatePaths, initial_view: InitialView) -> LocalNodeClient {
+    LocalNodeClient::connect_with_launcher(
+        LocalNodeClientConfig {
+            state,
+            build: BuildMetadata::new("hq-test", "0.1.0", Some("cli-e2e")).expect("build"),
+            initial_view,
+            io_timeout: Duration::from_secs(2),
+            command_deadline: Duration::from_secs(5),
+            max_connection_attempts: NonZeroUsize::new(8).expect("positive attempts"),
+            readiness_timeout: Duration::from_secs(5),
+            readiness_retry_interval: Duration::from_millis(10),
+            reconnect_initial: Duration::from_millis(10),
+            reconnect_maximum: Duration::from_millis(40),
+            completed_identity_capacity: NonZeroUsize::new(16).expect("positive history"),
+        },
+        ProcessNodeLauncher::new(env!("CARGO_BIN_EXE_hq").into()),
+    )
+    .expect("local command client")
+}
+
 fn client(runtime: RuntimePaths) -> LifecycleClient {
     LifecycleClient::new(LifecycleClientConfig {
         runtime,
@@ -202,23 +231,7 @@ fn foreground_status_restart_and_stop_converge_across_a_fresh_generation() {
     assert_eq!(record["data"]["command"], "status");
     assert_eq!(record["data"]["state"], "ready");
 
-    let mut local = LocalNodeClient::connect_with_launcher(
-        LocalNodeClientConfig {
-            state: state.clone(),
-            build: BuildMetadata::new("hq-test", "0.1.0", Some("cli-e2e")).expect("build"),
-            initial_view: InitialView::Snapshot,
-            io_timeout: Duration::from_secs(2),
-            command_deadline: Duration::from_secs(5),
-            max_connection_attempts: NonZeroUsize::new(8).expect("positive attempts"),
-            readiness_timeout: Duration::from_secs(5),
-            readiness_retry_interval: Duration::from_millis(10),
-            reconnect_initial: Duration::from_millis(10),
-            reconnect_maximum: Duration::from_millis(40),
-            completed_identity_capacity: NonZeroUsize::new(16).expect("positive history"),
-        },
-        ProcessNodeLauncher::new(env!("CARGO_BIN_EXE_hq").into()),
-    )
-    .expect("local command client");
+    let mut local = local_client(state.clone(), InitialView::Snapshot);
     let local_status = local
         .request(Request::Lifecycle(LifecycleRequest::Status))
         .expect("local API status");
@@ -453,6 +466,96 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
     );
     assert!(!refused.status.success());
     drop(live_owner);
+}
+
+#[test]
+fn human_account_creation_reconciles_concurrent_callers_and_survives_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let identity = initialize_identity(&state_root);
+    let installation = identity["data"]["installation_id"]
+        .as_str()
+        .expect("installation id")
+        .to_owned();
+
+    let first_root = state_root.clone();
+    let second_root = state_root.clone();
+    let first = std::thread::spawn(move || human_output(&first_root, &["create", "Personal"]));
+    let second = std::thread::spawn(move || human_output(&second_root, &["create", "Personal"]));
+    let first = first.join().expect("first creator");
+    let second = second.join().expect("second creator");
+    assert!(first.status.success(), "first stderr: {:?}", first.stderr);
+    assert!(
+        second.status.success(),
+        "second stderr: {:?}",
+        second.stderr
+    );
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout).expect("first human JSON");
+    let second: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second human JSON");
+    assert_eq!(first["data"], second["data"]);
+    let account = first["data"]["active_account"]
+        .as_str()
+        .expect("active account");
+    assert_ne!(account, installation);
+    assert_eq!(first["data"]["accounts"].as_array().map(Vec::len), Some(1));
+    assert_eq!(first["data"]["accounts"][0]["account_id"], account);
+    assert_eq!(
+        first["data"]["accounts"][0]["creator_installation"],
+        installation
+    );
+    assert_eq!(first["data"]["accounts"][0]["label"], "Personal");
+    assert_eq!(first["data"]["accounts"][0]["selected"], true);
+
+    let state = StatePaths::new(state_root.clone()).expect("state paths");
+    let mut client = local_client(state, InitialView::OnDemand);
+    assert_eq!(
+        client.snapshot().expect("authoritative snapshot").revision,
+        4,
+        "installation, mailbox, account, and selection are each authored exactly once"
+    );
+
+    let repeated = human_output(&state_root, &["create", "Personal"]);
+    assert!(repeated.status.success());
+    assert_eq!(
+        client
+            .snapshot()
+            .expect("snapshot after reconcile")
+            .revision,
+        4
+    );
+
+    let changed_label = human_output(&state_root, &["create", "Work"]);
+    assert!(!changed_label.status.success());
+    let changed_error: serde_json::Value =
+        serde_json::from_slice(&changed_label.stderr).expect("changed-label error JSON");
+    assert_eq!(changed_error["data"]["code"], "human.state_unavailable");
+
+    let unknown_id = "11".repeat(32);
+    let unknown = human_output(&state_root, &["select", &unknown_id]);
+    assert!(!unknown.status.success());
+    assert_eq!(
+        client.snapshot().expect("snapshot after refusals").revision,
+        4
+    );
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let shown = human_output(&state_root, &["show"]);
+    assert!(shown.status.success(), "show stderr: {:?}", shown.stderr);
+    let shown: serde_json::Value = serde_json::from_slice(&shown.stdout).expect("shown human JSON");
+    assert_eq!(shown["data"], first["data"]);
+
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
 }
 
 #[test]

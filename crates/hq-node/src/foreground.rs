@@ -215,7 +215,7 @@ fn boot_nonce() -> Result<Id32, ForegroundNodeError> {
     Ok(Id32::new(bytes))
 }
 
-const fn reserved_human_mailbox() -> MailboxId {
+pub(crate) const fn reserved_human_mailbox() -> MailboxId {
     let mut bytes = [0_u8; 32];
     bytes[6] = 0x70;
     bytes[8] = 0x80;

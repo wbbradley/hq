@@ -2,10 +2,13 @@
 
 use std::{error::Error, fmt, num::NonZeroUsize, os::unix::net::UnixStream, time::Duration};
 
+use hq_domain::InstallationId;
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientEvent, ClientTransport,
     InitialView, ReconnectPolicy, ReconnectingClient,
-    protocol::v1::{BuildMetadata, MutationRequest, ProjectCommandRequestDto, Request},
+    protocol::v1::{
+        AuthoritativeSnapshotDto, BuildMetadata, MutationRequest, ProjectCommandRequestDto, Request,
+    },
 };
 
 use crate::{
@@ -98,6 +101,7 @@ impl Error for LocalNodeClientError {}
 
 /// Reusable typed local command seam with no direct signer, storage, relay, or provider access.
 pub struct LocalNodeClient {
+    installation_id: InstallationId,
     runner: BlockingClientRunner<UnixClientTransport>,
 }
 
@@ -132,9 +136,15 @@ impl LocalNodeClient {
             },
         )
         .map_err(LocalNodeClientError::Coordinator)?;
-        let _ready = coordinator
+        let ready = coordinator
             .ensure_ready()
             .map_err(LocalNodeClientError::Coordinator)?;
+        let installation_id = ready
+            .observation
+            .readiness
+            .as_ref()
+            .map(|readiness| InstallationId::from_bytes(readiness.installation_id.bytes()))
+            .ok_or(LocalNodeClientError::Client)?;
         let transport = UnixClientTransport::new(UnixClientTransportConfig {
             runtime,
             io_timeout: config.io_timeout,
@@ -158,13 +168,28 @@ impl LocalNodeClient {
             transport,
         )
         .map_err(LocalNodeClientError::Execution)?;
-        Ok(Self { runner })
+        Ok(Self {
+            installation_id,
+            runner,
+        })
+    }
+
+    /// Returns the installation authenticated by coordinator readiness.
+    pub const fn installation_id(&self) -> InstallationId {
+        self.installation_id
     }
 
     /// Executes one non-retryable typed request.
     pub fn request(&mut self, request: Request) -> Result<ClientEvent, LocalNodeClientError> {
         self.runner
             .request(request)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Loads one fresh complete authoritative snapshot.
+    pub fn snapshot(&mut self) -> Result<AuthoritativeSnapshotDto, LocalNodeClientError> {
+        self.runner
+            .snapshot()
             .map_err(LocalNodeClientError::Execution)
     }
 

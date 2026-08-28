@@ -194,6 +194,7 @@ impl DomainSnapshot {
                     AuthorityProjection::Installation(view),
                 ) => ClientProjection::Installation {
                     installation_id: *installation_id,
+                    root_fact: view.root_fact,
                     signing_key: view.signing_key,
                     encryption_key: view.encryption_key,
                     label: view.label.clone(),
@@ -201,6 +202,7 @@ impl DomainSnapshot {
                 (AuthorityProjectionKey::Mailbox(address), AuthorityProjection::Mailbox(view)) => {
                     ClientProjection::Mailbox {
                         address: *address,
+                        create_fact: view.create_fact,
                         kind: view.kind,
                         label: view.label.clone(),
                     }
@@ -229,9 +231,14 @@ impl DomainSnapshot {
                 },
                 (
                     AuthorityProjectionKey::Account(account_id),
-                    AuthorityProjection::Account { creator, label, .. },
+                    AuthorityProjection::Account {
+                        root_fact,
+                        creator,
+                        label,
+                    },
                 ) => ClientProjection::Account {
                     account_id: *account_id,
+                    root_fact: *root_fact,
                     creator_installation: creator.installation_id(),
                     label: label.clone(),
                     selected: selected_accounts.contains(account_id),
@@ -256,6 +263,12 @@ impl DomainSnapshot {
                     installation_id: *installation_id,
                     candidates: candidates.clone(),
                     active: *active,
+                    frontier: self
+                        .authority
+                        .frontiers()
+                        .get(&AuthorityAggregateKey::AccountSelection(*installation_id))
+                        .cloned()
+                        .ok_or(ApplicationValueError::InvalidEncoding)?,
                 },
                 _ => return Err(ApplicationValueError::InvalidEncoding),
             };
@@ -508,17 +521,20 @@ pub enum ClientRemoteCommandStage {
 pub enum ClientProjection {
     Installation {
         installation_id: InstallationId,
+        root_fact: FactId,
         signing_key: SigningPublicKey,
         encryption_key: EncryptionPublicKey,
         label: Option<ShortText>,
     },
     Mailbox {
         address: MailboxAddress,
+        create_fact: FactId,
         kind: MailboxKind,
         label: Option<ShortText>,
     },
     Account {
         account_id: AccountId,
+        root_fact: FactId,
         creator_installation: InstallationId,
         label: Option<ShortText>,
         selected: bool,
@@ -545,6 +561,7 @@ pub enum ClientProjection {
         installation_id: InstallationId,
         candidates: BTreeSet<AccountId>,
         active: Option<AccountId>,
+        frontier: BTreeSet<FactId>,
     },
     Conversation {
         key: hq_reducer::ConversationKey,

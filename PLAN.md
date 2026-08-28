@@ -54,12 +54,21 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Implement human account pairing and device administration** — Add account inspection,
-  creator bootstrap/selection, bounded signed invite export, offline-verifiable join, device list,
-  and creator-only revoke through application plans and authoritative snapshots. Preserve maximal
-  membership frontiers, regrant-after-revoke ancestry, device fanout, stable replay identities, and
-  explicit stale/incomplete authority diagnostics. Test offline bundles, tampering, changed reuse,
-  concurrent grants/revokes, non-creator rejection, restart, and human/JSON rendering.
+- **[cli/high] Export and join offline-verifiable human pairing invitations** — Add bounded signed
+  invite export and guarded join through pure application plans and the canonical protocol. An
+  invitation carries the complete account creator/grant/regrant authority needed for offline target
+  verification plus exact target installation/key and bounded relay hints; it contains no root
+  secret or local operational state. Join verifies canonical bytes, signatures, target binding,
+  lineage, expiry policy if specified, and changed reuse before accepting and selecting membership.
+  Test tampering, wrong target/key/account, missing history, duplicate replay, concurrent revoke,
+  restart, unsafe paths, and deterministic human/JSON rendering.
+
+- **[cli/high] Inspect and revoke human account devices** — Add typed device listing and
+  creator-only revoke through authoritative snapshots and pure application plans. Preserve every
+  maximal acceptance/revoke, require exact grant attribution, fan revocation out to the named device
+  before route blocking, and expose pending/active/revoked/conflicted or incomplete states without a
+  chosen historical winner. Test non-creator rejection, stale/incomplete frontiers, concurrent
+  acceptance/revoke, regrant ancestry, response loss, restart, fanout, and human/JSON rendering.
 
 - **[cli/high] Implement directional peers and mailbox capabilities** — Add peer add/list/distrust
   and mailbox grant/revoke/inspection commands over exact application plans and authoritative

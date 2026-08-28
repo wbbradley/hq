@@ -86,14 +86,16 @@ For a new command, storage reverifies and completely reduces the transaction-vis
 invokes the callback with that snapshot. A committed decision supplies a typed
 `CanonicalEventPlan`, explicit BIP-340 auxiliary randomness, and bounded exact result bytes. Storage
 canonically authors and verifies the event, calls the same transaction-owned append/reduce/project/
-outbox/lineage engine as remote ingest, requires the new fact to be admitted, and stores the
-committed receipt at that engine's revision. The fact, dependency rows, every projection package,
+outbox/lineage engine as remote ingest, requires the fact to be admitted, and stores the committed
+receipt at that engine's revision. A byte-identical fact authored under a distinct command is a
+durable committed no-op: it retains a receipt at the original canonical revision but performs no
+projection, revision, outbox, or invalidation work. The fact, dependency rows, every projection package,
 outbox intents, lineage, receipt, and revision therefore commit together or all roll back.
 
 A rejected decision writes no canonical fact. It atomically allocates a revision and stores the
-exact rejected receipt so response loss remains reconcilable. New committed and rejected local
-transactions publish the same capacity-one post-commit invalidation; retry and conflict publish
-nothing. Repair cannot alter receipts or revisions. Unsigned local configuration, repair, and later
+exact rejected receipt so response loss remains reconcilable. New fact commits and rejected local
+transactions publish the same capacity-one post-commit invalidation; exact-fact no-ops, retries,
+and conflicts publish nothing. Repair cannot alter receipts or revisions. Unsigned local configuration, repair, and later
 operational saga mutations remain separately named operations and cannot enter an optional-fact
 variant of this path.
 
