@@ -6,8 +6,9 @@ use hq_reducer::ConversationKey;
 use crate::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts,
     AuthoritativeSnapshot, ConversationEntry, EffectOutcome, EffectRequest, FactMutation,
-    MutationAttempt, MutationOutcome, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
+    MutationAttempt, MutationOutcome, ProjectCommandOutcome, ProjectCommandRequest,
+    RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest,
+    SynchronizationRequest, WakeDisposition,
 };
 
 /// Durable mutation attempt plus separate post-commit scheduling evidence.
@@ -83,6 +84,14 @@ where
     /// Loads one complete authoritative projection refresh.
     pub fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, ApplicationError> {
         self.ports.authoritative_snapshot()
+    }
+
+    /// Executes, routes, or reconciles one exact project command.
+    pub fn control_project(
+        &self,
+        request: ProjectCommandRequest,
+    ) -> Result<ProjectCommandOutcome, ApplicationError> {
+        self.ports.control_project(request)
     }
 
     /// Loads one indexed conversation page without a complete-history scan or sort.

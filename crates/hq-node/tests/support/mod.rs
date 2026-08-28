@@ -83,6 +83,15 @@ impl InspectResource for UnavailableNodeComponent {
     }
 }
 
+impl hq_application::ControlProjects for UnavailableNodeComponent {
+    fn control_project(
+        &self,
+        _request: hq_application::ProjectCommandRequest,
+    ) -> Result<hq_application::ProjectCommandOutcome, ApplicationError> {
+        unavailable()
+    }
+}
+
 #[derive(Clone)]
 pub struct UnavailableApplicationPorts {
     hub: RevisionHub,
@@ -168,6 +177,15 @@ impl InspectResource for UnavailableApplicationPorts {
         &self,
         _request: &EffectRequest<ResourceInspectionRequest>,
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
+        unavailable()
+    }
+}
+
+impl hq_application::ControlProjects for UnavailableApplicationPorts {
+    fn control_project(
+        &self,
+        _request: hq_application::ProjectCommandRequest,
+    ) -> Result<hq_application::ProjectCommandOutcome, ApplicationError> {
         unavailable()
     }
 }

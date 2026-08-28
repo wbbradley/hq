@@ -12,9 +12,9 @@ use std::{
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorCode,
     ApplicationPorts, ConfigureRelays, ControlHarness, EffectOutcome, EffectRequest,
-    InspectResource, ObserveRevisions, PublishWake, QueryDomain, RelayConfiguration,
-    ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest, SubscriptionTopic,
-    SynchronizationRequest, WakeDisposition,
+    InspectResource, ObserveRevisions, ProjectCommandOutcome, ProjectCommandRequest, PublishWake,
+    QueryDomain, RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult,
+    SubscriptionRequest, SubscriptionTopic, SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{MailboxId, OperationId, Revision};
 use hq_node::{
@@ -164,6 +164,18 @@ impl InspectResource for FakeComponent {
         _request: &EffectRequest<ResourceInspectionRequest>,
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
         self.record("inspect-resource");
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
+impl hq_application::ControlProjects for FakeComponent {
+    fn control_project(
+        &self,
+        _request: ProjectCommandRequest,
+    ) -> Result<ProjectCommandOutcome, ApplicationError> {
+        self.record("control-project");
         Err(ApplicationError::new(
             ApplicationErrorCode::AdapterUnavailable,
         ))

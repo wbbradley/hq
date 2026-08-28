@@ -12,8 +12,9 @@ use hq_local_api::protocol::v1::{
     ClientHello, ConversationKeyDto, ConversationPageDto, ConversationPageRequest, DecodeError,
     DomainErrorDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse, FrameDecoder,
     Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus, MAX_FRAME_BYTES,
-    MutationAttemptDto, MutationOutcomeDto, MutationRequest, RelayAccessDto,
-    RelayAuthenticationDto, RelayConfigurationDto, Request, RequestEnvelope, RequestId,
+    MutationAttemptDto, MutationOutcomeDto, MutationRequest, ProjectCommandActionDto,
+    ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto,
+    RelayConfigurationDto, RemoteCommandProgressDto, Request, RequestEnvelope, RequestId,
     ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
     ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation,
     ServerHello, SessionControlDto, SnapshotItem, SubscriptionAcknowledgement,
@@ -243,6 +244,17 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             display_locator: locator(),
             canonical_locator: locator(),
         })),
+        Request::ControlProject(Box::new(ProjectCommandRequestDto {
+            command_id: Id32::new([40; 32]),
+            operation_id: Id32::new([41; 32]),
+            request_digest: Id32::new([42; 32]),
+            account_id: Id32::new([43; 32]),
+            project_id: Id32::new([44; 32]),
+            home: Id32::new([45; 32]),
+            expected_head: Id32::new([46; 32]),
+            issued_at_unix_millis: 1_700_000_000_000,
+            action: ProjectCommandActionDto::Open,
+        })),
         Request::Subscribe(
             SubscriptionRequestDto::new(
                 Id32::new([7; 32]),
@@ -310,6 +322,11 @@ fn every_success_and_error_response_family_interoperates() {
             )
             .expect("inspection"),
         )),
+        ResponseResult::ProjectCommand(ProjectCommandOutcomeDto::Completed {
+            operation_id: Id32::new([41; 32]),
+            project_head: Id32::new([47; 32]),
+            runtime: None,
+        }),
         ResponseResult::Subscription(SubscriptionAcknowledgement::new(
             Id32::new([7; 32]),
             snapshot,
@@ -576,8 +593,21 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
         SnapshotItem::RemoteCommand {
             command_id: id(21),
             request_digest: id(22),
+            account_id: id(23),
             project_id: id(14),
-            stage: "received".to_owned(),
+            target_home: id(24),
+            expected_head: id(25),
+            operation_provider: "hq".to_owned(),
+            operation_session: "project-control-v1".to_owned(),
+            operation_id: id(26),
+            body: "hq-project-action-v1:open".to_owned(),
+            issued_at_unix_millis: 1_700_000_000_123,
+            request_fact: id(27),
+            progress: Box::new(RemoteCommandProgressDto::Received {
+                receipt_fact: id(28),
+                received_head: id(25),
+                received_at_unix_millis: 1_700_000_000_456,
+            }),
         },
     ];
     let snapshot = AuthoritativeSnapshotDto::new(9, items).expect("snapshot is bounded");

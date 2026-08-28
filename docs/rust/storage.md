@@ -264,6 +264,13 @@ The session column is empty in that phase and becomes a validated provider-sessi
 after runtime readiness and the canonical runnable transition. This is a clean-sheet v13 shape
 change in place, not a migration or storage-version increment.
 
+Rebuildable `project_commands` rows retain the complete remote-control request envelope and exact
+control-plane attribution: account, project, target home, expected head, operation correlation,
+strict command body, issue time, request fact, and structured receipt/outcome facts, heads, times,
+results, and runtime observations. Strict load requires those exact facts to appear in projection
+support. This completed the existing unshipped clean-sheet v13 table definition in place; it added
+no migration path or storage-version increment.
+
 Reservations are home-qualified normalized locators. A competing operation cannot reserve the
 same destination, and accepted or uncertain Git work marks the reservation as protecting external
 state. Checkpoint replacement rejects immutable-input changes, stage or effect regression, changed

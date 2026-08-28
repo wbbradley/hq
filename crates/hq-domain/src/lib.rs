@@ -31,7 +31,7 @@ pub use correlation::{
     ProviderSessionId,
 };
 pub use envelope::{Command, Outcome, Page, PageCursor, VersionedView};
-pub use error::{DomainError, ErrorCategory, ErrorCode};
+pub use error::{DomainError, ERROR_CODE_MAX_BYTES, ErrorCategory, ErrorCode};
 pub use fact_catalog::{FactKind, ProtocolClass, RetentionClass};
 pub use ids::{
     AccountId, AgentId, AssignmentId, CommandDigest, CommandId, DispatchId, EncryptionPublicKey,

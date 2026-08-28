@@ -13,12 +13,13 @@ use sha2::{Digest, Sha256};
 
 use crate::protocol::v1::{
     AuthoritativeSnapshotDto, BuildMetadata, ClientHello, DecodeError, ErrorResponse, Id32,
-    InvalidationTopic, MutationAttemptDto, MutationRequest, Request, RequestEnvelope, RequestId,
-    Response, ResponseResult, SubscriptionRequestDto, V1, VersionRange, WireMessage,
+    InvalidationTopic, MutationAttemptDto, MutationRequest, ProjectCommandOutcomeDto,
+    ProjectCommandRequestDto, Request, RequestEnvelope, RequestId, Response, ResponseResult,
+    SubscriptionRequestDto, V1, VersionRange, WireMessage,
 };
 
-/// Maximum simultaneous exact mutation frames retained for response-loss replay.
-pub const MAX_IN_FLIGHT_MUTATIONS: usize = 256;
+/// Maximum simultaneous exact retryable frames retained for response-loss replay.
+pub const MAX_IN_FLIGHT_RETRYABLE_COMMANDS: usize = 256;
 
 const SUBSCRIPTION_ID_DOMAIN: &[u8] = b"hq-local-api-client-subscription-v1\0";
 
@@ -104,6 +105,13 @@ pub enum ClientEvent {
     Snapshot(AuthoritativeSnapshotDto),
     /// A stable mutation completed or remains explicitly uncertain.
     Mutation(MutationAttemptDto),
+    /// A retry-safe project command returned typed durable progress.
+    ProjectCommand {
+        /// Stable command identity from the submitted request.
+        command_id: CommandId,
+        /// Typed workflow result or checkpoint.
+        outcome: ProjectCommandOutcomeDto,
+    },
     /// A correlated ordinary request completed successfully.
     Response {
         /// Original request correlation identity.
@@ -144,8 +152,8 @@ pub enum ClientError {
     AlreadyStarted,
     /// A stable command ID was reused with a changed exact request digest.
     ChangedCommandIdentity,
-    /// The bounded in-flight mutation capacity was exhausted.
-    MutationCapacity,
+    /// The bounded in-flight retryable-command capacity was exhausted.
+    RetryableCommandCapacity,
     /// A frame failed strict local API v1 encoding or decoding.
     Codec,
     /// A current connection delivered a message outside the client protocol state.
@@ -170,6 +178,13 @@ impl Error for ClientError {}
 
 #[derive(Clone, Debug)]
 struct PendingMutation {
+    request_id: RequestId,
+    digest: CommandDigest,
+    frame: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingProjectCommand {
     request_id: RequestId,
     digest: CommandDigest,
     frame: Vec<u8>,
@@ -207,6 +222,7 @@ pub struct ReconnectingClient {
     failures: u32,
     next_request_id: u64,
     pending_mutations: BTreeMap<CommandId, PendingMutation>,
+    pending_project_commands: BTreeMap<CommandId, PendingProjectCommand>,
     completed_digests: BTreeMap<CommandId, CommandDigest>,
     completed_order: VecDeque<CommandId>,
     completed_capacity: usize,
@@ -237,6 +253,7 @@ impl ReconnectingClient {
             failures: 0,
             next_request_id: 1,
             pending_mutations: BTreeMap::new(),
+            pending_project_commands: BTreeMap::new(),
             completed_digests: BTreeMap::new(),
             completed_order: VecDeque::new(),
             completed_capacity: completed_identity_capacity,
@@ -353,6 +370,10 @@ impl ReconnectingClient {
             .get(&command_id)
             .is_some_and(|pending| pending.digest != digest)
             || self
+                .pending_project_commands
+                .get(&command_id)
+                .is_some_and(|pending| pending.digest != digest)
+            || self
                 .completed_digests
                 .get(&command_id)
                 .is_some_and(|completed| *completed != digest)
@@ -360,12 +381,15 @@ impl ReconnectingClient {
             return Err(ClientError::ChangedCommandIdentity);
         }
         if self.pending_mutations.contains_key(&command_id)
+            || self.pending_project_commands.contains_key(&command_id)
             || self.completed_digests.contains_key(&command_id)
         {
             return Ok(ClientTransition::default());
         }
-        if self.pending_mutations.len() >= MAX_IN_FLIGHT_MUTATIONS {
-            return Err(ClientError::MutationCapacity);
+        if self.pending_mutations.len() + self.pending_project_commands.len()
+            >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS
+        {
+            return Err(ClientError::RetryableCommandCapacity);
         }
         let request_id = self.allocate_request_id()?;
         let frame =
@@ -391,11 +415,68 @@ impl ReconnectingClient {
         })
     }
 
+    /// Queues or sends one exact project command and retains its frame across response loss.
+    pub fn submit_project_command(
+        &mut self,
+        request: ProjectCommandRequestDto,
+    ) -> Result<ClientTransition, ClientError> {
+        let command_id = CommandId::from_bytes(request.command_id.bytes());
+        let digest = CommandDigest::from_bytes(request.request_digest.bytes());
+        if self
+            .pending_project_commands
+            .get(&command_id)
+            .is_some_and(|pending| pending.digest != digest)
+            || self
+                .pending_mutations
+                .get(&command_id)
+                .is_some_and(|pending| pending.digest != digest)
+            || self
+                .completed_digests
+                .get(&command_id)
+                .is_some_and(|completed| *completed != digest)
+        {
+            return Err(ClientError::ChangedCommandIdentity);
+        }
+        if self.pending_project_commands.contains_key(&command_id)
+            || self.pending_mutations.contains_key(&command_id)
+            || self.completed_digests.contains_key(&command_id)
+        {
+            return Ok(ClientTransition::default());
+        }
+        if self.pending_project_commands.len() + self.pending_mutations.len()
+            >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS
+        {
+            return Err(ClientError::RetryableCommandCapacity);
+        }
+        let request_id = self.allocate_request_id()?;
+        let frame = request_frame(request_id, Request::ControlProject(Box::new(request)))?;
+        self.pending_project_commands.insert(
+            command_id,
+            PendingProjectCommand {
+                request_id,
+                digest,
+                frame: frame.clone(),
+            },
+        );
+        let actions = self
+            .active_generation()
+            .map_or_else(Vec::new, |generation| {
+                vec![ClientAction::Write { generation, frame }]
+            });
+        Ok(ClientTransition {
+            actions,
+            events: Vec::new(),
+        })
+    }
+
     /// Sends one ordinary typed request through the shared correlation and loss path.
     pub fn submit_request(&mut self, request: Request) -> Result<ClientTransition, ClientError> {
         if matches!(
             request,
-            Request::Mutation(_) | Request::Subscribe(_) | Request::AuthoritativeSnapshot
+            Request::Mutation(_)
+                | Request::ControlProject(_)
+                | Request::Subscribe(_)
+                | Request::AuthoritativeSnapshot
         ) {
             return Err(ClientError::ReservedRequest);
         }
@@ -476,6 +557,14 @@ impl ReconnectingClient {
                                 frame: pending.frame.clone(),
                             }),
                     );
+                transition
+                    .actions
+                    .extend(self.pending_project_commands.values().map(|pending| {
+                        ClientAction::Write {
+                            generation,
+                            frame: pending.frame.clone(),
+                        }
+                    }));
                 Ok(transition)
             }
             WireMessage::VersionRejected(_) => {
@@ -529,6 +618,7 @@ impl ReconnectingClient {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_response(
         &mut self,
         generation: ConnectionGeneration,
@@ -540,10 +630,20 @@ impl ReconnectingClient {
             .find_map(|(command_id, pending)| {
                 (pending.request_id == response.id).then_some(*command_id)
             });
+        let project_command =
+            self.pending_project_commands
+                .iter()
+                .find_map(|(command_id, pending)| {
+                    (pending.request_id == response.id).then_some(*command_id)
+                });
         match response.response {
-            Response::Error(error) => {
-                self.handle_error_response(generation, response.id, error, mutation_command)
-            }
+            Response::Error(error) => self.handle_error_response(
+                generation,
+                response.id,
+                error,
+                mutation_command,
+                project_command,
+            ),
             Response::Success(result) => match result {
                 ResponseResult::Mutation(attempt) => {
                     let Some(command_id) = mutation_command else {
@@ -598,6 +698,25 @@ impl ReconnectingClient {
                     self.refresh_in_flight = false;
                     self.accept_snapshot(generation, &snapshot)
                 }
+                ResponseResult::ProjectCommand(outcome) => {
+                    let Some(command_id) = project_command else {
+                        return Err(ClientError::ProtocolOrder);
+                    };
+                    let pending = self
+                        .pending_project_commands
+                        .remove(&command_id)
+                        .ok_or(ClientError::ProtocolOrder)?;
+                    if project_outcome_is_terminal(&outcome) {
+                        self.remember_completed(command_id, pending.digest);
+                    }
+                    Ok(ClientTransition {
+                        actions: Vec::new(),
+                        events: vec![ClientEvent::ProjectCommand {
+                            command_id,
+                            outcome,
+                        }],
+                    })
+                }
                 ResponseResult::Lifecycle(_)
                 | ResponseResult::ConversationPage(_)
                 | ResponseResult::EmptyEffect(_)
@@ -626,11 +745,19 @@ impl ReconnectingClient {
         request_id: RequestId,
         error: ErrorResponse,
         mutation_command: Option<CommandId>,
+        project_command: Option<CommandId>,
     ) -> Result<ClientTransition, ClientError> {
         if let Some(command_id) = mutation_command {
             if let Some(pending) = self.pending_mutations.remove(&command_id) {
                 self.remember_completed(command_id, pending.digest);
             }
+            return Ok(error_transition(request_id, error));
+        }
+
+        if let Some(command_id) = project_command {
+            self.pending_project_commands
+                .remove(&command_id)
+                .ok_or(ClientError::ProtocolOrder)?;
             return Ok(error_transition(request_id, error));
         }
 
@@ -802,6 +929,13 @@ fn mutation_matches(
                 && request_digest.bytes() == *digest.as_bytes()
         }
     }
+}
+
+const fn project_outcome_is_terminal(outcome: &ProjectCommandOutcomeDto) -> bool {
+    matches!(
+        outcome,
+        ProjectCommandOutcomeDto::Completed { .. } | ProjectCommandOutcomeDto::Rejected { .. }
+    )
 }
 
 const fn map_decode_error(_error: DecodeError) -> ClientError {

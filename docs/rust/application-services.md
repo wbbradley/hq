@@ -30,6 +30,7 @@ store-owned cursor.
 | `PublishWake` | Nonblocking, coalescible prompt for post-commit replication/reconciliation work |
 | `ConfigureRelays` | Stable relay-policy and explicit synchronization operations |
 | `ControlHarness` | Neutral named-agent start, exact resume, and stop operations |
+| `ControlProjects` | Local execution or durable routing of one exact project command |
 | `InspectResource` | Typed external observation without claiming a durable state transition |
 | `ObserveRevisions` | Pending registration, later activation, and idempotent cancellation |
 
@@ -159,6 +160,15 @@ completed, rejected, or reconcilable outcomes with an explicit durable checkpoin
 `ControlProjects` capability is opaque because its implementation owns project serialization and
 bounded recovery; the request, action payloads, provisioning request, and outcome fields are not
 hidden behind accessors.
+
+`ProjectCommandRouter` sends local-home requests directly to that workflow. A non-home call authors
+only a strict versioned `RemoteProjectCommandRequested` fact and reports `AwaitingHome`. The home
+worker scans a bounded deterministic projection, authors an exact receipt before execution, drives
+the same saga, and authors a terminal outcome only for definite completion or rejection. Receipt,
+saga, and outcome uncertainty remains repairable under stable identities. The application-backed
+remote port builds each request, receipt, and outcome plan from one serialized snapshot, checks
+digest/body agreement and expected heads, and cites exact request/receipt, project-head,
+active-human, and project-home authority facts.
 
 ## Subscription revision race
 

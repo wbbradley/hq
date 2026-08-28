@@ -8,9 +8,9 @@ use hq_application::{
     AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationPorts,
     AuthoritativeSnapshot, CommitFacts, ConfigureRelays, ConversationKey, DomainSnapshot,
     EffectOutcome, EffectRequest, FactMutation, InspectResource, MutationAttempt, ObserveRevisions,
-    PublishWake, QueryDomain, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
-    WakeDisposition,
+    ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration,
+    ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest, SubscriptionTopic,
+    SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{
     BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactScope, MAX_FACT_AUTHORITIES,
@@ -20,11 +20,11 @@ use hq_domain::{
 use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata, ClientHello,
     ConversationKeyDto, ConversationPageRequest, EffectRequestDto, Id32, InvalidationTopic,
-    LifecycleRequest, LifecycleState, LifecycleStatus, MutationRequest, RelayAccessDto,
-    RelayAuthenticationDto, RelayConfigurationDto, Request, RequestEnvelope, RequestId,
-    ResourceInspectionRequestDto, ResourceLocatorDto, ResourceSchemeDto, Response, ResponseResult,
-    SessionControlDto, SubscriptionRequestDto, SynchronizationRequestDto, V1, VersionRange,
-    WireMessage,
+    LifecycleRequest, LifecycleState, LifecycleStatus, MutationRequest, ProjectCommandActionDto,
+    ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
+    Request, RequestEnvelope, RequestId, ResourceInspectionRequestDto, ResourceLocatorDto,
+    ResourceSchemeDto, Response, ResponseResult, SessionControlDto, SubscriptionRequestDto,
+    SynchronizationRequestDto, V1, VersionRange, WireMessage,
 };
 use hq_local_api::{
     LifecycleControl, RevisionHub, ServerSession, ServerSessionError, ServerWriteDisposition,
@@ -121,6 +121,19 @@ impl InspectResource for Ports {
             details: None,
             checked_at: Timestamp::from_unix_millis(8),
         }))
+    }
+}
+
+impl hq_application::ControlProjects for Ports {
+    fn control_project(
+        &self,
+        request: ProjectCommandRequest,
+    ) -> Result<ProjectCommandOutcome, ApplicationError> {
+        self.trace.borrow_mut().push("project");
+        Ok(ProjectCommandOutcome::Accepted {
+            operation_id: request.operation_id,
+            stage: hq_application::ProjectCommandStage::AwaitingHome,
+        })
     }
 }
 
@@ -390,6 +403,17 @@ fn every_typed_request_family_routes_without_storage_types() {
             resource_id: Id32::new([15; 32]),
             display_locator: locator(),
             canonical_locator: locator(),
+        })),
+        Request::ControlProject(Box::new(ProjectCommandRequestDto {
+            command_id: Id32::new([16; 32]),
+            operation_id: Id32::new([17; 32]),
+            request_digest: Id32::new([18; 32]),
+            account_id: Id32::new([19; 32]),
+            project_id: Id32::new([20; 32]),
+            home: Id32::new([21; 32]),
+            expected_head: Id32::new([22; 32]),
+            issued_at_unix_millis: 23,
+            action: ProjectCommandActionDto::Open,
         })),
     ];
 

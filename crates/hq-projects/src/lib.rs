@@ -5,6 +5,8 @@
 
 mod canonical;
 mod command_codec;
+mod remote;
+mod remote_canonical;
 mod workflow;
 
 use hq_application::{
@@ -20,7 +22,10 @@ pub use canonical::ApplicationCanonicalProjectPort;
 pub use command_codec::{
     ProjectCommandCodecError, decode_canonical_project_mutation, decode_project_command_action,
     encode_canonical_project_mutation, encode_project_command_action,
+    project_command_request_digest,
 };
+pub use remote::*;
+pub use remote_canonical::ApplicationRemoteProjectCommandPort;
 pub use workflow::*;
 
 /// Maximum records returned by one startup recovery scan.
@@ -229,10 +234,12 @@ impl<S: ProjectSagaStore> ProjectSagaManager<S> {
             BeginSagaOutcome::IdentityConflict => Ok(ProjectCommandOutcome::Rejected {
                 operation_id,
                 error: domain_error(ErrorCategory::Conflict, "project_command_identity_conflict")?,
+                runtime: None,
             }),
             BeginSagaOutcome::ProjectBusy => Ok(ProjectCommandOutcome::Rejected {
                 operation_id,
                 error: domain_error(ErrorCategory::Conflict, "project_command_in_progress")?,
+                runtime: None,
             }),
         }
     }
@@ -261,10 +268,12 @@ fn outcome(record: &ProjectSagaRecord) -> ProjectCommandOutcome {
         ProjectSagaState::Completed { project_head } => ProjectCommandOutcome::Completed {
             operation_id: record.operation_id,
             project_head: *project_head,
+            runtime: None,
         },
         ProjectSagaState::Rejected(error) => ProjectCommandOutcome::Rejected {
             operation_id: record.operation_id,
             error: error.clone(),
+            runtime: None,
         },
         ProjectSagaState::Reconcilable { stage, error } => ProjectCommandOutcome::Reconcilable {
             operation_id: record.operation_id,

@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
-    AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText, CommandDigest,
-    CommandId, ContentText, DispatchId, ErrorCode, FactId, InstallationId, MailboxAddress,
-    MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation, OperationId,
-    PresentationKind, ProjectId, ProjectResource, ProviderId, ProviderSessionId,
+    AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText,
+    CommandDigest, CommandId, ContentText, DispatchId, ErrorCode, FactId, InstallationId,
+    MailboxAddress, MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation,
+    OperationId, PresentationKind, ProjectId, ProjectResource, ProviderId, ProviderSessionId,
     RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme,
-    RuntimeObservation, ShortText, ThreadId,
+    RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
 use hq_reducer::{
     ProjectAggregateKey, ProjectAssignmentPhase, ProjectAssignmentView, ProjectDispatchView,
@@ -1314,6 +1314,7 @@ fn valid_output(output_id: MessageId, view: &ProjectOutputView) -> bool {
         && !view.facts.is_empty()
 }
 
+#[allow(clippy::too_many_lines)]
 fn insert_command(
     transaction: &Transaction<'_>,
     digest: [u8; 32],
@@ -1323,7 +1324,10 @@ fn insert_command(
     if view.support.is_empty() {
         return Err(corrupt());
     }
+    let mut receipt_fact = ZERO;
     let mut received_head = ZERO;
+    let mut received_at = 0_i64;
+    let mut outcome_fact = ZERO;
     let mut result_kind = 0;
     let mut result_head = ZERO;
     let mut result_error = "";
@@ -1332,12 +1336,27 @@ fn insert_command(
     let stage = match &view.stage {
         RemoteCommandStage::Queued => 1,
         RemoteCommandStage::Received {
+            receipt_fact: fact,
             received_head: head,
+            received_at: at,
         } => {
+            receipt_fact = *fact.as_bytes();
             received_head = *head.as_bytes();
+            received_at = at.as_unix_millis();
             2
         }
-        RemoteCommandStage::Terminal { result, runtime } => {
+        RemoteCommandStage::Terminal {
+            receipt_fact: receipt,
+            received_head: received,
+            received_at: at,
+            outcome_fact: outcome,
+            result,
+            runtime,
+        } => {
+            receipt_fact = *receipt.as_bytes();
+            received_head = *received.as_bytes();
+            received_at = at.as_unix_millis();
+            outcome_fact = *outcome.as_bytes();
             match result {
                 RemoteCommandResult::Committed(head) => {
                     result_kind = 1;
@@ -1368,16 +1387,30 @@ fn insert_command(
     transaction
         .execute(
             "INSERT INTO project_commands( \
-                 key_digest, digest, project_id, expected_head, stage, received_head, \
+                 key_digest, account_id, digest, project_id, target_home, expected_head, \
+                 operation_provider, operation_session, operation_id, command_body, issued_at, \
+                 request_fact, stage, receipt_fact, received_head, received_at, outcome_fact, \
                  result_kind, result_head, result_error, runtime_kind, runtime_error \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
+                       ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 digest.as_slice(),
+                view.account_id.as_bytes().as_slice(),
                 view.digest.as_bytes().as_slice(),
                 view.project_id.as_bytes().as_slice(),
+                view.target_home.as_bytes().as_slice(),
                 view.expected_head.as_bytes().as_slice(),
+                view.operation.provider().as_str(),
+                view.operation.session().as_str(),
+                view.operation.operation().as_bytes().as_slice(),
+                view.body.as_str(),
+                view.issued_at.as_unix_millis(),
+                view.request_fact.as_bytes().as_slice(),
                 stage,
+                receipt_fact.as_slice(),
                 received_head.as_slice(),
+                received_at,
+                outcome_fact.as_slice(),
                 result_kind,
                 result_head.as_slice(),
                 result_error,
@@ -1394,6 +1427,7 @@ fn insert_command(
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn load_command(
     connection: &Connection,
     digest: [u8; 32],
@@ -1401,8 +1435,10 @@ fn load_command(
 ) -> Result<RemoteCommandView, StoreError> {
     let row = connection
         .query_row(
-            "SELECT digest, project_id, expected_head, stage, received_head, result_kind, \
-                    result_head, result_error, runtime_kind, runtime_error \
+            "SELECT account_id, digest, project_id, target_home, expected_head, \
+                    operation_provider, operation_session, operation_id, command_body, issued_at, \
+                    request_fact, stage, receipt_fact, received_head, received_at, outcome_fact, \
+                    result_kind, result_head, result_error, runtime_kind, runtime_error \
              FROM project_commands WHERE key_digest = ?1",
             [digest.as_slice()],
             |row| {
@@ -1410,66 +1446,121 @@ fn load_command(
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, Vec<u8>>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, Vec<u8>>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, Vec<u8>>(12)?,
+                    row.get::<_, Vec<u8>>(13)?,
+                    row.get::<_, i64>(14)?,
+                    row.get::<_, Vec<u8>>(15)?,
+                    row.get::<_, i64>(16)?,
+                    row.get::<_, Vec<u8>>(17)?,
+                    row.get::<_, String>(18)?,
+                    row.get::<_, i64>(19)?,
+                    row.get::<_, String>(20)?,
                 ))
             },
         )
         .map_err(database)?;
-    let received_head = fixed(row.4)?;
-    let result_head = fixed(row.6)?;
-    let stage = match row.3 {
-        1 if received_head == ZERO
-            && row.5 == 0
+    let request_fact = fixed(row.10)?;
+    let receipt_fact = fixed(row.12)?;
+    let received_head = fixed(row.13)?;
+    let outcome_fact = fixed(row.15)?;
+    let result_head = fixed(row.17)?;
+    let stage = match row.11 {
+        1 if receipt_fact == ZERO
+            && received_head == ZERO
+            && row.14 == 0
+            && outcome_fact == ZERO
+            && row.16 == 0
             && result_head == ZERO
-            && row.7.is_empty()
-            && row.8 == 0
-            && row.9.is_empty() =>
+            && row.18.is_empty()
+            && row.19 == 0
+            && row.20.is_empty() =>
         {
             RemoteCommandStage::Queued
         }
-        2 if received_head != ZERO
-            && row.5 == 0
+        2 if receipt_fact != ZERO
+            && received_head != ZERO
+            && outcome_fact == ZERO
+            && row.16 == 0
             && result_head == ZERO
-            && row.7.is_empty()
-            && row.8 == 0
-            && row.9.is_empty() =>
+            && row.18.is_empty()
+            && row.19 == 0
+            && row.20.is_empty() =>
         {
             RemoteCommandStage::Received {
+                receipt_fact: FactId::from_bytes(receipt_fact),
                 received_head: FactId::from_bytes(received_head),
+                received_at: Timestamp::from_unix_millis(row.14),
             }
         }
-        3 if received_head == ZERO => RemoteCommandStage::Terminal {
-            result: decode_result(row.5, result_head, row.7)?,
-            runtime: decode_runtime(row.8, row.9)?,
-        },
-        4 if received_head == ZERO
-            && row.5 == 0
+        3 if receipt_fact != ZERO && received_head != ZERO && outcome_fact != ZERO => {
+            RemoteCommandStage::Terminal {
+                receipt_fact: FactId::from_bytes(receipt_fact),
+                received_head: FactId::from_bytes(received_head),
+                received_at: Timestamp::from_unix_millis(row.14),
+                outcome_fact: FactId::from_bytes(outcome_fact),
+                result: decode_result(row.16, result_head, row.18)?,
+                runtime: decode_runtime(row.19, row.20)?,
+            }
+        }
+        4 if receipt_fact == ZERO
+            && received_head == ZERO
+            && row.14 == 0
+            && outcome_fact == ZERO
+            && row.16 == 0
             && result_head == ZERO
-            && row.7.is_empty()
-            && row.8 == 0
-            && row.9.is_empty() =>
+            && row.18.is_empty()
+            && row.19 == 0
+            && row.20.is_empty() =>
         {
             RemoteCommandStage::Conflicted
         }
         _ => return Err(corrupt()),
     };
     let view = RemoteCommandView {
-        digest: CommandDigest::from_bytes(fixed(row.0)?),
-        project_id: ProjectId::from_bytes(fixed(row.1)?),
-        expected_head: FactId::from_bytes(fixed(row.2)?),
+        account_id: AccountId::from_bytes(fixed(row.0)?),
+        digest: CommandDigest::from_bytes(fixed(row.1)?),
+        project_id: ProjectId::from_bytes(fixed(row.2)?),
+        target_home: InstallationId::from_bytes(fixed(row.3)?),
+        expected_head: FactId::from_bytes(fixed(row.4)?),
+        operation: OperationCorrelation::new(
+            ProviderId::new(row.5).map_err(|_| corrupt())?,
+            ProviderSessionId::new(row.6).map_err(|_| corrupt())?,
+            OperationId::from_bytes(fixed(row.7)?),
+        ),
+        body: ContentText::new(row.8).map_err(|_| corrupt())?,
+        issued_at: Timestamp::from_unix_millis(row.9),
+        request_fact: FactId::from_bytes(request_fact),
         stage,
         support: load_facts(connection, "project_command_support", digest)?,
     };
-    if view.support.is_empty() {
+    if !valid_command_view(&view) {
         return Err(corrupt());
     }
     Ok(view)
+}
+
+fn valid_command_view(view: &RemoteCommandView) -> bool {
+    view.support.contains(&view.request_fact)
+        && match &view.stage {
+            RemoteCommandStage::Queued | RemoteCommandStage::Conflicted => true,
+            RemoteCommandStage::Received { receipt_fact, .. } => {
+                view.support.contains(receipt_fact)
+            }
+            RemoteCommandStage::Terminal {
+                receipt_fact,
+                outcome_fact,
+                ..
+            } => view.support.contains(receipt_fact) && view.support.contains(outcome_fact),
+        }
 }
 
 fn decode_result(
@@ -2017,7 +2108,7 @@ mod tests {
             "UPDATE project_outputs SET body = body || '-changed'",
             "UPDATE project_output_facts SET fact_id = zeroblob(32) WHERE (key_digest, fact_id) = (SELECT key_digest, fact_id FROM project_output_facts LIMIT 1)",
             "UPDATE project_commands SET expected_head = zeroblob(32)",
-            "UPDATE project_command_support SET fact_id = zeroblob(32)",
+            "UPDATE project_command_support SET fact_id = zeroblob(32) WHERE (key_digest, fact_id) = (SELECT key_digest, fact_id FROM project_command_support LIMIT 1)",
         ] {
             let connection = fixture_connection(&expected);
             connection
@@ -2036,6 +2127,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn exhaustive_snapshot() -> ProjectProjectionSnapshot {
         let home = InstallationId::from_bytes([0x21; 32]);
+        let account = AccountId::from_bytes([0x20; 32]);
         let project_one = ProjectId::from_bytes([0x31; 32]);
         let project_two = ProjectId::from_bytes([0x32; 32]);
         let project_three = ProjectId::from_bytes([0x33; 32]);
@@ -2250,21 +2342,39 @@ mod tests {
         let command_stages = [
             RemoteCommandStage::Queued,
             RemoteCommandStage::Received {
+                receipt_fact: id(91),
                 received_head: id(23),
+                received_at: Timestamp::from_unix_millis(92),
             },
             RemoteCommandStage::Terminal {
+                receipt_fact: id(91),
+                received_head: id(23),
+                received_at: Timestamp::from_unix_millis(92),
+                outcome_fact: id(93),
                 result: RemoteCommandResult::Committed(id(24)),
                 runtime: None,
             },
             RemoteCommandStage::Terminal {
+                receipt_fact: id(91),
+                received_head: id(23),
+                received_at: Timestamp::from_unix_millis(92),
+                outcome_fact: id(93),
                 result: RemoteCommandResult::Rejected(error("rejected")),
                 runtime: Some(RuntimeObservation::Succeeded),
             },
             RemoteCommandStage::Terminal {
+                receipt_fact: id(91),
+                received_head: id(23),
+                received_at: Timestamp::from_unix_millis(92),
+                outcome_fact: id(93),
                 result: RemoteCommandResult::Rejected(error("failed")),
                 runtime: Some(RuntimeObservation::Failed(error("runtime-failed"))),
             },
             RemoteCommandStage::Terminal {
+                receipt_fact: id(91),
+                received_head: id(23),
+                received_at: Timestamp::from_unix_millis(92),
+                outcome_fact: id(93),
                 result: RemoteCommandResult::Rejected(error("uncertain")),
                 runtime: Some(RuntimeObservation::Uncertain(error("runtime-uncertain"))),
             },
@@ -2273,14 +2383,40 @@ mod tests {
         for (offset, stage) in command_stages.into_iter().enumerate() {
             let offset = u8::try_from(offset).expect("small offset");
             let command_id = CommandId::from_bytes([0x80 + offset; 32]);
+            let request_fact = id(40 + offset);
+            let mut command_support = set([request_fact]);
+            match &stage {
+                RemoteCommandStage::Received { receipt_fact, .. } => {
+                    command_support.insert(*receipt_fact);
+                }
+                RemoteCommandStage::Terminal {
+                    receipt_fact,
+                    outcome_fact,
+                    ..
+                } => {
+                    command_support.insert(*receipt_fact);
+                    command_support.insert(*outcome_fact);
+                }
+                RemoteCommandStage::Queued | RemoteCommandStage::Conflicted => {}
+            }
             projections.insert(
                 ProjectProjectionKey::Command(command_id),
                 ProjectProjection::Command(Box::new(RemoteCommandView {
+                    account_id: account,
                     digest: CommandDigest::from_bytes([0x90 + offset; 32]),
                     project_id: project_one,
+                    target_home: home,
                     expected_head: id(30 + offset),
+                    operation: OperationCorrelation::new(
+                        ProviderId::new("remote").expect("provider"),
+                        ProviderSessionId::new("control").expect("session"),
+                        OperationId::from_bytes([0xa0 + offset; 32]),
+                    ),
+                    body: content("hq-project-command-v1:{\"action\":\"open\"}"),
+                    issued_at: Timestamp::from_unix_millis(i64::from(offset) - 3),
+                    request_fact,
                     stage,
-                    support: set([id(40 + offset)]),
+                    support: command_support,
                 })),
             );
         }

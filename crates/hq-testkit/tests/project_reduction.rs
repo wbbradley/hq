@@ -1233,6 +1233,9 @@ fn remote_command_stages_never_mutate_project_without_a_canonical_home_transitio
             runtime: Some(RuntimeObservation::Succeeded),
         },
     )?;
+    let receipt_fact = receipt.id();
+    let outcome_fact = outcome.id();
+    let received_head = create.id();
     let report = reduce_complete(
         world
             .base()
@@ -1249,6 +1252,10 @@ fn remote_command_stages_never_mutate_project_without_a_canonical_home_transitio
     assert_eq!(
         command.stage,
         RemoteCommandStage::Terminal {
+            receipt_fact,
+            received_head,
+            received_at: Timestamp::from_unix_millis(11),
+            outcome_fact,
             result: RemoteCommandResult::Committed(committed.id()),
             runtime: Some(RuntimeObservation::Succeeded),
         }
@@ -1261,6 +1268,64 @@ fn remote_command_stages_never_mutate_project_without_a_canonical_home_transitio
     };
     assert_eq!(project.head, committed.id());
     assert_eq!(project.name, ShortText::new("remote-rename")?);
+    Ok(())
+}
+
+#[test]
+fn unequal_remote_request_bodies_under_one_command_identity_fail_closed()
+-> Result<(), Box<dyn Error>> {
+    let mut values = DeterministicValues::new(124);
+    let world = project_world(&mut values)?;
+    let project_id = ProjectId::from_bytes([124; 32]);
+    let create = project_created(
+        &mut values,
+        &world,
+        project_id,
+        MailboxId::from_bytes([124; 32]),
+        vec![],
+        None,
+        InitialProjectState::Closed,
+    )?;
+    let command_id = CommandId::from_bytes([125; 32]);
+    let digest = CommandDigest::from_bytes([126; 32]);
+    let operation = OperationCorrelation::new(
+        ProviderId::new("remote")?,
+        ProviderSessionId::new("control")?,
+        OperationId::from_bytes([127; 32]),
+    );
+    let open = hq_domain::ContentText::new("open")?;
+    let close = hq_domain::ContentText::new("close")?;
+    let payload = |body| SemanticPayload::RemoteProjectCommandRequested {
+        command_id,
+        digest,
+        project_id,
+        target_home: world.home.installation_id(),
+        expected_head: create.id(),
+        operation: operation.clone(),
+        body,
+    };
+    let first = remote_fact(&mut values, &world, [create.id()], [], payload(open))?;
+    let changed = remote_fact(&mut values, &world, [create.id()], [], payload(close))?;
+    let report = reduce_complete(
+        world
+            .base()
+            .into_iter()
+            .chain([create, first.clone(), changed.clone()]),
+        &world.reducer(),
+    )?;
+    assert_eq!(
+        report.decisions()[&first.id()].status(),
+        DecisionStatus::Conflicted
+    );
+    assert_eq!(
+        report.decisions()[&changed.id()].status(),
+        DecisionStatus::Conflicted
+    );
+    assert!(
+        !report
+            .projections()
+            .contains_key(&ProjectProjectionKey::Command(command_id))
+    );
     Ok(())
 }
 

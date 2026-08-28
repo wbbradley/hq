@@ -8,8 +8,8 @@ use std::{
 use hq_domain::{
     AccountId, AgentId, CommandDigest, CommandId, ContentText, DispatchId, EncryptionPublicKey,
     FactId, GrantId, InstallationId, MailboxAddress, MailboxKind, MessageId, ProjectId, ProviderId,
-    ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, Revision, ShortText,
-    SigningPublicKey,
+    ProviderSessionId, RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator, Revision,
+    RuntimeObservation, ShortText, SigningPublicKey, Timestamp,
 };
 use hq_reducer::{
     ActivityView, AgentAggregateKey, AgentLifecycle, AgentProjection, AgentProjectionKey,
@@ -395,17 +395,42 @@ impl DomainSnapshot {
                     ClientProjection::RemoteCommand {
                         command_id: *command_id,
                         request_digest: view.digest,
+                        account_id: view.account_id,
                         project_id: view.project_id,
-                        stage: match view.stage {
+                        target_home: view.target_home,
+                        expected_head: view.expected_head,
+                        operation: view.operation.clone(),
+                        body: view.body.clone(),
+                        issued_at: view.issued_at,
+                        request_fact: view.request_fact,
+                        stage: Box::new(match &view.stage {
                             RemoteCommandStage::Queued => ClientRemoteCommandStage::Queued,
-                            RemoteCommandStage::Received { .. } => {
-                                ClientRemoteCommandStage::Received
-                            }
-                            RemoteCommandStage::Terminal { .. } => {
-                                ClientRemoteCommandStage::Terminal
-                            }
+                            RemoteCommandStage::Received {
+                                receipt_fact,
+                                received_head,
+                                received_at,
+                            } => ClientRemoteCommandStage::Received {
+                                receipt_fact: *receipt_fact,
+                                received_head: *received_head,
+                                received_at: *received_at,
+                            },
+                            RemoteCommandStage::Terminal {
+                                receipt_fact,
+                                received_head,
+                                received_at,
+                                outcome_fact,
+                                result,
+                                runtime,
+                            } => ClientRemoteCommandStage::Terminal {
+                                receipt_fact: *receipt_fact,
+                                received_head: *received_head,
+                                received_at: *received_at,
+                                outcome_fact: *outcome_fact,
+                                result: result.clone(),
+                                runtime: runtime.clone(),
+                            },
                             RemoteCommandStage::Conflicted => ClientRemoteCommandStage::Conflicted,
-                        },
+                        }),
                     }
                 }
                 _ => return Err(ApplicationValueError::InvalidEncoding),
@@ -458,11 +483,22 @@ pub enum ClientProjectOutputStatus {
 }
 /// Stable client presentation of remote-command progress.
 #[allow(missing_docs)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientRemoteCommandStage {
     Queued,
-    Received,
-    Terminal,
+    Received {
+        receipt_fact: FactId,
+        received_head: FactId,
+        received_at: Timestamp,
+    },
+    Terminal {
+        receipt_fact: FactId,
+        received_head: FactId,
+        received_at: Timestamp,
+        outcome_fact: FactId,
+        result: RemoteCommandResult,
+        runtime: Option<RuntimeObservation>,
+    },
     Conflicted,
 }
 
@@ -581,8 +617,15 @@ pub enum ClientProjection {
     RemoteCommand {
         command_id: CommandId,
         request_digest: CommandDigest,
+        account_id: AccountId,
         project_id: ProjectId,
-        stage: ClientRemoteCommandStage,
+        target_home: InstallationId,
+        expected_head: FactId,
+        operation: hq_domain::OperationCorrelation,
+        body: ContentText,
+        issued_at: Timestamp,
+        request_fact: FactId,
+        stage: Box<ClientRemoteCommandStage>,
     },
 }
 

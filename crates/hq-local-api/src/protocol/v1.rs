@@ -4,7 +4,7 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use hq_application::FactPlan;
 use hq_domain::{
-    CONTENT_MAX_BYTES, CommandDigest, CommandId, PROVIDER_ID_MAX_BYTES,
+    CONTENT_MAX_BYTES, CommandDigest, CommandId, ERROR_CODE_MAX_BYTES, PROVIDER_ID_MAX_BYTES,
     PROVIDER_SESSION_ID_MAX_BYTES, RESOURCE_LOCATOR_MAX_BYTES, SHORT_TEXT_MAX_BYTES,
 };
 use hq_protocol::{CanonicalEventPlan, FailureClass, MAX_CONTENT_BYTES};
@@ -629,6 +629,195 @@ pub struct ResourceInspectionRequestDto {
     pub canonical_locator: ResourceLocatorDto,
 }
 
+/// Desired project resource carried by a control request.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectResourceDto {
+    pub resource_id: Id32,
+    pub display_locator: ResourceLocatorDto,
+    pub canonical_locator: ResourceLocatorDto,
+    pub health: ResourceHealthDto,
+}
+
+/// Exact worktree provisioning input.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeProvisioningRequestDto {
+    pub mailbox_id: Id32,
+    pub project_name: String,
+    pub brief: Option<String>,
+    pub source: ResourceLocatorDto,
+    pub destination: ResourceLocatorDto,
+    pub branch: String,
+    pub create_branch: bool,
+}
+
+/// Closed project action catalog for local API v1.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "action", content = "value", rename_all = "snake_case")]
+pub enum ProjectCommandActionDto {
+    Open,
+    Activate {
+        agent_id: Id32,
+        provider: String,
+        resume_session: Option<String>,
+        resume_thread: Option<Id32>,
+        launch_directory: ResourceLocatorDto,
+    },
+    DispatchPending,
+    Close {
+        force: bool,
+    },
+    SetArchived {
+        archived: bool,
+    },
+    Handoff {
+        agent_id: Id32,
+        provider: String,
+        resume_session: Option<String>,
+        thread_id: Id32,
+        launch_directory: ResourceLocatorDto,
+        force_takeover: bool,
+    },
+    RetireAgent {
+        agent_id: Id32,
+        force: bool,
+    },
+    AddResource {
+        resource: ProjectResourceDto,
+        make_primary: bool,
+    },
+    RemoveResource {
+        resource_id: Id32,
+        force: bool,
+    },
+    ReplaceResource {
+        old_resource_id: Id32,
+        new_resource: ProjectResourceDto,
+    },
+    ProvisionWorktree(WorktreeProvisioningRequestDto),
+}
+
+/// Stable exact project command envelope.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCommandRequestDto {
+    pub command_id: Id32,
+    pub operation_id: Id32,
+    pub request_digest: Id32,
+    pub account_id: Id32,
+    pub project_id: Id32,
+    pub home: Id32,
+    pub expected_head: Id32,
+    pub issued_at_unix_millis: i64,
+    pub action: ProjectCommandActionDto,
+}
+
+/// Durable project workflow checkpoint.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectCommandStageDto {
+    Accepted,
+    AwaitingHome,
+    ReceivedAtHome,
+    ValidatingResources,
+    Opening,
+    ConfiguringAssignment,
+    StartingRuntime,
+    ValidatingLaunchDirectory,
+    MakingRunnable,
+    DispatchingInputs,
+    AssessingRelease,
+    QuiescingRuntime,
+    EndingAssignment,
+    Closing,
+    UpdatingProject,
+    ReservingDestination,
+    ReconcilingGit,
+    CreatingWorktree,
+    IdentifyingResource,
+    CreatingProject,
+    Compensating,
+    ReconciliationRequired,
+    Complete,
+}
+
+/// External runtime truth retained without inference.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", content = "code", rename_all = "snake_case")]
+pub enum RuntimeObservationDto {
+    Succeeded,
+    Failed(String),
+    Uncertain(String),
+}
+
+/// Typed project command submission or progress result.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ProjectCommandOutcomeDto {
+    Accepted {
+        operation_id: Id32,
+        stage: ProjectCommandStageDto,
+    },
+    Running {
+        operation_id: Id32,
+        stage: ProjectCommandStageDto,
+    },
+    Completed {
+        operation_id: Id32,
+        project_head: Id32,
+        runtime: Option<RuntimeObservationDto>,
+    },
+    Rejected {
+        operation_id: Id32,
+        error: DomainErrorDto,
+        runtime: Option<RuntimeObservationDto>,
+    },
+    Reconcilable {
+        operation_id: Id32,
+        stage: ProjectCommandStageDto,
+        error: DomainErrorDto,
+    },
+}
+
+/// Terminal remote-control result.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", content = "value", rename_all = "snake_case")]
+pub enum RemoteCommandResultDto {
+    Committed(Id32),
+    Rejected(String),
+}
+
+/// Authoritative remote-control checkpoint with exact fact attribution.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum RemoteCommandProgressDto {
+    Queued,
+    Received {
+        receipt_fact: Id32,
+        received_head: Id32,
+        received_at_unix_millis: i64,
+    },
+    Terminal {
+        receipt_fact: Id32,
+        received_head: Id32,
+        received_at_unix_millis: i64,
+        outcome_fact: Id32,
+        result: RemoteCommandResultDto,
+        runtime: Option<RuntimeObservationDto>,
+    },
+    Conflicted,
+}
+
 /// Closed local API v1 request families.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -649,6 +838,8 @@ pub enum Request {
     ControlAgentSession(EffectRequestDto<AgentSessionRequestDto>),
     /// Inspect one typed project resource.
     InspectResource(EffectRequestDto<ResourceInspectionRequestDto>),
+    /// Execute, route, or reconcile one exact project command.
+    ControlProject(Box<ProjectCommandRequestDto>),
     /// Register a revision invalidation subscription.
     Subscribe(SubscriptionRequestDto),
     /// Cancel one pending or active subscription idempotently.
@@ -942,10 +1133,28 @@ pub enum SnapshotItem {
         command_id: Id32,
         /// Exact request digest.
         request_digest: Id32,
+        /// Active human account authorizing the request.
+        account_id: Id32,
         /// Target project.
         project_id: Id32,
-        /// Stable queued/received/terminal/conflicted stage name.
-        stage: String,
+        /// Immutable authoritative installation.
+        target_home: Id32,
+        /// Caller-observed canonical head.
+        expected_head: Id32,
+        /// Provider namespace used for durable routing correlation.
+        operation_provider: String,
+        /// Provider session used for durable routing correlation.
+        operation_session: String,
+        /// Stable workflow operation identity.
+        operation_id: Id32,
+        /// Strict versioned command body retained by the projection.
+        body: String,
+        /// Request semantic time.
+        issued_at_unix_millis: i64,
+        /// Exact request fact.
+        request_fact: Id32,
+        /// Structured authoritative progress.
+        progress: Box<RemoteCommandProgressDto>,
     },
 }
 
@@ -1190,6 +1399,8 @@ pub enum ResponseResult {
     AgentSession(EffectOutcomeDto<AgentSessionResultDto>),
     /// Resource inspection effect outcome.
     ResourceInspection(EffectOutcomeDto<ResourceInspectionResultDto>),
+    /// Project command submission or durable progress.
+    ProjectCommand(ProjectCommandOutcomeDto),
     /// Pending subscription acknowledgement.
     Subscription(SubscriptionAcknowledgement),
     /// Successful operation without a value.
@@ -1426,6 +1637,7 @@ impl WireMessage {
                     }
                     Ok(())
                 }
+                Request::ControlProject(request) => validate_project_request(request),
                 Request::Lifecycle(_)
                 | Request::AuthoritativeSnapshot
                 | Request::CancelSubscription { .. } => Ok(()),
@@ -1480,6 +1692,9 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         Response::Success(ResponseResult::Subscription(acknowledgement)) => {
             validate_snapshot(&acknowledgement.snapshot)
         }
+        Response::Success(ResponseResult::ProjectCommand(outcome)) => {
+            validate_project_outcome(outcome)
+        }
         Response::Success(ResponseResult::Empty) => Ok(()),
         Response::Success(ResponseResult::ResourceInspection(outcome)) => match outcome {
             EffectOutcomeDto::Accepted(result) => {
@@ -1501,6 +1716,83 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
             }
             Ok(())
         }
+    }
+}
+
+fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), ValueError> {
+    match &request.action {
+        ProjectCommandActionDto::Open
+        | ProjectCommandActionDto::DispatchPending
+        | ProjectCommandActionDto::Close { .. }
+        | ProjectCommandActionDto::SetArchived { .. }
+        | ProjectCommandActionDto::RetireAgent { .. }
+        | ProjectCommandActionDto::RemoveResource { .. } => Ok(()),
+        ProjectCommandActionDto::Activate {
+            provider,
+            resume_session,
+            launch_directory,
+            ..
+        }
+        | ProjectCommandActionDto::Handoff {
+            provider,
+            resume_session,
+            launch_directory,
+            ..
+        } => {
+            validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
+            if let Some(session) = resume_session {
+                validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+            }
+            validate_locator(launch_directory)
+        }
+        ProjectCommandActionDto::AddResource { resource, .. }
+        | ProjectCommandActionDto::ReplaceResource {
+            new_resource: resource,
+            ..
+        } => validate_project_resource(resource),
+        ProjectCommandActionDto::ProvisionWorktree(request) => {
+            validate_text(&request.project_name, SHORT_TEXT_MAX_BYTES)?;
+            if let Some(brief) = &request.brief {
+                validate_text(brief, CONTENT_MAX_BYTES)?;
+            }
+            validate_locator(&request.source)?;
+            validate_locator(&request.destination)?;
+            validate_text(&request.branch, SHORT_TEXT_MAX_BYTES)
+        }
+    }
+}
+
+fn validate_project_resource(resource: &ProjectResourceDto) -> Result<(), ValueError> {
+    validate_locator(&resource.display_locator)?;
+    validate_locator(&resource.canonical_locator)?;
+    if resource.display_locator.scheme != resource.canonical_locator.scheme {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    Ok(())
+}
+
+fn validate_runtime(runtime: &RuntimeObservationDto) -> Result<(), ValueError> {
+    match runtime {
+        RuntimeObservationDto::Succeeded => Ok(()),
+        RuntimeObservationDto::Failed(code) | RuntimeObservationDto::Uncertain(code) => {
+            validate_text(code, ERROR_CODE_MAX_BYTES)
+        }
+    }
+}
+
+fn validate_project_outcome(outcome: &ProjectCommandOutcomeDto) -> Result<(), ValueError> {
+    match outcome {
+        ProjectCommandOutcomeDto::Accepted { .. } | ProjectCommandOutcomeDto::Running { .. } => {
+            Ok(())
+        }
+        ProjectCommandOutcomeDto::Completed { runtime, .. } => {
+            runtime.as_ref().map_or(Ok(()), validate_runtime)
+        }
+        ProjectCommandOutcomeDto::Rejected { error, runtime, .. } => {
+            validate_domain_error(error)?;
+            runtime.as_ref().map_or(Ok(()), validate_runtime)
+        }
+        ProjectCommandOutcomeDto::Reconcilable { error, .. } => validate_domain_error(error),
     }
 }
 
@@ -1655,8 +1947,33 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 validate_text(status, SHORT_TEXT_MAX_BYTES)?;
                 validate_text(content, CONTENT_MAX_BYTES)?;
             }
-            SnapshotItem::RemoteCommand { stage, .. } => {
-                validate_text(stage, SHORT_TEXT_MAX_BYTES)?;
+            SnapshotItem::RemoteCommand {
+                operation_provider,
+                operation_session,
+                body,
+                progress,
+                ..
+            } => {
+                validate_text(operation_provider, PROVIDER_ID_MAX_BYTES)?;
+                validate_text(operation_session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+                validate_text(body, CONTENT_MAX_BYTES)?;
+                if let RemoteCommandProgressDto::Terminal {
+                    result: RemoteCommandResultDto::Rejected(code),
+                    runtime,
+                    ..
+                } = progress.as_ref()
+                {
+                    validate_text(code, ERROR_CODE_MAX_BYTES)?;
+                    if let Some(runtime) = runtime {
+                        validate_runtime(runtime)?;
+                    }
+                } else if let RemoteCommandProgressDto::Terminal {
+                    runtime: Some(runtime),
+                    ..
+                } = progress.as_ref()
+                {
+                    validate_runtime(runtime)?;
+                }
             }
         }
     }

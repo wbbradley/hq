@@ -45,7 +45,7 @@ use crate::{
 
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 13;
-const SCHEMA_MARKER: &str = "hq-store-v13-project-activation-2026-08-27";
+const SCHEMA_MARKER: &str = "hq-store-v13-project-remote-routing-2026-08-28";
 const SCHEMA_TABLES: [&str; 116] = [
     "storage_metadata",
     "canonical_facts",
@@ -1038,11 +1038,22 @@ CREATE TABLE project_output_facts (
 
 CREATE TABLE project_commands (
     key_digest BLOB PRIMARY KEY NOT NULL REFERENCES project_projection_keys(key_digest),
+    account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
     digest BLOB NOT NULL CHECK(typeof(digest) = 'blob' AND length(digest) = 32),
     project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
+    target_home BLOB NOT NULL CHECK(typeof(target_home) = 'blob' AND length(target_home) = 32),
     expected_head BLOB NOT NULL CHECK(typeof(expected_head) = 'blob' AND length(expected_head) = 32),
+    operation_provider TEXT NOT NULL CHECK(typeof(operation_provider) = 'text' AND length(CAST(operation_provider AS BLOB)) BETWEEN 1 AND 128),
+    operation_session TEXT NOT NULL CHECK(typeof(operation_session) = 'text' AND length(CAST(operation_session AS BLOB)) BETWEEN 1 AND 512),
+    operation_id BLOB NOT NULL CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    command_body TEXT NOT NULL CHECK(typeof(command_body) = 'text' AND length(CAST(command_body AS BLOB)) BETWEEN 1 AND 65536),
+    issued_at INTEGER NOT NULL,
+    request_fact BLOB NOT NULL CHECK(typeof(request_fact) = 'blob' AND length(request_fact) = 32),
     stage INTEGER NOT NULL CHECK(stage BETWEEN 1 AND 4),
+    receipt_fact BLOB NOT NULL CHECK(typeof(receipt_fact) = 'blob' AND length(receipt_fact) = 32),
     received_head BLOB NOT NULL CHECK(typeof(received_head) = 'blob' AND length(received_head) = 32),
+    received_at INTEGER NOT NULL,
+    outcome_fact BLOB NOT NULL CHECK(typeof(outcome_fact) = 'blob' AND length(outcome_fact) = 32),
     result_kind INTEGER NOT NULL CHECK(result_kind BETWEEN 0 AND 2),
     result_head BLOB NOT NULL CHECK(typeof(result_head) = 'blob' AND length(result_head) = 32),
     result_error TEXT NOT NULL CHECK(typeof(result_error) = 'text' AND length(CAST(result_error AS BLOB)) <= 128),

@@ -264,3 +264,12 @@ impl InspectResource for DormantNodeComponent {
         unavailable()
     }
 }
+
+impl hq_application::ControlProjects for DormantNodeComponent {
+    fn control_project(
+        &self,
+        _request: hq_application::ProjectCommandRequest,
+    ) -> Result<hq_application::ProjectCommandOutcome, ApplicationError> {
+        unavailable()
+    }
+}

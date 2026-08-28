@@ -96,12 +96,13 @@ Request methods are closed and typed:
 - relay configuration and explicit synchronization effects;
 - provider-neutral named-agent session control;
 - read-only resource inspection;
+- exact typed project control, including remote-home routing;
 - subscription registration; and
 - idempotent subscription cancellation.
 
 Successful response families are lifecycle status, authoritative snapshot, conversation page,
-mutation attempt, empty external effect, agent-session effect, resource-inspection effect,
-subscription acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
+mutation attempt, empty external effect, agent-session effect, resource-inspection effect, typed
+project-command progress, subscription acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
 and optional bounded inert detail. Machine behavior depends on class/code, never detail text.
 
 External effects retain their stable operation ID, exact request digest, issue time, and typed body.
@@ -114,7 +115,11 @@ An authoritative snapshot carries one serialized local revision and a bounded li
 client projection DTOs. The closed projection union covers installation/mailbox/account authority,
 peer routes, mailbox capabilities, device membership, account selection, conversation discovery,
 named-agent lifecycle and provider-session registers, projects, accepted input, dispatch, output,
-and remote-command progress. Project resources are separate projection items carrying display and
+and remote-command progress. A remote-command item retains the complete request envelope and exact
+request fact. Its progress is a closed `queued`, `received`, `terminal`, or `conflicted` value;
+received and terminal values carry the exact receipt, observed head, and receipt time, while a
+terminal value also carries the exact outcome fact, typed committed/rejected result, and optional
+typed runtime observation. Project resources are separate projection items carrying display and
 canonical locators, health, primary/active-claim flags, and bounded conflicting-project IDs. It is
 a client query representation, not the reducer's Rust layout or
 the store's normalized row schema.
@@ -155,6 +160,14 @@ before transport. Completed command IDs and digests are retained in a configured
 oldest-first window; in-flight mutations are never evicted. A result is either a completed
 committed/rejected receipt or explicit uncertainty; post-commit relay-wake failure does not change a
 committed receipt.
+
+Project control uses a separate closed action DTO and the same stable command/digest discipline.
+The request carries account, project, immutable home, expected head, operation, issue time, and the
+complete typed action. The shared client retains its exact encoded frame across ambiguous response
+loss. Accepted, running, and reconcilable progress may be explicitly resubmitted; completed and
+rejected identities enter the same bounded completed-identity window. Changed digest reuse fails
+before transport. The server delegates to `ControlProjects`; a non-home router authors only an
+inert request fact, while the home executes the ordinary durable project workflow.
 
 ## Revision subscriptions
 
@@ -197,4 +210,5 @@ generation and ignores late events from older sockets. Each connection starts wi
 Explicit version rejection is terminal; ordinary disconnects use deterministic exponential backoff
 bounded by configured positive minimum and maximum delays. Ordinary query/control requests are not
 silently replayed after response loss: the client reports their request IDs as lost so the caller
-can apply method-specific policy. Retry-safe mutations follow the exact-frame rule above.
+can apply method-specific policy. Retry-safe mutations and project commands follow the exact-frame
+rule above.

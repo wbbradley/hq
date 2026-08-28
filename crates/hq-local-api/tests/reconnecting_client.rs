@@ -12,7 +12,8 @@ use hq_domain::{
 use hq_local_api::protocol::v1::{
     AuthoritativeSnapshotDto, BuildMetadata, ClientHello, ErrorClass, ErrorResponse, Id32,
     InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus, MutationAttemptDto,
-    MutationRequest, Request, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
+    MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
+    Request, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
     SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
 };
 use hq_local_api::{
@@ -58,6 +59,20 @@ fn plan(at: i64) -> hq_application::FactPlan {
 fn mutation(command: u8, at: i64) -> MutationRequest {
     MutationRequest::from_plan(CommandId::from_bytes([command; 32]), plan(at))
         .expect("mutation request")
+}
+
+fn project_command(command: u8, digest: u8) -> ProjectCommandRequestDto {
+    ProjectCommandRequestDto {
+        command_id: Id32::new([command; 32]),
+        operation_id: Id32::new([command.wrapping_add(1); 32]),
+        request_digest: Id32::new([digest; 32]),
+        account_id: Id32::new([3; 32]),
+        project_id: Id32::new([4; 32]),
+        home: Id32::new([5; 32]),
+        expected_head: Id32::new([6; 32]),
+        issued_at_unix_millis: 1_700_000_000_000,
+        action: ProjectCommandActionDto::Open,
+    }
 }
 
 fn only_connect(actions: &[ClientAction]) -> (ConnectionGeneration, Duration) {
@@ -155,6 +170,98 @@ fn lost_mutation_response_replays_the_byte_identical_original_frame() {
         Err(ClientError::ChangedCommandIdentity)
     );
     assert_eq!(request.command_id(), CommandId::from_bytes([1; 32]));
+}
+
+#[test]
+fn lost_project_response_replays_exact_frame_and_terminal_identity_is_retained() {
+    let mut client = client();
+    let request = project_command(81, 82);
+    assert!(
+        client
+            .submit_project_command(request.clone())
+            .expect("queue project command")
+            .actions
+            .is_empty()
+    );
+    let (first, _) = only_connect(&client.start().expect("start").actions);
+    let _ = client.connected(first).expect("connect");
+    let negotiated = client
+        .receive_frame(
+            first,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([83; 32])))
+                .encode_frame()
+                .expect("hello frame"),
+        )
+        .expect("negotiates");
+    let original = negotiated
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientAction::Write { frame, .. }
+                if matches!(
+                    WireMessage::decode_frame(frame),
+                    Ok(WireMessage::Request(envelope))
+                        if matches!(envelope.request, Request::ControlProject(_))
+                ) =>
+            {
+                Some(frame.clone())
+            }
+            _ => None,
+        })
+        .expect("project frame");
+
+    let (second, _) = only_connect(&client.disconnected(first).expect("lost response").actions);
+    let _ = client.connected(second).expect("reconnect");
+    let replay = client
+        .receive_frame(
+            second,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([84; 32])))
+                .encode_frame()
+                .expect("hello frame"),
+        )
+        .expect("renegotiates");
+    assert!(
+        replay.actions.iter().any(
+            |action| matches!(action, ClientAction::Write { frame, .. } if frame == &original)
+        )
+    );
+
+    let WireMessage::Request(envelope) = WireMessage::decode_frame(&original).expect("request")
+    else {
+        panic!("expected project request")
+    };
+    let completed = WireMessage::Response(ResponseEnvelope::success(
+        envelope.id,
+        ResponseResult::ProjectCommand(ProjectCommandOutcomeDto::Completed {
+            operation_id: request.operation_id,
+            project_head: Id32::new([85; 32]),
+            runtime: None,
+        }),
+    ))
+    .encode_frame()
+    .expect("completion frame");
+    let transition = client
+        .receive_frame(second, &completed)
+        .expect("completion accepted");
+    assert!(matches!(
+        transition.events.as_slice(),
+        [ClientEvent::ProjectCommand { command_id, outcome: ProjectCommandOutcomeDto::Completed { .. } }]
+            if *command_id == CommandId::from_bytes([81; 32])
+    ));
+    assert_eq!(client.completed_identity_count(), 1);
+    assert!(
+        client
+            .submit_project_command(request.clone())
+            .expect("terminal replay is local")
+            .actions
+            .is_empty()
+    );
+    let mut changed = request;
+    changed.request_digest = Id32::new([86; 32]);
+    assert_eq!(
+        client.submit_project_command(changed),
+        Err(ClientError::ChangedCommandIdentity)
+    );
 }
 
 #[test]

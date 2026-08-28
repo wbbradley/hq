@@ -6859,3 +6859,116 @@ passes.
   those. If new future work items were discovered, add them. If the plan file or completed file is
   outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
   other changes.
+
+
+## 2026-08-28 — Durable remote project command routing and local API progress
+
+Implemented complete, strict remote project request, receipt, and terminal outcome projection with
+exact control-plane attribution, deterministic conflict handling, and clean reopen/corruption
+validation. Non-home routers author only inert requests; home repair workers receipt before
+executing the existing durable workflow and publish terminal outcomes only for definite committed
+or rejected results. Application-backed fact authoring revalidates active-human and project-home
+authority, immutable home, digest/body agreement, exact heads, and request/receipt lineage inside
+serialized callbacks. The local API now carries closed typed project actions, requests, outcomes,
+runtime observations, and queued/received/terminal/conflicted progress; its passive Rust DTO and
+result fields remain public, while reconnect replay preserves byte-identical command frames and
+bounded terminal identity history. The unshipped storage and local API schemas were completed in
+place: storage remains v13 with no migration or version bump. Locked builds, strict Clippy,
+architecture, behavior, causal/protocol, dependency, four-target, fuzz, formatting, whitespace, and
+frozen-Go build/vet/uncached-test gates pass. The unchanged Go race suite still exposes its
+pre-existing mailbox-capability timing failure on macOS. The otherwise-green Rust workspace suite
+also exposes a pre-existing relay test-harness hang: when a local connector fails before TCP
+connect, its test server waits indefinitely in `accept()`; all workspace tests pass with that one
+unrelated case skipped.
+
+### Original plan entry
+
+- **[projects/high] Implement durable remote project command routing and local API progress** —
+  Extend `hq-local-api` with the typed project request/outcome and authoritative checkpoint view.
+  Non-home devices author only strict `RemoteProjectCommandRequested` facts; the immutable home
+  derives typed receipt parents from one serialized snapshot, executes the same workflow, and
+  authors exactly one committed, rejected, or explicitly uncertain result. Validate digest/body
+  agreement and expected heads, reject unknown codec versions, and expose queued/received/terminal
+  progress without reducer side effects. Test offline routing, competing devices, duplicate and
+  changed command identities, stale receipt/result, restart repair, and complete control-plane
+  attribution.
+
+  **Implementation plan**
+
+  - Make the reducer-owned remote-command projection retain the complete executable request
+    envelope: target home, operation correlation, strict command body, exact request fact, and the
+    exact receipt fact once received. Persist those passive fields in the existing clean-sheet v13
+    projection table and strict codecs. Change the fresh schema in place; there is no installed
+    compatibility boundary, migration, or storage-version bump.
+  - Add an application-backed remote-control port that authors request, receipt, and outcome facts
+    through one serialized query/commit callback each. Request planning requires exact
+    digest/body agreement, active-human authority, observed project head, immutable target home,
+    and the prior per-project command frontier. Receipt and outcome planning cite the exact
+    request/receipt identities, current or committed canonical head, and project-home authority;
+    duplicate stable identities replay while changed bodies or results fail closed.
+  - Implement a bounded project-command router around the existing home workflow. A local-home
+    command executes that workflow directly. A non-home command authors only its inert request and
+    reports `AwaitingHome`. The immutable-home worker scans a deterministic bounded projection,
+    authors receipt at its transaction-consistent observed head, reconstructs the exact original
+    request with the strict codec, drives the same durable saga, and authors a terminal remote
+    outcome only after a definite commit/rejection. Running or reconcilable work remains repairable
+    and response loss replays exact fact mutations without duplicate control records.
+  - Extend `hq-local-api` v1 in place with closed typed project action/request/outcome DTOs and a
+    retry-safe client path. Expose authoritative remote progress as structured queued, received,
+    terminal, or conflicted data including expected/received/result heads and typed runtime
+    observation. Keep passive DTO fields public; retain opacity only for validated scalar values,
+    session-owned tickets, and behavioral capabilities. Add protocol, conversion, server, client,
+    router, reducer, store reopen/corruption, and restart-recovery contracts, then run every
+    repository gate.
+
+  **Risks and decisions**
+
+  - Control-plane facts never mutate a project. Only the existing home workflow may author
+    canonical project facts, and a remote committed result must cite the admitted resulting head.
+    A receipt records the head the home actually observed; it does not rewrite the caller's
+    expected head or imply success.
+  - Relay delivery, workflow execution, and outcome publication cannot be atomic. Exact request,
+    receipt, saga, and outcome identities therefore form separate durable boundaries. Unknown
+    canonical or runtime truth remains repairable and never becomes a fabricated terminal result.
+  - The local API and storage schemas are still unshipped clean-sheet contracts. They may be
+    completed in place without compatibility scaffolding, version churn, or accessor layers.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely
+  from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any
+  other marker. The task and its related subsections should no longer appear in the plan file at
+  all. The plan file should not have any sort of "Done" section. Then append a new entry to the
+  completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to
+     preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update
+  those. If new future work items were discovered, add them. If the plan file or completed file is
+  outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
+  other changes.

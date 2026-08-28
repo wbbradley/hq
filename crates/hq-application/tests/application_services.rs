@@ -13,9 +13,10 @@ use hq_application::{
     ApplicationErrorCode, ApplicationPorts, AuthoritativeSnapshot, CommitFacts, ConfigureRelays,
     DomainSnapshot, EffectOutcome, EffectRequest, FactMutation, FactPlan, InspectResource,
     MutationAttempt, MutationDecision, MutationOutcome, MutationReceipt, ObserveRevisions,
-    PreparedSubscription, PublishWake, QueryDomain, RelayAccess, RelayAuthentication,
-    RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult, SessionControl,
-    SubscriptionRequest, SubscriptionTopic, SynchronizationRequest, WakeDisposition,
+    PreparedSubscription, ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain,
+    RelayAccess, RelayAuthentication, RelayConfiguration, ResourceInspectionRequest,
+    ResourceInspectionResult, SessionControl, SubscriptionRequest, SubscriptionTopic,
+    SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{
     BoundedSet, BoundedText, CausalReferences, CommandDigest, CommandId, DomainError,
@@ -135,6 +136,17 @@ impl InspectResource for ScriptedPorts {
         request: &EffectRequest<ResourceInspectionRequest>,
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
         Ok(EffectOutcome::Uncertain(request.operation_id))
+    }
+}
+
+impl hq_application::ControlProjects for ScriptedPorts {
+    fn control_project(
+        &self,
+        _request: ProjectCommandRequest,
+    ) -> Result<ProjectCommandOutcome, ApplicationError> {
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable,
+        ))
     }
 }
 

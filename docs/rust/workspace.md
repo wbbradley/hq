@@ -79,7 +79,8 @@ those ports; application services never import their concrete types.
 
 `hq-local-api` owns the independently versioned local API v1 DTOs, canonical JSON codec, bounded
 length framing, negotiation values, exact mutation-plan replay representation, lifecycle/domain/
-effect request families, client snapshot/page values, typed errors, and revision-only invalidations
+effect and project-control request families, structured remote-command snapshots, typed errors, and
+revision-only invalidations
 specified in `docs/protocol/local-api-v1.md`. Its unsigned semantic-plan bridge reuses the canonical
 protocol owner's exhaustive semantic spelling, but the bytes carry no authority and must still pass
 ordinary node signing and canonical verification. No local API production source imports storage.
@@ -96,7 +97,8 @@ crates.
 The same crate owns one transport-independent reconnecting client state machine for the CLI, TUI,
 and harness launchers. A narrow adapter performs only connect, complete-frame write, and idempotent
 close operations; the pure machine emits generation-scoped actions and deterministic capped
-backoff delays. It renegotiates every connection, replays retained mutation frames byte-for-byte,
+backoff delays. It renegotiates every connection, replays retained mutation and project-command
+frames byte-for-byte,
 reports lost ordinary requests without replaying them, derives a fresh subscription registration
 per server session, and treats revision notices only as wakes for complete authoritative refreshes.
 All retained mutation and completed-identity state is explicitly bounded.

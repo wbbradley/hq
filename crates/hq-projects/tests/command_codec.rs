@@ -4,10 +4,10 @@
 
 use std::num::NonZeroU64;
 
-use hq_application::ProjectCommandAction;
+use hq_application::{ProjectCommandAction, ProjectCommandRequest};
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, BoundedText, CommandDigest, CommandId,
-    ContentText, DispatchId, ErrorCode, FactId, InstallationId, MessageId, ProjectId,
+    ContentText, DispatchId, ErrorCode, FactId, InstallationId, MessageId, OperationId, ProjectId,
     ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator,
     ResourceScheme, RuntimeObservation, ThreadId, Timestamp,
 };
@@ -15,6 +15,7 @@ use hq_projects::{
     CanonicalProjectMutation, CanonicalProjectMutationAction, PendingProjectInput,
     decode_canonical_project_mutation, decode_project_command_action,
     encode_canonical_project_mutation, encode_project_command_action,
+    project_command_request_digest,
 };
 
 fn locator(path: &str) -> ResourceLocator {
@@ -60,6 +61,34 @@ fn unknown_version_and_noncanonical_json_are_rejected() {
     )
     .expect("bounded noncanonical body");
     assert!(decode_project_command_action(&noncanonical).is_err());
+}
+
+#[test]
+fn request_digest_binds_every_envelope_field_and_canonical_action_body() {
+    let request = ProjectCommandRequest {
+        command_id: CommandId::from_bytes([60; 32]),
+        operation_id: OperationId::from_bytes([61; 32]),
+        request_digest: CommandDigest::from_bytes([0; 32]),
+        account_id: AccountId::from_bytes([62; 32]),
+        project_id: ProjectId::from_bytes([63; 32]),
+        home: InstallationId::from_bytes([64; 32]),
+        expected_head: FactId::from_bytes([65; 32]),
+        issued_at: Timestamp::from_unix_millis(66),
+        action: ProjectCommandAction::Open,
+    };
+    let digest = project_command_request_digest(&request).expect("digest");
+    let mut changed = request.clone();
+    changed.action = ProjectCommandAction::Close { force: false };
+    assert_ne!(
+        project_command_request_digest(&changed).expect("changed action digest"),
+        digest
+    );
+    changed = request;
+    changed.expected_head = FactId::from_bytes([67; 32]);
+    assert_ne!(
+        project_command_request_digest(&changed).expect("changed head digest"),
+        digest
+    );
 }
 
 #[test]

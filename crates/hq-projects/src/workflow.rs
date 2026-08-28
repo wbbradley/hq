@@ -405,12 +405,14 @@ where
                 return Ok(ProjectCommandOutcome::Rejected {
                     operation_id,
                     error: error(ErrorCategory::Conflict, "project_command_identity_conflict"),
+                    runtime: None,
                 });
             }
             BeginSagaOutcome::ProjectBusy => {
                 return Ok(ProjectCommandOutcome::Rejected {
                     operation_id,
                     error: error(ErrorCategory::Conflict, "project_command_in_progress"),
+                    runtime: None,
                 });
             }
         };
@@ -2512,10 +2514,12 @@ fn terminal_outcome(record: &ProjectSagaRecord) -> Option<ProjectCommandOutcome>
         ProjectSagaState::Completed { project_head } => Some(ProjectCommandOutcome::Completed {
             operation_id: record.operation_id,
             project_head: *project_head,
+            runtime: reported_runtime(record),
         }),
         ProjectSagaState::Rejected(error) => Some(ProjectCommandOutcome::Rejected {
             operation_id: record.operation_id,
             error: error.clone(),
+            runtime: reported_runtime(record),
         }),
         ProjectSagaState::Running(_) | ProjectSagaState::Reconcilable { .. } => None,
     }
@@ -2535,11 +2539,24 @@ fn progress_outcome(record: &ProjectSagaRecord) -> ProjectCommandOutcome {
         ProjectSagaState::Completed { project_head } => ProjectCommandOutcome::Completed {
             operation_id: record.operation_id,
             project_head: *project_head,
+            runtime: reported_runtime(record),
         },
         ProjectSagaState::Rejected(error) => ProjectCommandOutcome::Rejected {
             operation_id: record.operation_id,
             error: error.clone(),
+            runtime: reported_runtime(record),
         },
+    }
+}
+
+fn reported_runtime(record: &ProjectSagaRecord) -> Option<RuntimeObservation> {
+    match &record.runtime_effect {
+        SagaEffectState::Accepted => Some(RuntimeObservation::Succeeded),
+        SagaEffectState::Rejected(error) => Some(RuntimeObservation::Failed(error.code().clone())),
+        SagaEffectState::Uncertain(error) => {
+            Some(RuntimeObservation::Uncertain(error.code().clone()))
+        }
+        SagaEffectState::NotStarted | SagaEffectState::Pending => None,
     }
 }
 

@@ -4,10 +4,10 @@ use std::{error::Error, fmt, num::NonZeroUsize};
 
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts, CommitFacts,
-    ConfigureRelays, ControlHarness, EffectOutcome, EffectRequest, FactMutation, InspectResource,
-    MutationAttempt, ObserveRevisions, PublishWake, QueryDomain, RelayConfiguration,
-    ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest,
-    SynchronizationRequest, WakeDisposition,
+    ConfigureRelays, ControlHarness, ControlProjects, EffectOutcome, EffectRequest, FactMutation,
+    InspectResource, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
+    ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, ResourceInspectionRequest,
+    ResourceInspectionResult, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{Page, PageCursor, Revision};
 use hq_local_api::RevisionHub;
@@ -229,6 +229,15 @@ impl<R, H, P: InspectResource> InspectResource for NodeApplicationPorts<'_, R, H
     }
 }
 
+impl<R, H, P: ControlProjects> ControlProjects for NodeApplicationPorts<'_, R, H, P> {
+    fn control_project(
+        &self,
+        request: ProjectCommandRequest,
+    ) -> Result<ProjectCommandOutcome, ApplicationError> {
+        self.project.control_project(request)
+    }
+}
+
 impl<R, H, P> ObserveRevisions for NodeApplicationPorts<'_, R, H, P> {
     fn register_subscription(&self, request: &SubscriptionRequest) -> Result<(), ApplicationError> {
         self.revisions.register_subscription(request)
@@ -253,7 +262,7 @@ impl<R, H, P> ApplicationPorts for NodeApplicationPorts<'_, R, H, P>
 where
     R: PublishWake + ConfigureRelays,
     H: ControlHarness,
-    P: InspectResource,
+    P: InspectResource + ControlProjects,
 {
 }
 
@@ -342,7 +351,7 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
     where
         R: PublishWake + ConfigureRelays,
         H: ControlHarness,
-        P: InspectResource,
+        P: InspectResource + ControlProjects,
     {
         let foundation = self.foundation.as_ref()?;
         let components = self.components.as_ref()?;

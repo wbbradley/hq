@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
-    AgentId, AssignmentBinding, AssignmentIntent, AuthorityRole, CommandDigest, CommandId,
-    ContentText, DispatchId, ErrorCode, Fact, FactId, FactScope, InitialProjectState,
-    InstallationId, MailboxAddress, MailboxId, MessageContent, MessageId, ProjectId,
-    ProjectResource, RemoteCommandResult, ResourceId, ResourceLocator, ResourceScheme,
-    RuntimeObservation, SemanticPayload, ShortText, ThreadId,
+    AccountId, AgentId, AssignmentBinding, AssignmentIntent, AuthorityRole, CommandDigest,
+    CommandId, ContentText, DispatchId, ErrorCode, Fact, FactId, FactScope, InitialProjectState,
+    InstallationId, MailboxAddress, MailboxId, MessageContent, MessageId, OperationCorrelation,
+    ProjectId, ProjectResource, RemoteCommandResult, ResourceId, ResourceLocator, ResourceScheme,
+    RuntimeObservation, SemanticPayload, ShortText, ThreadId, Timestamp,
 };
 
 use crate::{
@@ -167,11 +167,23 @@ pub enum RemoteCommandStage {
     Queued,
     /// The immutable home acknowledged receipt at an observed head.
     Received {
+        /// Exact home-authored receipt fact.
+        receipt_fact: FactId,
         /// Canonical project head observed by the home.
         received_head: FactId,
+        /// Semantic time recorded by the receipt.
+        received_at: Timestamp,
     },
     /// The home reported a terminal canonical or rejected outcome.
     Terminal {
+        /// Exact home-authored receipt fact.
+        receipt_fact: FactId,
+        /// Canonical project head observed before execution.
+        received_head: FactId,
+        /// Semantic time recorded by the receipt.
+        received_at: Timestamp,
+        /// Exact home-authored outcome fact.
+        outcome_fact: FactId,
         /// Definite canonical commit or typed rejection.
         result: RemoteCommandResult,
         /// Runtime observation, including explicit uncertainty.
@@ -184,12 +196,24 @@ pub enum RemoteCommandStage {
 /// One stable remote command view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteCommandView {
+    /// Human account carrying the control record.
+    pub account_id: AccountId,
     /// Exact request digest.
     pub digest: CommandDigest,
     /// Target project.
     pub project_id: ProjectId,
     /// Expected canonical project head.
     pub expected_head: FactId,
+    /// Immutable target project home.
+    pub target_home: InstallationId,
+    /// Stable external operation correlation.
+    pub operation: OperationCorrelation,
+    /// Strict inert command body.
+    pub body: ContentText,
+    /// Semantic request time.
+    pub issued_at: Timestamp,
+    /// Exact active-device-authored request fact.
+    pub request_fact: FactId,
     /// Current control-plane stage.
     pub stage: RemoteCommandStage,
     /// Complete control record support.
@@ -1217,7 +1241,6 @@ fn validate_remote_control(
     match fact.payload() {
         SemanticPayload::RemoteProjectCommandRequested {
             command_id,
-            digest,
             project_id,
             target_home,
             expected_head,
@@ -1232,7 +1255,7 @@ fn validate_remote_control(
             {
                 return Err(invalid(ProjectReason::RemoteCommandConflict));
             }
-            let participants = remote_identity_participants(*command_id, digest, context);
+            let participants = remote_identity_participants(*command_id, context);
             if !participants.is_empty() {
                 return Err((ProjectReason::RemoteCommandConflict, participants));
             }
@@ -1315,13 +1338,24 @@ fn remote_request_parent<'a>(
 
 fn remote_identity_participants(
     command_id: CommandId,
-    digest: &CommandDigest,
     context: &ReductionContext<'_, ProjectReason>,
 ) -> BTreeSet<FactId> {
     let requests = context.facts().facts().filter(|candidate| matches!(candidate.payload(), SemanticPayload::RemoteProjectCommandRequested { command_id: candidate_command, .. } if *candidate_command == command_id)).collect::<Vec<_>>();
-    if requests.iter().any(|request| matches!(request.payload(), SemanticPayload::RemoteProjectCommandRequested { digest: candidate_digest, .. } if candidate_digest != digest)) {
+    if requests.first().is_some_and(|first| {
+        requests
+            .iter()
+            .any(|request| !same_remote_request(first, request))
+    }) {
         requests.into_iter().map(Fact::id).collect()
-    } else { BTreeSet::new() }
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn same_remote_request(first: &Fact, other: &Fact) -> bool {
+    first.payload() == other.payload()
+        && first.scope() == other.scope()
+        && first.authored_at() == other.authored_at()
 }
 
 fn aggregate_keys(fact: &Fact) -> Vec<ProjectAggregateKey> {
@@ -1810,48 +1844,43 @@ fn command_projections(
     groups
         .into_iter()
         .filter_map(|(command_id, facts)| {
-            let request = facts.iter().find_map(|fact| match fact.payload() {
-                SemanticPayload::RemoteProjectCommandRequested {
-                    digest,
-                    project_id,
-                    expected_head,
-                    ..
-                } => Some((*fact, *digest, *project_id, *expected_head)),
-                _ => None,
-            })?;
-            let receipts = facts
-                .iter()
-                .filter_map(|fact| match fact.payload() {
-                    SemanticPayload::RemoteProjectCommandReceipt { received_head, .. } => {
-                        Some((*fact, *received_head))
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let outcomes = facts
-                .iter()
-                .filter_map(|fact| match fact.payload() {
-                    SemanticPayload::RemoteProjectCommandOutcome {
-                        result, runtime, ..
-                    } => Some((*fact, result.clone(), runtime.clone())),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
+            let receipts = remote_receipts(&facts);
+            let outcomes = remote_outcomes(&facts);
+            let cited_request = receipts
+                .first()
+                .and_then(|(fact, ..)| fact.causal().authority(AuthorityRole::Request))
+                .or_else(|| {
+                    outcomes
+                        .first()
+                        .and_then(|(fact, ..)| fact.causal().authority(AuthorityRole::Request))
+                });
+            let request = remote_request_projection(&facts, cited_request)?;
             let stage = if outcomes.len() > 1
                 && outcomes
                     .windows(2)
                     .any(|pair| pair[0].1 != pair[1].1 || pair[0].2 != pair[1].2)
-                || receipts.len() > 1 && receipts.windows(2).any(|pair| pair[0].1 != pair[1].1)
+                || receipts.len() > 1
+                    && receipts
+                        .windows(2)
+                        .any(|pair| pair[0].1 != pair[1].1 || pair[0].2 != pair[1].2)
             {
                 RemoteCommandStage::Conflicted
-            } else if let Some((_, result, runtime)) = outcomes.first() {
+            } else if let (Some((outcome, result, runtime)), Some((receipt, head, received_at))) =
+                (outcomes.first(), receipts.first())
+            {
                 RemoteCommandStage::Terminal {
+                    receipt_fact: receipt.id(),
+                    received_head: *head,
+                    received_at: *received_at,
+                    outcome_fact: outcome.id(),
                     result: result.clone(),
                     runtime: runtime.clone(),
                 }
-            } else if let Some((_, received_head)) = receipts.first() {
+            } else if let Some((receipt, received_head, received_at)) = receipts.first() {
                 RemoteCommandStage::Received {
+                    receipt_fact: receipt.id(),
                     received_head: *received_head,
+                    received_at: *received_at,
                 }
             } else {
                 RemoteCommandStage::Queued
@@ -1859,14 +1888,93 @@ fn command_projections(
             Some(ProjectionContribution::new(
                 ProjectProjectionKey::Command(command_id),
                 ProjectProjection::Command(Box::new(RemoteCommandView {
-                    digest: request.1,
-                    project_id: request.2,
-                    expected_head: request.3,
+                    account_id: request.account_id,
+                    digest: request.digest,
+                    project_id: request.project_id,
+                    target_home: request.target_home,
+                    expected_head: request.expected_head,
+                    operation: request.operation,
+                    body: request.body,
+                    issued_at: request.issued_at,
+                    request_fact: request.fact_id,
                     stage,
                     support: facts.iter().map(|fact| fact.id()).collect(),
                 })),
                 facts.iter().map(|fact| fact.id()),
             ))
+        })
+        .collect()
+}
+
+struct RemoteRequestProjection {
+    fact_id: FactId,
+    account_id: AccountId,
+    digest: CommandDigest,
+    project_id: ProjectId,
+    target_home: InstallationId,
+    expected_head: FactId,
+    operation: OperationCorrelation,
+    body: ContentText,
+    issued_at: Timestamp,
+}
+
+fn remote_request_projection(
+    facts: &[&Fact],
+    cited_request: Option<FactId>,
+) -> Option<RemoteRequestProjection> {
+    facts.iter().find_map(|fact| match fact.payload() {
+        SemanticPayload::RemoteProjectCommandRequested {
+            digest,
+            project_id,
+            target_home,
+            expected_head,
+            operation,
+            body,
+            ..
+        } if cited_request.is_none_or(|request| request == fact.id()) => {
+            let FactScope::RemoteControl { account_id, .. } = fact.scope() else {
+                return None;
+            };
+            Some(RemoteRequestProjection {
+                fact_id: fact.id(),
+                account_id: *account_id,
+                digest: *digest,
+                project_id: *project_id,
+                target_home: *target_home,
+                expected_head: *expected_head,
+                operation: operation.clone(),
+                body: body.clone(),
+                issued_at: fact.authored_at(),
+            })
+        }
+        _ => None,
+    })
+}
+
+fn remote_receipts<'a>(facts: &'a [&'a Fact]) -> Vec<(&'a Fact, FactId, Timestamp)> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact.payload() {
+            SemanticPayload::RemoteProjectCommandReceipt {
+                received_head,
+                received_at,
+                ..
+            } => Some((*fact, *received_head, *received_at)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn remote_outcomes<'a>(
+    facts: &'a [&'a Fact],
+) -> Vec<(&'a Fact, RemoteCommandResult, Option<RuntimeObservation>)> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact.payload() {
+            SemanticPayload::RemoteProjectCommandOutcome {
+                result, runtime, ..
+            } => Some((*fact, result.clone(), runtime.clone())),
+            _ => None,
         })
         .collect()
 }

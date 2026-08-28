@@ -227,7 +227,8 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
 - Negotiation chooses the highest common nonzero version, reports disjoint ranges explicitly, and
   carries bounded diagnostic build metadata without using build identity as authority.
 - Every lifecycle, query, fact mutation, relay/sync effect, neutral agent-session effect, resource
-  inspection, subscription, response, error, and invalidation family round-trips through the one v1
+  inspection, typed project command/progress, subscription, response, error, and invalidation
+  family round-trips through the one v1
   codec; decoded values reapply all constructor bounds.
 - Every one of the 48 semantic fact families round-trips through the unsigned local planning bridge.
   The exact mutation digest binds canonical plan bytes plus auxiliary randomness; changing either
@@ -246,8 +247,9 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   registration, 10,000 coalesced slow-reader publishes, and concurrent publish/poll/cancel without
   blocking or growing more than one pending wake per subscriber.
 - Reconnecting-client contracts cover negotiation on every generation, stale-socket rejection,
-  capped deterministic backoff, terminal version incompatibility, byte-identical mutation replay
-  across ambiguous pre/post-commit response loss, changed-command rejection, bounded completed
+  capped deterministic backoff, terminal version incompatibility, byte-identical mutation and
+  project-command replay across ambiguous pre/post-commit response loss, changed-command rejection,
+  bounded completed
   identity history, correlated ordinary response/loss reporting, and clean lifecycle restart.
 - Client subscription contracts cover per-server-session registration identities, early and
   coalesced invalidations, acknowledgement snapshots as fresh bases, repeated full refresh while a

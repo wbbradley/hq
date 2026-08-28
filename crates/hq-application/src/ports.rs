@@ -329,6 +329,7 @@ pub trait ApplicationPorts:
     + PublishWake
     + ConfigureRelays
     + ControlHarness
+    + crate::ControlProjects
     + InspectResource
     + ObserveRevisions
 {

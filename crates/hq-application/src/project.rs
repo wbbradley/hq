@@ -3,7 +3,7 @@
 use hq_domain::{
     AccountId, AgentId, CommandDigest, CommandId, ContentText, DomainError, FactId, InstallationId,
     MailboxId, OperationId, ProjectId, ProjectResource, ProviderId, ProviderSessionId, ResourceId,
-    ResourceLocator, ShortText, ThreadId, Timestamp,
+    ResourceLocator, RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
 
 use crate::ApplicationError;
@@ -201,6 +201,8 @@ pub enum ProjectCommandOutcome {
         operation_id: OperationId,
         /// Resulting canonical project head.
         project_head: FactId,
+        /// Definite or uncertain runtime truth observed while reaching the result.
+        runtime: Option<RuntimeObservation>,
     },
     /// The command was definitely rejected without an unknown external effect.
     Rejected {
@@ -208,6 +210,8 @@ pub enum ProjectCommandOutcome {
         operation_id: OperationId,
         /// Stable typed reason.
         error: DomainError,
+        /// Definite or uncertain runtime truth observed before rejection.
+        runtime: Option<RuntimeObservation>,
     },
     /// External truth is unknown and the exact operation remains recoverable.
     Reconcilable {

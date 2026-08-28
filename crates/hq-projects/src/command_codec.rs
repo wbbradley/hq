@@ -3,7 +3,7 @@
 use std::{error::Error, fmt, num::NonZeroU64};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use hq_application::{ProjectCommandAction, WorktreeProvisioningRequest};
+use hq_application::{ProjectCommandAction, ProjectCommandRequest, WorktreeProvisioningRequest};
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText,
     CommandDigest, CommandId, ContentText, DispatchId, FactId, InstallationId, MessageId,
@@ -12,6 +12,7 @@ use hq_domain::{
     ThreadId, Timestamp,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{CanonicalProjectMutation, CanonicalProjectMutationAction, PendingProjectInput};
 
@@ -69,6 +70,30 @@ pub fn decode_project_command_action(
         return Err(ProjectCommandCodecError::Invalid);
     }
     ProjectCommandAction::try_from(wire)
+}
+
+/// Derives the exact request digest used by local and remote project-command intake.
+pub fn project_command_request_digest(
+    request: &ProjectCommandRequest,
+) -> Result<CommandDigest, ProjectCommandCodecError> {
+    let body = encode_project_command_action(&request.action)?;
+    let mut digest = Sha256::new();
+    digest.update(b"hq-project-command-request-v1\0");
+    digest.update(request.command_id.as_bytes());
+    digest.update(request.operation_id.as_bytes());
+    digest.update(request.account_id.as_bytes());
+    digest.update(request.project_id.as_bytes());
+    digest.update(request.home.as_bytes());
+    digest.update(request.expected_head.as_bytes());
+    digest.update(request.issued_at.as_unix_millis().to_be_bytes());
+    let body_bytes = body.as_str().as_bytes();
+    digest.update(
+        u32::try_from(body_bytes.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(body_bytes);
+    Ok(CommandDigest::from_bytes(digest.finalize().into()))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

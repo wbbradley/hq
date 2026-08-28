@@ -54,16 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[projects/high] Implement durable remote project command routing and local API progress** —
-  Extend `hq-local-api` with the typed project request/outcome and authoritative checkpoint view.
-  Non-home devices author only strict `RemoteProjectCommandRequested` facts; the immutable home
-  derives typed receipt parents from one serialized snapshot, executes the same workflow, and
-  authors exactly one committed, rejected, or explicitly uncertain result. Validate digest/body
-  agreement and expected heads, reject unknown codec versions, and expose queued/received/terminal
-  progress without reducer side effects. Test offline routing, competing devices, duplicate and
-  changed command identities, stale receipt/result, restart repair, and complete control-plane
-  attribution.
-
 - **[projects/high] Implement recoverable Git worktree provisioning and compose project workers** —
   Add a separate bounded mutating Git capability with stable lookup/create operations, short-lived
   repository serialization, destination reservation, exact worktree/branch reconciliation,

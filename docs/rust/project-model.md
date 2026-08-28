@@ -79,13 +79,21 @@ lifecycle, claims, assignment, or dispatch authority.
 ## Remote control
 
 Remote project commands occupy a disjoint control projection. An active-device request is queued
-and records its digest, target, operation, and expected head, but does not mutate the project. A
+and records its complete strict action body, account, digest, target home, operation, expected head,
+issue time, and exact request fact, but does not mutate the project. A
 home-signed receipt records the canonical head observed by the home. A terminal outcome is either a
 typed rejection or a commit citing an admitted canonical project head, plus an optional definite or
 uncertain runtime observation. Unequal values for one stable command identity expose a conflict.
 
 Only home-signed canonical project facts advance the project head. Queueing, relay acceptance,
 receipt, runtime success, and remote outcome records never substitute for that authority.
+
+Non-home submission and home recovery are separate durable boundaries. The requester authors only
+the inert request. The home authors the receipt from a serialized snapshot, reconstructs and
+revalidates the original typed request, executes the ordinary project saga, and publishes one
+terminal control outcome only after definite workflow completion or rejection. Unknown receipt,
+workflow, runtime, or outcome truth is retried by exact identity. Duplicate equal facts normalize;
+changed request bodies, receipts, or results conflict instead of being selected by arrival time.
 
 ## Deterministic run format
 

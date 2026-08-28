@@ -4,25 +4,29 @@ use crate::protocol::v1::{
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, ConversationEntryDto,
     ConversationKeyDto, ConversationPageDto, ConversationPageRequest, DomainErrorDto,
     EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse, Id32, InvalidationTopic,
-    MutationAttemptDto, MutationOutcomeDto, MutationRequest, RelayAccessDto,
-    RelayAuthenticationDto, RelayConfigurationDto, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, SessionControlDto,
-    SnapshotItem, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
+    MutationAttemptDto, MutationOutcomeDto, MutationRequest, ProjectCommandActionDto,
+    ProjectCommandOutcomeDto, ProjectCommandRequestDto, ProjectCommandStageDto, ProjectResourceDto,
+    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RemoteCommandProgressDto,
+    RemoteCommandResultDto, ResourceHealthDto, ResourceInspectionRequestDto,
+    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, RuntimeObservationDto,
+    SessionControlDto, SnapshotItem, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorClass,
     AuthoritativeSnapshot, ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState,
     ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage,
     ConversationEntry, ConversationKey, EffectOutcome, EffectRequest, FactMutation,
-    MutationAttempt, MutationDecision, MutationOutcome, MutationReceipt, RelayAccess,
+    MutationAttempt, MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, RelayAccess,
     RelayAuthentication, RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult,
     SessionControl, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    WorktreeProvisioningRequest,
 };
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, MailboxAddress,
-    OperationId, Page, PageCursor, ProjectId, ProviderId, ProviderSessionId,
-    RESOURCE_LOCATOR_MAX_BYTES, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme,
-    Revision, Timestamp,
+    MailboxId, OperationId, Page, PageCursor, ProjectId, ProjectResource, ProviderId,
+    ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult, ResourceHealth, ResourceId,
+    ResourceLocator, ResourceScheme, Revision, RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
 
 /// Converts one complete normalized application snapshot into bounded local API v1 items.
@@ -289,19 +293,29 @@ pub fn snapshot_to_v1(
             ClientProjection::RemoteCommand {
                 command_id,
                 request_digest,
+                account_id,
                 project_id,
+                target_home,
+                expected_head,
+                operation,
+                body,
+                issued_at,
+                request_fact,
                 stage,
             } => SnapshotItem::RemoteCommand {
                 command_id: id32(command_id.as_bytes()),
                 request_digest: id32(request_digest.as_bytes()),
+                account_id: id32(account_id.as_bytes()),
                 project_id: id32(project_id.as_bytes()),
-                stage: match stage {
-                    ClientRemoteCommandStage::Queued => "queued",
-                    ClientRemoteCommandStage::Received => "received",
-                    ClientRemoteCommandStage::Terminal => "terminal",
-                    ClientRemoteCommandStage::Conflicted => "conflicted",
-                }
-                .to_owned(),
+                target_home: id32(target_home.as_bytes()),
+                expected_head: id32(expected_head.as_bytes()),
+                operation_provider: operation.provider().as_str().to_owned(),
+                operation_session: operation.session().as_str().to_owned(),
+                operation_id: id32(operation.operation().as_bytes()),
+                body: body.as_str().to_owned(),
+                issued_at_unix_millis: issued_at.as_unix_millis(),
+                request_fact: id32(request_fact.as_bytes()),
+                progress: Box::new(remote_progress_to_v1(&stage)),
             },
         })
         .collect();
@@ -497,6 +511,258 @@ pub(crate) fn resource_effect_to_v1(
             .map(|details| details.as_str().to_owned()),
         checked_at_unix_millis: result.checked_at.as_unix_millis(),
     })
+}
+
+/// Converts one strict local API request into the transport-independent command value.
+pub fn project_command_from_v1(
+    request: ProjectCommandRequestDto,
+) -> Result<ProjectCommandRequest, ValueError> {
+    Ok(ProjectCommandRequest {
+        command_id: CommandId::from_bytes(request.command_id.bytes()),
+        operation_id: OperationId::from_bytes(request.operation_id.bytes()),
+        request_digest: CommandDigest::from_bytes(request.request_digest.bytes()),
+        account_id: hq_domain::AccountId::from_bytes(request.account_id.bytes()),
+        project_id: ProjectId::from_bytes(request.project_id.bytes()),
+        home: hq_domain::InstallationId::from_bytes(request.home.bytes()),
+        expected_head: hq_domain::FactId::from_bytes(request.expected_head.bytes()),
+        issued_at: Timestamp::from_unix_millis(request.issued_at_unix_millis),
+        action: project_action_from_v1(request.action)?,
+    })
+}
+
+/// Converts one typed project result into its local API representation.
+pub fn project_command_to_v1(outcome: &ProjectCommandOutcome) -> ProjectCommandOutcomeDto {
+    match outcome {
+        ProjectCommandOutcome::Accepted {
+            operation_id,
+            stage,
+        } => ProjectCommandOutcomeDto::Accepted {
+            operation_id: id32(operation_id.as_bytes()),
+            stage: project_stage_to_v1(*stage),
+        },
+        ProjectCommandOutcome::Running {
+            operation_id,
+            stage,
+        } => ProjectCommandOutcomeDto::Running {
+            operation_id: id32(operation_id.as_bytes()),
+            stage: project_stage_to_v1(*stage),
+        },
+        ProjectCommandOutcome::Completed {
+            operation_id,
+            project_head,
+            runtime,
+        } => ProjectCommandOutcomeDto::Completed {
+            operation_id: id32(operation_id.as_bytes()),
+            project_head: id32(project_head.as_bytes()),
+            runtime: runtime.as_ref().map(runtime_to_v1),
+        },
+        ProjectCommandOutcome::Rejected {
+            operation_id,
+            error,
+            runtime,
+        } => ProjectCommandOutcomeDto::Rejected {
+            operation_id: id32(operation_id.as_bytes()),
+            error: domain_error_to_v1(error),
+            runtime: runtime.as_ref().map(runtime_to_v1),
+        },
+        ProjectCommandOutcome::Reconcilable {
+            operation_id,
+            stage,
+            error,
+        } => ProjectCommandOutcomeDto::Reconcilable {
+            operation_id: id32(operation_id.as_bytes()),
+            stage: project_stage_to_v1(*stage),
+            error: domain_error_to_v1(error),
+        },
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn project_action_from_v1(
+    action: ProjectCommandActionDto,
+) -> Result<ProjectCommandAction, ValueError> {
+    Ok(match action {
+        ProjectCommandActionDto::Open => ProjectCommandAction::Open,
+        ProjectCommandActionDto::Activate {
+            agent_id,
+            provider,
+            resume_session,
+            resume_thread,
+            launch_directory,
+        } => ProjectCommandAction::Activate {
+            agent_id: AgentId::from_bytes(agent_id.bytes()),
+            provider: ProviderId::new(provider).map_err(|_| ValueError::InvalidText)?,
+            resume_session: resume_session
+                .map(ProviderSessionId::new)
+                .transpose()
+                .map_err(|_| ValueError::InvalidText)?,
+            resume_thread: resume_thread.map(|value| ThreadId::from_bytes(value.bytes())),
+            launch_directory: locator_from_v1(launch_directory)?,
+        },
+        ProjectCommandActionDto::DispatchPending => ProjectCommandAction::DispatchPending,
+        ProjectCommandActionDto::Close { force } => ProjectCommandAction::Close { force },
+        ProjectCommandActionDto::SetArchived { archived } => {
+            ProjectCommandAction::SetArchived { archived }
+        }
+        ProjectCommandActionDto::Handoff {
+            agent_id,
+            provider,
+            resume_session,
+            thread_id,
+            launch_directory,
+            force_takeover,
+        } => ProjectCommandAction::Handoff {
+            agent_id: AgentId::from_bytes(agent_id.bytes()),
+            provider: ProviderId::new(provider).map_err(|_| ValueError::InvalidText)?,
+            resume_session: resume_session
+                .map(ProviderSessionId::new)
+                .transpose()
+                .map_err(|_| ValueError::InvalidText)?,
+            thread_id: ThreadId::from_bytes(thread_id.bytes()),
+            launch_directory: locator_from_v1(launch_directory)?,
+            force_takeover,
+        },
+        ProjectCommandActionDto::RetireAgent { agent_id, force } => {
+            ProjectCommandAction::RetireAgent {
+                agent_id: AgentId::from_bytes(agent_id.bytes()),
+                force,
+            }
+        }
+        ProjectCommandActionDto::AddResource {
+            resource,
+            make_primary,
+        } => ProjectCommandAction::AddResource {
+            resource: project_resource_from_v1(resource)?,
+            make_primary,
+        },
+        ProjectCommandActionDto::RemoveResource { resource_id, force } => {
+            ProjectCommandAction::RemoveResource {
+                resource_id: ResourceId::from_bytes(resource_id.bytes()),
+                force,
+            }
+        }
+        ProjectCommandActionDto::ReplaceResource {
+            old_resource_id,
+            new_resource,
+        } => ProjectCommandAction::ReplaceResource {
+            old_resource_id: ResourceId::from_bytes(old_resource_id.bytes()),
+            new_resource: project_resource_from_v1(new_resource)?,
+        },
+        ProjectCommandActionDto::ProvisionWorktree(request) => {
+            ProjectCommandAction::ProvisionWorktree(WorktreeProvisioningRequest {
+                mailbox_id: MailboxId::from_bytes(request.mailbox_id.bytes()),
+                project_name: ShortText::new(request.project_name)
+                    .map_err(|_| ValueError::InvalidText)?,
+                brief: request
+                    .brief
+                    .map(hq_domain::ContentText::new)
+                    .transpose()
+                    .map_err(|_| ValueError::InvalidText)?,
+                source: locator_from_v1(request.source)?,
+                destination: locator_from_v1(request.destination)?,
+                branch: ShortText::new(request.branch).map_err(|_| ValueError::InvalidText)?,
+                create_branch: request.create_branch,
+            })
+        }
+    })
+}
+
+fn project_resource_from_v1(resource: ProjectResourceDto) -> Result<ProjectResource, ValueError> {
+    Ok(ProjectResource {
+        resource_id: ResourceId::from_bytes(resource.resource_id.bytes()),
+        display_locator: locator_from_v1(resource.display_locator)?,
+        canonical_locator: locator_from_v1(resource.canonical_locator)?,
+        health: resource_health_from_v1(resource.health),
+    })
+}
+
+const fn resource_health_from_v1(health: ResourceHealthDto) -> ResourceHealth {
+    match health {
+        ResourceHealthDto::Unknown => ResourceHealth::Unknown,
+        ResourceHealthDto::Healthy => ResourceHealth::Healthy,
+        ResourceHealthDto::Degraded => ResourceHealth::Degraded,
+        ResourceHealthDto::Unavailable => ResourceHealth::Unavailable,
+    }
+}
+
+fn runtime_to_v1(runtime: &RuntimeObservation) -> RuntimeObservationDto {
+    match runtime {
+        RuntimeObservation::Succeeded => RuntimeObservationDto::Succeeded,
+        RuntimeObservation::Failed(code) => RuntimeObservationDto::Failed(code.as_str().to_owned()),
+        RuntimeObservation::Uncertain(code) => {
+            RuntimeObservationDto::Uncertain(code.as_str().to_owned())
+        }
+    }
+}
+
+fn remote_progress_to_v1(stage: &ClientRemoteCommandStage) -> RemoteCommandProgressDto {
+    match stage {
+        ClientRemoteCommandStage::Queued => RemoteCommandProgressDto::Queued,
+        ClientRemoteCommandStage::Received {
+            receipt_fact,
+            received_head,
+            received_at,
+        } => RemoteCommandProgressDto::Received {
+            receipt_fact: id32(receipt_fact.as_bytes()),
+            received_head: id32(received_head.as_bytes()),
+            received_at_unix_millis: received_at.as_unix_millis(),
+        },
+        ClientRemoteCommandStage::Terminal {
+            receipt_fact,
+            received_head,
+            received_at,
+            outcome_fact,
+            result,
+            runtime,
+        } => RemoteCommandProgressDto::Terminal {
+            receipt_fact: id32(receipt_fact.as_bytes()),
+            received_head: id32(received_head.as_bytes()),
+            received_at_unix_millis: received_at.as_unix_millis(),
+            outcome_fact: id32(outcome_fact.as_bytes()),
+            result: match result {
+                RemoteCommandResult::Committed(head) => {
+                    RemoteCommandResultDto::Committed(id32(head.as_bytes()))
+                }
+                RemoteCommandResult::Rejected(code) => {
+                    RemoteCommandResultDto::Rejected(code.as_str().to_owned())
+                }
+            },
+            runtime: runtime.as_ref().map(runtime_to_v1),
+        },
+        ClientRemoteCommandStage::Conflicted => RemoteCommandProgressDto::Conflicted,
+    }
+}
+
+const fn project_stage_to_v1(stage: ProjectCommandStage) -> ProjectCommandStageDto {
+    match stage {
+        ProjectCommandStage::Accepted => ProjectCommandStageDto::Accepted,
+        ProjectCommandStage::AwaitingHome => ProjectCommandStageDto::AwaitingHome,
+        ProjectCommandStage::ReceivedAtHome => ProjectCommandStageDto::ReceivedAtHome,
+        ProjectCommandStage::ValidatingResources => ProjectCommandStageDto::ValidatingResources,
+        ProjectCommandStage::Opening => ProjectCommandStageDto::Opening,
+        ProjectCommandStage::ConfiguringAssignment => ProjectCommandStageDto::ConfiguringAssignment,
+        ProjectCommandStage::StartingRuntime => ProjectCommandStageDto::StartingRuntime,
+        ProjectCommandStage::ValidatingLaunchDirectory => {
+            ProjectCommandStageDto::ValidatingLaunchDirectory
+        }
+        ProjectCommandStage::MakingRunnable => ProjectCommandStageDto::MakingRunnable,
+        ProjectCommandStage::DispatchingInputs => ProjectCommandStageDto::DispatchingInputs,
+        ProjectCommandStage::AssessingRelease => ProjectCommandStageDto::AssessingRelease,
+        ProjectCommandStage::QuiescingRuntime => ProjectCommandStageDto::QuiescingRuntime,
+        ProjectCommandStage::EndingAssignment => ProjectCommandStageDto::EndingAssignment,
+        ProjectCommandStage::Closing => ProjectCommandStageDto::Closing,
+        ProjectCommandStage::UpdatingProject => ProjectCommandStageDto::UpdatingProject,
+        ProjectCommandStage::ReservingDestination => ProjectCommandStageDto::ReservingDestination,
+        ProjectCommandStage::ReconcilingGit => ProjectCommandStageDto::ReconcilingGit,
+        ProjectCommandStage::CreatingWorktree => ProjectCommandStageDto::CreatingWorktree,
+        ProjectCommandStage::IdentifyingResource => ProjectCommandStageDto::IdentifyingResource,
+        ProjectCommandStage::CreatingProject => ProjectCommandStageDto::CreatingProject,
+        ProjectCommandStage::Compensating => ProjectCommandStageDto::Compensating,
+        ProjectCommandStage::ReconciliationRequired => {
+            ProjectCommandStageDto::ReconciliationRequired
+        }
+        ProjectCommandStage::Complete => ProjectCommandStageDto::Complete,
+    }
 }
 
 fn effect_from_v1<T, U>(request: &EffectRequestDto<T>, body: U) -> EffectRequest<U> {
