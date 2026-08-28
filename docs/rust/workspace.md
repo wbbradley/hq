@@ -55,7 +55,9 @@ accessor facade or compatibility layer.
 factory configuration use public fields; child ownership, RPC identities, recovery maps, pending
 interactive requests, and mutable session state remain opaque capabilities. Its private synchronous
 JSONL/process implementation adds no async runtime and no Codex DTO or method name crosses into a
-neutral crate.
+neutral crate. Only `hq-node` depends outward on `hq-codex`: the foreground composition root owns
+registration and provider-private launch policy, while projects and managed-session clients cross
+the public-field neutral runtime request and harness contracts.
 
 `hq-resources` implements `docs/path-resources-v1.md`. Passive requests and reports expose public
 fields. The adapter itself remains an opaque capability because it owns injected filesystem and Git
@@ -137,7 +139,9 @@ lifecycle coordination remain in the immediately following node package.
 The node also owns `HarnessStoreAdapter`, the only mapping between neutral supervisor records and
 storage-owned records, plus `HarnessNodeComponent`, which composes the registry, restricted store
 handle, canonical persistence capability, injected clock/token sources, and ordered lifecycle.
-Application harness control cannot obtain a provider session or SQLite handle directly.
+Application harness control cannot obtain a provider session or SQLite handle directly. The
+foreground root supplies the sole production registry containing Codex; restart reconstructs that
+registry after the prior generation has drained and released all child ownership.
 
 ## Supported target matrix
 

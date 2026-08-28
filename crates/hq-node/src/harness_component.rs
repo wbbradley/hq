@@ -82,10 +82,19 @@ impl HarnessNodeComponent {
         store: &Store,
         canonical: Arc<dyn AgentSessionCanonicalPort>,
     ) -> Self {
+        Self::with_registry_and_canonical(store, Arc::new(HarnessRegistry::new()), canonical)
+    }
+
+    /// Composes the foreground supervisor with an already validated provider registry.
+    pub fn with_registry_and_canonical(
+        store: &Store,
+        registry: Arc<HarnessRegistry>,
+        canonical: Arc<dyn AgentSessionCanonicalPort>,
+    ) -> Self {
         Self::new(
             HarnessSupervisorConfig::default(),
             store,
-            Arc::new(HarnessRegistry::new()),
+            registry,
             Arc::new(UnavailableHarnessPersistence),
             Arc::new(SystemHarnessClock),
             Arc::new(RandomHarnessTokens),
@@ -425,7 +434,7 @@ impl ProjectRuntimePort for HarnessNodeComponent {
             let launch = HarnessLaunchRequest {
                 agent_id: request.body.agent_id,
                 project_id: Some(request.body.project_id),
-                launch_directory: None,
+                launch_directory: request.body.launch_directory.clone(),
                 provider_id: request.body.provider.clone(),
                 session: request.body.resume_session.as_ref().map_or(
                     HarnessSessionRequest::Start,

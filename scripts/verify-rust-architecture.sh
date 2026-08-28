@@ -108,6 +108,10 @@ done
 
 grep -Eq '^hq-harness(\.workspace)?[[:space:]]*=' "$repository_root/crates/hq-codex/Cargo.toml" ||
   fail "hq-codex must depend on the neutral hq-harness contract"
+grep -Eq '^hq-codex(\.workspace)?[[:space:]]*=' "$repository_root/crates/hq-node/Cargo.toml" ||
+  fail "hq-node must own the concrete Codex adapter dependency"
+grep -Fq 'compose_codex_registry(' "$repository_root/crates/hq-node/src/foreground.rs" ||
+  fail "foreground composition must register the concrete Codex adapter"
 
 if grep -ERq --include='*.rs' 'hq_testkit' \
   "$repository_root/crates/hq-codex/src/adapter.rs" \

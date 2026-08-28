@@ -480,6 +480,8 @@ pub struct ProjectRuntimeRequest {
     pub provider: ProviderId,
     /// Exact durable session to resume, or absence for a fresh session.
     pub resume_session: Option<ProviderSessionId>,
+    /// Human-selected launch directory for start/resume; absent for stop-only requests.
+    pub launch_directory: Option<ResourceLocator>,
 }
 
 /// One exact project input routed through the sole durable runtime delivery ledger.
@@ -1172,6 +1174,7 @@ where
                     .binding
                     .as_ref()
                     .map(|binding| binding.session.clone()),
+                launch_directory: None,
             },
         };
         match self.runtime.stop(&request)? {
@@ -1725,6 +1728,7 @@ where
                     .binding
                     .as_ref()
                     .map(|binding| binding.session.clone()),
+                launch_directory: None,
             },
         };
         let (runtime, forced) = match self.runtime.stop(&request)? {
@@ -2305,6 +2309,7 @@ where
                     agent_id,
                     provider: provider.clone(),
                     resume_session: resume_session.clone(),
+                    launch_directory: Some(launch_directory.clone()),
                 },
             };
             match self.runtime.start_or_resume(&request)? {
@@ -2621,6 +2626,7 @@ where
                     agent_id,
                     provider,
                     resume_session,
+                    launch_directory: None,
                 },
             };
             if matches!(self.runtime.stop(&request)?, EffectOutcome::Uncertain(_)) {

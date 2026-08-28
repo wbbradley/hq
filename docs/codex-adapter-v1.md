@@ -37,6 +37,13 @@ An empty acknowledgement fails as a crashed boundary. A different resume acknowl
 `SessionIdentityMismatch` and the child is stopped. A definite resume rejection is
 `SessionNotFound`; HQ never silently starts a replacement.
 
+Production registration exists only in the foreground node composition root. That boundary resolves
+the executable, optional model, permissive process policy, and fresh-thread developer instructions;
+it also requires an active uniquely named agent and an existing absolute working-tree directory.
+Direct managed sessions carry the node-canonicalized directory, while project activation carries
+its explicitly selected directory through the passive runtime request. Provider-private launch
+policy and Codex vocabulary do not enter the neutral harness or project workflow crates.
+
 HQ submits bounded text through `turn/start` while idle and `turn/steer` with the exact expected turn
 while active. The stable 32-byte HQ message identity is encoded as lowercase hexadecimal
 `clientUserMessageId`. `thread/read(includeTurns=true)` is the sole acceptance lookup and steering
@@ -95,8 +102,11 @@ again, drain and join stdout, then join stderr. Sibling instances never share pr
 ## Verification and installed smoke
 
 The crate tests hash the pinned schema, characterize representative fixtures and framing failures,
-exercise fake stdio/process behavior, and run all 14 reusable neutral harness scenarios through the
-real adapter seam. The installed-provider smoke is deliberately opt-in because it starts an
+exercise exact start/resume, copied environment, redacted diagnostics, and child teardown through
+fake stdio/process behavior, and run all 14 reusable neutral harness scenarios through the real
+adapter seam. Node tests cover foreground launch resolution, exact project-directory propagation,
+provider registration, and clean replacement of a drained foreground generation. The
+installed-provider smoke is deliberately opt-in because it starts an
 authenticated Codex thread:
 
 ```text

@@ -110,8 +110,12 @@ before provider I/O. The node resolves and canonicalizes the absolute launch dir
 only copied environment bytes to the neutral supervisor. After exact readiness it idempotently
 authors the immutable mailbox/session binding, repository context, and complete-frontier selection;
 an uncertain canonical commit remains uncertain and is replayed under deterministic stage
-identities. Foreground composition injects this canonical adapter, while concrete provider
-registration and event draining remain the next runtime package.
+identities. Foreground composition injects this canonical adapter and is the only production root
+that registers the Codex factory. It resolves provider-private executable, model, permissive mode,
+developer instructions, and validated working-tree launch policy there. Project activation carries
+its selected directory through the passive runtime request before the later canonical runnable
+acknowledgement. Restart drains all children and a replacement generation reconstructs the registry
+and ownership graph from the retained foundation state.
 
 The foreground project slot is concrete as well. `ProjectNodeComponent` owns bounded startup and
 shutdown repair around the saga store, canonical and remote application adapters, shared harness

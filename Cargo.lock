@@ -397,6 +397,7 @@ dependencies = [
  "chacha20poly1305",
  "getrandom 0.4.3",
  "hq-application",
+ "hq-codex",
  "hq-domain",
  "hq-harness",
  "hq-local-api",

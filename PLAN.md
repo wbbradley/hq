@@ -54,13 +54,17 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[runtime/high] Compose Codex workers and canonical harness persistence** — Register the Codex
-  adapter only in the foreground node composition root, resolve validated launch directories and
-  provider-private options there, continuously drain normalized provider events into idempotent
-  canonical output/activity persistence, and expose the completed `hq harness` client workflow.
-  Test process/runtime teardown, partial output-then-activity recovery, environment and diagnostic
-  redaction, exact Codex start/resume behavior, real foreground restart behavior, and local
-  API-only CLI architecture.
+- **[runtime/high] Persist normalized harness events canonically** — Continuously drain every live
+  provider worker's normalized output/activity stream into idempotent canonical facts under the
+  exact bound mailbox and session, retaining durable partial output-before-activity checkpoints.
+  Test restart recovery, partial persistence, duplicate events, backpressure, stale binding,
+  provider failure, and redacted diagnostics.
+
+- **[runtime/high] Expose the managed `hq harness` client workflow** — Add local-API-only CLI start,
+  exact-resume, and stop commands that resolve one named agent, copy the caller environment and
+  absolute launch directory at the boundary, derive stable exact request identity, autostart the
+  node, and render ready/stopped/rejected/uncertain outcomes. Test parsing, response loss, stale
+  sessions, non-UTF-8 environment values, node restart, machine output, and architecture isolation.
 
 - **[cli/high] Implement project/resource/worktree commands and audit non-TUI parity** — Expose
   project list/show/create/send/open/activate/handoff/close/archive/unarchive, desired-resource

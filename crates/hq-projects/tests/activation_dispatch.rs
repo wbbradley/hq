@@ -569,6 +569,7 @@ struct RuntimeState {
     deliveries: BTreeMap<MessageId, CommandDigest>,
     delivery_order: Vec<MessageId>,
     delivery_calls: usize,
+    start_requests: Vec<ProjectRuntimeRequest>,
     starts: usize,
     stops: usize,
 }
@@ -616,6 +617,7 @@ impl ProjectRuntimePort for ScriptedRuntime {
     ) -> Result<EffectOutcome<ProviderSessionId>, ApplicationError> {
         let mut state = self.0.lock().expect("runtime lock");
         state.starts += 1;
+        state.start_requests.push(request.body.clone());
         if state.reject_start {
             Ok(EffectOutcome::Rejected(domain_error(
                 ErrorCategory::Unresolved,
@@ -702,6 +704,10 @@ fn closed_activation_binds_readiness_then_dispatches_each_pending_input_once() {
     );
     let runtime_state = runtime.0.lock().expect("runtime lock");
     assert_eq!(runtime_state.starts, 1);
+    assert_eq!(
+        runtime_state.start_requests[0].launch_directory,
+        Some(locator("/work/project"))
+    );
     assert_eq!(runtime_state.deliveries.len(), 1);
     assert!(
         runtime_state

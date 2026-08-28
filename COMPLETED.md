@@ -1,5 +1,37 @@
 # Completed
 
+## 2026-08-28 — Foreground Codex worker composition and launch policy
+
+Registered the concrete Codex factory only in the foreground node composition root. The node owns
+provider-private executable, model, permissive execution, timeouts, process grace, frame capacity,
+and durable-agent developer instructions. Launch resolution requires an active uniquely named
+agent plus an existing absolute working-tree directory; invalid paths and retired agents fail
+closed before child creation. Passive configuration and runtime request records expose public
+fields, while the resolver and process/session owners remain opaque capabilities.
+
+Project activation now carries its already-selected launch directory through the neutral passive
+runtime request to the harness. Stop-only requests leave it absent. This preserves the deliberate
+ordering in which runtime readiness precedes canonical launch revalidation without manufacturing
+runnable projection state or adding accessors. Direct managed sessions continue using the node's
+canonicalized directory and copied environment.
+
+Codex characterization and conformance tests cover exact start/resume identity, copied environment,
+diagnostic redaction, and bounded process teardown. New node/project tests prove exact directory
+propagation, foreground-only registration and private options, invalid launch rejection, and a real
+restart that drains one complete foreground ownership graph before reopening a fresh generation.
+The architecture gate now requires the node-owned Codex dependency and foreground registration;
+provider vocabulary remains absent from neutral crates. Full locked workspace format, check,
+strict all-feature Clippy, tests, build, architecture, dependency, and bounded protocol fuzz gates
+pass. No storage or local-API version changed and no migration or compatibility layer was added.
+
+### Original plan entry
+
+- **[runtime/high] Compose foreground Codex workers and provider launch policy** — Register the
+  Codex adapter only in the foreground node composition root and resolve validated launch
+  directories, executable, developer instructions, and provider-private execution options there.
+  Test exact start/resume, environment and diagnostic redaction, process teardown, real foreground
+  restart behavior, and the dependency boundary that keeps Codex vocabulary out of neutral crates.
+
 ## 2026-08-28 — Managed named-agent session lifecycle reconciliation
 
 Added provider-neutral start, exact-resume, and stop as a dedicated retry-safe local API family.

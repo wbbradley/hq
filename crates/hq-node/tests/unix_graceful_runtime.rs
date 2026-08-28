@@ -13,11 +13,11 @@ use hq_local_api::protocol::v1::{
     RequestId, Response, ResponseResult, V1, VersionRange, WireMessage,
 };
 use hq_node::{
-    CancellationToken, ComponentDrain, ComponentError, ComponentKind, LocalNodeRuntime,
-    LocalNodeRuntimeConfig, LocalNodeRuntimeStartError, LocalSessionPumpConfig,
+    CancellationToken, ComponentDrain, ComponentError, ComponentKind, ForegroundNodeConfig,
+    LocalNodeRuntime, LocalNodeRuntimeConfig, LocalNodeRuntimeStartError, LocalSessionPumpConfig,
     LocalSessionRegistryConfig, NodeComponent, NodeComponents, NodeFoundation,
     NodeFoundationConfig, NodeOwner, RuntimePaths, ShutdownIntent, ShutdownStage,
-    StateDirectoryOwner, StatePaths, UnixShutdownSignals,
+    StateDirectoryOwner, StatePaths, UnixShutdownSignals, run_foreground_generation_until,
 };
 use hq_reducer::AuthorityPolicy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -280,6 +280,40 @@ async fn protocol_restart_retains_restart_intent_even_when_the_client_drops_its_
     assert_eq!(report.local_sessions.sessions.retained_tasks, 0);
     assert!(!runtime_paths.socket_file().exists());
     assert!(!runtime_paths.readiness_file().exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn foreground_restart_reopens_the_real_codex_composition_for_a_fresh_generation() {
+    let directory = TestDirectory::new();
+    let state = StatePaths::new(directory.path().join("state")).expect("state paths");
+    let initializer = StateDirectoryOwner::acquire(state.clone()).expect("state owner");
+    let _ = initializer.initialize().expect("identity");
+    drop(initializer);
+    let config = ForegroundNodeConfig {
+        state,
+        runtime: RuntimePaths::new(directory.path().join("runtime")).expect("runtime paths"),
+        build: build(),
+        store_capacity: NonZeroUsize::new(4).expect("store capacity"),
+        task_capacity: NonZeroUsize::new(4).expect("task capacity"),
+        subscription_capacity: NonZeroUsize::new(4).expect("subscription capacity"),
+        session_capacity: NonZeroUsize::new(2).expect("session capacity"),
+        event_capacity: NonZeroUsize::new(4).expect("event capacity"),
+        write_capacity: NonZeroUsize::new(2).expect("write capacity"),
+        response_drain_timeout: Duration::from_millis(100),
+    };
+
+    let first =
+        run_foreground_generation_until(&config, std::future::ready(ShutdownIntent::Restart))
+            .await
+            .expect("restart generation");
+    assert_eq!(first.intent, ShutdownIntent::Restart);
+
+    let second = run_foreground_generation_until(&config, std::future::ready(ShutdownIntent::Stop))
+        .await
+        .expect("replacement generation");
+    assert_eq!(second.intent, ShutdownIntent::Stop);
+    assert_eq!(second.local_sessions.sessions.retained_sessions, 0);
+    assert_eq!(second.local_sessions.sessions.retained_tasks, 0);
 }
 
 #[test]

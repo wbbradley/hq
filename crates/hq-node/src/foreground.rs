@@ -14,12 +14,12 @@ use hq_reducer::AuthorityPolicy;
 
 use crate::{
     ApplicationAgentSessionCanonicalPort, CancellationToken, ComponentDrain, ComponentError,
-    HarnessNodeComponent, LocalNodeRuntime, LocalNodeRuntimeConfig, LocalNodeRuntimeError,
-    LocalNodeRuntimeReport, LocalNodeRuntimeStartError, LocalSessionPumpConfig,
-    LocalSessionRegistryConfig, NodeComponent, NodeComponents, NodeFoundation,
-    NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError, ProjectNodeConfig,
-    RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent,
-    StandardProjectNodeComponent, StatePaths, WakingApplicationStore,
+    ForegroundCodexConfig, HarnessNodeComponent, LocalNodeRuntime, LocalNodeRuntimeConfig,
+    LocalNodeRuntimeError, LocalNodeRuntimeReport, LocalNodeRuntimeStartError,
+    LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent, NodeComponents,
+    NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError,
+    ProjectNodeConfig, RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent,
+    StandardProjectNodeComponent, StatePaths, WakingApplicationStore, compose_codex_registry,
     compose_standard_project_component,
 };
 
@@ -159,14 +159,20 @@ fn open_generation(
         Arc::new(hq_relay::WebSocketRelayConnector::default()),
     )?;
     let store = foundation.store().ok_or(ForegroundNodeError::Composition)?;
+    let gateway = hq_store::StoreGateway::new(store, policy, foundation.signer_handle());
     let canonical = Arc::new(ApplicationAgentSessionCanonicalPort::new(
-        WakingApplicationStore::new(
-            hq_store::StoreGateway::new(store, policy, foundation.signer_handle()),
-            relay.clone(),
-        ),
+        WakingApplicationStore::new(gateway.clone(), relay.clone()),
         foundation.public_identity().installation_id,
     ));
-    let harness = HarnessNodeComponent::without_providers_with_canonical(store, canonical);
+    let registry = compose_codex_registry(
+        gateway,
+        ForegroundCodexConfig::default(),
+        Arc::new(hq_codex::ExecCodexProcessStarter),
+        Arc::new(hq_codex::DiscardCodexDiagnostics),
+    )
+    .map_err(|_| ForegroundNodeError::Composition)?;
+    let harness =
+        HarnessNodeComponent::with_registry_and_canonical(store, Arc::new(registry), canonical);
     let project = compose_standard_project_component(
         ProjectNodeConfig {
             recovery_limit: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),

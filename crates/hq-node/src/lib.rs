@@ -4,6 +4,7 @@
 mod agent_guidance;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod cli;
+mod codex_component;
 mod components;
 mod coordination;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -56,6 +57,7 @@ pub use cli::{
     RelayAdminView, RelayCommand, RelayPolicyView, complete_cli_delivery, execute_cli,
     execute_cli_with_input, parse_cli, run_cli, run_cli_with_input,
 };
+pub use codex_component::{ForegroundCodexConfig, compose_codex_registry};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use foreground::{
     ForegroundNodeConfig, ForegroundNodeError, run_foreground, run_foreground_generation_until,
