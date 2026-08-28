@@ -8,13 +8,14 @@ use std::{
 };
 
 use hq_domain::{
-    BoundedText, InstallationId, ProjectId, ResourceHealth, ResourceId, ResourceLocator,
-    ResourceScheme,
+    BoundedText, InstallationId, ProjectId, ProjectResource, ResourceHealth, ResourceId,
+    ResourceLocator, ResourceScheme,
 };
 use hq_resources::{
     GitCommandFailure, GitCommandOutput, GitRunner, LaunchClaimRelation, PathClaim, PathCondition,
     PathEntryKind, PathIdentityRequest, PathProbeError, PathRelation, PathResourceAdapter,
     PathResourceError, PathSystem, claim_conflict, path_relation, select_primary,
+    valid_path_resource,
 };
 
 mod support;
@@ -347,6 +348,37 @@ fn conflicts_are_component_aware_home_scoped_and_ignore_same_project_overlap() {
         path_relation(&first.resource.canonical_locator, &malformed),
         PathRelation::Disjoint
     );
+}
+
+#[test]
+fn path_resource_identity_requires_normalized_working_tree_locators() {
+    let valid = ProjectResource {
+        resource_id: resource(9),
+        display_locator: ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new("/human/repo").expect("bounded"),
+        ),
+        canonical_locator: ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new("/canonical/repo").expect("bounded"),
+        ),
+        health: ResourceHealth::Unknown,
+    };
+    assert!(valid_path_resource(&valid));
+
+    let mut malformed = valid.clone();
+    malformed.canonical_locator = ResourceLocator::new(
+        ResourceScheme::WorkingTree,
+        BoundedText::new("/canonical//repo").expect("bounded"),
+    );
+    assert!(!valid_path_resource(&malformed));
+
+    let mut opaque = valid;
+    opaque.display_locator = ResourceLocator::new(
+        ResourceScheme::Opaque,
+        BoundedText::new("/human/repo").expect("bounded"),
+    );
+    assert!(!valid_path_resource(&opaque));
 }
 
 #[test]

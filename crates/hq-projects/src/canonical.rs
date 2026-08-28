@@ -9,13 +9,14 @@ use hq_application::{
 use hq_domain::{
     AgentId, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, DomainError,
     ErrorCategory, ErrorCode, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES,
-    MAX_FACT_PARENTS, ProjectId, SemanticPayload,
+    MAX_FACT_PARENTS, ProjectId, ProjectResource, SemanticPayload,
 };
 use hq_reducer::{
     AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityProjection,
     AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey, MembershipState,
     ProjectAssignmentPhase, ProjectLifecycle, ProjectProjection, ProjectProjectionKey,
 };
+use hq_resources::{PathClaim, claim_conflict, valid_path_resource};
 
 use crate::{
     CanonicalProjectAssignment, CanonicalProjectLifecycle, CanonicalProjectMutation,
@@ -247,6 +248,7 @@ fn build_plan(
     ))
 }
 
+#[allow(clippy::too_many_lines, reason = "closed canonical transition table")]
 fn payload(
     snapshot: &DomainSnapshot,
     mutation: &CanonicalProjectMutation,
@@ -254,9 +256,23 @@ fn payload(
     parents: &mut BTreeSet<FactId>,
 ) -> Result<SemanticPayload, DomainError> {
     let invalid = || domain_error(ErrorCategory::Conflict, "project_invalid_transition");
+    if matches!(
+        mutation.action,
+        CanonicalProjectMutationAction::AddResource { .. }
+            | CanonicalProjectMutationAction::RemoveResource { .. }
+            | CanonicalProjectMutationAction::ReplaceResource { .. }
+    ) {
+        return resource_payload(snapshot, mutation, view).ok_or_else(invalid);
+    }
     match &mutation.action {
         CanonicalProjectMutationAction::Open
-            if view.lifecycle == ProjectLifecycle::Closed && !view.archived && view.claimable =>
+            if view.lifecycle == ProjectLifecycle::Closed
+                && !view.archived
+                && project_resources_are_claimable(
+                    snapshot,
+                    mutation,
+                    &view.resources.values().collect::<Vec<_>>(),
+                ) =>
         {
             Ok(SemanticPayload::ProjectOpened {
                 project_id: mutation.project_id,
@@ -350,6 +366,119 @@ fn payload(
         }
         _ => Err(invalid()),
     }
+}
+
+fn resource_payload(
+    snapshot: &DomainSnapshot,
+    mutation: &CanonicalProjectMutation,
+    view: &hq_reducer::ProjectView,
+) -> Option<SemanticPayload> {
+    if !can_mutate_resources(view) {
+        return None;
+    }
+    match &mutation.action {
+        CanonicalProjectMutationAction::AddResource {
+            resource,
+            make_primary,
+        } if valid_path_resource(resource)
+            && !view.resources.contains_key(&resource.resource_id) =>
+        {
+            let resulting = view
+                .resources
+                .values()
+                .chain(std::iter::once(resource))
+                .collect::<Vec<_>>();
+            (view.lifecycle == ProjectLifecycle::Closed
+                || project_resources_are_claimable(snapshot, mutation, &resulting))
+            .then(|| SemanticPayload::ProjectResourceAdded {
+                project_id: mutation.project_id,
+                resource: resource.clone(),
+                make_primary: *make_primary,
+            })
+        }
+        CanonicalProjectMutationAction::RemoveResource { resource_id, force }
+            if view.resources.contains_key(resource_id)
+                && (view.assignment.is_none() || *force) =>
+        {
+            Some(SemanticPayload::ProjectResourceRemoved {
+                project_id: mutation.project_id,
+                resource_id: *resource_id,
+                force: *force,
+            })
+        }
+        CanonicalProjectMutationAction::ReplaceResource {
+            old_resource_id,
+            new_resource,
+        } if valid_path_resource(new_resource)
+            && view.resources.contains_key(old_resource_id)
+            && (*old_resource_id == new_resource.resource_id
+                || !view.resources.contains_key(&new_resource.resource_id)) =>
+        {
+            let resulting = view
+                .resources
+                .iter()
+                .filter_map(|(resource_id, resource)| {
+                    (*resource_id != *old_resource_id).then_some(resource)
+                })
+                .chain(std::iter::once(new_resource))
+                .collect::<Vec<_>>();
+            (view.lifecycle == ProjectLifecycle::Closed
+                || project_resources_are_claimable(snapshot, mutation, &resulting))
+            .then(|| SemanticPayload::ProjectResourceReplaced {
+                project_id: mutation.project_id,
+                old_resource_id: *old_resource_id,
+                new_resource: new_resource.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn can_mutate_resources(view: &hq_reducer::ProjectView) -> bool {
+    !view.archived && view.lifecycle != ProjectLifecycle::Closing
+}
+
+fn project_resources_are_claimable(
+    snapshot: &DomainSnapshot,
+    mutation: &CanonicalProjectMutation,
+    resources: &[&ProjectResource],
+) -> bool {
+    snapshot
+        .project()
+        .projections()
+        .iter()
+        .all(|(key, projection)| {
+            let ProjectProjection::Project(other) = projection else {
+                return true;
+            };
+            let ProjectProjectionKey::Project(other_project_id) = key else {
+                return false;
+            };
+            if !matches!(
+                other.lifecycle,
+                ProjectLifecycle::Open | ProjectLifecycle::Closing
+            ) {
+                return true;
+            }
+            resources.iter().all(|resource| {
+                let requested = PathClaim {
+                    project_id: mutation.project_id,
+                    home: mutation.home,
+                    resource: (*resource).clone(),
+                };
+                other.resources.values().all(|existing| {
+                    claim_conflict(
+                        &requested,
+                        &PathClaim {
+                            project_id: *other_project_id,
+                            home: other.home,
+                            resource: existing.clone(),
+                        },
+                    )
+                    .is_none()
+                })
+            })
+        })
 }
 
 fn can_make_runnable(
@@ -555,4 +684,155 @@ fn domain_error(category: ErrorCategory, code: &'static str) -> DomainError {
         category,
         ErrorCode::new(code).expect("static canonical project error code"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use hq_application::{DomainSnapshot, ProjectionSnapshot};
+    use hq_domain::{
+        AccountId, BoundedText, CommandDigest, CommandId, FactId, InstallationId, MailboxAddress,
+        MailboxId, ProjectId, ProjectResource, ResourceHealth, ResourceId, ResourceLocator,
+        ResourceScheme, ShortText, Timestamp,
+    };
+    use hq_reducer::{ProjectLifecycle, ProjectProjection, ProjectProjectionKey, ProjectView};
+
+    use super::{
+        CanonicalProjectMutation, CanonicalProjectMutationAction, payload, resource_payload,
+    };
+
+    #[test]
+    fn canonical_resource_policy_uses_the_complete_resulting_active_claim_set() {
+        let current_id = ProjectId::from_bytes([1; 32]);
+        let other_id = ProjectId::from_bytes([2; 32]);
+        let old = resource(1, "/shared");
+        let candidate = resource(2, "/shared/child");
+        let current = view(current_id, ProjectLifecycle::Open, [old.clone()]);
+        let other = view(other_id, ProjectLifecycle::Open, [candidate.clone()]);
+
+        let open = mutation(current_id, CanonicalProjectMutationAction::Open);
+        let closed = view(current_id, ProjectLifecycle::Closed, [old.clone()]);
+        let closed_snapshot = project_snapshot(current_id, closed.clone(), other_id, other.clone());
+        assert!(payload(&closed_snapshot, &open, &closed, &mut BTreeSet::new(),).is_err());
+
+        let add = mutation(
+            current_id,
+            CanonicalProjectMutationAction::AddResource {
+                resource: candidate.clone(),
+                make_primary: false,
+            },
+        );
+        let snapshot = project_snapshot(current_id, current.clone(), other_id, other.clone());
+        assert!(resource_payload(&snapshot, &add, &current).is_none());
+
+        let snapshot = project_snapshot(current_id, closed.clone(), other_id, other.clone());
+        assert!(resource_payload(&snapshot, &add, &closed).is_some());
+
+        let replacement = resource(3, "/independent");
+        let replace = mutation(
+            current_id,
+            CanonicalProjectMutationAction::ReplaceResource {
+                old_resource_id: old.resource_id,
+                new_resource: replacement,
+            },
+        );
+        let snapshot = project_snapshot(current_id, current.clone(), other_id, other);
+        assert!(resource_payload(&snapshot, &replace, &current).is_some());
+
+        let closing = view(other_id, ProjectLifecycle::Closing, [candidate]);
+        let snapshot = project_snapshot(current_id, current.clone(), other_id, closing);
+        assert!(resource_payload(&snapshot, &add, &current).is_none());
+    }
+
+    fn project_snapshot(
+        current_id: ProjectId,
+        current: ProjectView,
+        other_id: ProjectId,
+        other: ProjectView,
+    ) -> DomainSnapshot {
+        DomainSnapshot::new(
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(
+                BTreeMap::new(),
+                BTreeMap::from([
+                    (
+                        ProjectProjectionKey::Project(current_id),
+                        ProjectProjection::Project(Box::new(current)),
+                    ),
+                    (
+                        ProjectProjectionKey::Project(other_id),
+                        ProjectProjection::Project(Box::new(other)),
+                    ),
+                ]),
+                BTreeMap::new(),
+            ),
+        )
+    }
+
+    fn view<const N: usize>(
+        project_id: ProjectId,
+        lifecycle: ProjectLifecycle,
+        resources: [ProjectResource; N],
+    ) -> ProjectView {
+        let resources = resources
+            .into_iter()
+            .map(|resource| (resource.resource_id, resource))
+            .collect::<BTreeMap<_, _>>();
+        ProjectView {
+            root: FactId::from_bytes([10; 32]),
+            head: FactId::from_bytes([11; 32]),
+            fork_participants: BTreeSet::new(),
+            home: InstallationId::from_bytes([3; 32]),
+            mailbox: MailboxAddress::new(
+                InstallationId::from_bytes([3; 32]),
+                MailboxId::from_bytes(*project_id.as_bytes()),
+            ),
+            predecessor: None,
+            name: ShortText::new("project").expect("name"),
+            brief: None,
+            primary: resources.keys().next().copied(),
+            resources,
+            lifecycle,
+            archived: false,
+            active_claims: BTreeSet::new(),
+            claim_conflicts: BTreeMap::new(),
+            claimable: true,
+            assignment: None,
+            input_sequence: 0,
+        }
+    }
+
+    fn mutation(
+        project_id: ProjectId,
+        action: CanonicalProjectMutationAction,
+    ) -> CanonicalProjectMutation {
+        CanonicalProjectMutation {
+            command_id: CommandId::from_bytes([20; 32]),
+            request_digest: CommandDigest::from_bytes([21; 32]),
+            account_id: AccountId::from_bytes([22; 32]),
+            project_id,
+            home: InstallationId::from_bytes([3; 32]),
+            expected_head: FactId::from_bytes([11; 32]),
+            issued_at: Timestamp::from_unix_millis(23),
+            action,
+        }
+    }
+
+    fn resource(id: u8, path: &str) -> ProjectResource {
+        let locator = ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new(path).expect("path"),
+        );
+        ProjectResource {
+            resource_id: ResourceId::from_bytes([id; 32]),
+            display_locator: locator.clone(),
+            canonical_locator: locator,
+            health: ResourceHealth::Healthy,
+        }
+    }
 }

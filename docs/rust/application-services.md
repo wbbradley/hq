@@ -85,7 +85,7 @@ details, typed health, an optional newly observed canonical locator, and an expl
 time. These passive request/result values expose fields directly. Observation alone grants no
 project authority; workflow owners turn accepted observations into canonical decisions.
 
-## Project activation and dispatch
+## Project lifecycle workflows
 
 `hq-projects` composes four narrow capabilities: durable saga checkpoints, transaction-consistent
 canonical project compare-and-swap, read-only resource observation, and project-bound runtime
@@ -102,6 +102,14 @@ workflow-opened project to closed; uncertainty retains the original typed failur
 stable identity. The exact pending canonical mutation is checkpointed before commit, so a restart
 replays the original expected head, action, and attribution instead of inferring success from a
 similar-looking later snapshot.
+
+Explicit open and resource add/replace commands re-observe the exact desired display/canonical
+identity before commit. The serialized canonical callback then repeats lifecycle, authority,
+expected-head, normalized path identity, and home-qualified claim checks against the complete
+post-mutation resource set. Closed projects may retain overlapping desired resources; opening or
+mutating an open project may not acquire a conflicting active claim. Remove requires explicit
+force while assigned, and replace authors one atomic fact. These commands only change HQ's desired
+membership and advisory claims; they never mutate Git or filesystem state.
 
 Pending project inputs remain separate and ordered by their home acceptance sequence. Each exact
 input is submitted through the harness supervisor's existing durable delivery ledger. The workflow

@@ -7,8 +7,9 @@ use std::num::NonZeroU64;
 use hq_application::ProjectCommandAction;
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, BoundedText, CommandDigest, CommandId,
-    ContentText, DispatchId, FactId, InstallationId, MessageId, ProjectId, ProviderId,
-    ProviderSessionId, ResourceLocator, ResourceScheme, ThreadId, Timestamp,
+    ContentText, DispatchId, FactId, InstallationId, MessageId, ProjectId, ProjectResource,
+    ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme,
+    ThreadId, Timestamp,
 };
 use hq_projects::{
     CanonicalProjectMutation, CanonicalProjectMutationAction, PendingProjectInput,
@@ -99,4 +100,44 @@ fn in_flight_canonical_mutation_round_trips_with_complete_dispatch_attribution()
     let mut changed = encoded;
     changed.push(b' ');
     assert!(decode_canonical_project_mutation(&changed).is_err());
+}
+
+#[test]
+fn in_flight_resource_mutations_round_trip_exactly() {
+    let resource = ProjectResource {
+        resource_id: ResourceId::from_bytes([31; 32]),
+        display_locator: locator("/human/repo"),
+        canonical_locator: locator("/canonical/repo"),
+        health: ResourceHealth::Degraded,
+    };
+    for action in [
+        CanonicalProjectMutationAction::AddResource {
+            resource: resource.clone(),
+            make_primary: true,
+        },
+        CanonicalProjectMutationAction::RemoveResource {
+            resource_id: resource.resource_id,
+            force: true,
+        },
+        CanonicalProjectMutationAction::ReplaceResource {
+            old_resource_id: ResourceId::from_bytes([32; 32]),
+            new_resource: resource.clone(),
+        },
+    ] {
+        let mutation = CanonicalProjectMutation {
+            command_id: CommandId::from_bytes([33; 32]),
+            request_digest: CommandDigest::from_bytes([34; 32]),
+            account_id: AccountId::from_bytes([35; 32]),
+            project_id: ProjectId::from_bytes([36; 32]),
+            home: InstallationId::from_bytes([37; 32]),
+            expected_head: FactId::from_bytes([38; 32]),
+            issued_at: Timestamp::from_unix_millis(39),
+            action,
+        };
+        let encoded = encode_canonical_project_mutation(&mutation).expect("mutation encodes");
+        assert_eq!(
+            decode_canonical_project_mutation(&encoded).expect("mutation decodes"),
+            mutation
+        );
+    }
 }

@@ -95,6 +95,14 @@ fn components(value: &str) -> Option<Vec<&str>> {
     )
 }
 
+/// Returns whether both locators form a normalized path-resource identity.
+pub fn valid_path_resource(resource: &ProjectResource) -> bool {
+    resource.display_locator.scheme() == ResourceScheme::WorkingTree
+        && resource.canonical_locator.scheme() == ResourceScheme::WorkingTree
+        && components(resource.display_locator.value()).is_some()
+        && components(resource.canonical_locator.value()).is_some()
+}
+
 /// Returns a conflict only for overlapping claims from distinct projects in one home.
 pub fn claim_conflict(left: &PathClaim, right: &PathClaim) -> Option<PathClaimConflict> {
     if left.home != right.home || left.project_id == right.project_id {

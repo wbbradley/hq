@@ -6556,3 +6556,100 @@ and unchanged-Go gates pass.
   those. If new future work items were discovered, add them. If the plan file or completed file is
   outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
   other changes.
+
+
+## 2026-08-28 — Project open and resource mutation workflows
+
+Implemented durable direct open, resource add, forced/unforced remove, and atomic replace workflows
+over the existing transaction-consistent canonical project port. Open, add, and replace re-observe
+exact resource identity before mutation; the serialized callback independently revalidates home,
+human authority, expected head, lifecycle, normalized path identity, assigned-remove force, and the
+complete prospective active claim set. Closed desired resources may overlap, while prospective
+open claims fail closed against open or closing projects. Every exact canonical mutation remains
+checkpointed and strictly encoded for response-loss and restart replay, primary selection retains
+its deterministic reducer semantics, and the read-only capability boundary prevents filesystem or
+Git mutation. The clean-sheet storage schema remains v13 in place with no migration or version bump.
+All locked workspace, strict Clippy, documentation, architecture, dependency, specification,
+four-target, fuzz, whitespace, and unchanged-Go gates pass.
+
+### Original plan entry
+
+- **[projects/high] Implement project open and resource mutation workflows** — Implement explicit
+  open plus resource add, remove, and atomic replace over the transaction-consistent canonical
+  project port. Revalidate exact display/canonical identity and home-qualified claimability before
+  mutation; assigned removal requires explicit force, replacement never exposes a partially
+  released old claim, and no operation mutates or deletes external resources. Test stale heads,
+  inactive humans, claim conflicts, changed observations, assigned force policy, response loss,
+  restart repair, and exact primary-resource behavior.
+
+  **Implementation plan**
+
+  - Extend the closed canonical project mutation vocabulary with add, remove, and replace actions.
+    Validate immutable home, active-human authority, exact head, lifecycle constraints, resource
+    identity, assigned-removal force, and cross-project path claimability inside the serialized
+    commit snapshot. Use `hq-resources` pure component-aware claim policy rather than duplicating
+    path parsing in the workflow or reducer.
+  - Add direct `Open`, `AddResource`, `RemoveResource`, and `ReplaceResource` workflow paths to the
+    existing bounded saga manager. Open and new/replacement resources first cross the read-only
+    observation boundary with stable identities and exact display/canonical agreement; uncertainty
+    remains reconcilable and definite invalid observations leave canonical state unchanged.
+  - Checkpoint every exact canonical compare-and-swap before commit and reuse the existing strict
+    pending-mutation codec on restart. Resource mutations author exactly one canonical fact; replace
+    remains one atomic fact and remove never performs filesystem or Git deletion. Preserve reducer
+    primary selection: explicit add-primary, deterministic fallback after removal, and replacement
+    of the current primary.
+  - Add deterministic contracts for open state and archived rejection, stale heads, inactive
+    humans, closed/open claim behavior, local overlap versus cross-project conflict, assigned
+    removal with and without force, malformed or changed observations, resource and canonical
+    response loss, exact restart replay, atomic replacement, and zero external mutation. Run every
+    locked workspace, four-target, architecture, dependency, specification, fuzz, whitespace, and
+    unchanged-Go gate.
+
+  **Risks and decisions**
+
+  - Resource inspection is observational and may precede a conflicting canonical commit. The
+    transaction callback therefore repeats global claim policy against its exact snapshot; only the
+    canonical fact acquires or releases HQ's advisory claim.
+  - Closed projects may retain overlapping desired resources because they hold no active claims.
+    Opening or mutating an open project must be globally claimable. No resource command changes
+    external filesystem or Git state.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely
+  from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any
+  other marker. The task and its related subsections should no longer appear in the plan file at
+  all. The plan file should not have any sort of "Done" section. Then append a new entry to the
+  completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to
+     preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update
+  those. If new future work items were discovered, add them. If the plan file or completed file is
+  outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
+  other changes.

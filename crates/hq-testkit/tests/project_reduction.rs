@@ -579,6 +579,76 @@ fn cross_project_path_conflicts_fail_closed_but_local_overlap_and_home_namespace
 }
 
 #[test]
+fn add_primary_and_primary_removal_have_exact_deterministic_results() -> Result<(), Box<dyn Error>>
+{
+    let mut values = DeterministicValues::new(55);
+    let world = project_world(&mut values)?;
+    let project_id = ProjectId::from_bytes([55; 32]);
+    let retained = resource(55, "/work/retained")?;
+    let promoted = resource(56, "/work/promoted")?;
+    let create = project_created(
+        &mut values,
+        &world,
+        project_id,
+        MailboxId::from_bytes([55; 32]),
+        vec![retained.clone()],
+        Some(retained.resource_id),
+        InitialProjectState::Open,
+    )?;
+    let added = project_transition(
+        &mut values,
+        &world,
+        &create,
+        SemanticPayload::ProjectResourceAdded {
+            project_id,
+            resource: promoted.clone(),
+            make_primary: true,
+        },
+    )?;
+    let added_report = reduce_complete(
+        world
+            .base()
+            .into_iter()
+            .chain([create.clone(), added.clone()]),
+        &world.reducer(),
+    )?;
+    let Some(ProjectProjection::Project(added_view)) = added_report
+        .projections()
+        .get(&ProjectProjectionKey::Project(project_id))
+    else {
+        return Err("missing added project".into());
+    };
+    assert_eq!(added_view.primary, Some(promoted.resource_id));
+
+    let removed = project_transition(
+        &mut values,
+        &world,
+        &added,
+        SemanticPayload::ProjectResourceRemoved {
+            project_id,
+            resource_id: promoted.resource_id,
+            force: false,
+        },
+    )?;
+    let removed_report = reduce_complete(
+        world.base().into_iter().chain([create, added, removed]),
+        &world.reducer(),
+    )?;
+    let Some(ProjectProjection::Project(removed_view)) = removed_report
+        .projections()
+        .get(&ProjectProjectionKey::Project(project_id))
+    else {
+        return Err("missing removed project".into());
+    };
+    assert_eq!(removed_view.primary, Some(retained.resource_id));
+    assert_eq!(
+        removed_view.resources.keys().copied().collect::<Vec<_>>(),
+        vec![retained.resource_id]
+    );
+    Ok(())
+}
+
+#[test]
 fn lifecycle_resource_health_replacement_close_archive_and_restore_follow_explicit_laws()
 -> Result<(), Box<dyn Error>> {
     let mut values = DeterministicValues::new(60);

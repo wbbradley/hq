@@ -421,6 +421,7 @@ dependencies = [
  "hq-application",
  "hq-domain",
  "hq-reducer",
+ "hq-resources",
  "serde",
  "serde_json",
  "sha2",

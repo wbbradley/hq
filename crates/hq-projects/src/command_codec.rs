@@ -508,6 +508,18 @@ impl TryFrom<WireCanonicalMutation> for CanonicalProjectMutation {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum WireCanonicalAction {
     Open,
+    AddResource {
+        resource: WireProjectResource,
+        make_primary: bool,
+    },
+    RemoveResource {
+        resource_id: String,
+        force: bool,
+    },
+    ReplaceResource {
+        old_resource_id: String,
+        new_resource: WireProjectResource,
+    },
     Configure {
         assignment: String,
         agent: String,
@@ -536,6 +548,26 @@ impl From<&CanonicalProjectMutationAction> for WireCanonicalAction {
     fn from(action: &CanonicalProjectMutationAction) -> Self {
         match action {
             CanonicalProjectMutationAction::Open => Self::Open,
+            CanonicalProjectMutationAction::AddResource {
+                resource,
+                make_primary,
+            } => Self::AddResource {
+                resource: WireProjectResource::from(resource),
+                make_primary: *make_primary,
+            },
+            CanonicalProjectMutationAction::RemoveResource { resource_id, force } => {
+                Self::RemoveResource {
+                    resource_id: id_text(resource_id.as_bytes()),
+                    force: *force,
+                }
+            }
+            CanonicalProjectMutationAction::ReplaceResource {
+                old_resource_id,
+                new_resource,
+            } => Self::ReplaceResource {
+                old_resource_id: id_text(old_resource_id.as_bytes()),
+                new_resource: WireProjectResource::from(new_resource),
+            },
             CanonicalProjectMutationAction::Configure(intent) => Self::Configure {
                 assignment: id_text(intent.assignment_id.as_bytes()),
                 agent: id_text(intent.agent_id.as_bytes()),
@@ -580,6 +612,24 @@ impl TryFrom<WireCanonicalAction> for CanonicalProjectMutationAction {
     fn try_from(action: WireCanonicalAction) -> Result<Self, Self::Error> {
         Ok(match action {
             WireCanonicalAction::Open => Self::Open,
+            WireCanonicalAction::AddResource {
+                resource,
+                make_primary,
+            } => Self::AddResource {
+                resource: resource.try_into()?,
+                make_primary,
+            },
+            WireCanonicalAction::RemoveResource { resource_id, force } => Self::RemoveResource {
+                resource_id: ResourceId::from_bytes(parse_id(&resource_id)?),
+                force,
+            },
+            WireCanonicalAction::ReplaceResource {
+                old_resource_id,
+                new_resource,
+            } => Self::ReplaceResource {
+                old_resource_id: ResourceId::from_bytes(parse_id(&old_resource_id)?),
+                new_resource: new_resource.try_into()?,
+            },
             WireCanonicalAction::Configure {
                 assignment,
                 agent,

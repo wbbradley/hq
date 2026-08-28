@@ -18,5 +18,5 @@ pub use path::{
 };
 pub use policy::{
     PathClaim, PathClaimConflict, PathRelation, ReleaseDecision, ResourcePolicyError,
-    claim_conflict, decide_release, path_relation, select_primary,
+    claim_conflict, decide_release, path_relation, select_primary, valid_path_resource,
 };

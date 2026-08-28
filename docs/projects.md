@@ -178,8 +178,11 @@ check verifies that its symlink resolution still agrees with the reserved locato
 silently changes resource identity.
 
 Resource claims coordinate HQ actors but are not a filesystem sandbox. A human may explicitly
-remove a resource while an agent is assigned. The UI warns about continuing access, and the daemon
-records the action in structured logs and audit history.
+force removal of a resource while an agent is assigned. The UI warns about continuing access, and
+the daemon records the action in structured logs and audit history. Add and replace first
+re-observe the display-selected path's canonical identity; replace changes desired membership with
+one fact, so the old claim is never released before the replacement decision. None of these
+commands deletes or modifies the external path, worktree, branch, or repository.
 
 ## Resource health
 

@@ -54,14 +54,21 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[projects/high] Implement project lifecycle, resource, handoff, and retirement workflows** —
-  Implement open/archive, resource add/remove/replace, release assessment, graceful and forced
-  close, graceful handoff and forced takeover, and retirement over explicit durable checkpoints.
-  Dirty or unknown resources require force before releasing authority; graceful operations retain
-  claims until quiescence, failed handoff becomes blocked, forced actions revoke only HQ authority,
-  and retirement ends assignment before retiring the agent while the project stays open. Test
-  definite/unknown runtime and filesystem outcomes, compensation, competing agents/devices, stale
-  commands, blocked handoff, restart recovery, and no implicit resource mutation or deletion.
+- **[projects/high] Implement graceful/forced close and archival workflows** — Add durable release
+  assessment, graceful runtime quiescence, assignment end, claim-preserving closing, final close,
+  archive-after-close, and closed unarchive workflows. Dirty or unknown resources require force;
+  graceful close retains claims until runtime quiescence, while force revokes only HQ authority and
+  records stopped/still-running/unknown observation without claiming external cessation. Test every
+  definite/unknown filesystem, runtime, and canonical boundary, restart repair, pending-input
+  preservation, stale commands, competing devices, and no implicit resource deletion.
+
+- **[projects/high] Implement handoff, forced takeover, and agent retirement workflows** — Quiesce
+  and end the old assignment before activating the requested idle agent and exact historical
+  thread. A failed graceful handoff becomes canonically blocked; explicit takeover may revoke only
+  old HQ authority when runtime cessation is unknown. Retirement ends any assignment before the
+  installation-private absorbing agent-retirement mutation while leaving the project open with its
+  claims, pending messages, and history. Test compensation, blocked handoff, old/new agent races,
+  stale devices, runtime uncertainty, restart recovery, retired-thread rejection, and late output.
 
 - **[projects/high] Implement durable remote project command routing and local API progress** —
   Extend `hq-local-api` with the typed project request/outcome and authoritative checkpoint view.

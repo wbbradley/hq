@@ -13,6 +13,7 @@ base64.workspace = true
 hq-application.workspace = true
 hq-domain.workspace = true
 hq-reducer.workspace = true
+hq-resources.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

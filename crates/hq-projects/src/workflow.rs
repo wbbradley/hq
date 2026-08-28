@@ -102,6 +102,27 @@ pub struct ProjectWorkflowSnapshot {
 pub enum CanonicalProjectMutationAction {
     /// Conditionally open a closed, unarchived, claimable project.
     Open,
+    /// Add one observed desired resource.
+    AddResource {
+        /// Stable desired resource identity.
+        resource: ProjectResource,
+        /// Whether this resource becomes the explicit primary.
+        make_primary: bool,
+    },
+    /// Remove one desired resource without touching external state.
+    RemoveResource {
+        /// Stable desired resource identity.
+        resource_id: ResourceId,
+        /// Explicit authority to mutate resources while assigned.
+        force: bool,
+    },
+    /// Atomically replace one desired resource.
+    ReplaceResource {
+        /// Existing desired resource identity.
+        old_resource_id: ResourceId,
+        /// Fully observed replacement resource.
+        new_resource: ProjectResource,
+    },
     /// Record session-free assignment intent.
     Configure(AssignmentIntent),
     /// Bind exact runtime readiness and the selected thread.
@@ -378,6 +399,12 @@ where
         }
         for _ in 0..MAX_PROJECT_WORKFLOW_ADVANCES {
             match record.action.clone() {
+                ProjectCommandAction::Open
+                | ProjectCommandAction::AddResource { .. }
+                | ProjectCommandAction::RemoveResource { .. }
+                | ProjectCommandAction::ReplaceResource { .. } => {
+                    self.advance_resource_mutation(&mut record)?;
+                }
                 ProjectCommandAction::Activate {
                     agent_id,
                     provider,
@@ -410,6 +437,196 @@ where
             }
         }
         Ok(progress_outcome(&record))
+    }
+
+    fn advance_resource_mutation(
+        &self,
+        record: &mut ProjectSagaRecord,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let snapshot = self
+            .canonical
+            .snapshot(record.project_id, record.account_id, None)?;
+        if snapshot.home != record.home || snapshot.project_id != record.project_id {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Unauthorized, "project_wrong_home"),
+            );
+        }
+        let stage = current_stage(record);
+        if record.pending_canonical_mutation.is_some() {
+            return match self.replay_canonical_mutation(record)? {
+                CanonicalProjectMutationOutcome::Committed { project_head } => {
+                    record.state = ProjectSagaState::Completed { project_head };
+                    persist(&self.store, record)
+                }
+                CanonicalProjectMutationOutcome::Rejected(error) => {
+                    reject(&self.store, record, error)
+                }
+                CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                    &self.store,
+                    record,
+                    stage,
+                    effect_error("project_canonical_commit_unknown"),
+                    EffectKind::None,
+                ),
+            };
+        }
+        if stage == ProjectCommandStage::Accepted {
+            return self.accept_resource_mutation(record, &snapshot);
+        }
+
+        let Some(action) = self.prepare_resource_mutation(record, &snapshot, stage)? else {
+            return Ok(());
+        };
+        let tag = direct_mutation_tag(&action).ok_or_else(|| {
+            hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )
+        })?;
+        match self.mutate(record, snapshot.head, tag, action)? {
+            CanonicalProjectMutationOutcome::Committed { project_head } => {
+                record.state = ProjectSagaState::Completed { project_head };
+                persist(&self.store, record)
+            }
+            CanonicalProjectMutationOutcome::Rejected(error) => reject(&self.store, record, error),
+            CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                &self.store,
+                record,
+                stage,
+                effect_error("project_canonical_commit_unknown"),
+                EffectKind::None,
+            ),
+        }
+    }
+
+    fn accept_resource_mutation(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+    ) -> Result<(), hq_application::ApplicationError> {
+        if let Some(error) = direct_precondition_error(record, snapshot) {
+            return reject(&self.store, record, error);
+        }
+        let next_stage = match record.action {
+            ProjectCommandAction::RemoveResource { .. } => ProjectCommandStage::UpdatingProject,
+            _ => ProjectCommandStage::ValidatingResources,
+        };
+        checkpoint(&self.store, record, next_stage)
+    }
+
+    fn prepare_resource_mutation(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        stage: ProjectCommandStage,
+    ) -> Result<Option<CanonicalProjectMutationAction>, hq_application::ApplicationError> {
+        let requested_action = record.action.clone();
+        let action = match &requested_action {
+            ProjectCommandAction::Open if stage == ProjectCommandStage::ValidatingResources => {
+                if !self.validate_resource_observation(record, &snapshot.resources)? {
+                    return Ok(None);
+                }
+                CanonicalProjectMutationAction::Open
+            }
+            ProjectCommandAction::AddResource {
+                resource,
+                make_primary,
+            } if stage == ProjectCommandStage::ValidatingResources => {
+                if !self.validate_resource_observation(record, std::slice::from_ref(resource))? {
+                    return Ok(None);
+                }
+                CanonicalProjectMutationAction::AddResource {
+                    resource: resource.clone(),
+                    make_primary: *make_primary,
+                }
+            }
+            ProjectCommandAction::ReplaceResource {
+                old_resource_id,
+                new_resource,
+            } if stage == ProjectCommandStage::ValidatingResources => {
+                if !self
+                    .validate_resource_observation(record, std::slice::from_ref(new_resource))?
+                {
+                    return Ok(None);
+                }
+                CanonicalProjectMutationAction::ReplaceResource {
+                    old_resource_id: *old_resource_id,
+                    new_resource: new_resource.clone(),
+                }
+            }
+            ProjectCommandAction::RemoveResource { resource_id, force }
+                if stage == ProjectCommandStage::UpdatingProject =>
+            {
+                CanonicalProjectMutationAction::RemoveResource {
+                    resource_id: *resource_id,
+                    force: *force,
+                }
+            }
+            _ => {
+                reject(
+                    &self.store,
+                    record,
+                    error(ErrorCategory::Conflict, "project_invalid_transition"),
+                )?;
+                return Ok(None);
+            }
+        };
+        Ok(Some(action))
+    }
+
+    fn validate_resource_observation(
+        &self,
+        record: &mut ProjectSagaRecord,
+        resources: &[ProjectResource],
+    ) -> Result<bool, hq_application::ApplicationError> {
+        let operation = derived_operation(record.operation_id, b"resource-validation", &[]);
+        record.resource_operation_id = Some(operation);
+        if matches!(record.resource_effect, SagaEffectState::NotStarted) {
+            record.resource_effect = SagaEffectState::Pending;
+            persist(&self.store, record)?;
+        }
+        let request = EffectRequest {
+            operation_id: operation,
+            request_digest: resource_validation_digest(record, resources),
+            issued_at: record.issued_at,
+            body: ProjectResourceValidationRequest {
+                home: record.home,
+                project_id: record.project_id,
+                resources: resources.to_vec(),
+            },
+        };
+        match self.resources.validate_resources(&request)? {
+            EffectOutcome::Accepted(observations)
+                if resources_match_observations(resources, &observations) =>
+            {
+                record.resource_effect = SagaEffectState::Accepted;
+                persist(&self.store, record)?;
+                Ok(true)
+            }
+            EffectOutcome::Accepted(_) => {
+                reject(
+                    &self.store,
+                    record,
+                    error(ErrorCategory::Conflict, "project_resource_identity_changed"),
+                )?;
+                Ok(false)
+            }
+            EffectOutcome::Rejected(error) => {
+                reject(&self.store, record, error)?;
+                Ok(false)
+            }
+            EffectOutcome::Uncertain(_) => {
+                reconcile(
+                    &self.store,
+                    record,
+                    ProjectCommandStage::ValidatingResources,
+                    effect_error("project_resource_validation_unknown"),
+                    EffectKind::Resource,
+                )?;
+                Ok(false)
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1091,6 +1308,80 @@ enum EffectKind {
     Resource,
 }
 
+fn direct_precondition_error(
+    record: &ProjectSagaRecord,
+    snapshot: &ProjectWorkflowSnapshot,
+) -> Option<DomainError> {
+    if snapshot.head != record.expected_head {
+        return Some(error(ErrorCategory::Conflict, "project_stale_head"));
+    }
+    if !snapshot.active_human {
+        return Some(error(ErrorCategory::Unauthorized, "project_inactive_human"));
+    }
+    if snapshot.archived {
+        return Some(error(ErrorCategory::Conflict, "project_archived"));
+    }
+    if snapshot.lifecycle == CanonicalProjectLifecycle::Closing {
+        return Some(error(ErrorCategory::Conflict, "project_invalid_transition"));
+    }
+    let resource_exists = |resource_id| {
+        snapshot
+            .resources
+            .iter()
+            .any(|resource| resource.resource_id == resource_id)
+    };
+    match &record.action {
+        ProjectCommandAction::Open if snapshot.lifecycle != CanonicalProjectLifecycle::Closed => {
+            Some(error(ErrorCategory::Conflict, "project_invalid_transition"))
+        }
+        ProjectCommandAction::Open if !snapshot.claimable => Some(error(
+            ErrorCategory::Conflict,
+            "project_resource_claim_conflict",
+        )),
+        ProjectCommandAction::AddResource { resource, .. }
+            if resource_exists(resource.resource_id) =>
+        {
+            Some(error(ErrorCategory::Conflict, "project_resource_exists"))
+        }
+        ProjectCommandAction::RemoveResource { resource_id, .. }
+            if !resource_exists(*resource_id) =>
+        {
+            Some(error(ErrorCategory::Conflict, "project_resource_missing"))
+        }
+        ProjectCommandAction::RemoveResource { force: false, .. }
+            if snapshot.assignment.is_some() =>
+        {
+            Some(error(
+                ErrorCategory::Conflict,
+                "project_resource_force_required",
+            ))
+        }
+        ProjectCommandAction::ReplaceResource {
+            old_resource_id,
+            new_resource,
+        } if !resource_exists(*old_resource_id)
+            || (*old_resource_id != new_resource.resource_id
+                && resource_exists(new_resource.resource_id)) =>
+        {
+            Some(error(
+                ErrorCategory::Conflict,
+                "project_resource_invalid_replace",
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn direct_mutation_tag(action: &CanonicalProjectMutationAction) -> Option<&'static [u8]> {
+    match action {
+        CanonicalProjectMutationAction::Open => Some(b"open"),
+        CanonicalProjectMutationAction::AddResource { .. } => Some(b"add-resource"),
+        CanonicalProjectMutationAction::RemoveResource { .. } => Some(b"remove-resource"),
+        CanonicalProjectMutationAction::ReplaceResource { .. } => Some(b"replace-resource"),
+        _ => None,
+    }
+}
+
 fn resources_are_healthy(
     desired: &[ProjectResource],
     observations: &[ProjectResourceObservation],
@@ -1103,6 +1394,32 @@ fn resources_are_healthy(
                     && observation.health == ResourceHealth::Healthy
             })
         })
+}
+
+fn resources_match_observations(
+    desired: &[ProjectResource],
+    observations: &[ProjectResourceObservation],
+) -> bool {
+    desired.len() == observations.len()
+        && desired.iter().all(|resource| {
+            observations.iter().any(|observation| {
+                observation.resource_id == resource.resource_id
+                    && observation.observed_canonical.as_ref() == Some(&resource.canonical_locator)
+            })
+        })
+}
+
+fn resource_validation_digest(
+    record: &ProjectSagaRecord,
+    resources: &[ProjectResource],
+) -> CommandDigest {
+    let mut digest = Sha256::new();
+    put(&mut digest, b"hq-project-resource-validation-v1");
+    put(&mut digest, record.operation_id.as_bytes());
+    for resource in resources {
+        put_resource(&mut digest, resource);
+    }
+    CommandDigest::from_bytes(digest.finalize().into())
 }
 
 fn select_thread(
@@ -1286,6 +1603,27 @@ fn mutation_digest(
     put(&mut digest, expected_head.as_bytes());
     match action {
         CanonicalProjectMutationAction::Open => put(&mut digest, b"open"),
+        CanonicalProjectMutationAction::AddResource {
+            resource,
+            make_primary,
+        } => {
+            put(&mut digest, b"add-resource");
+            put_resource(&mut digest, resource);
+            put(&mut digest, &[u8::from(*make_primary)]);
+        }
+        CanonicalProjectMutationAction::RemoveResource { resource_id, force } => {
+            put(&mut digest, b"remove-resource");
+            put(&mut digest, resource_id.as_bytes());
+            put(&mut digest, &[u8::from(*force)]);
+        }
+        CanonicalProjectMutationAction::ReplaceResource {
+            old_resource_id,
+            new_resource,
+        } => {
+            put(&mut digest, b"replace-resource");
+            put(&mut digest, old_resource_id.as_bytes());
+            put_resource(&mut digest, new_resource);
+        }
         CanonicalProjectMutationAction::Configure(intent) => {
             put(&mut digest, b"configure");
             put(&mut digest, intent.assignment_id.as_bytes());
@@ -1349,6 +1687,19 @@ fn put_locator(digest: &mut Sha256, locator: &ResourceLocator) {
     };
     put(digest, &[scheme]);
     put(digest, locator.value().as_bytes());
+}
+
+fn put_resource(digest: &mut Sha256, resource: &ProjectResource) {
+    put(digest, resource.resource_id.as_bytes());
+    put_locator(digest, &resource.display_locator);
+    put_locator(digest, &resource.canonical_locator);
+    let health = match resource.health {
+        ResourceHealth::Unknown => 1_u8,
+        ResourceHealth::Healthy => 2,
+        ResourceHealth::Degraded => 3,
+        ResourceHealth::Unavailable => 4,
+    };
+    put(digest, &[health]);
 }
 
 fn put(digest: &mut Sha256, value: &[u8]) {
