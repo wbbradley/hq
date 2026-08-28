@@ -143,6 +143,19 @@ attribute creator revocation to one exact grant, reuse the current unrevoked gra
 frontier-complete regrants only after revocation, and verify exact target binding without
 reconstructing storage rows.
 
+Peer-route items carry the complete retained route-set and route-block histories. Each entry names
+its exact fact and whether it belongs to the complete causal-maximal frontier; route sets also carry
+the peer signing key, transport encryption key, optional label, and bounded relay hints. Validation
+requires every frontier fact to be retained, the histories to be disjoint, every membership flag to
+match the frontier, and `routable`/`blocked`/`conflicted` to agree with remove-wins derivation.
+
+Mailbox-capability items carry the stable grant identity, exact grant fact, fully qualified mailbox
+and grantee signing address, active flag, revoke frontier, observed action identities, and complete
+support. Validation requires the grant and every revoke maximum in support and derives active state
+from an empty revoke frontier. These are public planning facts, not signing or mailbox capability.
+They complete the existing unshipped clean local API v1 shape in place, with no compatibility branch
+or version bump.
+
 The canonical-evidence query accepts sorted unique roots and returns their complete transitive
 parent closure as sorted `(fact_id, exact_event)` values. Import accepts the same bounded shape,
 cryptographically and semantically re-verifies the entire request before its first insertion, and

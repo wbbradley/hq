@@ -13,13 +13,15 @@ use std::{
 
 use hq_application::{
     ApplicationError, HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs,
-    LocalInstallationAuthority, plan_human_account_creation, plan_human_account_selection,
-    plan_human_device_acceptance, plan_human_device_grant, plan_human_device_revoke,
-    plan_human_mailbox_creation,
+    LocalInstallationAuthority, MailboxGrantRequest, MailboxRevokeRequest, PeerRouteRequest,
+    plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
+    plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
+    plan_mailbox_grant, plan_mailbox_revoke, plan_peer_route_block, plan_peer_route_set,
 };
 use hq_domain::{
-    AccountId, BoundedText, CommandId, FactId, GrantId, InstallationAddress, InstallationId,
-    ProviderId, RESOURCE_LOCATOR_MAX_BYTES, RelayHints, ResourceLocator, ResourceScheme, ShortText,
+    AccountId, BoundedText, CommandId, EncryptionPublicKey, ErrorCode, FactId, GrantId,
+    InstallationAddress, InstallationId, MailboxAddress, MailboxId, ProviderId,
+    RESOURCE_LOCATOR_MAX_BYTES, RelayHints, ResourceLocator, ResourceScheme, ShortText,
     SigningPublicKey, Timestamp,
 };
 use hq_local_api::{
@@ -27,8 +29,8 @@ use hq_local_api::{
     protocol::v1::{
         AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto,
         DeviceGrantDto, Id32, LifecycleRequest, LifecycleState, MutationAttemptDto,
-        MutationOutcomeDto, MutationRequest, Request, ResourceSchemeDto, ResponseResult,
-        SnapshotItem,
+        MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto, Request,
+        ResourceSchemeDto, ResponseResult, SnapshotItem,
     },
 };
 use hq_protocol::VerifiedPairingInvitation;
@@ -147,6 +149,52 @@ pub enum HumanCommand {
     Revoke {
         /// Device installation to revoke.
         installation_id: InstallationId,
+    },
+}
+
+/// Closed directional peer-route administration behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PeerCommand {
+    /// Set or recover one exact directional route.
+    Add {
+        /// Peer installation.
+        installation_id: InstallationId,
+        /// Peer signing key.
+        signing_key: SigningPublicKey,
+        /// Peer transport encryption key.
+        encryption_key: EncryptionPublicKey,
+        /// Optional signed display label.
+        label: Option<ShortText>,
+        /// Signed non-authority relay hints.
+        relay_hints: RelayHints,
+    },
+    /// Inspect complete directional route history.
+    List,
+    /// Revoke every local mailbox capability before blocking the route.
+    Distrust {
+        /// Peer installation to block.
+        installation_id: InstallationId,
+    },
+}
+
+/// Closed directional mailbox-capability administration behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MailboxCommand {
+    /// Inspect complete locally owned mailbox capability history.
+    List,
+    /// Grant one locally owned mailbox to one uniquely routable peer.
+    Grant {
+        /// Locally owned mailbox.
+        mailbox_id: MailboxId,
+        /// Exact peer installation.
+        peer_id: InstallationId,
+    },
+    /// Revoke one locally owned mailbox grant for one exact peer.
+    Revoke {
+        /// Locally owned mailbox.
+        mailbox_id: MailboxId,
+        /// Exact peer installation.
+        peer_id: InstallationId,
     },
 }
 
@@ -277,6 +325,98 @@ pub struct HumanDevicesView {
     pub devices: Vec<HumanDeviceView>,
 }
 
+/// Passive exact peer-route candidate presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerRouteCandidateView {
+    /// Exact signed route-set fact.
+    pub fact_id: FactId,
+    /// Exact peer signing key.
+    pub signing_key: SigningPublicKey,
+    /// Exact peer transport encryption key.
+    pub encryption_key: EncryptionPublicKey,
+    /// Optional signed display label.
+    pub label: Option<String>,
+    /// Signed non-authority relay hints.
+    pub relay_hints: Vec<HumanRelayHintView>,
+    /// Whether this route set is a causal maximum.
+    pub frontier_member: bool,
+}
+
+/// Passive exact peer-route block presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerRouteBlockView {
+    /// Exact signed route-block fact.
+    pub fact_id: FactId,
+    /// Stable signed block reason.
+    pub reason: String,
+    /// Whether this route block is a causal maximum.
+    pub frontier_member: bool,
+}
+
+/// Passive complete directional peer-route presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerRouteView {
+    /// Installation that owns this directional route.
+    pub owner: InstallationId,
+    /// Remote installation named by the route.
+    pub peer: InstallationId,
+    /// Stable derived route state.
+    pub state: String,
+    /// Complete causal-maximal route frontier.
+    pub frontier: Vec<FactId>,
+    /// Complete retained signed route-set history.
+    pub routes: Vec<PeerRouteCandidateView>,
+    /// Complete retained signed route-block history.
+    pub blocks: Vec<PeerRouteBlockView>,
+}
+
+/// Passive complete directional mailbox-capability presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MailboxCapabilityView {
+    /// Stable capability identity.
+    pub grant_id: GrantId,
+    /// Exact capability-grant fact.
+    pub grant_fact: FactId,
+    /// Installation-qualified mailbox address.
+    pub mailbox: MailboxAddress,
+    /// Installation-qualified grantee address.
+    pub grantee: InstallationAddress,
+    /// Whether no retained revoke causally dominates the grant.
+    pub active: bool,
+    /// Complete causal-maximal revoke frontier.
+    pub revoke_frontier: Vec<FactId>,
+    /// Complete retained owner-observed action identities.
+    pub observed_actions: Vec<FactId>,
+    /// Complete transitive projection support.
+    pub support: Vec<FactId>,
+}
+
+/// Passive locally owned mailbox presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MailboxView {
+    /// Installation-qualified mailbox address.
+    pub address: MailboxAddress,
+    /// Exact mailbox creation fact.
+    pub create_fact: FactId,
+    /// Stable mailbox kind.
+    pub kind: String,
+    /// Optional signed display label.
+    pub label: Option<String>,
+}
+
+/// Passive administrative projection result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorityAdminView {
+    /// Stable operation label used by deterministic renderers.
+    pub operation: &'static str,
+    /// Complete local directional peer-route projections.
+    pub peers: Vec<PeerRouteView>,
+    /// Complete locally owned mailbox projections.
+    pub mailboxes: Vec<MailboxView>,
+    /// Complete locally owned mailbox-capability projections.
+    pub capabilities: Vec<MailboxCapabilityView>,
+}
+
 struct LocalSelection {
     candidates: Vec<AccountId>,
     active: Option<AccountId>,
@@ -311,6 +451,20 @@ pub enum CliCommand {
     Human {
         /// Requested human-account behavior.
         action: HumanCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
+    /// Execute one directional peer-route operation through the authenticated local API.
+    Peer {
+        /// Requested peer-route behavior.
+        action: PeerCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
+    /// Execute one mailbox-capability operation through the authenticated local API.
+    Mailbox {
+        /// Requested mailbox-capability behavior.
+        action: MailboxCommand,
         /// Validated installation state layout.
         state: StatePaths,
     },
@@ -399,6 +553,8 @@ pub enum CliError {
     Application(ApplicationError),
     /// Authoritative human-account state was absent, ambiguous, stale, or inconsistent.
     HumanState,
+    /// Directional route or mailbox authority was absent, ambiguous, stale, or inconsistent.
+    AuthorityState,
     /// Pairing evidence or its filesystem location failed strict validation.
     PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
@@ -410,7 +566,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|identity|config|human|daemon>",
+                 <help|version|identity|config|human|peer|mailbox|daemon>",
             ),
             Self::StatePath => formatter.write_str("node state path is unavailable or invalid"),
             Self::RuntimePath => formatter.write_str("node runtime path is unavailable or invalid"),
@@ -424,6 +580,9 @@ impl fmt::Display for CliError {
             Self::Application(error) => error.fmt(formatter),
             Self::HumanState => {
                 formatter.write_str("human account state is unavailable or ambiguous")
+            }
+            Self::AuthorityState => {
+                formatter.write_str("peer or mailbox authority is unavailable or ambiguous")
             }
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
@@ -507,6 +666,11 @@ impl CliError {
             Self::Application(_) | Self::HumanState => (
                 "human.state_unavailable",
                 "human account authority is absent, stale, ambiguous, or inconsistent",
+                CliExitClass::Failure,
+            ),
+            Self::AuthorityState => (
+                "authority.state_unavailable",
+                "peer or mailbox authority is absent, stale, ambiguous, or inconsistent",
                 CliExitClass::Failure,
             ),
             Self::PairingArtifact => (
@@ -597,6 +761,8 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
         Some("identity") => parse_identity(&rest, state_root.as_ref())?,
         Some("config") => parse_configuration(&rest, state_root.as_ref())?,
         Some("human") => parse_human(&rest, state_root.as_ref())?,
+        Some("peer") => parse_peer(&rest, state_root.as_ref())?,
+        Some("mailbox") => parse_mailbox(&rest, state_root.as_ref())?,
         Some("daemon") if rest.as_slice() == [OsString::from("--help")] => CliCommand::Help {
             topic: vec!["daemon".to_owned()],
         },
@@ -624,11 +790,62 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 | CliCommand::Identity { .. }
                 | CliCommand::Configuration { .. }
                 | CliCommand::Human { .. }
+                | CliCommand::Peer { .. }
+                | CliCommand::Mailbox { .. }
         )
     {
         return Err(CliError::Arguments);
     }
     Ok(CliInvocation { output, command })
+}
+
+fn parse_peer(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match arguments {
+        [action] if action == "list" => PeerCommand::List,
+        [action, installation] if action == "distrust" => PeerCommand::Distrust {
+            installation_id: InstallationId::from_bytes(parse_hex32(installation)?),
+        },
+        [action, installation, signing, encryption, options @ ..] if action == "add" => {
+            let (label, relay_hints) = parse_pairing_options(options)?;
+            PeerCommand::Add {
+                installation_id: InstallationId::from_bytes(parse_hex32(installation)?),
+                signing_key: SigningPublicKey::from_bytes(parse_hex32(signing)?),
+                encryption_key: EncryptionPublicKey::from_bytes(parse_hex32(encryption)?),
+                label,
+                relay_hints,
+            }
+        }
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::Peer {
+        action,
+        state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_mailbox(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match arguments {
+        [action] if action == "list" => MailboxCommand::List,
+        [action, mailbox, peer] if action == "grant" => MailboxCommand::Grant {
+            mailbox_id: MailboxId::from_bytes(parse_hex32(mailbox)?),
+            peer_id: InstallationId::from_bytes(parse_hex32(peer)?),
+        },
+        [action, mailbox, peer] if action == "revoke" => MailboxCommand::Revoke {
+            mailbox_id: MailboxId::from_bytes(parse_hex32(mailbox)?),
+            peer_id: InstallationId::from_bytes(parse_hex32(peer)?),
+        },
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::Mailbox {
+        action,
+        state: parsed_state(state_root)?,
+    })
 }
 
 fn parse_identity(
@@ -870,6 +1087,12 @@ pub fn run_cli_with_input(
         CliCommand::Human { action, state } => {
             return render_result(invocation.output, &run_human(action, state)?);
         }
+        CliCommand::Peer { action, state } => {
+            return render_result(invocation.output, &run_peer(action, state)?);
+        }
+        CliCommand::Mailbox { action, state } => {
+            return render_result(invocation.output, &run_mailbox(action, state)?);
+        }
         CliCommand::Help { .. } | CliCommand::Version | CliCommand::Daemon { .. } => {}
     }
     let CliCommand::Daemon { action, state } = &invocation.command else {
@@ -879,7 +1102,9 @@ pub fn run_cli_with_input(
             CliCommand::Daemon { .. }
             | CliCommand::Identity { .. }
             | CliCommand::Configuration { .. }
-            | CliCommand::Human { .. } => unreachable!(),
+            | CliCommand::Human { .. }
+            | CliCommand::Peer { .. }
+            | CliCommand::Mailbox { .. } => unreachable!(),
         };
     };
     let runtime = RuntimePaths::new(state.root().join("runtime"))
@@ -1055,6 +1280,67 @@ fn run_human(action: &HumanCommand, state: &StatePaths) -> Result<CliResult, Cli
             )?)))
         }
     }
+}
+
+fn run_peer(action: &PeerCommand, state: &StatePaths) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let local = client.installation_id();
+    match action {
+        PeerCommand::List => {}
+        PeerCommand::Add {
+            installation_id,
+            signing_key,
+            encryption_key,
+            label,
+            relay_hints,
+        } => add_peer_route(
+            &mut client,
+            local,
+            InstallationAddress::new(*installation_id, *signing_key),
+            *encryption_key,
+            label.as_ref(),
+            relay_hints,
+        )?,
+        PeerCommand::Distrust { installation_id } => {
+            distrust_peer(&mut client, local, *installation_id)?;
+        }
+    }
+    let snapshot = client.snapshot()?;
+    Ok(CliResult::AuthorityAdmin(Box::new(authority_admin_view(
+        &snapshot,
+        local,
+        match action {
+            PeerCommand::List => "peer_list",
+            PeerCommand::Add { .. } => "peer_add",
+            PeerCommand::Distrust { .. } => "peer_distrust",
+        },
+    ))))
+}
+
+fn run_mailbox(action: &MailboxCommand, state: &StatePaths) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let local = client.installation_id();
+    match action {
+        MailboxCommand::List => {}
+        MailboxCommand::Grant {
+            mailbox_id,
+            peer_id,
+        } => grant_mailbox(&mut client, local, *mailbox_id, *peer_id)?,
+        MailboxCommand::Revoke {
+            mailbox_id,
+            peer_id,
+        } => revoke_mailbox(&mut client, local, *mailbox_id, *peer_id)?,
+    }
+    let snapshot = client.snapshot()?;
+    Ok(CliResult::AuthorityAdmin(Box::new(authority_admin_view(
+        &snapshot,
+        local,
+        match action {
+            MailboxCommand::List => "mailbox_list",
+            MailboxCommand::Grant { .. } => "mailbox_grant",
+            MailboxCommand::Revoke { .. } => "mailbox_revoke",
+        },
+    ))))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1451,6 +1737,369 @@ fn installation_signing_keys(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn authority_admin_view(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    operation: &'static str,
+) -> AuthorityAdminView {
+    let mut peers = Vec::new();
+    let mut mailboxes = Vec::new();
+    let mut capabilities = Vec::new();
+    for item in &snapshot.items {
+        match item {
+            SnapshotItem::PeerRoute {
+                owner,
+                peer,
+                state,
+                frontier,
+                routes,
+                blocks,
+            } if owner.bytes() == *local.as_bytes() => peers.push(PeerRouteView {
+                owner: local,
+                peer: InstallationId::from_bytes(peer.bytes()),
+                state: state.clone(),
+                frontier: decode_fact_ids(frontier),
+                routes: routes.iter().map(peer_candidate_view).collect(),
+                blocks: blocks.iter().map(peer_block_view).collect(),
+            }),
+            SnapshotItem::Mailbox {
+                installation_id,
+                mailbox_id,
+                create_fact,
+                mailbox_kind,
+                label,
+            } if installation_id.bytes() == *local.as_bytes() => mailboxes.push(MailboxView {
+                address: MailboxAddress::new(local, MailboxId::from_bytes(mailbox_id.bytes())),
+                create_fact: FactId::from_bytes(create_fact.bytes()),
+                kind: mailbox_kind.clone(),
+                label: label.clone(),
+            }),
+            SnapshotItem::MailboxCapability {
+                grant_id,
+                grant_fact,
+                mailbox_installation,
+                mailbox_id,
+                grantee_installation,
+                grantee_signing_key,
+                active,
+                revoke_frontier,
+                observed_actions,
+                support,
+            } if mailbox_installation.bytes() == *local.as_bytes() => {
+                capabilities.push(MailboxCapabilityView {
+                    grant_id: GrantId::from_bytes(grant_id.bytes()),
+                    grant_fact: FactId::from_bytes(grant_fact.bytes()),
+                    mailbox: MailboxAddress::new(local, MailboxId::from_bytes(mailbox_id.bytes())),
+                    grantee: InstallationAddress::new(
+                        InstallationId::from_bytes(grantee_installation.bytes()),
+                        SigningPublicKey::from_bytes(grantee_signing_key.bytes()),
+                    ),
+                    active: *active,
+                    revoke_frontier: decode_fact_ids(revoke_frontier),
+                    observed_actions: decode_fact_ids(observed_actions),
+                    support: decode_fact_ids(support),
+                });
+            }
+            _ => {}
+        }
+    }
+    peers.sort_by_key(|peer| peer.peer);
+    mailboxes.sort_by_key(|mailbox| mailbox.address);
+    capabilities.sort_by_key(|capability| capability.grant_id);
+    AuthorityAdminView {
+        operation,
+        peers,
+        mailboxes,
+        capabilities,
+    }
+}
+
+fn add_peer_route(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    peer: InstallationAddress,
+    encryption_key: EncryptionPublicKey,
+    label: Option<&ShortText>,
+    relay_hints: &RelayHints,
+) -> Result<(), CliError> {
+    if peer.installation_id() == local {
+        return Err(CliError::AuthorityState);
+    }
+    let snapshot = client.snapshot()?;
+    let authority = local_authority(&snapshot, local)?;
+    let current = peer_route(&snapshot, local, peer.installation_id())?;
+    if current.as_ref().is_some_and(|route| {
+        route.state == "routable"
+            && route
+                .routes
+                .iter()
+                .filter(|candidate| candidate.frontier_member)
+                .count()
+                == 1
+            && route.routes.iter().any(|candidate| {
+                candidate.frontier_member
+                    && candidate.signing_key == peer.signing_key()
+                    && candidate.encryption_key == encryption_key
+                    && candidate.label.as_deref() == label.map(ShortText::as_str)
+                    && relay_views_match(&candidate.relay_hints, relay_hints)
+            })
+    }) {
+        return Ok(());
+    }
+    let plan = plan_peer_route_set(
+        authority,
+        stable_inputs(),
+        PeerRouteRequest {
+            peer,
+            encryption_key,
+            label: label.cloned(),
+            relay_hints: relay_hints.clone(),
+            route_frontier: current
+                .map_or_else(BTreeSet::new, |route| route.frontier.into_iter().collect()),
+        },
+    )?;
+    submit_human_plan(client, plan)
+}
+
+fn distrust_peer(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    peer: InstallationId,
+) -> Result<(), CliError> {
+    if peer == local {
+        return Err(CliError::AuthorityState);
+    }
+    let snapshot = client.snapshot()?;
+    let active = mailbox_capabilities(&snapshot, local)
+        .into_iter()
+        .filter(|capability| capability.active && capability.grantee.installation_id() == peer)
+        .collect::<Vec<_>>();
+    for capability in active {
+        revoke_exact_capability(client, local, &capability)?;
+    }
+    let snapshot = client.snapshot()?;
+    let route = peer_route(&snapshot, local, peer)?.ok_or(CliError::AuthorityState)?;
+    if route.state == "blocked" {
+        return Ok(());
+    }
+    let plan = plan_peer_route_block(
+        local_authority(&snapshot, local)?,
+        stable_inputs(),
+        peer,
+        ErrorCode::new("operator-distrust").map_err(|_| CliError::AuthorityState)?,
+        route.frontier.into_iter().collect(),
+    )?;
+    submit_human_plan(client, plan)
+}
+
+fn grant_mailbox(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    mailbox_id: MailboxId,
+    peer: InstallationId,
+) -> Result<(), CliError> {
+    let snapshot = client.snapshot()?;
+    let authority = local_authority(&snapshot, local)?;
+    let route = peer_route(&snapshot, local, peer)?.ok_or(CliError::AuthorityState)?;
+    let candidates = route
+        .routes
+        .iter()
+        .filter(|candidate| candidate.frontier_member)
+        .collect::<Vec<_>>();
+    let [candidate] = candidates.as_slice() else {
+        return Err(CliError::AuthorityState);
+    };
+    if route.state != "routable" {
+        return Err(CliError::AuthorityState);
+    }
+    let grantee = InstallationAddress::new(peer, candidate.signing_key);
+    let (mailbox, mailbox_fact) = local_mailbox(&snapshot, local, mailbox_id)?;
+    let history = mailbox_capabilities(&snapshot, local)
+        .into_iter()
+        .filter(|capability| {
+            capability.mailbox == mailbox && capability.grantee.installation_id() == peer
+        })
+        .collect::<Vec<_>>();
+    let active = history
+        .iter()
+        .filter(|capability| capability.active)
+        .collect::<Vec<_>>();
+    match active.as_slice() {
+        [] => {}
+        [capability] if capability.grantee == grantee => return Ok(()),
+        [_] | [_, _, ..] => return Err(CliError::AuthorityState),
+    }
+    let lineage_frontier = history
+        .iter()
+        .flat_map(|capability| capability.revoke_frontier.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let grant_id = mailbox_grant_id(mailbox, grantee, &lineage_frontier);
+    let plan = plan_mailbox_grant(
+        authority,
+        stable_inputs(),
+        MailboxGrantRequest {
+            grant_id,
+            mailbox,
+            mailbox_fact,
+            grantee,
+            lineage_frontier,
+        },
+    )?;
+    submit_human_plan(client, plan)
+}
+
+fn revoke_mailbox(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    mailbox_id: MailboxId,
+    peer: InstallationId,
+) -> Result<(), CliError> {
+    let snapshot = client.snapshot()?;
+    let (mailbox, _) = local_mailbox(&snapshot, local, mailbox_id)?;
+    let history = mailbox_capabilities(&snapshot, local)
+        .into_iter()
+        .filter(|capability| {
+            capability.mailbox == mailbox && capability.grantee.installation_id() == peer
+        })
+        .collect::<Vec<_>>();
+    let active = history
+        .iter()
+        .filter(|capability| capability.active)
+        .collect::<Vec<_>>();
+    match active.as_slice() {
+        [] if !history.is_empty() => Ok(()),
+        [capability] => revoke_exact_capability(client, local, capability),
+        [] | [_, _, ..] => Err(CliError::AuthorityState),
+    }
+}
+
+fn revoke_exact_capability(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    capability: &MailboxCapabilityView,
+) -> Result<(), CliError> {
+    let snapshot = client.snapshot()?;
+    let authority = local_authority(&snapshot, local)?;
+    let current = mailbox_capabilities(&snapshot, local)
+        .into_iter()
+        .find(|candidate| candidate.grant_id == capability.grant_id)
+        .ok_or(CliError::AuthorityState)?;
+    if !current.active {
+        return Ok(());
+    }
+    let plan = plan_mailbox_revoke(
+        authority,
+        stable_inputs(),
+        MailboxRevokeRequest {
+            grant_id: current.grant_id,
+            grant_fact: current.grant_fact,
+            mailbox: current.mailbox,
+            grantee_id: current.grantee.installation_id(),
+            capability_frontier: current.support.into_iter().collect(),
+        },
+    )?;
+    submit_human_plan(client, plan)
+}
+
+fn peer_candidate_view(candidate: &PeerRouteCandidateDto) -> PeerRouteCandidateView {
+    PeerRouteCandidateView {
+        fact_id: FactId::from_bytes(candidate.fact_id.bytes()),
+        signing_key: SigningPublicKey::from_bytes(candidate.signing_key.bytes()),
+        encryption_key: EncryptionPublicKey::from_bytes(candidate.encryption_key.bytes()),
+        label: candidate.label.clone(),
+        relay_hints: candidate
+            .relay_hints
+            .iter()
+            .map(|hint| HumanRelayHintView {
+                scheme: resource_scheme_label(hint.scheme),
+                value: hint.value.clone(),
+            })
+            .collect(),
+        frontier_member: candidate.frontier_member,
+    }
+}
+
+fn peer_block_view(block: &PeerRouteBlockDto) -> PeerRouteBlockView {
+    PeerRouteBlockView {
+        fact_id: FactId::from_bytes(block.fact_id.bytes()),
+        reason: block.reason.clone(),
+        frontier_member: block.frontier_member,
+    }
+}
+
+fn peer_route(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    peer: InstallationId,
+) -> Result<Option<PeerRouteView>, CliError> {
+    let matches = authority_admin_view(snapshot, local, "internal")
+        .peers
+        .into_iter()
+        .filter(|route| route.peer == peer)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => Err(CliError::AuthorityState),
+    }
+}
+
+fn mailbox_capabilities(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+) -> Vec<MailboxCapabilityView> {
+    authority_admin_view(snapshot, local, "internal").capabilities
+}
+
+fn local_mailbox(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    mailbox_id: MailboxId,
+) -> Result<(MailboxAddress, FactId), CliError> {
+    let address = MailboxAddress::new(local, mailbox_id);
+    let matches = authority_admin_view(snapshot, local, "internal")
+        .mailboxes
+        .into_iter()
+        .filter(|mailbox| mailbox.address == address)
+        .map(|mailbox| (mailbox.address, mailbox.create_fact))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [mailbox] => Ok(*mailbox),
+        [] | [_, _, ..] => Err(CliError::AuthorityState),
+    }
+}
+
+fn relay_views_match(actual: &[HumanRelayHintView], expected: &RelayHints) -> bool {
+    actual.len() == expected.as_slice().len()
+        && actual.iter().zip(expected.as_slice()).all(|(left, right)| {
+            left.value == right.value()
+                && left.scheme
+                    == resource_scheme_label(match right.scheme() {
+                        ResourceScheme::GitRepository => ResourceSchemeDto::GitRepository,
+                        ResourceScheme::WorkingTree => ResourceSchemeDto::WorkingTree,
+                        ResourceScheme::Container => ResourceSchemeDto::Container,
+                        ResourceScheme::Opaque => ResourceSchemeDto::Opaque,
+                    })
+        })
+}
+
+fn mailbox_grant_id(
+    mailbox: MailboxAddress,
+    grantee: InstallationAddress,
+    frontier: &BTreeSet<FactId>,
+) -> GrantId {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-mailbox-capability-grant-v1\0");
+    digest.update(mailbox.installation_id().as_bytes());
+    digest.update(mailbox.mailbox_id().as_bytes());
+    digest.update(grantee.installation_id().as_bytes());
+    digest.update(grantee.signing_key().as_bytes());
+    for fact in frontier {
+        digest.update(fact.as_bytes());
+    }
+    GrantId::from_bytes(digest.finalize().into())
 }
 
 fn classify_device_state(
@@ -2110,6 +2759,7 @@ enum CliResult {
     Human(Box<HumanView>),
     HumanPairing(HumanPairingView),
     HumanDevices(Box<HumanDevicesView>),
+    AuthorityAdmin(Box<AuthorityAdminView>),
     Completed {
         operation: &'static str,
     },
@@ -2144,13 +2794,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         )),
         (CliOutputFormat::Human, CliResult::Human(view)) => render_human_view(view),
         (CliOutputFormat::Human, CliResult::HumanDevices(view)) => render_human_devices(view),
-        (CliOutputFormat::Human, CliResult::HumanPairing(view)) => Ok(format!(
-            "completed operation={} account={} grant={} device={}\n",
-            view.operation,
-            crate::identity::encode_hex(view.account_id.as_bytes()),
-            crate::identity::encode_hex(view.grant_id.as_bytes()),
-            crate::identity::encode_hex(view.device.as_bytes()),
-        )),
+        (CliOutputFormat::Human, CliResult::HumanPairing(view)) => Ok(render_human_pairing(view)),
         (CliOutputFormat::Human, CliResult::Completed { operation }) => {
             Ok(format!("completed operation={operation}\n"))
         }
@@ -2212,10 +2856,79 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 "devices": view.devices.iter().map(device_json).collect::<Vec<_>>(),
             }),
         ),
+        (format, CliResult::AuthorityAdmin(view)) => render_authority_admin_result(format, view),
         (CliOutputFormat::Json, CliResult::Completed { operation }) => {
             machine_record("completed", &serde_json::json!({ "operation": operation }))
         }
     }
+}
+
+fn render_human_pairing(view: &HumanPairingView) -> String {
+    format!(
+        "completed operation={} account={} grant={} device={}\n",
+        view.operation,
+        encode_id(view.account_id.as_bytes()),
+        encode_id(view.grant_id.as_bytes()),
+        encode_id(view.device.as_bytes()),
+    )
+}
+
+fn render_authority_admin_result(
+    format: CliOutputFormat,
+    view: &AuthorityAdminView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => render_authority_admin(view),
+        CliOutputFormat::Json => machine_record("authority_admin", &authority_admin_json(view)),
+    }
+}
+
+fn authority_admin_json(view: &AuthorityAdminView) -> serde_json::Value {
+    serde_json::json!({
+        "capabilities": view.capabilities.iter().map(|capability| serde_json::json!({
+            "active": capability.active,
+            "grant_fact": encode_id(capability.grant_fact.as_bytes()),
+            "grant_id": encode_id(capability.grant_id.as_bytes()),
+            "grantee_installation": encode_id(capability.grantee.installation_id().as_bytes()),
+            "grantee_signing_key": encode_id(capability.grantee.signing_key().as_bytes()),
+            "mailbox_id": encode_id(capability.mailbox.mailbox_id().as_bytes()),
+            "mailbox_installation": encode_id(capability.mailbox.installation_id().as_bytes()),
+            "observed_actions": capability.observed_actions.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+            "revoke_frontier": capability.revoke_frontier.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+            "support": capability.support.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "mailboxes": view.mailboxes.iter().map(|mailbox| serde_json::json!({
+            "create_fact": encode_id(mailbox.create_fact.as_bytes()),
+            "kind": mailbox.kind,
+            "label": mailbox.label,
+            "mailbox_id": encode_id(mailbox.address.mailbox_id().as_bytes()),
+            "owner": encode_id(mailbox.address.installation_id().as_bytes()),
+        })).collect::<Vec<_>>(),
+        "operation": view.operation,
+        "peers": view.peers.iter().map(peer_json).collect::<Vec<_>>(),
+    })
+}
+
+fn peer_json(peer: &PeerRouteView) -> serde_json::Value {
+    serde_json::json!({
+        "blocks": peer.blocks.iter().map(|block| serde_json::json!({
+            "fact_id": encode_id(block.fact_id.as_bytes()),
+            "frontier_member": block.frontier_member,
+            "reason": block.reason,
+        })).collect::<Vec<_>>(),
+        "frontier": peer.frontier.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+        "owner": encode_id(peer.owner.as_bytes()),
+        "peer": encode_id(peer.peer.as_bytes()),
+        "routes": peer.routes.iter().map(|route| serde_json::json!({
+            "encryption_key": encode_id(route.encryption_key.as_bytes()),
+            "fact_id": encode_id(route.fact_id.as_bytes()),
+            "frontier_member": route.frontier_member,
+            "label": route.label,
+            "relay_hints": route.relay_hints.iter().map(|hint| serde_json::json!({"scheme": hint.scheme, "value": hint.value})).collect::<Vec<_>>(),
+            "signing_key": encode_id(route.signing_key.as_bytes()),
+        })).collect::<Vec<_>>(),
+        "state": peer.state,
+    })
 }
 
 fn device_json(device: &HumanDeviceView) -> serde_json::Value {
@@ -2342,6 +3055,60 @@ fn render_human_devices(view: &HumanDevicesView) -> Result<String, CliError> {
     Ok(output)
 }
 
+fn render_authority_admin(view: &AuthorityAdminView) -> Result<String, CliError> {
+    let mut output = format!(
+        "operation={} peers={} mailboxes={} capabilities={}\n",
+        view.operation,
+        view.peers.len(),
+        view.mailboxes.len(),
+        view.capabilities.len(),
+    );
+    for peer in &view.peers {
+        writeln!(
+            output,
+            "peer={} state={} frontier={} routes={} blocks={}",
+            encode_id(peer.peer.as_bytes()),
+            peer.state,
+            peer.frontier
+                .iter()
+                .map(|fact| encode_id(fact.as_bytes()))
+                .collect::<Vec<_>>()
+                .join(","),
+            peer.routes.len(),
+            peer.blocks.len(),
+        )
+        .map_err(|_| CliError::Runtime)?;
+    }
+    for mailbox in &view.mailboxes {
+        writeln!(
+            output,
+            "mailbox={}:{} fact={} kind={} label={}",
+            encode_id(mailbox.address.installation_id().as_bytes()),
+            encode_id(mailbox.address.mailbox_id().as_bytes()),
+            encode_id(mailbox.create_fact.as_bytes()),
+            mailbox.kind,
+            serde_json::to_string(&mailbox.label).map_err(|_| CliError::Runtime)?,
+        )
+        .map_err(|_| CliError::Runtime)?;
+    }
+    for capability in &view.capabilities {
+        writeln!(
+            output,
+            "capability={} fact={} mailbox={}:{} grantee={} active={} revokes={} observations={}",
+            encode_id(capability.grant_id.as_bytes()),
+            encode_id(capability.grant_fact.as_bytes()),
+            encode_id(capability.mailbox.installation_id().as_bytes()),
+            encode_id(capability.mailbox.mailbox_id().as_bytes()),
+            encode_id(capability.grantee.installation_id().as_bytes()),
+            capability.active,
+            capability.revoke_frontier.len(),
+            capability.observed_actions.len(),
+        )
+        .map_err(|_| CliError::Runtime)?;
+    }
+    Ok(output)
+}
+
 fn render_version(format: CliOutputFormat) -> Result<String, CliError> {
     let build = build()?;
     match format {
@@ -2380,7 +3147,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  daemon          Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  peer            Manage directional peer routes\n  mailbox         Manage directional mailbox capabilities\n  daemon          Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
         ),
         [command] if command == "version" => Some(
@@ -2402,6 +3169,14 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
              invite INSTALLATION_ID SIGNING_KEY ABSOLUTE_PATH [--label LABEL] [--relay URL]...\n                                          Export one new signed invitation\n  join ABSOLUTE_PATH                     Verify, import, accept, and select one invitation\n  devices                               Show complete selected-account device history\n  revoke INSTALLATION_ID                Revoke one device as the account creator\n\n\
              Human commands start or connect to the local node and author only through application plans.\n",
         ),
+        [command] if command == "peer" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] peer <COMMAND>\n\n\
+             Commands:\n  add INSTALLATION_ID SIGNING_KEY ENCRYPTION_KEY [--label LABEL] [--relay URL]...\n  list\n  distrust INSTALLATION_ID\n\nRoutes are directional metadata only and never grant mailbox authority. Distrust revokes active local capabilities before blocking the route.\n",
+        ),
+        [command] if command == "mailbox" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] mailbox <COMMAND>\n\n\
+             Commands:\n  list\n  grant MAILBOX_ID PEER_INSTALLATION_ID\n  revoke MAILBOX_ID PEER_INSTALLATION_ID\n\nMailbox capability commands require an exact locally owned mailbox and uniquely routable peer.\n",
+        ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
              Commands:\n  run        Own the node in the foreground\n  status     Probe without starting a node\n  readiness  Return a ready node, starting one when absent\n  stop       Converge the node to absence\n  restart    Converge on a fresh ready generation\n",
@@ -2418,13 +3193,19 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                     && matches!(
                         action.as_str(),
                         "show" | "create" | "select" | "invite" | "join" | "devices" | "revoke"
-                    )) =>
+                    ))
+                || (command == "peer"
+                    && matches!(action.as_str(), "add" | "list" | "distrust"))
+                || (command == "mailbox"
+                    && matches!(action.as_str(), "list" | "grant" | "revoke")) =>
         {
             match command.as_str() {
                 "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
                 "identity" => Some("Use `hq help identity` for identity command details.\n"),
                 "config" => Some("Use `hq help config` for configuration command details.\n"),
                 "human" => Some("Use `hq help human` for human command details.\n"),
+                "peer" => Some("Use `hq help peer` for peer command details.\n"),
+                "mailbox" => Some("Use `hq help mailbox` for mailbox command details.\n"),
                 _ => None,
             }
         }
@@ -2514,8 +3295,8 @@ mod tests {
 
     use super::{
         CliCommand, CliError, CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand,
-        HumanDeviceState, IdentityCommand, execute_cli, human_devices_view, human_view,
-        pairing_grant_id, parse_cli, read_password, run_cli,
+        HumanDeviceState, IdentityCommand, MailboxCommand, PeerCommand, execute_cli,
+        human_devices_view, human_view, pairing_grant_id, parse_cli, read_password, run_cli,
     };
     use hq_domain::{
         AccountId, FactId, InstallationAddress, InstallationId, RelayHints, SigningPublicKey,
@@ -2789,6 +3570,45 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_directional_peer_and_mailbox_administration() {
+        let peer = parse_cli([
+            OsString::from("peer"),
+            OsString::from("add"),
+            OsString::from("11".repeat(32)),
+            OsString::from("22".repeat(32)),
+            OsString::from("33".repeat(32)),
+            OsString::from("--label"),
+            OsString::from("desk"),
+        ])
+        .expect("peer add parses");
+        assert!(matches!(
+            peer.command,
+            CliCommand::Peer {
+                action: PeerCommand::Add {
+                    installation_id,
+                    label: Some(label),
+                    ..
+                },
+                ..
+            } if installation_id.as_bytes() == &[0x11; 32] && label.as_str() == "desk"
+        ));
+        let grant = parse_cli([
+            OsString::from("mailbox"),
+            OsString::from("grant"),
+            OsString::from("44".repeat(32)),
+            OsString::from("11".repeat(32)),
+        ])
+        .expect("mailbox grant parses");
+        assert!(matches!(
+            grant.command,
+            CliCommand::Mailbox {
+                action: MailboxCommand::Grant { mailbox_id, peer_id },
+                ..
+            } if mailbox_id.as_bytes() == &[0x44; 32] && peer_id.as_bytes() == &[0x11; 32]
+        ));
+    }
+
+    #[test]
     fn human_view_derives_selection_from_only_the_local_installation() {
         let local = InstallationId::from_bytes([1; 32]);
         let account = Id32::new([2; 32]);
@@ -2870,7 +3690,7 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  daemon          Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  peer            Manage directional peer routes\n  mailbox         Manage directional mailbox capabilities\n  daemon          Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
         let identity = run_cli(
@@ -2892,6 +3712,19 @@ mod tests {
         )
         .expect("human help");
         assert!(human.contains("select ACCOUNT_ID"));
+        let peer = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("peer")]).expect("peer help parses"),
+        )
+        .expect("peer help");
+        assert!(peer.contains("add INSTALLATION_ID SIGNING_KEY ENCRYPTION_KEY"));
+        assert!(peer.contains("distrust INSTALLATION_ID"));
+        let mailbox = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("mailbox")])
+                .expect("mailbox help parses"),
+        )
+        .expect("mailbox help");
+        assert!(mailbox.contains("grant MAILBOX_ID PEER_INSTALLATION_ID"));
+        assert!(mailbox.contains("revoke MAILBOX_ID PEER_INSTALLATION_ID"));
         let daemon = run_cli(
             &parse_cli([OsString::from("daemon"), OsString::from("--help")])
                 .expect("daemon help parses"),

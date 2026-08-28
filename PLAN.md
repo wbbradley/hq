@@ -54,13 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Implement directional peers and mailbox capabilities** — Add peer add/list/distrust
-  and mailbox grant/revoke/inspection commands over exact application plans and authoritative
-  snapshots. Keep route trust directional and distinct from mailbox authority; preserve historical
-  observations, revoke-before-block delivery ordering, full installation-qualified addresses, and
-  fail-closed concurrent/later authorization. Test stale frontiers, replay, block recovery, relay
-  hints as non-authority, and local-API-only architecture.
-
 - **[cli/high] Implement relay policy, synchronization, health, and repair administration** — Add
   relay add/list/remove, explicit sync, domain/delivery health status, and explicit repair commands
   over typed local effects and authoritative observations. Preserve stable effect identities,

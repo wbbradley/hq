@@ -1,5 +1,39 @@
 # Completed
 
+## 2026-08-28 — Directional peer and mailbox capability administration
+
+Added `peer add|list|distrust` and `mailbox list|grant|revoke` through public-field application
+requests, authoritative local API snapshots, and the existing exact mutation client. Route history
+is directional and complete: inspection retains every set, block, causal maximum, public key,
+label, and non-authority relay hint without choosing a conflicted winner. Mailbox inspection retains
+the exact grant fact, installation-qualified mailbox and grantee signing address, revoke frontier,
+observed actions, and complete support.
+
+Exact current routes and capabilities reconcile as no-ops. Route recovery cites the full block
+frontier; mailbox regrant cites the complete prior revoke lineage and creates a distinct stable
+grant. Distrust commits every active capability revoke before its route block, and explicit outbox
+fanout preserves the grantee recipient after projection changes. Missing ownership, route conflict,
+ambiguous capability history, stale or partial authority, concurrent revoke/action, and later use of
+an old grant fail closed under the existing reducer laws.
+
+The clean unshipped local API v1 and storage v13 definitions were completed in place. Storage now
+retains each exact capability grant fact; because HQ has never shipped and has no standing
+installations, there is no migration, compatibility path, protocol bump, or storage-version bump.
+Pure planner, strict DTO, relational codec/corruption, parser/help, deterministic JSON, fanout,
+response-replay, causal race, and real two-installation add/grant/distrust/recover/regrant/restart
+tests pass. Locked workspace build/tests, strict Clippy, architecture, protocol, causal,
+behavior-ledger, and dependency gates pass; dependency policy reports only the existing allowed
+yanked `chacha20 0.10.1` warning.
+
+### Original plan entry
+
+- **[cli/high] Implement directional peers and mailbox capabilities** — Add peer add/list/distrust
+  and mailbox grant/revoke/inspection commands over exact application plans and authoritative
+  snapshots. Keep route trust directional and distinct from mailbox authority; preserve historical
+  observations, revoke-before-block delivery ordering, full installation-qualified addresses, and
+  fail-closed concurrent/later authorization. Test stale frontiers, replay, block recovery, relay
+  hints as non-authority, and local-API-only architecture.
+
 ## 2026-08-27 — Pinned Codex app-server adapter
 
 Implemented the Codex provider boundary against pinned official CLI `0.150.1` schemas and fixtures. The adapter owns a bounded stdio JSON-RPC process, exact start/resume/read and turn lifecycle behavior, durable-submission reconciliation, supported fail-closed server requests, normalized output/activity, redacted typed failures, and graceful-to-forced shutdown. Passive configuration uses public fields while process and protocol invariants remain opaque. A real adapter seam passes the neutral 14-scenario conformance suite; deterministic transport/process/fixture tests, an opt-in installed-provider start/resume smoke, all locked workspace gates, four supported targets, fuzzing, dependency policy, and unchanged Go gates pass.

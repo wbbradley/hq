@@ -233,6 +233,8 @@ pub struct PeerRouteCandidate {
 /// Normalized directional mailbox capability lineage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapabilityView {
+    /// Exact supporting capability-grant fact.
+    pub grant_fact: FactId,
     /// Target mailbox.
     pub mailbox: MailboxAddress,
     /// Exact grantee installation and signing key.
@@ -247,20 +249,25 @@ pub struct CapabilityView {
 impl CapabilityView {
     /// Reconstructs a typed capability view from explicitly decoded persisted parts.
     pub fn from_parts(
+        grant_fact: FactId,
         mailbox: MailboxAddress,
         grantee: InstallationAddress,
         active: bool,
         revoke_frontier: BTreeSet<FactId>,
         observed_actions: BTreeSet<FactId>,
     ) -> Option<Self> {
-        (active == revoke_frontier.is_empty() && revoke_frontier.is_disjoint(&observed_actions))
-            .then_some(Self {
-                mailbox,
-                grantee,
-                active,
-                revoke_frontier,
-                observed_actions,
-            })
+        (active == revoke_frontier.is_empty()
+            && !revoke_frontier.contains(&grant_fact)
+            && !observed_actions.contains(&grant_fact)
+            && revoke_frontier.is_disjoint(&observed_actions))
+        .then_some(Self {
+            grant_fact,
+            mailbox,
+            grantee,
+            active,
+            revoke_frontier,
+            observed_actions,
+        })
     }
 
     /// Reports whether this grant is currently active.
@@ -1431,6 +1438,7 @@ fn capability_projections(
                 Some(ProjectionContribution::new(
                     AuthorityProjectionKey::MailboxCapability(*grant_id),
                     AuthorityProjection::MailboxCapability(CapabilityView {
+                        grant_fact: grant.id(),
                         mailbox: *mailbox,
                         grantee: *grantee,
                         active: revokes.is_empty(),

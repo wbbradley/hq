@@ -220,15 +220,45 @@ impl DomainSnapshot {
                         PeerRouteState::Conflicted => ClientPeerRouteState::Conflicted,
                     },
                     frontier: view.frontier().clone(),
+                    routes: view
+                        .routes
+                        .iter()
+                        .map(|(fact_id, route)| ClientPeerRouteCandidate {
+                            fact_id: *fact_id,
+                            peer: route.peer,
+                            encryption_key: route.encryption_key,
+                            label: route.label.clone(),
+                            relay_hints: route.relay_hints.clone(),
+                            frontier_member: view.frontier().contains(fact_id),
+                        })
+                        .collect(),
+                    blocks: view
+                        .blocks
+                        .iter()
+                        .map(|(fact_id, reason)| ClientPeerRouteBlock {
+                            fact_id: *fact_id,
+                            reason: reason.clone(),
+                            frontier_member: view.frontier().contains(fact_id),
+                        })
+                        .collect(),
                 },
                 (
                     AuthorityProjectionKey::MailboxCapability(grant_id),
                     AuthorityProjection::MailboxCapability(view),
                 ) => ClientProjection::MailboxCapability {
                     grant_id: *grant_id,
+                    grant_fact: view.grant_fact,
                     mailbox: view.mailbox,
-                    grantee_installation: view.grantee.installation_id(),
+                    grantee: view.grantee,
                     active: view.is_active(),
+                    revoke_frontier: view.revoke_frontier.clone(),
+                    observed_actions: view.observed_actions.clone(),
+                    support: self
+                        .authority
+                        .support()
+                        .get(key)
+                        .cloned()
+                        .ok_or(ApplicationValueError::InvalidEncoding)?,
                 },
                 (
                     AuthorityProjectionKey::Account(account_id),
@@ -506,6 +536,34 @@ pub struct ClientDeviceGrant {
     /// Whether one current active acceptance cites this exact grant identity.
     pub active: bool,
 }
+
+/// Passive exact directional peer-route candidate history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientPeerRouteCandidate {
+    /// Exact route-set fact.
+    pub fact_id: FactId,
+    /// Exact peer installation and signing key.
+    pub peer: InstallationAddress,
+    /// Exact transport encryption key.
+    pub encryption_key: EncryptionPublicKey,
+    /// Optional signed display label.
+    pub label: Option<ShortText>,
+    /// Signed non-authority relay hints.
+    pub relay_hints: RelayHints,
+    /// Whether this route set is a causal maximum.
+    pub frontier_member: bool,
+}
+
+/// Passive exact directional peer-route block history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientPeerRouteBlock {
+    /// Exact route-block fact.
+    pub fact_id: FactId,
+    /// Stable signed block reason.
+    pub reason: hq_domain::ErrorCode,
+    /// Whether this block is a causal maximum.
+    pub frontier_member: bool,
+}
 /// Stable client presentation of named-agent lifecycle.
 #[allow(missing_docs)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -580,12 +638,18 @@ pub enum ClientProjection {
         peer: InstallationId,
         state: ClientPeerRouteState,
         frontier: BTreeSet<FactId>,
+        routes: Vec<ClientPeerRouteCandidate>,
+        blocks: Vec<ClientPeerRouteBlock>,
     },
     MailboxCapability {
         grant_id: GrantId,
+        grant_fact: FactId,
         mailbox: MailboxAddress,
-        grantee_installation: InstallationId,
+        grantee: InstallationAddress,
         active: bool,
+        revoke_frontier: BTreeSet<FactId>,
+        observed_actions: BTreeSet<FactId>,
+        support: BTreeSet<FactId>,
     },
     Membership {
         account_id: AccountId,

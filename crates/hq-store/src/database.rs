@@ -422,6 +422,7 @@ CREATE TABLE authority_peer_route_relays (
 
 CREATE TABLE authority_capabilities (
     grant_id BLOB PRIMARY KEY NOT NULL CHECK(typeof(grant_id) = 'blob' AND length(grant_id) = 32),
+    grant_fact BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
     mailbox_owner BLOB NOT NULL CHECK(typeof(mailbox_owner) = 'blob' AND length(mailbox_owner) = 32),
     mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
     grantee_installation BLOB NOT NULL CHECK(typeof(grantee_installation) = 'blob' AND length(grantee_installation) = 32),
@@ -2225,6 +2226,12 @@ fn outbox_recipients(
         }
     }
     match fact.fact().payload() {
+        hq_domain::SemanticPayload::MailboxAccessGranted { grantee, .. } => {
+            recipients.insert(grantee.installation_id());
+        }
+        hq_domain::SemanticPayload::MailboxAccessRevoked { grantee_id, .. } => {
+            recipients.insert(*grantee_id);
+        }
         hq_domain::SemanticPayload::HumanDeviceGranted { device, .. } => {
             recipients.insert(device.installation_id());
         }
@@ -2896,6 +2903,52 @@ pub(crate) mod tests {
             outbox_recipients(&fact, local_policy(), &empty),
             BTreeSet::from([target])
         );
+    }
+
+    #[test]
+    fn mailbox_capability_fanout_always_names_the_grantee() {
+        let owner = local_policy().local_installation();
+        let mailbox =
+            hq_domain::MailboxAddress::new(owner, hq_domain::MailboxId::from_bytes([0x44; 32]));
+        let grantee = hq_domain::InstallationAddress::new(
+            hq_domain::InstallationId::from_bytes([0x55; 32]),
+            hq_domain::SigningPublicKey::from_bytes([0x56; 32]),
+        );
+        let grant_id = hq_domain::GrantId::from_bytes([0x66; 32]);
+        let payloads = [
+            hq_domain::SemanticPayload::MailboxAccessGranted {
+                grant_id,
+                mailbox,
+                grantee,
+            },
+            hq_domain::SemanticPayload::MailboxAccessRevoked {
+                grant_id,
+                mailbox,
+                grantee_id: grantee.installation_id(),
+            },
+        ];
+        let empty =
+            AuthorityProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+        for payload in payloads {
+            let plan = CanonicalEventPlan::new(
+                owner,
+                hq_domain::Timestamp::from_unix_millis(1),
+                hq_domain::FactScope::PeerAddressed(mailbox),
+                hq_domain::CausalReferences::new(
+                    hq_domain::BoundedSet::new([]).expect("empty parents"),
+                    [],
+                )
+                .expect("empty causal references"),
+                payload,
+            );
+            let fact = plan
+                .sign(&fixture_signer(), [7; 32])
+                .expect("capability fixture signs");
+            assert_eq!(
+                outbox_recipients(&fact, local_policy(), &empty),
+                BTreeSet::from([grantee.installation_id()])
+            );
+        }
     }
 
     #[test]

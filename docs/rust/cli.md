@@ -7,7 +7,8 @@ hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>
 ```
 
 The installed commands currently include `help`, `version`, `identity`, `config`,
-`human create|show|select|invite|join|devices|revoke`, and
+`human create|show|select|invite|join|devices|revoke`,
+`peer add|list|distrust`, `mailbox list|grant|revoke`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
 autostart and service managers. `daemon status` never starts a process; `readiness` may start one
@@ -61,12 +62,35 @@ responses replay the same framed command identity. The admitted account-addresse
 queued directly to its named device before any separately requested peer-route block can prevent
 ordinary routing.
 
+`peer add INSTALLATION_ID SIGNING_KEY ENCRYPTION_KEY [--label LABEL] [--relay URL]...`
+authors one local installation-private directional route. The signing key is the peer authority;
+the encryption key and signed relay locators are transport metadata only. An exact current route is
+reused. A changed route or recovery after a block cites the complete causal-maximal route frontier.
+`peer list` exposes the derived `routable`, `blocked`, or `conflicted` state together with every
+retained route, block, frontier identity, exact public key, label, and relay hint. It never chooses
+a winner from a conflicted frontier.
+
+`mailbox list` exposes every locally owned installation-qualified mailbox and complete capability
+lineage. `mailbox grant MAILBOX_ID PEER_INSTALLATION_ID` requires exactly one current routable peer
+candidate, binds its exact signing key, and cites the exact local mailbox creation fact. An exact
+active capability is reused; regrant after revocation cites every retained revoke maximum and
+creates a distinct stable grant identity. `mailbox revoke MAILBOX_ID PEER_INSTALLATION_ID` revokes
+the one exact active grant with its complete retained support and is a no-op for an already revoked
+lineage. Missing ownership, route conflict, and ambiguous capability history fail closed.
+
+`peer distrust INSTALLATION_ID` first revokes every active locally owned mailbox capability for the
+peer, one committed revision at a time, and only then authors a full-frontier route block. Repeating
+an already blocked state is a no-op. A later explicit `peer add` may recover the route by citing the
+block frontier, but it does not silently reactivate old capabilities; mailbox access requires a new
+lineage-complete grant.
+
 Identity output has only the installation ID, signing public key, and public fingerprint.
 Configuration output has the optional provider and the complete canonical relay list. Both are
 passive data with public fields. Configuration setters replace one complete typed field, rebuild
 the validated value, and the persistence adapter revalidates public fields again immediately before
-the atomic write. Human presentation records are also passive public-field values; command enums
-and the live client capability remain closed behavioral types.
+the atomic write. Human, peer, mailbox, route-history, and capability-history presentation records
+are also passive public-field values; command enums and the live client capability remain closed
+behavioral types.
 
 Human output is concise newline-terminated text. JSON output is exactly one newline-terminated
 object with schema `hq-cli-output-v1`, an `ok` boolean, a stable `kind`, and typed `data`. Errors use
@@ -94,6 +118,7 @@ after negotiation; command-only clients do not issue an unsolicited snapshot.
 CLI production code has no canonical storage, signer, relay, resource, harness-provider, or SQLite
 access. The identity/configuration commands cross only the private state-ownership and identity
 persistence adapter because they must operate while the node is absent. Canonical administration,
-including human account bootstrap and selection, uses fresh snapshots plus the reusable request,
+including human account bootstrap, peer routes, and mailbox capabilities, uses fresh snapshots plus
+the reusable request,
 mutation, and project methods rather than
 opening implementation adapters directly.

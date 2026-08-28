@@ -3,10 +3,11 @@
 use std::{collections::BTreeSet, error::Error, num::NonZeroU64};
 
 use hq_domain::{
-    AccountId, ActivityKind, AuthorityReference, AuthorityRole, BoundedVec, ContentText, Fact,
-    FactScope, GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
-    MailboxKind, MessageContent, MessagePurpose, OperationCorrelation, PresentationKind,
-    ProviderId, ProviderSessionId, SemanticPayload, ShortText, SigningPublicKey, Timestamp,
+    AccountId, ActivityKind, AuthorityReference, AuthorityRole, BoundedText, BoundedVec,
+    ContentText, Fact, FactScope, GrantId, InstallationAddress, InstallationId, MailboxAddress,
+    MailboxId, MailboxKind, MessageContent, MessagePurpose, OperationCorrelation, PresentationKind,
+    ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, ResourceLocator, ResourceScheme,
+    SemanticPayload, ShortText, SigningPublicKey, Timestamp,
 };
 use hq_reducer::{
     AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, AuthorityReducer, DecisionStatus,
@@ -675,7 +676,10 @@ fn peer_routes_and_untyped_parents_never_substitute_for_directional_capability()
             peer,
             encryption_key: hq_domain::EncryptionPublicKey::from_bytes([4; 32]),
             label: None,
-            relay_hints: BoundedVec::new([])?,
+            relay_hints: BoundedVec::new([ResourceLocator::new(
+                ResourceScheme::Opaque,
+                BoundedText::<RESOURCE_LOCATOR_MAX_BYTES>::new("wss://relay.example")?,
+            )])?,
         },
     )?;
     let message_id = values.message_id();

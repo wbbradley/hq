@@ -15,13 +15,14 @@ use hq_local_api::protocol::v1::{
     EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass, ErrorResponse,
     EvidenceIngestOutcomeDto, FrameDecoder, Id32, InvalidationTopic, LifecycleRequest,
     LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MutationAttemptDto, MutationOutcomeDto,
-    MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
-    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RemoteCommandProgressDto,
-    Request, RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope,
-    ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto, SnapshotItem,
-    SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
-    VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto, negotiate,
+    MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto, ProjectCommandActionDto,
+    ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto,
+    RelayConfigurationDto, RemoteCommandProgressDto, Request, RequestEnvelope, RequestId,
+    ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
+    ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation,
+    ServerHello, SessionControlDto, SnapshotItem, SubscriptionAcknowledgement,
+    SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
+    VersionRejected, WireMessage, WorktreeProvisioningRequestDto, negotiate,
 };
 
 fn build() -> BuildMetadata {
@@ -574,14 +575,32 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             owner: id(1),
             peer: id(6),
             state: "routable".to_owned(),
-            frontier: vec![id(7), id(8)],
+            frontier: vec![id(7)],
+            routes: vec![PeerRouteCandidateDto {
+                fact_id: id(7),
+                signing_key: id(35),
+                encryption_key: id(36),
+                label: Some("peer".to_owned()),
+                relay_hints: vec![],
+                frontier_member: true,
+            }],
+            blocks: vec![PeerRouteBlockDto {
+                fact_id: id(8),
+                reason: "prior-block".to_owned(),
+                frontier_member: false,
+            }],
         },
         SnapshotItem::MailboxCapability {
             grant_id: id(9),
+            grant_fact: id(37),
             mailbox_installation: id(1),
             mailbox_id: id(4),
             grantee_installation: id(6),
+            grantee_signing_key: id(38),
             active: true,
+            revoke_frontier: vec![],
+            observed_actions: vec![],
+            support: vec![id(37)],
         },
         SnapshotItem::Membership {
             account_id: id(5),
@@ -711,4 +730,34 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
         RequestId::new(3).expect("nonzero"),
         ResponseResult::AuthoritativeSnapshot(snapshot),
     )));
+}
+
+#[test]
+fn peer_route_snapshot_rejects_inconsistent_frontier_and_state() {
+    let id = |byte| Id32::new([byte; 32]);
+    let route = |frontier_member| PeerRouteCandidateDto {
+        fact_id: id(3),
+        signing_key: id(4),
+        encryption_key: id(5),
+        label: None,
+        relay_hints: vec![],
+        frontier_member,
+    };
+    let item = |state: &str, frontier_member: bool| SnapshotItem::PeerRoute {
+        owner: id(1),
+        peer: id(2),
+        state: state.to_owned(),
+        frontier: vec![id(3)],
+        routes: vec![route(frontier_member)],
+        blocks: vec![],
+    };
+
+    assert_eq!(
+        AuthoritativeSnapshotDto::new(1, vec![item("routable", false)]),
+        Err(ValueError::InvalidValueCombination)
+    );
+    assert_eq!(
+        AuthoritativeSnapshotDto::new(1, vec![item("blocked", true)]),
+        Err(ValueError::InvalidValueCombination)
+    );
 }

@@ -80,6 +80,15 @@ The records expose fields directly; they contain no secret or mutable capability
 only exact roots and frontiers from an authoritative snapshot, while the node-owned gateway remains
 the sole signer and commit capability.
 
+Directional peer and mailbox administration uses separate pure planners. Public passive request
+records carry the exact peer address and encryption metadata, complete route frontier, exact local
+mailbox creation fact, exact grantee address, stable grant identity, and complete revoke or
+capability lineage. Route set/block plans bind local-installation authority; mailbox grant/revoke
+plans bind the exact mailbox-owner or mailbox-grant authority. The planners reject self-routes,
+self-grants, nonlocal mailbox ownership, oversized support, and incomplete typed construction before
+returning an ordinary `FactPlan`. Route trust remains directional and distinct from mailbox access;
+relay hints and encryption keys never become authority.
+
 ## External operations
 
 `EffectRequest<T>` carries a stable `OperationId`, exact request digest, explicit issue time, and

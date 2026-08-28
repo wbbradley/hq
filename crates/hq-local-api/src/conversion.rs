@@ -6,12 +6,12 @@ use crate::protocol::v1::{
     DeviceGrantDto, DomainErrorDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
     EvidenceIngestOutcomeDto, Id32, InvalidationTopic, MAX_CANONICAL_EVIDENCE_BYTES,
     MAX_CANONICAL_EVIDENCE_ITEMS, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
-    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
-    ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto, RelayAuthenticationDto,
-    RelayConfigurationDto, RemoteCommandProgressDto, RemoteCommandResultDto, ResourceHealthDto,
-    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
-    ResourceSchemeDto, RuntimeObservationDto, SessionControlDto, SnapshotItem,
-    SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
+    PeerRouteBlockDto, PeerRouteCandidateDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+    ProjectCommandRequestDto, ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto,
+    RelayAuthenticationDto, RelayConfigurationDto, RemoteCommandProgressDto,
+    RemoteCommandResultDto, ResourceHealthDto, ResourceInspectionRequestDto,
+    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, RuntimeObservationDto,
+    SessionControlDto, SnapshotItem, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorClass,
@@ -164,6 +164,8 @@ pub fn snapshot_to_v1(
                 peer,
                 state,
                 frontier,
+                routes,
+                blocks,
             } => SnapshotItem::PeerRoute {
                 owner: id32(owner.as_bytes()),
                 peer: id32(peer.as_bytes()),
@@ -174,18 +176,57 @@ pub fn snapshot_to_v1(
                 }
                 .to_owned(),
                 frontier: frontier.iter().map(|fact| id32(fact.as_bytes())).collect(),
+                routes: routes
+                    .iter()
+                    .map(|route| PeerRouteCandidateDto {
+                        fact_id: id32(route.fact_id.as_bytes()),
+                        signing_key: id32(route.peer.signing_key().as_bytes()),
+                        encryption_key: id32(route.encryption_key.as_bytes()),
+                        label: route.label.as_ref().map(|label| label.as_str().to_owned()),
+                        relay_hints: route
+                            .relay_hints
+                            .as_slice()
+                            .iter()
+                            .map(locator_to_v1)
+                            .collect(),
+                        frontier_member: route.frontier_member,
+                    })
+                    .collect(),
+                blocks: blocks
+                    .iter()
+                    .map(|block| PeerRouteBlockDto {
+                        fact_id: id32(block.fact_id.as_bytes()),
+                        reason: block.reason.as_str().to_owned(),
+                        frontier_member: block.frontier_member,
+                    })
+                    .collect(),
             },
             ClientProjection::MailboxCapability {
                 grant_id,
+                grant_fact,
                 mailbox,
-                grantee_installation,
+                grantee,
                 active,
+                revoke_frontier,
+                observed_actions,
+                support,
             } => SnapshotItem::MailboxCapability {
                 grant_id: id32(grant_id.as_bytes()),
+                grant_fact: id32(grant_fact.as_bytes()),
                 mailbox_installation: id32(mailbox.installation_id().as_bytes()),
                 mailbox_id: id32(mailbox.mailbox_id().as_bytes()),
-                grantee_installation: id32(grantee_installation.as_bytes()),
+                grantee_installation: id32(grantee.installation_id().as_bytes()),
+                grantee_signing_key: id32(grantee.signing_key().as_bytes()),
                 active,
+                revoke_frontier: revoke_frontier
+                    .iter()
+                    .map(|fact| id32(fact.as_bytes()))
+                    .collect(),
+                observed_actions: observed_actions
+                    .iter()
+                    .map(|fact| id32(fact.as_bytes()))
+                    .collect(),
+                support: support.iter().map(|fact| id32(fact.as_bytes())).collect(),
             },
             ClientProjection::Membership {
                 account_id,

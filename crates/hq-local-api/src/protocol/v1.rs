@@ -1007,19 +1007,33 @@ pub enum SnapshotItem {
         state: String,
         /// Causal-maximal supporting facts.
         frontier: Vec<Id32>,
+        /// Complete signed route-set history.
+        routes: Vec<PeerRouteCandidateDto>,
+        /// Complete signed route-block history.
+        blocks: Vec<PeerRouteBlockDto>,
     },
     /// Directional mailbox capability lineage.
     MailboxCapability {
         /// Stable grant identity.
         grant_id: Id32,
+        /// Exact supporting capability-grant fact.
+        grant_fact: Id32,
         /// Mailbox-owning installation.
         mailbox_installation: Id32,
         /// Target mailbox identity.
         mailbox_id: Id32,
         /// Grantee installation.
         grantee_installation: Id32,
+        /// Exact grantee signing key.
+        grantee_signing_key: Id32,
         /// Whether the capability is active.
         active: bool,
+        /// Causal-maximal revoke facts.
+        revoke_frontier: Vec<Id32>,
+        /// Owner-observed action identities retained by history.
+        observed_actions: Vec<Id32>,
+        /// Complete projection support including observation facts.
+        support: Vec<Id32>,
     },
     /// Human device membership state.
     Membership {
@@ -1232,6 +1246,36 @@ pub struct DeviceGrantDto {
     pub frontier_member: bool,
     /// Whether a current active acceptance cites this grant identity.
     pub active: bool,
+}
+
+/// Passive exact directional peer-route candidate history.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerRouteCandidateDto {
+    /// Exact route-set fact.
+    pub fact_id: Id32,
+    /// Exact peer signing key.
+    pub signing_key: Id32,
+    /// Exact peer transport encryption key.
+    pub encryption_key: Id32,
+    /// Optional signed display label.
+    pub label: Option<String>,
+    /// Signed non-authority relay hints.
+    pub relay_hints: Vec<ResourceLocatorDto>,
+    /// Whether this route set is a causal maximum.
+    pub frontier_member: bool,
+}
+
+/// Passive exact directional peer-route block history.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerRouteBlockDto {
+    /// Exact route-block fact.
+    pub fact_id: Id32,
+    /// Stable signed block reason.
+    pub reason: String,
+    /// Whether this block is a causal maximum.
+    pub frontier_member: bool,
 }
 
 /// Complete revisioned client-facing authoritative snapshot.
@@ -1973,14 +2017,82 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 }
             }
             SnapshotItem::PeerRoute {
-                state, frontier, ..
+                state,
+                frontier,
+                routes,
+                blocks,
+                ..
             } => {
                 if !matches!(state.as_str(), "routable" | "blocked" | "conflicted") {
                     return Err(ValueError::InvalidValueCombination);
                 }
                 validate_id_set(frontier, 64)?;
+                if routes.len() > 64
+                    || blocks.len() > 64
+                    || routes
+                        .windows(2)
+                        .any(|pair| pair[0].fact_id >= pair[1].fact_id)
+                    || blocks
+                        .windows(2)
+                        .any(|pair| pair[0].fact_id >= pair[1].fact_id)
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                for route in routes {
+                    if route.frontier_member != frontier.contains(&route.fact_id)
+                        || blocks.iter().any(|block| block.fact_id == route.fact_id)
+                    {
+                        return Err(ValueError::InvalidValueCombination);
+                    }
+                    if let Some(label) = &route.label {
+                        validate_text(label, SHORT_TEXT_MAX_BYTES)?;
+                    }
+                    if route.relay_hints.len() > hq_domain::MAX_RELAY_HINTS
+                        || route.relay_hints.windows(2).any(|pair| pair[0] >= pair[1])
+                    {
+                        return Err(ValueError::InvalidValueCombination);
+                    }
+                    for locator in &route.relay_hints {
+                        validate_locator(locator)?;
+                    }
+                }
+                for block in blocks {
+                    if block.frontier_member != frontier.contains(&block.fact_id) {
+                        return Err(ValueError::InvalidValueCombination);
+                    }
+                    validate_text(&block.reason, SHORT_TEXT_MAX_BYTES)?;
+                }
+                let frontier_routes = routes.iter().filter(|route| route.frontier_member).count();
+                let frontier_blocks = blocks.iter().filter(|block| block.frontier_member).count();
+                let expected_state = if frontier_blocks > 0 {
+                    "blocked"
+                } else if frontier_routes == 1 {
+                    "routable"
+                } else {
+                    "conflicted"
+                };
+                if state != expected_state || frontier.len() != frontier_routes + frontier_blocks {
+                    return Err(ValueError::InvalidValueCombination);
+                }
             }
-            SnapshotItem::MailboxCapability { .. } => {}
+            SnapshotItem::MailboxCapability {
+                grant_fact,
+                active,
+                revoke_frontier,
+                observed_actions,
+                support,
+                ..
+            } => {
+                validate_id_set(revoke_frontier, 64)?;
+                validate_id_set(observed_actions, 64)?;
+                validate_id_set(support, 64)?;
+                if *active != revoke_frontier.is_empty()
+                    || !support.contains(grant_fact)
+                    || revoke_frontier.iter().any(|fact| !support.contains(fact))
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+            }
             SnapshotItem::AccountSelection {
                 candidates,
                 frontier,

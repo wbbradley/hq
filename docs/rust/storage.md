@@ -289,6 +289,11 @@ reduction. `HumanDeviceGranted` and `HumanDeviceRevoked` additionally name their
 directly, so initial pairing and removal cannot disappear merely because the post-mutation
 membership projection is pending or revoked.
 
+Peer-addressed mailbox grant and revoke facts likewise add their explicitly named grantee to the
+outbox after reduction. The peer-addressed scope names the owning mailbox installation, so this
+explicit recipient preserves initial grant delivery and revoke-before-route-block ordering even
+when the grantee is absent from or removed by the resulting authority projection.
+
 ## Authority projections
 
 `AuthorityProjectionSnapshot` is the application-owned representation-independent query boundary
@@ -305,8 +310,8 @@ application query and fact-commit ports with explicit authority policy and signe
 other application capabilities remain outside persistence ownership.
 
 Authority values are not serialized Rust structs. Dedicated strict tables and normalized child rows
-store each projection variant: route candidates, blocks, relay locators and frontiers; capability
-revoke and observed-action facts; membership grants with derived active attribution, relay
+store each projection variant: route candidates, blocks, relay locators and frontiers; the exact
+capability grant fact, revoke frontier, and observed-action facts; membership grants with derived active attribution, relay
 locators, acceptances, revokes and frontiers; selection candidates; aggregate frontiers; and
 projection support. Private exhaustive
 codecs map every key, state, address, public key, bounded label/error code, relay scheme/value, and
@@ -315,6 +320,10 @@ bounds, ordinals, key/value pairing, parent/child ownership and row-count limits
 digest over every authority row before returning it. Unknown, partial, orphaned, duplicated,
 cross-key, oversized, or valid-looking changed rows return `RebuildableStateCorrupt`; repair remains
 the only recovery path.
+
+The exact capability grant fact was added directly to the clean v13 authority-capability table and
+its digest/load codecs. HQ has not shipped and has no standing databases, so this is an in-place
+schema definition change with no migration, compatibility path, or storage-version bump.
 
 ## Conversation and activity projections
 

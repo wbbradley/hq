@@ -18,7 +18,9 @@ use std::{
 
 use hq_local_api::{
     ClientEvent, InitialView,
-    protocol::v1::{BuildMetadata, LifecycleRequest, LifecycleState, Request, ResponseResult},
+    protocol::v1::{
+        BuildMetadata, LifecycleRequest, LifecycleState, Request, ResponseResult, SnapshotItem,
+    },
 };
 use hq_node::{
     LifecycleClient, LifecycleClientConfig, LocalNodeClient, LocalNodeClientConfig,
@@ -137,6 +139,28 @@ fn human_output(state_root: &Path, arguments: &[&str]) -> Output {
             .chain(arguments.iter().copied().map(OsString::from)),
         None,
     )
+}
+
+fn admin_output(state_root: &Path, command: &str, arguments: &[&str]) -> Output {
+    offline_output(
+        state_root,
+        std::iter::once(OsString::from(command))
+            .chain(arguments.iter().copied().map(OsString::from)),
+        None,
+    )
+}
+
+fn encode_hex(bytes: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .into_iter()
+        .flat_map(|byte| {
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 0x0f)]),
+            ]
+        })
+        .collect()
 }
 
 fn local_client(state: StatePaths, initial_view: InitialView) -> LocalNodeClient {
@@ -822,6 +846,256 @@ fn human_pairing_is_target_bound_replay_safe_and_survives_restart() {
     );
 
     for root in [&creator_root, &device_root] {
+        let stopped = output("stop", root);
+        assert!(
+            stopped.status.success(),
+            "stop stderr: {:?}",
+            stopped.stderr
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn directional_peer_and_mailbox_authority_is_replay_safe_and_recovers_after_distrust() {
+    let directory = TestDirectory::new();
+    let owner_root = directory.path().join("owner");
+    let peer_root = directory.path().join("peer");
+    let owner_identity = initialize_identity(&owner_root);
+    let peer_identity = initialize_identity(&peer_root);
+    let owner_id = owner_identity["data"]["installation_id"]
+        .as_str()
+        .expect("owner installation");
+    let peer_id = peer_identity["data"]["installation_id"]
+        .as_str()
+        .expect("peer installation");
+    let peer_signing_key = peer_identity["data"]["signing_public_key"]
+        .as_str()
+        .expect("peer signing key");
+
+    let peer_state = StatePaths::new(peer_root.clone()).expect("peer state");
+    let mut peer_client = local_client(peer_state, InitialView::OnDemand);
+    let peer_snapshot = peer_client.snapshot().expect("peer snapshot");
+    let peer_encryption_key = peer_snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Installation { encryption_key, .. } => {
+                Some(encode_hex(encryption_key.bytes()))
+            }
+            _ => None,
+        })
+        .expect("peer encryption key");
+
+    let created = human_output(&owner_root, &["create", "Personal"]);
+    assert!(
+        created.status.success(),
+        "create stderr: {:?}",
+        created.stderr
+    );
+    let mailboxes = admin_output(&owner_root, "mailbox", &["list"]);
+    assert!(
+        mailboxes.status.success(),
+        "mailbox list stderr: {:?}",
+        mailboxes.stderr
+    );
+    let mailboxes: serde_json::Value =
+        serde_json::from_slice(&mailboxes.stdout).expect("mailbox JSON");
+    let mailbox_id = mailboxes["data"]["mailboxes"][0]["mailbox_id"]
+        .as_str()
+        .expect("local mailbox");
+
+    let added = admin_output(
+        &owner_root,
+        "peer",
+        &[
+            "add",
+            peer_id,
+            peer_signing_key,
+            &peer_encryption_key,
+            "--label",
+            "collaborator",
+            "--relay",
+            "wss://relay.example",
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "peer add stderr: {:?}",
+        added.stderr
+    );
+    let added: serde_json::Value = serde_json::from_slice(&added.stdout).expect("peer JSON");
+    assert_eq!(added["kind"], "authority_admin");
+    assert_eq!(added["data"]["peers"][0]["peer"], peer_id);
+    assert_eq!(added["data"]["peers"][0]["state"], "routable");
+    assert_eq!(
+        added["data"]["peers"][0]["routes"][0]["relay_hints"][0]["value"],
+        "wss://relay.example"
+    );
+
+    let owner_state = StatePaths::new(owner_root.clone()).expect("owner state");
+    let mut owner_client = local_client(owner_state, InitialView::OnDemand);
+    let added_revision = owner_client.snapshot().expect("added snapshot").revision;
+    let repeated_add = admin_output(
+        &owner_root,
+        "peer",
+        &[
+            "add",
+            peer_id,
+            peer_signing_key,
+            &peer_encryption_key,
+            "--label",
+            "collaborator",
+            "--relay",
+            "wss://relay.example",
+        ],
+    );
+    assert!(repeated_add.status.success());
+    assert_eq!(
+        owner_client
+            .snapshot()
+            .expect("repeated add snapshot")
+            .revision,
+        added_revision,
+        "an exact current route is reused"
+    );
+
+    let granted = admin_output(&owner_root, "mailbox", &["grant", mailbox_id, peer_id]);
+    assert!(
+        granted.status.success(),
+        "mailbox grant stderr: {:?}",
+        granted.stderr
+    );
+    let granted: serde_json::Value = serde_json::from_slice(&granted.stdout).expect("grant JSON");
+    assert_eq!(granted["data"]["capabilities"][0]["active"], true);
+    assert_eq!(
+        granted["data"]["capabilities"][0]["grantee_installation"],
+        peer_id
+    );
+    assert_eq!(
+        granted["data"]["capabilities"][0]["grantee_signing_key"],
+        peer_signing_key
+    );
+    let granted_revision = owner_client.snapshot().expect("grant snapshot").revision;
+    let repeated_grant = admin_output(&owner_root, "mailbox", &["grant", mailbox_id, peer_id]);
+    assert!(repeated_grant.status.success());
+    assert_eq!(
+        owner_client
+            .snapshot()
+            .expect("repeated grant snapshot")
+            .revision,
+        granted_revision,
+        "an exact active capability is reused"
+    );
+
+    let distrusted = admin_output(&owner_root, "peer", &["distrust", peer_id]);
+    assert!(
+        distrusted.status.success(),
+        "distrust stderr: {:?}",
+        distrusted.stderr
+    );
+    let distrusted: serde_json::Value =
+        serde_json::from_slice(&distrusted.stdout).expect("distrust JSON");
+    assert_eq!(distrusted["data"]["peers"][0]["state"], "blocked");
+    assert_eq!(distrusted["data"]["capabilities"][0]["active"], false);
+    let distrusted_revision = owner_client.snapshot().expect("distrust snapshot").revision;
+    assert_eq!(
+        distrusted_revision,
+        granted_revision + 2,
+        "distrust revokes the capability before authoring the route block"
+    );
+    let repeated_distrust = admin_output(&owner_root, "peer", &["distrust", peer_id]);
+    assert!(repeated_distrust.status.success());
+    assert_eq!(
+        owner_client
+            .snapshot()
+            .expect("repeated distrust snapshot")
+            .revision,
+        distrusted_revision
+    );
+
+    let recovered = admin_output(
+        &owner_root,
+        "peer",
+        &[
+            "add",
+            peer_id,
+            peer_signing_key,
+            &peer_encryption_key,
+            "--label",
+            "collaborator",
+            "--relay",
+            "wss://relay.example",
+        ],
+    );
+    assert!(
+        recovered.status.success(),
+        "recovery stderr: {:?}",
+        recovered.stderr
+    );
+    let recovered: serde_json::Value =
+        serde_json::from_slice(&recovered.stdout).expect("recovery JSON");
+    assert_eq!(recovered["data"]["peers"][0]["state"], "routable");
+    assert_eq!(
+        recovered["data"]["peers"][0]["blocks"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        recovered["data"]["peers"][0]["routes"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+
+    let regranted = admin_output(&owner_root, "mailbox", &["grant", mailbox_id, peer_id]);
+    assert!(
+        regranted.status.success(),
+        "regrant stderr: {:?}",
+        regranted.stderr
+    );
+    let regranted: serde_json::Value =
+        serde_json::from_slice(&regranted.stdout).expect("regrant JSON");
+    let capabilities = regranted["data"]["capabilities"]
+        .as_array()
+        .expect("capabilities");
+    assert_eq!(capabilities.len(), 2);
+    assert_eq!(
+        capabilities
+            .iter()
+            .filter(|capability| capability["active"] == true)
+            .count(),
+        1
+    );
+
+    let unauthorized = admin_output(&peer_root, "mailbox", &["grant", mailbox_id, owner_id]);
+    assert!(!unauthorized.status.success());
+    let unauthorized: serde_json::Value =
+        serde_json::from_slice(&unauthorized.stderr).expect("authority error JSON");
+    assert_eq!(unauthorized["data"]["code"], "authority.state_unavailable");
+
+    let restarted = output("restart", &owner_root);
+    assert!(
+        restarted.status.success(),
+        "owner restart stderr: {:?}",
+        restarted.stderr
+    );
+    let persisted = admin_output(&owner_root, "mailbox", &["list"]);
+    assert!(persisted.status.success());
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&persisted.stdout).expect("persisted authority JSON");
+    assert_eq!(
+        persisted["data"]["capabilities"]
+            .as_array()
+            .expect("persisted capabilities")
+            .iter()
+            .filter(|capability| capability["active"] == true)
+            .count(),
+        1
+    );
+
+    for root in [&owner_root, &peer_root] {
         let stopped = output("stop", root);
         assert!(
             stopped.status.success(),

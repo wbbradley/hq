@@ -216,9 +216,9 @@ fn insert_projection(
             AuthorityProjection::MailboxCapability(view),
         ) => {
             transaction.execute(
-                "INSERT INTO authority_capabilities(grant_id, mailbox_owner, mailbox_id, grantee_installation, \
-                     grantee_signing_key, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![grant.as_bytes().as_slice(), view.mailbox.installation_id().as_bytes().as_slice(),
+                "INSERT INTO authority_capabilities(grant_id, grant_fact, mailbox_owner, mailbox_id, grantee_installation, \
+                     grantee_signing_key, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![grant.as_bytes().as_slice(), view.grant_fact.as_bytes().as_slice(), view.mailbox.installation_id().as_bytes().as_slice(),
                     view.mailbox.mailbox_id().as_bytes().as_slice(), view.grantee.installation_id().as_bytes().as_slice(),
                     view.grantee.signing_key().as_bytes().as_slice(), i64::from(view.is_active())],
             ).map_err(database)?;
@@ -635,7 +635,7 @@ fn load_capabilities(
     output: &mut BTreeMap<AuthorityProjectionKey, AuthorityProjection>,
 ) -> Result<(), StoreError> {
     let mut statement = connection.prepare(
-        "SELECT grant_id, mailbox_owner, mailbox_id, grantee_installation, grantee_signing_key, active \
+        "SELECT grant_id, grant_fact, mailbox_owner, mailbox_id, grantee_installation, grantee_signing_key, active \
          FROM authority_capabilities ORDER BY grant_id",
     ).map_err(database)?;
     let rows = statement
@@ -646,15 +646,18 @@ fn load_capabilities(
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, Vec<u8>>(3)?,
                 row.get::<_, Vec<u8>>(4)?,
-                row.get::<_, i64>(5)?,
+                row.get::<_, Vec<u8>>(5)?,
+                row.get::<_, i64>(6)?,
             ))
         })
         .map_err(database)?;
     for row in rows {
-        let (grant, owner, mailbox, grantee, signing, active) = row.map_err(database)?;
+        let (grant, grant_fact, owner, mailbox, grantee, signing, active) =
+            row.map_err(database)?;
         let grant = GrantId::from_bytes(fixed(grant)?);
         let (revokes, observations) = load_capability_facts(connection, grant)?;
         let view = CapabilityView::from_parts(
+            FactId::from_bytes(fixed(grant_fact)?),
             MailboxAddress::new(
                 InstallationId::from_bytes(fixed(owner)?),
                 MailboxId::from_bytes(fixed(mailbox)?),
@@ -1341,7 +1344,7 @@ const DIGEST_QUERIES: &[(&str, &str)] = &[
     ),
     (
         "capabilities",
-        "SELECT quote(grant_id)||'|'||quote(mailbox_owner)||'|'||quote(mailbox_id)||'|'||quote(grantee_installation)||'|'||quote(grantee_signing_key)||'|'||quote(active) FROM authority_capabilities ORDER BY grant_id",
+        "SELECT quote(grant_id)||'|'||quote(grant_fact)||'|'||quote(mailbox_owner)||'|'||quote(mailbox_id)||'|'||quote(grantee_installation)||'|'||quote(grantee_signing_key)||'|'||quote(active) FROM authority_capabilities ORDER BY grant_id",
     ),
     (
         "capability-facts",
@@ -1539,6 +1542,7 @@ mod tests {
                 keys[3],
                 AuthorityProjection::MailboxCapability(
                     CapabilityView::from_parts(
+                        id(19),
                         mailbox,
                         InstallationAddress::new(peer, SigningPublicKey::from_bytes([0x75; 32])),
                         false,

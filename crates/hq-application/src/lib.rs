@@ -1,5 +1,6 @@
 //! Application use cases and inward-facing ports.
 
+mod authority_admin;
 mod error;
 mod human;
 mod mutation;
@@ -13,6 +14,10 @@ use hq_reducer::{GraphOnlyReducer, GraphReductionReport, ReduceError, reduce_com
 
 pub use hq_reducer::ConversationKey;
 
+pub use authority_admin::{
+    MailboxGrantRequest, MailboxRevokeRequest, PeerRouteRequest, plan_mailbox_grant,
+    plan_mailbox_revoke, plan_peer_route_block, plan_peer_route_set,
+};
 pub use error::{
     ApplicationError, ApplicationErrorClass, ApplicationErrorCode, ApplicationValueError,
 };
@@ -41,10 +46,11 @@ pub use project::{
 pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot,
-    ClientAgentLifecycle, ClientDeviceGrant, ClientMembershipState, ClientPeerRouteState,
-    ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage,
-    ConversationEntry, ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot,
-    ProjectProjectionSnapshot, ProjectionSnapshot,
+    ClientAgentLifecycle, ClientDeviceGrant, ClientMembershipState, ClientPeerRouteBlock,
+    ClientPeerRouteCandidate, ClientPeerRouteState, ClientProjectLifecycle,
+    ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
+    ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot, ProjectProjectionSnapshot,
+    ProjectionSnapshot,
 };
 
 /// Minimal in-memory use-case host for the workspace walking skeleton.
