@@ -4,8 +4,8 @@ use std::{
     collections::{BTreeMap, VecDeque},
     error::Error,
     fmt,
-    num::NonZeroU64,
-    time::Duration,
+    num::{NonZeroU64, NonZeroUsize},
+    time::{Duration, Instant},
 };
 
 use hq_domain::{CommandDigest, CommandId};
@@ -23,6 +23,15 @@ pub const MAX_IN_FLIGHT_RETRYABLE_COMMANDS: usize = 256;
 
 const SUBSCRIPTION_ID_DOMAIN: &[u8] = b"hq-local-api-client-subscription-v1\0";
 
+/// Initial authoritative-view behavior selected for one reconnecting client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InitialView {
+    /// Load an authoritative snapshot after every successful negotiation.
+    Snapshot,
+    /// Negotiate without loading state until an explicit request needs it.
+    OnDemand,
+}
+
 /// Narrow blocking transport operations used by a runner around the pure state machine.
 pub trait ClientTransport {
     /// Adapter-owned live connection handle.
@@ -33,10 +42,68 @@ pub trait ClientTransport {
     /// Opens one local transport connection.
     fn connect(&mut self) -> Result<Self::Connection, Self::Error>;
     /// Writes one complete exact frame.
-    fn write(&mut self, connection: &mut Self::Connection, frame: &[u8])
-    -> Result<(), Self::Error>;
+    fn write(
+        &mut self,
+        connection: &mut Self::Connection,
+        frame: &[u8],
+        timeout: Duration,
+    ) -> Result<(), Self::Error>;
+    /// Reads one complete bounded exact frame.
+    fn read_frame(
+        &mut self,
+        connection: &mut Self::Connection,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, Self::Error>;
     /// Closes one connection idempotently.
     fn close(&mut self, connection: Self::Connection);
+    /// Waits for one deterministic reconnect delay.
+    fn wait(&mut self, delay: Duration);
+}
+
+/// Passive bounds for one synchronous local command execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockingClientConfig {
+    /// Inclusive wall-time bound for one execution call.
+    pub deadline: Duration,
+    /// Maximum connection attempts across initial connect and retries.
+    pub max_connection_attempts: NonZeroUsize,
+}
+
+/// Closed synchronous runner failure without transport implementation prose.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BlockingClientError {
+    /// The configured wall-time bound was zero.
+    InvalidDeadline,
+    /// The pure reconnecting client rejected a transition or request.
+    Client(ClientError),
+    /// The command exceeded its explicit wall-time bound.
+    Deadline,
+    /// The bounded connection-attempt budget was exhausted.
+    ConnectionAttemptsExhausted,
+    /// An ordinary request lost its response and was not replayed.
+    ResponseLost,
+    /// The server supports no compatible local protocol version.
+    Incompatible,
+}
+
+impl fmt::Display for BlockingClientError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "blocking local client failed: {self:?}")
+    }
+}
+
+impl Error for BlockingClientError {}
+
+/// Opaque synchronous owner that drives one pure reconnecting client over an injected transport.
+pub struct BlockingClientRunner<T: ClientTransport> {
+    config: BlockingClientConfig,
+    client: ReconnectingClient,
+    transport: T,
+    connection: Option<(ConnectionGeneration, T::Connection)>,
+    actions: VecDeque<ClientAction>,
+    events: VecDeque<ClientEvent>,
+    connection_attempts: usize,
+    response_pending: bool,
 }
 
 /// Nonzero client-local connection attempt identity used to discard stale events.
@@ -123,6 +190,8 @@ pub enum ClientEvent {
     Error {
         /// Original request correlation identity.
         request_id: RequestId,
+        /// Semantic operation whose correlated response failed.
+        operation: ClientOperation,
         /// Stable typed failure.
         error: ErrorResponse,
     },
@@ -130,6 +199,21 @@ pub enum ClientEvent {
     RequestLost(RequestId),
     /// The server explicitly supports no compatible local API version.
     IncompatibleVersion,
+}
+
+/// Semantic origin of a correlated server error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientOperation {
+    /// Automatic or invalidation-triggered authoritative snapshot refresh.
+    Snapshot,
+    /// Broad invalidation subscription registration.
+    Subscription,
+    /// Caller-submitted ordinary request.
+    Ordinary,
+    /// Retry-safe fact mutation.
+    Mutation(CommandId),
+    /// Retry-safe durable project command.
+    Project(CommandId),
 }
 
 /// Pure actions and semantic events produced by one state transition.
@@ -228,6 +312,7 @@ pub struct ReconnectingClient {
     completed_capacity: usize,
     pending_requests: BTreeMap<RequestId, PendingRequest>,
     subscription: Option<SubscriptionIntent>,
+    initial_view: InitialView,
     active_subscription_id: Option<Id32>,
     current_revision: Option<u64>,
     newest_invalidation: u64,
@@ -241,6 +326,7 @@ impl ReconnectingClient {
         build: BuildMetadata,
         reconnect: ReconnectPolicy,
         completed_identity_capacity: usize,
+        initial_view: InitialView,
     ) -> Result<Self, ClientError> {
         if completed_identity_capacity == 0 {
             return Err(ClientError::ZeroIdentityHistory);
@@ -259,6 +345,7 @@ impl ReconnectingClient {
             completed_capacity: completed_identity_capacity,
             pending_requests: BTreeMap::new(),
             subscription: None,
+            initial_view,
             active_subscription_id: None,
             current_revision: None,
             newest_invalidation: 0,
@@ -514,6 +601,11 @@ impl ReconnectingClient {
         self.completed_digests.len()
     }
 
+    /// Reports whether the current generation completed negotiation.
+    pub const fn is_active(&self) -> bool {
+        matches!(self.phase, Phase::Active(_))
+    }
+
     fn handle_negotiation(
         &mut self,
         generation: ConnectionGeneration,
@@ -542,7 +634,7 @@ impl ReconnectingClient {
                     transition
                         .actions
                         .push(ClientAction::Write { generation, frame });
-                } else {
+                } else if self.initial_view == InitialView::Snapshot {
                     transition
                         .actions
                         .push(self.begin_snapshot_refresh(generation)?);
@@ -751,21 +843,34 @@ impl ReconnectingClient {
             if let Some(pending) = self.pending_mutations.remove(&command_id) {
                 self.remember_completed(command_id, pending.digest);
             }
-            return Ok(error_transition(request_id, error));
+            return Ok(error_transition(
+                request_id,
+                ClientOperation::Mutation(command_id),
+                error,
+            ));
         }
 
         if let Some(command_id) = project_command {
             self.pending_project_commands
                 .remove(&command_id)
                 .ok_or(ClientError::ProtocolOrder)?;
-            return Ok(error_transition(request_id, error));
+            return Ok(error_transition(
+                request_id,
+                ClientOperation::Project(command_id),
+                error,
+            ));
         }
 
         let pending = self
             .pending_requests
             .remove(&request_id)
             .ok_or(ClientError::ProtocolOrder)?;
-        let mut transition = error_transition(request_id, error);
+        let operation = match pending {
+            PendingRequest::Subscription(_) => ClientOperation::Subscription,
+            PendingRequest::Snapshot => ClientOperation::Snapshot,
+            PendingRequest::Ordinary => ClientOperation::Ordinary,
+        };
+        let mut transition = error_transition(request_id, operation, error);
         if matches!(
             pending,
             PendingRequest::Subscription(_) | PendingRequest::Snapshot
@@ -882,10 +987,368 @@ impl ReconnectingClient {
     }
 }
 
+impl<T: ClientTransport> BlockingClientRunner<T> {
+    /// Owns one validated synchronous execution policy, pure client, and transport.
+    pub fn new(
+        config: BlockingClientConfig,
+        client: ReconnectingClient,
+        transport: T,
+    ) -> Result<Self, BlockingClientError> {
+        if config.deadline.is_zero() {
+            return Err(BlockingClientError::InvalidDeadline);
+        }
+        Ok(Self {
+            config,
+            client,
+            transport,
+            connection: None,
+            actions: VecDeque::new(),
+            events: VecDeque::new(),
+            connection_attempts: 0,
+            response_pending: false,
+        })
+    }
+
+    /// Executes one non-retryable ordinary request after negotiated readiness.
+    pub fn request(&mut self, request: Request) -> Result<ClientEvent, BlockingClientError> {
+        let deadline = self.execution_deadline();
+        self.begin_execution();
+        self.ensure_connected(deadline)?;
+        let transition = self
+            .client
+            .submit_request(request)
+            .map_err(BlockingClientError::Client)?;
+        let request_id = submitted_request_id(&transition)?;
+        self.enqueue(transition);
+        loop {
+            match self.step(deadline)? {
+                Some(
+                    event @ ClientEvent::Response {
+                        request_id: completed,
+                        ..
+                    },
+                ) if completed == request_id => {
+                    return Ok(event);
+                }
+                Some(
+                    event @ ClientEvent::Error {
+                        request_id: failed,
+                        operation: ClientOperation::Ordinary,
+                        ..
+                    },
+                ) if failed == request_id => return Ok(event),
+                Some(ClientEvent::RequestLost(lost)) if lost == request_id => {
+                    return Err(BlockingClientError::ResponseLost);
+                }
+                Some(ClientEvent::IncompatibleVersion) => {
+                    return Err(BlockingClientError::Incompatible);
+                }
+                Some(
+                    ClientEvent::Snapshot(_)
+                    | ClientEvent::Mutation(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_)
+                    | ClientEvent::Error { .. },
+                )
+                | None => {}
+            }
+        }
+    }
+
+    /// Executes or reconciles one retry-safe mutation until its result is definite.
+    pub fn mutation(
+        &mut self,
+        request: MutationRequest,
+    ) -> Result<ClientEvent, BlockingClientError> {
+        let deadline = self.execution_deadline();
+        let command_id = request.command_id();
+        self.begin_execution();
+        let transition = self
+            .client
+            .submit_mutation(request)
+            .map_err(BlockingClientError::Client)?;
+        self.enqueue(transition);
+        self.ensure_started()?;
+        loop {
+            match self.step(deadline)? {
+                Some(
+                    event @ ClientEvent::Mutation(MutationAttemptDto::Completed {
+                        command_id: completed,
+                        ..
+                    }),
+                ) if CommandId::from_bytes(completed.bytes()) == command_id => {
+                    return Ok(event);
+                }
+                Some(
+                    event @ ClientEvent::Error {
+                        operation: ClientOperation::Mutation(failed),
+                        ..
+                    },
+                ) if failed == command_id => return Ok(event),
+                Some(ClientEvent::IncompatibleVersion) => {
+                    return Err(BlockingClientError::Incompatible);
+                }
+                Some(
+                    ClientEvent::Mutation(
+                        MutationAttemptDto::Completed { .. } | MutationAttemptDto::Uncertain { .. },
+                    )
+                    | ClientEvent::Snapshot(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_)
+                    | ClientEvent::Error { .. },
+                )
+                | None => {}
+            }
+        }
+    }
+
+    /// Executes or replays one project command through its next definite durable outcome.
+    pub fn project(
+        &mut self,
+        request: ProjectCommandRequestDto,
+    ) -> Result<ClientEvent, BlockingClientError> {
+        let deadline = self.execution_deadline();
+        let command_id = CommandId::from_bytes(request.command_id.bytes());
+        self.begin_execution();
+        let transition = self
+            .client
+            .submit_project_command(request)
+            .map_err(BlockingClientError::Client)?;
+        self.enqueue(transition);
+        self.ensure_started()?;
+        loop {
+            match self.step(deadline)? {
+                Some(
+                    event @ ClientEvent::ProjectCommand {
+                        command_id: completed,
+                        ..
+                    },
+                ) if completed == command_id => return Ok(event),
+                Some(
+                    event @ ClientEvent::Error {
+                        operation: ClientOperation::Project(failed),
+                        ..
+                    },
+                ) if failed == command_id => return Ok(event),
+                Some(ClientEvent::IncompatibleVersion) => {
+                    return Err(BlockingClientError::Incompatible);
+                }
+                Some(
+                    ClientEvent::Snapshot(_)
+                    | ClientEvent::Mutation(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_)
+                    | ClientEvent::Error { .. },
+                )
+                | None => {}
+            }
+        }
+    }
+
+    /// Returns the transport after closing any live generation.
+    pub fn into_transport(mut self) -> T {
+        if let Some((_, connection)) = self.connection.take() {
+            self.transport.close(connection);
+        }
+        self.transport
+    }
+
+    fn begin_execution(&mut self) {
+        self.connection_attempts = 0;
+        self.events.clear();
+    }
+
+    fn ensure_started(&mut self) -> Result<(), BlockingClientError> {
+        if self.client.current_generation().is_none() {
+            let transition = self.client.start().map_err(BlockingClientError::Client)?;
+            self.enqueue(transition);
+        }
+        Ok(())
+    }
+
+    fn ensure_connected(&mut self, deadline: Instant) -> Result<(), BlockingClientError> {
+        self.ensure_started()?;
+        while !self.client.is_active() {
+            if let Some(ClientEvent::IncompatibleVersion) = self.step(deadline)? {
+                return Err(BlockingClientError::Incompatible);
+            }
+        }
+        Ok(())
+    }
+
+    fn step(&mut self, deadline: Instant) -> Result<Option<ClientEvent>, BlockingClientError> {
+        if Instant::now() >= deadline {
+            return Err(BlockingClientError::Deadline);
+        }
+        if let Some(event) = self.events.pop_front() {
+            return Ok(Some(event));
+        }
+        if !self.response_pending
+            && let Some(action) = self.actions.pop_front()
+        {
+            self.apply_action(action, deadline)?;
+            return Ok(None);
+        }
+        let Some((generation, connection)) = self.connection.as_mut() else {
+            return Err(BlockingClientError::ConnectionAttemptsExhausted);
+        };
+        let timeout = remaining(deadline)?;
+        let transition = if let Ok(frame) = self.transport.read_frame(connection, timeout) {
+            let completes_response = matches!(
+                WireMessage::decode_frame(&frame),
+                Ok(WireMessage::ServerHello(_)
+                    | WireMessage::VersionRejected(_)
+                    | WireMessage::Response(_))
+            );
+            let transition = self
+                .client
+                .receive_frame(*generation, &frame)
+                .map_err(BlockingClientError::Client)?;
+            if completes_response {
+                self.response_pending = false;
+            }
+            transition
+        } else {
+            let (generation, connection) = self
+                .connection
+                .take()
+                .ok_or(BlockingClientError::ConnectionAttemptsExhausted)?;
+            self.transport.close(connection);
+            self.response_pending = false;
+            self.client
+                .disconnected(generation)
+                .map_err(BlockingClientError::Client)?
+        };
+        self.enqueue(transition);
+        Ok(None)
+    }
+
+    fn apply_action(
+        &mut self,
+        action: ClientAction,
+        deadline: Instant,
+    ) -> Result<(), BlockingClientError> {
+        let transition = match action {
+            ClientAction::ConnectAfter { generation, delay } => {
+                self.connection_attempts = self.connection_attempts.saturating_add(1);
+                if self.connection_attempts > self.config.max_connection_attempts.get() {
+                    return Err(BlockingClientError::ConnectionAttemptsExhausted);
+                }
+                if Instant::now()
+                    .checked_add(delay)
+                    .is_none_or(|ready| ready > deadline)
+                {
+                    return Err(BlockingClientError::Deadline);
+                }
+                self.transport.wait(delay);
+                let connected = self.transport.connect();
+                if Instant::now() >= deadline {
+                    if let Ok(connection) = connected {
+                        self.transport.close(connection);
+                    }
+                    return Err(BlockingClientError::Deadline);
+                }
+                match connected {
+                    Ok(connection) => {
+                        self.connection = Some((generation, connection));
+                        self.response_pending = false;
+                        self.client
+                            .connected(generation)
+                            .map_err(BlockingClientError::Client)?
+                    }
+                    Err(_) => self
+                        .client
+                        .connection_failed(generation)
+                        .map_err(BlockingClientError::Client)?,
+                }
+            }
+            ClientAction::Write { generation, frame } => {
+                let Some((current, connection)) = self.connection.as_mut() else {
+                    return Err(BlockingClientError::Client(ClientError::ProtocolOrder));
+                };
+                if *current != generation {
+                    return Err(BlockingClientError::Client(ClientError::ProtocolOrder));
+                }
+                let timeout = remaining(deadline)?;
+                if self.transport.write(connection, &frame, timeout).is_ok() {
+                    self.response_pending = true;
+                    ClientTransition::default()
+                } else {
+                    let (_, connection) = self
+                        .connection
+                        .take()
+                        .ok_or(BlockingClientError::ConnectionAttemptsExhausted)?;
+                    self.transport.close(connection);
+                    self.response_pending = false;
+                    self.client
+                        .disconnected(generation)
+                        .map_err(BlockingClientError::Client)?
+                }
+            }
+            ClientAction::Close { generation } => {
+                if self
+                    .connection
+                    .as_ref()
+                    .is_some_and(|(current, _)| *current == generation)
+                    && let Some((_, connection)) = self.connection.take()
+                {
+                    self.transport.close(connection);
+                }
+                self.response_pending = false;
+                ClientTransition::default()
+            }
+        };
+        self.enqueue(transition);
+        Ok(())
+    }
+
+    fn enqueue(&mut self, transition: ClientTransition) {
+        self.actions.extend(transition.actions);
+        self.events.extend(transition.events);
+    }
+
+    fn execution_deadline(&self) -> Instant {
+        Instant::now()
+            .checked_add(self.config.deadline)
+            .unwrap_or_else(Instant::now)
+    }
+}
+
 fn request_frame(request_id: RequestId, request: Request) -> Result<Vec<u8>, ClientError> {
     WireMessage::Request(RequestEnvelope::new(request_id, request))
         .encode_frame()
         .map_err(|_| ClientError::Codec)
+}
+
+fn submitted_request_id(transition: &ClientTransition) -> Result<RequestId, BlockingClientError> {
+    transition
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientAction::Write { frame, .. } => match WireMessage::decode_frame(frame) {
+                Ok(WireMessage::Request(envelope)) => Some(envelope.id),
+                Ok(
+                    WireMessage::ClientHello(_)
+                    | WireMessage::ServerHello(_)
+                    | WireMessage::VersionRejected(_)
+                    | WireMessage::Response(_)
+                    | WireMessage::Invalidation(_),
+                )
+                | Err(_) => None,
+            },
+            ClientAction::ConnectAfter { .. } | ClientAction::Close { .. } => None,
+        })
+        .ok_or(BlockingClientError::Client(ClientError::ProtocolOrder))
+}
+
+fn remaining(deadline: Instant) -> Result<Duration, BlockingClientError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(BlockingClientError::Deadline)
 }
 
 fn write_transition(generation: ConnectionGeneration, frame: Vec<u8>) -> ClientTransition {
@@ -895,10 +1358,18 @@ fn write_transition(generation: ConnectionGeneration, frame: Vec<u8>) -> ClientT
     }
 }
 
-fn error_transition(request_id: RequestId, error: ErrorResponse) -> ClientTransition {
+fn error_transition(
+    request_id: RequestId,
+    operation: ClientOperation,
+    error: ErrorResponse,
+) -> ClientTransition {
     ClientTransition {
         actions: Vec::new(),
-        events: vec![ClientEvent::Error { request_id, error }],
+        events: vec![ClientEvent::Error {
+            request_id,
+            operation,
+            error,
+        }],
     }
 }
 

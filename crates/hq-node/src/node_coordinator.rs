@@ -97,10 +97,10 @@ impl NodeLauncher for ProcessNodeLauncher {
 
     fn spawn(&mut self, state_root: &Path) -> Result<Self::Child, NodeLaunchError> {
         Command::new(&self.executable)
-            .arg("node")
-            .arg("run")
             .arg("--state-root")
             .arg(state_root)
+            .arg("daemon")
+            .arg("run")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

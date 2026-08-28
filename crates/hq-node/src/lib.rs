@@ -16,6 +16,8 @@ mod lifecycle;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lifecycle_client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod local_client;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod local_transport;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod node_coordinator;
@@ -31,9 +33,14 @@ mod session_io;
 mod session_pump;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_registry;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix_frame;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use cli::{NodeCliCommand, NodeCliError, parse_node_cli, run_node_cli};
+pub use cli::{
+    CliCommand, CliError, CliExecution, CliExitClass, CliInvocation, CliOutputFormat,
+    DaemonCommand, execute_cli, parse_cli, run_cli,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use foreground::{
     ForegroundNodeConfig, ForegroundNodeError, run_foreground, run_foreground_generation_until,
@@ -59,6 +66,11 @@ pub use lifecycle::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use lifecycle_client::{
     LifecycleClient, LifecycleClientConfig, LifecycleClientError, LifecycleObservation,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use local_client::{
+    LocalNodeClient, LocalNodeClientConfig, LocalNodeClientError, UnixClientTransport,
+    UnixClientTransportConfig, UnixClientTransportError,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local_transport::{

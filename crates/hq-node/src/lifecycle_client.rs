@@ -1,13 +1,13 @@
 //! Bounded one-shot lifecycle client over the private local Unix socket.
 
-use std::{error::Error, fmt, io::Read, io::Write, os::unix::net::UnixStream, time::Duration};
+use std::{error::Error, fmt, os::unix::net::UnixStream, time::Duration};
 
 use hq_local_api::protocol::v1::{
-    BuildMetadata, LifecycleRequest, LifecycleStatus, MAX_FRAME_BYTES, Request, RequestEnvelope,
-    RequestId, Response, ResponseResult, V1, VersionRange, WireMessage,
+    BuildMetadata, LifecycleRequest, LifecycleStatus, Request, RequestEnvelope, RequestId,
+    Response, ResponseResult, V1, VersionRange, WireMessage,
 };
 
-use crate::{ReadinessRecord, RuntimeArtifactErrorClass, RuntimePaths};
+use crate::{ReadinessRecord, RuntimeArtifactErrorClass, RuntimePaths, unix_frame};
 
 /// Explicit inputs for one bounded lifecycle request.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,7 +132,7 @@ fn write_message(
     let frame = message
         .encode_frame()
         .map_err(|_| LifecycleClientError::Protocol)?;
-    stream.write_all(&frame).map_err(|_| {
+    unix_frame::write_frame(stream, &frame).map_err(|_| {
         if request_written {
             LifecycleClientError::ResponseLost
         } else {
@@ -152,23 +152,13 @@ fn read_message(
             LifecycleClientError::Transport
         }
     };
-    let mut prefix = [0_u8; 4];
-    stream.read_exact(&mut prefix).map_err(|_| lost())?;
-    let body_len =
-        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| LifecycleClientError::Protocol)?;
-    if body_len > MAX_FRAME_BYTES {
-        return Err(LifecycleClientError::Protocol);
-    }
-    let mut frame = prefix.to_vec();
-    frame.resize(
-        body_len
-            .checked_add(prefix.len())
-            .ok_or(LifecycleClientError::Protocol)?,
-        0,
-    );
-    stream
-        .read_exact(&mut frame[prefix.len()..])
-        .map_err(|_| lost())?;
+    let frame = unix_frame::read_frame(stream).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            LifecycleClientError::Protocol
+        } else {
+            lost()
+        }
+    })?;
     WireMessage::decode_frame(&frame).map_err(|_| LifecycleClientError::Protocol)
 }
 

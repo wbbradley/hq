@@ -218,4 +218,12 @@ done < <(grep -El '^name[[:space:]]*=[[:space:]]*"hq"[[:space:]]*$' \
 [[ "${binary_manifests[0]}" == "$repository_root/crates/hq-node/Cargo.toml" ]] ||
   fail "the hq binary must be owned by hq-node"
 
+if grep -Eq '(hq_store|hq_relay|hq_codex|hq_resources|rusqlite|std::fs)' \
+  "$repository_root/crates/hq-node/src/cli.rs" \
+  "$repository_root/crates/hq-node/src/local_client.rs"; then
+  fail "the CLI/local client may cross only node coordination and hq-local-api boundaries"
+fi
+grep -Fq 'hq_node::execute_cli' "$repository_root/crates/hq-node/src/bin/hq.rs" ||
+  fail "the installed binary must delegate to the typed CLI composition root"
+
 printf 'Rust workspace architecture verified.\n'

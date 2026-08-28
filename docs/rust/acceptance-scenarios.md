@@ -254,6 +254,11 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   project-command replay across ambiguous pre/post-commit response loss, changed-command rejection,
   bounded completed
   identity history, correlated ordinary response/loss reporting, and clean lifecycle restart.
+- Blocking-runner contracts add one-response-at-a-time writes, strict bounded Unix frames,
+  connection-attempt and wall-time exhaustion, semantic error correlation, optional initial
+  snapshots, non-replayed ordinary response loss, real-node command execution, and coordinator-first
+  readiness. CLI fixtures cover complete help, build metadata, stable human/JSON records, typed exit
+  classes, closed stdin, and redacted invalid input.
 - Client subscription contracts cover per-server-session registration identities, early and
   coalesced invalidations, acknowledgement snapshots as fresh bases, repeated full refresh while a
   returned revision is behind, resubscription after acknowledgement loss, and two independent

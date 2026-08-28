@@ -4,15 +4,18 @@
 fn main() {
     use std::io::Write as _;
 
-    let result = hq_node::parse_node_cli(std::env::args_os().skip(1))
-        .and_then(|command| hq_node::run_node_cli(&command));
-    match result {
-        Ok(output) if std::io::stdout().write_all(output.as_bytes()).is_ok() => {}
-        Ok(_) => std::process::exit(1),
-        Err(error) => {
-            let _ = writeln!(std::io::stderr(), "hq: {error}");
-            std::process::exit(1);
-        }
+    let execution = hq_node::execute_cli(std::env::args_os().skip(1));
+    if std::io::stdout()
+        .write_all(execution.stdout.as_bytes())
+        .is_err()
+        || std::io::stderr()
+            .write_all(execution.stderr.as_bytes())
+            .is_err()
+    {
+        std::process::exit(1);
+    }
+    if execution.exit_code != 0 {
+        std::process::exit(i32::from(execution.exit_code));
     }
 }
 

@@ -7062,3 +7062,68 @@ macOS; all other race packages pass.
   - Project creation has no previous project head. Optionality is represented directly in passive
     command data and validated by action, rather than by a magic fact ID, ignored field, or
     accessor-enforced convention.
+
+## 2026-08-28 — Local client, output, and lifecycle command foundation
+
+Replaced the lifecycle-only argument shim with one installed `hq` command tree for complete help,
+build/version inspection, and foreground/status/readiness/stop/restart daemon roles. Plain command
+and output data has public fields; validated paths and live clients remain opaque. Human output and
+the versioned `hq-cli-output-v1` JSON envelope now cover successes and redacted typed errors with
+stable success/failure/usage/unavailable exit statuses and deterministic noninteractive behavior.
+
+Added a bounded synchronous runner around the pure reconnecting local API client plus a strict Unix
+transport. The runner serializes response-producing writes to the server's single-flight contract,
+caps attempts, reconnect delay, frames, socket operations, and workflow time, correlates semantic
+errors and exact request identities, never replays ordinary response loss, and replays retry-safe
+mutation/project bytes exactly. Command-only and snapshot-oriented clients select their initial
+view explicitly. The concrete `LocalNodeClient` converges coordinator readiness before exposing one
+reusable typed request/mutation/project seam, with no direct storage, signer, relay, resource, or
+provider access.
+
+Parser/help, deterministic human/JSON, typed exit/redaction, fake transport replay/loss/exhaustion/
+incompatibility, real foreground Unix transport, non-TTY, lifecycle restart, and concurrent
+autostart tests pass. Strict Clippy, the workspace suite excluding the previously documented relay
+test-harness hang, architecture/behavior/causal/protocol/dependency gates, formatting/whitespace,
+and frozen-Go build/vet/tests pass. Dependency policy retains the existing locked yanked
+`chacha20 0.10.1` warning. No storage schema, migration, or storage-version change was needed.
+
+### Original plan entry
+
+- **[cli/high] Build the local client, output, and lifecycle command foundation** — Replace the
+  lifecycle-only argument shim with one coherent installed `hq` command tree, a bounded Unix local
+  API runner around `hq-local-api::ReconnectingClient`, concurrent-safe node autostart/readiness,
+  stable human and machine-readable output, typed exit diagnostics, and complete help/version/build
+  inspection. Keep the explicit foreground daemon role internal to the same executable and give
+  later commands one reusable request/mutation/project execution seam. Test parsing, framing,
+  response loss, reconnect, incompatible builds, autostart races, non-TTY behavior, redaction, and
+  deterministic rendering without direct storage, signer, relay, or provider access.
+
+  **Implementation plan**
+
+  - Define plain public command/output option data and a closed parser for global state-root and
+    output-format options, `help`, `version`, and `daemon run/status/readiness/stop/restart`. Keep
+    validated runtime paths and live client/session ownership opaque. Render human records and one
+    stable versioned JSON envelope from typed results; map failures to documented exit classes with
+    no adapter prose.
+  - Add a bounded Unix `ClientTransport` and synchronous runner around the existing pure
+    `ReconnectingClient`. The runner owns exactly one connection generation, strict framed reads,
+    capped retry scheduling, response correlation, ordinary-request loss, byte-identical mutation
+    and project replay, subscription refresh, and explicit deadlines supplied by each command.
+  - Compose readiness through `NodeClientCoordinator` before local API connection, while foreground
+    daemon execution continues to own the node directly. Concurrent absent-node clients may spawn
+    candidates but converge on the same ready generation; incompatible protocol/build responses and
+    startup diagnostics remain typed and actionable.
+  - Add parser/help snapshots, fake-transport state-machine tests, real local-socket lifecycle and
+    autostart tests, machine-output fixtures, non-TTY/stdin contracts, redaction checks, and
+    architecture rules proving the CLI crosses only node coordination and local API boundaries.
+
+  **Risks and decisions**
+
+  - Retrying ordinary reads can change their observed revision, so only exact mutation and project
+    command identities replay automatically. A lost ordinary response is reported and the command
+    decides explicitly whether a fresh read is safe.
+  - Machine output is a Rust-era contract, not compatibility with Go JSON. It is versioned from its
+    first release and contains typed public data or stable error codes, never debug strings.
+  - The client runner may block for an explicit workflow deadline, but every socket operation,
+    queue, frame, retry delay, and retained identity set remains bounded. Ask/wait semantics that
+    intentionally have no routine overall timeout belong to the later messaging slice.

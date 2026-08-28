@@ -7,15 +7,20 @@ mod support;
 
 use std::{
     io::Read,
+    num::NonZeroUsize,
     os::unix::net::UnixStream,
     path::Path,
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
 };
 
-use hq_local_api::protocol::v1::{BuildMetadata, LifecycleRequest, LifecycleState};
+use hq_local_api::{
+    ClientEvent, InitialView,
+    protocol::v1::{BuildMetadata, LifecycleRequest, LifecycleState, Request, ResponseResult},
+};
 use hq_node::{
-    LifecycleClient, LifecycleClientConfig, RuntimePaths, StateDirectoryOwner, StatePaths,
+    LifecycleClient, LifecycleClientConfig, LocalNodeClient, LocalNodeClientConfig,
+    ProcessNodeLauncher, RuntimePaths, StateDirectoryOwner, StatePaths,
 };
 
 use support::TestDirectory;
@@ -41,10 +46,10 @@ fn initialize(directory: &TestDirectory) -> (StatePaths, RuntimePaths) {
 fn command(action: &str, state_root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hq"));
     command
-        .arg("node")
-        .arg(action)
         .arg("--state-root")
-        .arg(state_root);
+        .arg(state_root)
+        .arg("daemon")
+        .arg(action);
     command
 }
 
@@ -52,6 +57,19 @@ fn output(action: &str, state_root: &Path) -> Output {
     command(action, state_root)
         .output()
         .expect("CLI process runs")
+}
+
+fn machine_output(action: &str, state_root: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_hq"))
+        .arg("--output")
+        .arg("json")
+        .arg("--state-root")
+        .arg(state_root)
+        .arg("daemon")
+        .arg(action)
+        .stdin(Stdio::null())
+        .output()
+        .expect("non-interactive CLI process runs")
 }
 
 fn client(runtime: RuntimePaths) -> LifecycleClient {
@@ -110,6 +128,51 @@ fn foreground_status_restart_and_stop_converge_across_a_fresh_generation() {
         status.stderr
     );
     assert!(String::from_utf8_lossy(&status.stdout).contains("status=ready"));
+    let machine = machine_output("status", state.root());
+    assert!(
+        machine.status.success(),
+        "machine stderr: {:?}",
+        machine.stderr
+    );
+    assert!(machine.stderr.is_empty());
+    let record: serde_json::Value =
+        serde_json::from_slice(&machine.stdout).expect("machine lifecycle record");
+    assert_eq!(record["schema"], "hq-cli-output-v1");
+    assert_eq!(record["ok"], true);
+    assert_eq!(record["kind"], "lifecycle");
+    assert_eq!(record["data"]["command"], "status");
+    assert_eq!(record["data"]["state"], "ready");
+
+    let mut local = LocalNodeClient::connect_with_launcher(
+        LocalNodeClientConfig {
+            state: state.clone(),
+            build: BuildMetadata::new("hq-test", "0.1.0", Some("cli-e2e")).expect("build"),
+            initial_view: InitialView::OnDemand,
+            io_timeout: Duration::from_secs(2),
+            command_deadline: Duration::from_secs(5),
+            max_connection_attempts: NonZeroUsize::new(8).expect("positive attempts"),
+            readiness_timeout: Duration::from_secs(5),
+            readiness_retry_interval: Duration::from_millis(10),
+            reconnect_initial: Duration::from_millis(10),
+            reconnect_maximum: Duration::from_millis(40),
+            completed_identity_capacity: NonZeroUsize::new(16).expect("positive history"),
+        },
+        ProcessNodeLauncher::new(env!("CARGO_BIN_EXE_hq").into()),
+    )
+    .expect("local command client");
+    let local_status = local
+        .request(Request::Lifecycle(LifecycleRequest::Status))
+        .expect("local API status");
+    assert!(
+        matches!(
+            local_status,
+            ClientEvent::Response {
+            result: ResponseResult::Lifecycle(ref status),
+                ..
+            } if status.state == LifecycleState::Ready
+        ),
+        "unexpected local status: {local_status:?}"
+    );
 
     let mut old_connection = UnixStream::connect(runtime.socket_file()).expect("old connection");
     old_connection
@@ -141,7 +204,7 @@ fn foreground_status_restart_and_stop_converge_across_a_fresh_generation() {
         "stop stderr: {:?}",
         stopped.stderr
     );
-    assert!(String::from_utf8_lossy(&stopped.stdout).contains("stop=stopped"));
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("stopped intent=stopped"));
     wait_child(&mut child.0);
     assert!(!runtime.socket_file().exists());
     assert!(!runtime.readiness_file().exists());

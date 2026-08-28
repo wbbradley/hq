@@ -2,7 +2,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::time::Duration;
+use std::{collections::VecDeque, fmt, num::NonZeroUsize, time::Duration};
 
 use hq_domain::{
     BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactScope, InstallationId,
@@ -13,13 +13,73 @@ use hq_local_api::protocol::v1::{
     AuthoritativeSnapshotDto, BuildMetadata, ClientHello, ErrorClass, ErrorResponse, Id32,
     InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus, MutationAttemptDto,
     MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
-    Request, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
+    Request, RequestId, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
     SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
 };
 use hq_local_api::{
-    ClientAction, ClientError, ClientEvent, ConnectionGeneration, ReconnectPolicy,
+    BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientAction, ClientError,
+    ClientEvent, ClientTransport, ConnectionGeneration, InitialView, ReconnectPolicy,
     ReconnectingClient,
 };
+
+#[derive(Clone, Copy, Debug)]
+struct ScriptedTransportError;
+
+impl fmt::Display for ScriptedTransportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("scripted transport failure")
+    }
+}
+
+impl std::error::Error for ScriptedTransportError {}
+
+struct ScriptedTransport {
+    reads: VecDeque<Result<Vec<u8>, ScriptedTransportError>>,
+    writes: Vec<Vec<u8>>,
+    connects: usize,
+    failed_connects_remaining: usize,
+    closes: usize,
+}
+
+impl ClientTransport for ScriptedTransport {
+    type Connection = ();
+    type Error = ScriptedTransportError;
+
+    fn connect(&mut self) -> Result<Self::Connection, Self::Error> {
+        self.connects += 1;
+        if self.failed_connects_remaining > 0 {
+            self.failed_connects_remaining -= 1;
+            return Err(ScriptedTransportError);
+        }
+        Ok(())
+    }
+
+    fn write(
+        &mut self,
+        _connection: &mut Self::Connection,
+        frame: &[u8],
+        _timeout: Duration,
+    ) -> Result<(), Self::Error> {
+        self.writes.push(frame.to_vec());
+        Ok(())
+    }
+
+    fn read_frame(
+        &mut self,
+        _connection: &mut Self::Connection,
+        _timeout: Duration,
+    ) -> Result<Vec<u8>, Self::Error> {
+        self.reads
+            .pop_front()
+            .unwrap_or(Err(ScriptedTransportError))
+    }
+
+    fn close(&mut self, _connection: Self::Connection) {
+        self.closes += 1;
+    }
+
+    fn wait(&mut self, _delay: Duration) {}
+}
 
 fn build() -> BuildMetadata {
     BuildMetadata::new("hq-test", "0.1.0", Some("0123456789ab")).expect("bounded build")
@@ -31,7 +91,8 @@ fn policy() -> ReconnectPolicy {
 }
 
 fn client() -> ReconnectingClient {
-    ReconnectingClient::new(build(), policy(), 2).expect("positive identity history")
+    ReconnectingClient::new(build(), policy(), 2, InitialView::Snapshot)
+        .expect("positive identity history")
 }
 
 fn plan(at: i64) -> hq_application::FactPlan {
@@ -73,6 +134,17 @@ fn project_command(command: u8, digest: u8) -> ProjectCommandRequestDto {
         issued_at_unix_millis: 1_700_000_000_000,
         action: ProjectCommandActionDto::Open,
     }
+}
+
+fn snapshot_response(request_id: u64, revision: u64) -> Vec<u8> {
+    WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(request_id).expect("request id"),
+        ResponseResult::AuthoritativeSnapshot(
+            AuthoritativeSnapshotDto::new(revision, Vec::new()).expect("snapshot"),
+        ),
+    ))
+    .encode_frame()
+    .expect("snapshot response")
 }
 
 fn only_connect(actions: &[ClientAction]) -> (ConnectionGeneration, Duration) {
@@ -660,4 +732,176 @@ fn two_clients_derive_distinct_registrations_and_keep_bounded_identity_history()
             .expect("completion accepted");
     }
     assert_eq!(left.completed_identity_count(), 2);
+}
+
+#[test]
+fn blocking_runner_replays_mutation_bytes_after_response_loss() {
+    let request = mutation(91, 1_700_000_000_091);
+    let command_id = request.command_id();
+    let request_digest = request.request_digest();
+    let hello = |session| {
+        WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([session; 32])))
+            .encode_frame()
+            .expect("hello frame")
+    };
+    let completed = WireMessage::Response(ResponseEnvelope::success(
+        hq_local_api::protocol::v1::RequestId::new(1).expect("request id"),
+        ResponseResult::Mutation(MutationAttemptDto::Completed {
+            command_id: Id32::new(*command_id.as_bytes()),
+            request_digest: Id32::new(*request_digest.as_bytes()),
+            revision: 92,
+            outcome: hq_local_api::protocol::v1::MutationOutcomeDto::Committed,
+        }),
+    ))
+    .encode_frame()
+    .expect("completion frame");
+    let transport = ScriptedTransport {
+        reads: VecDeque::from([
+            Ok(hello(1)),
+            Ok(snapshot_response(2, 1)),
+            Err(ScriptedTransportError),
+            Ok(hello(2)),
+            Ok(snapshot_response(3, 1)),
+            Ok(completed),
+        ]),
+        writes: Vec::new(),
+        connects: 0,
+        failed_connects_remaining: 0,
+        closes: 0,
+    };
+    let mut runner = BlockingClientRunner::new(
+        BlockingClientConfig {
+            deadline: Duration::from_secs(1),
+            max_connection_attempts: NonZeroUsize::new(3).expect("nonzero"),
+        },
+        client(),
+        transport,
+    )
+    .expect("runner config");
+
+    assert!(matches!(
+        runner.mutation(request).expect("mutation reconciles"),
+        ClientEvent::Mutation(MutationAttemptDto::Completed { revision: 92, .. })
+    ));
+    let transport = runner.into_transport();
+    assert_eq!(transport.connects, 2);
+    assert_eq!(transport.writes.len(), 6);
+    assert_eq!(transport.writes[2], transport.writes[5]);
+}
+
+#[test]
+fn blocking_runner_never_replays_an_ordinary_request_after_response_loss() {
+    let hello = WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([93; 32])))
+        .encode_frame()
+        .expect("hello frame");
+    let transport = ScriptedTransport {
+        reads: VecDeque::from([
+            Ok(hello),
+            Ok(snapshot_response(1, 1)),
+            Err(ScriptedTransportError),
+        ]),
+        writes: Vec::new(),
+        connects: 0,
+        failed_connects_remaining: 0,
+        closes: 0,
+    };
+    let mut runner = BlockingClientRunner::new(
+        BlockingClientConfig {
+            deadline: Duration::from_secs(1),
+            max_connection_attempts: NonZeroUsize::new(2).expect("nonzero"),
+        },
+        client(),
+        transport,
+    )
+    .expect("runner config");
+
+    assert_eq!(
+        runner.request(Request::Lifecycle(LifecycleRequest::Status)),
+        Err(BlockingClientError::ResponseLost)
+    );
+    let transport = runner.into_transport();
+    assert_eq!(transport.connects, 1);
+    assert_eq!(transport.writes.len(), 3);
+}
+
+#[test]
+fn blocking_runner_reports_bounded_connection_exhaustion() {
+    let transport = ScriptedTransport {
+        reads: VecDeque::new(),
+        writes: Vec::new(),
+        connects: 0,
+        failed_connects_remaining: 3,
+        closes: 0,
+    };
+    let mut runner = BlockingClientRunner::new(
+        BlockingClientConfig {
+            deadline: Duration::from_secs(1),
+            max_connection_attempts: NonZeroUsize::new(2).expect("nonzero"),
+        },
+        client(),
+        transport,
+    )
+    .expect("runner config");
+
+    assert_eq!(
+        runner.mutation(mutation(94, 1_700_000_000_094)),
+        Err(BlockingClientError::ConnectionAttemptsExhausted)
+    );
+    assert_eq!(runner.into_transport().connects, 2);
+}
+
+#[test]
+fn blocking_runner_rejects_a_zero_workflow_deadline() {
+    let transport = ScriptedTransport {
+        reads: VecDeque::new(),
+        writes: Vec::new(),
+        connects: 0,
+        failed_connects_remaining: 0,
+        closes: 0,
+    };
+    assert!(matches!(
+        BlockingClientRunner::new(
+            BlockingClientConfig {
+                deadline: Duration::ZERO,
+                max_connection_attempts: NonZeroUsize::new(1).expect("nonzero"),
+            },
+            client(),
+            transport,
+        ),
+        Err(BlockingClientError::InvalidDeadline)
+    ));
+}
+
+#[test]
+fn blocking_runner_reports_incompatible_negotiation() {
+    let rejected = WireMessage::VersionRejected(VersionRejected::new(
+        VersionRange::new(2, 3).expect("versions"),
+        build(),
+    ))
+    .encode_frame()
+    .expect("rejection frame");
+    let transport = ScriptedTransport {
+        reads: VecDeque::from([Ok(rejected)]),
+        writes: Vec::new(),
+        connects: 0,
+        failed_connects_remaining: 0,
+        closes: 0,
+    };
+    let mut runner = BlockingClientRunner::new(
+        BlockingClientConfig {
+            deadline: Duration::from_secs(1),
+            max_connection_attempts: NonZeroUsize::new(2).expect("nonzero"),
+        },
+        client(),
+        transport,
+    )
+    .expect("runner config");
+
+    assert_eq!(
+        runner.request(Request::Lifecycle(LifecycleRequest::Status)),
+        Err(BlockingClientError::Incompatible)
+    );
+    let transport = runner.into_transport();
+    assert_eq!(transport.connects, 1);
+    assert_eq!(transport.closes, 1);
 }

@@ -7,8 +7,9 @@ pub mod protocol;
 mod server;
 
 pub use client::{
-    ClientAction, ClientError, ClientEvent, ClientTransition, ClientTransport,
-    ConnectionGeneration, MAX_IN_FLIGHT_RETRYABLE_COMMANDS, ReconnectPolicy, ReconnectingClient,
+    BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientAction, ClientError,
+    ClientEvent, ClientOperation, ClientTransition, ClientTransport, ConnectionGeneration,
+    InitialView, MAX_IN_FLIGHT_RETRYABLE_COMMANDS, ReconnectPolicy, ReconnectingClient,
 };
 pub use conversion::{
     application_error_to_v1, mutation_from_v1, mutation_to_v1, page_request_from_v1, page_to_v1,

@@ -54,14 +54,36 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/medium] Complete the Rust command-line client** — Implement the retained command workflows
-  from the behavior ledger over `hq-local-api` only, including identity/account, messaging, peers,
-  relays/status/sync, named agents and sessions, projects/resources/worktrees, lifecycle control,
-  noninteractive output, machine-readable output, and actionable typed diagnostics. Do not preserve
-  Go spelling where a simpler coherent Rust-era surface is better. Add parser, rendering, retry,
-  autostart, non-TTY, and end-to-end fake-node tests plus generated help. Complete this work when
-  every retained non-TUI workflow is available without direct storage, signing, relay, or provider
-  access.
+- **[cli/high] Implement identity, peer, relay, and configuration administration** — Add local API
+  use cases and client commands for installation/account inspection, human invite/join/device
+  management, directional peer trust, mailbox capability grant/revoke, relay policy, explicit
+  synchronization, health/status/repair, and typed local configuration. Author every fact through
+  application mutation plans and perform every observation through authoritative snapshots or
+  explicit local effects; never expose signer or storage access to the CLI. Add authorization,
+  replay, stale-frontier, offline, rendering, and end-to-end fake-node coverage.
+
+- **[cli/high] Implement mailbox messaging and repository-aware discovery** — Add `ask`, `send`,
+  `wait`, `poll`, `get`, human list/filter, answer, cancel/archive, restore, and repository-aware
+  mailbox discovery over typed application/local API operations. Preserve stable message identity,
+  causal reply/cancellation authority, non-consuming inspection, duplicate-safe ready delivery,
+  asynchronous send, and intentionally unbounded human wait with bounded per-attempt I/O. Support
+  explicit session mailbox selection without ambiguous provider inference. Test restart, reconnect,
+  incomplete history, duplicate delivery, stale targets, non-TTY input, filters, and machine output.
+
+- **[cli/medium] Implement named-agent sessions and embedded agent guidance** — Add named-agent
+  list/show/create/rename/retire and neutral start/exact-resume/stop workflows plus current-session
+  discovery for supported provider environments. Ship concise installed guidance for messaging,
+  retry, synchronization, delivery identity, causal incompleteness, and human-owned administrative
+  boundaries. Test provider ambiguity, stale sessions, resume mismatch, runtime uncertainty,
+  redacted diagnostics, generated help, and local API-only architecture.
+
+- **[cli/high] Implement project/resource/worktree commands and audit non-TUI parity** — Expose
+  project list/show/create/send/open/activate/handoff/close/archive/unarchive, desired-resource
+  add/remove/replace/check, remote-command progress, and recoverable worktree provisioning through
+  the existing project and inspection ports. Render checkpoints, conflicts, runtime uncertainty,
+  claims, and orphaned external-state warnings explicitly. Add parser, response-loss, restart,
+  stale-head, force-confirmation, fake-node, and real foreground end-to-end tests, then audit every
+  retained non-TUI behavior-ledger workflow and close any remaining CLI gap.
 
 - **[tui/high] Build the pure Ratatui application architecture and terminal shell** — Implement
   `UiModel`, the closed `UiEvent` enum, pure update transitions, explicit `UiEffect` values, stale
