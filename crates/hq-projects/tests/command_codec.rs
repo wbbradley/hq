@@ -147,6 +147,10 @@ fn in_flight_close_and_archive_mutations_round_trip_exactly() {
     let failure = ErrorCode::new("runtime-stop-failed").expect("error code");
     let uncertain = ErrorCode::new("runtime-stop-unknown").expect("error code");
     for action in [
+        CanonicalProjectMutationAction::BlockAssignment {
+            assignment_id: AssignmentId::from_bytes([40; 32]),
+            cause: ErrorCode::new("runtime-stop-failed").expect("error code"),
+        },
         CanonicalProjectMutationAction::EndAssignment {
             assignment_id: AssignmentId::from_bytes([41; 32]),
             forced: true,
@@ -158,6 +162,9 @@ fn in_flight_close_and_archive_mutations_round_trip_exactly() {
         },
         CanonicalProjectMutationAction::Archive,
         CanonicalProjectMutationAction::Unarchive,
+        CanonicalProjectMutationAction::RetireAgent {
+            agent_id: AgentId::from_bytes([49; 32]),
+        },
     ] {
         let mutation = CanonicalProjectMutation {
             command_id: CommandId::from_bytes([42; 32]),

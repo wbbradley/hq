@@ -52,6 +52,19 @@ Runnable state cites the exact assignment binding and an immutable conversation 
 message scope names the project mailbox and project UUID. The launch directory is canonical
 semantic context, not evidence that a directory exists. Runtime absence never expires an epoch.
 
+Handoff transfers authority only after exact old-runtime quiescence and assignment end. Definite or
+unknown graceful-stop failure moves the current epoch to blocked and non-runnable; it does not end
+the epoch or release claims. A later explicit force may end it with the truthful failed/uncertain
+runtime observation, after which a distinct idle agent may configure and resume only a historical
+project thread attributed to that agent. Target startup failure leaves the project open and
+unassigned rather than recreating the ended epoch.
+
+Retiring an assigned agent follows the same block/force rule, ends that epoch, and then authors the
+separate installation-private absorbing retirement fact. Retirement does not close the project or
+change desired resources, active claims, pending inputs, threads, dispatches, or output history. An
+idle active local agent may retire without any runtime call. Retired agents cannot receive new
+assignment authority, and output from an ended epoch remains historical/late.
+
 `ProjectInputAccepted` assigns the next contiguous positive home sequence to one exact project
 message. `ProjectInputDispatched` binds that accepted input at most once to the then-runnable
 assignment, agent, provider session, and immutable thread. Stable input, dispatch, and sequence

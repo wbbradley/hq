@@ -128,6 +128,24 @@ claim-free. Every release, runtime, assignment-end, close, archive, and unarchiv
 existing saga effect and pending-canonical-mutation checkpoints, so response-loss repair needs no
 additional storage field or compatibility migration.
 
+Handoff first validates a distinct idle active agent and one historical project thread previously
+attributed to that agent. The old runtime is then stopped by exact assignment/session identity. A
+failed or unknown graceful stop authors `ProjectAssignmentBlocked`, retaining the old assignment
+and claims while disabling dispatch until a human submits a separate forced takeover. Force may
+author an assignment end with a failed or uncertain observation, but only revokes HQ authority; it
+does not assert external cessation. After the old end commits, handoff reuses the ordinary resource,
+configure, runtime-readiness, launch-directory, runnable, and pending-dispatch path. Failure there
+compensates to open/unassigned and never resurrects the old epoch.
+
+Retirement uses the same quiescence/block/force policy when the named agent owns the current
+assignment, then leaves the project open and claim-preserving. An already idle local active agent
+skips runtime control. The final `AgentRetired` fact is installation-private, cites the exact active
+claim and selected-session frontier, and is committed only after a serialized global check finds no
+assignment for that agent. Retirement is absorbing in the agent reducer while names, sessions,
+threads, messages, dispatches, output, and late-output attribution remain history. These workflows
+reuse the existing failure, effect, operation, selected-thread, and pending-mutation fields; they add
+no storage schema or migration.
+
 Pending project inputs remain separate and ordered by their home acceptance sequence. Each exact
 input is submitted through the harness supervisor's existing durable delivery ledger. The workflow
 reconciles an uncertain submission before retry and authors `ProjectInputDispatched` only after

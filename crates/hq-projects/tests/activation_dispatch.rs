@@ -78,6 +78,7 @@ struct ScriptedCanonical(Arc<Mutex<CanonicalState>>);
 struct CanonicalState {
     snapshot: ProjectWorkflowSnapshot,
     mutations: Vec<CanonicalProjectMutationAction>,
+    retired_agents: BTreeSet<AgentId>,
     receipts: BTreeMap<CommandId, (CommandDigest, CanonicalProjectMutationOutcome)>,
     next_head: u8,
     uncertain_once: Option<MutationBoundary>,
@@ -92,9 +93,11 @@ enum MutationBoundary {
     MakeRunnable,
     BeginClosing,
     EndAssignment,
+    BlockAssignment,
     FinishClosing,
     Archive,
     Unarchive,
+    RetireAgent,
     RecordDispatch,
 }
 
@@ -103,6 +106,7 @@ impl ScriptedCanonical {
         Self(Arc::new(Mutex::new(CanonicalState {
             snapshot,
             mutations: Vec::new(),
+            retired_agents: BTreeSet::new(),
             receipts: BTreeMap::new(),
             next_head: 40,
             uncertain_once: None,
@@ -133,9 +137,14 @@ impl CanonicalProjectPort for ScriptedCanonical {
         &self,
         _project_id: ProjectId,
         _account_id: AccountId,
-        _requested_agent: Option<AgentId>,
+        requested_agent: Option<AgentId>,
     ) -> Result<ProjectWorkflowSnapshot, ApplicationError> {
-        Ok(self.snapshot_value())
+        let state = self.0.lock().expect("canonical lock");
+        let mut snapshot = state.snapshot.clone();
+        if requested_agent.is_some_and(|agent| state.retired_agents.contains(&agent)) {
+            snapshot.requested_agent_available = false;
+        }
+        Ok(snapshot)
     }
 
     #[allow(clippy::too_many_lines, reason = "single closed fake transition table")]
@@ -201,6 +210,7 @@ impl CanonicalProjectPort for ScriptedCanonical {
                     binding: None,
                     thread_id: None,
                     runnable: false,
+                    blocked: false,
                 });
             }
             CanonicalProjectMutationAction::MakeRunnable {
@@ -210,9 +220,15 @@ impl CanonicalProjectPort for ScriptedCanonical {
                 assignment.binding = Some(binding);
                 assignment.thread_id = Some(thread_id);
                 assignment.runnable = true;
+                assignment.blocked = false;
             }
             CanonicalProjectMutationAction::EndAssignment { .. } => {
                 state.snapshot.assignment = None;
+            }
+            CanonicalProjectMutationAction::BlockAssignment { .. } => {
+                let assignment = state.snapshot.assignment.as_mut().expect("assigned");
+                assignment.runnable = false;
+                assignment.blocked = true;
             }
             CanonicalProjectMutationAction::BeginClosing => {
                 state.snapshot.lifecycle = CanonicalProjectLifecycle::Closing;
@@ -222,6 +238,9 @@ impl CanonicalProjectPort for ScriptedCanonical {
             }
             CanonicalProjectMutationAction::Archive => state.snapshot.archived = true,
             CanonicalProjectMutationAction::Unarchive => state.snapshot.archived = false,
+            CanonicalProjectMutationAction::RetireAgent { agent_id } => {
+                state.retired_agents.insert(agent_id);
+            }
             CanonicalProjectMutationAction::RecordDispatch { input, .. } => {
                 state
                     .snapshot
@@ -229,9 +248,14 @@ impl CanonicalProjectPort for ScriptedCanonical {
                     .retain(|pending| pending.message_id != input.message_id);
             }
         }
-        let head = FactId::from_bytes([state.next_head; 32]);
-        state.next_head = state.next_head.saturating_add(1);
-        state.snapshot.head = head;
+        let head = if matches!(action, CanonicalProjectMutationAction::RetireAgent { .. }) {
+            state.snapshot.head
+        } else {
+            let head = FactId::from_bytes([state.next_head; 32]);
+            state.next_head = state.next_head.saturating_add(1);
+            state.snapshot.head = head;
+            head
+        };
         let boundary = match action {
             CanonicalProjectMutationAction::Open => Some(MutationBoundary::Open),
             CanonicalProjectMutationAction::AddResource { .. } => {
@@ -247,6 +271,12 @@ impl CanonicalProjectPort for ScriptedCanonical {
             CanonicalProjectMutationAction::BeginClosing => Some(MutationBoundary::BeginClosing),
             CanonicalProjectMutationAction::EndAssignment { .. } => {
                 Some(MutationBoundary::EndAssignment)
+            }
+            CanonicalProjectMutationAction::BlockAssignment { .. } => {
+                Some(MutationBoundary::BlockAssignment)
+            }
+            CanonicalProjectMutationAction::RetireAgent { .. } => {
+                Some(MutationBoundary::RetireAgent)
             }
             CanonicalProjectMutationAction::FinishClosing { .. } => {
                 Some(MutationBoundary::FinishClosing)
@@ -1763,6 +1793,624 @@ fn closed_archive_and_unarchive_do_not_touch_runtime_or_resources() {
     assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
 }
 
+#[test]
+fn graceful_handoff_ends_the_old_assignment_before_starting_the_new_agent() {
+    let initial = runnable_snapshot();
+    let old_assignment = initial
+        .assignment
+        .as_ref()
+        .expect("old assignment")
+        .intent
+        .assignment_id;
+    let thread_id = initial.pending_inputs[0].thread_id;
+    let target_agent = AgentId::from_bytes([51; 32]);
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::default();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::Handoff {
+        agent_id: target_agent,
+        provider: ProviderId::new("provider").expect("provider"),
+        resume_session: Some(ProviderSessionId::new("session-ready").expect("session")),
+        thread_id,
+        launch_directory: locator("/work/project"),
+        force_takeover: false,
+    }))
+    .expect("graceful handoff");
+
+    assert!(matches!(outcome, ProjectCommandOutcome::Completed { .. }));
+    let assignment = canonical
+        .snapshot_value()
+        .assignment
+        .expect("new assignment");
+    assert_eq!(assignment.intent.agent_id, target_agent);
+    assert_eq!(assignment.thread_id, Some(thread_id));
+    let mutations = canonical.mutations();
+    assert!(matches!(
+        mutations.first(),
+        Some(CanonicalProjectMutationAction::EndAssignment {
+            assignment_id,
+            forced: false,
+            runtime: Some(RuntimeObservation::Succeeded),
+        }) if *assignment_id == old_assignment
+    ));
+    let runtime = runtime.0.lock().expect("runtime lock");
+    assert_eq!(runtime.stops, 1);
+    assert_eq!(runtime.starts, 1);
+}
+
+#[test]
+fn graceful_handoff_failure_blocks_until_explicit_forced_takeover() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::rejecting_stop();
+    let rejected = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(handoff_action(false)))
+    .expect("blocked handoff");
+    let ProjectCommandOutcome::Rejected { error, .. } = rejected else {
+        panic!("expected rejected handoff, got {rejected:?}");
+    };
+    assert_eq!(error.code().as_str(), "stop-rejected");
+    let blocked = canonical.snapshot_value();
+    assert!(
+        blocked
+            .assignment
+            .as_ref()
+            .is_some_and(|assignment| assignment.blocked)
+    );
+    assert!(matches!(
+        canonical.mutations().as_slice(),
+        [CanonicalProjectMutationAction::BlockAssignment { .. }]
+    ));
+
+    let mut graceful_retry = request_for(handoff_action(false));
+    graceful_retry.expected_head = blocked.head;
+    let still_blocked = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(graceful_retry)
+    .expect("graceful retry");
+    let ProjectCommandOutcome::Rejected { error, .. } = still_blocked else {
+        panic!("expected force requirement, got {still_blocked:?}");
+    };
+    assert_eq!(error.code().as_str(), "project_handoff_force_required");
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+
+    let mut forced_request = request_for(handoff_action(true));
+    forced_request.expected_head = blocked.head;
+    let forced = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime,
+        HealthyResources,
+    )
+    .control(forced_request)
+    .expect("forced takeover");
+    assert!(matches!(forced, ProjectCommandOutcome::Completed { .. }));
+    assert!(matches!(
+        canonical.mutations().get(1),
+        Some(CanonicalProjectMutationAction::EndAssignment {
+            forced: true,
+            runtime: Some(RuntimeObservation::Failed(code)),
+            ..
+        }) if code.as_str() == "stop-rejected"
+    ));
+    assert_eq!(
+        canonical
+            .snapshot_value()
+            .assignment
+            .expect("replacement assignment")
+            .intent
+            .agent_id,
+        AgentId::from_bytes([51; 32])
+    );
+}
+
+#[test]
+fn unknown_graceful_handoff_blocks_and_forced_unknown_records_uncertainty() {
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let unknown = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        ScriptedRuntime::uncertain_stop_once(),
+        HealthyResources,
+    )
+    .control(request_for(handoff_action(false)))
+    .expect("unknown graceful stop");
+    assert!(matches!(unknown, ProjectCommandOutcome::Rejected { .. }));
+    assert!(
+        canonical
+            .snapshot_value()
+            .assignment
+            .expect("blocked")
+            .blocked
+    );
+
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let forced = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        ScriptedRuntime::uncertain_stop_once(),
+        HealthyResources,
+    )
+    .control(request_for(handoff_action(true)))
+    .expect("forced unknown takeover");
+    assert!(matches!(forced, ProjectCommandOutcome::Completed { .. }));
+    assert!(matches!(
+        canonical.mutations().first(),
+        Some(CanonicalProjectMutationAction::EndAssignment {
+            forced: true,
+            runtime: Some(RuntimeObservation::Uncertain(code)),
+            ..
+        }) if code.as_str() == "project_runtime_stop_unknown"
+    ));
+}
+
+#[test]
+fn failed_target_activation_after_handoff_leaves_the_project_open_and_unassigned() {
+    let initial = runnable_snapshot();
+    let pending = initial.pending_inputs.clone();
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::rejecting_start();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(handoff_action(false)))
+    .expect("target activation failure");
+
+    assert!(matches!(outcome, ProjectCommandOutcome::Rejected { .. }));
+    let project = canonical.snapshot_value();
+    assert_eq!(project.lifecycle, CanonicalProjectLifecycle::Open);
+    assert!(project.assignment.is_none());
+    assert_eq!(project.pending_inputs, pending);
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+    assert_eq!(
+        canonical
+            .mutations()
+            .iter()
+            .filter(|mutation| matches!(
+                mutation,
+                CanonicalProjectMutationAction::EndAssignment { .. }
+            ))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn handoff_rejects_same_busy_or_threadless_target_before_runtime_effects() {
+    let mut same = handoff_action(false);
+    if let ProjectCommandAction::Handoff { agent_id, .. } = &mut same {
+        *agent_id = AgentId::from_bytes([9; 32]);
+    }
+    let mut busy = runnable_snapshot();
+    busy.requested_agent_available = false;
+    let mut threadless = runnable_snapshot();
+    threadless.historical_threads.clear();
+    for (snapshot, action, code) in [
+        (runnable_snapshot(), same, "project_handoff_same_agent"),
+        (busy, handoff_action(false), "project_agent_unavailable"),
+        (
+            threadless,
+            handoff_action(false),
+            "project_activation_thread_missing",
+        ),
+    ] {
+        let canonical = ScriptedCanonical::new(snapshot);
+        let runtime = ScriptedRuntime::default();
+        let outcome = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        )
+        .control(request_for(action))
+        .expect("handoff precondition");
+        let ProjectCommandOutcome::Rejected { error, .. } = outcome else {
+            panic!("expected rejection, got {outcome:?}");
+        };
+        assert_eq!(error.code().as_str(), code);
+        assert!(canonical.mutations().is_empty());
+        assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
+    }
+}
+
+#[test]
+fn handoff_response_loss_replays_every_authority_boundary_exactly_once() {
+    for boundary in [
+        MutationBoundary::EndAssignment,
+        MutationBoundary::Configure,
+        MutationBoundary::MakeRunnable,
+        MutationBoundary::RecordDispatch,
+    ] {
+        let canonical = ScriptedCanonical::uncertain_once(runnable_snapshot(), boundary);
+        let runtime = ScriptedRuntime::default();
+        let manager = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        );
+        let request = request_for(handoff_action(false));
+        let first = manager
+            .control(request.clone())
+            .expect("lost handoff response");
+        assert!(
+            matches!(first, ProjectCommandOutcome::Reconcilable { .. }),
+            "boundary {boundary:?} returned {first:?}"
+        );
+        let repaired = manager.control(request).expect("handoff repair");
+        assert!(
+            matches!(repaired, ProjectCommandOutcome::Completed { .. }),
+            "boundary {boundary:?} returned {repaired:?}"
+        );
+        assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+        assert_eq!(
+            canonical
+                .mutations()
+                .iter()
+                .filter(|mutation| matches!(
+                    mutation,
+                    CanonicalProjectMutationAction::EndAssignment { .. }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    let canonical =
+        ScriptedCanonical::uncertain_once(runnable_snapshot(), MutationBoundary::BlockAssignment);
+    let runtime = ScriptedRuntime::rejecting_stop();
+    let manager = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    let request = request_for(handoff_action(false));
+    let first = manager
+        .control(request.clone())
+        .expect("lost block response");
+    assert!(matches!(first, ProjectCommandOutcome::Reconcilable { .. }));
+    let repaired = manager.control(request).expect("block repair");
+    assert!(matches!(repaired, ProjectCommandOutcome::Rejected { .. }));
+    assert!(
+        canonical
+            .snapshot_value()
+            .assignment
+            .expect("blocked")
+            .blocked
+    );
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+    assert_eq!(canonical.mutations().len(), 1);
+}
+
+#[test]
+fn assigned_agent_retirement_quiesces_without_closing_or_releasing_claims() {
+    let initial = runnable_snapshot();
+    let retiring_agent = initial
+        .assignment
+        .as_ref()
+        .expect("assignment")
+        .intent
+        .agent_id;
+    let resources = initial.resources.clone();
+    let pending = initial.pending_inputs.clone();
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::default();
+    let outcome = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::RetireAgent {
+        agent_id: retiring_agent,
+        force: false,
+    }))
+    .expect("assigned retirement");
+
+    assert!(matches!(outcome, ProjectCommandOutcome::Completed { .. }));
+    let project = canonical.snapshot_value();
+    assert_eq!(project.lifecycle, CanonicalProjectLifecycle::Open);
+    assert!(project.assignment.is_none());
+    assert_eq!(project.resources, resources);
+    assert_eq!(project.pending_inputs, pending);
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+    assert!(matches!(
+        canonical.mutations().last(),
+        Some(CanonicalProjectMutationAction::RetireAgent { agent_id })
+            if *agent_id == retiring_agent
+    ));
+}
+
+#[test]
+fn idle_retirement_skips_runtime_and_is_absorbing_for_future_selection() {
+    let initial = snapshot(CanonicalProjectLifecycle::Open);
+    let retiring_agent = AgentId::from_bytes([52; 32]);
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::default();
+    let retired = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::RetireAgent {
+        agent_id: retiring_agent,
+        force: false,
+    }))
+    .expect("idle retirement");
+    assert!(matches!(retired, ProjectCommandOutcome::Completed { .. }));
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
+
+    let unavailable = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime,
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::Activate {
+        agent_id: retiring_agent,
+        provider: ProviderId::new("provider").expect("provider"),
+        resume_session: None,
+        resume_thread: None,
+        launch_directory: locator("/work/project"),
+    }))
+    .expect("retired selection");
+    let ProjectCommandOutcome::Rejected { error, .. } = unavailable else {
+        panic!("expected retired agent rejection, got {unavailable:?}");
+    };
+    assert_eq!(error.code().as_str(), "project_agent_unavailable");
+}
+
+#[test]
+fn handoff_rejects_a_retired_target_before_quiescing_the_current_assignment() {
+    let retiring_agent = AgentId::from_bytes([51; 32]);
+    let canonical = ScriptedCanonical::new(runnable_snapshot());
+    let runtime = ScriptedRuntime::default();
+    let retired = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::RetireAgent {
+        agent_id: retiring_agent,
+        force: false,
+    }))
+    .expect("idle target retirement");
+    assert!(matches!(retired, ProjectCommandOutcome::Completed { .. }));
+
+    let handoff = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(handoff_action(false)))
+    .expect("retired target handoff");
+    let ProjectCommandOutcome::Rejected { error, .. } = handoff else {
+        panic!("expected retired target rejection, got {handoff:?}");
+    };
+    assert_eq!(error.code().as_str(), "project_agent_unavailable");
+    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
+    assert!(canonical.snapshot_value().assignment.is_some());
+}
+
+#[test]
+fn assigned_retirement_blocks_on_stop_failure_then_force_retires() {
+    let initial = runnable_snapshot();
+    let retiring_agent = initial
+        .assignment
+        .as_ref()
+        .expect("assignment")
+        .intent
+        .agent_id;
+    let canonical = ScriptedCanonical::new(initial);
+    let runtime = ScriptedRuntime::rejecting_stop();
+    let rejected = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::RetireAgent {
+        agent_id: retiring_agent,
+        force: false,
+    }))
+    .expect("blocked retirement");
+    assert!(matches!(rejected, ProjectCommandOutcome::Rejected { .. }));
+    let blocked = canonical.snapshot_value();
+    assert!(blocked.assignment.expect("blocked assignment").blocked);
+
+    let mut request = request_for(ProjectCommandAction::RetireAgent {
+        agent_id: retiring_agent,
+        force: true,
+    });
+    request.expected_head = blocked.head;
+    let forced = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime,
+        HealthyResources,
+    )
+    .control(request)
+    .expect("forced retirement");
+    assert!(matches!(forced, ProjectCommandOutcome::Completed { .. }));
+    assert!(canonical.snapshot_value().assignment.is_none());
+    assert!(matches!(
+        canonical.mutations().as_slice(),
+        [
+            CanonicalProjectMutationAction::BlockAssignment { .. },
+            CanonicalProjectMutationAction::EndAssignment {
+                forced: true,
+                runtime: Some(RuntimeObservation::Failed(code)),
+                ..
+            },
+            CanonicalProjectMutationAction::RetireAgent { .. },
+        ] if code.as_str() == "stop-rejected"
+    ));
+}
+
+#[test]
+fn retirement_response_loss_replays_assignment_end_and_retirement_once() {
+    for boundary in [
+        MutationBoundary::EndAssignment,
+        MutationBoundary::RetireAgent,
+    ] {
+        let initial = runnable_snapshot();
+        let agent_id = initial
+            .assignment
+            .as_ref()
+            .expect("assignment")
+            .intent
+            .agent_id;
+        let canonical = ScriptedCanonical::uncertain_once(initial, boundary);
+        let runtime = ScriptedRuntime::default();
+        let manager = ProjectWorkflowManager::new(
+            MemorySagaStore::default(),
+            canonical.clone(),
+            runtime.clone(),
+            HealthyResources,
+        );
+        let request = request_for(ProjectCommandAction::RetireAgent {
+            agent_id,
+            force: false,
+        });
+        let first = manager
+            .control(request.clone())
+            .expect("lost retirement response");
+        assert!(
+            matches!(first, ProjectCommandOutcome::Reconcilable { .. }),
+            "boundary {boundary:?} returned {first:?}"
+        );
+        let repaired = manager.control(request).expect("retirement repair");
+        assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
+        assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+        assert_eq!(
+            canonical
+                .mutations()
+                .iter()
+                .filter(|mutation| matches!(
+                    mutation,
+                    CanonicalProjectMutationAction::RetireAgent { .. }
+                ))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn uncertain_assigned_retirement_blocks_or_force_records_unknown_runtime() {
+    let initial = runnable_snapshot();
+    let agent_id = initial
+        .assignment
+        .as_ref()
+        .expect("assignment")
+        .intent
+        .agent_id;
+    let canonical = ScriptedCanonical::new(initial);
+    let rejected = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        ScriptedRuntime::uncertain_stop_once(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::RetireAgent {
+        agent_id,
+        force: false,
+    }))
+    .expect("unknown retirement stop");
+    assert!(matches!(rejected, ProjectCommandOutcome::Rejected { .. }));
+    assert!(
+        canonical
+            .snapshot_value()
+            .assignment
+            .expect("blocked")
+            .blocked
+    );
+
+    let initial = runnable_snapshot();
+    let canonical = ScriptedCanonical::new(initial);
+    let forced = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        ScriptedRuntime::uncertain_stop_once(),
+        HealthyResources,
+    )
+    .control(request_for(ProjectCommandAction::RetireAgent {
+        agent_id,
+        force: true,
+    }))
+    .expect("forced unknown retirement");
+    assert!(matches!(forced, ProjectCommandOutcome::Completed { .. }));
+    assert!(matches!(
+        canonical.mutations().first(),
+        Some(CanonicalProjectMutationAction::EndAssignment {
+            forced: true,
+            runtime: Some(RuntimeObservation::Uncertain(code)),
+            ..
+        }) if code.as_str() == "project_runtime_stop_unknown"
+    ));
+}
+
+#[test]
+fn stale_or_inactive_handoff_and_retirement_stop_before_runtime_effects() {
+    for action in [
+        handoff_action(false),
+        ProjectCommandAction::RetireAgent {
+            agent_id: AgentId::from_bytes([9; 32]),
+            force: false,
+        },
+    ] {
+        let mut stale = request_for(action.clone());
+        stale.expected_head = FactId::from_bytes([99; 32]);
+        let mut inactive = runnable_snapshot();
+        inactive.active_human = false;
+        for (snapshot, request, code) in [
+            (runnable_snapshot(), stale, "project_stale_head"),
+            (
+                inactive,
+                request_for(action.clone()),
+                "project_inactive_human",
+            ),
+        ] {
+            let canonical = ScriptedCanonical::new(snapshot);
+            let runtime = ScriptedRuntime::default();
+            let outcome = ProjectWorkflowManager::new(
+                MemorySagaStore::default(),
+                canonical.clone(),
+                runtime.clone(),
+                HealthyResources,
+            )
+            .control(request)
+            .expect("authority precondition");
+            let ProjectCommandOutcome::Rejected { error, .. } = outcome else {
+                panic!("expected rejection, got {outcome:?}");
+            };
+            assert_eq!(error.code().as_str(), code);
+            assert!(canonical.mutations().is_empty());
+            assert_eq!(runtime.0.lock().expect("runtime lock").stops, 0);
+        }
+    }
+}
+
 fn activation_request() -> ProjectCommandRequest {
     ProjectCommandRequest {
         command_id: CommandId::from_bytes([1; 32]),
@@ -1801,6 +2449,17 @@ fn request_for(action: ProjectCommandAction) -> ProjectCommandRequest {
     let mut request = activation_request();
     request.action = action;
     request
+}
+
+fn handoff_action(force_takeover: bool) -> ProjectCommandAction {
+    ProjectCommandAction::Handoff {
+        agent_id: AgentId::from_bytes([51; 32]),
+        provider: ProviderId::new("provider").expect("provider"),
+        resume_session: Some(ProviderSessionId::new("session-ready").expect("session")),
+        thread_id: ThreadId::from_bytes([18; 32]),
+        launch_directory: locator("/work/project"),
+        force_takeover,
+    }
 }
 
 fn snapshot(lifecycle: CanonicalProjectLifecycle) -> ProjectWorkflowSnapshot {
@@ -1842,6 +2501,7 @@ fn runnable_snapshot() -> ProjectWorkflowSnapshot {
         }),
         thread_id: Some(ThreadId::from_bytes([18; 32])),
         runnable: true,
+        blocked: false,
     });
     snapshot
 }

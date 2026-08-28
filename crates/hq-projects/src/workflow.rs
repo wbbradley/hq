@@ -46,6 +46,8 @@ pub struct CanonicalProjectAssignment {
     pub thread_id: Option<ThreadId>,
     /// Whether canonical policy currently permits delivery.
     pub runnable: bool,
+    /// Whether failed graceful quiescence requires explicit human resolution.
+    pub blocked: bool,
 }
 
 /// One accepted project input that has not yet received canonical dispatch attribution.
@@ -146,6 +148,13 @@ pub enum CanonicalProjectMutationAction {
         /// Typed runtime observation, when this transition follows quiescence.
         runtime: Option<RuntimeObservation>,
     },
+    /// Keep the exact assignment owned but non-runnable pending explicit resolution.
+    BlockAssignment {
+        /// Assignment epoch that could not be quiesced gracefully.
+        assignment_id: AssignmentId,
+        /// Stable typed reason requiring human resolution.
+        cause: ErrorCode,
+    },
     /// Enter canonical closing while retaining the current assignment and claims.
     BeginClosing,
     /// Finish canonical close after the assignment has ended.
@@ -159,6 +168,11 @@ pub enum CanonicalProjectMutationAction {
     Archive,
     /// Restore one archived project as visible and closed.
     Unarchive,
+    /// Permanently retire one unassigned local named agent.
+    RetireAgent {
+        /// Durable named agent identity.
+        agent_id: AgentId,
+    },
     /// Author immutable attribution after definite provider acceptance.
     RecordDispatch {
         /// Accepted input.
@@ -460,6 +474,25 @@ where
                 ProjectCommandAction::SetArchived { archived: false } => {
                     self.advance_unarchive(&mut record)?;
                 }
+                ProjectCommandAction::Handoff {
+                    agent_id,
+                    provider,
+                    resume_session,
+                    thread_id,
+                    launch_directory,
+                    force_takeover,
+                } => self.advance_handoff(
+                    &mut record,
+                    agent_id,
+                    provider,
+                    resume_session,
+                    thread_id,
+                    launch_directory,
+                    force_takeover,
+                )?,
+                ProjectCommandAction::RetireAgent { agent_id, force } => {
+                    self.advance_retirement(&mut record, agent_id, force)?;
+                }
                 _ => reject(
                     &self.store,
                     &mut record,
@@ -477,6 +510,469 @@ where
             }
         }
         Ok(progress_outcome(&record))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_handoff(
+        &self,
+        record: &mut ProjectSagaRecord,
+        target_agent: AgentId,
+        provider: ProviderId,
+        resume_session: Option<ProviderSessionId>,
+        thread_id: ThreadId,
+        launch_directory: ResourceLocator,
+        force_takeover: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let stage = current_stage(record);
+        if !matches!(
+            stage,
+            ProjectCommandStage::Accepted
+                | ProjectCommandStage::QuiescingRuntime
+                | ProjectCommandStage::EndingAssignment
+        ) {
+            return self.advance_activation(
+                record,
+                target_agent,
+                provider,
+                resume_session,
+                Some(thread_id),
+                launch_directory,
+            );
+        }
+        let snapshot =
+            self.canonical
+                .snapshot(record.project_id, record.account_id, Some(target_agent))?;
+        if snapshot.home != record.home || snapshot.project_id != record.project_id {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Unauthorized, "project_wrong_home"),
+            );
+        }
+        if let Some(pending) = record.pending_canonical_mutation.clone() {
+            return match self.replay_canonical_mutation(record)? {
+                CanonicalProjectMutationOutcome::Committed { .. } => {
+                    self.finish_handoff_mutation(record, &pending.action)
+                }
+                CanonicalProjectMutationOutcome::Rejected(error) => {
+                    reject(&self.store, record, error)
+                }
+                CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                    &self.store,
+                    record,
+                    stage,
+                    effect_error("project_handoff_commit_unknown"),
+                    EffectKind::None,
+                ),
+            };
+        }
+        match stage {
+            ProjectCommandStage::Accepted => {
+                self.accept_handoff(record, &snapshot, target_agent, thread_id, force_takeover)
+            }
+            ProjectCommandStage::QuiescingRuntime => {
+                let Some(assignment) = snapshot.assignment.as_ref() else {
+                    return reject(
+                        &self.store,
+                        record,
+                        error(ErrorCategory::Conflict, "project_not_assigned"),
+                    );
+                };
+                self.observe_assignment_stop(record, assignment, force_takeover)?;
+                checkpoint(&self.store, record, ProjectCommandStage::EndingAssignment)
+            }
+            ProjectCommandStage::EndingAssignment => {
+                self.commit_handoff_resolution(record, &snapshot, force_takeover)
+            }
+            _ => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
+    }
+
+    fn accept_handoff(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        target_agent: AgentId,
+        thread_id: ThreadId,
+        force_takeover: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        if snapshot.head != record.expected_head {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_stale_head"),
+            );
+        }
+        if !snapshot.active_human {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Unauthorized, "project_inactive_human"),
+            );
+        }
+        if snapshot.archived
+            || snapshot.lifecycle != CanonicalProjectLifecycle::Open
+            || !snapshot.claimable
+        {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_invalid_transition"),
+            );
+        }
+        let Some(assignment) = snapshot.assignment.as_ref() else {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_not_assigned"),
+            );
+        };
+        if assignment.intent.agent_id == target_agent {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_handoff_same_agent"),
+            );
+        }
+        if assignment.blocked && !force_takeover {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_handoff_force_required"),
+            );
+        }
+        if !snapshot.requested_agent_available {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_agent_unavailable"),
+            );
+        }
+        if !snapshot.historical_threads.contains(&thread_id) {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_activation_thread_missing"),
+            );
+        }
+        checkpoint(&self.store, record, ProjectCommandStage::QuiescingRuntime)
+    }
+
+    fn observe_assignment_stop(
+        &self,
+        record: &mut ProjectSagaRecord,
+        assignment: &CanonicalProjectAssignment,
+        force: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let operation = derived_operation(record.operation_id, b"assignment-quiescence", &[]);
+        record.runtime_operation_id = Some(operation);
+        if matches!(record.runtime_effect, SagaEffectState::NotStarted) {
+            record.runtime_effect = SagaEffectState::Pending;
+            persist(&self.store, record)?;
+        }
+        let request = EffectRequest {
+            operation_id: operation,
+            request_digest: close_runtime_digest(record.project_id, assignment),
+            issued_at: record.issued_at,
+            body: ProjectRuntimeRequest {
+                project_id: record.project_id,
+                agent_id: assignment.intent.agent_id,
+                provider: assignment.intent.provider.clone(),
+                resume_session: assignment
+                    .binding
+                    .as_ref()
+                    .map(|binding| binding.session.clone()),
+            },
+        };
+        match self.runtime.stop(&request)? {
+            EffectOutcome::Accepted(()) => {
+                record.runtime_effect = SagaEffectState::Accepted;
+            }
+            EffectOutcome::Rejected(error) => {
+                record.runtime_effect = SagaEffectState::Rejected(error.clone());
+                if !force {
+                    record.failure = Some(error);
+                }
+            }
+            EffectOutcome::Uncertain(_) => {
+                let error = effect_error("project_runtime_stop_unknown");
+                record.runtime_effect = SagaEffectState::Uncertain(error.clone());
+                if !force {
+                    record.failure = Some(error);
+                }
+            }
+        }
+        persist(&self.store, record)
+    }
+
+    fn commit_handoff_resolution(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        force: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let assignment = snapshot.assignment.as_ref().ok_or_else(|| {
+            hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )
+        })?;
+        let action = if let Some(failure) = record.failure.as_ref() {
+            CanonicalProjectMutationAction::BlockAssignment {
+                assignment_id: assignment.intent.assignment_id,
+                cause: failure.code().clone(),
+            }
+        } else {
+            CanonicalProjectMutationAction::EndAssignment {
+                assignment_id: assignment.intent.assignment_id,
+                forced: force && !matches!(record.runtime_effect, SagaEffectState::Accepted),
+                runtime: close_runtime_observation(&record.runtime_effect)?,
+            }
+        };
+        match self.mutate(
+            record,
+            snapshot.head,
+            b"handoff-old-assignment",
+            action.clone(),
+        )? {
+            CanonicalProjectMutationOutcome::Committed { .. } => {
+                self.finish_handoff_mutation(record, &action)
+            }
+            CanonicalProjectMutationOutcome::Rejected(error) => reject(&self.store, record, error),
+            CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::EndingAssignment,
+                effect_error("project_handoff_commit_unknown"),
+                EffectKind::None,
+            ),
+        }
+    }
+
+    fn finish_handoff_mutation(
+        &self,
+        record: &mut ProjectSagaRecord,
+        action: &CanonicalProjectMutationAction,
+    ) -> Result<(), hq_application::ApplicationError> {
+        match action {
+            CanonicalProjectMutationAction::BlockAssignment { .. } => {
+                let failure = record.failure.clone().ok_or_else(|| {
+                    hq_application::ApplicationError::new(
+                        hq_application::ApplicationErrorCode::StateCorrupt,
+                    )
+                })?;
+                reject(&self.store, record, failure)
+            }
+            CanonicalProjectMutationAction::EndAssignment { .. } => {
+                record.runtime_operation_id = None;
+                record.runtime_effect = SagaEffectState::NotStarted;
+                record.runtime_session = None;
+                checkpoint(
+                    &self.store,
+                    record,
+                    ProjectCommandStage::ValidatingResources,
+                )
+            }
+            _ => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
+    }
+
+    fn advance_retirement(
+        &self,
+        record: &mut ProjectSagaRecord,
+        agent_id: AgentId,
+        force: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let snapshot =
+            self.canonical
+                .snapshot(record.project_id, record.account_id, Some(agent_id))?;
+        if snapshot.home != record.home || snapshot.project_id != record.project_id {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Unauthorized, "project_wrong_home"),
+            );
+        }
+        let stage = current_stage(record);
+        if record.pending_canonical_mutation.is_some() {
+            return self.replay_retirement_mutation(record, stage);
+        }
+        match stage {
+            ProjectCommandStage::Accepted => {
+                self.accept_retirement(record, &snapshot, agent_id, force)
+            }
+            ProjectCommandStage::QuiescingRuntime => {
+                let assignment = snapshot.assignment.as_ref().ok_or_else(|| {
+                    hq_application::ApplicationError::new(
+                        hq_application::ApplicationErrorCode::StateCorrupt,
+                    )
+                })?;
+                self.observe_assignment_stop(record, assignment, force)?;
+                checkpoint(&self.store, record, ProjectCommandStage::EndingAssignment)
+            }
+            ProjectCommandStage::EndingAssignment => {
+                self.commit_retirement_assignment(record, &snapshot, force)
+            }
+            ProjectCommandStage::UpdatingProject => self.commit_terminal_mutation(
+                record,
+                snapshot.head,
+                b"retire-agent",
+                CanonicalProjectMutationAction::RetireAgent { agent_id },
+                "project_retirement_commit_unknown",
+            ),
+            _ => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
+    }
+
+    fn replay_retirement_mutation(
+        &self,
+        record: &mut ProjectSagaRecord,
+        stage: ProjectCommandStage,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let pending = record.pending_canonical_mutation.clone().ok_or_else(|| {
+            hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )
+        })?;
+        match self.replay_canonical_mutation(record)? {
+            CanonicalProjectMutationOutcome::Committed { project_head } => match pending.action {
+                CanonicalProjectMutationAction::BlockAssignment { .. } => {
+                    let failure = record.failure.clone().ok_or_else(|| {
+                        hq_application::ApplicationError::new(
+                            hq_application::ApplicationErrorCode::StateCorrupt,
+                        )
+                    })?;
+                    reject(&self.store, record, failure)
+                }
+                CanonicalProjectMutationAction::EndAssignment { .. } => {
+                    checkpoint(&self.store, record, ProjectCommandStage::UpdatingProject)
+                }
+                CanonicalProjectMutationAction::RetireAgent { .. } => {
+                    record.state = ProjectSagaState::Completed { project_head };
+                    persist(&self.store, record)
+                }
+                _ => Err(hq_application::ApplicationError::new(
+                    hq_application::ApplicationErrorCode::StateCorrupt,
+                )),
+            },
+            CanonicalProjectMutationOutcome::Rejected(error) => reject(&self.store, record, error),
+            CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                &self.store,
+                record,
+                stage,
+                effect_error("project_retirement_commit_unknown"),
+                EffectKind::None,
+            ),
+        }
+    }
+
+    fn accept_retirement(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        agent_id: AgentId,
+        force: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        if snapshot.head != record.expected_head {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_stale_head"),
+            );
+        }
+        if !snapshot.active_human {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Unauthorized, "project_inactive_human"),
+            );
+        }
+        if !snapshot.requested_agent_available {
+            return reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_agent_unavailable"),
+            );
+        }
+        match snapshot.assignment.as_ref() {
+            Some(assignment) if assignment.intent.agent_id == agent_id => {
+                if snapshot.lifecycle != CanonicalProjectLifecycle::Open {
+                    return reject(
+                        &self.store,
+                        record,
+                        error(ErrorCategory::Conflict, "project_invalid_transition"),
+                    );
+                }
+                if assignment.blocked && !force {
+                    return reject(
+                        &self.store,
+                        record,
+                        error(ErrorCategory::Conflict, "project_retirement_force_required"),
+                    );
+                }
+                checkpoint(&self.store, record, ProjectCommandStage::QuiescingRuntime)
+            }
+            Some(_) | None => checkpoint(&self.store, record, ProjectCommandStage::UpdatingProject),
+        }
+    }
+
+    fn commit_retirement_assignment(
+        &self,
+        record: &mut ProjectSagaRecord,
+        snapshot: &ProjectWorkflowSnapshot,
+        force: bool,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let assignment = snapshot.assignment.as_ref().ok_or_else(|| {
+            hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )
+        })?;
+        let action = if let Some(failure) = record.failure.as_ref() {
+            CanonicalProjectMutationAction::BlockAssignment {
+                assignment_id: assignment.intent.assignment_id,
+                cause: failure.code().clone(),
+            }
+        } else {
+            CanonicalProjectMutationAction::EndAssignment {
+                assignment_id: assignment.intent.assignment_id,
+                forced: force && !matches!(record.runtime_effect, SagaEffectState::Accepted),
+                runtime: close_runtime_observation(&record.runtime_effect)?,
+            }
+        };
+        match self.mutate(
+            record,
+            snapshot.head,
+            b"retirement-end-assignment",
+            action.clone(),
+        )? {
+            CanonicalProjectMutationOutcome::Committed { .. } => match action {
+                CanonicalProjectMutationAction::BlockAssignment { .. } => {
+                    let failure = record.failure.clone().ok_or_else(|| {
+                        hq_application::ApplicationError::new(
+                            hq_application::ApplicationErrorCode::StateCorrupt,
+                        )
+                    })?;
+                    reject(&self.store, record, failure)
+                }
+                CanonicalProjectMutationAction::EndAssignment { .. } => {
+                    checkpoint(&self.store, record, ProjectCommandStage::UpdatingProject)
+                }
+                _ => unreachable!(),
+            },
+            CanonicalProjectMutationOutcome::Rejected(error) => reject(&self.store, record, error),
+            CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::EndingAssignment,
+                effect_error("project_retirement_assignment_unknown"),
+                EffectKind::None,
+            ),
+        }
     }
 
     fn advance_close(
@@ -558,6 +1054,7 @@ where
                     snapshot.head,
                     b"archive",
                     CanonicalProjectMutationAction::Archive,
+                    "project_archive_commit_unknown",
                 ),
             _ => reject(
                 &self.store,
@@ -859,6 +1356,7 @@ where
             snapshot.head,
             b"unarchive",
             CanonicalProjectMutationAction::Unarchive,
+            "project_unarchive_commit_unknown",
         )
     }
 
@@ -868,6 +1366,7 @@ where
         expected_head: FactId,
         tag: &[u8],
         action: CanonicalProjectMutationAction,
+        uncertain_code: &'static str,
     ) -> Result<(), hq_application::ApplicationError> {
         let stage = current_stage(record);
         let outcome = if record.pending_canonical_mutation.is_some() {
@@ -885,7 +1384,7 @@ where
                 &self.store,
                 record,
                 stage,
-                effect_error("project_archive_commit_unknown"),
+                effect_error(uncertain_code),
                 EffectKind::None,
             ),
         }
@@ -2171,6 +2670,14 @@ fn mutation_digest(
             put(&mut digest, &[u8::from(*forced)]);
             put_runtime_observation(&mut digest, runtime.as_ref());
         }
+        CanonicalProjectMutationAction::BlockAssignment {
+            assignment_id,
+            cause,
+        } => {
+            put(&mut digest, b"block-assignment");
+            put(&mut digest, assignment_id.as_bytes());
+            put(&mut digest, cause.as_str().as_bytes());
+        }
         CanonicalProjectMutationAction::BeginClosing => put(&mut digest, b"begin-closing"),
         CanonicalProjectMutationAction::FinishClosing { forced, runtime } => {
             put(&mut digest, b"finish-closing");
@@ -2179,6 +2686,10 @@ fn mutation_digest(
         }
         CanonicalProjectMutationAction::Archive => put(&mut digest, b"archive"),
         CanonicalProjectMutationAction::Unarchive => put(&mut digest, b"unarchive"),
+        CanonicalProjectMutationAction::RetireAgent { agent_id } => {
+            put(&mut digest, b"retire-agent");
+            put(&mut digest, agent_id.as_bytes());
+        }
         CanonicalProjectMutationAction::RecordDispatch {
             input,
             dispatch_id,

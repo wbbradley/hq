@@ -537,6 +537,10 @@ enum WireCanonicalAction {
         forced: bool,
         runtime: Option<WireRuntimeObservation>,
     },
+    BlockAssignment {
+        assignment: String,
+        cause: String,
+    },
     BeginClosing,
     FinishClosing {
         forced: bool,
@@ -544,6 +548,9 @@ enum WireCanonicalAction {
     },
     Archive,
     Unarchive,
+    RetireAgent {
+        agent: String,
+    },
     RecordDispatch {
         input: WirePendingInput,
         dispatch: String,
@@ -601,6 +608,13 @@ impl From<&CanonicalProjectMutationAction> for WireCanonicalAction {
                 forced: *forced,
                 runtime: runtime.as_ref().map(WireRuntimeObservation::from),
             },
+            CanonicalProjectMutationAction::BlockAssignment {
+                assignment_id,
+                cause,
+            } => Self::BlockAssignment {
+                assignment: id_text(assignment_id.as_bytes()),
+                cause: cause.as_str().to_owned(),
+            },
             CanonicalProjectMutationAction::BeginClosing => Self::BeginClosing,
             CanonicalProjectMutationAction::FinishClosing { forced, runtime } => {
                 Self::FinishClosing {
@@ -610,6 +624,9 @@ impl From<&CanonicalProjectMutationAction> for WireCanonicalAction {
             }
             CanonicalProjectMutationAction::Archive => Self::Archive,
             CanonicalProjectMutationAction::Unarchive => Self::Unarchive,
+            CanonicalProjectMutationAction::RetireAgent { agent_id } => Self::RetireAgent {
+                agent: id_text(agent_id.as_bytes()),
+            },
             CanonicalProjectMutationAction::RecordDispatch {
                 input,
                 dispatch_id,
@@ -678,6 +695,11 @@ impl TryFrom<WireCanonicalAction> for CanonicalProjectMutationAction {
                 forced,
                 runtime: runtime.map(RuntimeObservation::try_from).transpose()?,
             },
+            WireCanonicalAction::BlockAssignment { assignment, cause } => Self::BlockAssignment {
+                assignment_id: AssignmentId::from_bytes(parse_id(&assignment)?),
+                cause: hq_domain::ErrorCode::new(cause)
+                    .map_err(|_| ProjectCommandCodecError::Invalid)?,
+            },
             WireCanonicalAction::BeginClosing => Self::BeginClosing,
             WireCanonicalAction::FinishClosing { forced, runtime } => Self::FinishClosing {
                 forced,
@@ -685,6 +707,9 @@ impl TryFrom<WireCanonicalAction> for CanonicalProjectMutationAction {
             },
             WireCanonicalAction::Archive => Self::Archive,
             WireCanonicalAction::Unarchive => Self::Unarchive,
+            WireCanonicalAction::RetireAgent { agent } => Self::RetireAgent {
+                agent_id: AgentId::from_bytes(parse_id(&agent)?),
+            },
             WireCanonicalAction::RecordDispatch {
                 input,
                 dispatch,

@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[projects/high] Implement handoff, forced takeover, and agent retirement workflows** — Quiesce
-  and end the old assignment before activating the requested idle agent and exact historical
-  thread. A failed graceful handoff becomes canonically blocked; explicit takeover may revoke only
-  old HQ authority when runtime cessation is unknown. Retirement ends any assignment before the
-  installation-private absorbing agent-retirement mutation while leaving the project open with its
-  claims, pending messages, and history. Test compensation, blocked handoff, old/new agent races,
-  stale devices, runtime uncertainty, restart recovery, retired-thread rejection, and late output.
-
 - **[projects/high] Implement durable remote project command routing and local API progress** —
   Extend `hq-local-api` with the typed project request/outcome and authoritative checkpoint view.
   Non-home devices author only strict `RemoteProjectCommandRequested` facts; the immutable home

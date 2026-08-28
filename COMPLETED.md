@@ -6556,6 +6556,8 @@ and unchanged-Go gates pass.
   those. If new future work items were discovered, add them. If the plan file or completed file is
   outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
   other changes.
+
+
 ## 2026-08-28 — Project open and resource mutation workflows
 
 Implemented durable direct open, resource add, forced/unforced remove, and atomic replace workflows
@@ -6708,6 +6710,115 @@ Go gates pass.
   - Archive has no force flag. An open archive request performs ordinary graceful close and may
     require the human to force-close separately before retrying archive. Closed archive/unarchive
     never acquires claims or invokes resource/runtime capabilities.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely
+  from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any
+  other marker. The task and its related subsections should no longer appear in the plan file at
+  all. The plan file should not have any sort of "Done" section. Then append a new entry to the
+  completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to
+     preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update
+  those. If new future work items were discovered, add them. If the plan file or completed file is
+  outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
+  other changes.
+
+
+## 2026-08-28 — Project handoff, forced takeover, and agent retirement workflows
+
+Implemented durable graceful handoff, forced takeover, and assigned/idle agent retirement over the
+existing project saga record. Handoff quiesces and ends the exact old assignment before reusing the
+activation path for a distinct available agent and an agent-attributed historical project thread;
+definite or unknown graceful stop failure canonically blocks dispatch until an explicit force
+records truthful failed/uncertain runtime state. Target activation failure leaves the project safely
+open and unassigned. Retirement uses the same quiescence policy, then authors an
+installation-private absorbing agent fact only after globally revalidating that the agent is
+unassigned, while preserving project lifecycle, claims, desired resources, pending input, threads,
+dispatches, and output history. Every canonical boundary has exact response-loss replay coverage,
+including blocking, assignment end, activation, dispatch, and retirement. Passive workflow state
+remains public Rust data; no accessor layer was introduced. The clean-sheet storage schema remains
+v13 with no new field, migration, or version bump. Locked workspace, strict Clippy, architecture,
+behavior, causal/protocol, dependency, four-target, fuzz, whitespace, and frozen-Go
+build/vet/uncached-test gates pass. The unchanged Go race suite still exposes its pre-existing
+three-second mailbox-capability timing failure on macOS; the corresponding uncached non-race suite
+passes.
+
+### Original plan entry
+
+- **[projects/high] Implement handoff, forced takeover, and agent retirement workflows** — Quiesce
+  and end the old assignment before activating the requested idle agent and exact historical
+  thread. A failed graceful handoff becomes canonically blocked; explicit takeover may revoke only
+  old HQ authority when runtime cessation is unknown. Retirement ends any assignment before the
+  installation-private absorbing agent-retirement mutation while leaving the project open with its
+  claims, pending messages, and history. Test compensation, blocked handoff, old/new agent races,
+  stale devices, runtime uncertainty, restart recovery, retired-thread rejection, and late output.
+
+  **Implementation plan**
+
+  - Extend the workflow-facing canonical vocabulary with assignment-blocked and agent-retired
+    actions. Block and assignment-end remain project-home linear; retirement is authored as an
+    installation-private fact with the exact active name claim and local-installation authority.
+    The serialized callback revalidates immutable home, active-human command authority, expected
+    project head, exact assignment epoch, target agent lifecycle/cardinality, and global absence of
+    another assignment before each mutation.
+  - Implement handoff as old-runtime quiescence followed by exact assignment end and reuse of the
+    existing activation path for the requested agent, provider/session, project-scoped historical
+    thread, and launch directory. A definite or unknown graceful stop blocks the old assignment and
+    requires a new explicit forced-takeover command. Force records failed/uncertain runtime truth,
+    revokes only HQ authority, then activates the new assignment; failed new activation compensates
+    to the safe open/unassigned state without resurrecting the old assignment.
+  - Implement retirement for an idle local active agent or the exact current project assignment.
+    Assigned retirement uses the same graceful/forced quiescence and truthful assignment-end path,
+    then authors one absorbing installation-private retirement. The project remains open with its
+    claims, accepted pending inputs, desired resources, threads, dispatches, output, and history;
+    retired agents and their threads cannot be selected for new runtime authority.
+  - Reuse the existing failure, runtime-effect, operation, selected-thread, and pending canonical
+    mutation fields for every checkpoint and exact replay. Do not add a storage field, migration,
+    or version bump. Add deterministic contracts for stale/inactive requests, same/retired/busy
+    target agents, blocked retry policy, stop outcomes, response loss at every canonical boundary,
+    activation compensation, retirement absorption, competing commands, and late-output retention,
+    then run every repository gate.
+
+  **Risks and decisions**
+
+  - Runtime stop and canonical authority transfer cannot be atomic. Graceful failure therefore
+    makes the old assignment canonically blocked and non-runnable; only a later explicit force
+    command may end it. A forced end records failed or uncertain observation and never asserts that
+    the old external process stopped or lost filesystem access.
+  - Handoff is not rollback to the old actor. Once its assignment end commits, later target startup
+    failure leaves the project safely open and unassigned. Historical output remains attributable
+    and late output cannot regain current authority.
+  - Agent retirement is a separate installation-private fact, not a project accessor or storage
+    flag. The project head only serializes any preceding assignment end; retirement remains
+    absorbing in the agent reducer and does not release project claims.
 
   ## Post-Plan Execution Steps
 

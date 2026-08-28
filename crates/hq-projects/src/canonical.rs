@@ -14,7 +14,8 @@ use hq_domain::{
 use hq_reducer::{
     AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityProjection,
     AuthorityProjectionKey, ConversationProjection, ConversationProjectionKey, MembershipState,
-    ProjectAssignmentPhase, ProjectLifecycle, ProjectProjection, ProjectProjectionKey,
+    ProjectAssignmentPhase, ProjectLifecycle, ProjectOutputStatus, ProjectProjection,
+    ProjectProjectionKey,
 };
 use hq_resources::{PathClaim, claim_conflict, valid_path_resource};
 
@@ -133,31 +134,39 @@ fn workflow_snapshot(
         })
         .collect::<Vec<_>>();
     pending_inputs.sort_by_key(|input| input.sequence);
-    let historical_threads = snapshot
-        .conversation()
-        .projections()
-        .values()
-        .filter_map(|projection| match projection {
-            ConversationProjection::Message(message)
-                if message.content.project_id == Some(project_id) =>
-            {
-                Some(message.thread_id)
-            }
-            _ => None,
-        })
-        .collect();
+    let historical_threads = requested_agent.map_or_else(
+        || {
+            snapshot
+                .conversation()
+                .projections()
+                .values()
+                .filter_map(|projection| match projection {
+                    ConversationProjection::Message(message)
+                        if message.content.project_id == Some(project_id) =>
+                    {
+                        Some(message.thread_id)
+                    }
+                    _ => None,
+                })
+                .collect()
+        },
+        |agent_id| agent_project_threads(snapshot, project_id, agent_id),
+    );
     let assignment = view.assignment.as_ref().map(|assignment| {
-        let (thread_id, phase_runnable) = match assignment.phase {
-            ProjectAssignmentPhase::Runnable { thread_id, .. } => (Some(thread_id), true),
-            ProjectAssignmentPhase::Configuring | ProjectAssignmentPhase::Blocked(_) => {
-                (None, false)
-            }
+        let (thread_id, phase_runnable, blocked) = match assignment.phase {
+            ProjectAssignmentPhase::Runnable { thread_id, .. } => (Some(thread_id), true, false),
+            ProjectAssignmentPhase::Configuring | ProjectAssignmentPhase::Blocked(_) => (
+                None,
+                false,
+                matches!(assignment.phase, ProjectAssignmentPhase::Blocked(_)),
+            ),
         };
         CanonicalProjectAssignment {
             intent: assignment.intent.clone(),
             binding: assignment.binding.clone(),
             thread_id,
             runnable: assignment.runnable && phase_runnable,
+            blocked,
         }
     });
     let requested_agent_available = requested_agent.is_none_or(|agent_id| {
@@ -224,6 +233,9 @@ fn build_plan(
             ));
         }
     };
+    if let CanonicalProjectMutationAction::RetireAgent { agent_id } = mutation.action {
+        return build_retirement_plan(snapshot, mutation, installation_root, agent_id);
+    }
     let mut parents = BTreeSet::from([view.head, installation_root, active_human]);
     let payload = payload(snapshot, mutation, view, &mut parents)?;
     let parents = BoundedSet::<FactId, MAX_FACT_PARENTS>::new(parents)
@@ -328,6 +340,16 @@ fn payload(
                 runtime: runtime.clone(),
             })
         }
+        CanonicalProjectMutationAction::BlockAssignment {
+            assignment_id,
+            cause,
+        } if view.assignment.as_ref().is_some_and(|assignment| {
+            assignment.intent.assignment_id == *assignment_id
+        }) => Ok(SemanticPayload::ProjectAssignmentBlocked {
+            project_id: mutation.project_id,
+            assignment_id: *assignment_id,
+            cause: cause.clone(),
+        }),
         CanonicalProjectMutationAction::BeginClosing
             if view.lifecycle == ProjectLifecycle::Open =>
         {
@@ -386,6 +408,109 @@ fn payload(
         }
         _ => Err(invalid()),
     }
+}
+
+fn build_retirement_plan(
+    snapshot: &DomainSnapshot,
+    mutation: &CanonicalProjectMutation,
+    installation_root: FactId,
+    agent_id: AgentId,
+) -> Result<FactPlan, DomainError> {
+    if !agent_is_unassigned(snapshot, agent_id) {
+        return Err(domain_error(
+            ErrorCategory::Conflict,
+            "project_agent_assigned",
+        ));
+    }
+    let Some(AgentProjection::Agent(agent)) = snapshot
+        .agent()
+        .projection(AgentProjectionKey::Agent(agent_id))
+    else {
+        return Err(domain_error(
+            ErrorCategory::Conflict,
+            "project_agent_unavailable",
+        ));
+    };
+    if agent.lifecycle != AgentLifecycle::Active
+        || agent.mailboxes.len() != 1
+        || !agent
+            .mailboxes
+            .iter()
+            .all(|mailbox| mailbox.installation_id() == mutation.home)
+    {
+        return Err(domain_error(
+            ErrorCategory::Conflict,
+            "project_agent_unavailable",
+        ));
+    }
+    let mailbox_id = agent
+        .mailboxes
+        .iter()
+        .next()
+        .map(|mailbox| mailbox.mailbox_id())
+        .ok_or_else(|| domain_error(ErrorCategory::Conflict, "project_agent_unavailable"))?;
+    let mut parents = BTreeSet::from([installation_root]);
+    parents.extend(agent.claims.iter().copied());
+    if let Some(AgentProjection::Selection(selection)) = snapshot
+        .agent()
+        .projection(AgentProjectionKey::Selection(agent_id))
+    {
+        parents.extend(selection.frontier.iter().copied());
+    }
+    let parents = BoundedSet::<FactId, MAX_FACT_PARENTS>::new(parents)
+        .map_err(|_| domain_error(ErrorCategory::InvariantViolation, "agent_parent_overflow"))?;
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        parents,
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            installation_root,
+        )],
+    )
+    .map_err(|_| domain_error(ErrorCategory::InvariantViolation, "agent_causal_invalid"))?;
+    Ok(FactPlan::new(
+        mutation.home,
+        mutation.issued_at,
+        FactScope::InstallationPrivate(mutation.home),
+        causal,
+        SemanticPayload::AgentRetired {
+            agent_id,
+            mailbox_id,
+        },
+        *mutation.request_digest.as_bytes(),
+    ))
+}
+
+fn agent_project_threads(
+    snapshot: &DomainSnapshot,
+    project_id: ProjectId,
+    agent_id: AgentId,
+) -> BTreeSet<hq_domain::ThreadId> {
+    snapshot
+        .project()
+        .projections()
+        .values()
+        .filter_map(|projection| match projection {
+            ProjectProjection::Dispatch(dispatch)
+                if !dispatch.conflicted && dispatch.binding.agent_id == agent_id =>
+            {
+                matches!(
+                    snapshot
+                        .project()
+                        .projection(ProjectProjectionKey::Input(dispatch.message_id)),
+                    Some(ProjectProjection::Input(input)) if input.project_id == project_id
+                )
+                .then_some(dispatch.thread_id)
+            }
+            ProjectProjection::Output(output)
+                if output.binding.agent_id == agent_id
+                    && output.message.project_id == Some(project_id)
+                    && output.status != ProjectOutputStatus::Conflicted =>
+            {
+                Some(output.thread_id)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn resource_payload(
@@ -634,6 +759,15 @@ fn agent_is_unassigned_elsewhere(
         })
 }
 
+fn agent_is_unassigned(snapshot: &DomainSnapshot, agent_id: AgentId) -> bool {
+    snapshot.project().projections().values().all(|projection| {
+        !matches!(projection, ProjectProjection::Project(project)
+        if project.assignment.as_ref().is_some_and(|assignment| {
+            assignment.intent.agent_id == agent_id
+        }))
+    })
+}
+
 fn agent_claim(
     snapshot: &DomainSnapshot,
     home: InstallationId,
@@ -714,14 +848,20 @@ mod tests {
 
     use hq_application::{DomainSnapshot, ProjectionSnapshot};
     use hq_domain::{
-        AccountId, BoundedText, CommandDigest, CommandId, FactId, InstallationId, MailboxAddress,
-        MailboxId, ProjectId, ProjectResource, ResourceHealth, ResourceId, ResourceLocator,
-        ResourceScheme, ShortText, Timestamp,
+        AccountId, AgentId, AssignmentId, AssignmentIntent, AuthorityRole, BoundedText,
+        CommandDigest, CommandId, FactId, FactScope, InstallationId, MailboxAddress, MailboxId,
+        ProjectId, ProjectResource, ProviderId, ResourceHealth, ResourceId, ResourceLocator,
+        ResourceScheme, SemanticPayload, ShortText, Timestamp,
     };
-    use hq_reducer::{ProjectLifecycle, ProjectProjection, ProjectProjectionKey, ProjectView};
+    use hq_reducer::{
+        AgentLifecycle, AgentProjection, AgentProjectionKey, AgentView, ProjectAssignmentPhase,
+        ProjectAssignmentView, ProjectLifecycle, ProjectProjection, ProjectProjectionKey,
+        ProjectView, SelectionView,
+    };
 
     use super::{
-        CanonicalProjectMutation, CanonicalProjectMutationAction, payload, resource_payload,
+        CanonicalProjectMutation, CanonicalProjectMutationAction, build_retirement_plan, payload,
+        resource_payload,
     };
 
     #[test]
@@ -765,6 +905,115 @@ mod tests {
         let closing = view(other_id, ProjectLifecycle::Closing, [candidate]);
         let snapshot = project_snapshot(current_id, current.clone(), other_id, closing);
         assert!(resource_payload(&snapshot, &add, &current).is_none());
+    }
+
+    #[test]
+    fn retirement_is_installation_private_frontier_complete_and_requires_no_assignment() {
+        let project_id = ProjectId::from_bytes([1; 32]);
+        let agent_id = AgentId::from_bytes([2; 32]);
+        let home = InstallationId::from_bytes([3; 32]);
+        let mailbox = MailboxAddress::new(home, MailboxId::from_bytes([4; 32]));
+        let claim = FactId::from_bytes([5; 32]);
+        let selection = FactId::from_bytes([6; 32]);
+        let root = FactId::from_bytes([7; 32]);
+        let mut project = view(project_id, ProjectLifecycle::Open, []);
+        let snapshot = retirement_snapshot(
+            project_id,
+            project.clone(),
+            agent_id,
+            mailbox,
+            claim,
+            selection,
+        );
+        let mutation = mutation(
+            project_id,
+            CanonicalProjectMutationAction::RetireAgent { agent_id },
+        );
+
+        let plan =
+            build_retirement_plan(&snapshot, &mutation, root, agent_id).expect("retirement plan");
+        assert_eq!(plan.scope(), &FactScope::InstallationPrivate(home));
+        assert_eq!(
+            plan.payload(),
+            &SemanticPayload::AgentRetired {
+                agent_id,
+                mailbox_id: mailbox.mailbox_id(),
+            }
+        );
+        assert_eq!(
+            plan.causal().authority(AuthorityRole::LocalInstallation),
+            Some(root)
+        );
+        assert!(plan.causal().parents().contains(&claim));
+        assert!(plan.causal().parents().contains(&selection));
+
+        project.assignment = Some(ProjectAssignmentView {
+            intent: AssignmentIntent {
+                assignment_id: AssignmentId::from_bytes([8; 32]),
+                agent_id,
+                provider: ProviderId::new("provider").expect("provider"),
+            },
+            binding: None,
+            phase: ProjectAssignmentPhase::Configuring,
+            cardinality_conflicted: false,
+            runnable: false,
+            support: BTreeSet::new(),
+        });
+        let assigned =
+            retirement_snapshot(project_id, project, agent_id, mailbox, claim, selection);
+        let error = build_retirement_plan(&assigned, &mutation, root, agent_id)
+            .expect_err("assigned retirement must fail");
+        assert_eq!(error.code().as_str(), "project_agent_assigned");
+    }
+
+    fn retirement_snapshot(
+        project_id: ProjectId,
+        project: ProjectView,
+        agent_id: AgentId,
+        mailbox: MailboxAddress,
+        claim: FactId,
+        selection: FactId,
+    ) -> DomainSnapshot {
+        DomainSnapshot::new(
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(
+                BTreeMap::new(),
+                BTreeMap::from([
+                    (
+                        AgentProjectionKey::Agent(agent_id),
+                        AgentProjection::Agent(Box::new(AgentView {
+                            claims: BTreeSet::from([claim]),
+                            names: BTreeSet::from([ShortText::new("agent").expect("name")]),
+                            mailboxes: BTreeSet::from([mailbox]),
+                            retirements: BTreeSet::new(),
+                            lifecycle: AgentLifecycle::Active,
+                            runnable: true,
+                            selected_session: None,
+                            name_reserved: true,
+                        })),
+                    ),
+                    (
+                        AgentProjectionKey::Selection(agent_id),
+                        AgentProjection::Selection(Box::new(SelectionView {
+                            candidates: BTreeMap::new(),
+                            frontier: BTreeSet::from([selection]),
+                            active: None,
+                            conflicted: false,
+                        })),
+                    ),
+                ]),
+                BTreeMap::new(),
+            ),
+            ProjectionSnapshot::new(
+                BTreeMap::new(),
+                BTreeMap::from([(
+                    ProjectProjectionKey::Project(project_id),
+                    ProjectProjection::Project(Box::new(project)),
+                )]),
+                BTreeMap::new(),
+            ),
+        )
     }
 
     fn project_snapshot(
