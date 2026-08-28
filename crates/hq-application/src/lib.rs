@@ -33,11 +33,13 @@ pub use mutation::{
 };
 pub use ports::{
     AgentSessionRequest, AgentSessionResult, ApplicationPorts, CanonicalEvidence, CommitFacts,
-    ConfigureRelays, ControlHarness, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
-    InspectResource, MAX_SUBSCRIPTION_TOPICS, ObserveRevisions, PublishWake, QueryDomain,
-    RelayAccess, RelayAuthentication, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, SessionControl, SubscriptionRequest, SubscriptionTopic,
-    SynchronizationRequest, WakeDisposition,
+    ConfigureRelays, ControlHarness, DomainHealth, EffectOutcome, EffectRequest,
+    EvidenceIngestOutcome, HealthDomain, InspectResource, MAX_RELAY_STATUS_POLICIES,
+    MAX_SUBSCRIPTION_TOPICS, ObserveRevisions, PublishWake, QueryDomain, RelayAccess,
+    RelayAuthentication, RelayConfiguration, RelayPolicyStatus, RelayStatus,
+    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
+    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    WakeDisposition,
 };
 pub use project::{
     ControlProjects, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,

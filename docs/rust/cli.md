@@ -9,6 +9,7 @@ hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>
 The installed commands currently include `help`, `version`, `identity`, `config`,
 `human create|show|select|invite|join|devices|revoke`,
 `peer add|list|distrust`, `mailbox list|grant|revoke`, and
+`relay add|list|remove|sync|status|repair`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
 autostart and service managers. `daemon status` never starts a process; `readiness` may start one
@@ -84,11 +85,29 @@ an already blocked state is a no-op. A later explicit `peer add` may recover the
 block frontier, but it does not silently reactivate old capabilities; mailbox access requires a new
 lineage-complete grant.
 
+`relay add URL [--access read|write|read-write] [--auth
+disabled|on-challenge|required]` installs or changes one exact durable `ws`/`wss` policy. The
+defaults are `read-write` and `on-challenge`. Repeating an equal desired policy is an `unchanged`
+no-op; a change advances its positive generation. `relay remove URL` disables the policy without
+erasing delivery history, and repeating removal is also unchanged. At most 256 policies are
+accepted. Invalid or credential-bearing URLs fail with redacted usage output.
+
+`relay sync [URL]` sends a coalescible prompt wake for all policies or one validated enabled policy;
+an absent or disabled target returns a typed rejected outcome.
+`relay list` and `relay status` render the bounded policy set, enabled state and generation, queued
+and prepared work, accepted/rejected/uncertain attempts, staging, quarantine, and an explicit
+truncation flag. `relay repair` is the deliberate all-domain rebuild operation: it derives a stable
+audit identity from the observed revision, reverifies immutable evidence, atomically replaces only
+rebuildable indexes, and reports health for authority, conversation, agent, and project domains.
+Policy and sync effects preserve exact operation/request identities across response loss; policy
+loss is first reconciled from status before an exact retry. Repair retries the same idempotent
+operation identity.
+
 Identity output has only the installation ID, signing public key, and public fingerprint.
 Configuration output has the optional provider and the complete canonical relay list. Both are
 passive data with public fields. Configuration setters replace one complete typed field, rebuild
 the validated value, and the persistence adapter revalidates public fields again immediately before
-the atomic write. Human, peer, mailbox, route-history, and capability-history presentation records
+the atomic write. Human, peer, mailbox, relay/health, route-history, and capability-history presentation records
 are also passive public-field values; command enums and the live client capability remain closed
 behavioral types.
 
@@ -118,7 +137,7 @@ after negotiation; command-only clients do not issue an unsolicited snapshot.
 CLI production code has no canonical storage, signer, relay, resource, harness-provider, or SQLite
 access. The identity/configuration commands cross only the private state-ownership and identity
 persistence adapter because they must operate while the node is absent. Canonical administration,
-including human account bootstrap, peer routes, and mailbox capabilities, uses fresh snapshots plus
+including human account bootstrap, peer routes, mailbox capabilities, and relay health/repair, uses fresh snapshots plus
 the reusable request,
 mutation, and project methods rather than
 opening implementation adapters directly.

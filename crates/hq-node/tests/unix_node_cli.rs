@@ -150,6 +150,16 @@ fn admin_output(state_root: &Path, command: &str, arguments: &[&str]) -> Output 
     )
 }
 
+fn admin_json(state_root: &Path, command: &str, arguments: &[&str]) -> serde_json::Value {
+    let output = admin_output(state_root, command, arguments);
+    assert!(
+        output.status.success(),
+        "{command} stderr: {:?}",
+        output.stderr
+    );
+    serde_json::from_slice(&output.stdout).expect("admin JSON")
+}
+
 fn encode_hex(bytes: [u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     bytes
@@ -1103,6 +1113,91 @@ fn directional_peer_and_mailbox_authority_is_replay_safe_and_recovers_after_dist
             stopped.stderr
         );
     }
+}
+
+#[test]
+fn relay_administration_is_idempotent_redacted_and_restart_durable() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let _identity = initialize_identity(&state_root);
+    let endpoint = "ws://127.0.0.1:9";
+
+    let initial = admin_json(&state_root, "relay", &["status"]);
+    assert_eq!(initial["kind"], "relay_admin");
+    assert_eq!(initial["data"]["policies"], serde_json::json!([]));
+    assert_eq!(initial["data"]["domains"].as_array().map(Vec::len), Some(4));
+
+    let added = admin_json(
+        &state_root,
+        "relay",
+        &["add", endpoint, "--access", "read", "--auth", "required"],
+    );
+    assert_eq!(added["data"]["outcome"], "accepted");
+    assert_eq!(
+        added["data"]["operation_id"].as_str().map(str::len),
+        Some(64)
+    );
+    assert_eq!(added["data"]["policies"][0]["endpoint"], endpoint);
+    assert_eq!(added["data"]["policies"][0]["access"], "read");
+    assert_eq!(added["data"]["policies"][0]["authentication"], "required");
+    assert_eq!(added["data"]["policies"][0]["enabled"], true);
+    assert_eq!(added["data"]["policies"][0]["generation"], 1);
+
+    let repeated = admin_json(
+        &state_root,
+        "relay",
+        &["add", endpoint, "--access", "read", "--auth", "required"],
+    );
+    assert_eq!(repeated["data"]["outcome"], "unchanged");
+    assert_eq!(repeated["data"]["policies"][0]["generation"], 1);
+
+    let synchronized = admin_json(&state_root, "relay", &["sync", endpoint]);
+    assert_eq!(synchronized["data"]["outcome"], "accepted");
+
+    let repaired = admin_json(&state_root, "relay", &["repair"]);
+    assert_eq!(repaired["data"]["outcome"], "repaired");
+    assert_eq!(
+        repaired["data"]["operation_id"].as_str().map(str::len),
+        Some(64)
+    );
+
+    let removed = admin_json(&state_root, "relay", &["remove", endpoint]);
+    assert_eq!(removed["data"]["policies"][0]["enabled"], false);
+    assert_eq!(removed["data"]["policies"][0]["generation"], 2);
+
+    let disabled_sync = admin_json(&state_root, "relay", &["sync", endpoint]);
+    assert_eq!(disabled_sync["data"]["outcome"], "rejected");
+    assert_eq!(
+        disabled_sync["data"]["operation_id"].as_str().map(str::len),
+        Some(64)
+    );
+
+    let repeated_remove = admin_json(&state_root, "relay", &["remove", endpoint]);
+    assert_eq!(repeated_remove["data"]["outcome"], "unchanged");
+    assert_eq!(repeated_remove["data"]["policies"][0]["generation"], 2);
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let persisted = admin_json(&state_root, "relay", &["list"]);
+    assert_eq!(persisted["data"]["policies"][0]["endpoint"], endpoint);
+    assert_eq!(persisted["data"]["policies"][0]["enabled"], false);
+    assert_eq!(persisted["data"]["policies"][0]["generation"], 2);
+
+    let secret_endpoint = "ws://secret@127.0.0.1:9";
+    let invalid = admin_output(&state_root, "relay", &["add", secret_endpoint]);
+    assert!(!invalid.status.success());
+    assert!(!String::from_utf8_lossy(&invalid.stderr).contains(secret_endpoint));
+
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
 }
 
 #[test]

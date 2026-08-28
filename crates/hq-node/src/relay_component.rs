@@ -11,14 +11,19 @@ use std::{
 
 use hq_application::{
     ApplicationError, ApplicationErrorCode, ConfigureRelays, EffectOutcome, EffectRequest,
-    PublishWake, RelayConfiguration, SynchronizationRequest, WakeDisposition,
+    MAX_RELAY_STATUS_POLICIES, PublishWake, RelayConfiguration, RelayPolicyStatus, RelayStatus,
+    SynchronizationRequest, WakeDisposition,
 };
-use hq_domain::{InstallationId, ResourceLocator, ResourceScheme, Revision};
+use hq_domain::{
+    BoundedText, InstallationId, RESOURCE_LOCATOR_MAX_BYTES, ResourceLocator, ResourceScheme,
+    Revision,
+};
 use hq_reducer::{AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, PeerRouteState};
 use hq_relay::{
-    CanonicalIngest, DesiredRelayPolicy, EnvelopeCodec, OutboxKey, RelayClock, RelayConnector,
-    RelayManager, RelayManagerConfig, RelayPolicyChange, RelayPortError, RelayStateMutation,
-    RelayStatePort, RelayUrl, ResolvedRoute, RouteResolver, StableRelayJitter,
+    AttemptDisposition, CanonicalIngest, DesiredRelayPolicy, EnvelopeCodec, OutboxKey, RelayClock,
+    RelayConnector, RelayManager, RelayManagerConfig, RelayPolicyChange, RelayPortError,
+    RelayStateMutation, RelayStatePort, RelayStateQuery, RelayUrl, ResolvedRoute, RouteResolver,
+    StableRelayJitter,
 };
 use hq_store::{ReplicationHandle, Store};
 
@@ -183,6 +188,34 @@ impl ConfigureRelays for RelayNodeComponent {
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         self.ensure_accepting()?;
         let relay = relay_url(&request.body.endpoint)?;
+        let current = self
+            .inner
+            .state
+            .load_page(RelayStateQuery::first(MAX_RELAY_STATUS_POLICIES + 1))
+            .map_err(application_error)?;
+        let already_configured = current
+            .state
+            .policies
+            .iter()
+            .any(|policy| policy.url == relay);
+        if !already_configured && current.state.policies.len() >= MAX_RELAY_STATUS_POLICIES {
+            return Ok(EffectOutcome::Rejected(relay_domain_error(
+                hq_domain::ErrorCategory::InvalidInput,
+                "relay_policy_limit",
+            )?));
+        }
+        let enabled_others = current
+            .state
+            .policies
+            .iter()
+            .filter(|policy| policy.enabled && policy.url != relay)
+            .count();
+        if request.body.enabled && enabled_others >= self.inner.config.manager.max_sessions {
+            return Ok(EffectOutcome::Rejected(relay_domain_error(
+                hq_domain::ErrorCategory::InvalidInput,
+                "relay_session_limit",
+            )?));
+        }
         self.inner
             .state
             .apply(RelayStateMutation::Configure(RelayPolicyChange {
@@ -192,7 +225,7 @@ impl ConfigureRelays for RelayNodeComponent {
                     url: relay,
                     access: request.body.access,
                     authentication: request.body.authentication,
-                    enabled: true,
+                    enabled: request.body.enabled,
                 },
             }))
             .map_err(application_error)?;
@@ -206,10 +239,87 @@ impl ConfigureRelays for RelayNodeComponent {
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         self.ensure_accepting()?;
         if let SynchronizationRequest::Relay(endpoint) = &request.body {
-            relay_url(endpoint)?;
+            let relay = relay_url(endpoint)?;
+            let page = self
+                .inner
+                .state
+                .load_page(RelayStateQuery::first(MAX_RELAY_STATUS_POLICIES))
+                .map_err(application_error)?;
+            let Some(policy) = page
+                .state
+                .policies
+                .iter()
+                .find(|policy| policy.url == relay)
+            else {
+                return Ok(EffectOutcome::Rejected(relay_domain_error(
+                    hq_domain::ErrorCategory::NotFound,
+                    "relay_policy_not_found",
+                )?));
+            };
+            if !policy.enabled {
+                return Ok(EffectOutcome::Rejected(relay_domain_error(
+                    hq_domain::ErrorCategory::Unresolved,
+                    "relay_policy_disabled",
+                )?));
+            }
         }
         self.wake().map_err(application_error)?;
         Ok(EffectOutcome::Accepted(()))
+    }
+
+    fn relay_status(&self) -> Result<RelayStatus, ApplicationError> {
+        self.ensure_accepting()?;
+        let page = self
+            .inner
+            .state
+            .load_page(RelayStateQuery::first(MAX_RELAY_STATUS_POLICIES))
+            .map_err(application_error)?;
+        let policies = page
+            .state
+            .policies
+            .into_iter()
+            .map(|policy| {
+                Ok(RelayPolicyStatus {
+                    endpoint: ResourceLocator::new(
+                        ResourceScheme::Opaque,
+                        BoundedText::<RESOURCE_LOCATOR_MAX_BYTES>::new(policy.url.as_str())
+                            .map_err(|_| {
+                                ApplicationError::new(ApplicationErrorCode::InvariantViolation)
+                            })?,
+                    ),
+                    access: policy.access,
+                    authentication: policy.authentication,
+                    enabled: policy.enabled,
+                    generation: policy.generation.get(),
+                })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        Ok(RelayStatus {
+            policies,
+            queued: page.state.outbound.len(),
+            prepared: page.state.prepared.len(),
+            uncertain: page
+                .state
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.disposition == AttemptDisposition::Uncertain)
+                .count(),
+            rejected: page
+                .state
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.disposition == AttemptDisposition::Rejected)
+                .count(),
+            accepted: page
+                .state
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.disposition == AttemptDisposition::Accepted)
+                .count(),
+            staged: page.state.staged.len(),
+            quarantined: page.state.quarantine.len(),
+            truncated: page.next.is_some(),
+        })
     }
 }
 
@@ -320,6 +430,15 @@ fn relay_url(locator: &ResourceLocator) -> Result<RelayUrl, ApplicationError> {
     }
     RelayUrl::new(locator.value().to_owned())
         .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvalidRequest))
+}
+
+fn relay_domain_error(
+    category: hq_domain::ErrorCategory,
+    code: &'static str,
+) -> Result<hq_domain::DomainError, ApplicationError> {
+    hq_domain::ErrorCode::new(code)
+        .map(|code| hq_domain::DomainError::new(category, code))
+        .map_err(|_| ApplicationError::new(ApplicationErrorCode::InvariantViolation))
 }
 
 const fn application_error(error: RelayPortError) -> ApplicationError {

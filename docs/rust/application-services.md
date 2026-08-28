@@ -25,10 +25,10 @@ store-owned cursor.
 
 | Capability | Contract |
 | --- | --- |
-| `QueryDomain` | One revisioned authoritative refresh, bounded indexed conversation pages, and bounded exact causal-evidence closure |
+| `QueryDomain` | Revisioned authoritative refresh and domain health, explicit rebuildable-state repair, bounded indexed conversation pages, and bounded exact causal-evidence closure |
 | `CommitFacts` | Execute or reconcile a stable transaction-consistent fact mutation, or reverify and idempotently ingest exact public evidence |
 | `PublishWake` | Nonblocking, coalescible prompt for post-commit replication/reconciliation work |
-| `ConfigureRelays` | Stable relay-policy and explicit synchronization operations |
+| `ConfigureRelays` | Stable relay-policy and explicit synchronization operations plus bounded durable relay/delivery status |
 | `ControlHarness` | Neutral named-agent start, exact resume, and stop operations |
 | `ControlProjects` | Local execution or durable routing of one exact project command |
 | `InspectResource` | Typed external observation without claiming a durable state transition |
@@ -98,8 +98,12 @@ common `EffectOutcome<T>` is `Accepted`, typed `Rejected`, or `Uncertain(operati
 means reconcile that identity before repeating the effect; persisted intent alone is never accepted
 evidence that external work happened.
 
-Relay configuration contains only a typed endpoint locator, read/write policy, and authentication
-policy. It contains no credentials or client-library values. Session control names a durable agent,
+Relay configuration contains only a typed endpoint locator, read/write policy, authentication
+policy, and enabled state. It contains no credentials or client-library values. Relay status is a
+passive bounded record of at most 256 current policies and durable delivery-state counts, including
+an explicit truncation bit. `StateHealth` and `StateRepairReport` expose stable ordered decision and
+conflict counts for all four reducer domains; repair carries the caller's stable operation identity.
+Session control names a durable agent,
 neutral provider namespace, and start/exact-resume/stop action. Resource inspection names the
 project, resource, display locator, and recorded canonical locator. It returns only bounded inert
 details, typed health, an optional newly observed canonical locator, and an explicit observation
@@ -223,7 +227,9 @@ or pending registration cancellation is idempotent.
 `hq-store::StoreGateway` is configured with an explicit `AuthorityPolicy` and a shared signer
 capability. It implements only `QueryDomain` and `CommitFacts`; the node combines it with separately
 owned relay, runtime, resource, and observation adapters. The store actor loads revision and all four
-projection packages in one serialized request. Mutation decisions enter the existing atomic local
+projection packages in one serialized request. Health likewise loads revision and its normalized
+index in one serialized request, and explicit repair returns the repaired index and observed
+revision without allowing another actor request to interleave. Mutation decisions enter the existing atomic local
 commit path, and retained result bytes are strictly decoded back into application receipts.
 
 Contracts prove exact replay does not decide twice, changed-digest reuse conflicts before decision,

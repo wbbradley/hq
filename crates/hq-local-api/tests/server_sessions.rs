@@ -80,6 +80,47 @@ impl QueryDomain for Ports {
             })
             .collect())
     }
+
+    fn state_health(&self) -> Result<hq_application::StateHealth, ApplicationError> {
+        self.trace.borrow_mut().push("state_health");
+        Ok(hq_application::StateHealth {
+            revision: Revision::new(7),
+            domains: health_domains(),
+        })
+    }
+
+    fn repair_state(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<hq_application::StateRepairReport, ApplicationError> {
+        self.trace.borrow_mut().push("repair_state");
+        Ok(hq_application::StateRepairReport {
+            operation_id,
+            revision: Revision::new(7),
+            domains: health_domains(),
+        })
+    }
+}
+
+fn health_domains() -> Vec<hq_application::DomainHealth> {
+    [
+        hq_application::HealthDomain::Authority,
+        hq_application::HealthDomain::Conversation,
+        hq_application::HealthDomain::Agent,
+        hq_application::HealthDomain::Project,
+    ]
+    .into_iter()
+    .map(|domain| hq_application::DomainHealth {
+        domain,
+        projected: 1,
+        unresolved: 0,
+        unauthorized: 0,
+        conflicted: 0,
+        invalid: 0,
+        unsupported: 0,
+        conflicts: 0,
+    })
+    .collect()
 }
 
 impl CommitFacts for Ports {
@@ -129,6 +170,21 @@ impl ConfigureRelays for Ports {
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         self.trace.borrow_mut().push("synchronize");
         Ok(EffectOutcome::Accepted(()))
+    }
+
+    fn relay_status(&self) -> Result<hq_application::RelayStatus, ApplicationError> {
+        self.trace.borrow_mut().push("relay_status");
+        Ok(hq_application::RelayStatus {
+            policies: Vec::new(),
+            queued: 0,
+            prepared: 0,
+            uncertain: 0,
+            rejected: 0,
+            accepted: 0,
+            staged: 0,
+            quarantined: 0,
+            truncated: false,
+        })
     }
 }
 
@@ -428,8 +484,14 @@ fn every_typed_request_family_routes_without_storage_types() {
             locator(),
             RelayAccessDto::ReadWrite,
             RelayAuthenticationDto::OnChallenge,
+            true,
         ))),
         Request::Synchronize(effect(SynchronizationRequestDto::All)),
+        Request::RelayStatus,
+        Request::StateHealth,
+        Request::RepairState {
+            operation_id: Id32::new([24; 32]),
+        },
         Request::ControlAgentSession(effect(
             AgentSessionRequestDto::new(
                 Id32::new([13; 32]),

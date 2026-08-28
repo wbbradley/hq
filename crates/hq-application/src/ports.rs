@@ -34,6 +34,9 @@ use crate::{
     FactMutation, MutationAttempt,
 };
 
+/// Maximum relay policies in one bounded application observation.
+pub const MAX_RELAY_STATUS_POLICIES: usize = 256;
+
 /// Query capability expressed in normalized semantic values rather than storage operations.
 pub trait QueryDomain {
     /// Loads all authoritative projection packages and their one serialized revision.
@@ -54,6 +57,23 @@ pub trait QueryDomain {
         _maximum_facts: usize,
         _maximum_bytes: usize,
     ) -> Result<Vec<CanonicalEvidence>, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    /// Loads current normalized domain health without mutating it.
+    fn state_health(&self) -> Result<StateHealth, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    /// Reverifies the immutable corpus and atomically replaces rebuildable state.
+    fn repair_state(
+        &self,
+        _operation_id: OperationId,
+    ) -> Result<StateRepairReport, ApplicationError> {
         Err(ApplicationError::new(
             crate::ApplicationErrorCode::AdapterUnavailable,
         ))
@@ -163,6 +183,8 @@ pub struct RelayConfiguration {
     pub access: RelayAccess,
     /// Connection authentication policy.
     pub authentication: RelayAuthentication,
+    /// Whether a relay session owner should exist.
+    pub enabled: bool,
 }
 
 impl RelayConfiguration {
@@ -171,13 +193,107 @@ impl RelayConfiguration {
         endpoint: ResourceLocator,
         access: RelayAccess,
         authentication: RelayAuthentication,
+        enabled: bool,
     ) -> Self {
         Self {
             endpoint,
             access,
             authentication,
+            enabled,
         }
     }
+}
+
+/// Passive current durable policy for one relay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayPolicyStatus {
+    /// Typed relay endpoint.
+    pub endpoint: ResourceLocator,
+    /// Enabled synchronization direction.
+    pub access: RelayAccess,
+    /// Connection authentication policy.
+    pub authentication: RelayAuthentication,
+    /// Whether a relay session owner should exist.
+    pub enabled: bool,
+    /// Positive durable policy generation.
+    pub generation: u64,
+}
+
+/// Passive bounded durable relay and delivery health observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayStatus {
+    /// Current durable policies in endpoint order.
+    pub policies: Vec<RelayPolicyStatus>,
+    /// Queued canonical delivery intents in the observed page.
+    pub queued: usize,
+    /// Prepared exact delivery lineages in the observed page.
+    pub prepared: usize,
+    /// Relay attempts with uncertain disposition in the observed page.
+    pub uncertain: usize,
+    /// Relay attempts with explicit rejection in the observed page.
+    pub rejected: usize,
+    /// Relay attempts with positive acceptance in the observed page.
+    pub accepted: usize,
+    /// Transient inbound wrappers awaiting retry in the observed page.
+    pub staged: usize,
+    /// Permanently rejected bounded evidence in the observed page.
+    pub quarantined: usize,
+    /// Whether additional durable rows exist beyond the bounded observation.
+    pub truncated: bool,
+}
+
+/// Stable reducer domain name used by administrative health output.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum HealthDomain {
+    /// Installation, mailbox, peer, capability, and account authority.
+    Authority,
+    /// Conversation, message, and activity state.
+    Conversation,
+    /// Named agents and provider sessions.
+    Agent,
+    /// Projects, resources, assignments, and control.
+    Project,
+}
+
+/// Passive decision counts for one authoritative reducer domain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DomainHealth {
+    /// Stable domain name.
+    pub domain: HealthDomain,
+    /// Admitted semantic facts.
+    pub projected: u64,
+    /// Facts waiting on missing or unusable dependencies.
+    pub unresolved: u64,
+    /// Facts rejected by authority policy.
+    pub unauthorized: u64,
+    /// Facts participating in explicit conflicts.
+    pub conflicted: u64,
+    /// Intrinsically invalid facts.
+    pub invalid: u64,
+    /// Verified but unsupported semantic families.
+    pub unsupported: u64,
+    /// Normalized aggregate/global conflicts.
+    pub conflicts: u64,
+}
+
+/// Passive authoritative domain-health observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateHealth {
+    /// Serialized local revision paired with the index at one adapter serialization point.
+    pub revision: Revision,
+    /// Complete fixed domain catalog in stable order.
+    pub domains: Vec<DomainHealth>,
+}
+
+/// Passive result of one explicit complete rebuildable-state repair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateRepairReport {
+    /// Caller-selected stable audit identity.
+    pub operation_id: OperationId,
+    /// Serialized local revision observed after repair.
+    pub revision: Revision,
+    /// Complete repaired domain health.
+    pub domains: Vec<DomainHealth>,
 }
 
 /// Scope of an explicit prompt to perform synchronization work.
@@ -202,6 +318,13 @@ pub trait ConfigureRelays {
         &self,
         request: &EffectRequest<SynchronizationRequest>,
     ) -> Result<EffectOutcome<()>, ApplicationError>;
+
+    /// Loads one bounded authoritative relay/delivery health observation.
+    fn relay_status(&self) -> Result<RelayStatus, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 }
 
 /// Neutral durable-agent session control action.

@@ -12,11 +12,11 @@ use std::{
 };
 
 use hq_application::{
-    ApplicationErrorClass, CanonicalEvidence, CommitFacts, FactMutation, FactPlan, MutationAttempt,
-    MutationDecision, MutationOutcome, QueryDomain,
+    ApplicationErrorClass, CanonicalEvidence, CommitFacts, FactMutation, FactPlan, HealthDomain,
+    MutationAttempt, MutationDecision, MutationOutcome, QueryDomain,
 };
 use hq_domain::{
-    CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, FactId, Revision,
+    CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, FactId, OperationId, Revision,
 };
 use hq_store::StoreGateway;
 use rusqlite::Connection;
@@ -55,6 +55,37 @@ fn authoritative_snapshot_is_one_revisioned_application_view() -> Result<(), Box
     assert_eq!(snapshot.conversations().len(), 1);
     assert_eq!(snapshot.conversations()[0].latest_fact, Some(question_id));
     assert_eq!(snapshot.conversations()[0].open_messages, 1);
+    Ok(())
+}
+
+#[test]
+fn health_and_repair_report_every_domain_at_the_observed_revision() -> Result<(), Box<dyn Error>> {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    store.append_verified(verified_fact())?;
+    let gateway = StoreGateway::new(&store, authority_policy(), Arc::new(signer(1)));
+
+    let health = gateway.state_health()?;
+    assert_eq!(health.revision, Revision::new(1));
+    assert_eq!(
+        health
+            .domains
+            .iter()
+            .map(|domain| domain.domain)
+            .collect::<Vec<_>>(),
+        vec![
+            HealthDomain::Authority,
+            HealthDomain::Conversation,
+            HealthDomain::Agent,
+            HealthDomain::Project,
+        ]
+    );
+
+    let operation_id = OperationId::from_bytes([0xc1; 32]);
+    let repaired = gateway.repair_state(operation_id)?;
+    assert_eq!(repaired.operation_id, operation_id);
+    assert_eq!(repaired.revision, Revision::new(1));
+    assert_eq!(repaired.domains, health.domains);
     Ok(())
 }
 

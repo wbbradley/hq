@@ -43,10 +43,21 @@ A policy contains URL, read/write access, authentication mode, enabled state, an
 monotonic generation. Configuration operations have a stable 32-byte operation ID and request
 digest. Equal replay is idempotent. Reusing an operation ID with unequal input conflicts. A changed
 policy allocates the next generation atomically. Ordinary work wakes do not change the generation.
+The administration boundary accepts at most 256 current policies. Its bounded status observation
+returns sorted policy state and durable queued, prepared, uncertain, rejected, accepted, staged,
+and quarantined counts with an explicit truncation flag.
 
 A session is recreated only after connection failure, lifecycle restart, or a relevant policy or
 authentication generation change. Disabling/removing a relay stops new work and drains its owner;
 it does not delete accepted audit history, prepared wrappers, or canonical facts.
+
+Local administration uses stable effect identities for policy changes and explicit synchronization.
+Targeted synchronization rejects absent or disabled policy state before the coalesced manager wake.
+After a lost policy response, the client first re-reads status and reports reconciliation when the
+desired generation is already visible; otherwise it repeats the exact effect. Explicit repair is
+separate from relay transport: it reverifies immutable canonical evidence and atomically replaces
+only rebuildable reducer/projection state, reports the four domain-health records at one serialized
+revision, and never deletes relay operational history.
 
 ## Outbound durable states
 

@@ -7,8 +7,8 @@ use hq_application::{
     CommitFacts, ConfigureRelays, ControlHarness, ControlProjects, EffectOutcome, EffectRequest,
     EvidenceIngestOutcome, FactMutation, InspectResource, MutationAttempt, ObserveRevisions,
     ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration,
-    ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest,
-    SynchronizationRequest, WakeDisposition,
+    RelayStatus, ResourceInspectionRequest, ResourceInspectionResult, StateHealth,
+    StateRepairReport, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{FactId, Page, PageCursor, Revision};
 use hq_local_api::RevisionHub;
@@ -192,6 +192,17 @@ impl<R, H, P> QueryDomain for NodeApplicationPorts<'_, R, H, P> {
         self.store
             .canonical_evidence(roots, maximum_facts, maximum_bytes)
     }
+
+    fn state_health(&self) -> Result<StateHealth, ApplicationError> {
+        self.store.state_health()
+    }
+
+    fn repair_state(
+        &self,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<StateRepairReport, ApplicationError> {
+        self.store.repair_state(operation_id)
+    }
 }
 
 impl<R, H, P> CommitFacts for NodeApplicationPorts<'_, R, H, P> {
@@ -226,6 +237,10 @@ impl<R: ConfigureRelays, H, P> ConfigureRelays for NodeApplicationPorts<'_, R, H
         request: &EffectRequest<SynchronizationRequest>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         self.relay.synchronize(request)
+    }
+
+    fn relay_status(&self) -> Result<RelayStatus, ApplicationError> {
+        self.relay.relay_status()
     }
 }
 

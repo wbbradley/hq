@@ -171,6 +171,13 @@ return `RebuildableStateCorrupt`. Neither case triggers implicit repair. This ke
 authoritative batch/rebuild boundary explicit while ordinary ingest uses the continuously checked
 incremental patch path.
 
+The narrow application-state capability also offers a serialized `(revision, reduction index)`
+health snapshot and `(revision, repaired reduction index)` explicit repair. Each pair is produced by one actor
+request, so a concurrent ingest cannot attach a later revision to an earlier health index. The
+repair operation identity is application audit data and does not enter schema tables. This extends
+the existing clean v13 API in place; it adds no table, migration, compatibility path, or storage
+version bump.
+
 ## Durable operational primitives
 
 `mutation_receipts` binds one 32-byte command identity to its 32-byte exact-request digest, a
@@ -195,6 +202,9 @@ and `relay_policies` for the current positive monotonic generation. Equal desire
 operation reuses the generation; changed access, authentication, or enabled state advances it.
 Exact URL spelling is the key. The store owns plain records and validates the bounded `ws`/`wss`
 shape at its transaction boundary; only the node maps these records to `hq-relay` values.
+The node/application administration boundary admits at most 256 current policies and returns an
+explicitly truncated bounded observation; storage pagination remains capable of traversing its
+independently bounded operational collections.
 
 `prepared_relay_outbox` binds one canonical fact/recipient lineage to exact kind-1059 bytes and all
 public envelope metadata. Wrapper IDs and one-use public keys are independently unique. The

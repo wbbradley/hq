@@ -7,8 +7,8 @@ use hq_domain::OperationId;
 
 use crate::conversion::{
     agent_effect_from_v1, agent_effect_to_v1, empty_effect_to_v1, project_command_from_v1,
-    project_command_to_v1, relay_effect_from_v1, resource_effect_from_v1, resource_effect_to_v1,
-    synchronization_effect_from_v1,
+    project_command_to_v1, relay_effect_from_v1, relay_status_to_v1, resource_effect_from_v1,
+    resource_effect_to_v1, state_health_to_v1, state_repair_to_v1, synchronization_effect_from_v1,
 };
 use crate::protocol::v1::{
     BuildMetadata, ErrorClass, ErrorResponse, Id32, LifecycleRequest, LifecycleStatus, Request,
@@ -336,6 +336,15 @@ impl ServerSession {
                 .map_err(|_| invalid_request_error())
                 .and_then(|request| application.synchronize(&request))
                 .map(|outcome| ResponseResult::EmptyEffect(empty_effect_to_v1(&outcome))),
+            Request::RelayStatus => application
+                .relay_status()
+                .map(|status| ResponseResult::RelayStatus(relay_status_to_v1(&status))),
+            Request::StateHealth => application
+                .state_health()
+                .map(|status| ResponseResult::StateHealth(state_health_to_v1(&status))),
+            Request::RepairState { operation_id } => application
+                .repair_state(OperationId::from_bytes(operation_id.bytes()))
+                .map(|report| ResponseResult::StateRepair(state_repair_to_v1(&report))),
             Request::ControlAgentSession(request) => agent_effect_from_v1(&request)
                 .map_err(|_| invalid_request_error())
                 .and_then(|request| application.control_agent_session(&request))

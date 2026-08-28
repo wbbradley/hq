@@ -12,17 +12,18 @@ use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
     CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationKeyDto,
     ConversationPageDto, ConversationPageRequest, DecodeError, DeviceGrantDto, DomainErrorDto,
-    EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass, ErrorResponse,
-    EvidenceIngestOutcomeDto, FrameDecoder, Id32, InvalidationTopic, LifecycleRequest,
-    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MutationAttemptDto, MutationOutcomeDto,
-    MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto, ProjectCommandActionDto,
-    ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto,
-    RelayConfigurationDto, RemoteCommandProgressDto, Request, RequestEnvelope, RequestId,
-    ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
-    ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation,
-    ServerHello, SessionControlDto, SnapshotItem, SubscriptionAcknowledgement,
-    SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
-    VersionRejected, WireMessage, WorktreeProvisioningRequestDto, negotiate,
+    DomainHealthDto, EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass, ErrorResponse,
+    EvidenceIngestOutcomeDto, FrameDecoder, HealthDomainDto, Id32, InvalidationTopic,
+    LifecycleRequest, LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MutationAttemptDto,
+    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
+    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto,
+    RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto,
+    RemoteCommandProgressDto, Request, RequestEnvelope, RequestId, ResourceHealthDto,
+    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
+    ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
+    SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
+    SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
+    VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto, negotiate,
 };
 
 fn build() -> BuildMetadata {
@@ -258,6 +259,53 @@ fn locator() -> ResourceLocatorDto {
         .expect("bounded locator")
 }
 
+fn repair_state_request() -> Request {
+    Request::RepairState {
+        operation_id: Id32::new([39; 32]),
+    }
+}
+
+fn health_domains() -> Vec<DomainHealthDto> {
+    [
+        HealthDomainDto::Authority,
+        HealthDomainDto::Conversation,
+        HealthDomainDto::Agent,
+        HealthDomainDto::Project,
+    ]
+    .into_iter()
+    .map(|domain| DomainHealthDto {
+        domain,
+        projected: 1,
+        unresolved: 0,
+        unauthorized: 0,
+        conflicted: 0,
+        invalid: 0,
+        unsupported: 0,
+        conflicts: 0,
+    })
+    .collect()
+}
+
+fn relay_status_result() -> ResponseResult {
+    ResponseResult::RelayStatus(RelayStatusDto {
+        policies: vec![RelayPolicyStatusDto {
+            endpoint: locator(),
+            access: RelayAccessDto::ReadWrite,
+            authentication: RelayAuthenticationDto::Required,
+            enabled: true,
+            generation: 1,
+        }],
+        queued: 1,
+        prepared: 1,
+        uncertain: 0,
+        rejected: 0,
+        accepted: 1,
+        staged: 0,
+        quarantined: 0,
+        truncated: false,
+    })
+}
+
 #[test]
 fn every_request_notification_and_negotiation_family_interoperates() {
     let mut messages = vec![
@@ -299,8 +347,12 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             locator(),
             RelayAccessDto::ReadWrite,
             RelayAuthenticationDto::OnChallenge,
+            true,
         ))),
         Request::Synchronize(effect(SynchronizationRequestDto::All)),
+        Request::RelayStatus,
+        Request::StateHealth,
+        repair_state_request(),
         Request::ControlAgentSession(effect(
             AgentSessionRequestDto::new(
                 Id32::new([4; 32]),
@@ -368,6 +420,7 @@ fn every_success_and_error_response_family_interoperates() {
         Some("ready".to_owned()),
     )
     .expect("status");
+    let domains = health_domains();
     let results = vec![
         ResponseResult::Lifecycle(lifecycle),
         ResponseResult::AuthoritativeSnapshot(snapshot.clone()),
@@ -390,6 +443,16 @@ fn every_success_and_error_response_family_interoperates() {
             inserted: true,
         }]),
         ResponseResult::EmptyEffect(EffectOutcomeDto::Accepted(())),
+        relay_status_result(),
+        ResponseResult::StateHealth(StateHealthDto {
+            revision: 4,
+            domains: domains.clone(),
+        }),
+        ResponseResult::StateRepair(StateRepairReportDto {
+            operation_id: Id32::new([39; 32]),
+            revision: 4,
+            domains,
+        }),
         ResponseResult::AgentSession(EffectOutcomeDto::Accepted(AgentSessionResultDto::Ready(
             "session-1".to_owned(),
         ))),

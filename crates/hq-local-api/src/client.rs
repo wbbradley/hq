@@ -827,6 +827,9 @@ impl ReconnectingClient {
                 | ResponseResult::CanonicalEvidence(_)
                 | ResponseResult::EvidenceIngest(_)
                 | ResponseResult::EmptyEffect(_)
+                | ResponseResult::RelayStatus(_)
+                | ResponseResult::StateHealth(_)
+                | ResponseResult::StateRepair(_)
                 | ResponseResult::AgentSession(_)
                 | ResponseResult::ResourceInspection(_)
                 | ResponseResult::Empty => {

@@ -57,6 +57,46 @@ impl QueryDomain for ScriptedPorts {
     ) -> Result<Page<hq_application::ConversationEntry>, ApplicationError> {
         Ok(Page::new(Vec::new(), None))
     }
+
+    fn state_health(&self) -> Result<hq_application::StateHealth, ApplicationError> {
+        Ok(scripted_health())
+    }
+
+    fn repair_state(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<hq_application::StateRepairReport, ApplicationError> {
+        let health = scripted_health();
+        Ok(hq_application::StateRepairReport {
+            operation_id,
+            revision: health.revision,
+            domains: health.domains,
+        })
+    }
+}
+
+fn scripted_health() -> hq_application::StateHealth {
+    hq_application::StateHealth {
+        revision: Revision::new(7),
+        domains: [
+            hq_application::HealthDomain::Authority,
+            hq_application::HealthDomain::Conversation,
+            hq_application::HealthDomain::Agent,
+            hq_application::HealthDomain::Project,
+        ]
+        .into_iter()
+        .map(|domain| hq_application::DomainHealth {
+            domain,
+            projected: 0,
+            unresolved: 0,
+            unauthorized: 0,
+            conflicted: 0,
+            invalid: 0,
+            unsupported: 0,
+            conflicts: 0,
+        })
+        .collect(),
+    }
 }
 
 impl CommitFacts for ScriptedPorts {
@@ -113,6 +153,20 @@ impl ConfigureRelays for ScriptedPorts {
             ErrorCategory::Unresolved,
             ErrorCode::new("relay_not_ready").expect("fixture code is valid"),
         )))
+    }
+
+    fn relay_status(&self) -> Result<hq_application::RelayStatus, ApplicationError> {
+        Ok(hq_application::RelayStatus {
+            policies: Vec::new(),
+            queued: 0,
+            prepared: 0,
+            uncertain: 0,
+            rejected: 0,
+            accepted: 0,
+            staged: 0,
+            quarantined: 0,
+            truncated: false,
+        })
     }
 }
 
@@ -269,6 +323,7 @@ fn external_use_cases_preserve_stable_uncertain_and_accepted_outcomes() -> Resul
             endpoint,
             RelayAccess::ReadWrite,
             RelayAuthentication::Required,
+            true,
         ),
     );
 
@@ -287,6 +342,13 @@ fn external_use_cases_preserve_stable_uncertain_and_accepted_outcomes() -> Resul
         application.synchronize(&synchronization)?,
         EffectOutcome::Rejected(error) if error.category() == ErrorCategory::Unresolved
     ));
+    assert!(application.relay_status()?.policies.is_empty());
+    assert_eq!(application.state_health()?.domains.len(), 4);
+    let repair_operation = OperationId::from_bytes([0x39; 32]);
+    assert_eq!(
+        application.repair_state(repair_operation)?.operation_id,
+        repair_operation
+    );
 
     let stop = EffectRequest::new(
         OperationId::from_bytes([0x41; 32]),

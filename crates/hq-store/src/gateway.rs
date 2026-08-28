@@ -3,18 +3,19 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use hq_application::{
-    ApplicationError, ApplicationErrorCode, CanonicalEvidence, CommitFacts, DomainSnapshot,
-    EvidenceIngestOutcome, FactMutation, MutationAttempt, MutationDecision, MutationOutcome,
-    MutationReceipt as ApplicationMutationReceipt, QueryDomain, decode_mutation_outcome,
-    encode_mutation_outcome,
+    ApplicationError, ApplicationErrorCode, CanonicalEvidence, CommitFacts, DomainHealth,
+    DomainSnapshot, EvidenceIngestOutcome, FactMutation, HealthDomain, MutationAttempt,
+    MutationDecision, MutationOutcome, MutationReceipt as ApplicationMutationReceipt, QueryDomain,
+    StateHealth, StateRepairReport, decode_mutation_outcome, encode_mutation_outcome,
 };
-use hq_domain::{FactId, Page, PageCursor};
+use hq_domain::{FactId, OperationId, Page, PageCursor};
 use hq_protocol::{Bip340Signer, CanonicalEventPlan, decode_semantic_event};
-use hq_reducer::{AuthorityPolicy, ConversationKey};
+use hq_reducer::{AuthorityPolicy, ConversationKey, DecisionStatus};
 
 use crate::{
     ApplicationStateHandle, IngestOutcome, LocalMutationDecision, LocalMutationRequest,
-    MutationResultBytes, MutationResultKind, ReplicationHandle, Store, StoreError, StoreErrorClass,
+    MutationResultBytes, MutationResultKind, ReductionDomain, ReductionIndexSnapshot,
+    ReplicationHandle, Store, StoreError, StoreErrorClass,
 };
 
 /// Application-facing store adapter configured with explicit local authoring capabilities.
@@ -75,6 +76,70 @@ impl QueryDomain for StoreGateway {
             .canonical_evidence(roots, maximum_facts, maximum_bytes)
             .map_err(map_store_error)
     }
+
+    fn state_health(&self) -> Result<StateHealth, ApplicationError> {
+        let (revision, index) = self
+            .store
+            .state_health_snapshot()
+            .map_err(map_store_error)?;
+        Ok(StateHealth {
+            revision,
+            domains: domain_health(&index),
+        })
+    }
+
+    fn repair_state(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<StateRepairReport, ApplicationError> {
+        let (revision, index) = self
+            .store
+            .repair_health_snapshot(self.policy)
+            .map_err(map_store_error)?;
+        Ok(StateRepairReport {
+            operation_id,
+            revision,
+            domains: domain_health(&index),
+        })
+    }
+}
+
+fn domain_health(index: &ReductionIndexSnapshot) -> Vec<DomainHealth> {
+    ReductionDomain::ALL
+        .into_iter()
+        .map(|domain| {
+            let mut health = DomainHealth {
+                domain: match domain {
+                    ReductionDomain::Authority => HealthDomain::Authority,
+                    ReductionDomain::Conversation => HealthDomain::Conversation,
+                    ReductionDomain::Agent => HealthDomain::Agent,
+                    ReductionDomain::Project => HealthDomain::Project,
+                },
+                projected: 0,
+                unresolved: 0,
+                unauthorized: 0,
+                conflicted: 0,
+                invalid: 0,
+                unsupported: 0,
+                conflicts: u64::try_from(index.conflicts(domain).len()).unwrap_or(u64::MAX),
+            };
+            for fact_id in index.presentation_order(domain) {
+                let Some(decision) = index.decision(domain, *fact_id) else {
+                    continue;
+                };
+                let count = match decision.status() {
+                    DecisionStatus::Projected => &mut health.projected,
+                    DecisionStatus::Unresolved => &mut health.unresolved,
+                    DecisionStatus::Unauthorized => &mut health.unauthorized,
+                    DecisionStatus::Conflicted => &mut health.conflicted,
+                    DecisionStatus::Invalid => &mut health.invalid,
+                    DecisionStatus::Unsupported => &mut health.unsupported,
+                };
+                *count = count.saturating_add(1);
+            }
+            health
+        })
+        .collect()
 }
 
 impl CommitFacts for StoreGateway {

@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Implement relay policy, synchronization, health, and repair administration** — Add
-  relay add/list/remove, explicit sync, domain/delivery health status, and explicit repair commands
-  over typed local effects and authoritative observations. Preserve stable effect identities,
-  accepted/rejected/uncertain reconciliation, bounded relay policy, offline queues, prompt-wake
-  semantics, and repair as an explicit audited operation. Test response loss, restart, disabled and
-  incompatible relays, stale revisions, offline rendering, redaction, and end-to-end fake-node
-  coverage.
-
 - **[cli/high] Implement mailbox messaging and repository-aware discovery** — Add `ask`, `send`,
   `wait`, `poll`, `get`, human list/filter, answer, cancel/archive, restore, and repository-aware
   mailbox discovery over typed application/local API operations. Preserve stable message identity,

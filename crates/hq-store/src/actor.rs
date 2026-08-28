@@ -224,6 +224,10 @@ enum Request {
     LoadReductionIndex {
         reply: SyncSender<Result<ReductionIndexSnapshot, StoreError>>,
     },
+    StateHealthSnapshot {
+        repair: Option<AuthorityPolicy>,
+        reply: SyncSender<Result<(Revision, ReductionIndexSnapshot), StoreError>>,
+    },
     LoadAuthoritySnapshot {
         reply: SyncSender<Result<AuthorityProjectionSnapshot, StoreError>>,
     },
@@ -403,6 +407,37 @@ impl ReplicationHandle {
 }
 
 impl ApplicationStateHandle {
+    /// Loads revision and the normalized structural index at one serialized store point.
+    pub fn state_health_snapshot(&self) -> Result<(Revision, ReductionIndexSnapshot), StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::StateHealthSnapshot {
+                repair: None,
+                reply,
+            })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Repairs rebuildable state and reports its revision from the same serialized store request.
+    pub fn repair_health_snapshot(
+        &self,
+        policy: AuthorityPolicy,
+    ) -> Result<(Revision, ReductionIndexSnapshot), StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::StateHealthSnapshot {
+                repair: Some(policy),
+                reply,
+            })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Executes one retryable local fact-backed mutation in the serialized store worker.
     pub fn execute_local_mutation(
         &self,
@@ -1109,6 +1144,9 @@ fn run(
             Request::LoadReductionIndex { reply } => {
                 let _ = reply.send(database.load_reduction_index());
             }
+            Request::StateHealthSnapshot { repair, reply } => {
+                let _ = reply.send(load_state_health_snapshot(&mut database, repair));
+            }
             Request::LoadAuthoritySnapshot { reply } => {
                 let _ = reply.send(database.load_authority_snapshot());
             }
@@ -1165,6 +1203,17 @@ fn run(
             }
         }
     }
+}
+
+fn load_state_health_snapshot(
+    database: &mut Database,
+    repair: Option<AuthorityPolicy>,
+) -> Result<(Revision, ReductionIndexSnapshot), StoreError> {
+    let index = match repair {
+        Some(policy) => database.repair(policy)?.persisted().clone(),
+        None => database.load_reduction_index()?,
+    };
+    Ok((database.current_revision()?, index))
 }
 
 fn execute_local_mutation(

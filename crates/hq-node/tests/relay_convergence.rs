@@ -263,6 +263,7 @@ fn configure(component: &RelayNodeComponent, relay: &RelayUrl, identity: u8) {
             endpoint,
             access: RelayAccess::ReadWrite,
             authentication: RelayAuthentication::Disabled,
+            enabled: true,
         },
     );
     assert_eq!(

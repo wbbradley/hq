@@ -9,8 +9,9 @@ use crate::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationPorts,
     AuthoritativeSnapshot, CanonicalEvidence, ConversationEntry, EffectOutcome, EffectRequest,
     EvidenceIngestOutcome, FactMutation, MutationAttempt, MutationOutcome, ProjectCommandOutcome,
-    ProjectCommandRequest, RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult,
-    SubscriptionRequest, SynchronizationRequest, WakeDisposition,
+    ProjectCommandRequest, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ResourceInspectionResult, StateHealth, StateRepairReport, SubscriptionRequest,
+    SynchronizationRequest, WakeDisposition,
 };
 
 /// Durable mutation attempt plus separate post-commit scheduling evidence.
@@ -157,6 +158,24 @@ where
         request: &EffectRequest<SynchronizationRequest>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         self.ports.synchronize(request)
+    }
+
+    /// Loads one bounded authoritative relay and delivery health observation.
+    pub fn relay_status(&self) -> Result<RelayStatus, ApplicationError> {
+        self.ports.relay_status()
+    }
+
+    /// Loads current normalized domain health without mutating it.
+    pub fn state_health(&self) -> Result<StateHealth, ApplicationError> {
+        self.ports.state_health()
+    }
+
+    /// Explicitly reverifies the corpus and atomically replaces rebuildable state.
+    pub fn repair_state(
+        &self,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<StateRepairReport, ApplicationError> {
+        self.ports.repair_state(operation_id)
     }
 
     /// Starts, resumes, or stops one neutral named-agent runtime operation.

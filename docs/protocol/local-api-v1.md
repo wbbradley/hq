@@ -55,6 +55,7 @@ All limits are inclusive. A larger value is rejected before it can become applic
 | provider namespace | 64 bytes, nonempty |
 | provider session | 256 bytes, nonempty |
 | resource locator | 4,096 bytes, nonempty |
+| relay policies in one status | 256, sorted and unique |
 | short names, states, categories, and error codes | 128 bytes, nonempty |
 | content and inert diagnostic detail | 16,384 bytes, nonempty when present |
 
@@ -95,7 +96,8 @@ Request methods are closed and typed:
 - bounded reducer-ordered conversation page;
 - exact retryable canonical-fact mutation;
 - bounded exact canonical-evidence closure query and reverified idempotent import;
-- relay configuration and explicit synchronization effects;
+- relay configuration and explicit synchronization effects, bounded relay/delivery status, domain
+  health, and explicit repair;
 - provider-neutral named-agent session control;
 - read-only resource inspection;
 - exact typed project control, including remote-home routing;
@@ -104,13 +106,22 @@ Request methods are closed and typed:
 
 Successful response families are lifecycle status, authoritative snapshot, conversation page,
 mutation attempt, canonical evidence, evidence-ingest outcomes, empty external effect,
-agent-session effect, resource-inspection effect, typed
+relay status, four-domain state health, explicit repair report, agent-session effect,
+resource-inspection effect, typed
 project-command progress, subscription acknowledgement, and empty acknowledgement. Errors carry a closed class, stable code,
 and optional bounded inert detail. Machine behavior depends on class/code, never detail text.
 
 External effects retain their stable operation ID, exact request digest, issue time, and typed body.
 Their result is `accepted`, `rejected`, or `uncertain`. An uncertain effect must be reconciled under
 the same operation ID before retry; it is not silently translated into success or failure.
+
+Relay status carries sorted current policies with access, authentication, enabled state, and
+positive generation plus bounded delivery-state counts and an explicit truncation bit. State health
+always carries one positive serialized revision and exactly the stable ordered authority,
+conversation, agent, and project domain records. Repair requests carry a caller-selected 32-byte
+operation identity; their report echoes it with the revision and the same complete domain catalog.
+These are passive public-field DTOs. Because HQ has not shipped, the additions complete clean local
+API v1 in place with no compatibility branch or version bump.
 
 ## Authoritative queries
 

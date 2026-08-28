@@ -1,5 +1,38 @@
 # Completed
 
+## 2026-08-28 — Relay synchronization, health, and repair administration
+
+Added `relay add|list|remove|sync|status|repair` over typed application capabilities and local API
+requests. Policy changes retain exact stable effect identities, equal desired state reconciles as an
+unchanged no-op, removal durably disables instead of deleting history, targeted synchronization
+rejects absent or disabled policies, and accepted/rejected/uncertain outcomes retain an audit
+identity in deterministic human and JSON output. Status reports a bounded sorted policy set,
+generation and enabled state, durable queue/delivery counts, and explicit truncation.
+
+State health reports decision and conflict counts for the stable authority, conversation, agent,
+and project catalog. The store actor pairs revision and normalized index in one serialized request;
+explicit repair reverifies immutable evidence, atomically replaces only rebuildable state, and
+returns the repaired index at that same serialization boundary. Policy capacity and active-session
+bounds fail closed. Passive application, wire, and CLI records expose public fields; invariant-owning
+identities and live capabilities remain opaque.
+
+Because HQ has never shipped and has no standing installations, the clean local API v1 and storage
+v13 contracts were completed in place with no migration, compatibility path, or version bump.
+Application/store/protocol contracts, stable-identity and stale-revision tests, real CLI
+add/sync/repair/disable/restart/redaction coverage, and the two-installation fake-relay response-loss
+scenario pass together with locked workspace tests, strict Clippy, build, architecture, protocol,
+causal, behavior-ledger, and dependency gates.
+
+### Original plan entry
+
+- **[cli/high] Implement relay policy, synchronization, health, and repair administration** — Add
+  relay add/list/remove, explicit sync, domain/delivery health status, and explicit repair commands
+  over typed local effects and authoritative observations. Preserve stable effect identities,
+  accepted/rejected/uncertain reconciliation, bounded relay policy, offline queues, prompt-wake
+  semantics, and repair as an explicit audited operation. Test response loss, restart, disabled and
+  incompatible relays, stale revisions, offline rendering, redaction, and end-to-end fake-node
+  coverage.
+
 ## 2026-08-28 — Directional peer and mailbox capability administration
 
 Added `peer add|list|distrust` and `mailbox list|grant|revoke` through public-field application

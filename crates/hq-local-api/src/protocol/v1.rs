@@ -31,6 +31,8 @@ pub const MAX_SNAPSHOT_ITEMS: usize = 16_384;
 pub const MAX_CANONICAL_EVIDENCE_ITEMS: usize = 64;
 /// Maximum aggregate exact event bytes in one transfer.
 pub const MAX_CANONICAL_EVIDENCE_BYTES: usize = 512 * 1024;
+/// Maximum relay policies returned in one health observation.
+pub const MAX_RELAY_STATUS_POLICIES: usize = hq_application::MAX_RELAY_STATUS_POLICIES;
 
 const MUTATION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mutation\0";
 
@@ -549,6 +551,8 @@ pub struct RelayConfigurationDto {
     pub access: RelayAccessDto,
     /// Relay authentication policy.
     pub authentication: RelayAuthenticationDto,
+    /// Whether a relay session owner should exist.
+    pub enabled: bool,
 }
 
 impl RelayConfigurationDto {
@@ -557,13 +561,113 @@ impl RelayConfigurationDto {
         endpoint: ResourceLocatorDto,
         access: RelayAccessDto,
         authentication: RelayAuthenticationDto,
+        enabled: bool,
     ) -> Self {
         Self {
             endpoint,
             access,
             authentication,
+            enabled,
         }
     }
+}
+
+/// Passive current durable policy for one relay.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayPolicyStatusDto {
+    /// Typed relay endpoint.
+    pub endpoint: ResourceLocatorDto,
+    /// Enabled synchronization direction.
+    pub access: RelayAccessDto,
+    /// Connection authentication policy.
+    pub authentication: RelayAuthenticationDto,
+    /// Whether a relay session owner should exist.
+    pub enabled: bool,
+    /// Positive durable policy generation.
+    pub generation: u64,
+}
+
+/// Passive bounded relay and delivery health observation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayStatusDto {
+    /// Current durable relay policies.
+    pub policies: Vec<RelayPolicyStatusDto>,
+    /// Queued canonical delivery intents in the observed page.
+    pub queued: u64,
+    /// Prepared exact delivery lineages in the observed page.
+    pub prepared: u64,
+    /// Uncertain relay attempts in the observed page.
+    pub uncertain: u64,
+    /// Explicitly rejected relay attempts in the observed page.
+    pub rejected: u64,
+    /// Positively accepted relay attempts in the observed page.
+    pub accepted: u64,
+    /// Transient inbound wrappers in the observed page.
+    pub staged: u64,
+    /// Permanently rejected evidence in the observed page.
+    pub quarantined: u64,
+    /// Whether additional durable rows exist beyond the observation.
+    pub truncated: bool,
+}
+
+/// Stable reducer domain name used by health output.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthDomainDto {
+    /// Installation, mailbox, peer, capability, and account authority.
+    Authority,
+    /// Conversation, message, and activity state.
+    Conversation,
+    /// Named agents and provider sessions.
+    Agent,
+    /// Projects, resources, assignments, and control.
+    Project,
+}
+
+/// Passive decision counts for one reducer domain.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainHealthDto {
+    /// Stable domain name.
+    pub domain: HealthDomainDto,
+    /// Admitted facts.
+    pub projected: u64,
+    /// Dependency-incomplete facts.
+    pub unresolved: u64,
+    /// Authority-rejected facts.
+    pub unauthorized: u64,
+    /// Explicitly conflicted facts.
+    pub conflicted: u64,
+    /// Intrinsically invalid facts.
+    pub invalid: u64,
+    /// Unsupported facts.
+    pub unsupported: u64,
+    /// Normalized aggregate/global conflicts.
+    pub conflicts: u64,
+}
+
+/// Passive authoritative domain health observation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateHealthDto {
+    /// Serialized local revision.
+    pub revision: u64,
+    /// Complete fixed domain catalog.
+    pub domains: Vec<DomainHealthDto>,
+}
+
+/// Passive explicit repair result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateRepairReportDto {
+    /// Caller-selected stable audit identity.
+    pub operation_id: Id32,
+    /// Serialized local revision after repair.
+    pub revision: u64,
+    /// Complete repaired domain health.
+    pub domains: Vec<DomainHealthDto>,
 }
 
 /// Explicit synchronization scope.
@@ -872,6 +976,15 @@ pub enum Request {
     ConfigureRelay(EffectRequestDto<RelayConfigurationDto>),
     /// Prompt or reconcile explicit relay synchronization.
     Synchronize(EffectRequestDto<SynchronizationRequestDto>),
+    /// Load bounded authoritative relay and delivery health.
+    RelayStatus,
+    /// Load authoritative reducer-domain health.
+    StateHealth,
+    /// Explicitly reverify the corpus and repair rebuildable state.
+    RepairState {
+        /// Stable caller-selected audit identity.
+        operation_id: Id32,
+    },
     /// Control one provider-neutral named-agent session.
     ControlAgentSession(EffectRequestDto<AgentSessionRequestDto>),
     /// Inspect one typed project resource.
@@ -1519,6 +1632,12 @@ pub enum ResponseResult {
     EvidenceIngest(Vec<EvidenceIngestOutcomeDto>),
     /// Relay configuration or synchronization effect outcome.
     EmptyEffect(EffectOutcomeDto<()>),
+    /// Bounded authoritative relay and delivery health.
+    RelayStatus(RelayStatusDto),
+    /// Authoritative reducer-domain health.
+    StateHealth(StateHealthDto),
+    /// Explicit rebuildable-state repair result.
+    StateRepair(StateRepairReportDto),
     /// Named-agent session effect outcome.
     AgentSession(EffectOutcomeDto<AgentSessionResultDto>),
     /// Resource inspection effect outcome.
@@ -1771,6 +1890,9 @@ impl WireMessage {
                 Request::ControlProject(request) => validate_project_request(request),
                 Request::Lifecycle(_)
                 | Request::AuthoritativeSnapshot
+                | Request::RelayStatus
+                | Request::StateHealth
+                | Request::RepairState { .. }
                 | Request::CancelSubscription { .. } => Ok(()),
             },
             Self::Invalidation(invalidation) => {
@@ -1828,6 +1950,29 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
         Response::Success(ResponseResult::EmptyEffect(outcome)) => {
             validate_effect_outcome(outcome, |()| Ok(()))
         }
+        Response::Success(ResponseResult::RelayStatus(status)) => {
+            if status.policies.len() > MAX_RELAY_STATUS_POLICIES
+                || status
+                    .policies
+                    .windows(2)
+                    .any(|pair| pair[0].endpoint >= pair[1].endpoint)
+            {
+                return Err(ValueError::InvalidValueCombination);
+            }
+            for policy in &status.policies {
+                validate_locator(&policy.endpoint)?;
+                if policy.generation == 0 {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+            }
+            Ok(())
+        }
+        Response::Success(ResponseResult::StateHealth(status)) => {
+            validate_state_health(status.revision, &status.domains)
+        }
+        Response::Success(ResponseResult::StateRepair(report)) => {
+            validate_state_health(report.revision, &report.domains)
+        }
         Response::Success(ResponseResult::AgentSession(outcome)) => {
             validate_effect_outcome(outcome, |result| {
                 if let AgentSessionResultDto::Ready(session) = result {
@@ -1864,6 +2009,19 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
             Ok(())
         }
     }
+}
+
+fn validate_state_health(revision: u64, domains: &[DomainHealthDto]) -> Result<(), ValueError> {
+    if revision == 0
+        || domains.len() != 4
+        || !matches!(domains[0].domain, HealthDomainDto::Authority)
+        || !matches!(domains[1].domain, HealthDomainDto::Conversation)
+        || !matches!(domains[2].domain, HealthDomainDto::Agent)
+        || !matches!(domains[3].domain, HealthDomainDto::Project)
+    {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    Ok(())
 }
 
 fn validate_evidence(evidence: &[CanonicalEvidenceDto]) -> Result<(), ValueError> {

@@ -3,25 +3,28 @@
 use crate::protocol::v1::{
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, CanonicalEvidenceDto,
     ConversationEntryDto, ConversationKeyDto, ConversationPageDto, ConversationPageRequest,
-    DeviceGrantDto, DomainErrorDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
-    EvidenceIngestOutcomeDto, Id32, InvalidationTopic, MAX_CANONICAL_EVIDENCE_BYTES,
-    MAX_CANONICAL_EVIDENCE_ITEMS, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
-    PeerRouteBlockDto, PeerRouteCandidateDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto,
-    RelayAuthenticationDto, RelayConfigurationDto, RemoteCommandProgressDto,
+    DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
+    ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
+    MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MutationAttemptDto,
+    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
+    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
+    ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto, RelayAuthenticationDto,
+    RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
     RemoteCommandResultDto, ResourceHealthDto, ResourceInspectionRequestDto,
     ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, RuntimeObservationDto,
-    SessionControlDto, SnapshotItem, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
+    SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionRequestDto,
+    SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorClass,
     AuthoritativeSnapshot, CanonicalEvidence, ClientAgentLifecycle, ClientMembershipState,
     ClientPeerRouteState, ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection,
-    ClientRemoteCommandStage, ConversationEntry, ConversationKey, EffectOutcome, EffectRequest,
-    EvidenceIngestOutcome, FactMutation, MutationAttempt, MutationDecision, MutationOutcome,
-    MutationReceipt, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
-    ProjectCommandStage, RelayAccess, RelayAuthentication, RelayConfiguration,
-    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, SubscriptionRequest,
+    ClientRemoteCommandStage, ConversationEntry, ConversationKey, DomainHealth, EffectOutcome,
+    EffectRequest, EvidenceIngestOutcome, FactMutation, HealthDomain, MutationAttempt,
+    MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, RelayAccess,
+    RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
     SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
 };
 use hq_domain::{
@@ -593,8 +596,76 @@ pub(crate) fn relay_effect_from_v1(
             RelayAuthenticationDto::OnChallenge => RelayAuthentication::OnChallenge,
             RelayAuthenticationDto::Required => RelayAuthentication::Required,
         },
+        request.body.enabled,
     );
     Ok(effect_from_v1(request, body))
+}
+
+pub(crate) fn relay_status_to_v1(status: &RelayStatus) -> RelayStatusDto {
+    let mut policies = status
+        .policies
+        .iter()
+        .map(|policy| RelayPolicyStatusDto {
+            endpoint: locator_to_v1(&policy.endpoint),
+            access: match policy.access {
+                RelayAccess::Read => RelayAccessDto::Read,
+                RelayAccess::Write => RelayAccessDto::Write,
+                RelayAccess::ReadWrite => RelayAccessDto::ReadWrite,
+            },
+            authentication: match policy.authentication {
+                RelayAuthentication::Disabled => RelayAuthenticationDto::Disabled,
+                RelayAuthentication::OnChallenge => RelayAuthenticationDto::OnChallenge,
+                RelayAuthentication::Required => RelayAuthenticationDto::Required,
+            },
+            enabled: policy.enabled,
+            generation: policy.generation,
+        })
+        .collect::<Vec<_>>();
+    policies.sort_by(|left, right| left.endpoint.cmp(&right.endpoint));
+    RelayStatusDto {
+        policies,
+        queued: u64::try_from(status.queued).unwrap_or(u64::MAX),
+        prepared: u64::try_from(status.prepared).unwrap_or(u64::MAX),
+        uncertain: u64::try_from(status.uncertain).unwrap_or(u64::MAX),
+        rejected: u64::try_from(status.rejected).unwrap_or(u64::MAX),
+        accepted: u64::try_from(status.accepted).unwrap_or(u64::MAX),
+        staged: u64::try_from(status.staged).unwrap_or(u64::MAX),
+        quarantined: u64::try_from(status.quarantined).unwrap_or(u64::MAX),
+        truncated: status.truncated,
+    }
+}
+
+pub(crate) fn state_health_to_v1(status: &StateHealth) -> StateHealthDto {
+    StateHealthDto {
+        revision: status.revision.value(),
+        domains: status.domains.iter().map(domain_health_to_v1).collect(),
+    }
+}
+
+pub(crate) fn state_repair_to_v1(report: &StateRepairReport) -> StateRepairReportDto {
+    StateRepairReportDto {
+        operation_id: Id32::new(*report.operation_id.as_bytes()),
+        revision: report.revision.value(),
+        domains: report.domains.iter().map(domain_health_to_v1).collect(),
+    }
+}
+
+fn domain_health_to_v1(health: &DomainHealth) -> DomainHealthDto {
+    DomainHealthDto {
+        domain: match health.domain {
+            HealthDomain::Authority => HealthDomainDto::Authority,
+            HealthDomain::Conversation => HealthDomainDto::Conversation,
+            HealthDomain::Agent => HealthDomainDto::Agent,
+            HealthDomain::Project => HealthDomainDto::Project,
+        },
+        projected: health.projected,
+        unresolved: health.unresolved,
+        unauthorized: health.unauthorized,
+        conflicted: health.conflicted,
+        invalid: health.invalid,
+        unsupported: health.unsupported,
+        conflicts: health.conflicts,
+    }
 }
 
 pub(crate) fn synchronization_effect_from_v1(

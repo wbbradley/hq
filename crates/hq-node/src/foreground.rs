@@ -5,7 +5,7 @@ use std::{error::Error, fmt, future::Future, num::NonZeroUsize, sync::Arc, time:
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorCode,
     ConfigureRelays, ControlHarness, EffectOutcome, EffectRequest, InspectResource, PublishWake,
-    RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult,
+    RelayConfiguration, RelayStatus, ResourceInspectionRequest, ResourceInspectionResult,
     SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{MailboxId, Revision, Timestamp};
@@ -267,6 +267,10 @@ impl ConfigureRelays for DormantNodeComponent {
         &self,
         _request: &EffectRequest<SynchronizationRequest>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
+        unavailable()
+    }
+
+    fn relay_status(&self) -> Result<RelayStatus, ApplicationError> {
         unavailable()
     }
 }

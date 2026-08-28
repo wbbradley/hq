@@ -28,9 +28,11 @@ use hq_local_api::{
     ClientEvent, InitialView,
     protocol::v1::{
         AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto,
-        DeviceGrantDto, Id32, LifecycleRequest, LifecycleState, MutationAttemptDto,
-        MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto, Request,
-        ResourceSchemeDto, ResponseResult, SnapshotItem,
+        DeviceGrantDto, EffectOutcomeDto, EffectRequestDto, HealthDomainDto, Id32,
+        LifecycleRequest, LifecycleState, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
+        PeerRouteBlockDto, PeerRouteCandidateDto, RelayAccessDto, RelayAuthenticationDto,
+        RelayConfigurationDto, RelayStatusDto, Request, ResourceLocatorDto, ResourceSchemeDto,
+        ResponseResult, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
     },
 };
 use hq_protocol::VerifiedPairingInvitation;
@@ -196,6 +198,105 @@ pub enum MailboxCommand {
         /// Exact peer installation.
         peer_id: InstallationId,
     },
+}
+
+/// Closed relay policy, synchronization, and health administration behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RelayCommand {
+    /// Add or replace one enabled relay policy.
+    Add {
+        /// Validated WebSocket relay endpoint.
+        endpoint: RelayEndpoint,
+        /// Enabled synchronization direction.
+        access: RelayAccessDto,
+        /// Connection authentication policy.
+        authentication: RelayAuthenticationDto,
+    },
+    /// Inspect bounded durable relay and delivery health.
+    List,
+    /// Disable one existing relay policy without erasing history.
+    Remove {
+        /// Validated WebSocket relay endpoint.
+        endpoint: RelayEndpoint,
+    },
+    /// Prompt all relays or one exact relay to perform pending work.
+    Sync {
+        /// Optional exact relay; absence prompts all configured relays.
+        endpoint: Option<RelayEndpoint>,
+    },
+    /// Inspect bounded durable relay and delivery health.
+    Status,
+    /// Explicitly reverify the corpus and repair every rebuildable domain index.
+    Repair,
+}
+
+/// Passive current relay policy presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayPolicyView {
+    /// Exact WebSocket endpoint.
+    pub endpoint: String,
+    /// Stable read/write access label.
+    pub access: String,
+    /// Stable authentication label.
+    pub authentication: String,
+    /// Whether a session owner should exist.
+    pub enabled: bool,
+    /// Positive durable policy generation.
+    pub generation: u64,
+}
+
+/// Passive bounded relay and delivery administration result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayAdminView {
+    /// Stable operation label.
+    pub operation: &'static str,
+    /// Definite or reconcilable effect outcome, when an effect was requested.
+    pub outcome: Option<String>,
+    /// Stable operation identity for uncertain reconciliation, when present.
+    pub operation_id: Option<[u8; 32]>,
+    /// Serialized local revision for the domain-health observation.
+    pub revision: u64,
+    /// Complete reducer-domain health in stable order.
+    pub domains: Vec<DomainHealthView>,
+    /// Current durable policies.
+    pub policies: Vec<RelayPolicyView>,
+    /// Queued canonical delivery intents in the bounded observation.
+    pub queued: u64,
+    /// Prepared exact delivery lineages in the bounded observation.
+    pub prepared: u64,
+    /// Uncertain relay attempts in the bounded observation.
+    pub uncertain: u64,
+    /// Explicitly rejected relay attempts in the bounded observation.
+    pub rejected: u64,
+    /// Positively accepted relay attempts in the bounded observation.
+    pub accepted: u64,
+    /// Transient inbound wrappers in the bounded observation.
+    pub staged: u64,
+    /// Permanently rejected evidence in the bounded observation.
+    pub quarantined: u64,
+    /// Whether additional rows exist beyond the bounded observation.
+    pub truncated: bool,
+}
+
+/// Passive decision counts for one reducer domain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DomainHealthView {
+    /// Stable reducer domain name.
+    pub domain: String,
+    /// Admitted facts.
+    pub projected: u64,
+    /// Dependency-incomplete facts.
+    pub unresolved: u64,
+    /// Authority-rejected facts.
+    pub unauthorized: u64,
+    /// Explicitly conflicted facts.
+    pub conflicted: u64,
+    /// Intrinsically invalid facts.
+    pub invalid: u64,
+    /// Unsupported facts.
+    pub unsupported: u64,
+    /// Normalized aggregate/global conflicts.
+    pub conflicts: u64,
 }
 
 /// Passive pairing operation result safe for human and machine output.
@@ -468,6 +569,13 @@ pub enum CliCommand {
         /// Validated installation state layout.
         state: StatePaths,
     },
+    /// Execute one relay administration operation through the authenticated local API.
+    Relay {
+        /// Requested relay behavior.
+        action: RelayCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
     /// Execute one daemon lifecycle command against an explicit installation layout.
     Daemon {
         /// Requested lifecycle behavior.
@@ -555,6 +663,8 @@ pub enum CliError {
     HumanState,
     /// Directional route or mailbox authority was absent, ambiguous, stale, or inconsistent.
     AuthorityState,
+    /// Relay policy, synchronization, or health state was unavailable or inconsistent.
+    RelayState,
     /// Pairing evidence or its filesystem location failed strict validation.
     PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
@@ -583,6 +693,9 @@ impl fmt::Display for CliError {
             }
             Self::AuthorityState => {
                 formatter.write_str("peer or mailbox authority is unavailable or ambiguous")
+            }
+            Self::RelayState => {
+                formatter.write_str("relay policy or delivery state is unavailable or inconsistent")
             }
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
@@ -671,6 +784,11 @@ impl CliError {
             Self::AuthorityState => (
                 "authority.state_unavailable",
                 "peer or mailbox authority is absent, stale, ambiguous, or inconsistent",
+                CliExitClass::Failure,
+            ),
+            Self::RelayState => (
+                "relay.state_unavailable",
+                "relay policy or delivery state is unavailable or inconsistent",
                 CliExitClass::Failure,
             ),
             Self::PairingArtifact => (
@@ -763,6 +881,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
         Some("human") => parse_human(&rest, state_root.as_ref())?,
         Some("peer") => parse_peer(&rest, state_root.as_ref())?,
         Some("mailbox") => parse_mailbox(&rest, state_root.as_ref())?,
+        Some("relay") => parse_relay_command(&rest, state_root.as_ref())?,
         Some("daemon") if rest.as_slice() == [OsString::from("--help")] => CliCommand::Help {
             topic: vec!["daemon".to_owned()],
         },
@@ -792,6 +911,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 | CliCommand::Human { .. }
                 | CliCommand::Peer { .. }
                 | CliCommand::Mailbox { .. }
+                | CliCommand::Relay { .. }
         )
     {
         return Err(CliError::Arguments);
@@ -846,6 +966,73 @@ fn parse_mailbox(
         action,
         state: parsed_state(state_root)?,
     })
+}
+
+fn parse_relay_command(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match arguments {
+        [action] if action == "list" => RelayCommand::List,
+        [action] if action == "status" => RelayCommand::Status,
+        [action] if action == "repair" => RelayCommand::Repair,
+        [action] if action == "sync" => RelayCommand::Sync { endpoint: None },
+        [action, endpoint] if action == "sync" => RelayCommand::Sync {
+            endpoint: Some(parse_relay(endpoint)?),
+        },
+        [action, endpoint] if action == "remove" => RelayCommand::Remove {
+            endpoint: parse_relay(endpoint)?,
+        },
+        [action, endpoint, options @ ..] if action == "add" => {
+            let (access, authentication) = parse_relay_policy_options(options)?;
+            RelayCommand::Add {
+                endpoint: parse_relay(endpoint)?,
+                access,
+                authentication,
+            }
+        }
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::Relay {
+        action,
+        state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_relay_policy_options(
+    options: &[OsString],
+) -> Result<(RelayAccessDto, RelayAuthenticationDto), CliError> {
+    let mut access = RelayAccessDto::ReadWrite;
+    let mut authentication = RelayAuthenticationDto::OnChallenge;
+    let mut saw_access = false;
+    let mut saw_authentication = false;
+    let mut index = 0;
+    while index < options.len() {
+        match options[index].to_str() {
+            Some("--access") if !saw_access => {
+                access = match options.get(index + 1).and_then(|value| value.to_str()) {
+                    Some("read") => RelayAccessDto::Read,
+                    Some("write") => RelayAccessDto::Write,
+                    Some("read-write") => RelayAccessDto::ReadWrite,
+                    _ => return Err(CliError::Arguments),
+                };
+                saw_access = true;
+                index += 2;
+            }
+            Some("--auth") if !saw_authentication => {
+                authentication = match options.get(index + 1).and_then(|value| value.to_str()) {
+                    Some("disabled") => RelayAuthenticationDto::Disabled,
+                    Some("on-challenge") => RelayAuthenticationDto::OnChallenge,
+                    Some("required") => RelayAuthenticationDto::Required,
+                    _ => return Err(CliError::Arguments),
+                };
+                saw_authentication = true;
+                index += 2;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    Ok((access, authentication))
 }
 
 fn parse_identity(
@@ -1093,6 +1280,9 @@ pub fn run_cli_with_input(
         CliCommand::Mailbox { action, state } => {
             return render_result(invocation.output, &run_mailbox(action, state)?);
         }
+        CliCommand::Relay { action, state } => {
+            return render_result(invocation.output, &run_relay(action, state)?);
+        }
         CliCommand::Help { .. } | CliCommand::Version | CliCommand::Daemon { .. } => {}
     }
     let CliCommand::Daemon { action, state } = &invocation.command else {
@@ -1104,7 +1294,8 @@ pub fn run_cli_with_input(
             | CliCommand::Configuration { .. }
             | CliCommand::Human { .. }
             | CliCommand::Peer { .. }
-            | CliCommand::Mailbox { .. } => unreachable!(),
+            | CliCommand::Mailbox { .. }
+            | CliCommand::Relay { .. } => unreachable!(),
         };
     };
     let runtime = RuntimePaths::new(state.root().join("runtime"))
@@ -1341,6 +1532,326 @@ fn run_mailbox(action: &MailboxCommand, state: &StatePaths) -> Result<CliResult,
             MailboxCommand::Revoke { .. } => "mailbox_revoke",
         },
     ))))
+}
+
+fn run_relay(action: &RelayCommand, state: &StatePaths) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let (operation, outcome, operation_id) = match action {
+        RelayCommand::List => ("relay_list", None, None),
+        RelayCommand::Status => ("relay_status", None, None),
+        RelayCommand::Add {
+            endpoint,
+            access,
+            authentication,
+        } => {
+            let body = relay_configuration(endpoint, *access, *authentication, true)?;
+            let (outcome, operation_id) = configure_relay(&mut client, body)?;
+            ("relay_add", Some(outcome), operation_id)
+        }
+        RelayCommand::Remove { endpoint } => {
+            let status = relay_status(&mut client)?;
+            let Some(policy) = status
+                .policies
+                .iter()
+                .find(|policy| policy.endpoint.value == endpoint.as_str())
+            else {
+                return Ok(CliResult::RelayAdmin(Box::new(relay_admin_view(
+                    "relay_remove",
+                    Some("unchanged".to_owned()),
+                    None,
+                    status,
+                    state_health(&mut client)?,
+                ))));
+            };
+            if !policy.enabled {
+                return Ok(CliResult::RelayAdmin(Box::new(relay_admin_view(
+                    "relay_remove",
+                    Some("unchanged".to_owned()),
+                    None,
+                    status,
+                    state_health(&mut client)?,
+                ))));
+            }
+            let body = RelayConfigurationDto::new(
+                policy.endpoint.clone(),
+                policy.access,
+                policy.authentication,
+                false,
+            );
+            let (outcome, operation_id) = configure_relay(&mut client, body)?;
+            ("relay_remove", Some(outcome), operation_id)
+        }
+        RelayCommand::Sync { endpoint } => {
+            let body = endpoint
+                .as_ref()
+                .map_or(Ok(SynchronizationRequestDto::All), |endpoint| {
+                    relay_locator(endpoint).map(SynchronizationRequestDto::Relay)
+                })?;
+            let (outcome, operation_id) = synchronize_relay(&mut client, body)?;
+            ("relay_sync", Some(outcome), operation_id)
+        }
+        RelayCommand::Repair => {
+            let health = state_health(&mut client)?;
+            let operation_id = stable_repair_operation(health.revision);
+            repair_state(&mut client, operation_id)?;
+            (
+                "relay_repair",
+                Some("repaired".to_owned()),
+                Some(operation_id),
+            )
+        }
+    };
+    let status = relay_status(&mut client)?;
+    let health = state_health(&mut client)?;
+    Ok(CliResult::RelayAdmin(Box::new(relay_admin_view(
+        operation,
+        outcome,
+        operation_id,
+        status,
+        health,
+    ))))
+}
+
+fn relay_configuration(
+    endpoint: &RelayEndpoint,
+    access: RelayAccessDto,
+    authentication: RelayAuthenticationDto,
+    enabled: bool,
+) -> Result<RelayConfigurationDto, CliError> {
+    Ok(RelayConfigurationDto::new(
+        relay_locator(endpoint)?,
+        access,
+        authentication,
+        enabled,
+    ))
+}
+
+fn relay_locator(endpoint: &RelayEndpoint) -> Result<ResourceLocatorDto, CliError> {
+    ResourceLocatorDto::new(ResourceSchemeDto::Opaque, endpoint.as_str().to_owned())
+        .map_err(|_| CliError::Arguments)
+}
+
+fn relay_status(client: &mut LocalNodeClient) -> Result<RelayStatusDto, CliError> {
+    for _ in 0..2 {
+        match client.request(Request::RelayStatus)? {
+            ClientEvent::Response {
+                result: ResponseResult::RelayStatus(status),
+                ..
+            } => return Ok(status),
+            ClientEvent::RequestLost(_) => {}
+            _ => return Err(CliError::RelayState),
+        }
+    }
+    Err(CliError::RelayState)
+}
+
+fn state_health(client: &mut LocalNodeClient) -> Result<StateHealthDto, CliError> {
+    for _ in 0..2 {
+        match client.request(Request::StateHealth)? {
+            ClientEvent::Response {
+                result: ResponseResult::StateHealth(status),
+                ..
+            } => return Ok(status),
+            ClientEvent::RequestLost(_) => {}
+            _ => return Err(CliError::RelayState),
+        }
+    }
+    Err(CliError::RelayState)
+}
+
+fn stable_repair_operation(revision: u64) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-cli-repair-operation-v1\0");
+    digest.update(revision.to_be_bytes());
+    digest.finalize().into()
+}
+
+fn repair_state(client: &mut LocalNodeClient, operation_id: [u8; 32]) -> Result<(), CliError> {
+    for _ in 0..2 {
+        match client.request(Request::RepairState {
+            operation_id: Id32::new(operation_id),
+        })? {
+            ClientEvent::Response {
+                result: ResponseResult::StateRepair(report),
+                ..
+            } if report.operation_id.bytes() == operation_id => return Ok(()),
+            ClientEvent::RequestLost(_) => {}
+            _ => return Err(CliError::RelayState),
+        }
+    }
+    Err(CliError::RelayState)
+}
+
+fn configure_relay(
+    client: &mut LocalNodeClient,
+    body: RelayConfigurationDto,
+) -> Result<(String, Option<[u8; 32]>), CliError> {
+    let prior = relay_status(client)?;
+    if relay_policy_matches(&prior, &body) {
+        return Ok(("unchanged".to_owned(), None));
+    }
+    let generation = prior
+        .policies
+        .iter()
+        .find(|policy| policy.endpoint == body.endpoint)
+        .map_or(0, |policy| policy.generation);
+    let request = stable_relay_effect(b"configure", generation, body)?;
+    for _ in 0..2 {
+        match client.request(Request::ConfigureRelay(request.clone()))? {
+            ClientEvent::Response {
+                result: ResponseResult::EmptyEffect(outcome),
+                ..
+            } => return effect_outcome(&outcome, request.operation_id.bytes()),
+            ClientEvent::RequestLost(_) => {
+                if relay_policy_matches(&relay_status(client)?, &request.body) {
+                    return Ok(("reconciled".to_owned(), Some(request.operation_id.bytes())));
+                }
+            }
+            _ => return Err(CliError::RelayState),
+        }
+    }
+    Err(CliError::RelayState)
+}
+
+fn synchronize_relay(
+    client: &mut LocalNodeClient,
+    body: SynchronizationRequestDto,
+) -> Result<(String, Option<[u8; 32]>), CliError> {
+    let request = stable_relay_effect(b"synchronize", 0, body)?;
+    for _ in 0..2 {
+        match client.request(Request::Synchronize(request.clone()))? {
+            ClientEvent::Response {
+                result: ResponseResult::EmptyEffect(outcome),
+                ..
+            } => return effect_outcome(&outcome, request.operation_id.bytes()),
+            ClientEvent::RequestLost(_) => {}
+            _ => return Err(CliError::RelayState),
+        }
+    }
+    Err(CliError::RelayState)
+}
+
+fn stable_relay_effect<T>(
+    domain: &[u8],
+    generation: u64,
+    body: T,
+) -> Result<EffectRequestDto<T>, CliError>
+where
+    T: serde::Serialize,
+{
+    let body_bytes = serde_json::to_vec(&body).map_err(|_| CliError::Runtime)?;
+    let mut operation = Sha256::new();
+    operation.update(b"hq-cli-relay-operation-v1\0");
+    operation.update(domain);
+    operation.update(generation.to_be_bytes());
+    operation.update(&body_bytes);
+    let operation_id = Id32::new(operation.finalize().into());
+    let mut request = Sha256::new();
+    request.update(b"hq-cli-relay-request-v1\0");
+    request.update(operation_id.bytes());
+    request.update(0_i64.to_be_bytes());
+    request.update(&body_bytes);
+    Ok(EffectRequestDto::new(
+        operation_id,
+        Id32::new(request.finalize().into()),
+        0,
+        body,
+    ))
+}
+
+fn relay_policy_matches(status: &RelayStatusDto, desired: &RelayConfigurationDto) -> bool {
+    status.policies.iter().any(|policy| {
+        policy.endpoint == desired.endpoint
+            && policy.access == desired.access
+            && policy.authentication == desired.authentication
+            && policy.enabled == desired.enabled
+    })
+}
+
+fn effect_outcome(
+    outcome: &EffectOutcomeDto<()>,
+    expected_operation_id: [u8; 32],
+) -> Result<(String, Option<[u8; 32]>), CliError> {
+    match outcome {
+        EffectOutcomeDto::Accepted(()) => Ok(("accepted".to_owned(), Some(expected_operation_id))),
+        EffectOutcomeDto::Rejected(_) => Ok(("rejected".to_owned(), Some(expected_operation_id))),
+        EffectOutcomeDto::Uncertain(operation_id)
+            if operation_id.bytes() == expected_operation_id =>
+        {
+            Ok(("uncertain".to_owned(), Some(expected_operation_id)))
+        }
+        EffectOutcomeDto::Uncertain(_) => Err(CliError::RelayState),
+    }
+}
+
+fn relay_admin_view(
+    operation: &'static str,
+    outcome: Option<String>,
+    operation_id: Option<[u8; 32]>,
+    status: RelayStatusDto,
+    health: StateHealthDto,
+) -> RelayAdminView {
+    RelayAdminView {
+        operation,
+        outcome,
+        operation_id,
+        revision: health.revision,
+        domains: health
+            .domains
+            .into_iter()
+            .map(|domain| DomainHealthView {
+                domain: match domain.domain {
+                    HealthDomainDto::Authority => "authority",
+                    HealthDomainDto::Conversation => "conversation",
+                    HealthDomainDto::Agent => "agent",
+                    HealthDomainDto::Project => "project",
+                }
+                .to_owned(),
+                projected: domain.projected,
+                unresolved: domain.unresolved,
+                unauthorized: domain.unauthorized,
+                conflicted: domain.conflicted,
+                invalid: domain.invalid,
+                unsupported: domain.unsupported,
+                conflicts: domain.conflicts,
+            })
+            .collect(),
+        policies: status
+            .policies
+            .into_iter()
+            .map(|policy| RelayPolicyView {
+                endpoint: policy.endpoint.value,
+                access: relay_access_label(policy.access).to_owned(),
+                authentication: relay_authentication_label(policy.authentication).to_owned(),
+                enabled: policy.enabled,
+                generation: policy.generation,
+            })
+            .collect(),
+        queued: status.queued,
+        prepared: status.prepared,
+        uncertain: status.uncertain,
+        rejected: status.rejected,
+        accepted: status.accepted,
+        staged: status.staged,
+        quarantined: status.quarantined,
+        truncated: status.truncated,
+    }
+}
+
+const fn relay_access_label(access: RelayAccessDto) -> &'static str {
+    match access {
+        RelayAccessDto::Read => "read",
+        RelayAccessDto::Write => "write",
+        RelayAccessDto::ReadWrite => "read-write",
+    }
+}
+
+const fn relay_authentication_label(authentication: RelayAuthenticationDto) -> &'static str {
+    match authentication {
+        RelayAuthenticationDto::Disabled => "disabled",
+        RelayAuthenticationDto::OnChallenge => "on-challenge",
+        RelayAuthenticationDto::Required => "required",
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2760,6 +3271,7 @@ enum CliResult {
     HumanPairing(HumanPairingView),
     HumanDevices(Box<HumanDevicesView>),
     AuthorityAdmin(Box<AuthorityAdminView>),
+    RelayAdmin(Box<RelayAdminView>),
     Completed {
         operation: &'static str,
     },
@@ -2857,6 +3369,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             }),
         ),
         (format, CliResult::AuthorityAdmin(view)) => render_authority_admin_result(format, view),
+        (format, CliResult::RelayAdmin(view)) => render_relay_admin_result(format, view),
         (CliOutputFormat::Json, CliResult::Completed { operation }) => {
             machine_record("completed", &serde_json::json!({ "operation": operation }))
         }
@@ -2881,6 +3394,100 @@ fn render_authority_admin_result(
         CliOutputFormat::Human => render_authority_admin(view),
         CliOutputFormat::Json => machine_record("authority_admin", &authority_admin_json(view)),
     }
+}
+
+fn render_relay_admin_result(
+    format: CliOutputFormat,
+    view: &RelayAdminView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => render_relay_admin(view),
+        CliOutputFormat::Json => machine_record("relay_admin", &relay_admin_json(view)),
+    }
+}
+
+fn relay_admin_json(view: &RelayAdminView) -> serde_json::Value {
+    serde_json::json!({
+        "accepted": view.accepted,
+        "domains": view.domains.iter().map(|domain| serde_json::json!({
+            "conflicted": domain.conflicted,
+            "conflicts": domain.conflicts,
+            "domain": domain.domain,
+            "invalid": domain.invalid,
+            "projected": domain.projected,
+            "unauthorized": domain.unauthorized,
+            "unresolved": domain.unresolved,
+            "unsupported": domain.unsupported,
+        })).collect::<Vec<_>>(),
+        "operation": view.operation,
+        "operation_id": view.operation_id.map(|identity| encode_id(&identity)),
+        "outcome": view.outcome,
+        "policies": view.policies.iter().map(|policy| serde_json::json!({
+            "access": policy.access,
+            "authentication": policy.authentication,
+            "enabled": policy.enabled,
+            "endpoint": policy.endpoint,
+            "generation": policy.generation,
+        })).collect::<Vec<_>>(),
+        "prepared": view.prepared,
+        "quarantined": view.quarantined,
+        "queued": view.queued,
+        "rejected": view.rejected,
+        "revision": view.revision,
+        "staged": view.staged,
+        "truncated": view.truncated,
+        "uncertain": view.uncertain,
+    })
+}
+
+fn render_relay_admin(view: &RelayAdminView) -> Result<String, CliError> {
+    let operation_id = view
+        .operation_id
+        .map_or_else(|| "none".to_owned(), |identity| encode_id(&identity));
+    let mut output = format!(
+        "operation={} outcome={} operation_id={} revision={} policies={} queued={} prepared={} uncertain={} rejected={} accepted={} staged={} quarantined={} truncated={}\n",
+        view.operation,
+        view.outcome.as_deref().unwrap_or("none"),
+        operation_id,
+        view.revision,
+        view.policies.len(),
+        view.queued,
+        view.prepared,
+        view.uncertain,
+        view.rejected,
+        view.accepted,
+        view.staged,
+        view.quarantined,
+        view.truncated,
+    );
+    for domain in &view.domains {
+        writeln!(
+            output,
+            "domain={} projected={} unresolved={} unauthorized={} conflicted={} invalid={} unsupported={} conflicts={}",
+            domain.domain,
+            domain.projected,
+            domain.unresolved,
+            domain.unauthorized,
+            domain.conflicted,
+            domain.invalid,
+            domain.unsupported,
+            domain.conflicts,
+        )
+        .map_err(|_| CliError::Runtime)?;
+    }
+    for policy in &view.policies {
+        writeln!(
+            output,
+            "relay={} access={} authentication={} enabled={} generation={}",
+            policy.endpoint,
+            policy.access,
+            policy.authentication,
+            policy.enabled,
+            policy.generation,
+        )
+        .map_err(|_| CliError::Runtime)?;
+    }
+    Ok(output)
 }
 
 fn authority_admin_json(view: &AuthorityAdminView) -> serde_json::Value {
@@ -3147,7 +3754,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  peer            Manage directional peer routes\n  mailbox         Manage directional mailbox capabilities\n  daemon          Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  peer            Manage directional peer routes\n  mailbox         Manage directional mailbox capabilities\n  relay           Manage relay policy, synchronization, and health\n  daemon          Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
         ),
         [command] if command == "version" => Some(
@@ -3177,6 +3784,10 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] mailbox <COMMAND>\n\n\
              Commands:\n  list\n  grant MAILBOX_ID PEER_INSTALLATION_ID\n  revoke MAILBOX_ID PEER_INSTALLATION_ID\n\nMailbox capability commands require an exact locally owned mailbox and uniquely routable peer.\n",
         ),
+        [command] if command == "relay" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] relay <COMMAND>\n\n\
+             Commands:\n  add URL [--access read|write|read-write] [--auth disabled|on-challenge|required]\n  list\n  remove URL\n  sync [URL]\n  status\n  repair\n\nRelay removal disables the durable policy without erasing delivery history. Status is a bounded authoritative observation. Repair explicitly reverifies the immutable corpus and atomically replaces rebuildable indexes.\n",
+        ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
              Commands:\n  run        Own the node in the foreground\n  status     Probe without starting a node\n  readiness  Return a ready node, starting one when absent\n  stop       Converge the node to absence\n  restart    Converge on a fresh ready generation\n",
@@ -3197,7 +3808,12 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                 || (command == "peer"
                     && matches!(action.as_str(), "add" | "list" | "distrust"))
                 || (command == "mailbox"
-                    && matches!(action.as_str(), "list" | "grant" | "revoke")) =>
+                    && matches!(action.as_str(), "list" | "grant" | "revoke"))
+                || (command == "relay"
+                    && matches!(
+                        action.as_str(),
+                        "add" | "list" | "remove" | "sync" | "status" | "repair"
+                    )) =>
         {
             match command.as_str() {
                 "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
@@ -3206,6 +3822,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                 "human" => Some("Use `hq help human` for human command details.\n"),
                 "peer" => Some("Use `hq help peer` for peer command details.\n"),
                 "mailbox" => Some("Use `hq help mailbox` for mailbox command details.\n"),
+                "relay" => Some("Use `hq help relay` for relay command details.\n"),
                 _ => None,
             }
         }
@@ -3295,14 +3912,16 @@ mod tests {
 
     use super::{
         CliCommand, CliError, CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand,
-        HumanDeviceState, IdentityCommand, MailboxCommand, PeerCommand, execute_cli,
-        human_devices_view, human_view, pairing_grant_id, parse_cli, read_password, run_cli,
+        HumanDeviceState, IdentityCommand, MailboxCommand, PeerCommand, RelayCommand,
+        effect_outcome, execute_cli, human_devices_view, human_view, pairing_grant_id, parse_cli,
+        read_password, run_cli, stable_relay_effect, stable_repair_operation,
     };
     use hq_domain::{
         AccountId, FactId, InstallationAddress, InstallationId, RelayHints, SigningPublicKey,
     };
     use hq_local_api::protocol::v1::{
-        AuthoritativeSnapshotDto, DeviceGrantDto, Id32, SnapshotItem,
+        AuthoritativeSnapshotDto, DeviceGrantDto, EffectOutcomeDto, Id32, RelayAccessDto,
+        RelayAuthenticationDto, SnapshotItem, SynchronizationRequestDto,
     };
 
     #[test]
@@ -3609,6 +4228,83 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_relay_policy_sync_health_and_repair_administration() {
+        let add = parse_cli([
+            OsString::from("relay"),
+            OsString::from("add"),
+            OsString::from("wss://relay.example"),
+            OsString::from("--access"),
+            OsString::from("read"),
+            OsString::from("--auth"),
+            OsString::from("required"),
+        ])
+        .expect("relay add parses");
+        assert!(matches!(
+            add.command,
+            CliCommand::Relay {
+                action: RelayCommand::Add {
+                    access: RelayAccessDto::Read,
+                    authentication: RelayAuthenticationDto::Required,
+                    ..
+                },
+                ..
+            }
+        ));
+        for action in ["list", "status", "repair"] {
+            assert!(matches!(
+                parse_cli([OsString::from("relay"), OsString::from(action)])
+                    .expect("relay command parses")
+                    .command,
+                CliCommand::Relay { .. }
+            ));
+        }
+        assert!(matches!(
+            parse_cli([
+                OsString::from("relay"),
+                OsString::from("sync"),
+                OsString::from("wss://relay.example"),
+            ])
+            .expect("relay sync parses")
+            .command,
+            CliCommand::Relay {
+                action: RelayCommand::Sync { endpoint: Some(_) },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn relay_and_repair_effect_identities_are_stable_and_revision_sensitive() {
+        let first = stable_relay_effect(b"synchronize", 3, SynchronizationRequestDto::All)
+            .expect("effect builds");
+        let replay = stable_relay_effect(b"synchronize", 3, SynchronizationRequestDto::All)
+            .expect("effect replays");
+        let next_generation =
+            stable_relay_effect(b"synchronize", 4, SynchronizationRequestDto::All)
+                .expect("new generation builds");
+        assert_eq!(first, replay);
+        assert_ne!(first.operation_id, next_generation.operation_id);
+        assert_eq!(stable_repair_operation(7), stable_repair_operation(7));
+        assert_ne!(stable_repair_operation(7), stable_repair_operation(8));
+        let expected = [0x51; 32];
+        assert_eq!(
+            effect_outcome(&EffectOutcomeDto::Accepted(()), expected),
+            Ok(("accepted".to_owned(), Some(expected)))
+        );
+        assert_eq!(
+            effect_outcome(&EffectOutcomeDto::Uncertain(Id32::new(expected)), expected),
+            Ok(("uncertain".to_owned(), Some(expected)))
+        );
+        assert_eq!(
+            effect_outcome(
+                &EffectOutcomeDto::Uncertain(Id32::new([0x52; 32])),
+                expected
+            ),
+            Err(CliError::RelayState)
+        );
+    }
+
+    #[test]
     fn human_view_derives_selection_from_only_the_local_installation() {
         let local = InstallationId::from_bytes([1; 32]);
         let account = Id32::new([2; 32]);
@@ -3690,7 +4386,7 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  peer            Manage directional peer routes\n  mailbox         Manage directional mailbox capabilities\n  daemon          Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  peer            Manage directional peer routes\n  mailbox         Manage directional mailbox capabilities\n  relay           Manage relay policy, synchronization, and health\n  daemon          Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
         let identity = run_cli(
@@ -3725,6 +4421,13 @@ mod tests {
         .expect("mailbox help");
         assert!(mailbox.contains("grant MAILBOX_ID PEER_INSTALLATION_ID"));
         assert!(mailbox.contains("revoke MAILBOX_ID PEER_INSTALLATION_ID"));
+        let relay = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("relay")])
+                .expect("relay help parses"),
+        )
+        .expect("relay help");
+        assert!(relay.contains("add URL [--access read|write|read-write]"));
+        assert!(relay.contains("repair"));
         let daemon = run_cli(
             &parse_cli([OsString::from("daemon"), OsString::from("--help")])
                 .expect("daemon help parses"),
