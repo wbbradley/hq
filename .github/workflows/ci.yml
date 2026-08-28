@@ -104,6 +104,7 @@ jobs:
         run: >-
           cargo check --locked -p hq-domain -p hq-reducer -p hq-protocol -p hq-application
           -p hq-local-api -p hq-harness -p hq-testkit -p hq-resources -p hq-codex
+          -p hq-projects
           --target "${{ matrix.target }}"
 
   rust-protocol-fuzz:

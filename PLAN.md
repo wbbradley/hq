@@ -54,16 +54,47 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[projects/high] Implement project command, activation, dispatch, and provisioning sagas** —
-  Implement home-authoritative project commands/results, durable remote routing, expected-head
-  serialization, resource acquisition/release, assignment/configuration/runnable transitions,
-  thread creation/resume, pending-message sequencing and at-most-once dispatch, graceful and forced
-  close/takeover, retirement, late output, and Git worktree provisioning. Every filesystem, Git,
-  network, and provider boundary must use a stable operation ID, explicit checkpoint,
-  reconciliation-before-retry, compensation, and definite-versus-unknown outcome. Test crashes and
-  failures at every boundary, stale commands, competing devices, blocked handoff, restart repair,
-  and complete attribution. Complete this work when every saga reaches a documented stable or
-  explicitly reconcilable state.
+- **[projects/high] Implement activation and at-most-once project dispatch** — Add the
+  transaction-consistent canonical project mutation capability and explicit activation workflow:
+  expected-head/home/active-human validation, resource observation and claim preview, conditional
+  open, configuring assignment, project-bound start or exact resume, launch-directory validation,
+  thread selection from the first pending project message or explicit historical resume, runnable
+  transition, and compensation to the documented prior stable state. Drain accepted inputs in home
+  sequence through the harness supervisor's sole durable delivery ledger, reconcile before retry,
+  and author dispatch only after definite acceptance. Test every crash and definite/unknown failure
+  boundary, stale heads, claim/agent conflicts, launch failure, pending-message preservation,
+  accepted-response loss, changed input, restart repair, late output, and complete attribution.
+
+- **[projects/high] Implement project lifecycle, resource, handoff, and retirement workflows** —
+  Implement open/archive, resource add/remove/replace, release assessment, graceful and forced
+  close, graceful handoff and forced takeover, and retirement over explicit durable checkpoints.
+  Dirty or unknown resources require force before releasing authority; graceful operations retain
+  claims until quiescence, failed handoff becomes blocked, forced actions revoke only HQ authority,
+  and retirement ends assignment before retiring the agent while the project stays open. Test
+  definite/unknown runtime and filesystem outcomes, compensation, competing agents/devices, stale
+  commands, blocked handoff, restart recovery, and no implicit resource mutation or deletion.
+
+- **[projects/high] Implement durable remote project command routing and local API progress** —
+  Extend `hq-local-api` with the typed project request/outcome and authoritative checkpoint view.
+  Non-home devices author only strict `RemoteProjectCommandRequested` facts; the immutable home
+  derives typed receipt parents from one serialized snapshot, executes the same workflow, and
+  authors exactly one committed, rejected, or explicitly uncertain result. Validate digest/body
+  agreement and expected heads, reject unknown codec versions, and expose queued/received/terminal
+  progress without reducer side effects. Test offline routing, competing devices, duplicate and
+  changed command identities, stale receipt/result, restart repair, and complete control-plane
+  attribution.
+
+- **[projects/high] Implement recoverable Git worktree provisioning and compose project workers** —
+  Add a separate bounded mutating Git capability with stable lookup/create operations, short-lived
+  repository serialization, destination reservation, exact worktree/branch reconciliation,
+  read-only `hq-resources` identification, and one canonical project creation. Resume after every
+  reservation, Git, identification, and canonical boundary without duplicate worktree/project;
+  never silently delete external state on uncertainty. Compose project workflow, store, harness,
+  resources, Git, canonical mutation, wake/recovery, intake, and shutdown ownership in `hq-node`.
+  Run bounded startup scans, checkpoint all accepted work before harness/store shutdown, add
+  model/failpoint tests for every boundary and reservation conflict, and finish project,
+  application/local API, storage, behavior-ledger, acceptance, architecture, and four-target CI
+  evidence.
 
 - **[cli/medium] Complete the Rust command-line client** — Implement the retained command workflows
   from the behavior ledger over `hq-local-api` only, including identity/account, messaging, peers,

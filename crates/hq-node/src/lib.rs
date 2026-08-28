@@ -19,6 +19,7 @@ mod lifecycle_client;
 mod local_transport;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod node_coordinator;
+mod project_store;
 mod relay_component;
 mod relay_store;
 mod runtime;
@@ -68,6 +69,7 @@ pub use node_coordinator::{
     NodeCoordinatorError, NodeLaunchError, NodeLauncher, NodeReady, NodeStopped,
     ProcessNodeLauncher,
 };
+pub use project_store::ProjectSagaStoreAdapter;
 pub use relay_component::{RelayNodeComponent, RelayNodeConfig};
 pub use relay_store::RelayStoreAdapter;
 pub use runtime::{

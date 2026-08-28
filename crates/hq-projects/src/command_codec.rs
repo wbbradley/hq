@@ -1,0 +1,437 @@
+//! Strict canonical remote-control body encoding.
+
+use std::{error::Error, fmt};
+
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hq_application::{ProjectCommandAction, WorktreeProvisioningRequest};
+use hq_domain::{
+    AgentId, BoundedText, ContentText, ProjectResource, ProviderId, ProviderSessionId,
+    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, ShortText, ThreadId,
+};
+use serde::{Deserialize, Serialize};
+
+const PREFIX: &str = "hq-project-command-v1:";
+
+/// Failure to encode or strictly decode a remote project command body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectCommandCodecError {
+    /// The body is malformed, noncanonical, or contains invalid typed values.
+    Invalid,
+    /// The body names an unsupported command codec version.
+    UnsupportedVersion,
+    /// The canonical body exceeds the domain content bound.
+    TooLarge,
+}
+
+impl fmt::Display for ProjectCommandCodecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Invalid => "project command body is invalid or noncanonical",
+            Self::UnsupportedVersion => "project command body version is unsupported",
+            Self::TooLarge => "project command body exceeds the content bound",
+        })
+    }
+}
+
+impl Error for ProjectCommandCodecError {}
+
+/// Encodes one action into the only canonical remote-control v1 body spelling.
+pub fn encode_project_command_action(
+    action: &ProjectCommandAction,
+) -> Result<ContentText, ProjectCommandCodecError> {
+    let wire = WireAction::from(action);
+    let json = serde_json::to_string(&wire).map_err(|_| ProjectCommandCodecError::Invalid)?;
+    ContentText::new(format!("{PREFIX}{json}")).map_err(|_| ProjectCommandCodecError::TooLarge)
+}
+
+/// Strictly decodes one canonical remote-control v1 body.
+pub fn decode_project_command_action(
+    body: &ContentText,
+) -> Result<ProjectCommandAction, ProjectCommandCodecError> {
+    let Some(json) = body.as_str().strip_prefix(PREFIX) else {
+        return Err(if body.as_str().starts_with("hq-project-command-v") {
+            ProjectCommandCodecError::UnsupportedVersion
+        } else {
+            ProjectCommandCodecError::Invalid
+        });
+    };
+    let wire: WireAction =
+        serde_json::from_str(json).map_err(|_| ProjectCommandCodecError::Invalid)?;
+    let canonical = serde_json::to_string(&wire).map_err(|_| ProjectCommandCodecError::Invalid)?;
+    if canonical != json {
+        return Err(ProjectCommandCodecError::Invalid);
+    }
+    ProjectCommandAction::try_from(wire)
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum WireAction {
+    Open,
+    Activate {
+        agent_id: String,
+        provider: String,
+        resume_session: Option<String>,
+        resume_thread: Option<String>,
+        launch_directory: WireLocator,
+    },
+    DispatchPending,
+    Close {
+        force: bool,
+    },
+    SetArchived {
+        archived: bool,
+    },
+    Handoff {
+        agent_id: String,
+        provider: String,
+        resume_session: Option<String>,
+        thread_id: String,
+        launch_directory: WireLocator,
+        force_takeover: bool,
+    },
+    RetireAgent {
+        agent_id: String,
+        force: bool,
+    },
+    AddResource {
+        resource: WireProjectResource,
+        make_primary: bool,
+    },
+    RemoveResource {
+        resource_id: String,
+        force: bool,
+    },
+    ReplaceResource {
+        old_resource_id: String,
+        new_resource: WireProjectResource,
+    },
+    ProvisionWorktree {
+        request: WireProvisioning,
+    },
+}
+
+impl From<&ProjectCommandAction> for WireAction {
+    fn from(action: &ProjectCommandAction) -> Self {
+        match action {
+            ProjectCommandAction::Open => Self::Open,
+            ProjectCommandAction::Activate {
+                agent_id,
+                provider,
+                resume_session,
+                resume_thread,
+                launch_directory,
+            } => Self::Activate {
+                agent_id: id_text(agent_id.as_bytes()),
+                provider: provider.as_str().to_owned(),
+                resume_session: resume_session
+                    .as_ref()
+                    .map(|session| session.as_str().to_owned()),
+                resume_thread: resume_thread.map(|thread| id_text(thread.as_bytes())),
+                launch_directory: WireLocator::from(launch_directory),
+            },
+            ProjectCommandAction::DispatchPending => Self::DispatchPending,
+            ProjectCommandAction::Close { force } => Self::Close { force: *force },
+            ProjectCommandAction::SetArchived { archived } => Self::SetArchived {
+                archived: *archived,
+            },
+            ProjectCommandAction::Handoff {
+                agent_id,
+                provider,
+                resume_session,
+                thread_id,
+                launch_directory,
+                force_takeover,
+            } => Self::Handoff {
+                agent_id: id_text(agent_id.as_bytes()),
+                provider: provider.as_str().to_owned(),
+                resume_session: resume_session
+                    .as_ref()
+                    .map(|session| session.as_str().to_owned()),
+                thread_id: id_text(thread_id.as_bytes()),
+                launch_directory: WireLocator::from(launch_directory),
+                force_takeover: *force_takeover,
+            },
+            ProjectCommandAction::RetireAgent { agent_id, force } => Self::RetireAgent {
+                agent_id: id_text(agent_id.as_bytes()),
+                force: *force,
+            },
+            ProjectCommandAction::AddResource {
+                resource,
+                make_primary,
+            } => Self::AddResource {
+                resource: WireProjectResource::from(resource),
+                make_primary: *make_primary,
+            },
+            ProjectCommandAction::RemoveResource { resource_id, force } => Self::RemoveResource {
+                resource_id: id_text(resource_id.as_bytes()),
+                force: *force,
+            },
+            ProjectCommandAction::ReplaceResource {
+                old_resource_id,
+                new_resource,
+            } => Self::ReplaceResource {
+                old_resource_id: id_text(old_resource_id.as_bytes()),
+                new_resource: WireProjectResource::from(new_resource),
+            },
+            ProjectCommandAction::ProvisionWorktree(request) => Self::ProvisionWorktree {
+                request: WireProvisioning::from(request),
+            },
+        }
+    }
+}
+
+impl TryFrom<WireAction> for ProjectCommandAction {
+    type Error = ProjectCommandCodecError;
+
+    fn try_from(action: WireAction) -> Result<Self, Self::Error> {
+        Ok(match action {
+            WireAction::Open => Self::Open,
+            WireAction::Activate {
+                agent_id,
+                provider,
+                resume_session,
+                resume_thread,
+                launch_directory,
+            } => Self::Activate {
+                agent_id: AgentId::from_bytes(parse_id(&agent_id)?),
+                provider: ProviderId::new(provider).map_err(|_| Self::Error::Invalid)?,
+                resume_session: resume_session
+                    .map(ProviderSessionId::new)
+                    .transpose()
+                    .map_err(|_| Self::Error::Invalid)?,
+                resume_thread: resume_thread
+                    .map(|value| parse_id(&value).map(ThreadId::from_bytes))
+                    .transpose()?,
+                launch_directory: launch_directory.try_into()?,
+            },
+            WireAction::DispatchPending => Self::DispatchPending,
+            WireAction::Close { force } => Self::Close { force },
+            WireAction::SetArchived { archived } => Self::SetArchived { archived },
+            WireAction::Handoff {
+                agent_id,
+                provider,
+                resume_session,
+                thread_id,
+                launch_directory,
+                force_takeover,
+            } => Self::Handoff {
+                agent_id: AgentId::from_bytes(parse_id(&agent_id)?),
+                provider: ProviderId::new(provider).map_err(|_| Self::Error::Invalid)?,
+                resume_session: resume_session
+                    .map(ProviderSessionId::new)
+                    .transpose()
+                    .map_err(|_| Self::Error::Invalid)?,
+                thread_id: ThreadId::from_bytes(parse_id(&thread_id)?),
+                launch_directory: launch_directory.try_into()?,
+                force_takeover,
+            },
+            WireAction::RetireAgent { agent_id, force } => Self::RetireAgent {
+                agent_id: AgentId::from_bytes(parse_id(&agent_id)?),
+                force,
+            },
+            WireAction::AddResource {
+                resource,
+                make_primary,
+            } => Self::AddResource {
+                resource: resource.try_into()?,
+                make_primary,
+            },
+            WireAction::RemoveResource { resource_id, force } => Self::RemoveResource {
+                resource_id: ResourceId::from_bytes(parse_id(&resource_id)?),
+                force,
+            },
+            WireAction::ReplaceResource {
+                old_resource_id,
+                new_resource,
+            } => Self::ReplaceResource {
+                old_resource_id: ResourceId::from_bytes(parse_id(&old_resource_id)?),
+                new_resource: new_resource.try_into()?,
+            },
+            WireAction::ProvisionWorktree { request } => {
+                Self::ProvisionWorktree(request.try_into()?)
+            }
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireLocator {
+    scheme: WireResourceScheme,
+    value: String,
+}
+
+impl From<&ResourceLocator> for WireLocator {
+    fn from(locator: &ResourceLocator) -> Self {
+        Self {
+            scheme: WireResourceScheme::from(locator.scheme()),
+            value: locator.value().to_owned(),
+        }
+    }
+}
+
+impl TryFrom<WireLocator> for ResourceLocator {
+    type Error = ProjectCommandCodecError;
+
+    fn try_from(locator: WireLocator) -> Result<Self, Self::Error> {
+        let value = BoundedText::new(locator.value).map_err(|_| Self::Error::Invalid)?;
+        Ok(Self::new(locator.scheme.into(), value))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WireResourceScheme {
+    GitRepository,
+    WorkingTree,
+    Container,
+    Opaque,
+}
+
+impl From<ResourceScheme> for WireResourceScheme {
+    fn from(scheme: ResourceScheme) -> Self {
+        match scheme {
+            ResourceScheme::GitRepository => Self::GitRepository,
+            ResourceScheme::WorkingTree => Self::WorkingTree,
+            ResourceScheme::Container => Self::Container,
+            ResourceScheme::Opaque => Self::Opaque,
+        }
+    }
+}
+
+impl From<WireResourceScheme> for ResourceScheme {
+    fn from(scheme: WireResourceScheme) -> Self {
+        match scheme {
+            WireResourceScheme::GitRepository => Self::GitRepository,
+            WireResourceScheme::WorkingTree => Self::WorkingTree,
+            WireResourceScheme::Container => Self::Container,
+            WireResourceScheme::Opaque => Self::Opaque,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireProjectResource {
+    resource_id: String,
+    display_locator: WireLocator,
+    canonical_locator: WireLocator,
+    health: WireResourceHealth,
+}
+
+impl From<&ProjectResource> for WireProjectResource {
+    fn from(resource: &ProjectResource) -> Self {
+        Self {
+            resource_id: id_text(resource.resource_id.as_bytes()),
+            display_locator: WireLocator::from(&resource.display_locator),
+            canonical_locator: WireLocator::from(&resource.canonical_locator),
+            health: WireResourceHealth::from(resource.health),
+        }
+    }
+}
+
+impl TryFrom<WireProjectResource> for ProjectResource {
+    type Error = ProjectCommandCodecError;
+
+    fn try_from(resource: WireProjectResource) -> Result<Self, Self::Error> {
+        Ok(Self {
+            resource_id: ResourceId::from_bytes(parse_id(&resource.resource_id)?),
+            display_locator: resource.display_locator.try_into()?,
+            canonical_locator: resource.canonical_locator.try_into()?,
+            health: resource.health.into(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WireResourceHealth {
+    Unknown,
+    Healthy,
+    Degraded,
+    Unavailable,
+}
+
+impl From<ResourceHealth> for WireResourceHealth {
+    fn from(health: ResourceHealth) -> Self {
+        match health {
+            ResourceHealth::Unknown => Self::Unknown,
+            ResourceHealth::Healthy => Self::Healthy,
+            ResourceHealth::Degraded => Self::Degraded,
+            ResourceHealth::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+impl From<WireResourceHealth> for ResourceHealth {
+    fn from(health: WireResourceHealth) -> Self {
+        match health {
+            WireResourceHealth::Unknown => Self::Unknown,
+            WireResourceHealth::Healthy => Self::Healthy,
+            WireResourceHealth::Degraded => Self::Degraded,
+            WireResourceHealth::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireProvisioning {
+    mailbox_id: String,
+    project_name: String,
+    brief: Option<String>,
+    source: WireLocator,
+    destination: WireLocator,
+    branch: String,
+    create_branch: bool,
+}
+
+impl From<&WorktreeProvisioningRequest> for WireProvisioning {
+    fn from(request: &WorktreeProvisioningRequest) -> Self {
+        Self {
+            mailbox_id: id_text(request.mailbox_id.as_bytes()),
+            project_name: request.project_name.as_str().to_owned(),
+            brief: request
+                .brief
+                .as_ref()
+                .map(|brief| brief.as_str().to_owned()),
+            source: WireLocator::from(&request.source),
+            destination: WireLocator::from(&request.destination),
+            branch: request.branch.as_str().to_owned(),
+            create_branch: request.create_branch,
+        }
+    }
+}
+
+impl TryFrom<WireProvisioning> for WorktreeProvisioningRequest {
+    type Error = ProjectCommandCodecError;
+
+    fn try_from(request: WireProvisioning) -> Result<Self, Self::Error> {
+        Ok(Self {
+            mailbox_id: hq_domain::MailboxId::from_bytes(parse_id(&request.mailbox_id)?),
+            project_name: ShortText::new(request.project_name).map_err(|_| Self::Error::Invalid)?,
+            brief: request
+                .brief
+                .map(ContentText::new)
+                .transpose()
+                .map_err(|_| Self::Error::Invalid)?,
+            source: request.source.try_into()?,
+            destination: request.destination.try_into()?,
+            branch: ShortText::new(request.branch).map_err(|_| Self::Error::Invalid)?,
+            create_branch: request.create_branch,
+        })
+    }
+}
+
+fn id_text(bytes: &[u8; 32]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn parse_id(value: &str) -> Result<[u8; 32], ProjectCommandCodecError> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| ProjectCommandCodecError::Invalid)?
+        .try_into()
+        .map_err(|_| ProjectCommandCodecError::Invalid)
+}

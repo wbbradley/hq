@@ -101,7 +101,7 @@ impl ConfigureRelays for ScriptedPorts {
         &self,
         request: &EffectRequest<RelayConfiguration>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
-        Ok(EffectOutcome::Uncertain(request.operation_id()))
+        Ok(EffectOutcome::Uncertain(request.operation_id))
     }
 
     fn synchronize(
@@ -120,10 +120,10 @@ impl hq_application::ControlHarness for ScriptedPorts {
         &self,
         request: &EffectRequest<AgentSessionRequest>,
     ) -> Result<EffectOutcome<AgentSessionResult>, ApplicationError> {
-        match request.body().control() {
+        match &request.body.control {
             SessionControl::Stop => Ok(EffectOutcome::Accepted(AgentSessionResult::Stopped)),
             SessionControl::Start | SessionControl::Resume { .. } => {
-                Ok(EffectOutcome::Uncertain(request.operation_id()))
+                Ok(EffectOutcome::Uncertain(request.operation_id))
             }
         }
     }
@@ -134,7 +134,7 @@ impl InspectResource for ScriptedPorts {
         &self,
         request: &EffectRequest<ResourceInspectionRequest>,
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
-        Ok(EffectOutcome::Uncertain(request.operation_id()))
+        Ok(EffectOutcome::Uncertain(request.operation_id))
     }
 }
 

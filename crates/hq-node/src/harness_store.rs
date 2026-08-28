@@ -257,6 +257,7 @@ const fn map_store_error(error: StoreError, conflict: HarnessErrorClass) -> Harn
         | StoreErrorClass::InvalidEvidence
         | StoreErrorClass::MutationConflict
         | StoreErrorClass::RelayStateConflict
+        | StoreErrorClass::ProjectSagaConflict
         | StoreErrorClass::RelayStagingFull
         | StoreErrorClass::RevisionExhausted
         | StoreErrorClass::OperationalStateCorrupt

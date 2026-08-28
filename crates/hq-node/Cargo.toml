@@ -17,6 +17,7 @@ hq-domain.workspace = true
 hq-harness.workspace = true
 hq-local-api.workspace = true
 hq-protocol.workspace = true
+hq-projects.workspace = true
 hq-relay.workspace = true
 hq-reducer.workspace = true
 hq-store.workspace = true

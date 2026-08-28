@@ -28,12 +28,13 @@ mod gateway;
 mod harness;
 mod operational;
 mod paths;
+mod project_saga;
 mod relay;
 mod snapshot;
 
 pub use actor::{
-    HarnessStateHandle, IngestOutcome, RelayStateHandle, RepairOutcome, ReplicationHandle,
-    RevisionInvalidations, Store, VerifiedFactCorpus,
+    HarnessStateHandle, IngestOutcome, ProjectSagaStateHandle, RelayStateHandle, RepairOutcome,
+    ReplicationHandle, RevisionInvalidations, Store, VerifiedFactCorpus,
 };
 pub use error::{StoreError, StoreErrorClass};
 pub use gateway::StoreGateway;
@@ -51,6 +52,10 @@ pub use operational::{
     LocalMutationCommit, LocalMutationDecision, LocalMutationRequest, MAX_MUTATION_RESULT_BYTES,
     MAX_OUTBOX_QUERY_ITEMS, MutationReceipt, MutationResultBytes, MutationResultKind,
     OperationalValueError, OutboxIntent,
+};
+pub use project_saga::{
+    MAX_PROJECT_COMMAND_BODY_BYTES, MAX_PROJECT_SAGA_QUERY_ITEMS, StoredProjectEffectState,
+    StoredProjectSaga, StoredProjectSagaBegin, StoredProjectSagaState,
 };
 pub use relay::{
     MAX_RELAY_QUARANTINE_BYTES, MAX_RELAY_QUARANTINE_ITEMS, MAX_RELAY_QUARANTINE_SAMPLE_BYTES,

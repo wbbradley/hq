@@ -144,7 +144,8 @@ fn map_store_error(error: StoreError) -> ApplicationError {
         StoreErrorClass::MutationConflict => ApplicationErrorCode::CommandIdentityConflict,
         StoreErrorClass::IdentityCollision
         | StoreErrorClass::RelayStateConflict
-        | StoreErrorClass::HarnessStateConflict => ApplicationErrorCode::StateIdentityConflict,
+        | StoreErrorClass::HarnessStateConflict
+        | StoreErrorClass::ProjectSagaConflict => ApplicationErrorCode::StateIdentityConflict,
         StoreErrorClass::InvalidOperationalRequest => ApplicationErrorCode::InvalidRequest,
         StoreErrorClass::RelayStagingFull => ApplicationErrorCode::IntakeFull,
         StoreErrorClass::ActorClosed

@@ -51,10 +51,14 @@ pub trait PublishWake {
 /// Stable request envelope for work that crosses an external-effect boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectRequest<T> {
-    operation_id: OperationId,
-    request_digest: CommandDigest,
-    issued_at: Timestamp,
-    body: T,
+    /// Stable external-operation identity.
+    pub operation_id: OperationId,
+    /// Digest of the exact external request.
+    pub request_digest: CommandDigest,
+    /// Caller-supplied issue time.
+    pub issued_at: Timestamp,
+    /// Typed operation body.
+    pub body: T,
 }
 
 impl<T> EffectRequest<T> {
@@ -71,26 +75,6 @@ impl<T> EffectRequest<T> {
             issued_at,
             body,
         }
-    }
-
-    /// Returns the stable external-operation identity.
-    pub const fn operation_id(&self) -> OperationId {
-        self.operation_id
-    }
-
-    /// Returns the digest of the exact external request.
-    pub const fn request_digest(&self) -> CommandDigest {
-        self.request_digest
-    }
-
-    /// Returns the caller-supplied issue time.
-    pub const fn issued_at(&self) -> Timestamp {
-        self.issued_at
-    }
-
-    /// Borrows the typed operation body.
-    pub const fn body(&self) -> &T {
-        &self.body
     }
 }
 
@@ -194,9 +178,12 @@ pub enum SessionControl {
 /// Application-level named-agent session request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentSessionRequest {
-    agent_id: AgentId,
-    provider: ProviderId,
-    control: SessionControl,
+    /// Durable named-agent identity.
+    pub agent_id: AgentId,
+    /// Neutral provider identity selected by configuration.
+    pub provider: ProviderId,
+    /// Requested lifecycle action.
+    pub control: SessionControl,
 }
 
 impl AgentSessionRequest {
@@ -207,21 +194,6 @@ impl AgentSessionRequest {
             provider,
             control,
         }
-    }
-
-    /// Returns the durable named-agent identity.
-    pub const fn agent_id(&self) -> AgentId {
-        self.agent_id
-    }
-
-    /// Returns the neutral provider identity selected by configuration.
-    pub const fn provider(&self) -> &ProviderId {
-        &self.provider
-    }
-
-    /// Returns the requested lifecycle action.
-    pub const fn control(&self) -> &SessionControl {
-        &self.control
     }
 }
 

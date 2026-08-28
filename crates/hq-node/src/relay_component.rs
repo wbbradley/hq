@@ -173,15 +173,15 @@ impl ConfigureRelays for RelayNodeComponent {
         request: &EffectRequest<RelayConfiguration>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         self.ensure_accepting()?;
-        let relay = relay_url(&request.body().endpoint)?;
+        let relay = relay_url(&request.body.endpoint)?;
         self.state
             .apply(RelayStateMutation::Configure(RelayPolicyChange {
-                operation_id: request.operation_id(),
-                request_digest: request.request_digest(),
+                operation_id: request.operation_id,
+                request_digest: request.request_digest,
                 desired: DesiredRelayPolicy {
                     url: relay,
-                    access: request.body().access,
-                    authentication: request.body().authentication,
+                    access: request.body.access,
+                    authentication: request.body.authentication,
                     enabled: true,
                 },
             }))
@@ -195,7 +195,7 @@ impl ConfigureRelays for RelayNodeComponent {
         request: &EffectRequest<SynchronizationRequest>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         self.ensure_accepting()?;
-        if let SynchronizationRequest::Relay(endpoint) = request.body() {
+        if let SynchronizationRequest::Relay(endpoint) = &request.body {
             relay_url(endpoint)?;
         }
         self.wake().map_err(application_error)?;

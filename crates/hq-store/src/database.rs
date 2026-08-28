@@ -6,6 +6,7 @@ mod conversation;
 mod harness;
 mod operational;
 mod project;
+mod project_saga;
 mod relay;
 mod repair;
 
@@ -44,8 +45,8 @@ use crate::{
 
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 13;
-const SCHEMA_MARKER: &str = "hq-store-v13-path-resource-identity-2026-08-27";
-const SCHEMA_TABLES: [&str; 114] = [
+const SCHEMA_MARKER: &str = "hq-store-v13-project-sagas-2026-08-27";
+const SCHEMA_TABLES: [&str; 116] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -160,11 +161,14 @@ const SCHEMA_TABLES: [&str; 114] = [
     "harness_ready_sessions",
     "harness_deliveries",
     "harness_event_checkpoints",
+    "project_sagas",
+    "project_saga_reservations",
 ];
-const OPERATIONAL_TABLE_COUNT: usize = 16;
-const SCHEMA_INDEXES: [&str; 2] = [
+const OPERATIONAL_TABLE_COUNT: usize = 18;
+const SCHEMA_INDEXES: [&str; 3] = [
     "conversation_messages_by_fact_id",
     "conversation_activities_by_fact_id",
+    "project_sagas_one_unresolved",
 ];
 const MAXIMUM_CORPUS_FACTS: i64 = 1_000_000;
 
@@ -1249,6 +1253,94 @@ CREATE TABLE harness_event_checkpoints (
     activity_committed INTEGER NOT NULL CHECK(activity_committed IN (0, 1)),
     PRIMARY KEY (agent_id, event_id)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE project_sagas (
+    operation_id BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    command_id BLOB UNIQUE NOT NULL
+        CHECK(typeof(command_id) = 'blob' AND length(command_id) = 32),
+    request_digest BLOB NOT NULL
+        CHECK(typeof(request_digest) = 'blob' AND length(request_digest) = 32),
+    account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
+    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
+    home BLOB NOT NULL CHECK(typeof(home) = 'blob' AND length(home) = 32),
+    expected_head BLOB NOT NULL
+        CHECK(typeof(expected_head) = 'blob' AND length(expected_head) = 32),
+    issued_at_millis BLOB NOT NULL
+        CHECK(typeof(issued_at_millis) = 'blob' AND length(issued_at_millis) = 8),
+    command_body BLOB NOT NULL
+        CHECK(typeof(command_body) = 'blob' AND length(command_body) BETWEEN 1 AND 65536),
+    state_kind INTEGER NOT NULL CHECK(state_kind BETWEEN 1 AND 4),
+    stage INTEGER NOT NULL CHECK(stage BETWEEN 1 AND 23),
+    project_head BLOB
+        CHECK(project_head IS NULL OR (typeof(project_head) = 'blob' AND length(project_head) = 32)),
+    error_category INTEGER CHECK(error_category IS NULL OR error_category BETWEEN 1 AND 6),
+    error_code TEXT CHECK(error_code IS NULL OR
+        (typeof(error_code) = 'text' AND length(CAST(error_code AS BLOB)) BETWEEN 1 AND 96)),
+    runtime_operation_id BLOB CHECK(runtime_operation_id IS NULL OR
+        (typeof(runtime_operation_id) = 'blob' AND length(runtime_operation_id) = 32)),
+    runtime_effect INTEGER NOT NULL CHECK(runtime_effect BETWEEN 1 AND 5),
+    runtime_error_category INTEGER
+        CHECK(runtime_error_category IS NULL OR runtime_error_category BETWEEN 1 AND 6),
+    runtime_error_code TEXT CHECK(runtime_error_code IS NULL OR
+        (typeof(runtime_error_code) = 'text' AND
+         length(CAST(runtime_error_code AS BLOB)) BETWEEN 1 AND 96)),
+    dispatch_operation_id BLOB CHECK(dispatch_operation_id IS NULL OR
+        (typeof(dispatch_operation_id) = 'blob' AND length(dispatch_operation_id) = 32)),
+    dispatch_effect INTEGER NOT NULL CHECK(dispatch_effect BETWEEN 1 AND 5),
+    dispatch_error_category INTEGER
+        CHECK(dispatch_error_category IS NULL OR dispatch_error_category BETWEEN 1 AND 6),
+    dispatch_error_code TEXT CHECK(dispatch_error_code IS NULL OR
+        (typeof(dispatch_error_code) = 'text' AND
+         length(CAST(dispatch_error_code AS BLOB)) BETWEEN 1 AND 96)),
+    git_operation_id BLOB CHECK(git_operation_id IS NULL OR
+        (typeof(git_operation_id) = 'blob' AND length(git_operation_id) = 32)),
+    git_effect INTEGER NOT NULL CHECK(git_effect BETWEEN 1 AND 5),
+    git_error_category INTEGER
+        CHECK(git_error_category IS NULL OR git_error_category BETWEEN 1 AND 6),
+    git_error_code TEXT CHECK(git_error_code IS NULL OR
+        (typeof(git_error_code) = 'text' AND
+         length(CAST(git_error_code AS BLOB)) BETWEEN 1 AND 96)),
+    resource_operation_id BLOB CHECK(resource_operation_id IS NULL OR
+        (typeof(resource_operation_id) = 'blob' AND length(resource_operation_id) = 32)),
+    resource_effect INTEGER NOT NULL CHECK(resource_effect BETWEEN 1 AND 5),
+    resource_error_category INTEGER
+        CHECK(resource_error_category IS NULL OR resource_error_category BETWEEN 1 AND 6),
+    resource_error_code TEXT CHECK(resource_error_code IS NULL OR
+        (typeof(resource_error_code) = 'text' AND
+         length(CAST(resource_error_code AS BLOB)) BETWEEN 1 AND 96)),
+    reservation_scheme INTEGER CHECK(reservation_scheme IS NULL OR reservation_scheme BETWEEN 1 AND 4),
+    reservation_value TEXT CHECK(reservation_value IS NULL OR
+        (typeof(reservation_value) = 'text' AND
+         length(CAST(reservation_value AS BLOB)) BETWEEN 1 AND 4096)),
+    updated_at_millis BLOB NOT NULL
+        CHECK(typeof(updated_at_millis) = 'blob' AND length(updated_at_millis) = 8),
+    CHECK((reservation_scheme IS NULL) = (reservation_value IS NULL)),
+    CHECK((state_kind = 2) = (project_head IS NOT NULL)),
+    CHECK((state_kind IN (3, 4)) = (error_category IS NOT NULL)),
+    CHECK((state_kind IN (3, 4)) = (error_code IS NOT NULL)),
+    CHECK((runtime_effect IN (4, 5)) = (runtime_error_category IS NOT NULL)),
+    CHECK((runtime_effect IN (4, 5)) = (runtime_error_code IS NOT NULL)),
+    CHECK((dispatch_effect IN (4, 5)) = (dispatch_error_category IS NOT NULL)),
+    CHECK((dispatch_effect IN (4, 5)) = (dispatch_error_code IS NOT NULL)),
+    CHECK((git_effect IN (4, 5)) = (git_error_category IS NOT NULL)),
+    CHECK((git_effect IN (4, 5)) = (git_error_code IS NOT NULL)),
+    CHECK((resource_effect IN (4, 5)) = (resource_error_category IS NOT NULL)),
+    CHECK((resource_effect IN (4, 5)) = (resource_error_code IS NOT NULL))
+) STRICT, WITHOUT ROWID;
+
+CREATE UNIQUE INDEX project_sagas_one_unresolved
+    ON project_sagas(project_id) WHERE state_kind IN (1, 4);
+
+CREATE TABLE project_saga_reservations (
+    home BLOB NOT NULL CHECK(typeof(home) = 'blob' AND length(home) = 32),
+    locator_scheme INTEGER NOT NULL CHECK(locator_scheme BETWEEN 1 AND 4),
+    locator_value TEXT NOT NULL CHECK(typeof(locator_value) = 'text' AND
+        length(CAST(locator_value AS BLOB)) BETWEEN 1 AND 4096),
+    operation_id BLOB UNIQUE NOT NULL REFERENCES project_sagas(operation_id) ON DELETE RESTRICT,
+    protects_external_state INTEGER NOT NULL CHECK(protects_external_state IN (0, 1)),
+    PRIMARY KEY (home, locator_scheme, locator_value)
+) STRICT, WITHOUT ROWID;
 ";
 
 pub(super) struct Database {
@@ -1567,6 +1659,27 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<crate::StoredHarnessDelivery>, StoreError> {
         harness::load_runnable_deliveries(&self.connection, agent_id, limit)
+    }
+
+    pub(super) fn begin_project_saga(
+        &mut self,
+        record: &crate::StoredProjectSaga,
+    ) -> Result<crate::StoredProjectSagaBegin, StoreError> {
+        project_saga::begin(&mut self.connection, record)
+    }
+
+    pub(super) fn replace_project_saga(
+        &mut self,
+        record: &crate::StoredProjectSaga,
+    ) -> Result<(), StoreError> {
+        project_saga::replace(&mut self.connection, record)
+    }
+
+    pub(super) fn load_runnable_project_sagas(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::StoredProjectSaga>, StoreError> {
+        project_saga::load_runnable(&self.connection, limit)
     }
 }
 

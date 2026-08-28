@@ -3,6 +3,7 @@
 mod error;
 mod mutation;
 mod ports;
+mod project;
 mod service;
 mod snapshot;
 
@@ -25,6 +26,10 @@ pub use ports::{
     ObserveRevisions, PublishWake, QueryDomain, RelayAccess, RelayAuthentication,
     RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult, SessionControl,
     SubscriptionRequest, SubscriptionTopic, SynchronizationRequest, WakeDisposition,
+};
+pub use project::{
+    ControlProjects, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
+    ProjectCommandStage, WorktreeProvisioningRequest,
 };
 pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{

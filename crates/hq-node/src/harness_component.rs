@@ -148,21 +148,21 @@ impl ControlHarness for HarnessNodeComponent {
         &self,
         request: &EffectRequest<hq_application::AgentSessionRequest>,
     ) -> Result<EffectOutcome<AgentSessionResult>, ApplicationError> {
-        self.with_supervisor(|supervisor| match request.body().control() {
+        self.with_supervisor(|supervisor| match &request.body.control {
             SessionControl::Start => supervisor
                 .launch(HarnessLaunchRequest {
-                    agent_id: request.body().agent_id(),
+                    agent_id: request.body.agent_id,
                     project_id: None,
-                    provider_id: request.body().provider().clone(),
+                    provider_id: request.body.provider.clone(),
                     session: HarnessSessionRequest::Start,
                     environment: HarnessEnvironment::default(),
                 })
                 .map(|session| EffectOutcome::Accepted(AgentSessionResult::Ready(session))),
             SessionControl::Resume { session } => supervisor
                 .recover(HarnessLaunchRequest {
-                    agent_id: request.body().agent_id(),
+                    agent_id: request.body.agent_id,
                     project_id: None,
-                    provider_id: request.body().provider().clone(),
+                    provider_id: request.body.provider.clone(),
                     session: HarnessSessionRequest::Resume {
                         session_id: session.clone(),
                     },
@@ -170,7 +170,7 @@ impl ControlHarness for HarnessNodeComponent {
                 })
                 .map(|ready| EffectOutcome::Accepted(AgentSessionResult::Ready(ready))),
             SessionControl::Stop => supervisor
-                .stop(request.body().agent_id())
+                .stop(request.body.agent_id)
                 .map(|_| EffectOutcome::Accepted(AgentSessionResult::Stopped)),
         })
     }

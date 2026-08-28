@@ -399,6 +399,7 @@ dependencies = [
  "hq-domain",
  "hq-harness",
  "hq-local-api",
+ "hq-projects",
  "hq-protocol",
  "hq-reducer",
  "hq-relay",
@@ -410,6 +411,17 @@ dependencies = [
  "tokio",
  "unicode-normalization",
  "zeroize",
+]
+
+[[package]]
+name = "hq-projects"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hq-application",
+ "hq-domain",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

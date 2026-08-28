@@ -6353,3 +6353,95 @@ without bumping the unshipped storage version.
   missing/inaccessible paths, symlinks, worktrees sharing a Git directory, dirty/unknown release,
   atomic replacement, and explicit force behavior. Complete this work when every path decision is
   deterministic, explainable, and auditable.
+
+## 2026-08-27 — Project command and durable saga foundations
+
+Implemented the `hq-projects` outward workflow foundation with public passive application
+commands, results, and checkpoints; a strict canonical v1 remote-command codec; exact-replay
+intake; and bounded recovery. Added non-rebuildable project saga and destination-reservation
+records to the clean-sheet storage v13 schema in place without a version bump, including project
+cardinality, monotonic transitions, exact typed effect outcomes, repair/reopen survival, and a
+node-owned store adapter. Replaced accessor-only passive effect and session records with idiomatic
+public Rust fields and extended architecture, storage, CI, and restart contract evidence. Locked
+workspace, strict Clippy, all-target test/build, four portable-target, architecture, dependency,
+specification, fuzz, whitespace, and unchanged-Go gates pass.
+
+### Original plan entry
+
+- **[projects/high] Establish project command and durable saga foundations** — Define the complete
+  typed project command/result vocabulary, strict versioned remote-command body codec, explicit
+  workflow checkpoints, exact-replay intake, one-unresolved-command project serialization, and
+  non-rebuildable SQLite checkpoint/reservation state. Keep passive Rust records public and
+  behavior-owning capabilities opaque. Update the clean-sheet storage v13 schema in place without a
+  version bump. Complete this work when changed identity, monotonicity, bounded recovery,
+  repair-survival, restart, codec, and composition-adapter contracts pass.
+
+  **Implementation plan**
+
+  - Add an outward `hq-projects` crate for explicit project workflows. It may depend inward on the
+    domain, reducer snapshots, application ports, neutral harness contract, and read-only resource
+    adapter; none of those crates may import it. Keep each workflow as its own closed command/stage
+    transition rather than introducing a generic workflow engine. Passive commands, checkpoints,
+    reports, conflicts, and recovery records expose public fields. Managers and injected effect
+    capabilities remain opaque because they own serialization, bounded work, and exact retry.
+  - Define one typed application project command family with stable operation ID, exact
+    digest, account/project/home identity, expected project head, and closed actions for open,
+    activation, dispatch repair, graceful/forced close, archive, handoff/takeover, retirement,
+    resource add/remove/replace, and worktree provisioning. Expose typed accepted/running,
+    completed, rejected, and reconcilable-unknown outcomes. One unresolved state-changing command
+    per project is enforced durably; local protocol projection belongs to the workflow package that
+    can expose authoritative progress rather than a placeholder transport shape.
+  - Persist non-rebuildable workflow state in the existing unshipped clean-sheet storage v13 schema
+    without a version bump. Store exact command/digest, project/home, expected head, closed workflow
+    kind and stage, derived external operation identities, reservation identity,
+    definite/unknown effect result, and terminal outcome. Add exact collision,
+    monotonic-stage, project-cardinality, bounded scan, atomic mutation, repair-survival,
+    and reopen validation. Canonical project facts remain the sole durable project authority; saga
+    rows are coordination checkpoints and never override projections.
+  - Encode command behavior with one strict canonical versioned codec; never parse free-form human
+    or diagnostic text. Map the outward workflow store capability to store-owned records in
+    `hq-node` without reversing dependencies. Build test-first contracts for public passive values,
+    exact and changed replay, project cardinality, monotonic stages/effects, bounded scans,
+    reservation conflicts, repair survival, close/reopen recovery, and strict codec rejection. Run
+    every locked workspace, supported-target, dependency, shell, whitespace, and unchanged-Go gate.
+
+  **Risks and decisions**
+
+  - Canonical facts and projections are authority; workflow checkpoints only answer what external
+    work may have happened and what must be reconciled next. Recovery always rereads both before an
+    effect, so a lost checkpoint response cannot regress or duplicate canonical state.
+  - Remote command bodies must be strict versioned structured data even though the reducer retains
+    them as inert bounded content. Only the workflow codec may decode that namespace, and canonical
+    digest agreement is checked before execution. Unknown versions are definite rejections, never
+    best-effort behavior or human-text parsing.
+
+  ## Post-Plan Execution Steps
+
+  Execute these steps in order:
+
+  ### Implement
+  Execute the plan above.
+
+  **Naming gate:** before creating any file, identifier, run-id, or env var, ask "would this name
+  make sense to someone who never read the plan?" If it encodes a sequence position (`Stage N` /
+  `Phase N` / `stepN`), rename it now — cheap before a checkpoint or downstream reference pins it.
+
+  ### Verify
+
+  1. Run the project's build/lint command. Fix all warnings.
+  2. Run the project's test suite.
+  3. If tests fail, fix them before proceeding.
+  4. If test coverage for the new work is insufficient, add tests.
+
+  ### Commit
+
+  Use Conventional Commits commit message style. If there are pre-existing modified files and they don't look harmful, go ahead and commit them, too.
+
+  ### Update the plan file
+
+  Read the plan file at `/Users/wbbradley/src/hq/PLAN.md`. **Remove** the completed task entirely from the "Next Up" section — do not leave it in place with a [DONE] tag, strikethrough, or any other marker. The task and its related subsections should no longer appear in the plan file at all. The plan file should not have any sort of "Done" section. Then append a new entry to the completed file at `/Users/wbbradley/src/hq/COMPLETED.md` with two parts, in this order:
+
+  1. A brief summary, written now, of what was actually implemented.
+  2. The full text of the plan entry as it existed before work began, verbatim, not paraphrased, to preserve the original.
+
+  If upcoming plan items need modifications due to a change during this implementation then update those. If new future work items were discovered, add them. If the plan file or completed file is outside the source repository or is ignored, do not try to stage it; otherwise commit it with the other changes.

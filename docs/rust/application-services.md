@@ -85,6 +85,14 @@ details, typed health, an optional newly observed canonical locator, and an expl
 time. These passive request/result values expose fields directly. Later workflow owners turn
 accepted observations into canonical facts.
 
+Project workflow intake uses one public passive `ProjectCommandRequest` with stable command and
+operation identities, an exact digest, account/project/home identities, expected project head,
+explicit issue time, and a closed `ProjectCommandAction`. Results are typed accepted, running,
+completed, rejected, or reconcilable outcomes with an explicit durable checkpoint. The
+`ControlProjects` capability is opaque because its implementation owns project serialization and
+bounded recovery; the request, action payloads, provisioning request, and outcome fields are not
+hidden behind accessors.
+
 ## Subscription revision race
 
 Subscription preparation has three ordered phases:

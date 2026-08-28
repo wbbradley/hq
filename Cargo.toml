@@ -8,6 +8,7 @@ members = [
   "crates/hq-local-api",
   "crates/hq-node",
   "crates/hq-protocol",
+  "crates/hq-projects",
   "crates/hq-reducer",
   "crates/hq-relay",
   "crates/hq-resources",
@@ -37,6 +38,7 @@ hq-domain = { version = "0.1.0", path = "crates/hq-domain" }
 hq-harness = { version = "0.1.0", path = "crates/hq-harness" }
 hq-local-api = { version = "0.1.0", path = "crates/hq-local-api" }
 hq-protocol = { version = "0.1.0", path = "crates/hq-protocol" }
+hq-projects = { version = "0.1.0", path = "crates/hq-projects" }
 hq-reducer = { version = "0.1.0", path = "crates/hq-reducer" }
 hq-relay = { version = "0.1.0", path = "crates/hq-relay" }
 hq-resources = { version = "0.1.0", path = "crates/hq-resources" }

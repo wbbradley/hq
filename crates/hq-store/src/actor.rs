@@ -20,8 +20,8 @@ use crate::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, CompleteSnapshot,
     ConversationEntry, ConversationProjectionSnapshot, HarnessLeaseOutcome, LocalMutationRequest,
     MutationReceipt, OutboxIntent, ProjectProjectionSnapshot, ReductionIndexSnapshot, StoreError,
-    StoreErrorClass, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
-    StoredRelayStateMutation, StoredRelayStatePage, StoredRelayStateQuery,
+    StoreErrorClass, StoredHarnessStateMutation, StoredHarnessStateSnapshot, StoredProjectSaga,
+    StoredProjectSagaBegin, StoredRelayStateMutation, StoredRelayStatePage, StoredRelayStateQuery,
     StoredRelayStateSnapshot, database::Database,
 };
 
@@ -256,6 +256,7 @@ enum Request {
     },
     Relay(Box<RelayRequest>),
     Harness(Box<HarnessRequest>),
+    ProjectSaga(Box<ProjectSagaRequest>),
     Close {
         reply: SyncSender<()>,
     },
@@ -307,6 +308,21 @@ enum HarnessRequest {
     },
 }
 
+enum ProjectSagaRequest {
+    Begin {
+        record: Box<StoredProjectSaga>,
+        reply: SyncSender<Result<StoredProjectSagaBegin, StoreError>>,
+    },
+    Replace {
+        record: Box<StoredProjectSaga>,
+        reply: SyncSender<Result<(), StoreError>>,
+    },
+    LoadRunnable {
+        limit: usize,
+        reply: SyncSender<Result<Vec<StoredProjectSaga>, StoreError>>,
+    },
+}
+
 /// Sole owner of one bounded SQLite worker and its request intake.
 ///
 /// The value is intentionally not `Clone`; owned tasks clone only narrow request capabilities,
@@ -325,6 +341,12 @@ pub struct RelayStateHandle {
 /// Cloneable harness-state request capability without store-worker ownership.
 #[derive(Clone)]
 pub struct HarnessStateHandle {
+    requests: SyncSender<Request>,
+}
+
+/// Cloneable project-workflow state capability without store-worker ownership.
+#[derive(Clone)]
+pub struct ProjectSagaStateHandle {
     requests: SyncSender<Request>,
 }
 
@@ -554,6 +576,59 @@ impl fmt::Debug for HarnessStateHandle {
     }
 }
 
+impl ProjectSagaStateHandle {
+    /// Atomically begins one exact project workflow.
+    pub fn begin(&self, record: StoredProjectSaga) -> Result<StoredProjectSagaBegin, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectSaga(Box::new(ProjectSagaRequest::Begin {
+                record: Box::new(record),
+                reply,
+            })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Atomically advances one exact project workflow checkpoint.
+    pub fn replace(&self, record: StoredProjectSaga) -> Result<(), StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectSaga(Box::new(
+                ProjectSagaRequest::Replace {
+                    record: Box::new(record),
+                    reply,
+                },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one deterministic bounded set of runnable or reconcilable workflows.
+    pub fn load_runnable(&self, limit: usize) -> Result<Vec<StoredProjectSaga>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::ProjectSaga(Box::new(
+                ProjectSagaRequest::LoadRunnable { limit, reply },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+}
+
+impl fmt::Debug for ProjectSagaStateHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProjectSagaStateHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl Store {
     /// Opens a fresh or compatible database on a dedicated synchronous worker thread.
     pub fn open(path: impl AsRef<Path>, capacity: NonZeroUsize) -> Result<Self, StoreError> {
@@ -610,6 +685,13 @@ impl Store {
     /// Creates a harness-state request capability for owned supervisor tasks.
     pub fn harness_state_handle(&self) -> HarnessStateHandle {
         HarnessStateHandle {
+            requests: self.requests.clone(),
+        }
+    }
+
+    /// Creates a project-workflow request capability for the owned saga worker.
+    pub fn project_saga_state_handle(&self) -> ProjectSagaStateHandle {
+        ProjectSagaStateHandle {
             requests: self.requests.clone(),
         }
     }
@@ -831,6 +913,27 @@ impl Store {
         self.harness_state_handle().load(limit)
     }
 
+    /// Atomically begins one exact durable project workflow.
+    pub fn begin_project_saga(
+        &self,
+        record: StoredProjectSaga,
+    ) -> Result<StoredProjectSagaBegin, StoreError> {
+        self.project_saga_state_handle().begin(record)
+    }
+
+    /// Atomically advances one exact durable project workflow checkpoint.
+    pub fn replace_project_saga(&self, record: StoredProjectSaga) -> Result<(), StoreError> {
+        self.project_saga_state_handle().replace(record)
+    }
+
+    /// Loads one deterministic bounded project workflow recovery prefix.
+    pub fn load_runnable_project_sagas(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredProjectSaga>, StoreError> {
+        self.project_saga_state_handle().load_runnable(limit)
+    }
+
     /// Stops intake, acknowledges worker shutdown, and joins the owning thread.
     pub fn close(mut self) -> Result<(), StoreError> {
         self.shutdown()
@@ -953,10 +1056,25 @@ fn run(
             }
             Request::Relay(request) => handle_relay_request(&mut database, *request),
             Request::Harness(request) => handle_harness_request(&mut database, *request),
+            Request::ProjectSaga(request) => handle_project_saga_request(&mut database, *request),
             Request::Close { reply } => {
                 let _ = reply.send(());
                 break;
             }
+        }
+    }
+}
+
+fn handle_project_saga_request(database: &mut Database, request: ProjectSagaRequest) {
+    match request {
+        ProjectSagaRequest::Begin { record, reply } => {
+            let _ = reply.send(database.begin_project_saga(&record));
+        }
+        ProjectSagaRequest::Replace { record, reply } => {
+            let _ = reply.send(database.replace_project_saga(&record));
+        }
+        ProjectSagaRequest::LoadRunnable { limit, reply } => {
+            let _ = reply.send(database.load_runnable_project_sagas(limit));
         }
     }
 }

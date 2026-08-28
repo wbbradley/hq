@@ -29,7 +29,7 @@ another process running as the same operating-system user.
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
 | Deterministic reduction indexes | Reverse and affected dependencies, decisions, diagnostics, conflicts, global reducer order, and conversation-local order | Yes, through atomic ingest or explicit repair |
 | Materialized projections | Complete authority, conversation/activity, named-agent, and project frontiers, typed values, ordered children, and support | Yes, through atomic ingest or explicit repair |
-| Durable operational state | Mutation receipts, canonical commit revisions, change revision, canonical outbox intents, relay policies, prepared wrappers, attempts, cursors, deduplication, staging, quarantine, and harness ownership/delivery/persistence checkpoints; later saga checkpoints remain reserved | No |
+| Durable operational state | Mutation receipts, canonical commit revisions, change revision, canonical outbox intents, relay policies, prepared wrappers, attempts, cursors, deduplication, staging, quarantine, harness ownership/delivery/persistence checkpoints, and project saga checkpoints/reservations | No |
 | Ephemeral runtime state | Sockets, tasks, environments, UI caches | Never stored as domain state |
 | Rejected/temporary input | Reserved bounded quarantine or retry staging with no domain effect | No domain effect |
 
@@ -247,6 +247,22 @@ Harness state snapshots and exact-delivery reads use typed records and bounded l
 decoding rejects malformed identities, text, booleans, state codes, tokens, and full-width times.
 Projection repair excludes every harness operational table. Close/reopen preserves leases, ready
 sessions, deliveries, and partial event checkpoints without ever persisting environment values.
+
+The same clean-sheet v13 schema includes `project_sagas` and `project_saga_reservations` without a
+storage-version increment. A saga row binds stable operation and command identities to the exact
+request digest, active account, project/home, expected head, strict versioned command body,
+monotonic checkpoint, external operation correlations and dispositions, optional destination
+reservation, typed terminal or reconcilable result, and injected recovery ordering key. Exact
+replay returns retained state; changed operation or command identity fails closed. A partial unique
+index permits at most one running or reconcilable state-changing command per project.
+
+Reservations are home-qualified normalized locators. A competing operation cannot reserve the
+same destination, and accepted or uncertain Git work marks the reservation as protecting external
+state. Checkpoint replacement rejects immutable-input changes, stage or effect regression, changed
+external identities, reservation changes, and time regression. Startup recovery scans only running
+or reconcilable rows in bounded deterministic order. Projection repair excludes both tables, and
+close/reopen retains them because canonical projections cannot reconstruct whether an external
+boundary was crossed.
 
 Account-addressed fanout normally uses the projected creator and active devices after the atomic
 reduction. `HumanDeviceGranted` and `HumanDeviceRevoked` additionally name their subject device

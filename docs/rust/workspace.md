@@ -23,6 +23,7 @@ making the skeleton a supported replacement for the Go executable.
 | `hq-relay` | Encrypted relay transport | Domain, protocol, application |
 | `hq-resources` | Path identity plus bounded filesystem and Git observation | Domain |
 | `hq-harness` | Provider-neutral runtime contract, registry, buffer, and supervisor | Domain |
+| `hq-projects` | Explicit durable project command workflows and strict remote command codec | Application, domain, reducer, harness, resources |
 | `hq-codex` | Private Codex adapter | Domain, `hq-harness` |
 | `hq-tui` | Pure UI state plus terminal adapter | Domain, application |
 | `hq-node` | Composition, runtime ownership, single binary | Any inward crate |
@@ -56,6 +57,12 @@ fields. The adapter itself remains an opaque capability because it owns injected
 effects. It preserves normalized human spelling separately from immutable canonical identity,
 keeps home qualification explicit, and returns closed health/release evidence without retaining
 file names, contents, stderr, environment, or operating-system diagnostics.
+
+`hq-projects` owns passive public command/checkpoint records, a strict canonical versioned command
+body codec, exact-replay intake, and the workflow persistence capability. It does not own SQLite,
+provider processes, or canonical fact authority. `hq-node` maps that capability to store-owned v13
+records; explicit workflow handlers inject canonical, runtime, resource, and Git capabilities
+without reversing dependencies.
 
 The in-memory composition path remains intentionally non-normative at the protocol boundary: it
 validates a small frame in `hq-protocol`, constructs an `hq-domain` fact, and submits it through

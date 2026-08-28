@@ -19,6 +19,7 @@ expected_crates=(
   hq-harness
   hq-local-api
   hq-node
+  hq-projects
   hq-protocol
   hq-reducer
   hq-relay
@@ -67,11 +68,14 @@ allowed_internal_dependency() {
       hq-relay:hq-domain | hq-relay:hq-protocol | hq-relay:hq-application | \
       hq-resources:hq-domain | \
       hq-harness:hq-domain | \
+      hq-projects:hq-domain | hq-projects:hq-reducer | \
+      hq-projects:hq-application | hq-projects:hq-harness | hq-projects:hq-resources | \
       hq-codex:hq-domain | hq-codex:hq-harness | hq-codex:hq-testkit | \
       hq-tui:hq-domain | hq-tui:hq-application | \
       hq-node:hq-domain | hq-node:hq-reducer | hq-node:hq-protocol | \
       hq-node:hq-application | hq-node:hq-store | hq-node:hq-local-api | \
       hq-node:hq-relay | hq-node:hq-harness | hq-node:hq-codex | \
+      hq-node:hq-resources | hq-node:hq-projects | \
       hq-node:hq-tui | hq-node:hq-testkit | \
       hq-testkit:hq-domain | hq-testkit:hq-reducer | hq-testkit:hq-protocol | \
       hq-testkit:hq-application | hq-testkit:hq-harness)
@@ -179,6 +183,15 @@ grep -Fq 'impl RelayStatePort for RelayStoreAdapter' \
 grep -Fq 'impl HarnessStatePort for HarnessStoreAdapter' \
   "$repository_root/crates/hq-node/src/harness_store.rs" ||
   fail "hq-node must own the harness/store record mapping"
+
+grep -Fq 'impl ProjectSagaStore for ProjectSagaStoreAdapter' \
+  "$repository_root/crates/hq-node/src/project_store.rs" ||
+  fail "hq-node must own the project-workflow/store record mapping"
+
+if grep -ERq --include='*.rs' '(hq_store|StoredProjectSaga|rusqlite)' \
+  "$repository_root/crates/hq-projects/src"; then
+  fail "hq-projects contains storage-adapter vocabulary"
+fi
 
 grep -Eq '^hq-domain(\.workspace)?[[:space:]]*=' \
   "$repository_root/crates/hq-resources/Cargo.toml" ||
