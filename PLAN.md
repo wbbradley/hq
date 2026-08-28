@@ -54,12 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[runtime/high] Continuously drain live harness event streams** — Poll every live provider worker
-  through bounded component-owned runtime work, normalize source-ordered output/activity into the
-  supervisor buffer, and drive canonical persistence without losing backpressured or restartable
-  work. Test restart recovery, buffer saturation and coalescing, provider closure/failure, ordered
-  shutdown, and zero leaked worker/task ownership.
-
 - **[runtime/high] Expose the managed `hq harness` client workflow** — Add local-API-only CLI start,
   exact-resume, and stop commands that resolve one named agent, copy the caller environment and
   absolute launch directory at the boundary, derive stable exact request identity, autostart the

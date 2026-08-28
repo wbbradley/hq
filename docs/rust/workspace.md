@@ -146,7 +146,10 @@ foreground root supplies the sole production registry containing Codex; restart 
 registry after the prior generation has drained and released all child ownership. Its node-owned
 canonical persistence adapter maps neutral values to pure application plans, revalidates exact
 mailbox/session or project binding at the transaction snapshot, and uses the ordinary waking fact
-mutation path without reversing crate dependencies.
+mutation path without reversing crate dependencies. The component also owns and joins the one
+bounded event-poll thread; neutral workers retain their fixed persistence FIFO, one backpressured
+source-staging slot, and bounded interactive requests without exposing provider sessions to the
+node task.
 
 ## Supported target matrix
 

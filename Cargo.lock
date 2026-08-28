@@ -374,6 +374,7 @@ name = "hq-harness"
 version = "0.1.0"
 dependencies = [
  "hq-domain",
+ "sha2",
 ]
 
 [[package]]

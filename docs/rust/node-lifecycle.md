@@ -102,8 +102,12 @@ The harness slot is likewise concrete. `HarnessNodeComponent` owns the neutral s
 implements application harness control without exposing provider sessions or storage. It composes
 the provider registry, record-only `HarnessStoreAdapter`, normalized persistence capability, and
 injected clock/token sources. Exact resume immediately reconciles durable pending/uncertain work.
-Stop-intake rejects new launch/control effects; drain flushes accepted events, bounds adapter wait,
-records escalation, force-stops runtime ownership, and releases exact worker leases.
+One component-owned joined thread continuously polls every live worker in bounded zero-wait passes,
+normalizes output/activity into the fixed FIFO, and retains one just-polled value per source when
+the FIFO backpressures. Stop-intake rejects new launch/control effects and closes provider intake
+before stopping that thread; drain continues bounded polling, joins the thread, flushes accepted
+events, bounds adapter wait, records escalation, force-stops runtime ownership, and releases exact
+worker leases.
 
 Foreground normalized persistence is concrete. `CanonicalHarnessPersistence` derives stable
 command identities and complete request digests, then invokes pure application planners through the

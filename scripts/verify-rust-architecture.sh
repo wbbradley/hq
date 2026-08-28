@@ -216,6 +216,11 @@ grep -Fq 'impl NodeComponent for RelayNodeComponent' \
 grep -Fq 'impl NodeComponent for HarnessNodeComponent' \
   "$repository_root/crates/hq-node/src/harness_component.rs" ||
   fail "hq-node must own the concrete harness component lifecycle"
+grep -Fq '.name("hq-harness-events".to_owned())' \
+  "$repository_root/crates/hq-node/src/harness_component.rs" ||
+  fail "the concrete harness component must own its joined event polling task"
+grep -Fq '.poll_events()' "$repository_root/crates/hq-node/src/harness_component.rs" ||
+  fail "the concrete harness event task must drive the neutral supervisor poll boundary"
 grep -Fq 'foundation.compose_relay(' "$repository_root/crates/hq-node/src/foreground.rs" ||
   fail "foreground composition must construct the concrete relay through foundation ownership"
 

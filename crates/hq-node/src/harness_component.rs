@@ -4,6 +4,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::thread::{self, JoinHandle};
 
 use hq_application::{
     AgentSessionResult, ApplicationError, ApplicationErrorCode, ControlHarness, EffectOutcome,
@@ -36,6 +37,8 @@ struct HarnessNodeInner {
     dependencies: HarnessSupervisorDependencies,
     canonical: Arc<dyn AgentSessionCanonicalPort>,
     supervisor: Mutex<Option<HarnessSupervisor>>,
+    event_task: Mutex<Option<JoinHandle<Result<(), HarnessError>>>>,
+    event_stop: AtomicBool,
     accepting: AtomicBool,
 }
 
@@ -67,6 +70,8 @@ impl HarnessNodeComponent {
                 },
                 canonical,
                 supervisor: Mutex::new(None),
+                event_task: Mutex::new(None),
+                event_stop: AtomicBool::new(false),
                 accepting: AtomicBool::new(false),
             }),
         }
@@ -240,14 +245,33 @@ impl HarnessNodeComponent {
             .and_then(|supervisor| operation(supervisor).map_err(map_harness_error))
     }
 
+    fn wake_event_task(&self) {
+        if let Ok(task) = self.inner.event_task.lock()
+            && let Some(task) = task.as_ref()
+        {
+            task.thread().unpark();
+        }
+    }
+
     fn shutdown_supervisor(&self) -> Result<ComponentDrain, ComponentError> {
+        self.inner.event_stop.store(true, Ordering::Release);
+        let event_failed = self
+            .inner
+            .event_task
+            .lock()
+            .map_err(|_| ComponentError::unavailable())?
+            .take()
+            .is_some_and(|task| {
+                task.thread().unpark();
+                !matches!(task.join(), Ok(Ok(())))
+            });
         let supervisor = self
             .inner
             .supervisor
             .lock()
             .map_err(|_| ComponentError::unavailable())?
             .take();
-        supervisor.map_or(Ok(ComponentDrain::Complete), |supervisor| {
+        let supervisor_result = supervisor.map_or(Ok(ComponentDrain::Complete), |supervisor| {
             supervisor
                 .shutdown()
                 .map(|report| {
@@ -258,8 +282,49 @@ impl HarnessNodeComponent {
                     }
                 })
                 .map_err(|_| ComponentError::unavailable())
-        })
+        })?;
+        if event_failed || supervisor_result == ComponentDrain::Escalate {
+            Ok(ComponentDrain::Escalate)
+        } else {
+            Ok(ComponentDrain::Complete)
+        }
     }
+}
+
+fn run_harness_events(
+    inner: &HarnessNodeInner,
+    cancellation: &CancellationToken,
+) -> Result<(), HarnessError> {
+    while !inner.event_stop.load(Ordering::Acquire) && !cancellation.is_cancelled() {
+        {
+            let supervisor = inner
+                .supervisor
+                .lock()
+                .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
+            if let Err(error) = supervisor
+                .as_ref()
+                .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?
+                .poll_events()
+            {
+                inner.accepting.store(false, Ordering::Release);
+                return Err(error);
+            }
+        }
+        thread::park_timeout(inner.config.event_poll_interval);
+    }
+    let supervisor = inner
+        .supervisor
+        .lock()
+        .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
+    let result = supervisor
+        .as_ref()
+        .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?
+        .drain_event_streams(inner.config.drain_wait)
+        .map(|_| ());
+    if result.is_err() {
+        inner.accepting.store(false, Ordering::Release);
+    }
+    result
 }
 
 struct UnavailableHarnessPersistence;
@@ -351,7 +416,7 @@ impl std::fmt::Debug for HarnessNodeComponent {
 }
 
 impl NodeComponent for HarnessNodeComponent {
-    fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
+    fn start(&mut self, cancellation: CancellationToken) -> Result<(), ComponentError> {
         let mut supervisor = self
             .inner
             .supervisor
@@ -363,13 +428,27 @@ impl NodeComponent for HarnessNodeComponent {
                     .map_err(|_| ComponentError::unavailable())?;
             *supervisor = Some(started);
         }
+        self.inner.event_stop.store(false, Ordering::Release);
+        let mut event_task = self
+            .inner
+            .event_task
+            .lock()
+            .map_err(|_| ComponentError::unavailable())?;
+        if event_task.is_none() {
+            let inner = Arc::clone(&self.inner);
+            let task = thread::Builder::new()
+                .name("hq-harness-events".to_owned())
+                .spawn(move || run_harness_events(&inner, &cancellation))
+                .map_err(|_| ComponentError::unavailable())?;
+            *event_task = Some(task);
+        }
         self.inner.accepting.store(true, Ordering::Release);
         Ok(())
     }
 
     fn stop_intake(&mut self) -> Result<(), ComponentError> {
         self.inner.accepting.store(false, Ordering::Release);
-        if let Some(supervisor) = self
+        let result = if let Some(supervisor) = self
             .inner
             .supervisor
             .lock()
@@ -378,9 +457,21 @@ impl NodeComponent for HarnessNodeComponent {
         {
             supervisor
                 .stop_intake()
-                .map_err(|_| ComponentError::unavailable())?;
+                .map_err(|_| ComponentError::unavailable())
+        } else {
+            Ok(())
+        };
+        self.inner.event_stop.store(true, Ordering::Release);
+        if let Some(task) = self
+            .inner
+            .event_task
+            .lock()
+            .map_err(|_| ComponentError::unavailable())?
+            .as_ref()
+        {
+            task.thread().unpark();
         }
-        Ok(())
+        result
     }
 
     fn drain(&mut self) -> Result<ComponentDrain, ComponentError> {
@@ -423,6 +514,7 @@ impl ControlHarness for HarnessNodeComponent {
         };
         let outcome =
             self.with_supervisor(|supervisor| supervisor.control_session(&operation, launch))?;
+        self.wake_event_task();
         self.finish_session_control(request, prepared.as_deref(), outcome)
     }
 }
@@ -445,7 +537,7 @@ impl ProjectRuntimePort for HarnessNodeComponent {
         &self,
         request: &EffectRequest<ProjectRuntimeRequest>,
     ) -> Result<EffectOutcome<hq_domain::ProviderSessionId>, ApplicationError> {
-        self.with_supervisor(|supervisor| {
+        let outcome = self.with_supervisor(|supervisor| {
             let launch = HarnessLaunchRequest {
                 agent_id: request.body.agent_id,
                 project_id: Some(request.body.project_id),
@@ -465,14 +557,16 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                 supervisor.launch(launch)
             }
             .map(EffectOutcome::Accepted)
-        })
+        });
+        self.wake_event_task();
+        outcome
     }
 
     fn deliver(
         &self,
         request: &EffectRequest<ProjectRuntimeDelivery>,
     ) -> Result<EffectOutcome<()>, ApplicationError> {
-        self.with_supervisor(|supervisor| {
+        let outcome = self.with_supervisor(|supervisor| {
             let delivery = HarnessDeliveryRecord {
                 agent_id: request.body.binding.agent_id,
                 provider_id: request.body.binding.provider.clone(),
@@ -518,7 +612,9 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                 }
                 None => attempt.map(|()| EffectOutcome::Uncertain(request.operation_id)),
             }
-        })
+        });
+        self.wake_event_task();
+        outcome
     }
 
     fn stop(
@@ -589,11 +685,24 @@ const fn map_harness_error(error: HarnessError) -> ApplicationError {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::num::NonZeroU64;
+    use std::{
+        collections::VecDeque,
+        fs,
+        num::{NonZeroU64, NonZeroUsize},
+        path::PathBuf,
+        sync::atomic::AtomicUsize,
+        time::{Duration, Instant},
+    };
 
     use hq_domain::{
         AgentId, AssignmentBinding, AssignmentId, CommandDigest, ContentText, MessageId,
         OperationId, ProjectId, ProviderId, ProviderSessionId, ThreadId, Timestamp,
+    };
+    use hq_harness::{
+        HarnessCapabilities, HarnessCapability, HarnessDrainOutcome, HarnessEvent,
+        HarnessEventPoll, HarnessFactory, HarnessInstance, HarnessInstanceRequest,
+        HarnessInteractiveAnswer, HarnessOutputKind, HarnessSession, HarnessSubmissionLookup,
+        HarnessSubmissionOutcome, OpenedHarnessSession,
     };
 
     use super::*;
@@ -623,6 +732,116 @@ mod tests {
         assert!(!same_project_delivery(&request, &retained));
     }
 
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn component_owned_event_task_drains_live_output_and_joins_before_release() {
+        let database = TestDatabase::new();
+        let store = Store::open(&database.path, NonZeroUsize::MIN).expect("store opens");
+        let provider_id = ProviderId::new("event-provider").expect("provider");
+        let session_id = ProviderSessionId::new("event-session").expect("session");
+        let events = Arc::new(Mutex::new(VecDeque::from([
+            Ok(HarnessEventPoll::Event(HarnessEvent::Output(
+                HarnessOutput {
+                    output_id: MessageId::from_bytes([71; 32]),
+                    operation_id: OperationId::from_bytes([72; 32]),
+                    kind: HarnessOutputKind::FinalAnswer,
+                    status: hq_domain::ActivityStatus::Succeeded,
+                    body: ContentText::new("background answer").expect("body"),
+                },
+            ))),
+            Ok(HarnessEventPoll::Closed),
+        ])));
+        let mut registry = HarnessRegistry::new();
+        registry
+            .register(
+                provider_id.clone(),
+                HarnessCapabilities {
+                    supported: [
+                        HarnessCapability::StartSessions,
+                        HarnessCapability::SubmissionLookup,
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+                Arc::new(EventFactory {
+                    session_id: session_id.clone(),
+                    events,
+                }),
+            )
+            .expect("provider registers");
+        let persistence = Arc::new(CountingPersistence::default());
+        let mut component = HarnessNodeComponent::new(
+            HarnessSupervisorConfig {
+                event_poll_interval: Duration::from_secs(60),
+                drain_wait: Duration::from_millis(20),
+                ..HarnessSupervisorConfig::default()
+            },
+            &store,
+            Arc::new(registry),
+            persistence.clone(),
+            Arc::new(SystemHarnessClock),
+            Arc::new(RandomHarnessTokens),
+            Arc::new(UnavailableAgentSessionCanonical),
+        );
+        let cancellation = CancellationToken::new();
+        component
+            .start(cancellation.child())
+            .expect("component starts event task");
+        component
+            .inner
+            .supervisor
+            .lock()
+            .expect("supervisor locks")
+            .as_ref()
+            .expect("supervisor started")
+            .launch(HarnessLaunchRequest {
+                agent_id: AgentId::from_bytes([73; 32]),
+                project_id: None,
+                launch_directory: None,
+                provider_id,
+                session: HarnessSessionRequest::Start,
+                environment: HarnessEnvironment::default(),
+            })
+            .expect("worker launches");
+        component.wake_event_task();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while persistence.outputs.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(persistence.outputs.load(Ordering::SeqCst), 1);
+        assert!(
+            component
+                .inner
+                .event_task
+                .lock()
+                .expect("task locks")
+                .is_some()
+        );
+
+        let shutdown_started = Instant::now();
+        component.stop_intake().expect("intake closes");
+        cancellation.cancel();
+        assert_eq!(component.drain(), Ok(ComponentDrain::Complete));
+        assert!(shutdown_started.elapsed() < Duration::from_secs(1));
+        assert!(
+            component
+                .inner
+                .event_task
+                .lock()
+                .expect("task locks")
+                .is_none()
+        );
+        assert!(
+            component
+                .inner
+                .supervisor
+                .lock()
+                .expect("supervisor locks")
+                .is_none()
+        );
+    }
+
     fn delivery_request() -> EffectRequest<ProjectRuntimeDelivery> {
         EffectRequest {
             operation_id: OperationId::from_bytes([1; 32]),
@@ -641,6 +860,157 @@ mod tests {
                 sequence: NonZeroU64::new(9).expect("nonzero"),
                 body: ContentText::new("body").expect("body"),
             },
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingPersistence {
+        outputs: AtomicUsize,
+    }
+
+    impl HarnessPersistencePort for CountingPersistence {
+        fn persist_output(
+            &self,
+            _agent_id: AgentId,
+            _provider_id: &ProviderId,
+            _session_id: &ProviderSessionId,
+            _output: &HarnessOutput,
+        ) -> Result<(), HarnessError> {
+            self.outputs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn persist_activity(
+            &self,
+            _agent_id: AgentId,
+            _provider_id: &ProviderId,
+            _session_id: &ProviderSessionId,
+            _activity: &HarnessActivity,
+        ) -> Result<(), HarnessError> {
+            Ok(())
+        }
+    }
+
+    struct EventFactory {
+        session_id: ProviderSessionId,
+        events: Arc<Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>>,
+    }
+
+    impl HarnessFactory for EventFactory {
+        fn create_instance(
+            &self,
+            _request: HarnessInstanceRequest,
+        ) -> Result<Box<dyn HarnessInstance>, HarnessError> {
+            Ok(Box::new(EventInstance {
+                session_id: self.session_id.clone(),
+                events: Arc::clone(&self.events),
+            }))
+        }
+    }
+
+    struct EventInstance {
+        session_id: ProviderSessionId,
+        events: Arc<Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>>,
+    }
+
+    impl HarnessInstance for EventInstance {
+        fn open_session(
+            self: Box<Self>,
+            _request: HarnessSessionRequest,
+        ) -> Result<OpenedHarnessSession, HarnessError> {
+            Ok(OpenedHarnessSession {
+                session_id: self.session_id,
+                session: Box::new(EventSession {
+                    events: self.events,
+                }),
+            })
+        }
+    }
+
+    struct EventSession {
+        events: Arc<Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>>,
+    }
+
+    impl HarnessSession for EventSession {
+        fn submit(
+            &mut self,
+            _submission: HarnessSubmission,
+        ) -> Result<HarnessSubmissionOutcome, HarnessError> {
+            Ok(HarnessSubmissionOutcome::Accepted)
+        }
+
+        fn lookup_submission(
+            &mut self,
+            _submission: &HarnessSubmission,
+        ) -> Result<HarnessSubmissionLookup, HarnessError> {
+            Ok(HarnessSubmissionLookup::Missing)
+        }
+
+        fn cancel_operation(
+            &mut self,
+            _operation_id: OperationId,
+        ) -> Result<hq_harness::HarnessCancellationOutcome, HarnessError> {
+            Ok(hq_harness::HarnessCancellationOutcome::AlreadyFinished)
+        }
+
+        fn poll_event(&mut self, _wait: Duration) -> Result<HarnessEventPoll, HarnessError> {
+            self.events
+                .lock()
+                .expect("events lock")
+                .pop_front()
+                .unwrap_or(Ok(HarnessEventPoll::TimedOut))
+        }
+
+        fn answer_interactive(
+            &mut self,
+            _answer: HarnessInteractiveAnswer,
+        ) -> Result<(), HarnessError> {
+            Ok(())
+        }
+
+        fn stop_intake(&mut self) -> Result<(), HarnessError> {
+            Ok(())
+        }
+
+        fn drain(&mut self, _wait: Duration) -> Result<HarnessDrainOutcome, HarnessError> {
+            Ok(HarnessDrainOutcome::Complete)
+        }
+
+        fn force_stop(&mut self) -> Result<(), HarnessError> {
+            Ok(())
+        }
+    }
+
+    struct TestDatabase {
+        path: PathBuf,
+    }
+
+    impl TestDatabase {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(1);
+            let root = std::env::temp_dir().join(format!(
+                "hq-harness-component-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).expect("test directory creates");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                    .expect("test directory permissions restrict");
+            }
+            Self {
+                path: root.join("hq.sqlite3"),
+            }
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            if let Some(parent) = self.path.parent() {
+                let _ = fs::remove_dir_all(parent);
+            }
         }
     }
 }

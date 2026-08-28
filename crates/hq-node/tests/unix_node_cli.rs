@@ -513,6 +513,12 @@ fn named_agent_catalog_reconciles_create_adopt_selection_and_rename_across_resta
                 && agent["sessions"][0]["display_name"] == "review work"
         })
     }));
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
 }
 
 #[test]
@@ -574,6 +580,12 @@ fn idle_named_agent_retirement_is_explicit_and_survives_restart() {
             .expect("UTF-8 diagnostic")
             .contains("agent.state_unavailable")
     );
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
 }
 
 #[test]
@@ -581,7 +593,7 @@ fn named_agent_current_rejects_ambiguous_provider_environment_without_echoing_se
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     initialize_identity(&state_root);
-    let output = Command::new(env!("CARGO_BIN_EXE_hq"))
+    let command_output = Command::new(env!("CARGO_BIN_EXE_hq"))
         .arg("--output")
         .arg("json")
         .arg("--state-root")
@@ -595,11 +607,17 @@ fn named_agent_current_rejects_ambiguous_provider_environment_without_echoing_se
         .env_remove("HQ_SESSION")
         .output()
         .expect("ambiguous current command runs");
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+    assert!(!command_output.status.success());
+    let stderr = String::from_utf8(command_output.stderr).expect("UTF-8 diagnostic");
     assert!(stderr.contains("state_unavailable"));
     assert!(!stderr.contains("secret-codex-session"));
     assert!(!stderr.contains("secret-pi-session"));
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
 }
 
 #[test]

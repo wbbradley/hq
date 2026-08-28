@@ -1,5 +1,47 @@
 # Completed
 
+## 2026-08-28 — Continuous live harness event draining
+
+Added a bounded supervisor polling pass that visits every live worker in stable agent order and
+polls each provider source once without blocking. Normalized output retains its stable output
+identity; activity derives a deterministic checkpoint identity from operation, item, kind, logical
+key, runtime, and semantic sequence. Complete normalized values determine checkpoint digests, and
+snapshot status alone enters exact operation/logical-key coalescing.
+
+Each worker now owns its fixed persistence FIFO, one explicit just-polled staging slot, and a
+separately bounded source-ordered interactive-request queue. A full FIFO cannot lose the event
+already returned by the provider: that value remains staged and its source is not polled again
+until admission succeeds. Existing snapshots may still replace their exact pending predecessor,
+while distinct durable values preserve FIFO order. Persistence outages leave accepted memory work
+owned; exact session resume and stable canonical identities recover provider replay without
+duplicate facts. Normal closure and typed poll failure both tear down only the exact worker and
+release its lease with redacted failure evidence.
+
+`HarnessNodeComponent` now owns one named joined event thread for the complete supervisor. Launch
+and delivery wake it immediately; ordinary work uses an explicit poll interval. Shutdown first
+closes every provider's intake, unparks the task independently of that interval, continues bounded
+provider polling, joins the task, flushes normalized work, drains or force-stops sessions, and only
+then releases worker ownership. A real component test uses a 60-second interval to prove launch
+wake, ordered drain, and zero retained task/supervisor ownership.
+
+Deterministic recovery tests cover source order, snapshot replacement under persistence outage,
+FIFO saturation plus the staging slot, exact replay after restart, provider closure, typed provider
+failure, partial checkpoints, and diagnostic redaction. The successful Unix CLI integration suite
+also exposed three generated-state daemons that its tests did not stop; those cases now perform
+explicit teardown, and the post-suite process table is clean. Full locked workspace format, check,
+strict all-feature Clippy, tests, build, architecture, dependency, and bounded protocol fuzz gates
+pass (the dependency audit retains its pre-existing yanked `chacha20 0.10.1` warning). No storage
+or local-API version changed, and no migration, compatibility representation, or passive-record
+accessor facade was added.
+
+### Original plan entry
+
+- **[runtime/high] Continuously drain live harness event streams** — Poll every live provider worker
+  through bounded component-owned runtime work, normalize source-ordered output/activity into the
+  supervisor buffer, and drive canonical persistence without losing backpressured or restartable
+  work. Test restart recovery, buffer saturation and coalescing, provider closure/failure, ordered
+  shutdown, and zero leaked worker/task ownership.
+
 ## 2026-08-28 — Canonical normalized harness value authoring
 
 Added pure application planners for normalized harness output and activity. Their passive request

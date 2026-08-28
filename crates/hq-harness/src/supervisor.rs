@@ -1,21 +1,26 @@
 //! Exact-owner managed-runtime supervision over consumer-owned durable and persistence ports.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fmt,
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use hq_domain::{AgentId, CommandDigest, MessageId, ProjectId, ProviderId, ProviderSessionId};
+use hq_domain::{
+    ActivityKind, ActivityStatus, AgentId, CommandDigest, MessageId, ProjectId, ProviderId,
+    ProviderSessionId,
+};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    HarnessActivity, HarnessBufferedEvent, HarnessCancellationOutcome, HarnessDrainOutcome,
-    HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessEventBuffer,
-    HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessOutput, HarnessRegistry,
-    HarnessSession, HarnessSessionRequest, HarnessSubmission, HarnessSubmissionLookup,
+    HarnessActivity, HarnessBufferPush, HarnessBufferedEvent, HarnessCancellationOutcome,
+    HarnessDrainOutcome, HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessEvent,
+    HarnessEventBuffer, HarnessEventPoll, HarnessInstanceRequest, HarnessInteractiveAnswer,
+    HarnessInteractiveRequest, HarnessOutput, HarnessOutputKind, HarnessRegistry, HarnessSession,
+    HarnessSessionRequest, HarnessSnapshotKey, HarnessSubmission, HarnessSubmissionLookup,
     HarnessSubmissionOutcome,
 };
 
@@ -318,6 +323,8 @@ pub struct HarnessSupervisorConfig {
     pub event_capacity: NonZeroUsize,
     /// Maximum adapter drain wait during ordered shutdown.
     pub drain_wait: Duration,
+    /// Delay between bounded component-owned event polling passes.
+    pub event_poll_interval: Duration,
 }
 
 impl Default for HarnessSupervisorConfig {
@@ -328,6 +335,7 @@ impl Default for HarnessSupervisorConfig {
             lease_duration: Duration::from_secs(30),
             event_capacity: NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN),
             drain_wait: Duration::from_secs(2),
+            event_poll_interval: Duration::from_millis(10),
         }
     }
 }
@@ -401,12 +409,35 @@ pub struct HarnessSupervisorReport {
     pub failures: Vec<HarnessErrorClass>,
 }
 
+/// One bounded polling pass over every currently live exact worker.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HarnessEventPumpReport {
+    /// Provider events accepted from source-ordered streams.
+    pub events_polled: usize,
+    /// Older replaceable snapshots removed before canonical persistence.
+    pub snapshots_replaced: usize,
+    /// Interactive requests retained for later exact response.
+    pub interactive_requests: usize,
+    /// Workers whose provider stream closed normally in this pass.
+    pub workers_closed: usize,
+    /// Workers whose provider poll failed in this pass.
+    pub workers_failed: usize,
+    /// Normalized persistence items still owned after this pass.
+    pub pending_values: usize,
+    /// Live workers remaining after this pass.
+    pub live_workers: usize,
+    /// Bounded stable failure classes observed without provider prose.
+    pub failures: Vec<HarnessErrorClass>,
+}
+
 struct HarnessWorker {
     token: HarnessOwnerToken,
     provider_id: ProviderId,
     session_id: ProviderSessionId,
     session: Box<dyn HarnessSession>,
     events: HarnessEventBuffer,
+    staged: Option<HarnessEvent>,
+    requests: VecDeque<HarnessInteractiveRequest>,
 }
 
 /// Sole synchronous owner of named-agent provider workers and recovery checkpoints.
@@ -424,10 +455,13 @@ impl HarnessSupervisor {
         dependencies: HarnessSupervisorDependencies,
     ) -> Result<Self, HarnessError> {
         if config.max_workers == 0
+            || config.max_workers > MAX_HARNESS_SUPERVISOR_STATE_ITEMS
             || config.state_query_items == 0
             || config.state_query_items > MAX_HARNESS_SUPERVISOR_STATE_ITEMS
+            || config.event_capacity.get() > MAX_HARNESS_SUPERVISOR_STATE_ITEMS
             || config.lease_duration.is_zero()
             || config.drain_wait.is_zero()
+            || config.event_poll_interval.is_zero()
         {
             return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
         }
@@ -663,6 +697,8 @@ impl HarnessSupervisor {
                 session_id: opened.session_id,
                 session: opened.session,
                 events: HarnessEventBuffer::new(self.config.event_capacity),
+                staged: None,
+                requests: VecDeque::with_capacity(self.config.event_capacity.get()),
             },
         );
         Ok(ready)
@@ -771,6 +807,105 @@ impl HarnessSupervisor {
         drain_events(&self.dependencies, agent_id, worker)
     }
 
+    /// Polls every live worker once without blocking and retains every accepted value.
+    pub fn poll_events(&self) -> Result<HarnessEventPumpReport, HarnessError> {
+        let mut workers = self.lock_workers()?;
+        let agents: Vec<_> = workers.keys().copied().collect();
+        let mut report = HarnessEventPumpReport::default();
+        let mut terminal = Vec::new();
+        for agent_id in agents {
+            let worker = workers
+                .get_mut(&agent_id)
+                .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+            let pass = pump_worker(&self.config, &self.dependencies, agent_id, worker);
+            report.events_polled = report.events_polled.saturating_add(pass.events_polled);
+            report.snapshots_replaced = report
+                .snapshots_replaced
+                .saturating_add(pass.snapshots_replaced);
+            report.interactive_requests = report
+                .interactive_requests
+                .saturating_add(pass.interactive_requests);
+            for failure in pass.failures {
+                retain_pump_failure(&mut report, failure, self.config.max_workers);
+            }
+            if let Some(outcome) = pass.terminal {
+                terminal.push((agent_id, outcome));
+            }
+        }
+        for (agent_id, outcome) in terminal {
+            let Some(worker) = workers.remove(&agent_id) else {
+                continue;
+            };
+            match outcome {
+                WorkerTerminal::Closed => {
+                    report.workers_closed = report.workers_closed.saturating_add(1);
+                }
+                WorkerTerminal::Failed(class) => {
+                    report.workers_failed = report.workers_failed.saturating_add(1);
+                    retain_pump_failure(&mut report, class, self.config.max_workers);
+                }
+            }
+            let stopped = stop_worker(&self.config, &self.dependencies, agent_id, worker);
+            for failure in stopped.failures {
+                retain_pump_failure(&mut report, failure, self.config.max_workers);
+            }
+        }
+        report.pending_values = workers
+            .values()
+            .map(|worker| {
+                worker.events.len()
+                    + usize::from(matches!(
+                        worker.staged.as_ref(),
+                        Some(HarnessEvent::Output(_) | HarnessEvent::Activity(_))
+                    ))
+            })
+            .sum();
+        report.live_workers = workers.len();
+        Ok(report)
+    }
+
+    /// Drains provider streams after intake closure for at most one explicit bounded wait.
+    pub fn drain_event_streams(
+        &self,
+        wait: Duration,
+    ) -> Result<HarnessEventPumpReport, HarnessError> {
+        if wait.is_zero() {
+            return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
+        }
+        let deadline = Instant::now()
+            .checked_add(wait)
+            .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
+        let mut aggregate = HarnessEventPumpReport::default();
+        loop {
+            let pass = self.poll_events()?;
+            merge_pump_report(&mut aggregate, pass, self.config.max_workers);
+            if aggregate.live_workers == 0 || Instant::now() >= deadline {
+                return Ok(aggregate);
+            }
+            std::thread::sleep(
+                self.config
+                    .event_poll_interval
+                    .min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
+
+    /// Loads one bounded source-ordered view of retained interactive requests.
+    pub fn interactive_requests(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> Result<Vec<HarnessInteractiveRequest>, HarnessError> {
+        if limit == 0 || limit > MAX_HARNESS_SUPERVISOR_STATE_ITEMS {
+            return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
+        }
+        let workers = self.lock_workers()?;
+        let worker = workers
+            .get(&agent_id)
+            .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+        Ok(worker.requests.iter().take(limit).cloned().collect())
+    }
+
     /// Answers one structured request through its sole live session owner.
     pub fn answer(
         &self,
@@ -783,7 +918,14 @@ impl HarnessSupervisor {
             .get_mut(&agent_id)
             .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
         renew_worker(&self.config, &self.dependencies, agent_id, worker)?;
-        worker.session.answer_interactive(answer)
+        let index = worker
+            .requests
+            .iter()
+            .position(|request| request.request_id == answer.request_id)
+            .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
+        worker.session.answer_interactive(answer)?;
+        let _ = worker.requests.remove(index);
+        Ok(())
     }
 
     /// Cancels one exact operation through its sole live session owner.
@@ -861,6 +1003,221 @@ impl HarnessSupervisor {
         } else {
             Err(HarnessError::new(HarnessErrorClass::IntakeClosed))
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WorkerTerminal {
+    Closed,
+    Failed(HarnessErrorClass),
+}
+
+#[derive(Default)]
+struct WorkerPump {
+    events_polled: usize,
+    snapshots_replaced: usize,
+    interactive_requests: usize,
+    failures: Vec<HarnessErrorClass>,
+    terminal: Option<WorkerTerminal>,
+}
+
+fn pump_worker(
+    config: &HarnessSupervisorConfig,
+    dependencies: &HarnessSupervisorDependencies,
+    agent_id: AgentId,
+    worker: &mut HarnessWorker,
+) -> WorkerPump {
+    let mut report = WorkerPump::default();
+    if let Err(error) = renew_worker(config, dependencies, agent_id, worker) {
+        report.terminal = Some(WorkerTerminal::Failed(error.class));
+        return report;
+    }
+    if let Err(error) = drain_events(dependencies, agent_id, worker) {
+        report.failures.push(error.class);
+    }
+    if let Some(staged) = worker.staged.take() {
+        match admit_polled_event(config, worker, staged) {
+            Ok(admission) => account_admission(&mut report, admission),
+            Err(staged) => {
+                worker.staged = Some(*staged);
+                return report;
+            }
+        }
+        if let Err(error) = drain_events(dependencies, agent_id, worker) {
+            report.failures.push(error.class);
+        }
+    }
+    match worker.session.poll_event(Duration::ZERO) {
+        Ok(HarnessEventPoll::Event(event)) => {
+            report.events_polled = 1;
+            match admit_polled_event(config, worker, event) {
+                Ok(admission) => account_admission(&mut report, admission),
+                Err(staged) => worker.staged = Some(*staged),
+            }
+            if let Err(error) = drain_events(dependencies, agent_id, worker) {
+                report.failures.push(error.class);
+            }
+        }
+        Ok(HarnessEventPoll::TimedOut) => {}
+        Ok(HarnessEventPoll::Closed) => report.terminal = Some(WorkerTerminal::Closed),
+        Err(error) => report.terminal = Some(WorkerTerminal::Failed(error.class)),
+    }
+    report
+}
+
+#[derive(Clone, Copy)]
+enum EventAdmission {
+    Value(HarnessBufferPush),
+    Interactive,
+    DuplicateInteractive,
+}
+
+fn admit_polled_event(
+    config: &HarnessSupervisorConfig,
+    worker: &mut HarnessWorker,
+    event: HarnessEvent,
+) -> Result<EventAdmission, Box<HarnessEvent>> {
+    match event {
+        HarnessEvent::Output(output) => {
+            let buffered = buffered_output(output.clone());
+            worker
+                .events
+                .push(buffered)
+                .map(EventAdmission::Value)
+                .map_err(|_| Box::new(HarnessEvent::Output(output)))
+        }
+        HarnessEvent::Activity(activity) => {
+            let buffered = buffered_activity(activity.clone());
+            worker
+                .events
+                .push(buffered)
+                .map(EventAdmission::Value)
+                .map_err(|_| Box::new(HarnessEvent::Activity(activity)))
+        }
+        HarnessEvent::InteractiveRequest(request) => {
+            if let Some(prior) = worker
+                .requests
+                .iter()
+                .find(|prior| prior.request_id == request.request_id)
+            {
+                return if prior == &request {
+                    Ok(EventAdmission::DuplicateInteractive)
+                } else {
+                    Err(Box::new(HarnessEvent::InteractiveRequest(request)))
+                };
+            }
+            if worker.requests.len() == config.event_capacity.get() {
+                return Err(Box::new(HarnessEvent::InteractiveRequest(request)));
+            }
+            worker.requests.push_back(request);
+            Ok(EventAdmission::Interactive)
+        }
+    }
+}
+
+fn account_admission(report: &mut WorkerPump, admission: EventAdmission) {
+    match admission {
+        EventAdmission::Value(HarnessBufferPush::Accepted)
+        | EventAdmission::DuplicateInteractive => {}
+        EventAdmission::Value(HarnessBufferPush::Replaced) => {
+            report.snapshots_replaced = report.snapshots_replaced.saturating_add(1);
+        }
+        EventAdmission::Interactive => {
+            report.interactive_requests = report.interactive_requests.saturating_add(1);
+        }
+    }
+}
+
+fn buffered_output(output: HarnessOutput) -> HarnessBufferedEvent {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-harness-buffered-output-v1\0");
+    digest.update(output.output_id.as_bytes());
+    digest.update(output.operation_id.as_bytes());
+    digest.update([match output.kind {
+        HarnessOutputKind::Update => 1,
+        HarnessOutputKind::FinalAnswer => 2,
+    }]);
+    update_activity_status(&mut digest, &output.status);
+    update_digest_text(&mut digest, output.body.as_str());
+    HarnessBufferedEvent::Output {
+        event_id: output.output_id,
+        digest: CommandDigest::from_bytes(digest.finalize().into()),
+        output,
+    }
+}
+
+fn buffered_activity(activity: HarnessActivity) -> HarnessBufferedEvent {
+    let mut identity = Sha256::new();
+    identity.update(b"hq-harness-buffered-activity-id-v1\0");
+    identity.update(activity.operation_id.as_bytes());
+    update_optional_digest_text(
+        &mut identity,
+        activity.item.as_ref().map(hq_domain::BoundedText::as_str),
+    );
+    identity.update([activity_kind_code(activity.kind)]);
+    update_digest_text(&mut identity, activity.logical_key.as_str());
+    update_digest_text(&mut identity, activity.runtime.as_str());
+    identity.update(activity.sequence.get().to_be_bytes());
+    let event_id = MessageId::from_bytes(identity.finalize().into());
+
+    let mut digest = Sha256::new();
+    digest.update(b"hq-harness-buffered-activity-value-v1\0");
+    digest.update(event_id.as_bytes());
+    update_activity_status(&mut digest, &activity.status);
+    update_digest_text(&mut digest, activity.content.as_str());
+    digest.update([u8::from(activity.truncated)]);
+    let digest = CommandDigest::from_bytes(digest.finalize().into());
+    if activity.status == ActivityStatus::Snapshot {
+        HarnessBufferedEvent::Snapshot {
+            event_id,
+            digest,
+            key: HarnessSnapshotKey {
+                operation_id: activity.operation_id,
+                logical_key: activity.logical_key.clone(),
+            },
+            activity,
+        }
+    } else {
+        HarnessBufferedEvent::Activity {
+            event_id,
+            digest,
+            activity,
+        }
+    }
+}
+
+fn update_digest_text(digest: &mut Sha256, value: &str) {
+    digest.update(value.len().to_be_bytes());
+    digest.update(value.as_bytes());
+}
+
+fn update_optional_digest_text(digest: &mut Sha256, value: Option<&str>) {
+    digest.update([u8::from(value.is_some())]);
+    if let Some(value) = value {
+        update_digest_text(digest, value);
+    }
+}
+
+fn update_activity_status(digest: &mut Sha256, status: &ActivityStatus) {
+    match status {
+        ActivityStatus::Snapshot => digest.update([1]),
+        ActivityStatus::Running => digest.update([2]),
+        ActivityStatus::Succeeded => digest.update([3]),
+        ActivityStatus::Failed(code) => {
+            digest.update([4]);
+            update_digest_text(digest, code.as_str());
+        }
+        ActivityStatus::Interrupted => digest.update([5]),
+    }
+}
+
+const fn activity_kind_code(kind: ActivityKind) -> u8 {
+    match kind {
+        ActivityKind::Status => 1,
+        ActivityKind::Progress => 2,
+        ActivityKind::Plan => 3,
+        ActivityKind::Diff => 4,
+        ActivityKind::CompletedItem => 5,
     }
 }
 
@@ -1038,6 +1395,23 @@ fn drain_events(
     Ok(())
 }
 
+fn drain_owned_values(
+    config: &HarnessSupervisorConfig,
+    dependencies: &HarnessSupervisorDependencies,
+    agent_id: AgentId,
+    worker: &mut HarnessWorker,
+) -> Result<(), HarnessError> {
+    drain_events(dependencies, agent_id, worker)?;
+    let Some(staged) = worker.staged.take() else {
+        return Ok(());
+    };
+    if let Err(staged) = admit_polled_event(config, worker, staged) {
+        worker.staged = Some(*staged);
+        return Err(HarnessError::new(HarnessErrorClass::Backpressure));
+    }
+    drain_events(dependencies, agent_id, worker)
+}
+
 fn persist_one(
     dependencies: &HarnessSupervisorDependencies,
     agent_id: AgentId,
@@ -1133,7 +1507,7 @@ fn stop_worker(
     if let Err(error) = worker.session.stop_intake() {
         retain_failure(&mut report, error.class, config.max_workers);
     }
-    if let Err(error) = drain_events(dependencies, agent_id, &mut worker) {
+    if let Err(error) = drain_owned_values(config, dependencies, agent_id, &mut worker) {
         retain_failure(&mut report, error.class, config.max_workers);
     }
     let needs_force = match worker.session.drain(config.drain_wait) {
@@ -1174,6 +1548,37 @@ fn merge_report(
     target.workers_forced = target.workers_forced.saturating_add(source.workers_forced);
     for failure in source.failures {
         retain_failure(target, failure, limit);
+    }
+}
+
+fn merge_pump_report(
+    target: &mut HarnessEventPumpReport,
+    source: HarnessEventPumpReport,
+    limit: usize,
+) {
+    target.events_polled = target.events_polled.saturating_add(source.events_polled);
+    target.snapshots_replaced = target
+        .snapshots_replaced
+        .saturating_add(source.snapshots_replaced);
+    target.interactive_requests = target
+        .interactive_requests
+        .saturating_add(source.interactive_requests);
+    target.workers_closed = target.workers_closed.saturating_add(source.workers_closed);
+    target.workers_failed = target.workers_failed.saturating_add(source.workers_failed);
+    target.pending_values = source.pending_values;
+    target.live_workers = source.live_workers;
+    for failure in source.failures {
+        retain_pump_failure(target, failure, limit);
+    }
+}
+
+fn retain_pump_failure(
+    report: &mut HarnessEventPumpReport,
+    failure: HarnessErrorClass,
+    limit: usize,
+) {
+    if report.failures.len() < limit {
+        report.failures.push(failure);
     }
 }
 

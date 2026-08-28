@@ -3,7 +3,7 @@
 #![allow(clippy::expect_used)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex,
@@ -19,7 +19,7 @@ use hq_domain::{
 use hq_harness::{
     HarnessActivity, HarnessBufferedEvent, HarnessCancellationOutcome, HarnessCapabilities,
     HarnessCapability, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState,
-    HarnessDrainOutcome, HarnessEnvironment, HarnessError, HarnessErrorClass,
+    HarnessDrainOutcome, HarnessEnvironment, HarnessError, HarnessErrorClass, HarnessEvent,
     HarnessEventCheckpoint, HarnessEventPoll, HarnessFactory, HarnessInstance,
     HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessLaunchRequest, HarnessLeaseOutcome,
     HarnessOutput, HarnessOutputKind, HarnessOwnerToken, HarnessPersistencePort,
@@ -30,6 +30,219 @@ use hq_harness::{
     HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource, HarnessWorkerLease,
     OpenedHarnessSession,
 };
+
+#[test]
+fn live_polling_persists_source_order_and_releases_closed_workers() {
+    let agent = AgentId::from_bytes([41; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let session_id = ProviderSessionId::new("event-session").expect("session validates");
+    let provider = Arc::new(ProviderState::default());
+    provider.queue([
+        Ok(HarnessEventPoll::Event(HarnessEvent::Output(output(
+            41,
+            "first output",
+        )))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(activity(
+            1,
+            ActivityStatus::Succeeded,
+            "completed",
+        )))),
+        Ok(HarnessEventPoll::Closed),
+    ]);
+    let state = Arc::new(MemoryState::default());
+    let persistence = Arc::new(MemoryPersistence::available());
+    let runtime = supervisor(dependencies(
+        registry(provider_id.clone(), session_id, provider),
+        state.clone(),
+        persistence.clone(),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("worker starts");
+
+    assert_eq!(
+        runtime.poll_events().expect("output polls").events_polled,
+        1
+    );
+    assert_eq!(
+        runtime.poll_events().expect("activity polls").events_polled,
+        1
+    );
+    let closed = runtime.poll_events().expect("closure polls");
+    assert_eq!(closed.workers_closed, 1);
+    assert_eq!(closed.live_workers, 0);
+    assert!(closed.failures.is_empty());
+    assert_eq!(
+        persistence
+            .persisted
+            .lock()
+            .expect("persisted locks")
+            .as_slice(),
+        ["output:first output", "activity:completed"]
+    );
+    assert!(state.snapshot().leases.is_empty());
+}
+
+#[test]
+fn saturation_stages_durable_values_and_coalesces_only_exact_snapshots() {
+    let agent = AgentId::from_bytes([42; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let provider = Arc::new(ProviderState::default());
+    provider.queue([
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(activity(
+            1,
+            ActivityStatus::Snapshot,
+            "old plan",
+        )))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::Activity(activity(
+            2,
+            ActivityStatus::Snapshot,
+            "new plan",
+        )))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::Output(output(
+            42,
+            "durable one",
+        )))),
+        Ok(HarnessEventPoll::Event(HarnessEvent::Output(output(
+            43,
+            "durable two",
+        )))),
+    ]);
+    let persistence = Arc::new(MemoryPersistence::with_failures(20, 20));
+    let runtime = supervisor(dependencies(
+        registry(
+            provider_id.clone(),
+            ProviderSessionId::new("event-session").expect("session"),
+            provider,
+        ),
+        Arc::new(MemoryState::default()),
+        persistence.clone(),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("worker starts");
+
+    runtime.poll_events().expect("old snapshot stages");
+    let replacement = runtime.poll_events().expect("new snapshot coalesces");
+    assert_eq!(replacement.snapshots_replaced, 1);
+    runtime
+        .poll_events()
+        .expect("first durable value fills buffer");
+    let staged = runtime.poll_events().expect("second durable value stages");
+    assert_eq!(staged.pending_values, 3);
+
+    persistence.allow_all();
+    let drained = runtime.poll_events().expect("owned values drain");
+    assert_eq!(drained.pending_values, 0);
+    assert_eq!(
+        persistence
+            .persisted
+            .lock()
+            .expect("persisted locks")
+            .as_slice(),
+        [
+            "activity:new plan",
+            "output:durable one",
+            "output:durable two"
+        ]
+    );
+    runtime.shutdown().expect("worker shuts down");
+}
+
+#[test]
+fn restart_replay_recovers_a_polled_value_after_persistence_outage() {
+    let agent = AgentId::from_bytes([43; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let session_id = ProviderSessionId::new("restart-session").expect("session validates");
+    let provider = Arc::new(ProviderState::default());
+    provider.queue([Ok(HarnessEventPoll::Event(HarnessEvent::Output(output(
+        44,
+        "replayed output",
+    ))))]);
+    let state = Arc::new(MemoryState::default());
+    let persistence = Arc::new(MemoryPersistence::with_failures(20, 0));
+    let dependencies = dependencies(
+        registry(provider_id.clone(), session_id.clone(), provider.clone()),
+        state.clone(),
+        persistence.clone(),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    );
+    let first = supervisor(dependencies.clone());
+    first
+        .launch(launch(
+            agent,
+            provider_id.clone(),
+            HarnessSessionRequest::Start,
+        ))
+        .expect("first worker starts");
+    assert_eq!(
+        first
+            .poll_events()
+            .expect("event remains owned")
+            .pending_values,
+        1
+    );
+    first.stop(agent).expect("failed value remains restartable");
+
+    persistence.allow_all();
+    provider.queue([Ok(HarnessEventPoll::Event(HarnessEvent::Output(output(
+        44,
+        "replayed output",
+    ))))]);
+    let restarted = supervisor(dependencies);
+    restarted
+        .recover(launch(
+            agent,
+            provider_id,
+            HarnessSessionRequest::Resume { session_id },
+        ))
+        .expect("exact session resumes");
+    restarted.poll_events().expect("replayed event persists");
+    assert_eq!(state.event_progress(agent), Some((true, true)));
+    assert_eq!(
+        persistence
+            .persisted
+            .lock()
+            .expect("persisted locks")
+            .as_slice(),
+        ["output:replayed output"]
+    );
+    restarted.shutdown().expect("restart shuts down");
+}
+
+#[test]
+fn provider_poll_failure_is_redacted_and_releases_exact_worker_ownership() {
+    let agent = AgentId::from_bytes([44; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let provider = Arc::new(ProviderState::default());
+    provider.queue([Err(HarnessError::new(HarnessErrorClass::TransportClosed))]);
+    let state = Arc::new(MemoryState::default());
+    let runtime = supervisor(dependencies(
+        registry(
+            provider_id.clone(),
+            ProviderSessionId::new("failed-session").expect("session"),
+            provider,
+        ),
+        state.clone(),
+        Arc::new(MemoryPersistence::available()),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(agent, provider_id, HarnessSessionRequest::Start))
+        .expect("worker starts");
+    let report = runtime.poll_events().expect("failure is contained");
+    assert_eq!(report.workers_failed, 1);
+    assert_eq!(report.live_workers, 0);
+    assert_eq!(report.failures, [HarnessErrorClass::TransportClosed]);
+    assert!(!format!("{report:?}").contains("provider diagnostic"));
+    assert!(state.snapshot().leases.is_empty());
+}
 
 #[test]
 fn restart_reconciles_response_loss_and_partial_event_persistence_before_forced_teardown() {
@@ -284,6 +497,7 @@ fn supervisor(dependencies: HarnessSupervisorDependencies) -> HarnessSupervisor 
             lease_duration: Duration::from_secs(1),
             event_capacity: NonZeroUsize::new(2).expect("capacity is nonzero"),
             drain_wait: Duration::from_millis(1),
+            event_poll_interval: Duration::from_millis(1),
         },
         dependencies,
     )
@@ -431,6 +645,30 @@ fn output_event(identity: u8, body: &str) -> HarnessBufferedEvent {
             status: ActivityStatus::Succeeded,
             body: ContentText::new(body).expect("output validates"),
         },
+    }
+}
+
+fn output(identity: u8, body: &str) -> HarnessOutput {
+    HarnessOutput {
+        output_id: MessageId::from_bytes([identity; 32]),
+        operation_id: OperationId::from_bytes([46; 32]),
+        kind: HarnessOutputKind::Update,
+        status: ActivityStatus::Running,
+        body: ContentText::new(body).expect("output validates"),
+    }
+}
+
+fn activity(sequence: u64, status: ActivityStatus, content: &str) -> HarnessActivity {
+    HarnessActivity {
+        operation_id: OperationId::from_bytes([46; 32]),
+        item: None,
+        kind: ActivityKind::Plan,
+        logical_key: ShortText::new("plan").expect("key validates"),
+        runtime: ShortText::new("scripted").expect("runtime validates"),
+        sequence: NonZeroU64::new(sequence).expect("sequence is positive"),
+        status,
+        content: ContentText::new(content).expect("content validates"),
+        truncated: false,
     }
 }
 
@@ -713,17 +951,34 @@ struct MemoryPersistence {
     outputs: Mutex<BTreeMap<MessageId, HarnessOutput>>,
     activities: Mutex<Vec<HarnessActivity>>,
     calls: Mutex<Vec<&'static str>>,
-    fail_activity_once: AtomicBool,
+    persisted: Mutex<Vec<String>>,
+    fail_outputs: AtomicUsize,
+    fail_activities: AtomicUsize,
 }
 
 impl MemoryPersistence {
     fn with_one_activity_failure() -> Self {
+        Self::with_failures(0, 1)
+    }
+
+    fn available() -> Self {
+        Self::with_failures(0, 0)
+    }
+
+    fn with_failures(outputs: usize, activities: usize) -> Self {
         Self {
             outputs: Mutex::new(BTreeMap::new()),
             activities: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
-            fail_activity_once: AtomicBool::new(true),
+            persisted: Mutex::new(Vec::new()),
+            fail_outputs: AtomicUsize::new(outputs),
+            fail_activities: AtomicUsize::new(activities),
         }
+    }
+
+    fn allow_all(&self) {
+        self.fail_outputs.store(0, Ordering::SeqCst);
+        self.fail_activities.store(0, Ordering::SeqCst);
     }
 }
 
@@ -735,6 +990,10 @@ impl HarnessPersistencePort for MemoryPersistence {
         _session_id: &ProviderSessionId,
         output: &HarnessOutput,
     ) -> Result<(), HarnessError> {
+        if take_failure(&self.fail_outputs) {
+            self.calls.lock().expect("calls lock").push("output-failed");
+            return Err(HarnessError::new(HarnessErrorClass::Unavailable));
+        }
         self.calls.lock().expect("calls lock").push("output");
         let mut outputs = self.outputs.lock().expect("outputs lock");
         if outputs
@@ -746,6 +1005,10 @@ impl HarnessPersistencePort for MemoryPersistence {
         outputs
             .entry(output.output_id)
             .or_insert_with(|| output.clone());
+        self.persisted
+            .lock()
+            .expect("persisted locks")
+            .push(format!("output:{}", output.body.as_str()));
         Ok(())
     }
 
@@ -756,7 +1019,7 @@ impl HarnessPersistencePort for MemoryPersistence {
         _session_id: &ProviderSessionId,
         activity: &HarnessActivity,
     ) -> Result<(), HarnessError> {
-        if self.fail_activity_once.swap(false, Ordering::SeqCst) {
+        if take_failure(&self.fail_activities) {
             self.calls
                 .lock()
                 .expect("calls lock")
@@ -767,9 +1030,21 @@ impl HarnessPersistencePort for MemoryPersistence {
         let mut activities = self.activities.lock().expect("activities lock");
         if !activities.contains(activity) {
             activities.push(activity.clone());
+            self.persisted
+                .lock()
+                .expect("persisted locks")
+                .push(format!("activity:{}", activity.content.as_str()));
         }
         Ok(())
     }
+}
+
+fn take_failure(remaining: &AtomicUsize) -> bool {
+    remaining
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+            value.checked_sub(1)
+        })
+        .is_ok()
 }
 
 struct TestClock(AtomicU64);
@@ -805,6 +1080,13 @@ struct ProviderState {
     submission_calls: AtomicUsize,
     drain_pending: AtomicBool,
     force_stops: AtomicUsize,
+    events: Mutex<VecDeque<Result<HarnessEventPoll, HarnessError>>>,
+}
+
+impl ProviderState {
+    fn queue(&self, events: impl IntoIterator<Item = Result<HarnessEventPoll, HarnessError>>) {
+        self.events.lock().expect("events lock").extend(events);
+    }
 }
 
 struct TestFactory {
@@ -904,7 +1186,12 @@ impl HarnessSession for TestSession {
     }
 
     fn poll_event(&mut self, _wait: Duration) -> Result<HarnessEventPoll, HarnessError> {
-        Ok(HarnessEventPoll::TimedOut)
+        self.state
+            .events
+            .lock()
+            .expect("events lock")
+            .pop_front()
+            .unwrap_or(Ok(HarnessEventPoll::TimedOut))
     }
 
     fn answer_interactive(

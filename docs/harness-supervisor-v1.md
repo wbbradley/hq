@@ -9,9 +9,10 @@ operational state, not canonical facts and not authority.
 ## Worker ownership and readiness
 
 There is at most one mutable worker owner for each named agent. A worker owns one provider session,
-one fixed-capacity event buffer, and one opaque 32-byte owner token. Before opening a provider
-session it MUST atomically claim the agent's durable lease. A live exact owner may renew its lease.
-A different token may take over only after the injected absolute deadline has expired.
+one fixed-capacity event buffer, one source-staging slot, one equally bounded interactive-request
+queue, and one opaque 32-byte owner token. Before opening a provider session it MUST atomically
+claim the agent's durable lease. A live exact owner may renew its lease. A different token may take
+over only after the injected absolute deadline has expired.
 
 Ready state commits only after `Start` or exact `Resume` acknowledges a provider session identity.
 Every delivery transition and persistence checkpoint MUST cite the current exact token. Release
@@ -60,6 +61,22 @@ snapshots may coalesce only with the same operation/logical key already in the b
 snapshot is removed and the replacement is appended at the tail, preserving the order of all
 intervening work. A new snapshot key at capacity also backpressures.
 
+The node owns one joined polling task for the complete supervisor, not one detached task per
+provider. Every bounded pass polls each live session once with zero wait and in stable agent order.
+The normalized source event is admitted before that session is polled again. If a distinct durable
+value arrives at capacity, the worker retains it in its single staging slot and stops polling that
+source until admission succeeds. Thus pressure is bounded to the configured FIFO plus one already
+polled value, durable values cannot disappear, and an exact snapshot may still replace its pending
+pre-persistence predecessor. Output uses its provider-normalized output identity; activity derives
+its checkpoint identity from operation, item, kind, logical key, runtime, and semantic sequence.
+The complete normalized value determines the checkpoint digest.
+
+Structured requests enter a separate bounded source-ordered queue and are removed only after the
+sole session owner accepts the exact answer. A full request queue uses the same staging rule, so a
+later output cannot cross an unretained authority-bearing request. Normal provider closure and
+typed poll failure both remove the exact worker through the ordinary bounded teardown path and
+release only its token. Failures retain only a closed neutral class.
+
 Canonical persistence is injected and idempotent by stable identity. Reusing an output identity
 with unequal content is a persistence collision. For a paired event, output commits and is
 checkpointed before activity begins. If activity fails, the accepted buffer item and its partial
@@ -99,15 +116,20 @@ operation cancellation semantics; cancellation never proves an uncertain deliver
 Shutdown is ordered and bounded for every worker even if a sibling fails:
 
 1. stop adapter intake;
-2. flush already accepted normalized events;
-3. request adapter drain with the configured maximum wait;
-4. force-stop when drain is pending or failed, and close the runtime capability idempotently; and
-5. release only the worker's exact lease token.
+2. signal the component polling task only after every live adapter has observed intake closure;
+3. continue bounded polling so already accepted provider work reaches the FIFO or staging slot;
+4. join the sole polling task before moving or releasing the supervisor;
+5. flush already accepted normalized events;
+6. request adapter drain with the configured maximum wait;
+7. force-stop when drain is pending or failed, and close the runtime capability idempotently; and
+8. release only the worker's exact lease token.
 
 The supervisor report counts released and forced workers and retains only closed failure classes.
-Pending accepted work or a persistence failure is reported and remains durable; it is never silently
-dropped. The node lifecycle closes application intake before invoking this sequence and maps any
-reported pending work or failure to escalation evidence.
+Pending accepted work or a persistence failure is reported; an interrupted provider is exactly
+resumed and may replay normalized values through stable idempotent identities and durable partial
+checkpoints. It is never silently treated as completed. The node lifecycle closes application
+intake before invoking this sequence and maps any reported pending work or failure to escalation
+evidence.
 
 ## Boundaries
 
