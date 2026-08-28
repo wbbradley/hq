@@ -1,5 +1,39 @@
 # Completed
 
+## 2026-08-28 — Mailbox messaging and repository-aware discovery
+
+Added `ask`, `send`, `wait`, `poll`, `get`, `mailboxes`, and human `list`, `answer`, `cancel`,
+`archive`, and `restore` commands over pure application planners and typed local API requests.
+Passive Rust command, request, result, context, and diagnostic records use public fields; only
+invariant-owning plans, identities, and live clients remain opaque. Explicit provider/session
+selection requires both values, environment discovery rejects ambiguity, and repository-aware
+selection joins canonical directory, repository, and worktree observations to direct sessions.
+
+Message pages now carry typed purpose, presentation, correlation, project association, reversible
+state, and normalized thread readiness. Inspection is non-consuming, asynchronous sends return a
+stable message identity immediately, and waits are intentionally unbounded unless requested while
+each local I/O attempt remains bounded. Ready delivery writes stdout before applying a reversible
+archive completion, giving duplicate-safe at-least-once behavior across interruption. Missing
+causal history is exposed as bounded inert diagnostics and cannot grant reply, cancellation,
+completion, or state-change authority.
+
+Because HQ has never shipped and has no standing installations, the clean local API v1 and storage
+v13 contracts were completed in place with no migration, compatibility path, protocol bump, or
+storage-version bump. Pure planner, strict protocol, relational projection, restart/reconnect,
+incomplete-history, stale-state, non-TTY input, filter, deterministic machine-output, repository
+discovery, and real stdout-before-archive CLI tests pass together with the locked workspace and
+architectural verification gates.
+
+### Original plan entry
+
+- **[cli/high] Implement mailbox messaging and repository-aware discovery** — Add `ask`, `send`,
+  `wait`, `poll`, `get`, human list/filter, answer, cancel/archive, restore, and repository-aware
+  mailbox discovery over typed application/local API operations. Preserve stable message identity,
+  causal reply/cancellation authority, non-consuming inspection, duplicate-safe ready delivery,
+  asynchronous send, and intentionally unbounded human wait with bounded per-attempt I/O. Support
+  explicit session mailbox selection without ambiguous provider inference. Test restart, reconnect,
+  incomplete history, duplicate delivery, stale targets, non-TTY input, filters, and machine output.
+
 ## 2026-08-28 — Relay synchronization, health, and repair administration
 
 Added `relay add|list|remove|sync|status|repair` over typed application capabilities and local API

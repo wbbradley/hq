@@ -208,6 +208,37 @@ remote port builds each request, receipt, and outcome plan from one serialized s
 digest/body agreement and expected heads, and cites exact request/receipt, project-head,
 active-human, and project-home authority facts.
 
+## Mailbox messaging and discovery
+
+Message authoring enters through pure application planners. `MessageAuthoringAuthority` carries the
+exact author installation, semantic sender mailbox, audience scope, historical authority edge, and
+complete support set. Question, asynchronous-message, reply, cancellation, archive, and restore
+requests are passive public-field records. The planners reject cross-installation private routes,
+scope changes, non-reversed replies, cancellation by a mailbox other than the question sender,
+non-root-derived thread identities, and incomplete state frontiers before a fact reaches an
+adapter. The validated `FactPlan` remains opaque because it owns the encoded authoring invariant.
+
+Conversation pages pair each `MessageView` with its normalized `ThreadView`, so clients consume the
+reducer's canonical ready-answer and cancellation decisions instead of reconstructing causality.
+Page DTOs expose typed sender/recipient, purpose, presentation, reversible-state frontier, receipt
+children, root identities, ready-answer state, and cancellation state. Dependency-incomplete
+message facts remain separate inert snapshot diagnostics with bounded missing/unusable dependency
+sets and explicit truncation; displaying one never grants reply, cancellation, archive, or delivery
+authority.
+
+Provider-session discovery joins permanent direct-session bindings with the mailbox's grow-only
+`RepositoryContext` history. The resource adapter observes a canonical current directory, Git
+common repository, worktree, and symbolic branch through bounded read-only operations. An explicit
+session always supplies both provider and provider-scoped session; opaque session text never causes
+provider inference.
+
+Agent waits have no overall deadline unless the caller requests one, but each snapshot, page, and
+connection attempt retains a fixed bound and reconnect retry budget. Ready delivery is at least
+once: the executable writes stdout before authoring the reversible archive completion. Failure in
+that window repeats a stable message identity instead of losing content. Direct `get` and human
+list operations do not create a completion. The clean unshipped local API v1 and storage v13
+contracts were completed in place; no migration, compatibility accessor, or version bump exists.
+
 ## Subscription revision race
 
 Subscription preparation has three ordered phases:

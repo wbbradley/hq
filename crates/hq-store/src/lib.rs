@@ -46,7 +46,8 @@ pub use harness::{
 };
 pub use hq_application::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, ConversationEntry,
-    ConversationProjectionSnapshot, DomainSnapshot, ProjectProjectionSnapshot,
+    ConversationMessageEntry, ConversationProjectionSnapshot, DomainSnapshot,
+    ProjectProjectionSnapshot,
 };
 pub use hq_reducer::ConversationKey;
 pub use operational::{

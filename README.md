@@ -71,7 +71,13 @@ hq poll
 
 `poll` exits with code 3 and writes nothing when the mailbox has no ready messages.
 
-The mailbox follows a resumed harness session across process restarts and directory changes. `--session ID` and `HQ_SESSION` select a `custom` mailbox for advanced use; an explicit flag wins. `hq mailboxes` lists mailbox candidates seen in the current directory, Git common directory, worktree, branch, or compact remote identity. Each row includes `agent=NAME` when the mailbox has a durable agent name, `agent=NAME (retired)` when that agent is retired, or `agent=-` when it is unnamed. JSON output includes `agent_name` for named mailboxes and `agent_retired` when applicable. The command does not claim or merge a mailbox.
+The mailbox follows a resumed provider session across process restarts and directory changes. An
+explicit selection always supplies both `--provider PROVIDER` and `--session SESSION`; HQ never
+infers a provider from an opaque session string. Without those flags, HQ accepts exactly one of the
+built-in provider environment identities, the explicit `HQ_PROVIDER` plus `HQ_SESSION` pair, or one
+unambiguous repository-aware match. `hq mailboxes` joins durable session bindings with typed
+directory, Git common-repository, worktree, and branch history. Discovery does not claim or merge a
+mailbox.
 
 Durable installation-local agent names can be created or can adopt an existing unnamed local agent mailbox. Names are lowercase slugs and remain permanently reserved after retirement. Presence is a local advisory lease rather than a relay heartbeat:
 
@@ -292,13 +298,17 @@ Use `hq project list`, `show`, `reopen`, `handoff`, `check`, and `resource` for 
 ## Command summary
 
 ```text
-hq ask [--session ID] [--dir PATH] [--details TEXT] [--timeout DURATION] [--interval DURATION] [--json] [MESSAGE]
-hq send [--session ID] [--dir PATH] [--details TEXT] [--json] [MESSAGE]
-hq wait [--session ID] [--dir PATH] [--timeout DURATION] [--interval DURATION] [--json] MESSAGE_ID
-hq poll [--session ID] [--dir PATH] [--json]
+hq [--output human|json] ask [--provider PROVIDER --session SESSION] [--dir PATH] [--timeout DURATION] [--interval DURATION] [MESSAGE]
+hq [--output human|json] send [--provider PROVIDER --session SESSION] [--dir PATH] [MESSAGE]
+hq [--output human|json] wait [--provider PROVIDER --session SESSION] [--dir PATH] [--timeout DURATION] [--interval DURATION] MESSAGE_ID
+hq [--output human|json] poll [--provider PROVIDER --session SESSION] [--dir PATH]
 hq get MESSAGE_ID
-hq list [--sender MAILBOX] [--recipient MAILBOX] [--dir PATH] [--archived|--all] [--limit N] [--json]
-hq mailboxes [--dir PATH] [--json]
+hq list [--sender MAILBOX_ID] [--recipient MAILBOX_ID] [--archived|--all] [--limit N]
+hq answer MESSAGE_ID [RESPONSE]
+hq cancel MESSAGE_ID
+hq archive MESSAGE_ID
+hq restore MESSAGE_ID
+hq [--output human|json] mailboxes [--dir PATH]
 hq agent create NAME [--mailbox MAILBOX_ID]
 hq agent list [--json]
 hq agent retire NAME --yes
@@ -323,8 +333,6 @@ hq relay remove WSS_URL
 hq status [--json]
 hq sync
 hq daemon run|status|stop|restart
-hq answer MESSAGE_ID [RESPONSE]
-hq cancel MESSAGE_ID
 hq harness --provider ID --agent NAME [--cwd PATH] [--new-session | --session SESSION_ID] [--codex-yolo] [INITIAL PROMPT...]
 hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
@@ -345,7 +353,18 @@ peer-addressed action cites that grant as a causal authority. Revocation fails c
 or later actions while retaining receiver-observed history. Replying adds signed answer and archive
 events in one SQLite transaction and fans both facts to active account devices.
 
-`ask` and `wait` read a reply only when the current mailbox sent the first message. `poll` reads every ready message addressed to the current harness mailbox, including unsolicited human messages, without a directory filter. `get` keeps direct-ID access as an explicit path for cooperative cross-mailbox inspection. Delivery leases each row, writes stdout once, and then sets `completed_at` and `archived_at`. A crash after stdout but before the database update can cause one later retry, so consumers can use the message ID as an idempotency key.
+`ask` and `wait` return a reply only when the selected mailbox sent the question root. They wait
+indefinitely unless a real `--timeout` is supplied, while each connection and page request remains
+bounded. `poll` delivers every currently ready answer or asynchronous message addressed to the
+selected provider mailbox and exits with status 3 and no output when empty. `get` is explicit,
+non-consuming inspection by stable message ID. Dependency-incomplete records are displayed with
+their missing/unusable causal identities but remain inert: they cannot grant reply, cancellation,
+archive, or delivery-completion authority.
+
+Ready delivery is at least once. HQ writes stdout first and only then authors the reversible archive
+fact that completes receipt. A crash in that window can repeat the same stable message ID, but it
+cannot lose the message. Machine consumers should therefore use `message_id` as their idempotency
+key. `archive` and `restore` are explicit causal state actions and preserve history.
 
 `hq list` shows only open messages by default. `--archived` shows archived messages, and `--all` shows both.
 

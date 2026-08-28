@@ -3,6 +3,7 @@
 mod authority_admin;
 mod error;
 mod human;
+mod messaging;
 mod mutation;
 mod ports;
 mod project;
@@ -25,6 +26,11 @@ pub use human::{
     HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority,
     plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
     plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
+};
+pub use messaging::{
+    MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest, ReplyRequest,
+    ThreadCancellationRequest, plan_asynchronous_message, plan_message_archive,
+    plan_message_restore, plan_question, plan_reply, plan_thread_cancellation,
 };
 pub use mutation::{
     FactMutation, FactPlan, MAX_ENCODED_MUTATION_RESULT_BYTES, MutationAttempt, MutationDecision,
@@ -51,8 +57,8 @@ pub use snapshot::{
     ClientAgentLifecycle, ClientDeviceGrant, ClientMembershipState, ClientPeerRouteBlock,
     ClientPeerRouteCandidate, ClientPeerRouteState, ClientProjectLifecycle,
     ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
-    ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot, ProjectProjectionSnapshot,
-    ProjectionSnapshot,
+    ConversationMessageEntry, ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot,
+    IncompleteMessageSummary, ProjectProjectionSnapshot, ProjectionSnapshot,
 };
 
 /// Minimal in-memory use-case host for the workspace walking skeleton.

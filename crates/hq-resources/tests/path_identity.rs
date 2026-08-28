@@ -20,7 +20,7 @@ use hq_resources::{
 
 mod support;
 
-use support::TestDirectory;
+use support::{TestDirectory, initialize_repository};
 
 fn home(value: u8) -> InstallationId {
     InstallationId::from_bytes([value; 32])
@@ -108,6 +108,37 @@ fn missing_path_uses_the_nearest_existing_ancestor_without_losing_human_spelling
         resolved.resource.canonical_locator.value(),
         expected.to_str().expect("UTF-8")
     );
+}
+
+#[test]
+fn repository_context_reports_directory_common_repository_worktree_and_branch() {
+    let directory = TestDirectory::new();
+    initialize_repository(directory.path());
+    let nested = directory.join("nested");
+    fs::create_dir(&nested).expect("nested directory creates");
+
+    let context = PathResourceAdapter::system()
+        .repository_context(home(1), nested.clone())
+        .expect("repository context resolves");
+
+    assert_eq!(
+        context.directory.value(),
+        fs::canonicalize(nested)
+            .expect("nested canonicalizes")
+            .to_str()
+            .expect("UTF-8")
+    );
+    assert_eq!(
+        context.worktree.as_ref().map(ResourceLocator::value),
+        Some(
+            fs::canonicalize(directory.path())
+                .expect("worktree canonicalizes")
+                .to_str()
+                .expect("UTF-8")
+        )
+    );
+    assert!(context.repository.is_some());
+    assert!(context.branch.is_some());
 }
 
 #[cfg(unix)]

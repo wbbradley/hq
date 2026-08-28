@@ -15,12 +15,23 @@ fn main() {
     } else {
         hq_node::execute_cli_with_input(arguments, &mut stdin.lock())
     };
-    if std::io::stdout()
-        .write_all(execution.stdout.as_bytes())
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    if stdout.write_all(execution.stdout.as_bytes()).is_err() || stdout.flush().is_err() {
+        std::process::exit(1);
+    }
+    drop(stdout);
+    if let Some(completion) = &execution.completion
+        && hq_node::complete_cli_delivery(completion).is_err()
+    {
+        let _ = std::io::stderr().write_all(
+            b"hq: delivered output but could not complete receipt; retry may repeat stable message IDs\n",
+        );
+        std::process::exit(1);
+    }
+    if std::io::stderr()
+        .write_all(execution.stderr.as_bytes())
         .is_err()
-        || std::io::stderr()
-            .write_all(execution.stderr.as_bytes())
-            .is_err()
     {
         std::process::exit(1);
     }

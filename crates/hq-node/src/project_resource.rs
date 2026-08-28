@@ -7,7 +7,8 @@ use hq_application::{
     ResourceInspectionResult,
 };
 use hq_domain::{
-    DomainError, ErrorCategory, ErrorCode, InstallationId, ProjectResource, ResourceHealth,
+    DomainError, ErrorCategory, ErrorCode, InstallationId, ProjectResource, RepositoryContext,
+    ResourceHealth,
 };
 use hq_projects::{
     ProjectLaunchObservation, ProjectLaunchValidationRequest, ProjectReleaseAssessmentRequest,
@@ -30,6 +31,18 @@ impl ProjectResourceAdapter {
             home,
             paths: PathAdapter::system(),
         }
+    }
+
+    /// Observes one canonical directory and its read-only Git repository context.
+    pub fn repository_context(
+        &self,
+        directory: PathBuf,
+    ) -> Result<RepositoryContext, ApplicationError> {
+        self.paths
+            .repository_context(self.home, directory)
+            .map_err(|_| {
+                ApplicationError::new(hq_application::ApplicationErrorCode::InvalidRequest)
+            })
     }
 
     fn same_home(&self, home: InstallationId) -> Result<(), ApplicationError> {

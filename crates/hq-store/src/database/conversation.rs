@@ -18,8 +18,10 @@ use hq_reducer::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
-use crate::ConversationEntry;
-use crate::{ConversationProjectionSnapshot, StoreError, StoreErrorClass};
+use crate::{
+    ConversationEntry, ConversationMessageEntry, ConversationProjectionSnapshot, StoreError,
+    StoreErrorClass,
+};
 
 const MAXIMUM_CONVERSATION_ROWS: i64 = 64_000_000;
 const ZERO: [u8; 32] = [0; 32];
@@ -182,7 +184,19 @@ pub(super) fn load_entry(
     let projection = load_projection(connection, *digest, &key)?;
     match (entry_kind, projection) {
         (1, ConversationProjection::Message(message)) if message.fact_id == fact_id => {
-            Ok(ConversationEntry::Message(message))
+            let thread_key = ConversationProjectionKey::Thread(message.thread_id);
+            let thread_digest = key_digest(KeyTable::Projection, &projection_parts(&thread_key));
+            let thread = match load_projection(connection, thread_digest, &thread_key) {
+                Ok(ConversationProjection::Thread(thread)) => Some(*thread),
+                Err(_) if message.content.purpose != MessagePurpose::Question => None,
+                Ok(_) | Err(_) => return Err(corrupt()),
+            };
+            Ok(ConversationEntry::Message(Box::new(
+                ConversationMessageEntry {
+                    message: *message,
+                    thread,
+                },
+            )))
         }
         (2, ConversationProjection::Activity(activity)) if activity.fact_id == fact_id => {
             Ok(ConversationEntry::Activity(activity))

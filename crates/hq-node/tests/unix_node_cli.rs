@@ -16,15 +16,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+use hq_application::FactPlan;
+use hq_domain::{
+    AuthorityReference, AuthorityRole, BoundedSet, BoundedText, CausalReferences, CommandId,
+    FactId, FactScope, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxId, MailboxKind, ProviderId,
+    ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RepositoryContext, ResourceLocator,
+    ResourceScheme, SemanticPayload, Timestamp,
+};
 use hq_local_api::{
     ClientEvent, InitialView,
     protocol::v1::{
-        BuildMetadata, LifecycleRequest, LifecycleState, Request, ResponseResult, SnapshotItem,
+        BuildMetadata, LifecycleRequest, LifecycleState, MutationAttemptDto, MutationOutcomeDto,
+        MutationRequest, Request, ResponseResult, SnapshotItem,
     },
 };
 use hq_node::{
     LifecycleClient, LifecycleClientConfig, LocalNodeClient, LocalNodeClientConfig,
-    ProcessNodeLauncher, RuntimePaths, StateDirectoryOwner, StatePaths,
+    ProcessNodeLauncher, RuntimePaths, StateDirectoryOwner, StatePaths, execute_cli_with_input,
 };
 
 use support::TestDirectory;
@@ -35,6 +43,42 @@ impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+struct OutputChildGuard(Option<Child>);
+
+impl OutputChildGuard {
+    fn wait_with_output(&mut self, timeout: Duration) -> Output {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .0
+                .as_mut()
+                .expect("guarded child")
+                .try_wait()
+                .expect("child status")
+                .is_some()
+            {
+                return self
+                    .0
+                    .take()
+                    .expect("completed child")
+                    .wait_with_output()
+                    .expect("child output");
+            }
+            assert!(Instant::now() < deadline, "CLI process timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for OutputChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -141,6 +185,14 @@ fn human_output(state_root: &Path, arguments: &[&str]) -> Output {
     )
 }
 
+fn message_output(state_root: &Path, arguments: &[&str]) -> Output {
+    offline_output(
+        state_root,
+        arguments.iter().copied().map(OsString::from),
+        None,
+    )
+}
+
 fn admin_output(state_root: &Path, command: &str, arguments: &[&str]) -> Output {
     offline_output(
         state_root,
@@ -191,6 +243,426 @@ fn local_client(state: StatePaths, initial_view: InitialView) -> LocalNodeClient
         ProcessNodeLauncher::new(env!("CARGO_BIN_EXE_hq").into()),
     )
     .expect("local command client")
+}
+
+fn commit_plan(client: &mut LocalNodeClient, identity: u8, plan: FactPlan) {
+    let request = MutationRequest::from_plan(CommandId::from_bytes([identity; 32]), plan)
+        .expect("mutation request");
+    assert!(matches!(
+        client.mutation(request).expect("mutation completes"),
+        ClientEvent::Mutation(MutationAttemptDto::Completed {
+            outcome: MutationOutcomeDto::Committed,
+            ..
+        })
+    ));
+}
+
+#[allow(clippy::too_many_lines)]
+fn setup_direct_agent_session(
+    client: &mut LocalNodeClient,
+    directory: &Path,
+) -> (MailboxId, ProviderId, ProviderSessionId) {
+    let local = client.installation_id();
+    let snapshot = client.snapshot().expect("initial snapshot");
+    let root_fact = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Installation {
+                installation_id,
+                root_fact,
+                ..
+            } if installation_id.bytes() == *local.as_bytes() => {
+                Some(FactId::from_bytes(root_fact.bytes()))
+            }
+            _ => None,
+        })
+        .expect("installation root");
+    let agent_mailbox = MailboxId::from_bytes([0xa3; 32]);
+    let authority = [AuthorityReference::new(
+        AuthorityRole::LocalInstallation,
+        root_fact,
+    )];
+    let root_causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new([root_fact]).expect("root parent"),
+        authority,
+    )
+    .expect("root authority");
+    commit_plan(
+        client,
+        0xa1,
+        FactPlan::new(
+            local,
+            Timestamp::from_unix_millis(10),
+            FactScope::InstallationPrivate(local),
+            root_causal,
+            SemanticPayload::MailboxCreated {
+                mailbox_id: agent_mailbox,
+                kind: MailboxKind::Agent,
+                label: None,
+            },
+            [0xa1; 32],
+        ),
+    );
+    let snapshot = client.snapshot().expect("mailbox snapshot");
+    let mailbox_fact = snapshot
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SnapshotItem::Mailbox {
+                installation_id,
+                mailbox_id,
+                create_fact,
+                ..
+            } if installation_id.bytes() == *local.as_bytes()
+                && mailbox_id.bytes() == *agent_mailbox.as_bytes() =>
+            {
+                Some(FactId::from_bytes(create_fact.bytes()))
+            }
+            _ => None,
+        })
+        .expect("agent mailbox fact");
+    let provider = ProviderId::new("codex").expect("provider");
+    let session = ProviderSessionId::new("mailbox-e2e").expect("session");
+    let causal = || {
+        CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+            BoundedSet::new([root_fact, mailbox_fact]).expect("binding parents"),
+            authority,
+        )
+        .expect("binding authority")
+    };
+    commit_plan(
+        client,
+        0xa2,
+        FactPlan::new(
+            local,
+            Timestamp::from_unix_millis(11),
+            FactScope::InstallationPrivate(local),
+            causal(),
+            SemanticPayload::MailboxSessionBound {
+                mailbox_id: agent_mailbox,
+                provider: provider.clone(),
+                session: session.clone(),
+            },
+            [0xa2; 32],
+        ),
+    );
+    let directory = fs::canonicalize(directory).expect("context directory canonicalizes");
+    commit_plan(
+        client,
+        0xa3,
+        FactPlan::new(
+            local,
+            Timestamp::from_unix_millis(12),
+            FactScope::InstallationPrivate(local),
+            causal(),
+            SemanticPayload::MailboxContextRecorded {
+                mailbox_id: agent_mailbox,
+                context: RepositoryContext {
+                    directory: ResourceLocator::new(
+                        ResourceScheme::WorkingTree,
+                        BoundedText::<RESOURCE_LOCATOR_MAX_BYTES>::new(
+                            directory.to_str().expect("UTF-8 directory").to_owned(),
+                        )
+                        .expect("directory locator"),
+                    ),
+                    repository: None,
+                    worktree: None,
+                    branch: None,
+                },
+            },
+            [0xa3; 32],
+        ),
+    );
+    (agent_mailbox, provider, session)
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn mailbox_commands_survive_restart_and_preserve_delivery_state() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let human = human_output(&state_root, &["create"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+
+    let state = StatePaths::new(state_root.clone()).expect("state paths");
+    let mut seed = local_client(state, InitialView::Snapshot);
+    let (agent_mailbox, provider, session) =
+        setup_direct_agent_session(&mut seed, directory.path());
+    drop(seed);
+
+    let ask = Command::new(env!("CARGO_BIN_EXE_hq"))
+        .arg("--output")
+        .arg("json")
+        .arg("--state-root")
+        .arg(&state_root)
+        .arg("ask")
+        .arg("--provider")
+        .arg(provider.as_str())
+        .arg("--session")
+        .arg(session.as_str())
+        .arg("--interval")
+        .arg("10ms")
+        .arg("question across restart")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ask process starts");
+    let mut ask = OutputChildGuard(Some(ask));
+
+    let question = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if ask
+                .0
+                .as_mut()
+                .expect("guarded ask")
+                .try_wait()
+                .expect("ask status")
+                .is_some()
+            {
+                let output = ask.wait_with_output(Duration::ZERO);
+                panic!(
+                    "ask exited before its question became visible: status={:?} stdout={:?} stderr={:?}",
+                    output.status, output.stdout, output.stderr
+                );
+            }
+            let listed = message_output(&state_root, &["list"]);
+            if listed.status.success() {
+                let record: serde_json::Value =
+                    serde_json::from_slice(&listed.stdout).expect("message list JSON");
+                if let Some(message) = record["data"]["messages"].as_array().and_then(|messages| {
+                    messages
+                        .iter()
+                        .find(|message| message["content"] == "question across restart")
+                }) {
+                    break message["message_id"]
+                        .as_str()
+                        .expect("question identity")
+                        .to_owned();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "question did not become visible; status={:?} stdout={:?} stderr={:?}",
+                listed.status,
+                listed.stdout,
+                listed.stderr
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+
+    let get = |message_id: &str| {
+        offline_output(
+            &state_root,
+            [OsString::from("get"), OsString::from(message_id)],
+            None,
+        )
+    };
+    let first_get = get(&question);
+    let second_get = get(&question);
+    assert!(
+        first_get.status.success(),
+        "get stderr: {:?}",
+        first_get.stderr
+    );
+    assert!(
+        second_get.status.success(),
+        "get stderr: {:?}",
+        second_get.stderr
+    );
+    let first_get: serde_json::Value =
+        serde_json::from_slice(&first_get.stdout).expect("first get JSON");
+    let second_get: serde_json::Value =
+        serde_json::from_slice(&second_get.stdout).expect("second get JSON");
+    assert_eq!(first_get["data"], second_get["data"]);
+    assert_eq!(first_get["data"]["messages"][0]["open"], true);
+
+    let discovered = offline_output(
+        &state_root,
+        [
+            OsString::from("mailboxes"),
+            OsString::from("--dir"),
+            directory.path().as_os_str().to_owned(),
+        ],
+        None,
+    );
+    assert!(
+        discovered.status.success(),
+        "mailboxes stderr: {:?}",
+        discovered.stderr
+    );
+    let discovered: serde_json::Value =
+        serde_json::from_slice(&discovered.stdout).expect("mailbox discovery JSON");
+    assert_eq!(discovered["data"]["candidates"][0]["provider"], "codex");
+    assert_eq!(
+        discovered["data"]["candidates"][0]["session"],
+        "mailbox-e2e"
+    );
+    assert_eq!(discovered["data"]["candidates"][0]["directory_match"], true);
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let answered = message_output(&state_root, &["answer", &question, "answer after restart"]);
+    assert!(
+        answered.status.success(),
+        "answer stderr: {:?}",
+        answered.stderr
+    );
+
+    let ask_output = ask.wait_with_output(Duration::from_secs(15));
+    assert!(
+        ask_output.status.success(),
+        "ask stderr: {:?}",
+        ask_output.stderr
+    );
+    let ask_record: serde_json::Value =
+        serde_json::from_slice(&ask_output.stdout).expect("ask JSON");
+    assert_eq!(ask_record["data"]["operation"], "ask");
+    assert_eq!(ask_record["data"]["root_message"], question);
+    assert_eq!(
+        ask_record["data"]["messages"][0]["content"],
+        "answer after restart"
+    );
+    assert_eq!(ask_record["data"]["messages"][0]["root_message"], question);
+    let answer_message = ask_record["data"]["messages"][0]["message_id"]
+        .as_str()
+        .expect("answer identity")
+        .to_owned();
+
+    let polled = offline_output(
+        &state_root,
+        [
+            OsString::from("poll"),
+            OsString::from("--provider"),
+            OsString::from(provider.as_str()),
+            OsString::from("--session"),
+            OsString::from(session.as_str()),
+        ],
+        None,
+    );
+    assert_eq!(polled.status.code(), Some(3));
+    assert!(polled.stdout.is_empty());
+    assert!(polled.stderr.is_empty());
+
+    let restored_answer = message_output(&state_root, &["restore", &answer_message]);
+    assert!(
+        restored_answer.status.success(),
+        "answer restore stderr: {:?}",
+        restored_answer.stderr
+    );
+    let wait_arguments = vec![
+        OsString::from("--output"),
+        OsString::from("json"),
+        OsString::from("--state-root"),
+        state_root.as_os_str().to_owned(),
+        OsString::from("wait"),
+        OsString::from("--provider"),
+        OsString::from(provider.as_str()),
+        OsString::from("--session"),
+        OsString::from(session.as_str()),
+        OsString::from(&question),
+    ];
+    let first_delivery = execute_cli_with_input(wait_arguments.clone(), &mut std::io::empty());
+    let second_delivery = execute_cli_with_input(wait_arguments, &mut std::io::empty());
+    assert_eq!(first_delivery.exit_code, 0);
+    assert_eq!(first_delivery.stdout, second_delivery.stdout);
+    assert_eq!(first_delivery.completion, second_delivery.completion);
+    assert!(first_delivery.stdout.contains(&answer_message));
+    let rearchived_answer = message_output(&state_root, &["archive", &answer_message]);
+    assert!(
+        rearchived_answer.status.success(),
+        "answer archive stderr: {:?}",
+        rearchived_answer.stderr
+    );
+
+    let sent = offline_output(
+        &state_root,
+        [
+            OsString::from("send"),
+            OsString::from("--provider"),
+            OsString::from(provider.as_str()),
+            OsString::from("--session"),
+            OsString::from(session.as_str()),
+            OsString::from("asynchronous delivery"),
+        ],
+        None,
+    );
+    assert!(sent.status.success(), "send stderr: {:?}", sent.stderr);
+    let sent: serde_json::Value = serde_json::from_slice(&sent.stdout).expect("send JSON");
+    let asynchronous = sent["data"]["root_message"]
+        .as_str()
+        .expect("asynchronous identity");
+
+    let sender = encode_hex(*agent_mailbox.as_bytes());
+    let filtered = message_output(&state_root, &["list", "--sender", &sender, "--limit", "2"]);
+    assert!(
+        filtered.status.success(),
+        "filtered list stderr: {:?}",
+        filtered.stderr
+    );
+    let filtered: serde_json::Value =
+        serde_json::from_slice(&filtered.stdout).expect("filtered list JSON");
+    let filtered_messages = filtered["data"]["messages"]
+        .as_array()
+        .expect("filtered messages");
+    assert!(!filtered_messages.is_empty());
+    assert!(filtered_messages.len() <= 2);
+    assert!(
+        filtered_messages
+            .iter()
+            .all(|message| { message["sender"]["mailbox_id"].as_str() == Some(sender.as_str()) })
+    );
+
+    let archived = message_output(&state_root, &["archive", asynchronous]);
+    assert!(
+        archived.status.success(),
+        "archive stderr: {:?}",
+        archived.stderr
+    );
+    let archived_list = message_output(&state_root, &["list", "--archived"]);
+    assert!(archived_list.status.success());
+    let archived_list: serde_json::Value =
+        serde_json::from_slice(&archived_list.stdout).expect("archived list JSON");
+    assert!(
+        archived_list["data"]["messages"]
+            .as_array()
+            .expect("archived messages")
+            .iter()
+            .any(|message| message["message_id"] == asynchronous)
+    );
+
+    let restored = message_output(&state_root, &["restore", asynchronous]);
+    assert!(
+        restored.status.success(),
+        "restore stderr: {:?}",
+        restored.stderr
+    );
+    let open_list = message_output(&state_root, &["list"]);
+    assert!(open_list.status.success());
+    let open_list: serde_json::Value =
+        serde_json::from_slice(&open_list.stdout).expect("open list JSON");
+    assert!(
+        open_list["data"]["messages"]
+            .as_array()
+            .expect("open messages")
+            .iter()
+            .any(|message| message["message_id"] == asynchronous)
+    );
+
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
 }
 
 fn client(runtime: RuntimePaths) -> LifecycleClient {

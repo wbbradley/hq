@@ -1187,6 +1187,43 @@ pub enum SnapshotItem {
         /// Number of currently open actionable messages.
         open_messages: u32,
     },
+    /// Inert message whose required causal history is incomplete.
+    IncompleteMessage {
+        /// Canonical message-bearing fact.
+        fact_id: Id32,
+        /// Stable public message identity.
+        message_id: Id32,
+        /// Declared or derived causal thread identity.
+        thread_id: Id32,
+        /// Sender installation identity.
+        sender_installation: Id32,
+        /// Sender mailbox identity.
+        sender_mailbox: Id32,
+        /// Recipient installation identity when directly addressed.
+        recipient_installation: Option<Id32>,
+        /// Recipient mailbox identity when directly addressed.
+        recipient_mailbox: Option<Id32>,
+        /// Bounded message body.
+        content: String,
+        /// Typed semantic purpose.
+        purpose: MessagePurposeDto,
+        /// Typed presentation behavior.
+        presentation: PresentationKindDto,
+        /// Correlated provider namespace when present.
+        correlation_provider: Option<String>,
+        /// Correlated provider session when present.
+        correlation_session: Option<String>,
+        /// Correlated operation identity when present.
+        correlation_operation: Option<Id32>,
+        /// Optional project association.
+        project_id: Option<Id32>,
+        /// Required causal identities that are absent.
+        missing_dependencies: Vec<Id32>,
+        /// Present causal identities that are unusable.
+        unusable_dependencies: Vec<Id32>,
+    },
+    /// More dependency-incomplete addressed messages exist beyond the diagnostic bound.
+    IncompleteMessagesTruncated,
     /// Named agent current presentation state.
     Agent {
         /// Agent identity.
@@ -1234,6 +1271,32 @@ pub enum SnapshotItem {
         resolved: bool,
         /// Resolved display name or explicit clear.
         display_name: Option<String>,
+    },
+    /// Grow-only repository-context history for one provider session.
+    AgentContext {
+        /// Context-owning mailbox installation.
+        mailbox_installation: Id32,
+        /// Context-owning mailbox identity.
+        mailbox_id: Id32,
+        /// Complete typed context history in fact order.
+        history: Vec<RepositoryContextDto>,
+        /// Exact causal-maximal context fact frontier.
+        frontier: Vec<Id32>,
+    },
+    /// Permanent direct provider-session mailbox binding.
+    AgentDirectSession {
+        /// Provider namespace.
+        provider: String,
+        /// Provider-scoped session identity.
+        session: String,
+        /// Bound mailbox installation.
+        mailbox_installation: Id32,
+        /// Bound mailbox identity.
+        mailbox_id: Id32,
+        /// Unique compatible named agent when present.
+        named_agent: Option<Id32>,
+        /// Whether incompatible binding history blocks use.
+        conflicted: bool,
     },
     /// Project current presentation state.
     Project {
@@ -1339,6 +1402,22 @@ pub enum SnapshotItem {
     },
 }
 
+/// One immutable repository context observation and its canonical fact identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryContextDto {
+    /// Canonical context fact identity.
+    pub fact_id: Id32,
+    /// Canonical working-directory locator.
+    pub directory: ResourceLocatorDto,
+    /// Optional canonical repository identity.
+    pub repository: Option<ResourceLocatorDto>,
+    /// Optional canonical worktree identity.
+    pub worktree: Option<ResourceLocatorDto>,
+    /// Optional bounded display branch.
+    pub branch: Option<String>,
+}
+
 /// Passive creator-issued human-device grant history.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1415,20 +1494,7 @@ impl AuthoritativeSnapshotDto {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConversationEntryDto {
     /// Durable message presentation.
-    Message {
-        /// Canonical fact identity.
-        fact_id: Id32,
-        /// Stable public message identity.
-        message_id: Id32,
-        /// Causal thread identity.
-        thread_id: Id32,
-        /// Bounded message content.
-        content: String,
-        /// Whether the message remains open.
-        open: bool,
-        /// Whether the message was absorbing-rejected.
-        rejected: bool,
-    },
+    Message(Box<ConversationMessageDto>),
     /// Durable or selected harness activity presentation.
     Activity {
         /// Canonical fact identity.
@@ -1442,6 +1508,81 @@ pub enum ConversationEntryDto {
         /// Whether authoring truncated the content.
         truncated: bool,
     },
+}
+
+/// Passive typed message presentation carried by one conversation page item.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ConversationMessageDto {
+    /// Canonical fact identity.
+    pub fact_id: Id32,
+    /// Stable public message identity.
+    pub message_id: Id32,
+    /// Causal thread identity.
+    pub thread_id: Id32,
+    /// Bounded message content.
+    pub content: String,
+    /// Sender installation identity.
+    pub sender_installation: Id32,
+    /// Sender mailbox identity.
+    pub sender_mailbox: Id32,
+    /// Recipient installation identity when directly addressed.
+    pub recipient_installation: Option<Id32>,
+    /// Recipient mailbox identity when directly addressed.
+    pub recipient_mailbox: Option<Id32>,
+    /// Typed semantic message purpose.
+    pub purpose: MessagePurposeDto,
+    /// Typed presentation behavior.
+    pub presentation: PresentationKindDto,
+    /// Correlated provider namespace when present.
+    pub correlation_provider: Option<String>,
+    /// Correlated provider session when present.
+    pub correlation_session: Option<String>,
+    /// Correlated operation identity when present.
+    pub correlation_operation: Option<Id32>,
+    /// Optional project association.
+    pub project_id: Option<Id32>,
+    /// Whether the message remains open.
+    pub open: bool,
+    /// Whether the message was absorbing-rejected.
+    pub rejected: bool,
+    /// Exact causal-maximal reversible-state facts.
+    pub state_frontier: Vec<Id32>,
+    /// Peer-authored usable children proving receipt.
+    pub peer_received_by: Vec<Id32>,
+    /// Exact question root fact when normalized thread state exists.
+    pub root_fact: Option<Id32>,
+    /// Stable root message identity when normalized thread state exists.
+    pub root_message: Option<Id32>,
+    /// Whether this fact is currently a ready answer.
+    pub ready_answer: bool,
+    /// Whether at least one valid thread cancellation exists.
+    pub thread_cancelled: bool,
+}
+
+/// Typed message purpose on the stable local protocol.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePurposeDto {
+    /// A question expects an answer.
+    Question,
+    /// An asynchronous message does not imply a blocking wait.
+    Asynchronous,
+    /// Output produced for a project input.
+    ProjectOutput,
+}
+
+/// Typed message presentation on the stable local protocol.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentationKindDto {
+    /// Ordinary user or agent prose.
+    Message,
+    /// Final answer from a managed operation.
+    FinalAnswer,
+    /// Concise status or progress notice.
+    Status,
 }
 
 /// Bounded page response with a stable continuation cursor.
@@ -2260,6 +2401,30 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 validate_id_set(frontier, 64)?;
             }
             SnapshotItem::Conversation { key, .. } => validate_conversation_key(key)?,
+            SnapshotItem::IncompleteMessage {
+                recipient_installation,
+                recipient_mailbox,
+                content,
+                missing_dependencies,
+                unusable_dependencies,
+                correlation_provider,
+                correlation_session,
+                correlation_operation,
+                ..
+            } => {
+                if recipient_installation.is_some() != recipient_mailbox.is_some() {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                validate_text(content, CONTENT_MAX_BYTES)?;
+                validate_id_set(missing_dependencies, 64)?;
+                validate_id_set(unusable_dependencies, 64)?;
+                validate_optional_correlation(
+                    correlation_provider.as_deref(),
+                    correlation_session.as_deref(),
+                    correlation_operation.as_ref(),
+                )?;
+            }
+            SnapshotItem::IncompleteMessagesTruncated => {}
             SnapshotItem::ProjectInput { sequence, .. }
             | SnapshotItem::ProjectDispatch { sequence, .. } => {
                 if *sequence == 0 {
@@ -2374,6 +2539,42 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                     return Err(ValueError::InvalidValueCombination);
                 }
             }
+            SnapshotItem::AgentContext {
+                history, frontier, ..
+            } => {
+                if history.len() > MAX_SNAPSHOT_ITEMS
+                    || history
+                        .windows(2)
+                        .any(|pair| pair[0].fact_id >= pair[1].fact_id)
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                for context in history {
+                    validate_locator(&context.directory)?;
+                    if let Some(repository) = &context.repository {
+                        validate_locator(repository)?;
+                    }
+                    if let Some(worktree) = &context.worktree {
+                        validate_locator(worktree)?;
+                    }
+                    if let Some(branch) = &context.branch {
+                        validate_text(branch, SHORT_TEXT_MAX_BYTES)?;
+                    }
+                }
+                validate_id_set(frontier, 64)?;
+                if frontier
+                    .iter()
+                    .any(|fact_id| !history.iter().any(|context| context.fact_id == *fact_id))
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+            }
+            SnapshotItem::AgentDirectSession {
+                provider, session, ..
+            } => {
+                validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
+                validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+            }
             SnapshotItem::Project {
                 name, lifecycle, ..
             } => {
@@ -2466,14 +2667,46 @@ fn validate_page(page: &ConversationPageDto) -> Result<(), ValueError> {
     }
     for item in &page.items {
         match item {
-            ConversationEntryDto::Message { content, .. }
-            | ConversationEntryDto::Activity { content, .. } => {
+            ConversationEntryDto::Message(message) => {
+                validate_text(&message.content, CONTENT_MAX_BYTES)?;
+                if message.recipient_installation.is_some() != message.recipient_mailbox.is_some()
+                    || message.root_fact.is_some() != message.root_message.is_some()
+                    || (message.ready_answer && message.root_fact.is_none())
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
+                validate_id_set(&message.state_frontier, 64)?;
+                validate_id_set(&message.peer_received_by, 64)?;
+                validate_optional_correlation(
+                    message.correlation_provider.as_deref(),
+                    message.correlation_session.as_deref(),
+                    message.correlation_operation.as_ref(),
+                )?;
+            }
+            ConversationEntryDto::Activity { content, .. } => {
                 validate_text(content, CONTENT_MAX_BYTES)?;
             }
         }
         if matches!(item, ConversationEntryDto::Activity { sequence: 0, .. }) {
             return Err(ValueError::InvalidSequence);
         }
+    }
+    Ok(())
+}
+
+fn validate_optional_correlation(
+    provider: Option<&str>,
+    session: Option<&str>,
+    operation: Option<&Id32>,
+) -> Result<(), ValueError> {
+    if provider.is_some() != session.is_some() || provider.is_some() != operation.is_some() {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    if let Some(provider) = provider {
+        validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
+    }
+    if let Some(session) = session {
+        validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
     }
     Ok(())
 }

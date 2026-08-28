@@ -5,15 +5,15 @@ use crate::protocol::v1::{
     ConversationEntryDto, ConversationKeyDto, ConversationPageDto, ConversationPageRequest,
     DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
     ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
-    MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MutationAttemptDto,
-    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
-    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
-    ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto, RelayAuthenticationDto,
-    RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
-    RemoteCommandResultDto, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, RuntimeObservationDto,
-    SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionRequestDto,
-    SynchronizationRequestDto, ValueError,
+    MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MessagePurposeDto,
+    MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
+    PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+    ProjectCommandRequestDto, ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto,
+    RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto,
+    RemoteCommandProgressDto, RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto,
+    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
+    ResourceSchemeDto, RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto,
+    StateRepairReportDto, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, ApplicationError, ApplicationErrorClass,
@@ -29,10 +29,10 @@ use hq_application::{
 };
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
-    MailboxAddress, MailboxId, OperationId, Page, PageCursor, ProjectId, ProjectResource,
-    ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult, ResourceHealth,
-    ResourceId, ResourceLocator, ResourceScheme, Revision, RuntimeObservation, ShortText, ThreadId,
-    Timestamp,
+    MailboxAddress, MailboxId, MessagePurpose, OperationId, Page, PageCursor, PresentationKind,
+    ProjectId, ProjectResource, ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES,
+    RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, Revision,
+    RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
 
 /// Converts bounded exact canonical evidence into its wire representation.
@@ -301,6 +301,56 @@ pub fn snapshot_to_v1(
                 latest_fact: latest_fact.map(|fact| id32(fact.as_bytes())),
                 open_messages,
             },
+            ClientProjection::IncompleteMessage { message } => SnapshotItem::IncompleteMessage {
+                fact_id: id32(message.fact_id.as_bytes()),
+                message_id: id32(message.content.message_id.as_bytes()),
+                thread_id: id32(message.thread_id.as_bytes()),
+                sender_installation: id32(message.content.sender.installation_id().as_bytes()),
+                sender_mailbox: id32(message.content.sender.mailbox_id().as_bytes()),
+                recipient_installation: message
+                    .content
+                    .recipient
+                    .map(|recipient| id32(recipient.installation_id().as_bytes())),
+                recipient_mailbox: message
+                    .content
+                    .recipient
+                    .map(|recipient| id32(recipient.mailbox_id().as_bytes())),
+                content: message.content.body.as_str().to_owned(),
+                purpose: message_purpose_to_v1(message.content.purpose),
+                presentation: presentation_to_v1(message.content.presentation),
+                correlation_provider: message
+                    .content
+                    .correlation
+                    .as_ref()
+                    .map(|correlation| correlation.provider().as_str().to_owned()),
+                correlation_session: message
+                    .content
+                    .correlation
+                    .as_ref()
+                    .map(|correlation| correlation.session().as_str().to_owned()),
+                correlation_operation: message
+                    .content
+                    .correlation
+                    .as_ref()
+                    .map(|correlation| id32(correlation.operation().as_bytes())),
+                project_id: message
+                    .content
+                    .project_id
+                    .map(|project| id32(project.as_bytes())),
+                missing_dependencies: message
+                    .missing_dependencies
+                    .iter()
+                    .map(|fact| id32(fact.as_bytes()))
+                    .collect(),
+                unusable_dependencies: message
+                    .unusable_dependencies
+                    .iter()
+                    .map(|fact| id32(fact.as_bytes()))
+                    .collect(),
+            },
+            ClientProjection::IncompleteMessagesTruncated => {
+                SnapshotItem::IncompleteMessagesTruncated
+            }
             ClientProjection::Agent {
                 agent_id,
                 names,
@@ -360,6 +410,42 @@ pub fn snapshot_to_v1(
                 session: session.as_str().to_owned(),
                 resolved,
                 display_name: display_name.map(|name| name.as_str().to_owned()),
+            },
+            ClientProjection::AgentContext {
+                mailbox,
+                history,
+                frontier,
+            } => SnapshotItem::AgentContext {
+                mailbox_installation: id32(mailbox.installation_id().as_bytes()),
+                mailbox_id: id32(mailbox.mailbox_id().as_bytes()),
+                history: history
+                    .into_iter()
+                    .map(|(fact_id, context)| RepositoryContextDto {
+                        fact_id: id32(fact_id.as_bytes()),
+                        directory: locator_to_v1(&context.directory),
+                        repository: context.repository.as_ref().map(locator_to_v1),
+                        worktree: context.worktree.as_ref().map(locator_to_v1),
+                        branch: context.branch.map(|branch| branch.as_str().to_owned()),
+                    })
+                    .collect(),
+                frontier: frontier
+                    .iter()
+                    .map(|fact_id| id32(fact_id.as_bytes()))
+                    .collect(),
+            },
+            ClientProjection::AgentDirectSession {
+                provider,
+                session,
+                mailbox,
+                named_agent,
+                conflicted,
+            } => SnapshotItem::AgentDirectSession {
+                provider: provider.as_str().to_owned(),
+                session: session.as_str().to_owned(),
+                mailbox_installation: id32(mailbox.installation_id().as_bytes()),
+                mailbox_id: id32(mailbox.mailbox_id().as_bytes()),
+                named_agent: named_agent.map(|agent| id32(agent.as_bytes())),
+                conflicted,
             },
             ClientProjection::Project {
                 project_id,
@@ -1090,14 +1176,80 @@ fn conversation_key_to_v1(key: &ConversationKey) -> ConversationKeyDto {
 
 fn conversation_entry_to_v1(entry: &ConversationEntry) -> ConversationEntryDto {
     match entry {
-        ConversationEntry::Message(message) => ConversationEntryDto::Message {
-            fact_id: id32(message.fact_id.as_bytes()),
-            message_id: id32(message.content.message_id.as_bytes()),
-            thread_id: id32(message.thread_id.as_bytes()),
-            content: message.content.body.as_str().to_owned(),
-            open: message.open,
-            rejected: message.rejected,
-        },
+        ConversationEntry::Message(entry) => {
+            ConversationEntryDto::Message(Box::new(crate::protocol::v1::ConversationMessageDto {
+                fact_id: id32(entry.message.fact_id.as_bytes()),
+                message_id: id32(entry.message.content.message_id.as_bytes()),
+                thread_id: id32(entry.message.thread_id.as_bytes()),
+                content: entry.message.content.body.as_str().to_owned(),
+                sender_installation: id32(
+                    entry.message.content.sender.installation_id().as_bytes(),
+                ),
+                sender_mailbox: id32(entry.message.content.sender.mailbox_id().as_bytes()),
+                recipient_installation: entry
+                    .message
+                    .content
+                    .recipient
+                    .map(|recipient| id32(recipient.installation_id().as_bytes())),
+                recipient_mailbox: entry
+                    .message
+                    .content
+                    .recipient
+                    .map(|recipient| id32(recipient.mailbox_id().as_bytes())),
+                purpose: message_purpose_to_v1(entry.message.content.purpose),
+                presentation: presentation_to_v1(entry.message.content.presentation),
+                correlation_provider: entry
+                    .message
+                    .content
+                    .correlation
+                    .as_ref()
+                    .map(|correlation| correlation.provider().as_str().to_owned()),
+                correlation_session: entry
+                    .message
+                    .content
+                    .correlation
+                    .as_ref()
+                    .map(|correlation| correlation.session().as_str().to_owned()),
+                correlation_operation: entry
+                    .message
+                    .content
+                    .correlation
+                    .as_ref()
+                    .map(|correlation| id32(correlation.operation().as_bytes())),
+                project_id: entry
+                    .message
+                    .content
+                    .project_id
+                    .map(|project| id32(project.as_bytes())),
+                open: entry.message.open,
+                rejected: entry.message.rejected,
+                state_frontier: entry
+                    .message
+                    .state_frontier
+                    .iter()
+                    .map(|fact_id| id32(fact_id.as_bytes()))
+                    .collect(),
+                peer_received_by: entry
+                    .message
+                    .peer_received_by
+                    .iter()
+                    .map(|fact_id| id32(fact_id.as_bytes()))
+                    .collect(),
+                root_fact: entry
+                    .thread
+                    .as_ref()
+                    .map(|thread| id32(thread.root_fact.as_bytes())),
+                root_message: entry
+                    .thread
+                    .as_ref()
+                    .map(|thread| id32(thread.root_message.as_bytes())),
+                ready_answer: entry
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.ready_answers.contains(&entry.message.fact_id)),
+                thread_cancelled: entry.thread.as_ref().is_some_and(|thread| thread.cancelled),
+            }))
+        }
         ConversationEntry::Activity(activity) => ConversationEntryDto::Activity {
             fact_id: id32(activity.fact_id.as_bytes()),
             sequence: activity.sequence.get(),
@@ -1105,6 +1257,22 @@ fn conversation_entry_to_v1(entry: &ConversationEntry) -> ConversationEntryDto {
             content: activity.content.as_str().to_owned(),
             truncated: activity.truncated,
         },
+    }
+}
+
+const fn message_purpose_to_v1(purpose: MessagePurpose) -> MessagePurposeDto {
+    match purpose {
+        MessagePurpose::Question => MessagePurposeDto::Question,
+        MessagePurpose::Asynchronous => MessagePurposeDto::Asynchronous,
+        MessagePurpose::ProjectOutput => MessagePurposeDto::ProjectOutput,
+    }
+}
+
+const fn presentation_to_v1(presentation: PresentationKind) -> PresentationKindDto {
+    match presentation {
+        PresentationKind::Message => PresentationKindDto::Message,
+        PresentationKind::FinalAnswer => PresentationKindDto::FinalAnswer,
+        PresentationKind::Status => PresentationKindDto::Status,
     }
 }
 

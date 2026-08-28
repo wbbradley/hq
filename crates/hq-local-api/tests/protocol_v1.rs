@@ -10,12 +10,13 @@ use hq_domain::{
 use hq_local_api::project_command_from_v1;
 use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
-    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationKeyDto,
-    ConversationPageDto, ConversationPageRequest, DecodeError, DeviceGrantDto, DomainErrorDto,
-    DomainHealthDto, EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass, ErrorResponse,
-    EvidenceIngestOutcomeDto, FrameDecoder, HealthDomainDto, Id32, InvalidationTopic,
-    LifecycleRequest, LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MutationAttemptDto,
-    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
+    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationEntryDto,
+    ConversationKeyDto, ConversationMessageDto, ConversationPageDto, ConversationPageRequest,
+    DecodeError, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
+    EffectRequestDto, EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto,
+    FrameDecoder, HealthDomainDto, Id32, InvalidationTopic, LifecycleRequest, LifecycleState,
+    LifecycleStatus, MAX_FRAME_BYTES, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto,
+    MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto,
     ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto,
     RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto,
     RemoteCommandProgressDto, Request, RequestEnvelope, RequestId, ResourceHealthDto,
@@ -496,6 +497,101 @@ fn every_success_and_error_response_family_interoperates() {
             DomainErrorDto::new("conflict".to_owned(), "relay-conflict".to_owned())
                 .expect("domain error"),
         )),
+    )));
+}
+
+#[test]
+fn conversation_message_page_preserves_addressing_state_and_ready_thread_semantics() {
+    let entry = ConversationEntryDto::Message(Box::new(ConversationMessageDto {
+        fact_id: Id32::new([1; 32]),
+        message_id: Id32::new([2; 32]),
+        thread_id: Id32::new([3; 32]),
+        content: "answer".to_owned(),
+        sender_installation: Id32::new([4; 32]),
+        sender_mailbox: Id32::new([5; 32]),
+        recipient_installation: Some(Id32::new([6; 32])),
+        recipient_mailbox: Some(Id32::new([7; 32])),
+        purpose: MessagePurposeDto::Question,
+        presentation: PresentationKindDto::FinalAnswer,
+        correlation_provider: None,
+        correlation_session: None,
+        correlation_operation: None,
+        project_id: None,
+        open: true,
+        rejected: false,
+        state_frontier: vec![Id32::new([8; 32])],
+        peer_received_by: vec![Id32::new([9; 32])],
+        root_fact: Some(Id32::new([10; 32])),
+        root_message: Some(Id32::new([11; 32])),
+        ready_answer: true,
+        thread_cancelled: false,
+    }));
+    let page = ConversationPageDto::new(vec![entry], None).expect("typed page validates");
+    round_trip(&WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(1).expect("nonzero"),
+        ResponseResult::ConversationPage(page),
+    )));
+
+    let invalid = ConversationEntryDto::Message(Box::new(ConversationMessageDto {
+        fact_id: Id32::new([1; 32]),
+        message_id: Id32::new([2; 32]),
+        thread_id: Id32::new([3; 32]),
+        content: "invalid".to_owned(),
+        sender_installation: Id32::new([4; 32]),
+        sender_mailbox: Id32::new([5; 32]),
+        recipient_installation: Some(Id32::new([6; 32])),
+        recipient_mailbox: None,
+        purpose: MessagePurposeDto::Question,
+        presentation: PresentationKindDto::Message,
+        correlation_provider: None,
+        correlation_session: None,
+        correlation_operation: None,
+        project_id: None,
+        open: true,
+        rejected: false,
+        state_frontier: Vec::new(),
+        peer_received_by: Vec::new(),
+        root_fact: None,
+        root_message: None,
+        ready_answer: false,
+        thread_cancelled: false,
+    }));
+    assert_eq!(
+        ConversationPageDto::new(vec![invalid], None),
+        Err(ValueError::InvalidValueCombination)
+    );
+}
+
+#[test]
+fn incomplete_addressed_message_round_trips_as_inert_snapshot_diagnostic() {
+    let snapshot = AuthoritativeSnapshotDto::new(
+        7,
+        vec![
+            SnapshotItem::IncompleteMessage {
+                fact_id: Id32::new([1; 32]),
+                message_id: Id32::new([2; 32]),
+                thread_id: Id32::new([3; 32]),
+                sender_installation: Id32::new([4; 32]),
+                sender_mailbox: Id32::new([5; 32]),
+                recipient_installation: Some(Id32::new([6; 32])),
+                recipient_mailbox: Some(Id32::new([7; 32])),
+                content: "history missing".to_owned(),
+                purpose: MessagePurposeDto::Question,
+                presentation: PresentationKindDto::Message,
+                correlation_provider: None,
+                correlation_session: None,
+                correlation_operation: None,
+                project_id: None,
+                missing_dependencies: vec![Id32::new([8; 32])],
+                unusable_dependencies: Vec::new(),
+            },
+            SnapshotItem::IncompleteMessagesTruncated,
+        ],
+    )
+    .expect("diagnostic snapshot validates");
+    round_trip(&WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(1).expect("nonzero"),
+        ResponseResult::AuthoritativeSnapshot(snapshot),
     )));
 }
 

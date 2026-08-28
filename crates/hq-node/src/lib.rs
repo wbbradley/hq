@@ -40,13 +40,13 @@ mod unix_frame;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use cli::{
-    AuthorityAdminView, CliCommand, CliError, CliExecution, CliExitClass, CliInvocation,
-    CliOutputFormat, ConfigurationCommand, DaemonCommand, DomainHealthView, HumanAccountView,
-    HumanCommand, HumanDeviceGrantView, HumanDeviceState, HumanDeviceView, HumanDevicesView,
-    HumanRelayHintView, HumanView, IdentityCommand, MailboxCapabilityView, MailboxCommand,
-    MailboxView, PeerCommand, PeerRouteBlockView, PeerRouteCandidateView, PeerRouteView,
-    RelayAdminView, RelayCommand, RelayPolicyView, execute_cli, execute_cli_with_input, parse_cli,
-    run_cli, run_cli_with_input,
+    AuthorityAdminView, CliCommand, CliCompletion, CliError, CliExecution, CliExitClass,
+    CliInvocation, CliOutputFormat, ConfigurationCommand, DaemonCommand, DomainHealthView,
+    HumanAccountView, HumanCommand, HumanDeviceGrantView, HumanDeviceState, HumanDeviceView,
+    HumanDevicesView, HumanRelayHintView, HumanView, IdentityCommand, MailboxCapabilityView,
+    MailboxCommand, MailboxView, PeerCommand, PeerRouteBlockView, PeerRouteCandidateView,
+    PeerRouteView, RelayAdminView, RelayCommand, RelayPolicyView, complete_cli_delivery,
+    execute_cli, execute_cli_with_input, parse_cli, run_cli, run_cli_with_input,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use foreground::{

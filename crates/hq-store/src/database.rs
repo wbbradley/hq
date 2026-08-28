@@ -16,10 +16,10 @@ use std::{
     time::Duration,
 };
 
-use hq_application::ConversationSummary;
+use hq_application::{ConversationSummary, IncompleteMessageSummary};
 use hq_domain::{
     AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, Page,
-    PageCursor,
+    PageCursor, SemanticPayload,
 };
 use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
@@ -40,7 +40,7 @@ use crate::{
     ProjectProjectionSnapshot, ReductionIndexSnapshot, RepairOutcome, StoreError, StoreErrorClass,
     operational::LocalMutationDecisionParts,
     paths::{prepare_database_path, validate_database_path},
-    snapshot::build_complete_snapshot,
+    snapshot::{ReductionDomain, build_complete_snapshot, encode_domain, encode_status},
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
@@ -1598,11 +1598,14 @@ impl Database {
         let project = project::load(&self.connection)?;
         let revision = operational::current_revision(&self.connection)?;
         let conversations = conversation_summaries(&index, &conversation)?;
+        let (incomplete_messages, incomplete_messages_truncated) =
+            incomplete_message_summaries(&self.connection)?;
         Ok(AuthoritativeSnapshot::with_conversations(
             revision,
             DomainSnapshot::new(authority, conversation, agent, project),
             conversations,
-        ))
+        )
+        .with_incomplete_messages(incomplete_messages, incomplete_messages_truncated))
     }
 
     pub(super) fn current_revision(&self) -> Result<hq_domain::Revision, StoreError> {
@@ -1744,6 +1747,122 @@ fn conversation_summaries(
             })
         })
         .collect()
+}
+
+fn incomplete_message_summaries(
+    connection: &Connection,
+) -> Result<(Vec<IncompleteMessageSummary>, bool), StoreError> {
+    const LIMIT: usize = 256;
+    let mut statement = connection
+        .prepare(
+            "SELECT decision.fact_id FROM reduction_decisions AS decision \
+             JOIN canonical_facts AS fact ON fact.fact_id = decision.fact_id \
+             WHERE decision.domain = ?1 AND decision.status = ?2 \
+               AND fact.family IN (15, 16, 17) \
+             ORDER BY decision.fact_id LIMIT ?3",
+        )
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(
+            params![
+                encode_domain(ReductionDomain::Conversation),
+                encode_status(DecisionStatus::Unresolved),
+                i64::try_from(LIMIT + 1)
+                    .map_err(|_| { StoreError::new(StoreErrorClass::RebuildableStateCorrupt) })?,
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(sql_error)?;
+    let mut ids = rows
+        .map(|row| {
+            row.map_err(sql_error)
+                .and_then(fixed_bytes)
+                .map(FactId::from_bytes)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let truncated = ids.len() > LIMIT;
+    ids.truncate(LIMIT);
+    let mut summaries = Vec::new();
+    for fact_id in ids {
+        let verified = load_verified_fact(connection, fact_id)?;
+        let (thread_id, content) = match verified.fact().payload() {
+            SemanticPayload::QuestionAsked(content)
+            | SemanticPayload::AsynchronousMessageSent(content) => (
+                hq_domain::ThreadId::from_bytes(*fact_id.as_bytes()),
+                content.clone(),
+            ),
+            SemanticPayload::AnswerGiven { thread_id, message } => (*thread_id, message.clone()),
+            _ => continue,
+        };
+        summaries.push(IncompleteMessageSummary {
+            fact_id,
+            thread_id,
+            content,
+            missing_dependencies: load_decision_dependencies(
+                connection,
+                "reduction_missing_dependencies",
+                fact_id,
+            )?,
+            unusable_dependencies: load_decision_dependencies(
+                connection,
+                "reduction_unusable_dependencies",
+                fact_id,
+            )?,
+        });
+    }
+    Ok((summaries, truncated))
+}
+
+fn load_decision_dependencies(
+    connection: &Connection,
+    table: &str,
+    fact_id: FactId,
+) -> Result<BTreeSet<FactId>, StoreError> {
+    let sql = match table {
+        "reduction_missing_dependencies" => {
+            "SELECT dependency_id FROM reduction_missing_dependencies \
+             WHERE domain = ?1 AND fact_id = ?2 ORDER BY dependency_id"
+        }
+        "reduction_unusable_dependencies" => {
+            "SELECT dependency_id FROM reduction_unusable_dependencies \
+             WHERE domain = ?1 AND fact_id = ?2 ORDER BY dependency_id"
+        }
+        _ => return Err(StoreError::new(StoreErrorClass::RebuildableStateCorrupt)),
+    };
+    let mut statement = connection.prepare(sql).map_err(sql_error)?;
+    statement
+        .query_map(
+            params![
+                encode_domain(ReductionDomain::Conversation),
+                fact_id.as_bytes().as_slice()
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(sql_error)?
+        .map(|row| {
+            row.map_err(sql_error)
+                .and_then(fixed_bytes)
+                .map(FactId::from_bytes)
+        })
+        .collect()
+}
+
+fn load_verified_fact(
+    connection: &Connection,
+    expected: FactId,
+) -> Result<VerifiedSemanticFact, StoreError> {
+    let event_bytes = connection
+        .query_row(
+            "SELECT event_bytes FROM canonical_facts WHERE fact_id = ?1",
+            [expected.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(sql_error)?;
+    let verified = verify_event(event_bytes)?;
+    if verified.fact().id() != expected {
+        return Err(StoreError::new(StoreErrorClass::InvalidEvidence));
+    }
+    Ok(verified)
 }
 
 fn encode_conversation_cursor(

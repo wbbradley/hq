@@ -2,7 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use hq_domain::{InstallationId, ProjectResource, ResourceHealth, ResourceId, ResourceLocator};
+use hq_domain::{
+    BoundedText, InstallationId, ProjectResource, RepositoryContext, ResourceHealth, ResourceId,
+    ResourceLocator, SHORT_TEXT_MAX_BYTES,
+};
 
 use crate::{
     ExecGit, GitRunner, PathCondition, PathIdentityRequest, PathReleaseAssessment,
@@ -79,6 +82,60 @@ impl<F, G> PathResourceAdapter<F, G> {
 }
 
 impl<F: PathSystem, G: GitRunner> PathResourceAdapter<F, G> {
+    /// Observes typed directory, repository, worktree, and branch context without mutating state.
+    pub fn repository_context(
+        &self,
+        home: InstallationId,
+        directory: PathBuf,
+    ) -> Result<RepositoryContext, PathResourceError> {
+        let resolved = resolve_path(
+            &self.filesystem,
+            &PathIdentityRequest {
+                home,
+                resource_id: ResourceId::from_bytes([0; 32]),
+                display_path: directory,
+            },
+        )?;
+        let directory = resolved.resource.canonical_locator;
+        let directory_path = PathBuf::from(directory.value());
+        let worktree_path = self.git_path(&directory_path, &["rev-parse", "--show-toplevel"]);
+        let worktree = worktree_path
+            .as_ref()
+            .and_then(|path| crate::path::working_tree_locator(path).ok());
+        let repository = worktree_path.as_ref().and_then(|worktree_path| {
+            self.git_path(
+                worktree_path,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .and_then(|path| git_locator(&path).ok())
+        });
+        let branch = worktree_path.as_ref().and_then(|worktree_path| {
+            let output = self
+                .git
+                .run(
+                    worktree_path,
+                    &["symbolic-ref", "--quiet", "--short", "HEAD"],
+                )
+                .ok()?;
+            if !output.success {
+                return None;
+            }
+            let value = std::str::from_utf8(&output.stdout).ok()?;
+            let value = value.strip_suffix('\n').unwrap_or(value);
+            let value = value.strip_suffix('\r').unwrap_or(value);
+            if value.is_empty() || value.contains(['\n', '\r', '\0']) {
+                return None;
+            }
+            BoundedText::<SHORT_TEXT_MAX_BYTES>::new(value.to_owned()).ok()
+        });
+        Ok(RepositoryContext {
+            directory,
+            repository,
+            worktree,
+            branch,
+        })
+    }
+
     /// Resolves a human-selected absolute path to one home-local durable identity.
     pub fn identify(
         &self,

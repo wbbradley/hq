@@ -8,31 +8,37 @@ use std::{
     io::Read,
     num::NonZeroUsize,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use hq_application::{
     ApplicationError, HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs,
-    LocalInstallationAuthority, MailboxGrantRequest, MailboxRevokeRequest, PeerRouteRequest,
+    LocalInstallationAuthority, MailboxGrantRequest, MailboxRevokeRequest,
+    MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest, PeerRouteRequest,
+    ReplyRequest, ThreadCancellationRequest, plan_asynchronous_message,
     plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
     plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
-    plan_mailbox_grant, plan_mailbox_revoke, plan_peer_route_block, plan_peer_route_set,
+    plan_mailbox_grant, plan_mailbox_revoke, plan_message_archive, plan_message_restore,
+    plan_peer_route_block, plan_peer_route_set, plan_question, plan_reply,
+    plan_thread_cancellation,
 };
 use hq_domain::{
-    AccountId, BoundedText, CommandId, EncryptionPublicKey, ErrorCode, FactId, GrantId,
-    InstallationAddress, InstallationId, MailboxAddress, MailboxId, ProviderId,
-    RESOURCE_LOCATOR_MAX_BYTES, RelayHints, ResourceLocator, ResourceScheme, ShortText,
-    SigningPublicKey, Timestamp,
+    AccountId, AuthorityReference, AuthorityRole, BoundedText, CommandId, EncryptionPublicKey,
+    ErrorCode, FactId, FactScope, GrantId, InstallationAddress, InstallationId, MailboxAddress,
+    MailboxId, MessageId, MessagePurpose, OperationCorrelation, OperationId, PresentationKind,
+    ProjectId, ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RelayHints,
+    ResourceLocator, ResourceScheme, ShortText, SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_local_api::{
     ClientEvent, InitialView,
     protocol::v1::{
         AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto,
-        DeviceGrantDto, EffectOutcomeDto, EffectRequestDto, HealthDomainDto, Id32,
-        LifecycleRequest, LifecycleState, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
-        PeerRouteBlockDto, PeerRouteCandidateDto, RelayAccessDto, RelayAuthenticationDto,
-        RelayConfigurationDto, RelayStatusDto, Request, ResourceLocatorDto, ResourceSchemeDto,
-        ResponseResult, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
+        ConversationEntryDto, ConversationMessageDto, ConversationPageRequest, DeviceGrantDto,
+        EffectOutcomeDto, EffectRequestDto, HealthDomainDto, Id32, LifecycleRequest,
+        LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
+        PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, RelayAccessDto,
+        RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request, ResourceLocatorDto,
+        ResourceSchemeDto, ResponseResult, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
     },
 };
 use hq_protocol::VerifiedPairingInvitation;
@@ -276,6 +282,193 @@ pub struct RelayAdminView {
     pub quarantined: u64,
     /// Whether additional rows exist beyond the bounded observation.
     pub truncated: bool,
+}
+
+/// Explicit or discoverable provider-session mailbox selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentMailboxSelection {
+    /// Explicit provider namespace; paired with `session`.
+    pub provider: Option<ProviderId>,
+    /// Explicit provider-scoped durable session; paired with `provider`.
+    pub session: Option<hq_domain::ProviderSessionId>,
+    /// Optional repository-discovery directory override.
+    pub directory: Option<PathBuf>,
+}
+
+/// Closed agent-side mailbox messaging behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentMessageCommand {
+    /// Author a question and wait for one ready answer.
+    Ask {
+        /// Mailbox selection inputs.
+        mailbox: AgentMailboxSelection,
+        /// Argument body, or stdin when absent.
+        body: Option<hq_domain::ContentText>,
+        /// Optional overall wait bound; absence intentionally waits indefinitely.
+        timeout: Option<Duration>,
+        /// Bounded request retry interval.
+        interval: Duration,
+    },
+    /// Author an asynchronous message and return immediately.
+    Send {
+        /// Mailbox selection inputs.
+        mailbox: AgentMailboxSelection,
+        /// Argument body, or stdin when absent.
+        body: Option<hq_domain::ContentText>,
+    },
+    /// Wait for one ready answer to a question sent by the selected mailbox.
+    Wait {
+        /// Mailbox selection inputs.
+        mailbox: AgentMailboxSelection,
+        /// Stable root public message identity.
+        message_id: hq_domain::MessageId,
+        /// Optional overall wait bound; absence intentionally waits indefinitely.
+        timeout: Option<Duration>,
+        /// Bounded request retry interval.
+        interval: Duration,
+    },
+    /// Deliver currently ready addressed content without blocking.
+    Poll {
+        /// Mailbox selection inputs.
+        mailbox: AgentMailboxSelection,
+    },
+}
+
+/// Passive human mailbox query filters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanMessageFilters {
+    /// Optional sender mailbox identity.
+    pub sender: Option<MailboxId>,
+    /// Optional recipient mailbox identity.
+    pub recipient: Option<MailboxId>,
+    /// Include archived messages only.
+    pub archived: bool,
+    /// Include both open and archived messages.
+    pub all: bool,
+    /// Inclusive bounded result limit.
+    pub limit: u16,
+}
+
+/// Closed human-side mailbox messaging behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HumanMessageCommand {
+    /// List messages with typed filters.
+    List(HumanMessageFilters),
+    /// Answer one exact question root.
+    Answer {
+        /// Stable root public message identity.
+        message_id: hq_domain::MessageId,
+        /// Argument response, or stdin when absent.
+        body: Option<hq_domain::ContentText>,
+    },
+    /// Cancel one question authored by the local human mailbox.
+    Cancel {
+        /// Stable root public message identity.
+        message_id: hq_domain::MessageId,
+    },
+    /// Archive one exact message.
+    Archive {
+        /// Stable public message identity.
+        message_id: hq_domain::MessageId,
+    },
+    /// Restore one exact archived message.
+    Restore {
+        /// Stable public message identity.
+        message_id: hq_domain::MessageId,
+    },
+}
+
+/// Passive message presentation used by both human and machine renderers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct CliMessageView {
+    /// Canonical message-bearing fact.
+    pub fact_id: FactId,
+    /// Stable public message identity.
+    pub message_id: MessageId,
+    /// Stable causal thread identity.
+    pub thread_id: ThreadId,
+    /// Exact sender mailbox.
+    pub sender: MailboxAddress,
+    /// Optional direct recipient.
+    pub recipient: Option<MailboxAddress>,
+    /// Bounded message body.
+    pub content: String,
+    /// Typed purpose.
+    pub purpose: MessagePurposeDto,
+    /// Typed presentation behavior.
+    pub presentation: PresentationKindDto,
+    /// Optional provider/session/operation correlation.
+    pub correlation: Option<(String, String, [u8; 32])>,
+    /// Optional project association.
+    pub project_id: Option<ProjectId>,
+    /// Whether the message remains open.
+    pub open: bool,
+    /// Whether the message is absorbing-rejected.
+    pub rejected: bool,
+    /// Exact reversible-state frontier.
+    pub state_frontier: BTreeSet<FactId>,
+    /// Question root fact when normalized thread state exists.
+    pub root_fact: Option<FactId>,
+    /// Stable root message identity when normalized thread state exists.
+    pub root_message: Option<MessageId>,
+    /// Whether this fact is a currently ready answer.
+    pub ready_answer: bool,
+    /// Whether the normalized thread is cancelled.
+    pub thread_cancelled: bool,
+    /// Whether the record is inert because required causal history is incomplete.
+    pub incomplete: bool,
+    /// Required causal identities that are absent.
+    pub missing_dependencies: BTreeSet<FactId>,
+    /// Present causal identities that are unusable.
+    pub unusable_dependencies: BTreeSet<FactId>,
+}
+
+/// Passive result of one mailbox message command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessageCommandView {
+    /// Stable operation name.
+    pub operation: &'static str,
+    /// Selected mailbox for agent-side actions.
+    pub mailbox: Option<MailboxAddress>,
+    /// Stable root identity authored or selected by the operation.
+    pub root_message: Option<MessageId>,
+    /// Canonically ordered message records.
+    pub messages: Vec<CliMessageView>,
+    /// Whether additional incomplete-history diagnostics exist beyond the bounded snapshot.
+    pub incomplete_truncated: bool,
+}
+
+/// One repository-aware provider-session mailbox candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MailboxDiscoveryCandidate {
+    /// Provider namespace.
+    pub provider: String,
+    /// Provider-scoped durable session.
+    pub session: String,
+    /// Exact bound mailbox.
+    pub mailbox: MailboxAddress,
+    /// Whether incompatible history blocks selection.
+    pub conflicted: bool,
+    /// Whether at least one recorded directory matches the requested directory.
+    pub directory_match: bool,
+    /// Recorded canonical directory spellings in fact order.
+    pub directories: Vec<String>,
+    /// Recorded canonical repository identities in fact order.
+    pub repositories: Vec<String>,
+    /// Recorded canonical worktree identities in fact order.
+    pub worktrees: Vec<String>,
+    /// Recorded display branches in fact order.
+    pub branches: Vec<String>,
+}
+
+/// Passive repository-aware mailbox discovery result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MailboxDiscoveryView {
+    /// Exact requested discovery directory.
+    pub directory: PathBuf,
+    /// Stable candidate order by provider, session, and mailbox.
+    pub candidates: Vec<MailboxDiscoveryCandidate>,
 }
 
 /// Passive decision counts for one reducer domain.
@@ -576,6 +769,34 @@ pub enum CliCommand {
         /// Validated installation state layout.
         state: StatePaths,
     },
+    /// Execute one agent-side ask, send, wait, or poll operation.
+    AgentMessage {
+        /// Requested agent mailbox behavior.
+        action: AgentMessageCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
+    /// Inspect one exact message without consuming it.
+    GetMessage {
+        /// Stable public message identity.
+        message_id: hq_domain::MessageId,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
+    /// Discover repository-aware provider-session mailboxes.
+    DiscoverMailboxes {
+        /// Optional discovery-directory override.
+        directory: Option<PathBuf>,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
+    /// Execute one human-side message query or mutation.
+    HumanMessage {
+        /// Requested human mailbox behavior.
+        action: HumanMessageCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
     /// Execute one daemon lifecycle command against an explicit installation layout.
     Daemon {
         /// Requested lifecycle behavior.
@@ -603,6 +824,19 @@ pub struct CliExecution {
     pub stderr: String,
     /// Portable process exit status: zero, failure, usage, or unavailable.
     pub exit_code: u8,
+    /// Post-stdout delivery completion; absent for non-consuming commands.
+    pub completion: Option<CliCompletion>,
+}
+
+/// Recoverable post-stdout completion for at-least-once ready-message delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CliCompletion {
+    /// Installation state needed to reconnect after stdout succeeds.
+    pub state: StatePaths,
+    /// Mailbox completing receipt of the delivered records.
+    pub mailbox: MailboxAddress,
+    /// Stable delivered message identities.
+    pub messages: Vec<MessageId>,
 }
 
 /// Stable broad exit classification for scripts and human callers.
@@ -665,6 +899,8 @@ pub enum CliError {
     AuthorityState,
     /// Relay policy, synchronization, or health state was unavailable or inconsistent.
     RelayState,
+    /// Mailbox selection, message state, or causal authority was unavailable or inconsistent.
+    MessagingState,
     /// Pairing evidence or its filesystem location failed strict validation.
     PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
@@ -676,7 +912,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|identity|config|human|peer|mailbox|daemon>",
+                 <help|version|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
             ),
             Self::StatePath => formatter.write_str("node state path is unavailable or invalid"),
             Self::RuntimePath => formatter.write_str("node runtime path is unavailable or invalid"),
@@ -696,6 +932,9 @@ impl fmt::Display for CliError {
             }
             Self::RelayState => {
                 formatter.write_str("relay policy or delivery state is unavailable or inconsistent")
+            }
+            Self::MessagingState => {
+                formatter.write_str("mailbox or message state is unavailable or ambiguous")
             }
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
@@ -791,6 +1030,11 @@ impl CliError {
                 "relay policy or delivery state is unavailable or inconsistent",
                 CliExitClass::Failure,
             ),
+            Self::MessagingState => (
+                "message.state_unavailable",
+                "mailbox selection or causal message state is absent, stale, ambiguous, or inconsistent",
+                CliExitClass::Failure,
+            ),
             Self::PairingArtifact => (
                 "human.pairing_invalid",
                 "the pairing invitation or its file location is invalid",
@@ -882,6 +1126,28 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
         Some("peer") => parse_peer(&rest, state_root.as_ref())?,
         Some("mailbox") => parse_mailbox(&rest, state_root.as_ref())?,
         Some("relay") => parse_relay_command(&rest, state_root.as_ref())?,
+        Some("ask") => parse_agent_message("ask", &rest, state_root.as_ref())?,
+        Some("send") => parse_agent_message("send", &rest, state_root.as_ref())?,
+        Some("wait") => parse_agent_message("wait", &rest, state_root.as_ref())?,
+        Some("poll") => parse_agent_message("poll", &rest, state_root.as_ref())?,
+        Some("get") => {
+            let [message_id] = rest.as_slice() else {
+                return Err(CliError::Arguments);
+            };
+            CliCommand::GetMessage {
+                message_id: hq_domain::MessageId::from_bytes(parse_hex32(message_id)?),
+                state: parsed_state(state_root.as_ref())?,
+            }
+        }
+        Some("mailboxes") => parse_mailbox_discovery(&rest, state_root.as_ref())?,
+        Some("list" | "answer" | "cancel" | "archive" | "restore") => parse_human_message(
+            command
+                .as_ref()
+                .and_then(|value| value.to_str())
+                .ok_or(CliError::Arguments)?,
+            &rest,
+            state_root.as_ref(),
+        )?,
         Some("daemon") if rest.as_slice() == [OsString::from("--help")] => CliCommand::Help {
             topic: vec!["daemon".to_owned()],
         },
@@ -912,11 +1178,240 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 | CliCommand::Peer { .. }
                 | CliCommand::Mailbox { .. }
                 | CliCommand::Relay { .. }
+                | CliCommand::AgentMessage { .. }
+                | CliCommand::GetMessage { .. }
+                | CliCommand::DiscoverMailboxes { .. }
+                | CliCommand::HumanMessage { .. }
         )
     {
         return Err(CliError::Arguments);
     }
     Ok(CliInvocation { output, command })
+}
+
+fn parse_agent_message(
+    command: &str,
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let mut provider = None;
+    let mut session = None;
+    let mut directory = None;
+    let mut timeout = None;
+    let mut interval = Duration::from_millis(250);
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--provider") if provider.is_none() => {
+                provider = Some(
+                    ProviderId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--session") if session.is_none() => {
+                session = Some(
+                    hq_domain::ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--dir") if directory.is_none() => {
+                directory = Some(PathBuf::from(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                ));
+                index += 2;
+            }
+            Some("--timeout") if timeout.is_none() && matches!(command, "ask" | "wait") => {
+                timeout = Some(parse_duration(argument_text(arguments.get(index + 1))?)?);
+                index += 2;
+            }
+            Some("--interval") if matches!(command, "ask" | "wait") => {
+                interval = parse_duration(argument_text(arguments.get(index + 1))?)?;
+                index += 2;
+            }
+            Some(value) if !value.starts_with('-') => {
+                positionals.push(value.to_owned());
+                index += 1;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    if provider.is_some() != session.is_some() || interval.is_zero() {
+        return Err(CliError::Arguments);
+    }
+    let mailbox = AgentMailboxSelection {
+        provider,
+        session,
+        directory,
+    };
+    let action = match (command, positionals.as_slice()) {
+        ("ask", []) => AgentMessageCommand::Ask {
+            mailbox,
+            body: None,
+            timeout,
+            interval,
+        },
+        ("ask", [body]) => AgentMessageCommand::Ask {
+            mailbox,
+            body: Some(parse_content(body)?),
+            timeout,
+            interval,
+        },
+        ("send", []) => AgentMessageCommand::Send {
+            mailbox,
+            body: None,
+        },
+        ("send", [body]) => AgentMessageCommand::Send {
+            mailbox,
+            body: Some(parse_content(body)?),
+        },
+        ("wait", [message_id]) => AgentMessageCommand::Wait {
+            mailbox,
+            message_id: hq_domain::MessageId::from_bytes(parse_hex32(&OsString::from(message_id))?),
+            timeout,
+            interval,
+        },
+        ("poll", []) => AgentMessageCommand::Poll { mailbox },
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::AgentMessage {
+        action,
+        state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_mailbox_discovery(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let directory = match arguments {
+        [] => None,
+        [flag, directory] if flag == "--dir" => Some(PathBuf::from(directory)),
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::DiscoverMailboxes {
+        directory,
+        state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_human_message(
+    command: &str,
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let action = match command {
+        "list" => HumanMessageCommand::List(parse_human_message_filters(arguments)?),
+        "answer" => match arguments {
+            [message_id] => HumanMessageCommand::Answer {
+                message_id: hq_domain::MessageId::from_bytes(parse_hex32(message_id)?),
+                body: None,
+            },
+            [message_id, body] => HumanMessageCommand::Answer {
+                message_id: hq_domain::MessageId::from_bytes(parse_hex32(message_id)?),
+                body: Some(parse_content(argument_text(Some(body))?)?),
+            },
+            _ => return Err(CliError::Arguments),
+        },
+        "cancel" | "archive" | "restore" => {
+            let [message_id] = arguments else {
+                return Err(CliError::Arguments);
+            };
+            let message_id = hq_domain::MessageId::from_bytes(parse_hex32(message_id)?);
+            match command {
+                "cancel" => HumanMessageCommand::Cancel { message_id },
+                "archive" => HumanMessageCommand::Archive { message_id },
+                "restore" => HumanMessageCommand::Restore { message_id },
+                _ => unreachable!(),
+            }
+        }
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::HumanMessage {
+        action,
+        state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_human_message_filters(arguments: &[OsString]) -> Result<HumanMessageFilters, CliError> {
+    let mut filters = HumanMessageFilters {
+        sender: None,
+        recipient: None,
+        archived: false,
+        all: false,
+        limit: 100,
+    };
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--sender") if filters.sender.is_none() => {
+                filters.sender = Some(MailboxId::from_bytes(parse_hex32(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                )?));
+                index += 2;
+            }
+            Some("--recipient") if filters.recipient.is_none() => {
+                filters.recipient = Some(MailboxId::from_bytes(parse_hex32(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                )?));
+                index += 2;
+            }
+            Some("--archived") if !filters.archived && !filters.all => {
+                filters.archived = true;
+                index += 1;
+            }
+            Some("--all") if !filters.archived && !filters.all => {
+                filters.all = true;
+                index += 1;
+            }
+            Some("--limit") => {
+                filters.limit = argument_text(arguments.get(index + 1))?
+                    .parse::<u16>()
+                    .map_err(|_| CliError::Arguments)?;
+                if filters.limit == 0 || filters.limit > 200 {
+                    return Err(CliError::Arguments);
+                }
+                index += 2;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    Ok(filters)
+}
+
+fn argument_text(value: Option<&OsString>) -> Result<&str, CliError> {
+    value
+        .and_then(|value| value.to_str())
+        .ok_or(CliError::Arguments)
+}
+
+fn parse_content(value: &str) -> Result<hq_domain::ContentText, CliError> {
+    hq_domain::ContentText::new(value.to_owned()).map_err(|_| CliError::Arguments)
+}
+
+fn parse_duration(value: &str) -> Result<Duration, CliError> {
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
+        (number, 1_u64)
+    } else if let Some(number) = value.strip_suffix('s') {
+        (number, 1_000)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60_000)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 3_600_000)
+    } else {
+        return Err(CliError::Arguments);
+    };
+    let milliseconds = number
+        .parse::<u64>()
+        .map_err(|_| CliError::Arguments)?
+        .checked_mul(multiplier)
+        .ok_or(CliError::Arguments)?;
+    if milliseconds == 0 {
+        return Err(CliError::Arguments);
+    }
+    Ok(Duration::from_millis(milliseconds))
 }
 
 fn parse_peer(
@@ -1237,11 +1732,21 @@ pub fn execute_cli_with_input(
 ) -> CliExecution {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
     let format = output_hint(&arguments);
-    match parse_cli(arguments).and_then(|invocation| run_cli_with_input(&invocation, input)) {
-        Ok(stdout) => CliExecution {
-            stdout,
+    match parse_cli(arguments).and_then(|invocation| {
+        let result = run_cli_result(&invocation, input)?;
+        let empty_poll = matches!(
+            &result,
+            CliResult::Messages(view) if view.operation == "poll" && view.messages.is_empty()
+        );
+        let completion = completion_for(&invocation, &result);
+        let stdout = render_result(invocation.output, &result)?;
+        Ok((stdout, completion, empty_poll))
+    }) {
+        Ok((stdout, completion, empty_poll)) => CliExecution {
+            stdout: if empty_poll { String::new() } else { stdout },
             stderr: String::new(),
-            exit_code: 0,
+            exit_code: if empty_poll { 3 } else { 0 },
+            completion: if empty_poll { None } else { completion },
         },
         Err(error) => {
             let (code, message, class) = error.diagnostic();
@@ -1249,6 +1754,7 @@ pub fn execute_cli_with_input(
                 stdout: String::new(),
                 stderr: render_error(format, code, message, class),
                 exit_code: class.status(),
+                completion: None,
             }
         }
     }
@@ -1264,38 +1770,47 @@ pub fn run_cli_with_input(
     invocation: &CliInvocation,
     input: &mut dyn Read,
 ) -> Result<String, CliError> {
+    let result = run_cli_result(invocation, input)?;
+    render_result(invocation.output, &result)
+}
+
+fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<CliResult, CliError> {
     match &invocation.command {
-        CliCommand::Identity { action, state } => {
-            return render_result(invocation.output, &run_identity(action, state, input)?);
+        CliCommand::Identity { action, state } => return run_identity(action, state, input),
+        CliCommand::Configuration { action, state } => return run_configuration(action, state),
+        CliCommand::Human { action, state } => return run_human(action, state),
+        CliCommand::Peer { action, state } => return run_peer(action, state),
+        CliCommand::Mailbox { action, state } => return run_mailbox(action, state),
+        CliCommand::Relay { action, state } => return run_relay(action, state),
+        CliCommand::AgentMessage { action, state } => {
+            return run_agent_message(action, state, input);
         }
-        CliCommand::Configuration { action, state } => {
-            return render_result(invocation.output, &run_configuration(action, state)?);
+        CliCommand::GetMessage { message_id, state } => return run_get_message(*message_id, state),
+        CliCommand::DiscoverMailboxes { directory, state } => {
+            return run_mailbox_discovery(directory.as_deref(), state);
         }
-        CliCommand::Human { action, state } => {
-            return render_result(invocation.output, &run_human(action, state)?);
-        }
-        CliCommand::Peer { action, state } => {
-            return render_result(invocation.output, &run_peer(action, state)?);
-        }
-        CliCommand::Mailbox { action, state } => {
-            return render_result(invocation.output, &run_mailbox(action, state)?);
-        }
-        CliCommand::Relay { action, state } => {
-            return render_result(invocation.output, &run_relay(action, state)?);
+        CliCommand::HumanMessage { action, state } => {
+            return run_human_message(action, state, input);
         }
         CliCommand::Help { .. } | CliCommand::Version | CliCommand::Daemon { .. } => {}
     }
     let CliCommand::Daemon { action, state } = &invocation.command else {
         return match &invocation.command {
-            CliCommand::Help { topic } => render_help(invocation.output, topic),
-            CliCommand::Version => render_version(invocation.output),
+            CliCommand::Help { topic } => {
+                render_help(invocation.output, topic).map(CliResult::Rendered)
+            }
+            CliCommand::Version => render_version(invocation.output).map(CliResult::Rendered),
             CliCommand::Daemon { .. }
             | CliCommand::Identity { .. }
             | CliCommand::Configuration { .. }
             | CliCommand::Human { .. }
             | CliCommand::Peer { .. }
             | CliCommand::Mailbox { .. }
-            | CliCommand::Relay { .. } => unreachable!(),
+            | CliCommand::Relay { .. }
+            | CliCommand::AgentMessage { .. }
+            | CliCommand::GetMessage { .. }
+            | CliCommand::DiscoverMailboxes { .. }
+            | CliCommand::HumanMessage { .. } => unreachable!(),
         };
     };
     let runtime = RuntimePaths::new(state.root().join("runtime"))
@@ -1347,7 +1862,7 @@ pub fn run_cli_with_input(
             }
         }
     };
-    render_result(invocation.output, &output)
+    Ok(output)
 }
 
 fn run_identity(
@@ -1610,6 +2125,884 @@ fn run_relay(action: &RelayCommand, state: &StatePaths) -> Result<CliResult, Cli
         status,
         health,
     ))))
+}
+
+fn run_agent_message(
+    action: &AgentMessageCommand,
+    state: &StatePaths,
+    input: &mut dyn Read,
+) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let local = client.installation_id();
+    let snapshot = messaging_snapshot(&mut client)?;
+    let selection = match action {
+        AgentMessageCommand::Ask { mailbox, .. }
+        | AgentMessageCommand::Send { mailbox, .. }
+        | AgentMessageCommand::Wait { mailbox, .. }
+        | AgentMessageCommand::Poll { mailbox } => mailbox,
+    };
+    let mailbox = resolve_agent_mailbox(&snapshot, local, selection)?;
+    match action {
+        AgentMessageCommand::Ask {
+            body,
+            timeout,
+            interval,
+            ..
+        } => {
+            let body = message_body(body.as_ref(), input)?;
+            let message_id = random_message_id()?;
+            let plan = plan_question(
+                message_authority(&snapshot, local, mailbox)?,
+                stable_inputs(),
+                NewMessageRequest {
+                    message_id,
+                    recipient: Some(human_mailbox(&snapshot, local)?.0),
+                    body,
+                    presentation: PresentationKind::Message,
+                    project_id: None,
+                },
+            )?;
+            submit_message_plan(&mut client, plan)?;
+            let answer = wait_for_answer(&mut client, mailbox, message_id, *timeout, *interval)?;
+            Ok(CliResult::Messages(Box::new(MessageCommandView {
+                operation: "ask",
+                mailbox: Some(mailbox),
+                root_message: Some(message_id),
+                messages: vec![answer],
+                incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
+            })))
+        }
+        AgentMessageCommand::Send { body, .. } => {
+            let body = message_body(body.as_ref(), input)?;
+            let message_id = random_message_id()?;
+            let plan = plan_asynchronous_message(
+                message_authority(&snapshot, local, mailbox)?,
+                stable_inputs(),
+                NewMessageRequest {
+                    message_id,
+                    recipient: Some(human_mailbox(&snapshot, local)?.0),
+                    body,
+                    presentation: PresentationKind::Message,
+                    project_id: None,
+                },
+            )?;
+            submit_message_plan(&mut client, plan)?;
+            Ok(CliResult::Messages(Box::new(MessageCommandView {
+                operation: "send",
+                mailbox: Some(mailbox),
+                root_message: Some(message_id),
+                messages: Vec::new(),
+                incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
+            })))
+        }
+        AgentMessageCommand::Wait {
+            message_id,
+            timeout,
+            interval,
+            ..
+        } => {
+            let answer = wait_for_answer(&mut client, mailbox, *message_id, *timeout, *interval)?;
+            Ok(CliResult::Messages(Box::new(MessageCommandView {
+                operation: "wait",
+                mailbox: Some(mailbox),
+                root_message: Some(*message_id),
+                messages: vec![answer],
+                incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
+            })))
+        }
+        AgentMessageCommand::Poll { .. } => {
+            let snapshot = messaging_snapshot(&mut client)?;
+            let messages = load_all_messages(&mut client, &snapshot)?
+                .into_iter()
+                .filter(|message| {
+                    (message.open || message.incomplete)
+                        && message.recipient == Some(mailbox)
+                        && (message.incomplete
+                            || message.ready_answer
+                            || message.purpose == MessagePurposeDto::Asynchronous)
+                })
+                .collect();
+            Ok(CliResult::Messages(Box::new(MessageCommandView {
+                operation: "poll",
+                mailbox: Some(mailbox),
+                root_message: None,
+                messages,
+                incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
+            })))
+        }
+    }
+}
+
+fn run_get_message(message_id: MessageId, state: &StatePaths) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let snapshot = messaging_snapshot(&mut client)?;
+    let message = exact_message(load_all_messages(&mut client, &snapshot)?, message_id)?;
+    Ok(CliResult::Messages(Box::new(MessageCommandView {
+        operation: "get",
+        mailbox: None,
+        root_message: Some(message_id),
+        messages: vec![message],
+        incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
+    })))
+}
+
+fn run_mailbox_discovery(
+    directory: Option<&Path>,
+    state: &StatePaths,
+) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let local = client.installation_id();
+    let snapshot = messaging_snapshot(&mut client)?;
+    let directory = discovery_directory(directory)?;
+    Ok(CliResult::MailboxDiscovery(Box::new(
+        mailbox_discovery_view(&snapshot, local, directory)?,
+    )))
+}
+
+fn run_human_message(
+    action: &HumanMessageCommand,
+    state: &StatePaths,
+    input: &mut dyn Read,
+) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let local = client.installation_id();
+    let snapshot = messaging_snapshot(&mut client)?;
+    let (human, _) = human_mailbox(&snapshot, local)?;
+    let all = load_all_messages(&mut client, &snapshot)?;
+    match action {
+        HumanMessageCommand::List(filters) => {
+            let messages = filter_human_messages(all, filters);
+            Ok(human_message_result(
+                "list", human, None, messages, &snapshot,
+            ))
+        }
+        HumanMessageCommand::Answer { message_id, body } => {
+            let root = answerable_human_question(all, *message_id, human)?;
+            let answer_id = random_message_id()?;
+            let plan = plan_reply(
+                message_authority(&snapshot, local, human)?,
+                stable_inputs(),
+                ReplyRequest {
+                    thread_id: root.thread_id,
+                    root_fact: root.fact_id,
+                    root: message_content(&root)?,
+                    root_scope: FactScope::InstallationPrivate(local),
+                    message_id: answer_id,
+                    body: message_body(body.as_ref(), input)?,
+                    presentation: PresentationKind::Message,
+                },
+            )?;
+            submit_message_plan(&mut client, plan)?;
+            Ok(human_message_result(
+                "answer",
+                human,
+                Some(*message_id),
+                Vec::new(),
+                &snapshot,
+            ))
+        }
+        HumanMessageCommand::Cancel { message_id } => {
+            let root = exact_message(all, *message_id)?;
+            if root.incomplete {
+                return Err(CliError::MessagingState);
+            }
+            let plan = plan_thread_cancellation(
+                message_authority(&snapshot, local, human)?,
+                stable_inputs(),
+                ThreadCancellationRequest {
+                    thread_id: root.thread_id,
+                    root_fact: root.fact_id,
+                    root: message_content(&root)?,
+                    root_scope: FactScope::InstallationPrivate(local),
+                    reason: None,
+                },
+            )?;
+            submit_message_plan(&mut client, plan)?;
+            Ok(human_message_result(
+                "cancel",
+                human,
+                Some(*message_id),
+                Vec::new(),
+                &snapshot,
+            ))
+        }
+        HumanMessageCommand::Archive { message_id }
+        | HumanMessageCommand::Restore { message_id } => {
+            let target = exact_message(all, *message_id)?;
+            if target.incomplete {
+                return Err(CliError::MessagingState);
+            }
+            let request = MessageStateRequest {
+                message_id: *message_id,
+                target_fact: target.fact_id,
+                state_frontier: target.state_frontier,
+            };
+            let authority = message_authority(&snapshot, local, human)?;
+            let (operation, plan) = if matches!(action, HumanMessageCommand::Archive { .. }) {
+                (
+                    "archive",
+                    plan_message_archive(authority, stable_inputs(), request)?,
+                )
+            } else {
+                (
+                    "restore",
+                    plan_message_restore(authority, stable_inputs(), request)?,
+                )
+            };
+            submit_message_plan(&mut client, plan)?;
+            Ok(human_message_result(
+                operation,
+                human,
+                Some(*message_id),
+                Vec::new(),
+                &snapshot,
+            ))
+        }
+    }
+}
+
+fn answerable_human_question(
+    messages: Vec<CliMessageView>,
+    message_id: MessageId,
+    human: MailboxAddress,
+) -> Result<CliMessageView, CliError> {
+    let root = exact_message(messages, message_id)?;
+    if root.incomplete
+        || root.fact_id != root.root_fact.unwrap_or(root.fact_id)
+        || root.purpose != MessagePurposeDto::Question
+        || root.recipient != Some(human)
+        || root.thread_cancelled
+    {
+        return Err(CliError::MessagingState);
+    }
+    Ok(root)
+}
+
+fn filter_human_messages(
+    messages: Vec<CliMessageView>,
+    filters: &HumanMessageFilters,
+) -> Vec<CliMessageView> {
+    messages
+        .into_iter()
+        .filter(|message| {
+            filters
+                .sender
+                .is_none_or(|sender| message.sender.mailbox_id() == sender)
+                && filters.recipient.is_none_or(|recipient| {
+                    message
+                        .recipient
+                        .is_some_and(|address| address.mailbox_id() == recipient)
+                })
+                && (message.incomplete
+                    || filters.all
+                    || if filters.archived {
+                        !message.open
+                    } else {
+                        message.open
+                    })
+        })
+        .take(usize::from(filters.limit))
+        .collect()
+}
+
+fn human_message_result(
+    operation: &'static str,
+    human: MailboxAddress,
+    root_message: Option<MessageId>,
+    messages: Vec<CliMessageView>,
+    snapshot: &AuthoritativeSnapshotDto,
+) -> CliResult {
+    CliResult::Messages(Box::new(MessageCommandView {
+        operation,
+        mailbox: Some(human),
+        root_message,
+        messages,
+        incomplete_truncated: snapshot_has_incomplete_truncation(snapshot),
+    }))
+}
+
+fn resolve_agent_mailbox(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    selection: &AgentMailboxSelection,
+) -> Result<MailboxAddress, CliError> {
+    let explicit = match (&selection.provider, &selection.session) {
+        (Some(provider), Some(session)) => {
+            Some((provider.as_str().to_owned(), session.as_str().to_owned()))
+        }
+        (None, None) => None,
+        _ => return Err(CliError::MessagingState),
+    };
+    let identity = match explicit {
+        Some(identity) => Some(identity),
+        None => environment_session_identity()?,
+    };
+    if let Some((provider, session)) = identity {
+        let matches = direct_session_candidates(snapshot, local)
+            .into_iter()
+            .filter(|candidate| candidate.provider == provider && candidate.session == session)
+            .collect::<Vec<_>>();
+        let [candidate] = matches.as_slice() else {
+            return Err(CliError::MessagingState);
+        };
+        return (!candidate.conflicted)
+            .then_some(candidate.mailbox)
+            .ok_or(CliError::MessagingState);
+    }
+    let directory = discovery_directory(selection.directory.as_deref())?;
+    let matches = mailbox_discovery_view(snapshot, local, directory)?
+        .candidates
+        .into_iter()
+        .filter(|candidate| candidate.directory_match && !candidate.conflicted)
+        .collect::<Vec<_>>();
+    let [candidate] = matches.as_slice() else {
+        return Err(CliError::MessagingState);
+    };
+    Ok(candidate.mailbox)
+}
+
+fn environment_session_identity() -> Result<Option<(String, String)>, CliError> {
+    let builtins = [
+        ("codex", "CODEX_THREAD_ID"),
+        ("claude", "CLAUDE_CODE_SESSION_ID"),
+        ("pi", "PI_SESSION_ID"),
+    ]
+    .into_iter()
+    .filter_map(|(provider, variable)| {
+        std::env::var(variable)
+            .ok()
+            .filter(|session| !session.is_empty())
+            .map(|session| (provider.to_owned(), session))
+    })
+    .collect::<Vec<_>>();
+    if builtins.len() > 1 {
+        return Err(CliError::MessagingState);
+    }
+    if let Some(identity) = builtins.into_iter().next() {
+        return Ok(Some(identity));
+    }
+    match (
+        std::env::var("HQ_PROVIDER").ok(),
+        std::env::var("HQ_SESSION").ok(),
+    ) {
+        (None, None) => Ok(None),
+        (Some(provider), Some(session)) if !provider.is_empty() && !session.is_empty() => {
+            ProviderId::new(provider.clone()).map_err(|_| CliError::MessagingState)?;
+            hq_domain::ProviderSessionId::new(session.clone())
+                .map_err(|_| CliError::MessagingState)?;
+            Ok(Some((provider, session)))
+        }
+        _ => Err(CliError::MessagingState),
+    }
+}
+
+fn direct_session_candidates(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+) -> Vec<MailboxDiscoveryCandidate> {
+    let contexts = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::AgentContext {
+                mailbox_installation,
+                mailbox_id,
+                history,
+                ..
+            } if mailbox_installation.bytes() == *local.as_bytes() => Some((
+                mailbox_id.bytes(),
+                (
+                    history
+                        .iter()
+                        .map(|context| context.directory.value.clone())
+                        .collect::<Vec<_>>(),
+                    history
+                        .iter()
+                        .filter_map(|context| {
+                            context.repository.as_ref().map(|value| value.value.clone())
+                        })
+                        .collect::<Vec<_>>(),
+                    history
+                        .iter()
+                        .filter_map(|context| {
+                            context.worktree.as_ref().map(|value| value.value.clone())
+                        })
+                        .collect::<Vec<_>>(),
+                    history
+                        .iter()
+                        .filter_map(|context| context.branch.clone())
+                        .collect::<Vec<_>>(),
+                ),
+            )),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut candidates = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::AgentDirectSession {
+                provider,
+                session,
+                mailbox_installation,
+                mailbox_id,
+                conflicted,
+                ..
+            } if mailbox_installation.bytes() == *local.as_bytes() => {
+                let mailbox = MailboxAddress::new(local, MailboxId::from_bytes(mailbox_id.bytes()));
+                Some(MailboxDiscoveryCandidate {
+                    provider: provider.clone(),
+                    session: session.clone(),
+                    mailbox,
+                    conflicted: *conflicted,
+                    directory_match: false,
+                    directories: contexts
+                        .get(&mailbox_id.bytes())
+                        .map(|context| context.0.clone())
+                        .unwrap_or_default(),
+                    repositories: contexts
+                        .get(&mailbox_id.bytes())
+                        .map(|context| context.1.clone())
+                        .unwrap_or_default(),
+                    worktrees: contexts
+                        .get(&mailbox_id.bytes())
+                        .map(|context| context.2.clone())
+                        .unwrap_or_default(),
+                    branches: contexts
+                        .get(&mailbox_id.bytes())
+                        .map(|context| context.3.clone())
+                        .unwrap_or_default(),
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        (&left.provider, &left.session, left.mailbox).cmp(&(
+            &right.provider,
+            &right.session,
+            right.mailbox,
+        ))
+    });
+    candidates
+}
+
+fn mailbox_discovery_view(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    directory: PathBuf,
+) -> Result<MailboxDiscoveryView, CliError> {
+    let requested = crate::ProjectResourceAdapter::system(local)
+        .repository_context(directory)
+        .map_err(|_| CliError::MessagingState)?;
+    let mut candidates = direct_session_candidates(snapshot, local);
+    for candidate in &mut candidates {
+        candidate.directory_match = candidate
+            .directories
+            .iter()
+            .any(|value| value == requested.directory.value())
+            || requested.repository.as_ref().is_some_and(|repository| {
+                candidate
+                    .repositories
+                    .iter()
+                    .any(|value| value == repository.value())
+            })
+            || requested.worktree.as_ref().is_some_and(|worktree| {
+                candidate
+                    .worktrees
+                    .iter()
+                    .any(|value| value == worktree.value())
+            });
+    }
+    Ok(MailboxDiscoveryView {
+        directory: PathBuf::from(requested.directory.value()),
+        candidates,
+    })
+}
+
+fn discovery_directory(directory: Option<&Path>) -> Result<PathBuf, CliError> {
+    let directory = directory
+        .map_or_else(std::env::current_dir, |path| Ok(path.to_path_buf()))
+        .map_err(|_| CliError::MessagingState)?;
+    Ok(directory)
+}
+
+fn human_mailbox(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+) -> Result<(MailboxAddress, FactId), CliError> {
+    local_mailbox(snapshot, local, crate::foreground::reserved_human_mailbox())
+        .map_err(|_| CliError::MessagingState)
+}
+
+fn message_authority(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    sender: MailboxAddress,
+) -> Result<MessageAuthoringAuthority, CliError> {
+    let installation = local_authority(snapshot, local).map_err(|_| CliError::MessagingState)?;
+    let (_, mailbox_fact) = local_mailbox(snapshot, local, sender.mailbox_id())
+        .map_err(|_| CliError::MessagingState)?;
+    Ok(MessageAuthoringAuthority {
+        author: local,
+        sender,
+        scope: FactScope::InstallationPrivate(local),
+        authority: AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            installation.root_fact,
+        ),
+        support: [installation.root_fact, mailbox_fact].into_iter().collect(),
+    })
+}
+
+fn message_body(
+    argument: Option<&hq_domain::ContentText>,
+    input: &mut dyn Read,
+) -> Result<hq_domain::ContentText, CliError> {
+    if let Some(argument) = argument {
+        return Ok(argument.clone());
+    }
+    let mut bytes = Vec::new();
+    input
+        .take(u64::try_from(hq_domain::CONTENT_MAX_BYTES).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CliError::Arguments)?;
+    if bytes.len() > hq_domain::CONTENT_MAX_BYTES {
+        return Err(CliError::Arguments);
+    }
+    while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+        let _ = bytes.pop();
+    }
+    let content = String::from_utf8(bytes).map_err(|_| CliError::Arguments)?;
+    if content.is_empty() {
+        return Err(CliError::Arguments);
+    }
+    hq_domain::ContentText::new(content).map_err(|_| CliError::Arguments)
+}
+
+fn submit_message_plan(
+    client: &mut LocalNodeClient,
+    plan: hq_application::FactPlan,
+) -> Result<(), CliError> {
+    let request = MutationRequest::from_plan(random_command_id()?, plan)
+        .map_err(|_| CliError::MessagingState)?;
+    match client.mutation(request)? {
+        ClientEvent::Mutation(MutationAttemptDto::Completed {
+            outcome: MutationOutcomeDto::Committed,
+            ..
+        }) => Ok(()),
+        _ => Err(CliError::MessagingState),
+    }
+}
+
+fn random_message_id() -> Result<MessageId, CliError> {
+    random_command_id().map(|identity| MessageId::from_bytes(*identity.as_bytes()))
+}
+
+fn wait_for_answer(
+    client: &mut LocalNodeClient,
+    sender: MailboxAddress,
+    root_message: MessageId,
+    timeout: Option<Duration>,
+    interval: Duration,
+) -> Result<CliMessageView, CliError> {
+    let started = Instant::now();
+    loop {
+        let snapshot = messaging_snapshot(client)?;
+        let messages = load_all_messages(client, &snapshot)?;
+        let root = exact_message(messages.clone(), root_message)?;
+        if root.incomplete || root.sender != sender || root.purpose != MessagePurposeDto::Question {
+            return Err(CliError::MessagingState);
+        }
+        if let Some(answer) = messages
+            .into_iter()
+            .find(|message| message.root_message == Some(root_message) && message.ready_answer)
+        {
+            return Ok(answer);
+        }
+        if root.thread_cancelled || timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+            return Err(CliError::MessagingState);
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+fn load_all_messages(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+) -> Result<Vec<CliMessageView>, CliError> {
+    let keys = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Conversation { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut messages = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::IncompleteMessage { .. } => Some(incomplete_message_from_snapshot(item)),
+            _ => None,
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for key in keys {
+        let mut cursor = None;
+        let mut seen = BTreeSet::new();
+        loop {
+            let request = ConversationPageRequest::new(key.clone(), 200, cursor.clone())
+                .map_err(|_| CliError::MessagingState)?;
+            let ClientEvent::Response {
+                result: ResponseResult::ConversationPage(page),
+                ..
+            } = messaging_request(client, &Request::ConversationPage(request))?
+            else {
+                return Err(CliError::MessagingState);
+            };
+            for item in page.items {
+                if let ConversationEntryDto::Message(_) = item {
+                    messages.push(message_from_dto(item)?);
+                }
+            }
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            if !seen.insert(next.clone()) {
+                return Err(CliError::MessagingState);
+            }
+            cursor = Some(next);
+        }
+    }
+    Ok(messages)
+}
+
+fn snapshot_has_incomplete_truncation(snapshot: &AuthoritativeSnapshotDto) -> bool {
+    snapshot
+        .items
+        .iter()
+        .any(|item| matches!(item, SnapshotItem::IncompleteMessagesTruncated))
+}
+
+fn messaging_snapshot(client: &mut LocalNodeClient) -> Result<AuthoritativeSnapshotDto, CliError> {
+    for _ in 0..3 {
+        if let Ok(snapshot) = client.snapshot() {
+            return Ok(snapshot);
+        }
+    }
+    Err(CliError::MessagingState)
+}
+
+fn messaging_request(
+    client: &mut LocalNodeClient,
+    request: &Request,
+) -> Result<ClientEvent, CliError> {
+    for _ in 0..3 {
+        if let Ok(event) = client.request(request.clone()) {
+            return Ok(event);
+        }
+    }
+    Err(CliError::MessagingState)
+}
+
+fn message_from_dto(item: ConversationEntryDto) -> Result<CliMessageView, CliError> {
+    let ConversationEntryDto::Message(message) = item else {
+        return Err(CliError::MessagingState);
+    };
+    let ConversationMessageDto {
+        fact_id,
+        message_id,
+        thread_id,
+        content,
+        sender_installation,
+        sender_mailbox,
+        recipient_installation,
+        recipient_mailbox,
+        purpose,
+        presentation,
+        correlation_provider,
+        correlation_session,
+        correlation_operation,
+        project_id,
+        open,
+        rejected,
+        state_frontier,
+        root_fact,
+        root_message,
+        ready_answer,
+        thread_cancelled,
+        ..
+    } = *message;
+    if recipient_installation.is_some() != recipient_mailbox.is_some() {
+        return Err(CliError::MessagingState);
+    }
+    Ok(CliMessageView {
+        fact_id: FactId::from_bytes(fact_id.bytes()),
+        message_id: MessageId::from_bytes(message_id.bytes()),
+        thread_id: ThreadId::from_bytes(thread_id.bytes()),
+        sender: MailboxAddress::new(
+            InstallationId::from_bytes(sender_installation.bytes()),
+            MailboxId::from_bytes(sender_mailbox.bytes()),
+        ),
+        recipient: recipient_installation
+            .zip(recipient_mailbox)
+            .map(|(installation, mailbox)| {
+                MailboxAddress::new(
+                    InstallationId::from_bytes(installation.bytes()),
+                    MailboxId::from_bytes(mailbox.bytes()),
+                )
+            }),
+        content,
+        purpose,
+        presentation,
+        correlation: correlation_from_dto(
+            correlation_provider,
+            correlation_session,
+            correlation_operation,
+        )?,
+        project_id: project_id.map(|project| ProjectId::from_bytes(project.bytes())),
+        open,
+        rejected,
+        state_frontier: state_frontier
+            .into_iter()
+            .map(|fact_id| FactId::from_bytes(fact_id.bytes()))
+            .collect(),
+        root_fact: root_fact.map(|fact_id| FactId::from_bytes(fact_id.bytes())),
+        root_message: root_message.map(|message_id| MessageId::from_bytes(message_id.bytes())),
+        ready_answer,
+        thread_cancelled,
+        incomplete: false,
+        missing_dependencies: BTreeSet::new(),
+        unusable_dependencies: BTreeSet::new(),
+    })
+}
+
+fn incomplete_message_from_snapshot(item: &SnapshotItem) -> Result<CliMessageView, CliError> {
+    let SnapshotItem::IncompleteMessage {
+        fact_id,
+        message_id,
+        thread_id,
+        sender_installation,
+        sender_mailbox,
+        recipient_installation,
+        recipient_mailbox,
+        content,
+        purpose,
+        presentation,
+        correlation_provider,
+        correlation_session,
+        correlation_operation,
+        project_id,
+        missing_dependencies,
+        unusable_dependencies,
+        ..
+    } = item
+    else {
+        return Err(CliError::MessagingState);
+    };
+    if recipient_installation.is_some() != recipient_mailbox.is_some() {
+        return Err(CliError::MessagingState);
+    }
+    Ok(CliMessageView {
+        fact_id: FactId::from_bytes(fact_id.bytes()),
+        message_id: MessageId::from_bytes(message_id.bytes()),
+        thread_id: ThreadId::from_bytes(thread_id.bytes()),
+        sender: MailboxAddress::new(
+            InstallationId::from_bytes(sender_installation.bytes()),
+            MailboxId::from_bytes(sender_mailbox.bytes()),
+        ),
+        recipient: recipient_installation
+            .zip(*recipient_mailbox)
+            .map(|(installation, mailbox)| {
+                MailboxAddress::new(
+                    InstallationId::from_bytes(installation.bytes()),
+                    MailboxId::from_bytes(mailbox.bytes()),
+                )
+            }),
+        content: content.clone(),
+        purpose: *purpose,
+        presentation: *presentation,
+        correlation: correlation_from_dto(
+            correlation_provider.clone(),
+            correlation_session.clone(),
+            *correlation_operation,
+        )?,
+        project_id: project_id.map(|project| ProjectId::from_bytes(project.bytes())),
+        open: false,
+        rejected: false,
+        state_frontier: BTreeSet::new(),
+        root_fact: None,
+        root_message: None,
+        ready_answer: false,
+        thread_cancelled: false,
+        incomplete: true,
+        missing_dependencies: missing_dependencies
+            .iter()
+            .map(|dependency| FactId::from_bytes(dependency.bytes()))
+            .collect(),
+        unusable_dependencies: unusable_dependencies
+            .iter()
+            .map(|dependency| FactId::from_bytes(dependency.bytes()))
+            .collect(),
+    })
+}
+
+fn exact_message(
+    messages: Vec<CliMessageView>,
+    message_id: MessageId,
+) -> Result<CliMessageView, CliError> {
+    let matches = messages
+        .into_iter()
+        .filter(|message| message.message_id == message_id)
+        .collect::<Vec<_>>();
+    let [message] = matches.as_slice() else {
+        return Err(CliError::MessagingState);
+    };
+    Ok(message.clone())
+}
+
+fn message_content(message: &CliMessageView) -> Result<hq_domain::MessageContent, CliError> {
+    let correlation = match &message.correlation {
+        None => None,
+        Some((provider, session, operation)) => Some(OperationCorrelation::new(
+            ProviderId::new(provider.clone()).map_err(|_| CliError::MessagingState)?,
+            ProviderSessionId::new(session.clone()).map_err(|_| CliError::MessagingState)?,
+            OperationId::from_bytes(*operation),
+        )),
+    };
+    Ok(hq_domain::MessageContent {
+        message_id: message.message_id,
+        sender: message.sender,
+        recipient: message.recipient,
+        body: hq_domain::ContentText::new(message.content.clone())
+            .map_err(|_| CliError::MessagingState)?,
+        purpose: match message.purpose {
+            MessagePurposeDto::Question => MessagePurpose::Question,
+            MessagePurposeDto::Asynchronous => MessagePurpose::Asynchronous,
+            MessagePurposeDto::ProjectOutput => MessagePurpose::ProjectOutput,
+        },
+        presentation: match message.presentation {
+            PresentationKindDto::Message => PresentationKind::Message,
+            PresentationKindDto::FinalAnswer => PresentationKind::FinalAnswer,
+            PresentationKindDto::Status => PresentationKind::Status,
+        },
+        correlation,
+        project_id: message.project_id,
+    })
+}
+
+fn correlation_from_dto(
+    provider: Option<String>,
+    session: Option<String>,
+    operation: Option<Id32>,
+) -> Result<Option<(String, String, [u8; 32])>, CliError> {
+    match (provider, session, operation) {
+        (None, None, None) => Ok(None),
+        (Some(provider), Some(session), Some(operation)) => {
+            Ok(Some((provider, session, operation.bytes())))
+        }
+        _ => Err(CliError::MessagingState),
+    }
 }
 
 fn relay_configuration(
@@ -3258,6 +4651,7 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 }
 
 enum CliResult {
+    Rendered(String),
     Lifecycle {
         label: &'static str,
         observation: Box<LifecycleObservation>,
@@ -3272,6 +4666,8 @@ enum CliResult {
     HumanDevices(Box<HumanDevicesView>),
     AuthorityAdmin(Box<AuthorityAdminView>),
     RelayAdmin(Box<RelayAdminView>),
+    Messages(Box<MessageCommandView>),
+    MailboxDiscovery(Box<MailboxDiscoveryView>),
     Completed {
         operation: &'static str,
     },
@@ -3279,6 +4675,7 @@ enum CliResult {
 
 fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, CliError> {
     match (format, result) {
+        (_, CliResult::Rendered(output)) => Ok(output.clone()),
         (CliOutputFormat::Human, CliResult::Lifecycle { label, observation }) => {
             Ok(format_observation(label, observation))
         }
@@ -3310,6 +4707,8 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         (CliOutputFormat::Human, CliResult::Completed { operation }) => {
             Ok(format!("completed operation={operation}\n"))
         }
+        (format, CliResult::Messages(view)) => render_message_result(format, view),
+        (format, CliResult::MailboxDiscovery(view)) => render_mailbox_discovery(format, view),
         (CliOutputFormat::Json, CliResult::Lifecycle { label, observation }) => machine_record(
             "lifecycle",
             &serde_json::json!({
@@ -3373,6 +4772,222 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         (CliOutputFormat::Json, CliResult::Completed { operation }) => {
             machine_record("completed", &serde_json::json!({ "operation": operation }))
         }
+    }
+}
+
+fn completion_for(invocation: &CliInvocation, result: &CliResult) -> Option<CliCompletion> {
+    let CliCommand::AgentMessage { state, .. } = &invocation.command else {
+        return None;
+    };
+    let CliResult::Messages(view) = result else {
+        return None;
+    };
+    if !matches!(view.operation, "ask" | "wait" | "poll") || view.messages.is_empty() {
+        return None;
+    }
+    let messages = view
+        .messages
+        .iter()
+        .filter(|message| !message.incomplete)
+        .map(|message| message.message_id)
+        .collect::<Vec<_>>();
+    if messages.is_empty() {
+        return None;
+    }
+    Some(CliCompletion {
+        state: state.clone(),
+        mailbox: view.mailbox?,
+        messages,
+    })
+}
+
+/// Completes ready-message delivery only after the caller has successfully written stdout.
+pub fn complete_cli_delivery(completion: &CliCompletion) -> Result<(), CliError> {
+    let mut client = command_client(&completion.state)?;
+    let local = client.installation_id();
+    if completion.mailbox.installation_id() != local {
+        return Err(CliError::MessagingState);
+    }
+    for message_id in &completion.messages {
+        let snapshot = messaging_snapshot(&mut client)?;
+        let target = exact_message(load_all_messages(&mut client, &snapshot)?, *message_id)?;
+        if !target.open {
+            continue;
+        }
+        let plan = plan_message_archive(
+            message_authority(&snapshot, local, completion.mailbox)?,
+            stable_inputs(),
+            MessageStateRequest {
+                message_id: *message_id,
+                target_fact: target.fact_id,
+                state_frontier: target.state_frontier,
+            },
+        )?;
+        submit_message_plan(&mut client, plan)?;
+    }
+    Ok(())
+}
+
+fn render_message_result(
+    format: CliOutputFormat,
+    view: &MessageCommandView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human if matches!(view.operation, "ask" | "wait") => {
+            let mut output = String::new();
+            for message in &view.messages {
+                writeln!(output, "{}", message.content).map_err(|_| CliError::Runtime)?;
+            }
+            Ok(output)
+        }
+        CliOutputFormat::Human if view.operation == "send" => Ok(format!(
+            "message={}\n",
+            view.root_message.map_or_else(
+                || "none".to_owned(),
+                |message| encode_id(message.as_bytes())
+            )
+        )),
+        CliOutputFormat::Human => {
+            let mut output = String::new();
+            for message in &view.messages {
+                writeln!(
+                    output,
+                    "message={} fact={} thread={} sender={}:{} recipient={} purpose={} open={} rejected={} ready={} cancelled={} incomplete={} missing={} unusable={} content={}",
+                    encode_id(message.message_id.as_bytes()),
+                    encode_id(message.fact_id.as_bytes()),
+                    encode_id(message.thread_id.as_bytes()),
+                    encode_id(message.sender.installation_id().as_bytes()),
+                    encode_id(message.sender.mailbox_id().as_bytes()),
+                    message.recipient.map_or_else(
+                        || "none".to_owned(),
+                        |recipient| format!(
+                            "{}:{}",
+                            encode_id(recipient.installation_id().as_bytes()),
+                            encode_id(recipient.mailbox_id().as_bytes())
+                        )
+                    ),
+                    message_purpose_label(message.purpose),
+                    message.open,
+                    message.rejected,
+                    message.ready_answer,
+                    message.thread_cancelled,
+                    message.incomplete,
+                    message.missing_dependencies.len(),
+                    message.unusable_dependencies.len(),
+                    serde_json::to_string(&message.content).map_err(|_| CliError::Runtime)?,
+                )
+                .map_err(|_| CliError::Runtime)?;
+            }
+            if view.incomplete_truncated {
+                output.push_str("incomplete_history=truncated\n");
+            }
+            Ok(output)
+        }
+        CliOutputFormat::Json => machine_record(
+            "messages",
+            &serde_json::json!({
+                "mailbox": view.mailbox.map(mailbox_json),
+                "incomplete_truncated": view.incomplete_truncated,
+                "messages": view.messages.iter().map(message_json).collect::<Vec<_>>(),
+                "operation": view.operation,
+                "root_message": view.root_message.map(|message| encode_id(message.as_bytes())),
+            }),
+        ),
+    }
+}
+
+fn render_mailbox_discovery(
+    format: CliOutputFormat,
+    view: &MailboxDiscoveryView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => {
+            let mut output = String::new();
+            for candidate in &view.candidates {
+                writeln!(
+                    output,
+                    "provider={} session={} mailbox={}:{} conflicted={} directory_match={} directories={}",
+                    candidate.provider,
+                    candidate.session,
+                    encode_id(candidate.mailbox.installation_id().as_bytes()),
+                    encode_id(candidate.mailbox.mailbox_id().as_bytes()),
+                    candidate.conflicted,
+                    candidate.directory_match,
+                    candidate.directories.join(","),
+                )
+                .map_err(|_| CliError::Runtime)?;
+            }
+            Ok(output)
+        }
+        CliOutputFormat::Json => machine_record(
+            "mailboxes",
+            &serde_json::json!({
+                "candidates": view.candidates.iter().map(|candidate| serde_json::json!({
+                    "conflicted": candidate.conflicted,
+                    "branches": candidate.branches,
+                    "directories": candidate.directories,
+                    "directory_match": candidate.directory_match,
+                    "mailbox": mailbox_json(candidate.mailbox),
+                    "provider": candidate.provider,
+                    "repositories": candidate.repositories,
+                    "session": candidate.session,
+                    "worktrees": candidate.worktrees,
+                })).collect::<Vec<_>>(),
+                "directory": view.directory,
+            }),
+        ),
+    }
+}
+
+fn message_json(message: &CliMessageView) -> serde_json::Value {
+    serde_json::json!({
+        "cancelled": message.thread_cancelled,
+        "content": message.content,
+        "correlation": message.correlation.as_ref().map(|(provider, session, operation)| serde_json::json!({
+            "operation_id": encode_id(operation),
+            "provider": provider,
+            "session": session,
+        })),
+        "fact_id": encode_id(message.fact_id.as_bytes()),
+        "incomplete": message.incomplete,
+        "message_id": encode_id(message.message_id.as_bytes()),
+        "open": message.open,
+        "purpose": message_purpose_label(message.purpose),
+        "presentation": presentation_label(message.presentation),
+        "project_id": message.project_id.map(|project| encode_id(project.as_bytes())),
+        "ready_answer": message.ready_answer,
+        "recipient": message.recipient.map(mailbox_json),
+        "rejected": message.rejected,
+        "root_fact": message.root_fact.map(|fact| encode_id(fact.as_bytes())),
+        "root_message": message.root_message.map(|message| encode_id(message.as_bytes())),
+        "sender": mailbox_json(message.sender),
+        "state_frontier": message.state_frontier.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+        "missing_dependencies": message.missing_dependencies.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+        "thread_id": encode_id(message.thread_id.as_bytes()),
+        "unusable_dependencies": message.unusable_dependencies.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+    })
+}
+
+fn mailbox_json(mailbox: MailboxAddress) -> serde_json::Value {
+    serde_json::json!({
+        "installation_id": encode_id(mailbox.installation_id().as_bytes()),
+        "mailbox_id": encode_id(mailbox.mailbox_id().as_bytes()),
+    })
+}
+
+const fn message_purpose_label(purpose: MessagePurposeDto) -> &'static str {
+    match purpose {
+        MessagePurposeDto::Question => "question",
+        MessagePurposeDto::Asynchronous => "asynchronous",
+        MessagePurposeDto::ProjectOutput => "project_output",
+    }
+}
+
+const fn presentation_label(presentation: PresentationKindDto) -> &'static str {
+    match presentation {
+        PresentationKindDto::Message => "message",
+        PresentationKindDto::FinalAnswer => "final_answer",
+        PresentationKindDto::Status => "status",
     }
 }
 
@@ -3754,12 +5369,34 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  peer            Manage directional peer routes\n  mailbox         Manage directional mailbox capabilities\n  relay           Manage relay policy, synchronization, and health\n  daemon          Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
         ),
         [command] if command == "version" => Some(
             "Usage: hq [--output human|json] version\n\nShow executable version, local protocol version, and build commit metadata.\n",
         ),
+        [command] if matches!(command.as_str(), "ask" | "send" | "wait" | "poll") => Some(
+            "Agent mailbox messaging\n\n\
+             Usage:\n  hq ask [--provider PROVIDER --session SESSION] [--dir PATH] [--timeout DURATION] [--interval DURATION] [MESSAGE]\n  hq send [--provider PROVIDER --session SESSION] [--dir PATH] [MESSAGE]\n  hq wait [--provider PROVIDER --session SESSION] [--dir PATH] [--timeout DURATION] [--interval DURATION] MESSAGE_ID\n  hq poll [--provider PROVIDER --session SESSION] [--dir PATH]\n\n\
+             Explicit sessions require both provider and session. Without them, HQ uses exactly one built-in provider environment identity, HQ_PROVIDER plus HQ_SESSION, or one unambiguous repository-aware candidate. ask and wait are intentionally unbounded unless --timeout is supplied; every local API attempt remains bounded. poll exits 3 with no output when empty. Ready output is completed only after stdout succeeds, so a crash can repeat stable message IDs but cannot lose them.\n",
+        ),
+        [command] if command == "get" => Some(
+            "Usage: hq [--output human|json] get MESSAGE_ID\n\nInspect one projected or dependency-incomplete message without consuming it.\n",
+        ),
+        [command] if command == "mailboxes" => Some(
+            "Usage: hq [--output human|json] mailboxes [--dir PATH]\n\nList durable provider sessions joined with typed directory, repository, worktree, and branch context. Discovery never claims or merges mailboxes.\n",
+        ),
+        [command]
+            if matches!(
+                command.as_str(),
+                "list" | "answer" | "cancel" | "archive" | "restore"
+            ) =>
+        {
+            Some(
+                "Human mailbox messaging\n\n\
+                 Usage:\n  hq list [--sender MAILBOX_ID] [--recipient MAILBOX_ID] [--archived|--all] [--limit N]\n  hq answer MESSAGE_ID [RESPONSE]\n  hq cancel MESSAGE_ID\n  hq archive MESSAGE_ID\n  hq restore MESSAGE_ID\n\nMessage or response content may be supplied as one argument or bounded UTF-8 stdin. Incomplete-history records are inert and cannot be answered, cancelled, archived, or restored.\n",
+            )
+        }
         [command] if command == "identity" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] identity <COMMAND>\n\n\
              Commands:\n  init                                      Create identity without overwrite\n  show                                      Show safe public identity metadata\n  export ABSOLUTE_PATH --password-stdin     Export an encrypted backup without overwrite\n  import ABSOLUTE_PATH --password-stdin     Import an encrypted backup without overwrite\n\n\
@@ -3908,20 +5545,25 @@ fn format_observation(label: &str, observation: &LifecycleObservation) -> String
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::{collections::BTreeSet, ffi::OsString};
+    use std::{collections::BTreeSet, ffi::OsString, time::Duration};
 
     use super::{
-        CliCommand, CliError, CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand,
-        HumanDeviceState, IdentityCommand, MailboxCommand, PeerCommand, RelayCommand,
-        effect_outcome, execute_cli, human_devices_view, human_view, pairing_grant_id, parse_cli,
-        read_password, run_cli, stable_relay_effect, stable_repair_operation,
+        AgentMailboxSelection, AgentMessageCommand, CliCommand, CliError, CliMessageView,
+        CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand, HumanDeviceState,
+        HumanMessageCommand, HumanMessageFilters, IdentityCommand, MailboxCommand,
+        MessageCommandView, PeerCommand, RelayCommand, completion_for, effect_outcome, execute_cli,
+        human_devices_view, human_view, mailbox_discovery_view, message_body, pairing_grant_id,
+        parse_cli, read_password, render_result, run_cli, stable_relay_effect,
+        stable_repair_operation,
     };
     use hq_domain::{
-        AccountId, FactId, InstallationAddress, InstallationId, RelayHints, SigningPublicKey,
+        AccountId, FactId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
+        MessageId, RelayHints, SigningPublicKey, ThreadId,
     };
     use hq_local_api::protocol::v1::{
-        AuthoritativeSnapshotDto, DeviceGrantDto, EffectOutcomeDto, Id32, RelayAccessDto,
-        RelayAuthenticationDto, SnapshotItem, SynchronizationRequestDto,
+        AuthoritativeSnapshotDto, DeviceGrantDto, EffectOutcomeDto, Id32, MessagePurposeDto,
+        PresentationKindDto, RelayAccessDto, RelayAuthenticationDto, RepositoryContextDto,
+        ResourceLocatorDto, ResourceSchemeDto, SnapshotItem, SynchronizationRequestDto,
     };
 
     #[test]
@@ -4274,6 +5916,207 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_explicit_agent_mailbox_messaging_without_provider_inference() {
+        let ask = parse_cli([
+            OsString::from("ask"),
+            OsString::from("--provider"),
+            OsString::from("codex"),
+            OsString::from("--session"),
+            OsString::from("session-1"),
+            OsString::from("--timeout"),
+            OsString::from("30s"),
+            OsString::from("--interval"),
+            OsString::from("100ms"),
+            OsString::from("What changed?"),
+        ])
+        .expect("typed ask parses");
+        assert!(matches!(
+            ask.command,
+            CliCommand::AgentMessage {
+                action: AgentMessageCommand::Ask {
+                    mailbox: AgentMailboxSelection {
+                        provider: Some(_),
+                        session: Some(_),
+                        ..
+                    },
+                    timeout: Some(timeout),
+                    interval,
+                    ..
+                },
+                ..
+            } if timeout == Duration::from_secs(30) && interval == Duration::from_millis(100)
+        ));
+
+        assert!(
+            parse_cli([
+                OsString::from("send"),
+                OsString::from("--session"),
+                OsString::from("ambiguous"),
+                OsString::from("hello"),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_cli([
+                OsString::from("poll"),
+                OsString::from("--provider"),
+                OsString::from("codex"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parser_accepts_non_consuming_get_discovery_and_human_mailbox_actions() {
+        let id = "11".repeat(32);
+        assert!(matches!(
+            parse_cli([OsString::from("get"), OsString::from(&id)])
+                .expect("get parses")
+                .command,
+            CliCommand::GetMessage { .. }
+        ));
+        assert!(matches!(
+            parse_cli([
+                OsString::from("mailboxes"),
+                OsString::from("--dir"),
+                OsString::from("/tmp/repository"),
+            ])
+            .expect("discovery parses")
+            .command,
+            CliCommand::DiscoverMailboxes {
+                directory: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_cli([
+                OsString::from("list"),
+                OsString::from("--archived"),
+                OsString::from("--limit"),
+                OsString::from("25"),
+            ])
+            .expect("list parses")
+            .command,
+            CliCommand::HumanMessage {
+                action: HumanMessageCommand::List(HumanMessageFilters {
+                    archived: true,
+                    limit: 25,
+                    ..
+                }),
+                ..
+            }
+        ));
+        for action in ["answer", "cancel", "archive", "restore"] {
+            assert!(matches!(
+                parse_cli([OsString::from(action), OsString::from(&id)])
+                    .expect("human action parses")
+                    .command,
+                CliCommand::HumanMessage { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn repository_discovery_joins_public_context_and_direct_session_records() {
+        let local = InstallationId::from_bytes([1; 32]);
+        let mailbox_id = Id32::new([2; 32]);
+        let context_fact = Id32::new([3; 32]);
+        let directory = std::env::current_dir().expect("current directory");
+        let snapshot = AuthoritativeSnapshotDto::new(
+            1,
+            vec![
+                SnapshotItem::AgentContext {
+                    mailbox_installation: Id32::new(*local.as_bytes()),
+                    mailbox_id,
+                    history: vec![RepositoryContextDto {
+                        fact_id: context_fact,
+                        directory: ResourceLocatorDto::new(
+                            ResourceSchemeDto::WorkingTree,
+                            directory.to_str().expect("UTF-8 path").to_owned(),
+                        )
+                        .expect("locator"),
+                        repository: None,
+                        worktree: None,
+                        branch: Some("main".to_owned()),
+                    }],
+                    frontier: vec![context_fact],
+                },
+                SnapshotItem::AgentDirectSession {
+                    provider: "codex".to_owned(),
+                    session: "session-1".to_owned(),
+                    mailbox_installation: Id32::new(*local.as_bytes()),
+                    mailbox_id,
+                    named_agent: None,
+                    conflicted: false,
+                },
+            ],
+        )
+        .expect("snapshot validates");
+
+        let view = mailbox_discovery_view(&snapshot, local, directory)
+            .expect("repository discovery succeeds");
+        assert_eq!(view.candidates.len(), 1);
+        assert!(view.candidates[0].directory_match);
+        assert_eq!(view.candidates[0].provider, "codex");
+        assert_eq!(view.candidates[0].branches, vec!["main"]);
+    }
+
+    #[test]
+    fn message_rendering_keeps_stable_identity_in_machine_output_and_plain_wait_output() {
+        let installation = InstallationId::from_bytes([1; 32]);
+        let mailbox = MailboxAddress::new(installation, MailboxId::from_bytes([2; 32]));
+        let message = CliMessageView {
+            fact_id: FactId::from_bytes([3; 32]),
+            message_id: MessageId::from_bytes([4; 32]),
+            thread_id: ThreadId::from_bytes([5; 32]),
+            sender: mailbox,
+            recipient: Some(mailbox),
+            content: "ready answer".to_owned(),
+            purpose: MessagePurposeDto::Question,
+            presentation: PresentationKindDto::FinalAnswer,
+            correlation: None,
+            project_id: None,
+            open: true,
+            rejected: false,
+            state_frontier: BTreeSet::new(),
+            root_fact: Some(FactId::from_bytes([5; 32])),
+            root_message: Some(MessageId::from_bytes([6; 32])),
+            ready_answer: true,
+            thread_cancelled: false,
+            incomplete: false,
+            missing_dependencies: BTreeSet::new(),
+            unusable_dependencies: BTreeSet::new(),
+        };
+        let result = super::CliResult::Messages(Box::new(MessageCommandView {
+            operation: "wait",
+            mailbox: Some(mailbox),
+            root_message: message.root_message,
+            messages: vec![message.clone()],
+            incomplete_truncated: false,
+        }));
+        assert_eq!(
+            render_result(CliOutputFormat::Human, &result).expect("human output"),
+            "ready answer\n"
+        );
+        let machine = render_result(CliOutputFormat::Json, &result).expect("machine output");
+        assert!(machine.contains(&crate::identity::encode_hex(message.message_id.as_bytes())));
+        assert!(machine.contains("ready_answer"));
+
+        let invocation = parse_cli([
+            OsString::from("wait"),
+            OsString::from("--provider"),
+            OsString::from("codex"),
+            OsString::from("--session"),
+            OsString::from("session-1"),
+            OsString::from("06".repeat(32)),
+        ])
+        .expect("wait invocation");
+        let completion = completion_for(&invocation, &result).expect("delivery completion");
+        assert_eq!(completion.mailbox, mailbox);
+        assert_eq!(completion.messages, vec![message.message_id]);
+    }
+
+    #[test]
     fn relay_and_repair_effect_identities_are_stable_and_revision_sensitive() {
         let first = stable_relay_effect(b"synchronize", 3, SynchronizationRequestDto::All)
             .expect("effect builds");
@@ -4386,9 +6229,20 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  identity        Manage installation identity offline\n  config          Manage typed local defaults offline\n  human           Manage the local human account\n  peer            Manage directional peer routes\n  mailbox         Manage directional mailbox capabilities\n  relay           Manage relay policy, synchronization, and health\n  daemon          Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
+        let ask = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("ask")]).expect("ask help parses"),
+        )
+        .expect("ask help");
+        assert!(ask.contains("intentionally unbounded"));
+        assert!(ask.contains("stable message IDs"));
+        let get = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("get")]).expect("get help parses"),
+        )
+        .expect("get help");
+        assert!(get.contains("without consuming"));
         let identity = run_cli(
             &parse_cli([OsString::from("help"), OsString::from("identity")])
                 .expect("identity help parses"),
@@ -4481,5 +6335,19 @@ mod tests {
             read_password(&mut std::io::empty()),
             Err(CliError::SecretInput)
         ));
+    }
+
+    #[test]
+    fn non_tty_message_input_accepts_bounded_utf8_and_rejects_empty_or_oversized_streams() {
+        let mut input = std::io::Cursor::new(b"line one\nline two\n".to_vec());
+        assert_eq!(
+            message_body(None, &mut input)
+                .expect("multiline message input")
+                .as_str(),
+            "line one\nline two"
+        );
+        assert!(message_body(None, &mut std::io::empty()).is_err());
+        let mut oversized = std::io::Cursor::new(vec![b'x'; hq_domain::CONTENT_MAX_BYTES + 1]);
+        assert!(message_body(None, &mut oversized).is_err());
     }
 }

@@ -2,6 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
+use hq_application::ClientProjection;
 use hq_domain::{AuthorityRole, MailboxAddress, PageCursor, ProviderId, ProviderSessionId};
 use hq_protocol::VerifiedSemanticFact;
 use hq_store::{ConversationEntry, ConversationKey, IngestOutcome, StoreErrorClass};
@@ -12,8 +13,41 @@ mod support;
 use support::{
     TestDirectory, TestStoreExt, authored_conversation_entry, authored_durable_conversation_entry,
     authority_policy, open_store, verified_account, verified_child, verified_fact,
-    verified_question,
+    verified_incomplete_peer_question, verified_question,
 };
+
+#[test]
+fn incomplete_peer_message_is_bounded_inert_diagnostic_state_across_reopen() {
+    let directory = TestDirectory::new();
+    let database = directory.database_path();
+    let store = open_store(&database);
+    let question = verified_incomplete_peer_question();
+    let question_fact = question.fact().id();
+    store
+        .append_verified(question)
+        .expect("incomplete addressed evidence ingests");
+
+    for snapshot in [store.authoritative_snapshot().expect("snapshot loads"), {
+        drop(store);
+        open_store(&database)
+            .authoritative_snapshot()
+            .expect("reopened snapshot loads")
+    }] {
+        let matches = snapshot
+            .client_projections()
+            .expect("client projections")
+            .into_iter()
+            .filter_map(|projection| match projection {
+                ClientProjection::IncompleteMessage { message } => Some(message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].fact_id, question_fact);
+        assert_eq!(matches[0].content.body.as_str(), "incomplete peer question");
+        assert_eq!(matches[0].missing_dependencies.len(), 1);
+    }
+}
 
 #[test]
 fn late_parent_affected_closure_and_incremental_state_equal_batch_and_repair() {
@@ -132,7 +166,20 @@ fn cursor_pages_are_bound_to_the_conversation_and_concatenate_to_reducer_order()
         .expect("first page loads");
     assert_eq!(page.items().len(), 1);
     assert_eq!(page.items()[0].fact_id(), question_id);
-    assert!(matches!(page.items()[0], ConversationEntry::Message(_)));
+    let entry = page
+        .items()
+        .iter()
+        .find_map(|entry| match entry {
+            ConversationEntry::Message(message) => Some(message),
+            ConversationEntry::Activity(_) => None,
+        })
+        .expect("question page entry is a message");
+    let thread = entry
+        .thread
+        .as_ref()
+        .expect("question carries thread state");
+    assert_eq!(thread.root_fact, question_id);
+    assert_eq!(entry.message.fact_id, question_id);
     assert!(page.next_cursor().is_none());
 
     let malformed = PageCursor::new("v1:not-a-cursor").expect("opaque cursor validates");

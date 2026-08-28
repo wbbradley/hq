@@ -7,10 +7,10 @@ use std::{
 
 use hq_domain::{
     AccountId, AgentId, CommandDigest, CommandId, ContentText, DispatchId, EncryptionPublicKey,
-    FactId, GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxKind, MessageId,
-    ProjectId, ProviderId, ProviderSessionId, RelayHints, RemoteCommandResult, ResourceHealth,
-    ResourceId, ResourceLocator, Revision, RuntimeObservation, ShortText, SigningPublicKey,
-    Timestamp,
+    FactId, GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxKind,
+    MessageContent, MessageId, ProjectId, ProviderId, ProviderSessionId, RelayHints,
+    RemoteCommandResult, RepositoryContext, ResourceHealth, ResourceId, ResourceLocator, Revision,
+    RuntimeObservation, ShortText, SigningPublicKey, Timestamp,
 };
 use hq_reducer::{
     ActivityView, AgentAggregateKey, AgentLifecycle, AgentProjection, AgentProjectionKey,
@@ -375,10 +375,33 @@ impl DomainSnapshot {
                         display_name: view.display_name.clone(),
                     });
                 }
-                (AgentProjectionKey::Name(_), AgentProjection::Name(_))
-                | (AgentProjectionKey::Context(_), AgentProjection::Context(_))
-                | (AgentProjectionKey::DirectSession { .. }, AgentProjection::DirectSession(_)) => {
+                (AgentProjectionKey::Context(mailbox), AgentProjection::Context(view)) => {
+                    items.push(ClientProjection::AgentContext {
+                        mailbox: *mailbox,
+                        history: view
+                            .history
+                            .iter()
+                            .map(|(fact_id, context)| (*fact_id, context.clone()))
+                            .collect(),
+                        frontier: view.frontier.clone(),
+                    });
                 }
+                (
+                    AgentProjectionKey::DirectSession { session, mailbox },
+                    AgentProjection::DirectSession(view),
+                ) => {
+                    if view.mailbox != *mailbox {
+                        return Err(ApplicationValueError::InvalidEncoding);
+                    }
+                    items.push(ClientProjection::AgentDirectSession {
+                        provider: session.provider.clone(),
+                        session: session.session.clone(),
+                        mailbox: view.mailbox,
+                        named_agent: view.named_agent,
+                        conflicted: view.conflicted,
+                    });
+                }
+                (AgentProjectionKey::Name(_), AgentProjection::Name(_)) => {}
                 _ => return Err(ApplicationValueError::InvalidEncoding),
             }
         }
@@ -672,6 +695,10 @@ pub enum ClientProjection {
         latest_fact: Option<FactId>,
         open_messages: u32,
     },
+    IncompleteMessage {
+        message: IncompleteMessageSummary,
+    },
+    IncompleteMessagesTruncated,
     Agent {
         agent_id: AgentId,
         names: BTreeSet<ShortText>,
@@ -695,6 +722,18 @@ pub enum ClientProjection {
         session: ProviderSessionId,
         resolved: bool,
         display_name: Option<ShortText>,
+    },
+    AgentContext {
+        mailbox: MailboxAddress,
+        history: Vec<(FactId, RepositoryContext)>,
+        frontier: BTreeSet<FactId>,
+    },
+    AgentDirectSession {
+        provider: ProviderId,
+        session: ProviderSessionId,
+        mailbox: MailboxAddress,
+        named_agent: Option<AgentId>,
+        conflicted: bool,
     },
     Project {
         project_id: ProjectId,
@@ -762,6 +801,8 @@ pub struct AuthoritativeSnapshot {
     revision: Revision,
     domain: DomainSnapshot,
     conversations: Vec<ConversationSummary>,
+    incomplete_messages: Vec<IncompleteMessageSummary>,
+    incomplete_messages_truncated: bool,
 }
 
 impl AuthoritativeSnapshot {
@@ -771,6 +812,8 @@ impl AuthoritativeSnapshot {
             revision,
             domain,
             conversations: Vec::new(),
+            incomplete_messages: Vec::new(),
+            incomplete_messages_truncated: false,
         }
     }
 
@@ -784,7 +827,21 @@ impl AuthoritativeSnapshot {
             revision,
             domain,
             conversations,
+            incomplete_messages: Vec::new(),
+            incomplete_messages_truncated: false,
         }
+    }
+
+    /// Adds one bounded diagnostic view of addressed dependency-incomplete messages.
+    #[must_use]
+    pub fn with_incomplete_messages(
+        mut self,
+        messages: Vec<IncompleteMessageSummary>,
+        truncated: bool,
+    ) -> Self {
+        self.incomplete_messages = messages;
+        self.incomplete_messages_truncated = truncated;
+        self
     }
 
     /// Returns the serialized state revision.
@@ -812,8 +869,32 @@ impl AuthoritativeSnapshot {
                 open_messages: summary.open_messages,
             }
         }));
+        projections.extend(
+            self.incomplete_messages
+                .iter()
+                .cloned()
+                .map(|message| ClientProjection::IncompleteMessage { message }),
+        );
+        if self.incomplete_messages_truncated {
+            projections.push(ClientProjection::IncompleteMessagesTruncated);
+        }
         Ok(projections)
     }
+}
+
+/// One inert message retained for incomplete-history diagnosis.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IncompleteMessageSummary {
+    /// Canonical message-bearing fact.
+    pub fact_id: FactId,
+    /// Causal thread identity declared or derived by the message family.
+    pub thread_id: hq_domain::ThreadId,
+    /// Typed immutable content.
+    pub content: MessageContent,
+    /// Required causal identities that are absent.
+    pub missing_dependencies: BTreeSet<FactId>,
+    /// Present causal identities that are currently unusable.
+    pub unusable_dependencies: BTreeSet<FactId>,
 }
 
 /// Plain indexed conversation discovery summary owned by the application boundary.
@@ -831,7 +912,7 @@ pub struct ConversationSummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationEntry {
     /// Typed projected message state.
-    Message(Box<MessageView>),
+    Message(Box<ConversationMessageEntry>),
     /// Typed selected or durable activity value.
     Activity(ActivityView),
 }
@@ -840,8 +921,17 @@ impl ConversationEntry {
     /// Returns the stable canonical fact identity anchoring this entry.
     pub const fn fact_id(&self) -> FactId {
         match self {
-            Self::Message(message) => message.fact_id,
+            Self::Message(message) => message.message.fact_id,
             Self::Activity(activity) => activity.fact_id,
         }
     }
+}
+
+/// One projected message paired with its normalized thread state when available.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationMessageEntry {
+    /// Durable immutable content and reversible message state.
+    pub message: MessageView,
+    /// Question-thread state; absent only for message families without a thread projection.
+    pub thread: Option<hq_reducer::ThreadView>,
 }

@@ -225,6 +225,42 @@ pub fn verified_question(parent_id: [u8; 32]) -> VerifiedSemanticFact {
     signed_fact(2, content.as_bytes(), [10; 32])
 }
 
+pub fn verified_incomplete_peer_question() -> VerifiedSemanticFact {
+    let local = authority_policy().local_installation();
+    let sender = MailboxAddress::new(local, hq_domain::MailboxId::from_bytes([0x33; 32]));
+    let recipient = MailboxAddress::new(
+        InstallationId::from_bytes([0x44; 32]),
+        hq_domain::MailboxId::from_bytes([0x55; 32]),
+    );
+    let missing_grant = FactId::from_bytes([0xaa; 32]);
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new([missing_grant]).expect("one parent"),
+        [AuthorityReference::new(
+            AuthorityRole::MailboxGrant,
+            missing_grant,
+        )],
+    )
+    .expect("missing grant remains a structural authority edge");
+    CanonicalEventPlan::new(
+        local,
+        Timestamp::from_unix_millis(2_500),
+        FactScope::PeerAddressed(recipient),
+        causal,
+        SemanticPayload::QuestionAsked(MessageContent {
+            message_id: MessageId::from_bytes([0x66; 32]),
+            sender,
+            recipient: Some(recipient),
+            body: ContentText::new("incomplete peer question").expect("bounded body"),
+            purpose: MessagePurpose::Question,
+            presentation: PresentationKind::Message,
+            correlation: None,
+            project_id: None,
+        }),
+    )
+    .sign(&signer(1), [0x77; 32])
+    .expect("incomplete question signs")
+}
+
 pub fn authored_conversation_entry(index: u16, activity: bool) -> VerifiedSemanticFact {
     authored_conversation_entry_with_retention(index, activity, false)
 }

@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Implement mailbox messaging and repository-aware discovery** — Add `ask`, `send`,
-  `wait`, `poll`, `get`, human list/filter, answer, cancel/archive, restore, and repository-aware
-  mailbox discovery over typed application/local API operations. Preserve stable message identity,
-  causal reply/cancellation authority, non-consuming inspection, duplicate-safe ready delivery,
-  asynchronous send, and intentionally unbounded human wait with bounded per-attempt I/O. Support
-  explicit session mailbox selection without ambiguous provider inference. Test restart, reconnect,
-  incomplete history, duplicate delivery, stale targets, non-TTY input, filters, and machine output.
-
 - **[cli/medium] Implement named-agent sessions and embedded agent guidance** — Add named-agent
   list/show/create/rename/retire and neutral start/exact-resume/stop workflows plus current-session
   discovery for supported provider environments. Ship concise installed guidance for messaging,
