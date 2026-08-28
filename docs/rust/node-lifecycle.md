@@ -105,6 +105,14 @@ injected clock/token sources. Exact resume immediately reconciles durable pendin
 Stop-intake rejects new launch/control effects; drain flushes accepted events, bounds adapter wait,
 records escalation, force-stops runtime ownership, and releases exact worker leases.
 
+Foreground normalized persistence is concrete. `CanonicalHarnessPersistence` derives stable
+command identities and complete request digests, then invokes pure application planners through the
+same waking canonical mutation path as other local facts. It revalidates the active agent mailbox
+and exact direct-session or runnable-project binding inside the transaction snapshot, attaches the
+local installation/mailbox/binding and prior activity frontier, and maps stale state, changed
+identity, uncertainty, and adapter failure to closed neutral classes. No output body, activity
+content, provider diagnostic, or storage error enters its `Debug` or error values.
+
 Managed named-agent control validates the authoritative active claim and unique local agent mailbox
 before provider I/O. The node resolves and canonicalizes the absolute launch directory, then passes
 only copied environment bytes to the neutral supervisor. After exact readiness it idempotently

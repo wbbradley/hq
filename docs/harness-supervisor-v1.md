@@ -66,6 +66,15 @@ checkpointed before activity begins. If activity fails, the accepted buffer item
 checkpoint remain; retry may repeat the exact output and then completes activity. An item leaves
 the buffer only after every required persistence effect and checkpoint succeeds.
 
+The production persistence implementation lives in the node composition boundary. Pure
+application planners author output as a correlated agent message and activity as the typed
+`HarnessActivityRecorded` family. At the transaction snapshot, the adapter requires an active
+unique local agent mailbox and either its exact unconflicted direct session binding or an exact
+runnable project assignment binding. Local installation, human mailbox, agent mailbox, binding,
+and complete prior activity-frontier evidence are causal support. Equal normalized replay has one
+deterministic command identity; changed output identity reuse, equal activity sequence with changed
+content, and stale binding reject without provider or store diagnostics.
+
 ## Environment and secret lifetime
 
 Launch environment entries are bounded, copied into supervisor-owned memory, and independent of
@@ -108,7 +117,7 @@ identities, secrets, and mutable runtime traits remain opaque because they enfor
 grant capabilities. The crate imports no storage, serialization, async runtime, filesystem, process,
 application, node, or provider-specific API.
 
-`hq-store` owns SQLite rows and strict codecs. `hq-node` owns the record-only mapping and concrete
-component composition. Provider process and transport behavior belongs to private adapters. The
+`hq-store` owns SQLite rows and strict codecs. `hq-node` owns the record-only mapping, canonical
+persistence adapter, and concrete component composition. Provider process and transport behavior belongs to private adapters. The
 deterministic testkit exercises the same neutral supervisor and provider conformance contract used
 by production adapters.

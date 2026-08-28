@@ -14,6 +14,7 @@ mod foundation;
 mod graceful_runtime;
 mod harness_canonical;
 mod harness_component;
+mod harness_persistence;
 mod harness_store;
 mod identity;
 mod lifecycle;
@@ -75,6 +76,7 @@ pub use harness_canonical::{
     PreparedAgentSessionSelection,
 };
 pub use harness_component::HarnessNodeComponent;
+pub use harness_persistence::CanonicalHarnessPersistence;
 pub use harness_store::HarnessStoreAdapter;
 pub use identity::{
     BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity, LocalConfiguration,

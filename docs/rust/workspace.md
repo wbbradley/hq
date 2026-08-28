@@ -83,6 +83,8 @@ kernel without moving graph logic into application or adapter crates.
 the consumer-side capability traits documented in `docs/rust/application-services.md`. Storage,
 local sessions, relays, managed runtimes, resource observers, and the node implement or compose
 those ports; application services never import their concrete types.
+Pure harness-output and activity planners accept passive public-field intents and exact authority
+evidence, but import neither the neutral runtime crate nor a provider adapter.
 
 `hq-local-api` owns the independently versioned local API v1 DTOs, canonical JSON codec, bounded
 length framing, negotiation values, exact mutation-plan replay representation, lifecycle/domain/
@@ -141,7 +143,10 @@ storage-owned records, plus `HarnessNodeComponent`, which composes the registry,
 handle, canonical persistence capability, injected clock/token sources, and ordered lifecycle.
 Application harness control cannot obtain a provider session or SQLite handle directly. The
 foreground root supplies the sole production registry containing Codex; restart reconstructs that
-registry after the prior generation has drained and released all child ownership.
+registry after the prior generation has drained and released all child ownership. Its node-owned
+canonical persistence adapter maps neutral values to pure application plans, revalidates exact
+mailbox/session or project binding at the transaction snapshot, and uses the ordinary waking fact
+mutation path without reversing crate dependencies.
 
 ## Supported target matrix
 

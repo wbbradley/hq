@@ -13,14 +13,14 @@ use hq_local_api::protocol::v1::{BuildMetadata, Id32};
 use hq_reducer::AuthorityPolicy;
 
 use crate::{
-    ApplicationAgentSessionCanonicalPort, CancellationToken, ComponentDrain, ComponentError,
-    ForegroundCodexConfig, HarnessNodeComponent, LocalNodeRuntime, LocalNodeRuntimeConfig,
-    LocalNodeRuntimeError, LocalNodeRuntimeReport, LocalNodeRuntimeStartError,
-    LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent, NodeComponents,
-    NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError,
-    ProjectNodeConfig, RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent,
-    StandardProjectNodeComponent, StatePaths, WakingApplicationStore, compose_codex_registry,
-    compose_standard_project_component,
+    ApplicationAgentSessionCanonicalPort, CancellationToken, CanonicalHarnessPersistence,
+    ComponentDrain, ComponentError, ForegroundCodexConfig, HarnessNodeComponent, LocalNodeRuntime,
+    LocalNodeRuntimeConfig, LocalNodeRuntimeError, LocalNodeRuntimeReport,
+    LocalNodeRuntimeStartError, LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent,
+    NodeComponents, NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError,
+    NodeStartupError, ProjectNodeConfig, RelayNodeComponent, RelayNodeConfig, RuntimePaths,
+    ShutdownIntent, StandardProjectNodeComponent, StatePaths, WakingApplicationStore,
+    compose_codex_registry, compose_standard_project_component,
 };
 
 /// Explicit capacities and paths for one foreground node process.
@@ -160,8 +160,9 @@ fn open_generation(
     )?;
     let store = foundation.store().ok_or(ForegroundNodeError::Composition)?;
     let gateway = hq_store::StoreGateway::new(store, policy, foundation.signer_handle());
+    let application = WakingApplicationStore::new(gateway.clone(), relay.clone());
     let canonical = Arc::new(ApplicationAgentSessionCanonicalPort::new(
-        WakingApplicationStore::new(gateway.clone(), relay.clone()),
+        application.clone(),
         foundation.public_identity().installation_id,
     ));
     let registry = compose_codex_registry(
@@ -171,8 +172,18 @@ fn open_generation(
         Arc::new(hq_codex::DiscardCodexDiagnostics),
     )
     .map_err(|_| ForegroundNodeError::Composition)?;
-    let harness =
-        HarnessNodeComponent::with_registry_and_canonical(store, Arc::new(registry), canonical);
+    let persistence = Arc::new(CanonicalHarnessPersistence::new(
+        application,
+        foundation.public_identity().installation_id,
+        reserved_human_mailbox(),
+        Arc::new(crate::harness_component::SystemHarnessClock),
+    ));
+    let harness = HarnessNodeComponent::with_registry_persistence_and_canonical(
+        store,
+        Arc::new(registry),
+        persistence,
+        canonical,
+    );
     let project = compose_standard_project_component(
         ProjectNodeConfig {
             recovery_limit: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),

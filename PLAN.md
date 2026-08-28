@@ -54,11 +54,11 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[runtime/high] Persist normalized harness events canonically** — Continuously drain every live
-  provider worker's normalized output/activity stream into idempotent canonical facts under the
-  exact bound mailbox and session, retaining durable partial output-before-activity checkpoints.
-  Test restart recovery, partial persistence, duplicate events, backpressure, stale binding,
-  provider failure, and redacted diagnostics.
+- **[runtime/high] Continuously drain live harness event streams** — Poll every live provider worker
+  through bounded component-owned runtime work, normalize source-ordered output/activity into the
+  supervisor buffer, and drive canonical persistence without losing backpressured or restartable
+  work. Test restart recovery, buffer saturation and coalescing, provider closure/failure, ordered
+  shutdown, and zero leaked worker/task ownership.
 
 - **[runtime/high] Expose the managed `hq harness` client workflow** — Add local-API-only CLI start,
   exact-resume, and stop commands that resolve one named agent, copy the caller environment and

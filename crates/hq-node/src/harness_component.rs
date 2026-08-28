@@ -91,11 +91,26 @@ impl HarnessNodeComponent {
         registry: Arc<HarnessRegistry>,
         canonical: Arc<dyn AgentSessionCanonicalPort>,
     ) -> Self {
+        Self::with_registry_persistence_and_canonical(
+            store,
+            registry,
+            Arc::new(UnavailableHarnessPersistence),
+            canonical,
+        )
+    }
+
+    /// Composes the foreground supervisor with provider and canonical persistence capabilities.
+    pub fn with_registry_persistence_and_canonical(
+        store: &Store,
+        registry: Arc<HarnessRegistry>,
+        persistence: Arc<dyn HarnessPersistencePort>,
+        canonical: Arc<dyn AgentSessionCanonicalPort>,
+    ) -> Self {
         Self::new(
             HarnessSupervisorConfig::default(),
             store,
             registry,
-            Arc::new(UnavailableHarnessPersistence),
+            persistence,
             Arc::new(SystemHarnessClock),
             Arc::new(RandomHarnessTokens),
             canonical,
@@ -301,7 +316,7 @@ impl HarnessPersistencePort for UnavailableHarnessPersistence {
     }
 }
 
-struct SystemHarnessClock;
+pub(crate) struct SystemHarnessClock;
 
 impl HarnessClock for SystemHarnessClock {
     fn now_millis(&self) -> u64 {

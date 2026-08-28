@@ -1,5 +1,38 @@
 # Completed
 
+## 2026-08-28 — Canonical normalized harness value authoring
+
+Added pure application planners for normalized harness output and activity. Their passive request
+and authority records expose public fields, while fact construction retains the existing
+invariant-owning plan boundary. Output is authored from the exact active agent mailbox to the
+installation-local human with its operation correlation and presentation; activity preserves the
+complete normalized provider, session, item, logical-time, runtime, sequence, status, content, and
+truncation values.
+
+Added a node-owned persistence adapter that revalidates the exact live agent, mailbox, installation,
+provider, session, and either direct-session or runnable project-assignment authority inside each
+canonical transaction. Deterministic command identities make equal replays idempotent and reject
+changed reuse of a stable output or activity identity. Causal support includes the authority roots,
+binding evidence, and prior activity frontier, so stale or conflicted bindings fail closed. The
+adapter maps output before activity through the supervisor's existing independent checkpoints,
+allowing recovery after partial persistence without duplicating either fact.
+
+Foreground composition now gives the neutral harness component the canonical adapter through the
+same waking application store used by other node-owned persistence. Unit and recovery tests cover
+exact correlation and normalized fields, direct and project bindings, duplicate values, stable-ID
+collisions, partial output-before-activity recovery, stale authority, and redacted diagnostics.
+Full locked workspace format, check, strict all-feature Clippy, tests, build, architecture,
+dependency, and bounded protocol fuzz gates pass. Storage and local API were evolved in place: no
+version bump, migration, compatibility record, or accessor facade was introduced.
+
+### Original plan entry
+
+- **[runtime/high] Author normalized harness values as canonical facts** — Implement pure planning
+  and a node-owned persistence adapter that idempotently commits normalized output and activity
+  under the exact active agent mailbox, provider, session, and operation correlation. Preserve
+  output-before-activity checkpoints and reject stable-identity collisions or stale bindings.
+  Test duplicate values, partial persistence, stale authority/session state, and redacted failures.
+
 ## 2026-08-28 — Foreground Codex worker composition and launch policy
 
 Registered the concrete Codex factory only in the foreground node composition root. The node owns

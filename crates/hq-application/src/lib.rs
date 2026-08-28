@@ -3,6 +3,7 @@
 mod agent_admin;
 mod authority_admin;
 mod error;
+mod harness;
 mod human;
 mod messaging;
 mod mutation;
@@ -29,6 +30,10 @@ pub use authority_admin::{
 };
 pub use error::{
     ApplicationError, ApplicationErrorClass, ApplicationErrorCode, ApplicationValueError,
+};
+pub use harness::{
+    HarnessActivityFactRequest, HarnessAuthoringAuthority, HarnessOutputFactRequest,
+    plan_harness_activity, plan_harness_output,
 };
 pub use human::{
     HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority,
