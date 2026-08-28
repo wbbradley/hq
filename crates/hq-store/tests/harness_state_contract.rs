@@ -6,9 +6,9 @@ use hq_domain::{
     AgentId, CommandDigest, ContentText, MessageId, OperationId, ProviderId, ProviderSessionId,
 };
 use hq_store::{
-    HarnessLeaseOutcome, StoreErrorClass, StoredHarnessDelivery, StoredHarnessDeliveryState,
-    StoredHarnessEventCheckpoint, StoredHarnessSessionOperation, StoredHarnessSessionOperationKind,
-    StoredHarnessSessionOperationState, StoredHarnessStateMutation,
+    HarnessLeaseOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
+    HarnessSessionOperationState, StoreErrorClass, StoredHarnessDelivery,
+    StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessStateMutation,
 };
 
 mod support;
@@ -181,15 +181,15 @@ fn session_operations_reject_changed_identity_and_survive_reopen_without_launch_
     let directory = TestDirectory::new();
     let database = directory.database_path();
     let store = open_store(&database);
-    let operation = StoredHarnessSessionOperation {
+    let operation = HarnessSessionOperation {
         operation_id: OperationId::from_bytes([21; 32]),
         request_digest: CommandDigest::from_bytes([22; 32]),
         agent_id: AgentId::from_bytes([23; 32]),
         provider_id: ProviderId::new("scripted").expect("provider"),
-        kind: StoredHarnessSessionOperationKind::Resume(
+        kind: HarnessSessionOperationKind::Resume(
             ProviderSessionId::new("exact-session").expect("session"),
         ),
-        state: StoredHarnessSessionOperationState::Prepared,
+        state: HarnessSessionOperationState::Prepared,
     };
     store
         .apply_harness_state(StoredHarnessStateMutation::QueueSessionOperation(
@@ -213,14 +213,14 @@ fn session_operations_reject_changed_identity_and_survive_reopen_without_launch_
     store
         .apply_harness_state(StoredHarnessStateMutation::SetSessionOperationState {
             operation_id: operation.operation_id,
-            state: StoredHarnessSessionOperationState::Uncertain,
+            state: HarnessSessionOperationState::Uncertain,
         })
         .expect("uncertainty precedes provider I/O");
     let ready = ProviderSessionId::new("exact-session").expect("session");
     store
         .apply_harness_state(StoredHarnessStateMutation::SetSessionOperationState {
             operation_id: operation.operation_id,
-            state: StoredHarnessSessionOperationState::Ready(ready.clone()),
+            state: HarnessSessionOperationState::Ready(ready.clone()),
         })
         .expect("readiness commits");
     store.close().expect("store closes");
@@ -231,16 +231,13 @@ fn session_operations_reject_changed_identity_and_survive_reopen_without_launch_
         .session_operation(operation.operation_id)
         .expect("operation loads")
         .expect("operation remains");
-    assert_eq!(
-        retained.state,
-        StoredHarnessSessionOperationState::Ready(ready)
-    );
+    assert_eq!(retained.state, HarnessSessionOperationState::Ready(ready));
     assert_eq!(retained.request_digest, operation.request_digest);
     assert_eq!(
         reopened
             .apply_harness_state(StoredHarnessStateMutation::SetSessionOperationState {
                 operation_id: operation.operation_id,
-                state: StoredHarnessSessionOperationState::Stopped,
+                state: HarnessSessionOperationState::Stopped,
             })
             .expect_err("terminal operation cannot change meaning")
             .class(),

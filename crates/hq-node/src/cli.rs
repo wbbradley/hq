@@ -8,7 +8,7 @@ use std::{
     io::Read,
     num::NonZeroUsize,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use hq_application::{
@@ -35,15 +35,16 @@ use hq_domain::{
 use hq_local_api::{
     ClientEvent, InitialView,
     protocol::v1::{
-        AgentRetirementOutcomeDto, AgentRetirementRequestDto, AuthoritativeSnapshotDto,
-        BuildMetadata, CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ConversationEntryDto,
+        AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
+        AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
+        CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ConversationEntryDto,
         ConversationMessageDto, ConversationPageRequest, DeviceGrantDto, EffectOutcomeDto,
-        EffectRequestDto, HealthDomainDto, Id32, LifecycleRequest, LifecycleState,
-        MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
+        EffectRequestDto, HealthDomainDto, Id32, LaunchEnvironmentDto, LifecycleRequest,
+        LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
         PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, RelayAccessDto,
         RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request, ResourceLocatorDto,
-        ResourceSchemeDto, ResponseResult, RuntimeObservationDto, SnapshotItem, StateHealthDto,
-        SynchronizationRequestDto,
+        ResourceSchemeDto, ResponseResult, RuntimeObservationDto, SessionControlDto, SnapshotItem,
+        StateHealthDto, SynchronizationRequestDto, agent_session_request_digest,
     },
 };
 use hq_projects::agent_retirement_request_digest;
@@ -355,6 +356,65 @@ pub enum NamedAgentCommand {
         /// Whether failed or uncertain runtime cessation may revoke HQ authority.
         force: bool,
     },
+}
+
+/// Provider-neutral managed runtime behavior for one named agent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HarnessCommand {
+    /// Start one fresh durable provider session.
+    Start {
+        /// Permanent name or stable identity.
+        agent: NamedAgentSelector,
+        /// Explicit provider namespace.
+        provider: ProviderId,
+        /// Optional caller-relative launch directory override.
+        directory: Option<PathBuf>,
+    },
+    /// Resume exactly one durable provider session.
+    Resume {
+        /// Permanent name or stable identity.
+        agent: NamedAgentSelector,
+        /// Explicit provider namespace.
+        provider: ProviderId,
+        /// Exact provider-scoped durable session.
+        session: ProviderSessionId,
+        /// Optional caller-relative launch directory override.
+        directory: Option<PathBuf>,
+    },
+    /// Stop the current local runtime without erasing durable session history.
+    Stop {
+        /// Permanent name or stable identity.
+        agent: NamedAgentSelector,
+        /// Explicit provider namespace.
+        provider: ProviderId,
+    },
+}
+
+/// Passive managed-session control result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessSessionView {
+    /// Stable requested operation label.
+    pub operation: &'static str,
+    /// Exact retry-safe operation identity.
+    pub operation_id: OperationId,
+    /// Resolved durable named-agent identity.
+    pub agent_id: AgentId,
+    /// Explicit provider namespace.
+    pub provider: String,
+    /// Exact requested resume session, when present.
+    pub requested_session: Option<String>,
+    /// Acknowledged ready session, when present.
+    pub ready_session: Option<String>,
+    /// Canonical absolute launch directory, when sent.
+    pub directory: Option<String>,
+    /// Stable ready, stopped, rejected, or uncertain status.
+    pub status: &'static str,
+    /// Stable rejection category, when rejected.
+    pub error_category: Option<String>,
+    /// Stable rejection code, when rejected.
+    pub error_code: Option<String>,
+    /// Reconciliation identity returned for an uncertain operation.
+    pub reconciliation_id: Option<[u8; 32]>,
 }
 
 /// Passive exact provider-session identity shown by catalog commands.
@@ -907,6 +967,13 @@ pub enum CliCommand {
         /// Validated installation state layout.
         state: StatePaths,
     },
+    /// Control one daemon-owned managed provider session through the local API.
+    Harness {
+        /// Requested provider-neutral runtime behavior.
+        action: HarnessCommand,
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
     /// Execute one agent-side ask, send, wait, or poll operation.
     AgentMessage {
         /// Requested agent mailbox behavior.
@@ -1041,6 +1108,8 @@ pub enum CliError {
     MessagingState,
     /// Named-agent catalog or session metadata was absent, stale, ambiguous, or inconsistent.
     AgentState,
+    /// Managed-session launch inputs or response state were invalid or inconsistent.
+    HarnessState,
     /// Pairing evidence or its filesystem location failed strict validation.
     PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
@@ -1052,7 +1121,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|agents|agent|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
+                 <help|version|agents|agent|harness|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
             ),
             Self::StatePath => formatter.write_str("node state path is unavailable or invalid"),
             Self::RuntimePath => formatter.write_str("node runtime path is unavailable or invalid"),
@@ -1078,6 +1147,9 @@ impl fmt::Display for CliError {
             }
             Self::AgentState => {
                 formatter.write_str("named-agent or session state is unavailable or ambiguous")
+            }
+            Self::HarnessState => {
+                formatter.write_str("managed harness request or response state is invalid")
             }
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
@@ -1179,6 +1251,11 @@ impl CliError {
                 CliExitClass::Failure,
             ),
             Self::AgentState => agent_state_diagnostic(),
+            Self::HarnessState => (
+                "harness.state_invalid",
+                "managed harness launch inputs or response state are invalid or inconsistent",
+                CliExitClass::Failure,
+            ),
             Self::PairingArtifact | Self::SecretInput => input_diagnostic(self),
         }
     }
@@ -1283,6 +1360,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 | CliCommand::Mailbox { .. }
                 | CliCommand::Relay { .. }
                 | CliCommand::NamedAgent { .. }
+                | CliCommand::Harness { .. }
                 | CliCommand::AgentMessage { .. }
                 | CliCommand::GetMessage { .. }
                 | CliCommand::DiscoverMailboxes { .. }
@@ -1321,6 +1399,10 @@ fn parse_top_level_command(
             topic: vec!["agent".to_owned()],
         },
         Some("agent") => parse_named_agent(rest, state_root)?,
+        Some("harness") if rest == [OsString::from("--help")] => CliCommand::Help {
+            topic: vec!["harness".to_owned()],
+        },
+        Some("harness") => parse_harness(rest, state_root)?,
         Some("ask") => parse_agent_message("ask", rest, state_root)?,
         Some("send") => parse_agent_message("send", rest, state_root)?,
         Some("wait") => parse_agent_message("wait", rest, state_root)?,
@@ -1361,6 +1443,75 @@ fn parse_top_level_command(
             CliCommand::Daemon { action, state }
         }
         _ => return Err(CliError::Arguments),
+    })
+}
+
+fn parse_harness(
+    arguments: &[OsString],
+    state_root: Option<&PathBuf>,
+) -> Result<CliCommand, CliError> {
+    let operation = arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .ok_or(CliError::Arguments)?;
+    let mut agent = None;
+    let mut provider = None;
+    let mut session = None;
+    let mut directory = None;
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--agent") if agent.is_none() => {
+                agent = Some(parse_named_agent_selector(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                )?);
+                index += 2;
+            }
+            Some("--provider") if provider.is_none() => {
+                provider = Some(
+                    ProviderId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--session") if session.is_none() => {
+                session = Some(
+                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--dir") if directory.is_none() => {
+                directory = Some(PathBuf::from(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                ));
+                index += 2;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    let (agent, provider) = (
+        agent.ok_or(CliError::Arguments)?,
+        provider.ok_or(CliError::Arguments)?,
+    );
+    let action = match (operation, session, directory) {
+        ("start", None, directory) => HarnessCommand::Start {
+            agent,
+            provider,
+            directory,
+        },
+        ("resume", Some(session), directory) => HarnessCommand::Resume {
+            agent,
+            provider,
+            session,
+            directory,
+        },
+        ("stop", None, None) => HarnessCommand::Stop { agent, provider },
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(CliCommand::Harness {
+        action,
+        state: parsed_state(state_root)?,
     })
 }
 
@@ -2081,14 +2232,15 @@ pub fn execute_cli_with_input(
             &result,
             CliResult::Messages(view) if view.operation == "poll" && view.messages.is_empty()
         );
+        let exit_code = successful_result_exit_code(&result, empty_poll);
         let completion = completion_for(&invocation, &result);
         let stdout = render_result(invocation.output, &result)?;
-        Ok((stdout, completion, empty_poll))
+        Ok((stdout, completion, empty_poll, exit_code))
     }) {
-        Ok((stdout, completion, empty_poll)) => CliExecution {
+        Ok((stdout, completion, empty_poll, exit_code)) => CliExecution {
             stdout: if empty_poll { String::new() } else { stdout },
             stderr: String::new(),
-            exit_code: if empty_poll { 3 } else { 0 },
+            exit_code,
             completion: if empty_poll { None } else { completion },
         },
         Err(error) => {
@@ -2100,6 +2252,20 @@ pub fn execute_cli_with_input(
                 completion: None,
             }
         }
+    }
+}
+
+fn successful_result_exit_code(result: &CliResult, empty_poll: bool) -> u8 {
+    match result {
+        CliResult::HarnessSession(HarnessSessionView {
+            status: "rejected", ..
+        }) => 1,
+        CliResult::HarnessSession(HarnessSessionView {
+            status: "uncertain",
+            ..
+        }) => 3,
+        _ if empty_poll => 3,
+        _ => 0,
     }
 }
 
@@ -2126,6 +2292,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
         CliCommand::Mailbox { action, state } => return run_mailbox(action, state),
         CliCommand::Relay { action, state } => return run_relay(action, state),
         CliCommand::NamedAgent { action, state } => return run_named_agent(action, state),
+        CliCommand::Harness { action, state } => return run_harness(action, state),
         CliCommand::AgentMessage { action, state } => {
             return run_agent_message(action, state, input);
         }
@@ -2156,6 +2323,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
             | CliCommand::Mailbox { .. }
             | CliCommand::Relay { .. }
             | CliCommand::NamedAgent { .. }
+            | CliCommand::Harness { .. }
             | CliCommand::AgentMessage { .. }
             | CliCommand::GetMessage { .. }
             | CliCommand::DiscoverMailboxes { .. }
@@ -2242,6 +2410,161 @@ fn run_identity(
             )))
         }
     }
+}
+
+fn run_harness(action: &HarnessCommand, state: &StatePaths) -> Result<CliResult, CliError> {
+    let mut client = command_client(state)?;
+    let snapshot = client.snapshot()?;
+    let selector = match action {
+        HarnessCommand::Start { agent, .. }
+        | HarnessCommand::Resume { agent, .. }
+        | HarnessCommand::Stop { agent, .. } => agent,
+    };
+    let evidence = resolve_named_agent(&snapshot, selector)?;
+    let operation_id = OperationId::from_bytes(*random_command_id()?.as_bytes());
+    let issued_at_unix_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .ok_or(CliError::Runtime)?;
+    let launch = match action {
+        HarnessCommand::Start { directory, .. } | HarnessCommand::Resume { directory, .. } => {
+            Some(capture_launch_context(directory.as_deref())?)
+        }
+        HarnessCommand::Stop { .. } => None,
+    };
+    let directory = launch.as_ref().map(|launch| launch.directory.value.clone());
+    let request = harness_request(
+        action,
+        evidence.agent_id,
+        operation_id,
+        issued_at_unix_millis,
+        launch,
+    )?;
+    let event = client.agent_session(request)?;
+    let ClientEvent::AgentSession {
+        operation_id: completed,
+        outcome,
+    } = event
+    else {
+        return Err(CliError::HarnessState);
+    };
+    if completed != operation_id {
+        return Err(CliError::HarnessState);
+    }
+    let (operation, provider, requested_session) = match action {
+        HarnessCommand::Start { provider, .. } => ("start", provider, None),
+        HarnessCommand::Resume {
+            provider, session, ..
+        } => ("resume", provider, Some(session.as_str().to_owned())),
+        HarnessCommand::Stop { provider, .. } => ("stop", provider, None),
+    };
+    let mut view = HarnessSessionView {
+        operation,
+        operation_id,
+        agent_id: evidence.agent_id,
+        provider: provider.as_str().to_owned(),
+        requested_session,
+        ready_session: None,
+        directory,
+        status: "uncertain",
+        error_category: None,
+        error_code: None,
+        reconciliation_id: None,
+    };
+    match outcome {
+        EffectOutcomeDto::Accepted(AgentSessionResultDto::Ready(session)) => {
+            view.status = "ready";
+            view.ready_session = Some(session);
+        }
+        EffectOutcomeDto::Accepted(AgentSessionResultDto::Stopped) => {
+            view.status = "stopped";
+        }
+        EffectOutcomeDto::Rejected(error) => {
+            view.status = "rejected";
+            view.error_category = Some(error.category);
+            view.error_code = Some(error.code);
+        }
+        EffectOutcomeDto::Uncertain(reconciliation_id) => {
+            view.reconciliation_id = Some(reconciliation_id.bytes());
+        }
+    }
+    Ok(CliResult::HarnessSession(view))
+}
+
+fn harness_request(
+    action: &HarnessCommand,
+    agent_id: AgentId,
+    operation_id: OperationId,
+    issued_at_unix_millis: i64,
+    launch: Option<AgentLaunchContextDto>,
+) -> Result<EffectRequestDto<AgentSessionRequestDto>, CliError> {
+    let (provider, control) = match action {
+        HarnessCommand::Start { provider, .. } => (provider, SessionControlDto::Start),
+        HarnessCommand::Resume {
+            provider, session, ..
+        } => (
+            provider,
+            SessionControlDto::Resume(session.as_str().to_owned()),
+        ),
+        HarnessCommand::Stop { provider, .. } => (provider, SessionControlDto::Stop),
+    };
+    let body = AgentSessionRequestDto::new(
+        Id32::new(*agent_id.as_bytes()),
+        provider.as_str().to_owned(),
+        control,
+        launch,
+    )
+    .map_err(|_| CliError::HarnessState)?;
+    let mut request = EffectRequestDto::new(
+        Id32::new(*operation_id.as_bytes()),
+        Id32::new([0; 32]),
+        issued_at_unix_millis,
+        body,
+    );
+    request.request_digest = Id32::new(
+        *agent_session_request_digest(&request)
+            .map_err(|_| CliError::HarnessState)?
+            .as_bytes(),
+    );
+    Ok(request)
+}
+
+fn capture_launch_context(directory: Option<&Path>) -> Result<AgentLaunchContextDto, CliError> {
+    let directory = directory
+        .map_or_else(std::env::current_dir, |path| Ok(path.to_path_buf()))
+        .map_err(|_| CliError::HarnessState)?;
+    let directory = directory
+        .canonicalize()
+        .map_err(|_| CliError::HarnessState)?;
+    if !directory.is_absolute() || !directory.is_dir() {
+        return Err(CliError::HarnessState);
+    }
+    let directory = directory.to_str().ok_or(CliError::HarnessState)?;
+    let directory = ResourceLocatorDto::new(ResourceSchemeDto::WorkingTree, directory.to_owned())
+        .map_err(|_| CliError::HarnessState)?;
+    Ok(AgentLaunchContextDto {
+        directory,
+        environment: copy_launch_environment(std::env::vars_os())?,
+    })
+}
+
+fn copy_launch_environment(
+    entries: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Result<LaunchEnvironmentDto, CliError> {
+    let entries = entries
+        .into_iter()
+        .map(|(name, value)| {
+            let name = name.into_string().map_err(|_| CliError::HarnessState)?;
+            Ok((name, value.as_encoded_bytes().to_vec()))
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    LaunchEnvironmentDto::copy_from(
+        entries
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_slice())),
+    )
+    .map_err(|_| CliError::HarnessState)
 }
 
 fn run_configuration(
@@ -5848,6 +6171,7 @@ enum CliResult {
     MailboxDiscovery(Box<MailboxDiscoveryView>),
     NamedAgentCatalog(Box<NamedAgentCatalogView>),
     NamedAgentRetirement(NamedAgentRetirementView),
+    HarnessSession(HarnessSessionView),
     Completed {
         operation: &'static str,
     },
@@ -5947,6 +6271,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         ),
         (format, CliResult::AuthorityAdmin(view)) => render_authority_admin_result(format, view),
         (format, CliResult::RelayAdmin(view)) => render_relay_admin_result(format, view),
+        (format, CliResult::HarnessSession(view)) => render_harness_session(format, view),
         (
             _,
             CliResult::AgentGuidance(_)
@@ -5955,6 +6280,45 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             | CliResult::Completed { .. }
             | CliResult::Stopped { .. },
         ) => unreachable!(),
+    }
+}
+
+fn render_harness_session(
+    format: CliOutputFormat,
+    view: &HarnessSessionView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => Ok(format!(
+            "harness={} agent={} provider={} requested_session={} session={} directory={} operation_id={} reconciliation_id={} error={}:{}\n",
+            view.status,
+            encode_id(view.agent_id.as_bytes()),
+            view.provider,
+            view.requested_session.as_deref().unwrap_or("none"),
+            view.ready_session.as_deref().unwrap_or("none"),
+            view.directory.as_deref().unwrap_or("none"),
+            encode_id(view.operation_id.as_bytes()),
+            view.reconciliation_id
+                .as_ref()
+                .map_or_else(|| "none".to_owned(), encode_id),
+            view.error_category.as_deref().unwrap_or("none"),
+            view.error_code.as_deref().unwrap_or("none"),
+        )),
+        CliOutputFormat::Json => machine_record(
+            "harness_session",
+            &serde_json::json!({
+                "agent_id": encode_id(view.agent_id.as_bytes()),
+                "directory": view.directory,
+                "error_category": view.error_category,
+                "error_code": view.error_code,
+                "operation": view.operation,
+                "operation_id": encode_id(view.operation_id.as_bytes()),
+                "provider": view.provider,
+                "ready_session": view.ready_session,
+                "reconciliation_id": view.reconciliation_id.as_ref().map(encode_id),
+                "requested_session": view.requested_session,
+                "status": view.status,
+            }),
+        ),
     }
 }
 
@@ -6699,7 +7063,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
         ),
         [command] if matches!(command.as_str(), "ask" | "send" | "wait" | "poll") => Some(
@@ -6752,10 +7116,6 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] relay <COMMAND>\n\n\
              Commands:\n  add URL [--access read|write|read-write] [--auth disabled|on-challenge|required]\n  list\n  remove URL\n  sync [URL]\n  status\n  repair\n\nRelay removal disables the durable policy without erasing delivery history. Status is a bounded authoritative observation. Repair explicitly reverifies the immutable corpus and atomically replaces rebuildable indexes.\n",
         ),
-        [command] if command == "daemon" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
-             Commands:\n  run        Own the node in the foreground\n  status     Probe without starting a node\n  readiness  Return a ready node, starting one when absent\n  stop       Converge the node to absence\n  restart    Converge on a fresh ready generation\n",
-        ),
         [command, action]
             if (command == "daemon"
                 && matches!(
@@ -6777,7 +7137,9 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                     && matches!(
                         action.as_str(),
                         "add" | "list" | "remove" | "sync" | "status" | "repair"
-                    )) =>
+                    ))
+                || (command == "harness"
+                    && matches!(action.as_str(), "start" | "resume" | "stop")) =>
         {
             match command.as_str() {
                 "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
@@ -6787,6 +7149,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                 "peer" => Some("Use `hq help peer` for peer command details.\n"),
                 "mailbox" => Some("Use `hq help mailbox` for mailbox command details.\n"),
                 "relay" => Some("Use `hq help relay` for relay command details.\n"),
+                "harness" => Some("Use `hq help harness` for harness command details.\n"),
                 _ => None,
             }
         }
@@ -6806,6 +7169,15 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] agent <COMMAND>\n\n\
              Commands:\n  list\n  show NAME|AGENT_ID\n  create NAME [--mailbox MAILBOX_ID]\n  current\n  select NAME|AGENT_ID [--provider PROVIDER --session SESSION] [--dir PATH]\n  rename NAME|AGENT_ID DISPLAY_NAME [--provider PROVIDER --session SESSION]\n  rename NAME|AGENT_ID --clear [--provider PROVIDER --session SESSION]\n  retire NAME|AGENT_ID --yes [--force]\n\n\
              Names are permanent lowercase installation-local slugs. create without --mailbox allocates a deterministic local agent mailbox; --mailbox adopts one existing local agent mailbox. current, select, and rename reject ambiguous provider environments and stale or conflicted session metadata. retire is absorbing, requires --yes, and only --force may revoke HQ authority after failed or uncertain runtime cessation.\n",
+        ),
+        [command] if command == "harness" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] harness <COMMAND>\n\n\
+             Commands:\n  start --agent NAME|AGENT_ID --provider PROVIDER [--dir PATH]\n  resume --agent NAME|AGENT_ID --provider PROVIDER --session SESSION [--dir PATH]\n  stop --agent NAME|AGENT_ID --provider PROVIDER\n\n\
+             start and resume resolve the launch directory to an absolute path and copy the caller environment at the local API boundary. resume never falls back to a new session. Rejected operations exit 1; uncertain operations print their exact operation identity and exit 3 for reconciliation.\n",
+        ),
+        [command] if command == "daemon" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
+             Commands:\n  run        Own the node in the foreground\n  status     Probe without starting a node\n  readiness  Return a ready node, starting when absent\n  stop       Converge the node to absence\n  restart    Converge on a fresh ready generation\n",
         ),
         _ => None,
     }
@@ -6891,27 +7263,243 @@ mod tests {
 
     use std::{collections::BTreeSet, ffi::OsString, path::Path, time::Duration};
 
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+
     use super::{
         AgentMailboxSelection, AgentMessageCommand, CliCommand, CliError, CliMessageView,
-        CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand, HumanDeviceState,
-        HumanMessageCommand, HumanMessageFilters, IdentityCommand, MailboxCommand,
-        MessageCommandView, NamedAgentCommand, NamedAgentSelector, PeerCommand, RelayCommand,
-        completion_for, effect_outcome, execute_cli, human_devices_view, human_view,
-        mailbox_discovery_view, message_body, named_agent_catalog_view, pairing_grant_id,
-        parse_cli, read_password, render_result, resolve_environment_session,
-        resolve_named_agent_id, run_cli, session_binding_fact, session_context,
-        stable_relay_effect, stable_repair_operation,
+        CliOutputFormat, ConfigurationCommand, DaemonCommand, HarnessCommand, HarnessSessionView,
+        HumanCommand, HumanDeviceState, HumanMessageCommand, HumanMessageFilters, IdentityCommand,
+        MailboxCommand, MessageCommandView, NamedAgentCommand, NamedAgentSelector, PeerCommand,
+        RelayCommand, completion_for, copy_launch_environment, effect_outcome, execute_cli,
+        harness_request, human_devices_view, human_view, mailbox_discovery_view, message_body,
+        named_agent_catalog_view, pairing_grant_id, parse_cli, read_password, render_result,
+        resolve_environment_session, resolve_named_agent_id, run_cli, session_binding_fact,
+        session_context, stable_relay_effect, stable_repair_operation, successful_result_exit_code,
     };
     use hq_domain::{
-        AccountId, FactId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
-        MessageId, RelayHints, SigningPublicKey, ThreadId,
+        AccountId, AgentId, FactId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
+        MessageId, OperationId, ProviderId, ProviderSessionId, RelayHints, SigningPublicKey,
+        ThreadId,
     };
     use hq_local_api::protocol::v1::{
-        AgentSessionBindingDto, AuthoritativeSnapshotDto, DeviceGrantDto, EffectOutcomeDto, Id32,
-        MailboxAddressDto, MessagePurposeDto, PresentationKindDto, RelayAccessDto,
-        RelayAuthenticationDto, RepositoryContextDto, ResourceLocatorDto, ResourceSchemeDto,
-        SnapshotItem, SynchronizationRequestDto,
+        AgentLaunchContextDto, AgentSessionBindingDto, AuthoritativeSnapshotDto, DeviceGrantDto,
+        EffectOutcomeDto, Id32, MailboxAddressDto, MessagePurposeDto, PresentationKindDto,
+        RelayAccessDto, RelayAuthenticationDto, RepositoryContextDto, ResourceLocatorDto,
+        ResourceSchemeDto, SnapshotItem, SynchronizationRequestDto,
     };
+
+    #[test]
+    fn parser_accepts_explicit_managed_harness_operations() {
+        let start = parse_cli([
+            OsString::from("harness"),
+            OsString::from("start"),
+            OsString::from("--agent"),
+            OsString::from("fred"),
+            OsString::from("--provider"),
+            OsString::from("codex"),
+            OsString::from("--dir"),
+            OsString::from("."),
+        ])
+        .expect("start parses");
+        assert!(matches!(
+            start.command,
+            CliCommand::Harness {
+                action: HarnessCommand::Start { agent: NamedAgentSelector::Name(name), provider, directory: Some(directory) },
+                ..
+            } if name.as_str() == "fred" && provider.as_str() == "codex" && directory == Path::new(".")
+        ));
+
+        let session = "session-exact";
+        let resume = parse_cli([
+            OsString::from("harness"),
+            OsString::from("resume"),
+            OsString::from("--provider"),
+            OsString::from("fake"),
+            OsString::from("--session"),
+            OsString::from(session),
+            OsString::from("--agent"),
+            OsString::from("11".repeat(32)),
+        ])
+        .expect("resume parses");
+        assert!(matches!(
+            resume.command,
+            CliCommand::Harness {
+                action: HarnessCommand::Resume {
+                    agent: NamedAgentSelector::Id(agent),
+                    provider,
+                    session: parsed_session,
+                    directory: None,
+                },
+                ..
+            } if agent.as_bytes() == &[0x11; 32]
+                && provider.as_str() == "fake"
+                && parsed_session.as_str() == session
+        ));
+
+        let stop = parse_cli([
+            OsString::from("harness"),
+            OsString::from("stop"),
+            OsString::from("--agent"),
+            OsString::from("fred"),
+            OsString::from("--provider"),
+            OsString::from("codex"),
+        ])
+        .expect("stop parses");
+        assert!(matches!(
+            stop.command,
+            CliCommand::Harness {
+                action: HarnessCommand::Stop { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parser_rejects_implicit_or_incoherent_harness_operations() {
+        for arguments in [
+            vec!["harness", "start", "--agent", "fred"],
+            vec![
+                "harness",
+                "resume",
+                "--agent",
+                "fred",
+                "--provider",
+                "codex",
+            ],
+            vec![
+                "harness",
+                "start",
+                "--agent",
+                "fred",
+                "--provider",
+                "codex",
+                "--session",
+                "old",
+            ],
+            vec![
+                "harness",
+                "stop",
+                "--agent",
+                "fred",
+                "--provider",
+                "codex",
+                "--dir",
+                ".",
+            ],
+        ] {
+            assert_eq!(
+                parse_cli(arguments.into_iter().map(OsString::from)),
+                Err(CliError::Arguments)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launch_environment_preserves_non_utf8_values_and_redacts_debug() {
+        let environment = copy_launch_environment([(
+            OsString::from("HQ_BINARY_SECRET"),
+            OsString::from_vec(vec![0xff, b'x']),
+        )])
+        .expect("binary value copies");
+        let mut observed = Vec::new();
+        environment.visit(|name, value| observed.push((name.to_owned(), value.to_vec())));
+        assert_eq!(
+            observed,
+            [("HQ_BINARY_SECRET".to_owned(), vec![0xff, b'x'])]
+        );
+        let debug = format!("{environment:?}");
+        assert!(debug.contains("entry_count"));
+        assert!(!debug.contains("HQ_BINARY_SECRET"));
+    }
+
+    #[test]
+    fn managed_harness_request_identity_is_exact_and_stable() {
+        let action = HarnessCommand::Resume {
+            agent: NamedAgentSelector::Name(hq_domain::ShortText::new("fred").expect("name")),
+            provider: ProviderId::new("fake").expect("provider"),
+            session: ProviderSessionId::new("session-1").expect("session"),
+            directory: None,
+        };
+        let launch = AgentLaunchContextDto {
+            directory: ResourceLocatorDto::new(
+                ResourceSchemeDto::WorkingTree,
+                "/work/hq".to_owned(),
+            )
+            .expect("directory"),
+            environment: copy_launch_environment([(
+                OsString::from("HQ_TOKEN"),
+                OsString::from("secret"),
+            )])
+            .expect("environment"),
+        };
+        let first = harness_request(
+            &action,
+            AgentId::from_bytes([1; 32]),
+            OperationId::from_bytes([2; 32]),
+            1_700_000_000_000,
+            Some(launch.clone()),
+        )
+        .expect("request");
+        let replay = harness_request(
+            &action,
+            AgentId::from_bytes([1; 32]),
+            OperationId::from_bytes([2; 32]),
+            1_700_000_000_000,
+            Some(launch),
+        )
+        .expect("replay");
+        assert_eq!(first, replay);
+
+        let changed = harness_request(
+            &action,
+            AgentId::from_bytes([1; 32]),
+            OperationId::from_bytes([3; 32]),
+            1_700_000_000_000,
+            Some(AgentLaunchContextDto {
+                directory: ResourceLocatorDto::new(
+                    ResourceSchemeDto::WorkingTree,
+                    "/work/hq".to_owned(),
+                )
+                .expect("directory"),
+                environment: copy_launch_environment([(
+                    OsString::from("HQ_TOKEN"),
+                    OsString::from("secret"),
+                )])
+                .expect("environment"),
+            }),
+        )
+        .expect("changed request");
+        assert_ne!(first.request_digest, changed.request_digest);
+    }
+
+    #[test]
+    fn harness_machine_result_exposes_reconciliation_without_secrets() {
+        let result = super::CliResult::HarnessSession(HarnessSessionView {
+            operation: "resume",
+            operation_id: OperationId::from_bytes([1; 32]),
+            agent_id: AgentId::from_bytes([2; 32]),
+            provider: "fake".to_owned(),
+            requested_session: Some("session-1".to_owned()),
+            ready_session: None,
+            directory: Some("/work/hq".to_owned()),
+            status: "uncertain",
+            error_category: None,
+            error_code: None,
+            reconciliation_id: Some([3; 32]),
+        });
+        let output = render_result(CliOutputFormat::Json, &result).expect("machine result");
+        assert_eq!(successful_result_exit_code(&result, false), 3);
+        let value: serde_json::Value = serde_json::from_str(&output).expect("JSON");
+        assert_eq!(value["kind"], "harness_session");
+        assert_eq!(value["data"]["status"], "uncertain");
+        assert_eq!(
+            value["data"]["reconciliation_id"].as_str().map(str::len),
+            Some(64)
+        );
+        assert!(!output.contains("secret"));
+    }
 
     #[test]
     fn parser_accepts_global_output_and_explicit_daemon_roles() {
@@ -7813,7 +8401,7 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
         let ask = run_cli(
@@ -7829,6 +8417,13 @@ mod tests {
         .expect("agent help");
         assert!(agent.contains("create NAME [--mailbox MAILBOX_ID]"));
         assert!(agent.contains("reject ambiguous provider environments"));
+        let harness = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("harness")])
+                .expect("harness help parses"),
+        )
+        .expect("harness help");
+        assert!(harness.contains("resume --agent NAME|AGENT_ID"));
+        assert!(harness.contains("never falls back to a new session"));
         let guidance = run_cli(
             &parse_cli([OsString::from("agents"), OsString::from("delivery")])
                 .expect("delivery guidance parses"),

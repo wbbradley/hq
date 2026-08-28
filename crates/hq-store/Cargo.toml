@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 hq-application.workspace = true
 hq-domain.workspace = true
+hq-harness.workspace = true
 hq-protocol.workspace = true
 hq-reducer.workspace = true
 rusqlite.workspace = true

@@ -482,6 +482,7 @@ version = "0.1.0"
 dependencies = [
  "hq-application",
  "hq-domain",
+ "hq-harness",
  "hq-protocol",
  "hq-reducer",
  "rusqlite",

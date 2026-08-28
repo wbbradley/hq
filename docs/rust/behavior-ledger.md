@@ -328,7 +328,7 @@ row. It proves workflow coverage; it does not reserve the command names.
 | `hq answer`; `hq cancel` | Reply and archive/cancel through causal facts. | redesign: `MSG-001`, `MSG-004`, `MSG-005`, `CLI-009` |
 | `hq mailboxes` | Discover repository-related mailbox candidates and agent labels. | redesign: `CLI-023` |
 | `hq agent create/list/retire` | Manage permanent named-agent identity and retirement, including safe quiescence. | redesign: `RUN-001`, `RUN-002`, `PRJ-015` |
-| `hq harness` | Start/resume an exact managed provider session and await readiness. | redesign: `RUN-003`, `RUN-006` through `RUN-009`, `RUN-017` |
+| `hq harness start|resume|stop` | Start, exact-resume, or stop a managed provider session through the local API; report rejection and uncertainty explicitly. | redesign: `RUN-003`, `RUN-006` through `RUN-009`, `RUN-017`; CLI parser/request tests, reconnecting-client exact-frame tests, and `unix_node_cli` restart/stale-resume coverage |
 | `hq project create/list/show/send/activate/handoff/close/reopen/archive/unarchive/check` | Manage the full project lifecycle, assignment, health, messaging, and workflow outcomes. | redesign: `PRJ-001` through `PRJ-020`, `CLI-011` |
 | `hq project resource add/remove/primary/replace` | Manage desired paths, primary selection, active claims, conflict, and health. | redesign: `PRJ-004`, `PRJ-010` through `PRJ-013` |
 | `hq project worktree` | Provision a recoverable Git worktree and project with one stable operation. | redesign: `PRJ-019`, `CLI-011` |

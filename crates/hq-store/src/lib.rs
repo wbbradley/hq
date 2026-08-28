@@ -40,10 +40,10 @@ pub use actor::{
 pub use error::{StoreError, StoreErrorClass};
 pub use gateway::StoreGateway;
 pub use harness::{
-    HarnessLeaseOutcome, MAX_HARNESS_STATE_QUERY_ITEMS, StoredHarnessDelivery,
+    HarnessLeaseOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
+    HarnessSessionOperationState, MAX_HARNESS_STATE_QUERY_ITEMS, StoredHarnessDelivery,
     StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessLease,
-    StoredHarnessReadySession, StoredHarnessSessionOperation, StoredHarnessSessionOperationKind,
-    StoredHarnessSessionOperationState, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
+    StoredHarnessReadySession, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
 };
 pub use hq_application::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, ConversationEntry,

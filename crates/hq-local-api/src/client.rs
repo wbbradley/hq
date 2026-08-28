@@ -1495,7 +1495,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 Some(
                     event @ ClientEvent::AgentSession {
                         operation_id: completed,
-                        outcome: EffectOutcomeDto::Accepted(_) | EffectOutcomeDto::Rejected(_),
+                        ..
                     },
                 ) if completed == operation_id => return Ok(event),
                 Some(

@@ -62,7 +62,7 @@ allowed_internal_dependency() {
     hq-reducer:hq-domain | \
       hq-protocol:hq-domain | \
       hq-application:hq-domain | hq-application:hq-reducer | \
-      hq-store:hq-domain | hq-store:hq-reducer | hq-store:hq-protocol | \
+      hq-store:hq-domain | hq-store:hq-reducer | hq-store:hq-protocol | hq-store:hq-harness | \
       hq-store:hq-application | \
       hq-local-api:hq-domain | hq-local-api:hq-protocol | hq-local-api:hq-application | \
       hq-relay:hq-domain | hq-relay:hq-protocol | hq-relay:hq-application | \
@@ -248,6 +248,15 @@ grep -Fq 'fn run_named_agent(' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "the installed CLI must expose named-agent catalog workflows"
 grep -Fq 'client.agent_retirement(' "$repository_root/crates/hq-node/src/cli.rs" ||
   fail "named-agent retirement must cross the typed local API client"
+grep -Fq 'fn run_harness(' "$repository_root/crates/hq-node/src/cli.rs" ||
+  fail "the installed CLI must expose managed harness workflows"
+grep -Fq 'client.agent_session(' "$repository_root/crates/hq-node/src/cli.rs" ||
+  fail "managed harness clients must cross the typed local API client"
+if grep -Eq '(CodexHarness|CodexSession|CodexProcess|CodexProtocol)' \
+  "$repository_root/crates/hq-node/src/cli.rs" \
+  "$repository_root/crates/hq-node/src/local_client.rs"; then
+  fail "managed harness clients must remain provider neutral"
+fi
 if grep -Eq '(ProjectWorkflowManager|CanonicalProjectPort|retire_idle_agent)' \
   "$repository_root/crates/hq-node/src/cli.rs" \
   "$repository_root/crates/hq-node/src/local_client.rs"; then

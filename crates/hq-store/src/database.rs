@@ -1711,7 +1711,7 @@ impl Database {
     pub(super) fn load_harness_session_operation(
         &self,
         operation_id: hq_domain::OperationId,
-    ) -> Result<Option<crate::StoredHarnessSessionOperation>, StoreError> {
+    ) -> Result<Option<crate::HarnessSessionOperation>, StoreError> {
         harness::load_session_operation(&self.connection, operation_id)
     }
 

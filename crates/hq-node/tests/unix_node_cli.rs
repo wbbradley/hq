@@ -220,6 +220,10 @@ fn agent_json(state_root: &Path, arguments: &[&str]) -> serde_json::Value {
     admin_json(state_root, "agent", arguments)
 }
 
+fn harness_output(state_root: &Path, arguments: &[&str]) -> Output {
+    admin_output(state_root, "harness", arguments)
+}
+
 fn encode_hex(bytes: [u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     bytes
@@ -585,6 +589,88 @@ fn idle_named_agent_retirement_is_explicit_and_survives_restart() {
         stopped.status.success(),
         "stop stderr: {:?}",
         stopped.stderr
+    );
+}
+
+#[test]
+fn managed_harness_stop_and_stale_exact_resume_are_machine_readable_across_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let created = agent_json(&state_root, &["create", "runtime-agent"]);
+    let agent_id = created["data"]["agents"][0]["agent_id"]
+        .as_str()
+        .expect("agent identity")
+        .to_owned();
+
+    let stopped = harness_output(
+        &state_root,
+        &["stop", "--agent", "runtime-agent", "--provider", "codex"],
+    );
+    assert!(
+        stopped.status.success(),
+        "harness stop stderr: {:?}",
+        stopped.stderr
+    );
+    let stopped: serde_json::Value = serde_json::from_slice(&stopped.stdout).expect("stop JSON");
+    assert_eq!(stopped["kind"], "harness_session");
+    assert_eq!(stopped["data"]["agent_id"], agent_id);
+    assert_eq!(stopped["data"]["operation"], "stop");
+    assert_eq!(stopped["data"]["provider"], "codex");
+    assert_eq!(stopped["data"]["status"], "stopped");
+    assert_eq!(
+        stopped["data"]["operation_id"].as_str().map(str::len),
+        Some(64)
+    );
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let stale = harness_output(
+        &state_root,
+        &[
+            "resume",
+            "--agent",
+            "runtime-agent",
+            "--provider",
+            "codex",
+            "--session",
+            "missing-session",
+            "--dir",
+            directory.path().to_str().expect("UTF-8 test directory"),
+        ],
+    );
+    assert_eq!(stale.status.code(), Some(1));
+    assert!(stale.stderr.is_empty());
+    let stale: serde_json::Value =
+        serde_json::from_slice(&stale.stdout).expect("stale resume JSON");
+    assert_eq!(stale["kind"], "harness_session");
+    assert_eq!(stale["data"]["operation"], "resume");
+    assert_eq!(stale["data"]["requested_session"], "missing-session");
+    assert_eq!(stale["data"]["status"], "rejected");
+    assert_eq!(stale["data"]["error_code"], "managed_session_precondition");
+
+    let stopped_again = harness_output(
+        &state_root,
+        &["stop", "--agent", &agent_id, "--provider", "codex"],
+    );
+    assert!(
+        stopped_again.status.success(),
+        "second harness stop stderr: {:?}",
+        stopped_again.stderr
+    );
+    let stopped_again: serde_json::Value =
+        serde_json::from_slice(&stopped_again.stdout).expect("second stop JSON");
+    assert_eq!(stopped_again["data"]["status"], "stopped");
+
+    let daemon_stopped = output("stop", &state_root);
+    assert!(
+        daemon_stopped.status.success(),
+        "daemon stop stderr: {:?}",
+        daemon_stopped.stderr
     );
 }
 

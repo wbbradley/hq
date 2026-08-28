@@ -1,5 +1,39 @@
 # Completed
 
+## 2026-08-28 — Managed harness CLI workflow
+
+Added explicit provider-neutral `harness start`, exact `resume`, and `stop` commands to the installed
+Rust executable. Every command resolves one active named agent and crosses only the authenticated
+local API. Start and resume canonicalize the caller's launch directory and copy the complete caller
+environment at that boundary, preserving non-UTF-8 values as sensitive binary data. One random
+operation identity and a digest over the exact agent, provider, action, time, directory, and
+environment make transport replay byte-identical without causing separate invocations to alias.
+
+Human and `hq-cli-output-v1` records expose ready, stopped, rejected, and uncertain outcomes without
+launch secrets. Exact resume never creates a replacement session; rejection exits 1, while explicit
+uncertainty returns immediately with the operation and reconciliation identities and exits 3. The
+node still owns provider workers, and the CLI autostarts it through the existing coordinator.
+
+Storage now consumes the neutral `HarnessSessionOperation`, kind, and state records directly. The
+identical `StoredHarnessSessionOperationState` family and its exhaustive node conversion layer were
+deleted; capability-bearing owner tokens remain encapsulated. This is an in-place cleanup of the
+unshipped storage shape with no migration, compatibility type, accessor facade, or version bump.
+
+Parser, exact-identity, binary-environment, redaction, uncertainty, response-loss, architecture,
+machine-output, stale-resume, restart, and real daemon tests pass. Full locked workspace tests,
+build/check, formatting, strict Clippy, architecture, behavior/causal/protocol specifications,
+dependency policy, four portable targets, both bounded fuzz smokes, and frozen Go build/vet/tests
+pass. The dependency audit retains only the existing yanked `chacha20 0.10.1` warning, and the
+post-suite process table contains no HQ daemon.
+
+### Original plan entry
+
+- **[runtime/high] Expose the managed `hq harness` client workflow** — Add local-API-only CLI start,
+  exact-resume, and stop commands that resolve one named agent, copy the caller environment and
+  absolute launch directory at the boundary, derive stable exact request identity, autostart the
+  node, and render ready/stopped/rejected/uncertain outcomes. Test parsing, response loss, stale
+  sessions, non-UTF-8 environment values, node restart, machine output, and architecture isolation.
+
 ## 2026-08-28 — Continuous live harness event draining
 
 Added a bounded supervisor polling pass that visits every live worker in stable agent order and
@@ -112,7 +146,8 @@ pass. No storage or local-API version changed and no migration or compatibility 
 Added provider-neutral start, exact-resume, and stop as a dedicated retry-safe local API family.
 The reconnecting client retains and replays the exact encoded frame after response loss or explicit
 uncertainty, shares changed-identity detection with every retryable command family, and completes
-only on a definite accepted or rejected result. Both client and server recompute a canonical digest
+with a definite result or returns explicit uncertainty for caller-visible reconciliation. Both
+client and server recompute a canonical digest
 covering operation/time, agent/provider/action, launch directory, and every copied environment
 entry. Binary environment values use canonical base64; secret-owning environment fields remain
 opaque, redact diagnostics, enforce strict bounds, and zero values on drop.
@@ -127,9 +162,10 @@ restart repair. Environment values and provider diagnostics never enter storage.
 The node now validates the active installation-local named agent and canonical absolute launch path
 before provider work. Only the exact acknowledged provider session can then author its immutable
 mailbox binding, repository context, and complete-frontier selection through deterministic,
-replay-safe canonical mutations. Passive request/state/result records expose public fields. The
-separate neutral and store operation records preserve crate decoupling through one exhaustive
-record-only node mapping; they are not compatibility types and add no accessor facade.
+replay-safe canonical mutations. Passive request/state/result records expose public fields. Storage
+now consumes the same neutral operation, kind, and state records directly; the former identical
+stored copies and their exhaustive record-only node mapping were unnecessary indirection and are
+gone.
 
 Because HQ has never shipped and has no standing installations, local API v1 and storage v13 were
 evolved directly in place with no protocol bump, storage-version bump, migration, or compatibility

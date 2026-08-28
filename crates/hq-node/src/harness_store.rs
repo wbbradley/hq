@@ -3,14 +3,13 @@
 use hq_harness::{
     HarnessDeliveryRecord, HarnessDeliveryState, HarnessError, HarnessErrorClass,
     HarnessEventCheckpoint, HarnessLeaseOutcome, HarnessOwnerToken, HarnessReadySession,
-    HarnessSessionOperation, HarnessSessionOperationKind, HarnessSessionOperationState,
-    HarnessStateMutation, HarnessStatePort, HarnessStateSnapshot, HarnessWorkerLease,
+    HarnessSessionOperation, HarnessStateMutation, HarnessStatePort, HarnessStateSnapshot,
+    HarnessWorkerLease,
 };
 use hq_store::{
     HarnessStateHandle, Store, StoreError, StoreErrorClass, StoredHarnessDelivery,
     StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessLease,
-    StoredHarnessReadySession, StoredHarnessSessionOperation, StoredHarnessSessionOperationKind,
-    StoredHarnessSessionOperationState, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
+    StoredHarnessReadySession, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
 };
 
 /// Neutral harness durable-state capability backed by the sole store actor.
@@ -51,7 +50,6 @@ impl HarnessStatePort for HarnessStoreAdapter {
         self.store
             .session_operation(operation_id)
             .map_err(|error| map_store_error(error, HarnessErrorClass::PersistenceCollision))
-            .map(|stored| stored.map(map_session_operation))
     }
 
     fn delivery(
@@ -104,14 +102,14 @@ fn store_mutation(mutation: HarnessStateMutation) -> StoredHarnessStateMutation 
             }
         }
         HarnessStateMutation::QueueSessionOperation(operation) => {
-            StoredHarnessStateMutation::QueueSessionOperation(store_session_operation(operation))
+            StoredHarnessStateMutation::QueueSessionOperation(operation)
         }
         HarnessStateMutation::SetSessionOperationState {
             operation_id,
             state,
         } => StoredHarnessStateMutation::SetSessionOperationState {
             operation_id,
-            state: store_session_operation_state(state),
+            state,
         },
         HarnessStateMutation::QueueDelivery(delivery) => {
             StoredHarnessStateMutation::QueueDelivery(store_delivery(delivery))
@@ -145,72 +143,10 @@ fn map_snapshot(stored: StoredHarnessStateSnapshot) -> Result<HarnessStateSnapsh
             .map(map_lease)
             .collect::<Result<_, _>>()?,
         ready_sessions: stored.ready_sessions.into_iter().map(map_ready).collect(),
-        session_operations: stored
-            .session_operations
-            .into_iter()
-            .map(map_session_operation)
-            .collect(),
+        session_operations: stored.session_operations,
         deliveries: stored.deliveries.into_iter().map(map_delivery).collect(),
         events: stored.events.iter().map(map_checkpoint).collect(),
     })
-}
-
-fn store_session_operation(operation: HarnessSessionOperation) -> StoredHarnessSessionOperation {
-    StoredHarnessSessionOperation {
-        operation_id: operation.operation_id,
-        request_digest: operation.request_digest,
-        agent_id: operation.agent_id,
-        provider_id: operation.provider_id,
-        kind: match operation.kind {
-            HarnessSessionOperationKind::Start => StoredHarnessSessionOperationKind::Start,
-            HarnessSessionOperationKind::Resume(session) => {
-                StoredHarnessSessionOperationKind::Resume(session)
-            }
-            HarnessSessionOperationKind::Stop => StoredHarnessSessionOperationKind::Stop,
-        },
-        state: store_session_operation_state(operation.state),
-    }
-}
-
-fn map_session_operation(operation: StoredHarnessSessionOperation) -> HarnessSessionOperation {
-    HarnessSessionOperation {
-        operation_id: operation.operation_id,
-        request_digest: operation.request_digest,
-        agent_id: operation.agent_id,
-        provider_id: operation.provider_id,
-        kind: match operation.kind {
-            StoredHarnessSessionOperationKind::Start => HarnessSessionOperationKind::Start,
-            StoredHarnessSessionOperationKind::Resume(session) => {
-                HarnessSessionOperationKind::Resume(session)
-            }
-            StoredHarnessSessionOperationKind::Stop => HarnessSessionOperationKind::Stop,
-        },
-        state: match operation.state {
-            StoredHarnessSessionOperationState::Prepared => HarnessSessionOperationState::Prepared,
-            StoredHarnessSessionOperationState::Uncertain => {
-                HarnessSessionOperationState::Uncertain
-            }
-            StoredHarnessSessionOperationState::Ready(session) => {
-                HarnessSessionOperationState::Ready(session)
-            }
-            StoredHarnessSessionOperationState::Stopped => HarnessSessionOperationState::Stopped,
-            StoredHarnessSessionOperationState::Rejected => HarnessSessionOperationState::Rejected,
-        },
-    }
-}
-
-fn store_session_operation_state(
-    state: HarnessSessionOperationState,
-) -> StoredHarnessSessionOperationState {
-    match state {
-        HarnessSessionOperationState::Prepared => StoredHarnessSessionOperationState::Prepared,
-        HarnessSessionOperationState::Uncertain => StoredHarnessSessionOperationState::Uncertain,
-        HarnessSessionOperationState::Ready(session) => {
-            StoredHarnessSessionOperationState::Ready(session)
-        }
-        HarnessSessionOperationState::Stopped => StoredHarnessSessionOperationState::Stopped,
-        HarnessSessionOperationState::Rejected => StoredHarnessSessionOperationState::Rejected,
-    }
 }
 
 fn store_ready(ready: HarnessReadySession) -> StoredHarnessReadySession {

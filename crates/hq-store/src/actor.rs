@@ -322,7 +322,7 @@ enum HarnessRequest {
     },
     SessionOperation {
         operation_id: OperationId,
-        reply: SyncSender<Result<Option<crate::StoredHarnessSessionOperation>, StoreError>>,
+        reply: SyncSender<Result<Option<crate::HarnessSessionOperation>, StoreError>>,
     },
 }
 
@@ -707,7 +707,7 @@ impl HarnessStateHandle {
     pub fn session_operation(
         &self,
         operation_id: OperationId,
-    ) -> Result<Option<crate::StoredHarnessSessionOperation>, StoreError> {
+    ) -> Result<Option<crate::HarnessSessionOperation>, StoreError> {
         let (reply, response) = mpsc::sync_channel(1);
         self.requests
             .send(Request::Harness(Box::new(

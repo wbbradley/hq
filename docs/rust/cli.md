@@ -9,8 +9,9 @@ hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>
 The installed commands currently include `help`, `version`, `agents`, `identity`, `config`,
 `human create|show|select|invite|join|devices|revoke`,
 `peer add|list|distrust`, `mailbox list|grant|revoke`, and
-`relay add|list|remove|sync|status|repair`, and
-`agent list|show|create|current|select|rename`, the agent-side
+`relay add|list|remove|sync|status|repair`,
+`agent list|show|create|current|select|rename|retire`, and
+`harness start|resume|stop`, the agent-side
 `ask|send|wait|poll`, human-side `get|list|answer|cancel|archive|restore`, `mailboxes`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
@@ -133,6 +134,18 @@ blocked and HQ authority intact; only an explicit `--force` retry may revoke it,
 response loss, nonterminal sagas repair after restart, and catalog history retains the retired name.
 Managed runtime start/resume/stop remains a separate node-owned workflow.
 
+`harness start --agent NAME|AGENT_ID --provider PROVIDER [--dir PATH]` and `harness resume
+--agent NAME|AGENT_ID --provider PROVIDER --session SESSION [--dir PATH]` resolve exactly one active
+named agent, canonicalize the supplied directory (or caller working directory), and copy the complete
+caller environment at the local-API boundary. Environment names remain UTF-8 while values are
+preserved as binary sensitive data. `resume` names one exact provider session and never falls back to
+start. `harness stop --agent NAME|AGENT_ID --provider PROVIDER` stops only the local runtime and does
+not erase durable history. Every invocation generates one operation identity and derives its digest
+from that identity, timestamp, agent, provider, action, absolute directory, and complete environment;
+the reconnecting client replays the exact framed request after response loss. Output is a passive
+public-field view with `ready`, `stopped`, `rejected`, or `uncertain` status. Rejection exits 1;
+uncertainty exits 3 and exposes both operation and reconciliation identities without launch inputs.
+
 `agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
 for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert
 dependency-incomplete history, and the boundary that humans own identity, authority, durable
@@ -167,8 +180,9 @@ one Unix transport and `hq-local-api::ReconnectingClient`. The transport perform
 length-prefixed reads and complete writes. The runner allows one response-producing write at a
 time, renegotiates each connection, caps attempts and wall time, and correlates errors with their
 semantic operation. Ordinary requests are never replayed after response loss. Exact mutation,
-project-command, and named-agent-retirement frames retain their stable identities and replay
-byte-for-byte until a definite typed result or the explicit bound is reached. Snapshot-oriented clients may request a fresh view
+project-command, named-agent-retirement, and managed-session frames retain their stable identities
+and replay byte-for-byte. Managed-session calls return explicit uncertainty for caller-visible
+reconciliation rather than waiting for a fabricated definite result. Snapshot-oriented clients may request a fresh view
 after negotiation; command-only clients do not issue an unsolicited snapshot.
 
 CLI production code has no canonical storage, signer, relay, resource, harness-provider, or SQLite

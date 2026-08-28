@@ -54,12 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[runtime/high] Expose the managed `hq harness` client workflow** — Add local-API-only CLI start,
-  exact-resume, and stop commands that resolve one named agent, copy the caller environment and
-  absolute launch directory at the boundary, derive stable exact request identity, autostart the
-  node, and render ready/stopped/rejected/uncertain outcomes. Test parsing, response loss, stale
-  sessions, non-UTF-8 environment values, node restart, machine output, and architecture isolation.
-
 - **[cli/high] Implement project/resource/worktree commands and audit non-TUI parity** — Expose
   project list/show/create/send/open/activate/handoff/close/archive/unarchive, desired-resource
   add/remove/replace/check, remote-command progress, and recoverable worktree provisioning through

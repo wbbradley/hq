@@ -1025,6 +1025,45 @@ fn blocking_runner_replays_mutation_bytes_after_response_loss() {
 }
 
 #[test]
+fn blocking_runner_returns_explicitly_uncertain_agent_session_outcome() {
+    let request = agent_session(92);
+    let hello = WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([92; 32])))
+        .encode_frame()
+        .expect("hello frame");
+    let uncertain = WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(1).expect("request id"),
+        ResponseResult::AgentSession(EffectOutcomeDto::Uncertain(Id32::new([93; 32]))),
+    ))
+    .encode_frame()
+    .expect("uncertain response");
+    let transport = ScriptedTransport {
+        reads: VecDeque::from([Ok(hello), Ok(snapshot_response(2, 1)), Ok(uncertain)]),
+        writes: Vec::new(),
+        connects: 0,
+        failed_connects_remaining: 0,
+        closes: 0,
+    };
+    let mut runner = BlockingClientRunner::new(
+        BlockingClientConfig {
+            deadline: Duration::from_secs(1),
+            max_connection_attempts: NonZeroUsize::new(2).expect("nonzero"),
+        },
+        client(),
+        transport,
+    )
+    .expect("runner config");
+
+    assert!(matches!(
+        runner.agent_session(request).expect("uncertain outcome"),
+        ClientEvent::AgentSession {
+            operation_id,
+            outcome: EffectOutcomeDto::Uncertain(reconciliation),
+        } if operation_id == OperationId::from_bytes([92; 32])
+            && reconciliation == Id32::new([93; 32])
+    ));
+}
+
+#[test]
 fn blocking_runner_returns_the_in_flight_initial_snapshot_then_refreshes_again() {
     let hello = WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([90; 32])))
         .encode_frame()

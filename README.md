@@ -130,20 +130,20 @@ codex --version
 hq identity init
 ```
 
-Launch or resume a named agent in the current directory, optionally with an initial prompt:
+Start, exactly resume, or stop a named agent:
 
 ```sh
-hq harness --provider codex --agent fred
-hq harness --provider codex --agent fred --cwd . "Inspect the failing tests and propose a fix"
-hq harness --provider codex --agent fred --new-session
-hq harness --provider codex --agent fred --session 019c0000-0000-7000-8000-000000000001
+hq harness start --agent fred --provider codex
+hq harness start --agent fred --provider codex --dir .
+hq harness resume --agent fred --provider codex --session 019c0000-0000-7000-8000-000000000001
+hq harness stop --agent fred --provider codex
 ```
 
-`--provider ID` and `--agent NAME` are required. `--cwd` defaults to the invoking client's current directory, and relative values are resolved there before the request is sent. The daemon validates the absolute path on its own machine, starts or resumes the exact requested session through the selected factory, and changes the durable selection only after the provider acknowledges success. A missing session is an actionable failure and never silently creates a replacement.
+`--provider ID` and `--agent NAME|AGENT_ID` are required. `--dir` defaults to the invoking client's current directory, and relative values are canonicalized there before the request is sent. The daemon starts or resumes the exact requested session through the selected factory and changes the durable selection only after the provider acknowledges success. A missing session is a typed rejection and never silently creates a replacement.
 
-The client transmits its complete environment snapshot as a sensitive local-RPC input so the selected provider sees the caller's credentials, `PATH`, and configuration. After a successful launch, the daemon retains one exact last-known-good launch template per agent in memory so an offline agent can be resumed with the same environment, cwd, repository context, and provider options. Templates are replaced and wiped in memory and are never added to SQLite, signed events, mutation receipts, the ledger, Nostr, HQ-authored log attributes, diagnostics, status, or RPC results. The protected diagnostic log does capture Codex app-server stderr verbatim, so anything the child itself prints there is retained. The adapter-scoped `--codex-yolo` option sets `approvalPolicy` to `never` and `sandbox` to `danger-full-access` on both new and resumed Codex threads; it is rejected for other providers. Set its local default with `hq config set codex.yolo true` and override it for one launch with `--codex-yolo=false`.
+For start and resume, the client transmits its complete environment snapshot as a sensitive local-API input so the selected provider sees the caller's credentials, `PATH`, and configuration. Environment values remain binary and are never rendered. The launch path and environment are not added to SQLite, signed events, mutation receipts, the ledger, Nostr, HQ-authored log attributes, diagnostics, status, or API results. The protected diagnostic log does capture Codex app-server stderr verbatim, so anything the child itself prints there is retained.
 
-The CLI waits for a definitive running or failed acknowledgement, prints the agent, provider, selected session, directory, and status, and exits. The generic bridge and provider instance remain owned by the daemon; they survive CLI or TUI exit and stop cleanly when the daemon stops or restarts. Workers remain offline after a node restart until needed. Committing a local human message or answer to an offline named harness agent automatically attempts to resume its selected session with that session's provider. While the daemon remains alive, HQ reuses the exact last-known-good launch template. After a daemon restart, the durable selected session and cwd are combined with the sending client's current environment and current provider defaults. The original initial prompt is never replayed. Message creation remains successful and queued if the asynchronous wake fails.
+The CLI prints ready, stopped, rejected, or uncertain state and exits. Rejection exits 1; uncertainty exits 3 and includes the exact operation and reconciliation identities. Request bytes remain stable across response loss. The generic bridge and provider instance remain owned by the daemon; they survive CLI exit and stop cleanly when the daemon stops or restarts. Workers remain offline after a node restart until needed.
 
 A newly created agent has no selected session until its first successful `thread/start`. New threads receive developer instructions naming the durable agent and requiring structured human input; exact resumes do not replace the thread's instructions. Starting another thread preserves historical bindings and their exact repository/directory context, creation time, and most-recent selection time. One thread can never be reassigned to another agent.
 
@@ -355,7 +355,9 @@ hq relay remove WSS_URL
 hq status [--json]
 hq sync
 hq daemon run|status|stop|restart
-hq harness --provider ID --agent NAME [--cwd PATH] [--new-session | --session SESSION_ID] [--codex-yolo] [INITIAL PROMPT...]
+hq harness start --agent NAME|AGENT_ID --provider ID [--dir PATH]
+hq harness resume --agent NAME|AGENT_ID --provider ID --session SESSION_ID [--dir PATH]
+hq harness stop --agent NAME|AGENT_ID --provider ID
 hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
 ```
