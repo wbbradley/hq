@@ -1,5 +1,38 @@
 # Completed
 
+## 2026-08-28 — Existing-resource project creation CLI
+
+Added `project create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]` through
+the typed local API and project workflow. Creation allocates stable command-derived workflow,
+project, mailbox, and resource identities, binds the exact request digest, carries no fabricated
+previous head, and identifies the existing directory on the authoritative home before committing
+one initially open project with a healthy primary claim. Passive application, protocol, and CLI
+records expose public fields; invariant-bearing identities, locators, and live capabilities remain
+validated or opaque.
+
+Remote creation now uses the same durable request/receipt/outcome path as existing-project control.
+The clean canonical and rebuildable projection shapes carry optional expected and received heads,
+so a remote home can acknowledge creation before the project exists and can still author a definite
+rejection. Committed outcomes bind the new canonical head. These unshipped protocol and clean-schema
+changes were made in place: storage remains v13 and local API remains v1, with no migration,
+compatibility reader, or accessor facade.
+
+Parser, help, request identity, canonical body, workflow replay, remote routing, response-loss,
+nullable projection round-trip, stale-home, path identity, concurrent real-process claim,
+machine-output, and restart tests pass. Formatting, locked workspace tests/build, strict Clippy,
+architecture, protocol, causal, behavior-ledger, dependency, and bounded protocol-fuzz gates pass.
+The full parallel CLI suite exposed one intermittent inherited-output wait in its pre-existing
+concurrent-readiness test; stopping that test's single expected daemon allowed the suite to finish,
+and the focused test immediately passed cleanly. A final process-table check found no HQ daemon.
+
+### Original plan entry
+
+- **[cli/high] Add project creation over an existing resource** — Extend the project workflow port
+  with exact identification of an existing resource, then add `project create` with local or
+  selected remote home, deterministic mailbox/project identity, and exact no-head replay. Test
+  response loss, concurrent or changed creation, stale home authority, restart, path identity, and
+  machine output without adding a storage/local-API version or migration.
+
 ## 2026-08-28 — Authoritative project catalog CLI
 
 Added local-API-only `project list` and `project show PROJECT_ID` commands to the installed Rust

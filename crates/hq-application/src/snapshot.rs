@@ -644,12 +644,12 @@ pub enum ClientRemoteCommandStage {
     Queued,
     Received {
         receipt_fact: FactId,
-        received_head: FactId,
+        received_head: Option<FactId>,
         received_at: Timestamp,
     },
     Terminal {
         receipt_fact: FactId,
-        received_head: FactId,
+        received_head: Option<FactId>,
         received_at: Timestamp,
         outcome_fact: FactId,
         result: RemoteCommandResult,
@@ -814,7 +814,7 @@ pub enum ClientProjection {
         account_id: AccountId,
         project_id: ProjectId,
         target_home: InstallationId,
-        expected_head: FactId,
+        expected_head: Option<FactId>,
         operation: hq_domain::OperationCorrelation,
         body: ContentText,
         issued_at: Timestamp,

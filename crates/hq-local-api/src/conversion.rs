@@ -25,8 +25,8 @@ use hq_application::{
     ConversationEntry, ConversationKey, DomainHealth, EffectOutcome, EffectRequest,
     EvidenceIngestOutcome, FactMutation, HealthDomain, LaunchEnvironment, MutationAttempt,
     MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
-    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, RelayAccess,
-    RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
+    RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
     ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
     SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
 };
@@ -601,7 +601,7 @@ pub fn snapshot_to_v1(
                 account_id: id32(account_id.as_bytes()),
                 project_id: id32(project_id.as_bytes()),
                 target_home: id32(target_home.as_bytes()),
-                expected_head: id32(expected_head.as_bytes()),
+                expected_head: expected_head.map(|head| id32(head.as_bytes())),
                 operation_provider: operation.provider().as_str().to_owned(),
                 operation_session: operation.session().as_str().to_owned(),
                 operation_id: id32(operation.operation().as_bytes()),
@@ -908,11 +908,11 @@ pub(crate) fn resource_effect_to_v1(
 pub fn project_command_from_v1(
     request: ProjectCommandRequestDto,
 ) -> Result<ProjectCommandRequest, ValueError> {
-    let provisioning = matches!(
+    let creation = matches!(
         &request.action,
-        ProjectCommandActionDto::ProvisionWorktree(_)
+        ProjectCommandActionDto::Create(_) | ProjectCommandActionDto::ProvisionWorktree(_)
     );
-    if provisioning == request.expected_head.is_some() {
+    if creation == request.expected_head.is_some() {
         return Err(ValueError::InvalidValueCombination);
     }
     Ok(ProjectCommandRequest {
@@ -1037,6 +1037,20 @@ fn project_action_from_v1(
     action: ProjectCommandActionDto,
 ) -> Result<ProjectCommandAction, ValueError> {
     Ok(match action {
+        ProjectCommandActionDto::Create(request) => {
+            ProjectCommandAction::Create(ProjectCreationRequest {
+                mailbox_id: MailboxId::from_bytes(request.mailbox_id.bytes()),
+                project_name: ShortText::new(request.project_name)
+                    .map_err(|_| ValueError::InvalidText)?,
+                brief: request
+                    .brief
+                    .map(hq_domain::ContentText::new)
+                    .transpose()
+                    .map_err(|_| ValueError::InvalidText)?,
+                resource_id: ResourceId::from_bytes(request.resource_id.bytes()),
+                resource: locator_from_v1(request.resource)?,
+            })
+        }
         ProjectCommandActionDto::Open => ProjectCommandAction::Open,
         ProjectCommandActionDto::Activate {
             agent_id,
@@ -1159,7 +1173,7 @@ fn remote_progress_to_v1(stage: &ClientRemoteCommandStage) -> RemoteCommandProgr
             received_at,
         } => RemoteCommandProgressDto::Received {
             receipt_fact: id32(receipt_fact.as_bytes()),
-            received_head: id32(received_head.as_bytes()),
+            received_head: received_head.map(|head| id32(head.as_bytes())),
             received_at_unix_millis: received_at.as_unix_millis(),
         },
         ClientRemoteCommandStage::Terminal {
@@ -1171,7 +1185,7 @@ fn remote_progress_to_v1(stage: &ClientRemoteCommandStage) -> RemoteCommandProgr
             runtime,
         } => RemoteCommandProgressDto::Terminal {
             receipt_fact: id32(receipt_fact.as_bytes()),
-            received_head: id32(received_head.as_bytes()),
+            received_head: received_head.map(|head| id32(head.as_bytes())),
             received_at_unix_millis: received_at.as_unix_millis(),
             outcome_fact: id32(outcome_fact.as_bytes()),
             result: match result {

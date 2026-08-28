@@ -4,7 +4,7 @@
 
 use std::num::NonZeroU64;
 
-use hq_application::{ProjectCommandAction, ProjectCommandRequest};
+use hq_application::{ProjectCommandAction, ProjectCommandRequest, ProjectCreationRequest};
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, BoundedText, CommandDigest, CommandId,
     ContentText, DispatchId, ErrorCode, FactId, InstallationId, MailboxId, MessageId, OperationId,
@@ -35,6 +35,30 @@ fn action_body_round_trips_canonically_without_behavioral_text_parsing() {
         launch_directory: locator("/repo/worktree"),
         force_takeover: true,
     };
+
+    let encoded = encode_project_command_action(&action).expect("action encodes");
+    assert_eq!(
+        decode_project_command_action(&encoded).expect("action decodes"),
+        action
+    );
+    assert_eq!(
+        encode_project_command_action(
+            &decode_project_command_action(&encoded).expect("canonical action decodes")
+        )
+        .expect("canonical action re-encodes"),
+        encoded
+    );
+}
+
+#[test]
+fn existing_resource_creation_body_round_trips_canonically() {
+    let action = ProjectCommandAction::Create(ProjectCreationRequest {
+        mailbox_id: MailboxId::from_bytes([3; 32]),
+        project_name: ShortText::new("project").expect("name"),
+        brief: Some(ContentText::new("brief").expect("brief")),
+        resource_id: ResourceId::from_bytes([4; 32]),
+        resource: locator("/repo/worktree"),
+    });
 
     let encoded = encode_project_command_action(&action).expect("action encodes");
     assert_eq!(

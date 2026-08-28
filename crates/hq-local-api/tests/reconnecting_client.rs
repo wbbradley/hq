@@ -15,9 +15,9 @@ use hq_local_api::protocol::v1::{
     ClientHello, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse, Id32,
     InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
     MutationAttemptDto, MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, Request, RequestId, ResourceLocatorDto, ResourceSchemeDto,
-    ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto,
-    SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
+    ProjectCommandRequestDto, ProjectCreationRequestDto, Request, RequestId, ResourceLocatorDto,
+    ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
+    SessionControlDto, SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
     agent_session_request_digest,
 };
 use hq_local_api::{
@@ -134,9 +134,19 @@ fn project_command(command: u8, digest: u8) -> ProjectCommandRequestDto {
         account_id: Id32::new([3; 32]),
         project_id: Id32::new([4; 32]),
         home: Id32::new([5; 32]),
-        expected_head: Some(Id32::new([6; 32])),
+        expected_head: None,
         issued_at_unix_millis: 1_700_000_000_000,
-        action: ProjectCommandActionDto::Open,
+        action: ProjectCommandActionDto::Create(ProjectCreationRequestDto {
+            mailbox_id: Id32::new([6; 32]),
+            project_name: "existing".to_owned(),
+            brief: None,
+            resource_id: Id32::new([7; 32]),
+            resource: ResourceLocatorDto::new(
+                ResourceSchemeDto::WorkingTree,
+                "/work/existing".to_owned(),
+            )
+            .expect("resource locator"),
+        }),
     }
 }
 

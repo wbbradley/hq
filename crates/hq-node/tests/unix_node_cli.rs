@@ -722,6 +722,140 @@ fn project_catalog_reads_authoritative_state_and_survives_restart() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "complete real-node creation race and restart"
+)]
+fn project_create_claims_one_existing_path_and_survives_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("existing-worktree");
+    fs::create_dir(&worktree).expect("existing working tree");
+    initialize_identity(&state_root);
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+
+    let unknown_home = encode_hex([0xee; 32]);
+    let stale_home = admin_output(
+        &state_root,
+        "project",
+        &[
+            "create",
+            "Wrong home",
+            "--path",
+            worktree.to_str().expect("UTF-8 test path"),
+            "--home",
+            &unknown_home,
+        ],
+    );
+    assert_eq!(stale_home.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&stale_home.stderr).contains("project.state_unavailable"),
+        "stale home stderr: {:?}",
+        stale_home.stderr
+    );
+
+    let first_root = state_root.clone();
+    let first_path = worktree.clone();
+    let first = std::thread::spawn(move || {
+        admin_output(
+            &first_root,
+            "project",
+            &[
+                "create",
+                "First claimant",
+                "--brief",
+                "created over an existing path",
+                "--path",
+                first_path.to_str().expect("UTF-8 test path"),
+            ],
+        )
+    });
+    let second_root = state_root.clone();
+    let second_path = worktree.clone();
+    let second = std::thread::spawn(move || {
+        admin_output(
+            &second_root,
+            "project",
+            &[
+                "create",
+                "Second claimant",
+                "--path",
+                second_path.to_str().expect("UTF-8 test path"),
+            ],
+        )
+    });
+    let first = first.join().expect("first creator");
+    let second = second.join().expect("second creator");
+    assert_eq!(
+        usize::from(first.status.success()) + usize::from(second.status.success()),
+        1,
+        "exactly one create succeeds; first={first:?} second={second:?}"
+    );
+    let (created, rejected) = if first.status.success() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(rejected.status.code(), Some(1));
+    let created: serde_json::Value = serde_json::from_slice(&created.stdout).expect("created JSON");
+    let rejected: serde_json::Value =
+        serde_json::from_slice(&rejected.stdout).expect("rejected JSON");
+    assert_eq!(created["kind"], "project_operation");
+    assert_eq!(created["data"]["operation"], "create");
+    assert_eq!(created["data"]["status"], "completed");
+    assert_eq!(
+        created["data"]["project_id"].as_str().map(str::len),
+        Some(64)
+    );
+    assert_eq!(
+        created["data"]["project_head"].as_str().map(str::len),
+        Some(64)
+    );
+    assert_eq!(rejected["kind"], "project_operation");
+    assert_eq!(rejected["data"]["status"], "rejected");
+    assert_eq!(
+        rejected["data"]["error_code"],
+        "project_creation_resource_conflict"
+    );
+
+    let listed = project_json(&state_root, &["list"]);
+    assert_eq!(listed["data"]["projects"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        listed["data"]["projects"][0]["resources"][0]["display_locator"]["value"],
+        worktree.to_str().expect("UTF-8 test path")
+    );
+    assert_eq!(
+        listed["data"]["projects"][0]["resources"][0]["canonical_locator"]["value"],
+        fs::canonicalize(&worktree)
+            .expect("canonical worktree")
+            .to_str()
+            .expect("UTF-8 canonical path")
+    );
+    let project_id = created["data"]["project_id"]
+        .as_str()
+        .expect("project id")
+        .to_owned();
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let shown = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(shown["data"]["projects"][0]["project_id"], project_id);
+    assert_eq!(shown["data"]["projects"][0]["lifecycle"], "open");
+
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
+}
+
+#[test]
 fn managed_harness_stop_and_stale_exact_resume_are_machine_readable_across_restart() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");

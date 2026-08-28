@@ -9,7 +9,8 @@ use std::{
 
 use hq_application::{
     ApplicationError, ApplicationErrorCode, EffectOutcome, EffectRequest, ProjectCommandAction,
-    ProjectCommandOutcome, ProjectCommandRequest, WorktreeProvisioningRequest,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCreationRequest,
+    WorktreeProvisioningRequest,
 };
 use hq_domain::{
     AccountId, BoundedText, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode,
@@ -87,13 +88,15 @@ struct ScriptedCanonical {
 
 impl ScriptedCanonical {
     fn committing() -> Self {
+        Self::with_outcomes([CanonicalProjectMutationOutcome::Committed {
+            project_head: FactId::from_bytes([99; 32]),
+        }])
+    }
+
+    fn with_outcomes(outcomes: impl IntoIterator<Item = CanonicalProjectMutationOutcome>) -> Self {
         Self {
             mutations: Arc::new(Mutex::new(Vec::new())),
-            outcomes: Arc::new(Mutex::new(VecDeque::from([
-                CanonicalProjectMutationOutcome::Committed {
-                    project_head: FactId::from_bytes([99; 32]),
-                },
-            ]))),
+            outcomes: Arc::new(Mutex::new(outcomes.into_iter().collect())),
         }
     }
 }
@@ -209,6 +212,60 @@ impl ProjectResourcePort for IdentifiedResource {
     ) -> Result<EffectOutcome<ProjectLaunchObservation>, ApplicationError> {
         unavailable()
     }
+}
+
+#[test]
+fn existing_resource_creation_identifies_then_replays_exact_no_head_mutation() {
+    let request = existing_creation_request();
+    let ProjectCommandAction::Create(creation) = &request.action else {
+        panic!("creation request")
+    };
+    let resource = ProjectResource {
+        resource_id: creation.resource_id,
+        display_locator: creation.resource.clone(),
+        canonical_locator: locator("/private/var/work/existing"),
+        health: ResourceHealth::Healthy,
+    };
+    let canonical = ScriptedCanonical::with_outcomes([
+        CanonicalProjectMutationOutcome::Uncertain,
+        CanonicalProjectMutationOutcome::Committed {
+            project_head: FactId::from_bytes([99; 32]),
+        },
+    ]);
+    let manager = hq_projects::ProjectWorkflowManager::new(
+        MemoryStore::default(),
+        canonical.clone(),
+        UnusedRuntime,
+        IdentifiedResource(resource.clone()),
+    );
+
+    assert!(matches!(
+        manager.control(request.clone()).expect("uncertain create"),
+        ProjectCommandOutcome::Reconcilable { .. }
+    ));
+    assert_eq!(
+        manager.control(request.clone()).expect("replayed create"),
+        ProjectCommandOutcome::Completed {
+            operation_id: request.operation_id,
+            project_head: FactId::from_bytes([99; 32]),
+            runtime: None,
+        }
+    );
+    let mutations = canonical.mutations.lock().expect("mutations");
+    assert_eq!(mutations.len(), 2);
+    assert_eq!(mutations[0], mutations[1]);
+    assert_eq!(mutations[0].expected_head, None);
+    assert!(matches!(
+        &mutations[0].action,
+        CanonicalProjectMutationAction::Create {
+            mailbox_id,
+            name,
+            resource: created,
+            ..
+        } if *mailbox_id == creation.mailbox_id
+            && name == &creation.project_name
+            && created == &resource
+    ));
 }
 
 #[derive(Clone, Copy)]
@@ -386,6 +443,28 @@ fn provisioning_request() -> ProjectCommandRequest {
             destination,
             branch: ShortText::new("feature/exact").expect("branch"),
             create_branch: true,
+        }),
+    };
+    request.request_digest = project_command_request_digest(&request).expect("digest");
+    request
+}
+
+fn existing_creation_request() -> ProjectCommandRequest {
+    let mut request = ProjectCommandRequest {
+        command_id: CommandId::from_bytes([0x11; 32]),
+        operation_id: OperationId::from_bytes([0x12; 32]),
+        request_digest: CommandDigest::from_bytes([0; 32]),
+        account_id: AccountId::from_bytes([0x13; 32]),
+        project_id: ProjectId::from_bytes([0x14; 32]),
+        home: InstallationId::from_bytes([0x15; 32]),
+        expected_head: None,
+        issued_at: Timestamp::from_unix_millis(16),
+        action: ProjectCommandAction::Create(ProjectCreationRequest {
+            mailbox_id: MailboxId::from_bytes([0x17; 32]),
+            project_name: ShortText::new("existing").expect("name"),
+            brief: None,
+            resource_id: ResourceId::from_bytes([0x18; 32]),
+            resource: locator("/var/work/existing"),
         }),
     };
     request.request_digest = project_command_request_digest(&request).expect("digest");

@@ -584,7 +584,7 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             digest: id(digest),
             project: id(project_id),
             target_home: id(target_home),
-            expected_head: id(expected_head),
+            expected_head: model::RequiredOption(expected_head.as_ref().map(id)),
             operation: operation(value),
             body: content_text(body),
         }),
@@ -598,7 +598,7 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             command: id(command_id),
             digest: id(digest),
             project: id(project_id),
-            received_head: id(received_head),
+            received_head: model::RequiredOption(received_head.as_ref().map(id)),
             received_at: milliseconds(*received_at),
         }),
         Input::RemoteProjectCommandOutcome {

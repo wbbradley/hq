@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use hq_application::{
     ApplicationError, ApplicationErrorCode, CommitFacts, DomainSnapshot, FactMutation, FactPlan,
-    MutationAttempt, MutationDecision, MutationOutcome, ProjectCommandRequest, QueryDomain,
+    MutationAttempt, MutationDecision, MutationOutcome, ProjectCommandAction,
+    ProjectCommandRequest, QueryDomain,
 };
 use hq_domain::{
     AccountId, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, CommandDigest,
@@ -177,25 +178,30 @@ fn request_plan(
     request: &ProjectCommandRequest,
     body: hq_domain::ContentText,
 ) -> Result<FactPlan, DomainError> {
-    let Some(expected_head) = request.expected_head else {
-        return Err(domain_error(
-            ErrorCategory::InvalidInput,
-            "remote_project_creation_requires_home",
-        ));
-    };
-    let project = project_view(snapshot, request.project_id)?;
-    if project.home != request.home {
-        return Err(domain_error(
-            ErrorCategory::Unauthorized,
-            "project_wrong_home",
-        ));
-    }
-    if project.head != expected_head {
-        return Err(domain_error(ErrorCategory::Conflict, "project_stale_head"));
-    }
     let active_human = active_human_authority(snapshot, request.account_id, requester)
         .ok_or_else(|| domain_error(ErrorCategory::Unauthorized, "project_inactive_human"))?;
-    let mut parents = BTreeSet::from([project.head, active_human]);
+    let mut parents = BTreeSet::from([active_human]);
+    if let Some(expected_head) = request.expected_head {
+        let project = project_view(snapshot, request.project_id)?;
+        if project.home != request.home {
+            return Err(domain_error(
+                ErrorCategory::Unauthorized,
+                "project_wrong_home",
+            ));
+        }
+        if project.head != expected_head {
+            return Err(domain_error(ErrorCategory::Conflict, "project_stale_head"));
+        }
+        parents.insert(project.head);
+    } else if !matches!(
+        request.action,
+        ProjectCommandAction::Create(_) | ProjectCommandAction::ProvisionWorktree(_)
+    ) {
+        return Err(domain_error(
+            ErrorCategory::InvalidInput,
+            "project_remote_creation_action_required",
+        ));
+    }
     parents.extend(
         snapshot
             .project()
@@ -241,7 +247,7 @@ fn request_plan(
             digest: request.request_digest,
             project_id: request.project_id,
             target_home: request.home,
-            expected_head,
+            expected_head: request.expected_head,
             operation: routing_correlation(request.operation_id)?,
             body,
         },
@@ -262,19 +268,22 @@ fn receipt_plan(
             "project_remote_invalid_receipt",
         ));
     }
-    let project = project_view(snapshot, command.project_id)?;
-    if project.home != home {
-        return Err(domain_error(
-            ErrorCategory::Unauthorized,
-            "project_remote_wrong_home",
-        ));
-    }
+    let received_head = if command.expected_head.is_some() {
+        let project = project_view(snapshot, command.project_id)?;
+        if project.home != home {
+            return Err(domain_error(
+                ErrorCategory::Unauthorized,
+                "project_remote_wrong_home",
+            ));
+        }
+        Some(project.head)
+    } else {
+        None
+    };
     let root = installation_root(snapshot, home)?;
-    let causal = project_home_causal(
-        BTreeSet::from([command.request_fact, project.head, root]),
-        root,
-        command.request_fact,
-    )?;
+    let mut parents = BTreeSet::from([command.request_fact, root]);
+    parents.extend(received_head);
+    let causal = project_home_causal(parents, root, command.request_fact)?;
     Ok(FactPlan::new(
         home,
         received_at,
@@ -287,10 +296,17 @@ fn receipt_plan(
             command_id,
             digest: command.digest,
             project_id: command.project_id,
-            received_head: project.head,
+            received_head,
             received_at,
         },
-        *remote_mutation_digest(command_id, b"receipt-plan", &[project.head.as_bytes()]).as_bytes(),
+        *remote_mutation_digest(
+            command_id,
+            b"receipt-plan",
+            &[received_head
+                .as_ref()
+                .map_or(&[][..], |head| &head.as_bytes()[..])],
+        )
+        .as_bytes(),
     ))
 }
 
@@ -319,9 +335,9 @@ fn outcome_plan(
             "project_remote_wrong_home",
         ));
     }
-    let project = project_view(snapshot, command.project_id)?;
     let mut parents = BTreeSet::from([command.request_fact, receipt_fact]);
     if let RemoteCommandResult::Committed(head) = result {
+        let project = project_view(snapshot, command.project_id)?;
         if head != project.head {
             return Err(domain_error(
                 ErrorCategory::Conflict,
@@ -377,7 +393,7 @@ fn command_record_from_view(
         account_id: view.account_id,
         project_id: view.project_id,
         home: view.target_home,
-        expected_head: Some(view.expected_head),
+        expected_head: view.expected_head,
         issued_at: view.issued_at,
         action,
     };
@@ -626,10 +642,10 @@ mod tests {
 
     use std::collections::{BTreeMap, BTreeSet};
 
-    use hq_application::ProjectionSnapshot;
+    use hq_application::{ProjectCreationRequest, ProjectionSnapshot};
     use hq_domain::{
         BoundedText, EncryptionPublicKey, InstallationAddress, MailboxAddress, MailboxId,
-        ResourceLocator, ResourceScheme, ShortText, SigningPublicKey,
+        ResourceId, ResourceLocator, ResourceScheme, ShortText, SigningPublicKey,
     };
     use hq_reducer::{InstallationView, ProjectLifecycle, ProjectView};
 
@@ -637,36 +653,69 @@ mod tests {
     use crate::ProjectCommandAction;
 
     #[test]
-    fn project_creation_is_never_routed_to_a_non_home_installation() {
+    fn project_creation_routes_without_a_head_and_receipts_absent_project_state() {
         let fixture = Fixture::new();
-        let snapshot = fixture.snapshot(RemoteCommandStage::Queued);
         let mut request = fixture.request();
+        request.project_id = ProjectId::from_bytes([90; 32]);
         request.expected_head = None;
-        request.action =
-            ProjectCommandAction::ProvisionWorktree(hq_application::WorktreeProvisioningRequest {
-                mailbox_id: MailboxId::from_bytes([90; 32]),
-                project_name: ShortText::new("created").expect("name"),
-                brief: None,
-                source: ResourceLocator::new(
-                    ResourceScheme::WorkingTree,
-                    BoundedText::new("/repo").expect("path"),
-                ),
-                destination: ResourceLocator::new(
-                    ResourceScheme::WorkingTree,
-                    BoundedText::new("/repo/worktree").expect("path"),
-                ),
-                branch: ShortText::new("feature").expect("branch"),
-                create_branch: true,
-            });
+        request.action = ProjectCommandAction::Create(ProjectCreationRequest {
+            mailbox_id: MailboxId::from_bytes([91; 32]),
+            project_name: ShortText::new("created").expect("name"),
+            brief: None,
+            resource_id: ResourceId::from_bytes([92; 32]),
+            resource: ResourceLocator::new(
+                ResourceScheme::WorkingTree,
+                BoundedText::new("/repo/existing").expect("path"),
+            ),
+        });
         request.request_digest = project_command_request_digest(&request).expect("request digest");
+        let snapshot = fixture.snapshot_for_request(RemoteCommandStage::Queued, &request);
         let body = encode_project_command_action(&request.action).expect("action encodes");
 
-        let error = request_plan(&snapshot, fixture.requester, &request, body)
-            .expect_err("creation must execute at its home");
-        assert_eq!(
-            error.code().as_str(),
-            "remote_project_creation_requires_home"
+        let request_fact =
+            request_plan(&snapshot, fixture.requester, &request, body).expect("request plan");
+        assert!(!request_fact.causal().parents().contains(&fixture.head));
+        assert!(matches!(
+            request_fact.payload(),
+            SemanticPayload::RemoteProjectCommandRequested {
+                expected_head: None,
+                project_id,
+                ..
+            } if *project_id == request.project_id
+        ));
+
+        let receipt = receipt_plan(
+            &snapshot,
+            fixture.home,
+            fixture.command,
+            fixture.received_at,
+        )
+        .expect("creation receipt");
+        assert!(!receipt.causal().parents().contains(&fixture.head));
+        assert!(matches!(
+            receipt.payload(),
+            SemanticPayload::RemoteProjectCommandReceipt {
+                received_head: None,
+                ..
+            }
+        ));
+
+        let received = fixture.snapshot_for_request(
+            RemoteCommandStage::Received {
+                receipt_fact: fixture.receipt_fact,
+                received_head: None,
+                received_at: fixture.received_at,
+            },
+            &request,
         );
+        outcome_plan(
+            &received,
+            fixture.home,
+            fixture.command,
+            RemoteCommandResult::Rejected(ErrorCode::new("conflict").expect("code")),
+            None,
+        )
+        .expect("rejected creation outcome does not require a project");
     }
 
     #[test]
@@ -715,7 +764,7 @@ mod tests {
 
         let received = fixture.snapshot(RemoteCommandStage::Received {
             receipt_fact: fixture.receipt_fact,
-            received_head: fixture.head,
+            received_head: Some(fixture.head),
             received_at: fixture.received_at,
         });
         let outcome = outcome_plan(
@@ -753,7 +802,7 @@ mod tests {
 
         let received = fixture.snapshot(RemoteCommandStage::Received {
             receipt_fact: fixture.receipt_fact,
-            received_head: fixture.head,
+            received_head: Some(fixture.head),
             received_at: fixture.received_at,
         });
         let error = outcome_plan(
@@ -817,6 +866,14 @@ mod tests {
 
         fn snapshot(&self, stage: RemoteCommandStage) -> DomainSnapshot {
             let request = self.request();
+            self.snapshot_for_request(stage, &request)
+        }
+
+        fn snapshot_for_request(
+            &self,
+            stage: RemoteCommandStage,
+            request: &ProjectCommandRequest,
+        ) -> DomainSnapshot {
             let body = encode_project_command_action(&request.action).expect("action encodes");
             let project = ProjectView {
                 root: FactId::from_bytes([14; 32]),
@@ -840,8 +897,8 @@ mod tests {
             let command = RemoteCommandView {
                 account_id: self.account,
                 digest: request.request_digest,
-                project_id: self.project,
-                expected_head: self.head,
+                project_id: request.project_id,
+                expected_head: request.expected_head,
                 target_home: self.home,
                 operation: routing_correlation(request.operation_id).expect("correlation"),
                 body,

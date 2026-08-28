@@ -699,7 +699,8 @@ object!(RemoteProjectCommandRequestedDto {
     digest: Hex32,
     project: Hex32,
     target_home: Hex32,
-    expected_head: Hex32,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    expected_head: RequiredOption<Hex32>,
     operation: OperationDto,
     body: ContentText,
 });
@@ -707,7 +708,8 @@ object!(RemoteProjectCommandReceiptDto {
     command: Hex32,
     digest: Hex32,
     project: Hex32,
-    received_head: Hex32,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    received_head: RequiredOption<Hex32>,
     received_at: Milliseconds,
 });
 object!(RemoteProjectCommandOutcomeDto {

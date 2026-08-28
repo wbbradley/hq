@@ -11,6 +11,8 @@ use crate::ApplicationError;
 /// Requested project operation. These variants are data; workflow policy lives in the owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProjectCommandAction {
+    /// Identify one existing resource and create an initially open project over it.
+    Create(ProjectCreationRequest),
     /// Open a closed project and acquire its advisory resource claims.
     Open,
     /// Activate one agent assignment, optionally resuming exact durable history.
@@ -85,6 +87,21 @@ pub enum ProjectCommandAction {
     ProvisionWorktree(WorktreeProvisioningRequest),
 }
 
+/// Exact declarative input for existing-resource project creation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectCreationRequest {
+    /// Project mailbox allocated deterministically by the caller.
+    pub mailbox_id: MailboxId,
+    /// Human-visible project name.
+    pub project_name: ShortText,
+    /// Optional project brief.
+    pub brief: Option<ContentText>,
+    /// Stable resource identity allocated deterministically by the caller.
+    pub resource_id: ResourceId,
+    /// Normalized existing resource spelling to identify on the selected home.
+    pub resource: ResourceLocator,
+}
+
 /// Exact declarative input for Git worktree provisioning.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorktreeProvisioningRequest {
@@ -119,7 +136,7 @@ pub struct ProjectCommandRequest {
     pub project_id: ProjectId,
     /// Immutable authoritative installation.
     pub home: InstallationId,
-    /// Expected canonical project head, absent only when provisioning a new project.
+    /// Expected canonical project head, absent only when creating a new project.
     pub expected_head: Option<FactId>,
     /// Caller-supplied semantic time.
     pub issued_at: Timestamp,

@@ -9,11 +9,12 @@ use std::{
 
 use hq_application::{
     ApplicationError, ControlProjects, ProjectCommandAction, ProjectCommandOutcome,
-    ProjectCommandRequest, ProjectCommandStage,
+    ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
 };
 use hq_domain::{
-    AccountId, CommandDigest, CommandId, ErrorCategory, ErrorCode, FactId, InstallationId,
-    OperationId, ProjectId, RemoteCommandResult, RuntimeObservation, Timestamp,
+    AccountId, BoundedText, CommandDigest, CommandId, ErrorCategory, ErrorCode, FactId,
+    InstallationId, MailboxId, OperationId, ProjectId, RemoteCommandResult, ResourceId,
+    ResourceLocator, ResourceScheme, RuntimeObservation, ShortText, Timestamp,
 };
 use hq_projects::{
     ProjectCommandRouter, RemoteProjectCommandPort, RemoteProjectCommandProgress,
@@ -111,10 +112,7 @@ impl RemoteProjectCommandPort for MemoryRemote {
         assert_eq!(record.request.command_id, command_id);
         record.progress = RemoteProjectCommandProgress::Received {
             receipt_fact: FactId::from_bytes([32; 32]),
-            received_head: record
-                .request
-                .expected_head
-                .expect("remote commands target an existing project"),
+            received_head: record.request.expected_head,
             received_at,
         };
         Ok(RemoteProjectFactOutcome::Committed)
@@ -258,6 +256,67 @@ fn restarted_home_repairs_a_retained_receipt_without_authoring_another() {
     );
     assert_eq!(local.calls.get(), 1);
     assert_eq!(remote.outcome_calls.get(), 1);
+}
+
+#[test]
+fn no_head_creation_routes_to_its_remote_home_and_reaches_a_terminal_result() {
+    let requester = InstallationId::from_bytes([9; 32]);
+    let home = InstallationId::from_bytes([8; 32]);
+    let mut request = request(home);
+    request.expected_head = None;
+    request.action = ProjectCommandAction::Create(ProjectCreationRequest {
+        mailbox_id: MailboxId::from_bytes([41; 32]),
+        project_name: ShortText::new("remote").expect("name"),
+        brief: None,
+        resource_id: ResourceId::from_bytes([42; 32]),
+        resource: ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new("/work/remote").expect("path"),
+        ),
+    });
+    request.request_digest = project_command_request_digest(&request).expect("request digest");
+    let project_head = FactId::from_bytes([43; 32]);
+    let outcome = ProjectCommandOutcome::Completed {
+        operation_id: request.operation_id,
+        project_head,
+        runtime: None,
+    };
+    let remote = MemoryRemote::default();
+    let local = ScriptedLocal {
+        calls: Rc::new(Cell::new(0)),
+        outcome: outcome.clone(),
+    };
+
+    let requester_router = ProjectCommandRouter::new(requester, local.clone(), remote.clone());
+    assert!(matches!(
+        requester_router
+            .control_project(request.clone())
+            .expect("queue creation"),
+        ProjectCommandOutcome::Accepted {
+            stage: ProjectCommandStage::AwaitingHome,
+            ..
+        }
+    ));
+    let home_router = ProjectCommandRouter::new(home, local.clone(), remote.clone());
+    assert_eq!(
+        home_router
+            .repair_remote(Timestamp::from_unix_millis(99), 4)
+            .expect("home repair"),
+        vec![outcome]
+    );
+    assert_eq!(local.calls.get(), 1);
+    let terminal = remote
+        .command(request.command_id)
+        .expect("lookup")
+        .expect("record");
+    assert!(matches!(
+        terminal.progress,
+        RemoteProjectCommandProgress::Terminal {
+            received_head: None,
+            result: RemoteCommandResult::Committed(head),
+            ..
+        } if head == project_head
+    ));
 }
 
 #[test]

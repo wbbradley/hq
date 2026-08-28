@@ -938,11 +938,24 @@ pub struct WorktreeProvisioningRequestDto {
     pub create_branch: bool,
 }
 
+/// Exact existing-resource project creation input.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectCreationRequestDto {
+    pub mailbox_id: Id32,
+    pub project_name: String,
+    pub brief: Option<String>,
+    pub resource_id: Id32,
+    pub resource: ResourceLocatorDto,
+}
+
 /// Closed project action catalog for local API v1.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", content = "value", rename_all = "snake_case")]
 pub enum ProjectCommandActionDto {
+    Create(ProjectCreationRequestDto),
     Open,
     Activate {
         agent_id: Id32,
@@ -1130,12 +1143,12 @@ pub enum RemoteCommandProgressDto {
     Queued,
     Received {
         receipt_fact: Id32,
-        received_head: Id32,
+        received_head: Option<Id32>,
         received_at_unix_millis: i64,
     },
     Terminal {
         receipt_fact: Id32,
-        received_head: Id32,
+        received_head: Option<Id32>,
         received_at_unix_millis: i64,
         outcome_fact: Id32,
         result: RemoteCommandResultDto,
@@ -1619,8 +1632,8 @@ pub enum SnapshotItem {
         project_id: Id32,
         /// Immutable authoritative installation.
         target_home: Id32,
-        /// Caller-observed canonical head.
-        expected_head: Id32,
+        /// Caller-observed canonical head, absent for creation.
+        expected_head: Option<Id32>,
         /// Provider namespace used for durable routing correlation.
         operation_provider: String,
         /// Provider session used for durable routing correlation.
@@ -2471,11 +2484,11 @@ fn validate_evidence(evidence: &[CanonicalEvidenceDto]) -> Result<(), ValueError
 }
 
 fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), ValueError> {
-    let provisioning = matches!(
+    let creation = matches!(
         &request.action,
-        ProjectCommandActionDto::ProvisionWorktree(_)
+        ProjectCommandActionDto::Create(_) | ProjectCommandActionDto::ProvisionWorktree(_)
     );
-    if provisioning == request.expected_head.is_some() {
+    if creation == request.expected_head.is_some() {
         return Err(ValueError::InvalidValueCombination);
     }
     match &request.action {
@@ -2508,6 +2521,13 @@ fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), Va
             new_resource: resource,
             ..
         } => validate_project_resource(resource),
+        ProjectCommandActionDto::Create(request) => {
+            validate_text(&request.project_name, SHORT_TEXT_MAX_BYTES)?;
+            if let Some(brief) = &request.brief {
+                validate_text(brief, CONTENT_MAX_BYTES)?;
+            }
+            validate_locator(&request.resource)
+        }
         ProjectCommandActionDto::ProvisionWorktree(request) => {
             validate_text(&request.project_name, SHORT_TEXT_MAX_BYTES)?;
             if let Some(brief) = &request.brief {

@@ -16,16 +16,17 @@ use hq_application::{
     AgentSessionSelectionRequest, ApplicationError, HumanDeviceGrantRequest,
     HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority, MailboxGrantRequest,
     MailboxRevokeRequest, MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest,
-    PeerRouteRequest, ReplyRequest, ThreadCancellationRequest, plan_agent_mailbox_creation,
-    plan_agent_name_claim, plan_agent_session_rename, plan_agent_session_selection,
-    plan_asynchronous_message, plan_human_account_creation, plan_human_account_selection,
-    plan_human_device_acceptance, plan_human_device_grant, plan_human_device_revoke,
-    plan_human_mailbox_creation, plan_mailbox_grant, plan_mailbox_revoke, plan_message_archive,
-    plan_message_restore, plan_peer_route_block, plan_peer_route_set, plan_question, plan_reply,
+    PeerRouteRequest, ProjectCommandAction, ProjectCommandRequest, ProjectCreationRequest,
+    ReplyRequest, ThreadCancellationRequest, plan_agent_mailbox_creation, plan_agent_name_claim,
+    plan_agent_session_rename, plan_agent_session_selection, plan_asynchronous_message,
+    plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
+    plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
+    plan_mailbox_grant, plan_mailbox_revoke, plan_message_archive, plan_message_restore,
+    plan_peer_route_block, plan_peer_route_set, plan_question, plan_reply,
     plan_thread_cancellation,
 };
 use hq_domain::{
-    AccountId, AgentId, AuthorityReference, AuthorityRole, BoundedText, CommandId,
+    AccountId, AgentId, AuthorityReference, AuthorityRole, BoundedText, CommandId, ContentText,
     EncryptionPublicKey, ErrorCode, FactId, FactScope, GrantId, InstallationAddress,
     InstallationId, MailboxAddress, MailboxId, MessageId, MessagePurpose, OperationCorrelation,
     OperationId, PresentationKind, ProjectId, ProviderId, ProviderSessionId,
@@ -41,14 +42,15 @@ use hq_local_api::{
         ConversationMessageDto, ConversationPageRequest, DeviceGrantDto, EffectOutcomeDto,
         EffectRequestDto, HealthDomainDto, Id32, LaunchEnvironmentDto, LifecycleRequest,
         LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
-        PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, RelayAccessDto,
-        RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request, ResourceHealthDto,
-        ResourceLocatorDto, ResourceSchemeDto, ResponseResult, RuntimeObservationDto,
-        SessionControlDto, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
-        agent_session_request_digest,
+        PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto,
+        ProjectCommandOutcomeDto, ProjectCommandRequestDto, ProjectCommandStageDto,
+        ProjectCreationRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
+        RelayStatusDto, Request, ResourceHealthDto, ResourceLocatorDto, ResourceSchemeDto,
+        ResponseResult, RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto,
+        SynchronizationRequestDto, agent_session_request_digest,
     },
 };
-use hq_projects::agent_retirement_request_digest;
+use hq_projects::{agent_retirement_request_digest, project_command_request_digest};
 use hq_protocol::VerifiedPairingInvitation;
 use hq_reducer::{
     AuthorityPolicy, AuthorityProjectionKey, AuthorityReducer, DecisionStatus, reduce_complete,
@@ -418,13 +420,24 @@ pub struct HarnessSessionView {
     pub reconciliation_id: Option<[u8; 32]>,
 }
 
-/// Read-only authoritative project catalog behavior.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProjectCatalogCommand {
+/// Closed project command behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectCliCommand {
     /// List every projected project in stable identity order.
     List,
     /// Show one exact project identity.
     Show(ProjectId),
+    /// Create an initially open project over one existing working tree.
+    Create {
+        /// Human-visible project name.
+        name: ShortText,
+        /// Optional bounded project brief.
+        brief: Option<ContentText>,
+        /// Existing working-tree path on the selected home.
+        path: PathBuf,
+        /// Selected immutable home, or the local installation by default.
+        home: Option<InstallationId>,
+    },
 }
 
 /// Passive desired-resource and advisory-claim presentation.
@@ -496,8 +509,8 @@ pub struct RemoteProjectCommandView {
     pub account_id: AccountId,
     /// Immutable target home.
     pub target_home: InstallationId,
-    /// Caller-observed project head.
-    pub expected_head: FactId,
+    /// Caller-observed project head, absent for creation.
+    pub expected_head: Option<FactId>,
     /// Stable workflow operation identity.
     pub operation_id: OperationId,
     /// Provider namespace retained for durable routing correlation.
@@ -570,6 +583,35 @@ pub struct ProjectCatalogView {
     pub unattributed_dispatches: usize,
     /// Output projections whose dispatch is unavailable.
     pub unattributed_outputs: usize,
+}
+
+/// Passive project workflow submission or checkpoint result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectOperationView {
+    /// Stable requested operation label.
+    pub operation: &'static str,
+    /// Exact retry-safe command identity.
+    pub command_id: CommandId,
+    /// Exact durable workflow identity.
+    pub operation_id: OperationId,
+    /// Target or newly created project identity.
+    pub project_id: ProjectId,
+    /// Immutable selected home.
+    pub home: InstallationId,
+    /// Stable accepted, running, completed, rejected, or reconcilable state.
+    pub status: &'static str,
+    /// Durable workflow checkpoint, when nonterminal.
+    pub stage: Option<&'static str>,
+    /// Resulting canonical project head, when complete.
+    pub project_head: Option<FactId>,
+    /// Stable rejection or reconciliation category.
+    pub error_category: Option<String>,
+    /// Stable rejection or reconciliation code.
+    pub error_code: Option<String>,
+    /// Stable succeeded, failed, or uncertain runtime state.
+    pub runtime_state: Option<&'static str>,
+    /// Runtime failure or uncertainty code.
+    pub runtime_code: Option<String>,
 }
 
 /// Passive exact provider-session identity shown by catalog commands.
@@ -1129,10 +1171,10 @@ pub enum CliCommand {
         /// Validated installation state layout.
         state: StatePaths,
     },
-    /// Inspect authoritative project and remote-command state through the local API.
-    ProjectCatalog {
-        /// Requested read-only catalog behavior.
-        action: ProjectCatalogCommand,
+    /// Inspect or mutate project state through the local API.
+    Project {
+        /// Requested project behavior.
+        action: ProjectCliCommand,
         /// Validated installation state layout.
         state: StatePaths,
     },
@@ -1534,7 +1576,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 | CliCommand::Relay { .. }
                 | CliCommand::NamedAgent { .. }
                 | CliCommand::Harness { .. }
-                | CliCommand::ProjectCatalog { .. }
+                | CliCommand::Project { .. }
                 | CliCommand::AgentMessage { .. }
                 | CliCommand::GetMessage { .. }
                 | CliCommand::DiscoverMailboxes { .. }
@@ -1629,15 +1671,66 @@ fn parse_project_catalog(
     state_root: Option<&PathBuf>,
 ) -> Result<CliCommand, CliError> {
     let action = match arguments {
-        [action] if action == "list" => ProjectCatalogCommand::List,
+        [action] if action == "list" => ProjectCliCommand::List,
         [action, project_id] if action == "show" => {
-            ProjectCatalogCommand::Show(ProjectId::from_bytes(parse_hex32(project_id)?))
+            ProjectCliCommand::Show(ProjectId::from_bytes(parse_hex32(project_id)?))
         }
+        [action, rest @ ..] if action == "create" => parse_project_create(rest)?,
         _ => return Err(CliError::Arguments),
     };
-    Ok(CliCommand::ProjectCatalog {
+    Ok(CliCommand::Project {
         action,
         state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_project_create(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
+    let mut name = None;
+    let mut brief = None;
+    let mut path = None;
+    let mut home = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--brief") if brief.is_none() => {
+                index += 1;
+                brief = Some(
+                    ContentText::new(
+                        arguments
+                            .get(index)
+                            .and_then(|value| value.to_str())
+                            .ok_or(CliError::Arguments)?
+                            .to_owned(),
+                    )
+                    .map_err(|_| CliError::Arguments)?,
+                );
+            }
+            Some("--path") if path.is_none() => {
+                index += 1;
+                let value = arguments.get(index).ok_or(CliError::Arguments)?;
+                value.to_str().ok_or(CliError::Arguments)?;
+                path = Some(PathBuf::from(value));
+            }
+            Some("--home") if home.is_none() => {
+                index += 1;
+                home = Some(InstallationId::from_bytes(parse_hex32(
+                    arguments.get(index).ok_or(CliError::Arguments)?,
+                )?));
+            }
+            Some(value) if !value.starts_with('-') && name.is_none() => {
+                name = Some(ShortText::new(value.to_owned()).map_err(|_| CliError::Arguments)?);
+            }
+            _ => return Err(CliError::Arguments),
+        }
+        index += 1;
+    }
+    let path = path.ok_or(CliError::Arguments)?;
+    let _ = normalized_existing_resource(&path)?;
+    Ok(ProjectCliCommand::Create {
+        name: name.ok_or(CliError::Arguments)?,
+        brief,
+        path,
+        home,
     })
 }
 
@@ -2454,9 +2547,16 @@ fn successful_result_exit_code(result: &CliResult, empty_poll: bool) -> u8 {
     match result {
         CliResult::HarnessSession(HarnessSessionView {
             status: "rejected", ..
+        })
+        | CliResult::ProjectOperation(ProjectOperationView {
+            status: "rejected", ..
         }) => 1,
         CliResult::HarnessSession(HarnessSessionView {
             status: "uncertain",
+            ..
+        })
+        | CliResult::ProjectOperation(ProjectOperationView {
+            status: "reconcilable",
             ..
         }) => 3,
         _ if empty_poll => 3,
@@ -2488,8 +2588,8 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
         CliCommand::Relay { action, state } => return run_relay(action, state),
         CliCommand::NamedAgent { action, state } => return run_named_agent(action, state),
         CliCommand::Harness { action, state } => return run_harness(action, state),
-        CliCommand::ProjectCatalog { action, state } => {
-            return run_project_catalog(*action, state);
+        CliCommand::Project { action, state } => {
+            return run_project(action, state);
         }
         CliCommand::AgentMessage { action, state } => {
             return run_agent_message(action, state, input);
@@ -2522,7 +2622,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
             | CliCommand::Relay { .. }
             | CliCommand::NamedAgent { .. }
             | CliCommand::Harness { .. }
-            | CliCommand::ProjectCatalog { .. }
+            | CliCommand::Project { .. }
             | CliCommand::AgentMessage { .. }
             | CliCommand::GetMessage { .. }
             | CliCommand::DiscoverMailboxes { .. }
@@ -2581,18 +2681,295 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
     Ok(output)
 }
 
-fn run_project_catalog(
-    action: ProjectCatalogCommand,
-    state: &StatePaths,
-) -> Result<CliResult, CliError> {
+fn run_project(action: &ProjectCliCommand, state: &StatePaths) -> Result<CliResult, CliError> {
     let mut client = command_client(state)?;
     let snapshot = client.snapshot()?;
-    project_catalog_view(&snapshot, action).map(|view| CliResult::ProjectCatalog(Box::new(view)))
+    match action {
+        ProjectCliCommand::List | ProjectCliCommand::Show(_) => {
+            project_catalog_view(&snapshot, action)
+                .map(|view| CliResult::ProjectCatalog(Box::new(view)))
+        }
+        ProjectCliCommand::Create {
+            name,
+            brief,
+            path,
+            home,
+        } => create_project(&mut client, &snapshot, name, brief.as_ref(), path, *home),
+    }
+}
+
+fn create_project(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    name: &ShortText,
+    brief: Option<&ContentText>,
+    path: &Path,
+    requested_home: Option<InstallationId>,
+) -> Result<CliResult, CliError> {
+    let local = client.installation_id();
+    let account_id = local_selection(snapshot, local)
+        .map_err(|_| CliError::ProjectState)?
+        .active
+        .ok_or(CliError::ProjectState)?;
+    let home = requested_home.unwrap_or(local);
+    require_active_project_home(snapshot, account_id, home)?;
+    let resource = normalized_existing_resource(path)?;
+    let command_id = random_command_id()?;
+    let (wire, project_id, operation_id) = project_creation_request(
+        command_id,
+        account_id,
+        home,
+        name,
+        brief,
+        &resource,
+        current_unix_millis()?,
+    )?;
+    let ClientEvent::ProjectCommand {
+        command_id: completed,
+        outcome,
+    } = client.project(wire)?
+    else {
+        return Err(CliError::ProjectState);
+    };
+    if completed != command_id {
+        return Err(CliError::ProjectState);
+    }
+    project_operation_view(
+        "create",
+        command_id,
+        project_id,
+        home,
+        operation_id,
+        outcome,
+    )
+    .map(CliResult::ProjectOperation)
+}
+
+fn project_creation_request(
+    command_id: CommandId,
+    account_id: AccountId,
+    home: InstallationId,
+    name: &ShortText,
+    brief: Option<&ContentText>,
+    resource: &ResourceLocator,
+    issued_at_unix_millis: i64,
+) -> Result<(ProjectCommandRequestDto, ProjectId, OperationId), CliError> {
+    let operation_id = project_creation_operation_id(command_id);
+    let project_id = ProjectId::from_bytes(project_creation_identity(operation_id, b"project"));
+    let mailbox_id = MailboxId::from_bytes(project_creation_identity(operation_id, b"mailbox"));
+    let resource_id =
+        hq_domain::ResourceId::from_bytes(project_creation_identity(operation_id, b"resource"));
+    let issued_at = Timestamp::from_unix_millis(issued_at_unix_millis);
+    let mut request = ProjectCommandRequest {
+        command_id,
+        operation_id,
+        request_digest: hq_domain::CommandDigest::from_bytes([0; 32]),
+        account_id,
+        project_id,
+        home,
+        expected_head: None,
+        issued_at,
+        action: ProjectCommandAction::Create(ProjectCreationRequest {
+            mailbox_id,
+            project_name: name.clone(),
+            brief: brief.cloned(),
+            resource_id,
+            resource: resource.clone(),
+        }),
+    };
+    request.request_digest =
+        project_command_request_digest(&request).map_err(|_| CliError::ProjectState)?;
+    let wire = ProjectCommandRequestDto {
+        command_id: Id32::new(*command_id.as_bytes()),
+        operation_id: Id32::new(*operation_id.as_bytes()),
+        request_digest: Id32::new(*request.request_digest.as_bytes()),
+        account_id: Id32::new(*account_id.as_bytes()),
+        project_id: Id32::new(*project_id.as_bytes()),
+        home: Id32::new(*home.as_bytes()),
+        expected_head: None,
+        issued_at_unix_millis: issued_at.as_unix_millis(),
+        action: ProjectCommandActionDto::Create(ProjectCreationRequestDto {
+            mailbox_id: Id32::new(*mailbox_id.as_bytes()),
+            project_name: name.as_str().to_owned(),
+            brief: brief.map(|value| value.as_str().to_owned()),
+            resource_id: Id32::new(*resource_id.as_bytes()),
+            resource: ResourceLocatorDto::new(
+                ResourceSchemeDto::WorkingTree,
+                resource.value().to_owned(),
+            )
+            .map_err(|_| CliError::ProjectState)?,
+        }),
+    };
+    Ok((wire, project_id, operation_id))
+}
+
+fn require_active_project_home(
+    snapshot: &AuthoritativeSnapshotDto,
+    account_id: AccountId,
+    home: InstallationId,
+) -> Result<(), CliError> {
+    let (_, creator, _, _) = account_item(snapshot, account_id).ok_or(CliError::ProjectState)?;
+    if home == creator {
+        return Ok(());
+    }
+    let matches = snapshot.items.iter().filter(|item| {
+        matches!(item, SnapshotItem::Membership {
+            account_id: candidate_account,
+            device,
+            state,
+            ..
+        } if candidate_account.bytes() == *account_id.as_bytes()
+            && device.bytes() == *home.as_bytes()
+            && state == "active")
+    });
+    if matches.count() == 1 {
+        Ok(())
+    } else {
+        Err(CliError::ProjectState)
+    }
+}
+
+fn normalized_existing_resource(path: &Path) -> Result<ResourceLocator, CliError> {
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+    {
+        return Err(CliError::Arguments);
+    }
+    let normalized = path.components().collect::<PathBuf>();
+    let value = normalized.to_str().ok_or(CliError::Arguments)?.to_owned();
+    Ok(ResourceLocator::new(
+        ResourceScheme::WorkingTree,
+        BoundedText::<RESOURCE_LOCATOR_MAX_BYTES>::new(value).map_err(|_| CliError::Arguments)?,
+    ))
+}
+
+fn current_unix_millis() -> Result<i64, CliError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .ok_or(CliError::Runtime)
+}
+
+fn project_creation_operation_id(command_id: CommandId) -> OperationId {
+    OperationId::from_bytes(project_creation_identity(
+        OperationId::from_bytes(*command_id.as_bytes()),
+        b"operation",
+    ))
+}
+
+fn project_creation_identity(operation_id: OperationId, label: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-project-create-identity-v1\0");
+    digest.update(operation_id.as_bytes());
+    digest.update(label);
+    digest.finalize().into()
+}
+
+fn project_operation_view(
+    operation: &'static str,
+    command_id: CommandId,
+    project_id: ProjectId,
+    home: InstallationId,
+    expected_operation: OperationId,
+    outcome: ProjectCommandOutcomeDto,
+) -> Result<ProjectOperationView, CliError> {
+    let (operation_id, status, stage, project_head, error, runtime) = match outcome {
+        ProjectCommandOutcomeDto::Accepted {
+            operation_id,
+            stage,
+        } => (operation_id, "accepted", Some(stage), None, None, None),
+        ProjectCommandOutcomeDto::Running {
+            operation_id,
+            stage,
+        } => (operation_id, "running", Some(stage), None, None, None),
+        ProjectCommandOutcomeDto::Completed {
+            operation_id,
+            project_head,
+            runtime,
+        } => (
+            operation_id,
+            "completed",
+            None,
+            Some(FactId::from_bytes(project_head.bytes())),
+            None,
+            runtime,
+        ),
+        ProjectCommandOutcomeDto::Rejected {
+            operation_id,
+            error,
+            runtime,
+        } => (operation_id, "rejected", None, None, Some(error), runtime),
+        ProjectCommandOutcomeDto::Reconcilable {
+            operation_id,
+            stage,
+            error,
+        } => (
+            operation_id,
+            "reconcilable",
+            Some(stage),
+            None,
+            Some(error),
+            None,
+        ),
+    };
+    let operation_id = OperationId::from_bytes(operation_id.bytes());
+    if operation_id != expected_operation {
+        return Err(CliError::ProjectState);
+    }
+    let (runtime_state, runtime_code) = retirement_runtime(runtime.as_ref());
+    Ok(ProjectOperationView {
+        operation,
+        command_id,
+        operation_id,
+        project_id,
+        home,
+        status,
+        stage: stage.map(project_stage_label),
+        project_head,
+        error_category: error.as_ref().map(|error| error.category.clone()),
+        error_code: error.map(|error| error.code),
+        runtime_state,
+        runtime_code,
+    })
+}
+
+const fn project_stage_label(stage: ProjectCommandStageDto) -> &'static str {
+    match stage {
+        ProjectCommandStageDto::Accepted => "accepted",
+        ProjectCommandStageDto::AwaitingHome => "awaiting_home",
+        ProjectCommandStageDto::ReceivedAtHome => "received_at_home",
+        ProjectCommandStageDto::ValidatingResources => "validating_resources",
+        ProjectCommandStageDto::Opening => "opening",
+        ProjectCommandStageDto::ConfiguringAssignment => "configuring_assignment",
+        ProjectCommandStageDto::StartingRuntime => "starting_runtime",
+        ProjectCommandStageDto::ValidatingLaunchDirectory => "validating_launch_directory",
+        ProjectCommandStageDto::MakingRunnable => "making_runnable",
+        ProjectCommandStageDto::DispatchingInputs => "dispatching_inputs",
+        ProjectCommandStageDto::AssessingRelease => "assessing_release",
+        ProjectCommandStageDto::QuiescingRuntime => "quiescing_runtime",
+        ProjectCommandStageDto::EndingAssignment => "ending_assignment",
+        ProjectCommandStageDto::Closing => "closing",
+        ProjectCommandStageDto::UpdatingProject => "updating_project",
+        ProjectCommandStageDto::ReservingDestination => "reserving_destination",
+        ProjectCommandStageDto::ReconcilingGit => "reconciling_git",
+        ProjectCommandStageDto::CreatingWorktree => "creating_worktree",
+        ProjectCommandStageDto::IdentifyingResource => "identifying_resource",
+        ProjectCommandStageDto::CreatingProject => "creating_project",
+        ProjectCommandStageDto::Compensating => "compensating",
+        ProjectCommandStageDto::ReconciliationRequired => "reconciliation_required",
+        ProjectCommandStageDto::Complete => "complete",
+    }
 }
 
 fn project_catalog_view(
     snapshot: &AuthoritativeSnapshotDto,
-    action: ProjectCatalogCommand,
+    action: &ProjectCliCommand,
 ) -> Result<ProjectCatalogView, CliError> {
     let mut projects = project_rows(snapshot)?;
     add_project_resources(snapshot, &mut projects)?;
@@ -2604,15 +2981,17 @@ fn project_catalog_view(
     sort_project_rows(&mut projects);
 
     let projects = match action {
-        ProjectCatalogCommand::List => projects.into_values().collect(),
-        ProjectCatalogCommand::Show(project_id) => {
-            vec![projects.remove(&project_id).ok_or(CliError::ProjectState)?]
+        ProjectCliCommand::List => projects.into_values().collect(),
+        ProjectCliCommand::Show(project_id) => {
+            vec![projects.remove(project_id).ok_or(CliError::ProjectState)?]
         }
+        ProjectCliCommand::Create { .. } => return Err(CliError::ProjectState),
     };
     Ok(ProjectCatalogView {
         operation: match action {
-            ProjectCatalogCommand::List => "list",
-            ProjectCatalogCommand::Show(_) => "show",
+            ProjectCliCommand::List => "list",
+            ProjectCliCommand::Show(_) => "show",
+            ProjectCliCommand::Create { .. } => return Err(CliError::ProjectState),
         },
         projects,
         unattributed_dispatches,
@@ -2767,7 +3146,7 @@ fn add_remote_project_commands(
                 request_digest,
                 account_id,
                 target_home,
-                expected_head,
+                expected_head.as_ref(),
                 operation_provider,
                 operation_session,
                 operation_id,
@@ -2899,7 +3278,7 @@ fn remote_project_command_view(
     request_digest: &Id32,
     account_id: &Id32,
     target_home: &Id32,
-    expected_head: &Id32,
+    expected_head: Option<&Id32>,
     operation_provider: &str,
     operation_session: &str,
     operation_id: &Id32,
@@ -2914,7 +3293,7 @@ fn remote_project_command_view(
         request_digest: hq_domain::CommandDigest::from_bytes(request_digest.bytes()),
         account_id: AccountId::from_bytes(account_id.bytes()),
         target_home: InstallationId::from_bytes(target_home.bytes()),
-        expected_head: FactId::from_bytes(expected_head.bytes()),
+        expected_head: expected_head.map(|head| FactId::from_bytes(head.bytes())),
         operation_id: OperationId::from_bytes(operation_id.bytes()),
         operation_provider: operation_provider.to_owned(),
         operation_session: operation_session.to_owned(),
@@ -2939,7 +3318,7 @@ fn remote_project_command_view(
         } => {
             view.progress = "received";
             view.receipt_fact = Some(FactId::from_bytes(receipt_fact.bytes()));
-            view.received_head = Some(FactId::from_bytes(received_head.bytes()));
+            view.received_head = received_head.map(|head| FactId::from_bytes(head.bytes()));
             view.received_at_unix_millis = Some(*received_at_unix_millis);
         }
         RemoteCommandProgressDto::Terminal {
@@ -2952,7 +3331,7 @@ fn remote_project_command_view(
         } => {
             view.progress = "terminal";
             view.receipt_fact = Some(FactId::from_bytes(receipt_fact.bytes()));
-            view.received_head = Some(FactId::from_bytes(received_head.bytes()));
+            view.received_head = received_head.map(|head| FactId::from_bytes(head.bytes()));
             view.received_at_unix_millis = Some(*received_at_unix_millis);
             view.outcome_fact = Some(FactId::from_bytes(outcome_fact.bytes()));
             match result {
@@ -6771,6 +7150,7 @@ enum CliResult {
     NamedAgentRetirement(NamedAgentRetirementView),
     HarnessSession(HarnessSessionView),
     ProjectCatalog(Box<ProjectCatalogView>),
+    ProjectOperation(ProjectOperationView),
     Completed {
         operation: &'static str,
     },
@@ -6872,6 +7252,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         (format, CliResult::RelayAdmin(view)) => render_relay_admin_result(format, view),
         (format, CliResult::HarnessSession(view)) => render_harness_session(format, view),
         (format, CliResult::ProjectCatalog(view)) => render_project_catalog(format, view),
+        (format, CliResult::ProjectOperation(view)) => render_project_operation(format, view),
         (
             _,
             CliResult::AgentGuidance(_)
@@ -6896,6 +7277,46 @@ fn render_project_catalog(
                 "projects": view.projects.iter().map(project_json).collect::<Vec<_>>(),
                 "unattributed_dispatches": view.unattributed_dispatches,
                 "unattributed_outputs": view.unattributed_outputs,
+            }),
+        ),
+    }
+}
+
+fn render_project_operation(
+    format: CliOutputFormat,
+    view: &ProjectOperationView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => Ok(format!(
+            "project_operation operation={} status={} project={} home={} command_id={} operation_id={} stage={} project_head={} error={}:{} runtime={}:{}\n",
+            view.operation,
+            view.status,
+            encode_id(view.project_id.as_bytes()),
+            encode_id(view.home.as_bytes()),
+            encode_id(view.command_id.as_bytes()),
+            encode_id(view.operation_id.as_bytes()),
+            view.stage.unwrap_or("none"),
+            optional_id(view.project_head.as_ref()),
+            view.error_category.as_deref().unwrap_or("none"),
+            view.error_code.as_deref().unwrap_or("none"),
+            view.runtime_state.unwrap_or("none"),
+            view.runtime_code.as_deref().unwrap_or("none"),
+        )),
+        CliOutputFormat::Json => machine_record(
+            "project_operation",
+            &serde_json::json!({
+                "command_id": encode_id(view.command_id.as_bytes()),
+                "error_category": view.error_category,
+                "error_code": view.error_code,
+                "home": encode_id(view.home.as_bytes()),
+                "operation": view.operation,
+                "operation_id": encode_id(view.operation_id.as_bytes()),
+                "project_head": view.project_head.map(|head| encode_id(head.as_bytes())),
+                "project_id": encode_id(view.project_id.as_bytes()),
+                "runtime_code": view.runtime_code,
+                "runtime_state": view.runtime_state,
+                "stage": view.stage,
+                "status": view.status,
             }),
         ),
     }
@@ -6994,7 +7415,7 @@ fn render_project_catalog_human(view: &ProjectCatalogView) -> Result<String, Cli
                 encode_id(command.command_id.as_bytes()),
                 command.progress,
                 encode_id(command.target_home.as_bytes()),
-                encode_id(command.expected_head.as_bytes()),
+                optional_id(command.expected_head.as_ref()),
                 encode_id(command.operation_id.as_bytes()),
                 command.operation_provider,
                 command.operation_session,
@@ -7064,7 +7485,7 @@ fn remote_project_command_json(command: &RemoteProjectCommandView) -> serde_json
     serde_json::json!({
         "account_id": encode_id(command.account_id.as_bytes()),
         "command_id": encode_id(command.command_id.as_bytes()),
-        "expected_head": encode_id(command.expected_head.as_bytes()),
+        "expected_head": command.expected_head.map(|id| encode_id(id.as_bytes())),
         "issued_at_unix_millis": command.issued_at_unix_millis,
         "operation_id": encode_id(command.operation_id.as_bytes()),
         "operation_provider": command.operation_provider,
@@ -7984,8 +8405,8 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
         ),
         [command] if command == "project" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
-             Commands:\n  list               Show every authoritative project\n  show PROJECT_ID    Show one exact project\n\n\
-             Project inspection starts or connects to the local node and reads one complete authoritative snapshot. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit; the CLI never chooses a historical winner.\n",
+             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
+             Project inspection starts or connects to the local node and reads one complete authoritative snapshot. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
@@ -8083,12 +8504,13 @@ mod tests {
         CliOutputFormat, ConfigurationCommand, DaemonCommand, HarnessCommand, HarnessSessionView,
         HumanCommand, HumanDeviceState, HumanMessageCommand, HumanMessageFilters, IdentityCommand,
         MailboxCommand, MessageCommandView, NamedAgentCommand, NamedAgentSelector, PeerCommand,
-        ProjectCatalogCommand, RelayCommand, completion_for, copy_launch_environment,
-        effect_outcome, execute_cli, harness_request, human_devices_view, human_view,
-        mailbox_discovery_view, message_body, named_agent_catalog_view, pairing_grant_id,
-        parse_cli, project_catalog_view, read_password, render_project_catalog, render_result,
-        resolve_environment_session, resolve_named_agent_id, run_cli, session_binding_fact,
-        session_context, stable_relay_effect, stable_repair_operation, successful_result_exit_code,
+        ProjectCliCommand, RelayCommand, completion_for, copy_launch_environment, effect_outcome,
+        execute_cli, harness_request, human_devices_view, human_view, mailbox_discovery_view,
+        message_body, named_agent_catalog_view, normalized_existing_resource, pairing_grant_id,
+        parse_cli, project_catalog_view, project_creation_request, project_operation_view,
+        read_password, render_project_catalog, render_result, resolve_environment_session,
+        resolve_named_agent_id, run_cli, session_binding_fact, session_context,
+        stable_relay_effect, stable_repair_operation, successful_result_exit_code,
     };
     use hq_domain::{
         AccountId, AgentId, FactId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
@@ -8097,10 +8519,11 @@ mod tests {
     };
     use hq_local_api::protocol::v1::{
         AgentLaunchContextDto, AgentSessionBindingDto, AuthoritativeSnapshotDto, DeviceGrantDto,
-        EffectOutcomeDto, Id32, MailboxAddressDto, MessagePurposeDto, PresentationKindDto,
-        RelayAccessDto, RelayAuthenticationDto, RemoteCommandProgressDto, RemoteCommandResultDto,
-        RepositoryContextDto, ResourceHealthDto, ResourceLocatorDto, ResourceSchemeDto,
-        RuntimeObservationDto, SnapshotItem, SynchronizationRequestDto,
+        DomainErrorDto, EffectOutcomeDto, Id32, MailboxAddressDto, MessagePurposeDto,
+        PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+        ProjectCommandStageDto, RelayAccessDto, RelayAuthenticationDto, RemoteCommandProgressDto,
+        RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto, ResourceLocatorDto,
+        ResourceSchemeDto, RuntimeObservationDto, SnapshotItem, SynchronizationRequestDto,
     };
 
     #[test]
@@ -8170,13 +8593,13 @@ mod tests {
     }
 
     #[test]
-    fn parser_accepts_only_read_only_project_catalog_commands_in_this_slice() {
+    fn parser_accepts_project_catalog_and_existing_resource_creation() {
         let listed = parse_cli([OsString::from("project"), OsString::from("list")])
             .expect("project list parses");
         assert!(matches!(
             listed.command,
-            CliCommand::ProjectCatalog {
-                action: ProjectCatalogCommand::List,
+            CliCommand::Project {
+                action: ProjectCliCommand::List,
                 ..
             }
         ));
@@ -8188,10 +8611,32 @@ mod tests {
         .expect("project show parses");
         assert!(matches!(
             shown.command,
-            CliCommand::ProjectCatalog {
-                action: ProjectCatalogCommand::Show(project_id),
+            CliCommand::Project {
+                action: ProjectCliCommand::Show(project_id),
                 ..
             } if project_id.as_bytes() == &[0x22; 32]
+        ));
+        let created = parse_cli([
+            OsString::from("project"),
+            OsString::from("create"),
+            OsString::from("catalog"),
+            OsString::from("--path"),
+            OsString::from("/work/catalog"),
+            OsString::from("--brief"),
+            OsString::from("exact work"),
+            OsString::from("--home"),
+            OsString::from("33".repeat(32)),
+        ])
+        .expect("project create parses");
+        assert!(matches!(
+            created.command,
+            CliCommand::Project {
+                action: ProjectCliCommand::Create { name, brief: Some(brief), path, home: Some(home) },
+                ..
+            } if name.as_str() == "catalog"
+                && brief.as_str() == "exact work"
+                && path == Path::new("/work/catalog")
+                && home.as_bytes() == &[0x33; 32]
         ));
         for arguments in [
             vec!["project"],
@@ -8199,12 +8644,115 @@ mod tests {
             vec!["project", "list", "extra"],
             vec!["project", "show", "not-an-id"],
             vec!["project", "create", "later"],
+            vec!["project", "create", "name", "--path", "relative"],
         ] {
             assert_eq!(
                 parse_cli(arguments.into_iter().map(OsString::from)),
                 Err(CliError::Arguments)
             );
         }
+    }
+
+    #[test]
+    fn project_creation_request_has_stable_identity_and_exact_content_digest() {
+        let command_id = hq_domain::CommandId::from_bytes([1; 32]);
+        let account_id = AccountId::from_bytes([2; 32]);
+        let home = InstallationId::from_bytes([3; 32]);
+        let name = hq_domain::ShortText::new("catalog").expect("name");
+        let brief = hq_domain::ContentText::new("exact work").expect("brief");
+        let resource =
+            normalized_existing_resource(Path::new("/work/catalog")).expect("normalized resource");
+        let first = project_creation_request(
+            command_id,
+            account_id,
+            home,
+            &name,
+            Some(&brief),
+            &resource,
+            1_700_000_000_000,
+        )
+        .expect("creation request");
+        let repeated = project_creation_request(
+            command_id,
+            account_id,
+            home,
+            &name,
+            Some(&brief),
+            &resource,
+            1_700_000_000_000,
+        )
+        .expect("repeated request");
+        assert_eq!(first, repeated);
+        assert_eq!(first.0.expected_head, None);
+        assert!(matches!(
+            &first.0.action,
+            ProjectCommandActionDto::Create(request)
+                if request.project_name == "catalog"
+                    && request.brief.as_deref() == Some("exact work")
+                    && request.resource.value == "/work/catalog"
+        ));
+
+        let changed_name = hq_domain::ShortText::new("changed").expect("changed name");
+        let changed = project_creation_request(
+            command_id,
+            account_id,
+            home,
+            &changed_name,
+            Some(&brief),
+            &resource,
+            1_700_000_000_000,
+        )
+        .expect("changed request");
+        assert_eq!(first.1, changed.1);
+        assert_eq!(first.2, changed.2);
+        assert_ne!(first.0.request_digest, changed.0.request_digest);
+    }
+
+    #[test]
+    fn project_operation_result_preserves_terminal_and_reconcilable_semantics() {
+        let command_id = hq_domain::CommandId::from_bytes([1; 32]);
+        let operation_id = OperationId::from_bytes([2; 32]);
+        let project_id = ProjectId::from_bytes([3; 32]);
+        let home = InstallationId::from_bytes([4; 32]);
+        let rejected = project_operation_view(
+            "create",
+            command_id,
+            project_id,
+            home,
+            operation_id,
+            ProjectCommandOutcomeDto::Rejected {
+                operation_id: Id32::new(*operation_id.as_bytes()),
+                error: DomainErrorDto::new("project".to_owned(), "resource_conflict".to_owned())
+                    .expect("domain error"),
+                runtime: None,
+            },
+        )
+        .expect("rejected view");
+        let rejected_result = super::CliResult::ProjectOperation(rejected);
+        assert_eq!(successful_result_exit_code(&rejected_result, false), 1);
+        let output = render_result(CliOutputFormat::Json, &rejected_result).expect("JSON result");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("JSON");
+        assert_eq!(value["kind"], "project_operation");
+        assert_eq!(value["data"]["status"], "rejected");
+        assert_eq!(value["data"]["error_category"], "project");
+        assert_eq!(value["data"]["error_code"], "resource_conflict");
+
+        let reconcilable = project_operation_view(
+            "create",
+            command_id,
+            project_id,
+            home,
+            operation_id,
+            ProjectCommandOutcomeDto::Reconcilable {
+                operation_id: Id32::new(*operation_id.as_bytes()),
+                stage: ProjectCommandStageDto::IdentifyingResource,
+                error: DomainErrorDto::new("effect".to_owned(), "outcome_unknown".to_owned())
+                    .expect("domain error"),
+            },
+        )
+        .expect("reconcilable view");
+        let reconcilable_result = super::CliResult::ProjectOperation(reconcilable);
+        assert_eq!(successful_result_exit_code(&reconcilable_result, false), 3);
     }
 
     #[test]
@@ -8292,7 +8840,7 @@ mod tests {
                     account_id: Id32::new([73; 32]),
                     project_id: Id32::new([1; 32]),
                     target_home: Id32::new([11; 32]),
-                    expected_head: Id32::new([21; 32]),
+                    expected_head: Some(Id32::new([21; 32])),
                     operation_provider: "codex".to_owned(),
                     operation_session: "session-7".to_owned(),
                     operation_id: Id32::new([74; 32]),
@@ -8301,7 +8849,7 @@ mod tests {
                     request_fact: Id32::new([75; 32]),
                     progress: Box::new(RemoteCommandProgressDto::Terminal {
                         receipt_fact: Id32::new([76; 32]),
-                        received_head: Id32::new([21; 32]),
+                        received_head: Some(Id32::new([21; 32])),
                         received_at_unix_millis: 1_700_000_000_001,
                         outcome_fact: Id32::new([77; 32]),
                         result: RemoteCommandResultDto::Rejected("stale_head".to_owned()),
@@ -8311,7 +8859,7 @@ mod tests {
             ],
         };
 
-        let view = project_catalog_view(&snapshot, ProjectCatalogCommand::List).expect("catalog");
+        let view = project_catalog_view(&snapshot, &ProjectCliCommand::List).expect("catalog");
         assert_eq!(
             view.projects
                 .iter()
@@ -8360,7 +8908,7 @@ mod tests {
 
         let shown = project_catalog_view(
             &snapshot,
-            ProjectCatalogCommand::Show(ProjectId::from_bytes([2; 32])),
+            &ProjectCliCommand::Show(ProjectId::from_bytes([2; 32])),
         )
         .expect("exact project");
         assert_eq!(shown.projects.len(), 1);
@@ -8368,7 +8916,7 @@ mod tests {
         assert_eq!(
             project_catalog_view(
                 &snapshot,
-                ProjectCatalogCommand::Show(ProjectId::from_bytes([9; 32])),
+                &ProjectCliCommand::Show(ProjectId::from_bytes([9; 32])),
             ),
             Err(CliError::ProjectState)
         );
@@ -9443,13 +9991,6 @@ mod tests {
         .expect("harness help");
         assert!(harness.contains("resume --agent NAME|AGENT_ID"));
         assert!(harness.contains("never falls back to a new session"));
-        let project = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("project")])
-                .expect("project help parses"),
-        )
-        .expect("project help");
-        assert!(project.contains("show PROJECT_ID"));
-        assert!(project.contains("never chooses a historical winner"));
         let guidance = run_cli(
             &parse_cli([OsString::from("agents"), OsString::from("delivery")])
                 .expect("delivery guidance parses"),
@@ -9515,6 +10056,18 @@ mod tests {
             ),
             Err(CliError::Arguments)
         );
+    }
+
+    #[test]
+    fn project_help_covers_catalog_and_creation() {
+        let project = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("project")])
+                .expect("project help parses"),
+        )
+        .expect("project help");
+        assert!(project.contains("show PROJECT_ID"));
+        assert!(project.contains("create NAME --path ABSOLUTE_PATH"));
+        assert!(project.contains("never chooses a historical winner"));
     }
 
     #[test]

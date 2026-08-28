@@ -238,8 +238,10 @@ worker scans a bounded deterministic projection, authors an exact receipt before
 the same saga, and authors a terminal outcome only for definite completion or rejection. Receipt,
 saga, and outcome uncertainty remains repairable under stable identities. The application-backed
 remote port builds each request, receipt, and outcome plan from one serialized snapshot, checks
-digest/body agreement and expected heads, and cites exact request/receipt, project-head,
-active-human, and project-home authority facts.
+digest/body agreement and expected heads, and cites exact request/receipt, project-head when one
+exists, active-human, and project-home authority facts. Creation carries an absent expected head;
+its home receipt likewise records no prior head, and only a committed outcome requires the newly
+created canonical project head.
 
 ## Mailbox messaging and discovery
 

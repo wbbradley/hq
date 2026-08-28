@@ -11,7 +11,7 @@ The installed commands currently include `help`, `version`, `agents`, `identity`
 `peer add|list|distrust`, `mailbox list|grant|revoke`, and
 `relay add|list|remove|sync|status|repair`,
 `agent list|show|create|current|select|rename|retire`, and
-`harness start|resume|stop`, `project list|show`, the agent-side
+`harness start|resume|stop`, `project list|show|create`, the agent-side
 `ask|send|wait|poll`, human-side `get|list|answer|cancel|archive|restore`, `mailboxes`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
@@ -158,6 +158,19 @@ received, terminal, or conflicted progress, including receipt/head/outcome facts
 rejected result, and exact runtime success/failure/uncertainty. Both human and JSON output are
 deterministic, and the same catalog survives a node restart without a separate CLI cache.
 
+`project create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]` creates an
+initially open project over one existing directory. The caller sends only its normalized absolute
+spelling; the selected authoritative home resolves the canonical filesystem identity and requires a
+healthy directory before committing the project and its primary advisory claim. The default home is
+the local installation; an explicit home must be the account creator or exactly one active member.
+Command, workflow, project, mailbox, and resource identities are stable for one exact framed
+request, while changing any request content changes its digest. The create workflow has no prior
+project head, replays byte-for-byte after response loss, and rejects overlapping concurrent claims.
+Output exposes accepted, running, completed, rejected, or reconcilable workflow truth; rejection
+exits 1 and reconcilable uncertainty exits 3. Creation and catalog state survive restart without client-side
+state. Because HQ has no shipped installations, this capability extends local API v1 in place and
+adds no storage migration or compatibility shape.
+
 `agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
 for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert
 dependency-incomplete history, and the boundary that humans own identity, authority, durable
@@ -168,7 +181,8 @@ Configuration output has the optional provider and the complete canonical relay 
 passive data with public fields. Configuration setters replace one complete typed field, rebuild
 the validated value, and the persistence adapter revalidates public fields again immediately before
 the atomic write. Human, peer, mailbox, relay/health, route-history, capability-history,
-named-agent, session, and project-catalog presentation records are also passive public-field values; command enums
+named-agent, session, project-catalog, and project-operation presentation records are also passive
+public-field values; command enums
 and the live client capability remain closed behavioral types. The clean unshipped local API v1
 contract carries exact agent claims, mailboxes, immutable binding facts, and selection/rename
 candidates and frontiers in place; there is no compatibility accessor, migration, or version bump.

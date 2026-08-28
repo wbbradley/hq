@@ -491,7 +491,7 @@ pub enum SemanticPayload {
         digest: CommandDigest,
         project_id: ProjectId,
         target_home: InstallationId,
-        expected_head: FactId,
+        expected_head: Option<FactId>,
         operation: OperationCorrelation,
         body: ContentText,
     },
@@ -500,7 +500,7 @@ pub enum SemanticPayload {
         command_id: CommandId,
         digest: CommandDigest,
         project_id: ProjectId,
-        received_head: FactId,
+        received_head: Option<FactId>,
         received_at: Timestamp,
     },
     /// FCT-048.

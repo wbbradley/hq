@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, num::NonZeroU64, path::Path};
 use hq_application::{
     AgentRetirementOutcome, AgentRetirementRequest, EffectOutcome, EffectRequest, MutationAttempt,
     MutationOutcome, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
-    ProjectCommandStage, WorktreeProvisioningRequest,
+    ProjectCommandStage, ProjectCreationRequest, WorktreeProvisioningRequest,
 };
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, CommandDigest,
@@ -691,86 +691,12 @@ where
         if let Some(outcome) = terminal_outcome(&record) {
             return Ok(outcome);
         }
-        let provisioning = matches!(record.action, ProjectCommandAction::ProvisionWorktree(_));
-        if provisioning == record.expected_head.is_some() {
-            reject(
-                &self.store,
-                &mut record,
-                error(
-                    ErrorCategory::InvalidInput,
-                    "project_command_head_precondition_invalid",
-                ),
-            )?;
-            return Ok(progress_outcome(&record));
-        }
-        if let ProjectCommandAction::ProvisionWorktree(request) = &record.action
-            && !valid_provisioning_paths(request)
-        {
-            reject(
-                &self.store,
-                &mut record,
-                error(
-                    ErrorCategory::InvalidInput,
-                    "project_worktree_locator_not_normalized",
-                ),
-            )?;
+        if let Some(error) = initial_command_error(&record) {
+            reject(&self.store, &mut record, error)?;
             return Ok(progress_outcome(&record));
         }
         for _ in 0..MAX_PROJECT_WORKFLOW_ADVANCES {
-            match record.action.clone() {
-                ProjectCommandAction::Open
-                | ProjectCommandAction::AddResource { .. }
-                | ProjectCommandAction::RemoveResource { .. }
-                | ProjectCommandAction::ReplaceResource { .. } => {
-                    self.advance_resource_mutation(&mut record)?;
-                }
-                ProjectCommandAction::Activate {
-                    agent_id,
-                    provider,
-                    resume_session,
-                    resume_thread,
-                    launch_directory,
-                } => self.advance_activation(
-                    &mut record,
-                    agent_id,
-                    provider,
-                    resume_session,
-                    resume_thread,
-                    launch_directory,
-                )?,
-                ProjectCommandAction::DispatchPending => self.advance_dispatch(&mut record)?,
-                ProjectCommandAction::Close { force } => {
-                    self.advance_close(&mut record, force, false)?;
-                }
-                ProjectCommandAction::SetArchived { archived: true } => {
-                    self.advance_close(&mut record, false, true)?;
-                }
-                ProjectCommandAction::SetArchived { archived: false } => {
-                    self.advance_unarchive(&mut record)?;
-                }
-                ProjectCommandAction::Handoff {
-                    agent_id,
-                    provider,
-                    resume_session,
-                    thread_id,
-                    launch_directory,
-                    force_takeover,
-                } => self.advance_handoff(
-                    &mut record,
-                    agent_id,
-                    provider,
-                    resume_session,
-                    thread_id,
-                    launch_directory,
-                    force_takeover,
-                )?,
-                ProjectCommandAction::RetireAgent { agent_id, force } => {
-                    self.advance_retirement(&mut record, agent_id, force)?;
-                }
-                ProjectCommandAction::ProvisionWorktree(request) => {
-                    self.advance_provisioning(&mut record, &request)?;
-                }
-            }
+            self.advance_once(&mut record)?;
             if let Some(outcome) = terminal_outcome(&record) {
                 return Ok(outcome);
             }
@@ -779,6 +705,152 @@ where
             }
         }
         Ok(progress_outcome(&record))
+    }
+
+    fn advance_once(
+        &self,
+        record: &mut ProjectSagaRecord,
+    ) -> Result<(), hq_application::ApplicationError> {
+        match record.action.clone() {
+            ProjectCommandAction::Create(request) => self.advance_creation(record, &request),
+            ProjectCommandAction::Open
+            | ProjectCommandAction::AddResource { .. }
+            | ProjectCommandAction::RemoveResource { .. }
+            | ProjectCommandAction::ReplaceResource { .. } => {
+                self.advance_resource_mutation(record)
+            }
+            ProjectCommandAction::Activate {
+                agent_id,
+                provider,
+                resume_session,
+                resume_thread,
+                launch_directory,
+            } => self.advance_activation(
+                record,
+                agent_id,
+                provider,
+                resume_session,
+                resume_thread,
+                launch_directory,
+            ),
+            ProjectCommandAction::DispatchPending => self.advance_dispatch(record),
+            ProjectCommandAction::Close { force } => self.advance_close(record, force, false),
+            ProjectCommandAction::SetArchived { archived: true } => {
+                self.advance_close(record, false, true)
+            }
+            ProjectCommandAction::SetArchived { archived: false } => self.advance_unarchive(record),
+            ProjectCommandAction::Handoff {
+                agent_id,
+                provider,
+                resume_session,
+                thread_id,
+                launch_directory,
+                force_takeover,
+            } => self.advance_handoff(
+                record,
+                agent_id,
+                provider,
+                resume_session,
+                thread_id,
+                launch_directory,
+                force_takeover,
+            ),
+            ProjectCommandAction::RetireAgent { agent_id, force } => {
+                self.advance_retirement(record, agent_id, force)
+            }
+            ProjectCommandAction::ProvisionWorktree(request) => {
+                self.advance_provisioning(record, &request)
+            }
+        }
+    }
+
+    fn advance_creation(
+        &self,
+        record: &mut ProjectSagaRecord,
+        request: &ProjectCreationRequest,
+    ) -> Result<(), hq_application::ApplicationError> {
+        match current_stage(record) {
+            ProjectCommandStage::Accepted => checkpoint(
+                &self.store,
+                record,
+                ProjectCommandStage::IdentifyingResource,
+            ),
+            ProjectCommandStage::IdentifyingResource => {
+                self.identify_existing_resource(record, request)
+            }
+            ProjectCommandStage::CreatingProject => self.commit_new_project(record),
+            _ => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
+    }
+
+    fn identify_existing_resource(
+        &self,
+        record: &mut ProjectSagaRecord,
+        request: &ProjectCreationRequest,
+    ) -> Result<(), hq_application::ApplicationError> {
+        if record.pending_canonical_mutation.is_some() {
+            return checkpoint(&self.store, record, ProjectCommandStage::CreatingProject);
+        }
+        let operation_id = record.resource_operation_id.unwrap_or_else(|| {
+            derived_operation(
+                record.operation_id,
+                b"identify-existing-resource",
+                request.resource_id.as_bytes(),
+            )
+        });
+        if record.resource_operation_id.is_none() {
+            record.resource_operation_id = Some(operation_id);
+            record.resource_effect = SagaEffectState::Pending;
+            persist(&self.store, record)?;
+        }
+        let effect = EffectRequest::new(
+            operation_id,
+            derived_digest(
+                record.operation_id,
+                b"identify-existing-resource",
+                request.resource.value().as_bytes(),
+            ),
+            record.issued_at,
+            ProjectResourceIdentificationRequest {
+                home: record.home,
+                project_id: record.project_id,
+                resource_id: request.resource_id,
+                destination: request.resource.clone(),
+            },
+        );
+        match self.resources.identify_resource(&effect)? {
+            EffectOutcome::Accepted(resource)
+                if resource.resource_id == request.resource_id
+                    && resource.display_locator == request.resource
+                    && resource.health == ResourceHealth::Healthy =>
+            {
+                record.resource_effect = SagaEffectState::Accepted;
+                record.pending_canonical_mutation =
+                    Some(existing_creation_mutation(record, request, resource));
+                checkpoint(&self.store, record, ProjectCommandStage::CreatingProject)
+            }
+            EffectOutcome::Accepted(_) => reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_resource_identity_changed"),
+            ),
+            EffectOutcome::Rejected(error) => {
+                record.resource_effect = SagaEffectState::Rejected(error.clone());
+                reject(&self.store, record, error)
+            }
+            EffectOutcome::Uncertain(returned) if returned == operation_id => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::IdentifyingResource,
+                effect_error("project_resource_identification_unknown"),
+                EffectKind::Resource,
+            ),
+            EffectOutcome::Uncertain(_) => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
     }
 
     fn advance_provisioning(
@@ -803,7 +875,7 @@ where
             ProjectCommandStage::IdentifyingResource => {
                 self.identify_provisioned_resource(record, request)
             }
-            ProjectCommandStage::CreatingProject => self.commit_provisioned_project(record),
+            ProjectCommandStage::CreatingProject => self.commit_new_project(record),
             _ => Err(hq_application::ApplicationError::new(
                 hq_application::ApplicationErrorCode::StateCorrupt,
             )),
@@ -969,7 +1041,7 @@ where
         }
     }
 
-    fn commit_provisioned_project(
+    fn commit_new_project(
         &self,
         record: &mut ProjectSagaRecord,
     ) -> Result<(), hq_application::ApplicationError> {
@@ -2757,6 +2829,36 @@ fn valid_provisioning_paths(request: &WorktreeProvisioningRequest) -> bool {
     ) && exact_normalized_path(&request.destination, &[ResourceScheme::WorkingTree])
 }
 
+fn initial_command_error(record: &ProjectSagaRecord) -> Option<DomainError> {
+    let creation = matches!(
+        record.action,
+        ProjectCommandAction::Create(_) | ProjectCommandAction::ProvisionWorktree(_)
+    );
+    if creation == record.expected_head.is_some() {
+        return Some(error(
+            ErrorCategory::InvalidInput,
+            "project_command_head_precondition_invalid",
+        ));
+    }
+    match &record.action {
+        ProjectCommandAction::ProvisionWorktree(request) if !valid_provisioning_paths(request) => {
+            Some(error(
+                ErrorCategory::InvalidInput,
+                "project_worktree_locator_not_normalized",
+            ))
+        }
+        ProjectCommandAction::Create(request)
+            if !exact_normalized_path(&request.resource, &[ResourceScheme::WorkingTree]) =>
+        {
+            Some(error(
+                ErrorCategory::InvalidInput,
+                "project_resource_locator_not_normalized",
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn exact_normalized_path(locator: &ResourceLocator, schemes: &[ResourceScheme]) -> bool {
     let original = Path::new(locator.value());
     schemes.contains(&locator.scheme())
@@ -3263,6 +3365,33 @@ fn git_effect_request(
 fn provisioning_creation_mutation(
     record: &ProjectSagaRecord,
     request: &WorktreeProvisioningRequest,
+    resource: ProjectResource,
+) -> CanonicalProjectMutation {
+    let action = CanonicalProjectMutationAction::Create {
+        mailbox_id: request.mailbox_id,
+        name: request.project_name.clone(),
+        brief: request.brief.clone(),
+        resource,
+    };
+    CanonicalProjectMutation {
+        command_id: derived_command(
+            record.operation_id,
+            b"create-project",
+            record.project_id.as_bytes(),
+        ),
+        request_digest: mutation_digest(record.operation_id, b"create-project", None, &action),
+        account_id: record.account_id,
+        project_id: record.project_id,
+        home: record.home,
+        expected_head: None,
+        issued_at: record.issued_at,
+        action,
+    }
+}
+
+fn existing_creation_mutation(
+    record: &ProjectSagaRecord,
+    request: &ProjectCreationRequest,
     resource: ProjectResource,
 ) -> CanonicalProjectMutation {
     let action = CanonicalProjectMutationAction::Create {

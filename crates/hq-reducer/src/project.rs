@@ -170,7 +170,7 @@ pub enum RemoteCommandStage {
         /// Exact home-authored receipt fact.
         receipt_fact: FactId,
         /// Canonical project head observed by the home.
-        received_head: FactId,
+        received_head: Option<FactId>,
         /// Semantic time recorded by the receipt.
         received_at: Timestamp,
     },
@@ -179,7 +179,7 @@ pub enum RemoteCommandStage {
         /// Exact home-authored receipt fact.
         receipt_fact: FactId,
         /// Canonical project head observed before execution.
-        received_head: FactId,
+        received_head: Option<FactId>,
         /// Semantic time recorded by the receipt.
         received_at: Timestamp,
         /// Exact home-authored outcome fact.
@@ -203,7 +203,7 @@ pub struct RemoteCommandView {
     /// Target project.
     pub project_id: ProjectId,
     /// Expected canonical project head.
-    pub expected_head: FactId,
+    pub expected_head: Option<FactId>,
     /// Immutable target project home.
     pub target_home: InstallationId,
     /// Stable external operation correlation.
@@ -1248,10 +1248,12 @@ fn validate_remote_control(
         } => {
             if !matches!(fact.scope(), FactScope::RemoteControl { target_home: scope_home, .. } if *scope_home == *target_home)
                 || !valid_active_human(fact, context)
-                || context
-                    .facts()
-                    .get(*expected_head)
-                    .is_none_or(|head| project_id_of(head) != Some(*project_id))
+                || expected_head.is_some_and(|expected_head| {
+                    context
+                        .facts()
+                        .get(expected_head)
+                        .is_none_or(|head| project_id_of(head) != Some(*project_id))
+                })
             {
                 return Err(invalid(ProjectReason::RemoteCommandConflict));
             }
@@ -1276,10 +1278,12 @@ fn validate_remote_control(
             };
             if fact.author().installation_id() != target_home
                 || !valid_project_home(fact, target_home, context)
-                || context
-                    .facts()
-                    .get(*received_head)
-                    .is_none_or(|head| project_id_of(head) != Some(*project_id))
+                || received_head.is_some_and(|received_head| {
+                    context
+                        .facts()
+                        .get(received_head)
+                        .is_none_or(|head| project_id_of(head) != Some(*project_id))
+                })
             {
                 return Err(invalid(ProjectReason::RemoteCommandConflict));
             }
@@ -1912,7 +1916,7 @@ struct RemoteRequestProjection {
     digest: CommandDigest,
     project_id: ProjectId,
     target_home: InstallationId,
-    expected_head: FactId,
+    expected_head: Option<FactId>,
     operation: OperationCorrelation,
     body: ContentText,
     issued_at: Timestamp,
@@ -1951,7 +1955,7 @@ fn remote_request_projection(
     })
 }
 
-fn remote_receipts<'a>(facts: &'a [&'a Fact]) -> Vec<(&'a Fact, FactId, Timestamp)> {
+fn remote_receipts<'a>(facts: &'a [&'a Fact]) -> Vec<(&'a Fact, Option<FactId>, Timestamp)> {
     facts
         .iter()
         .filter_map(|fact| match fact.payload() {

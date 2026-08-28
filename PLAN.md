@@ -54,12 +54,17 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Add project creation and project-addressed messaging** — Add project creation over an
-  exactly identified existing resource through the project workflow port, including local or
-  selected remote home, deterministic mailbox/project identity, and exact no-head replay. Add
-  project-addressed human `send` through the ordinary application message planner so closed or
-  unassigned work remains pending. Test response loss, concurrent or changed creation, stale home
-  authority, restart, message sequencing, stdin, and machine output.
+- **[runtime/high] Eliminate intermittent concurrent-autostart output waits** — Reproduce the full
+  parallel CLI-suite case where a readiness caller waits on inherited output after its single
+  expected daemon is ready. Make process spawning and child release guarantee that background node
+  generations cannot retain an invoking CLI's output pipes or survive an explicit test stop.
+  Stress concurrent readiness with other autostarting commands, bound completion, and assert the
+  process table and runtime artifacts are clean afterward.
+
+- **[cli/high] Add project-addressed messaging** — Add `project send` through the ordinary
+  application message planner so closed or unassigned work remains pending for the authoritative
+  home. Test message sequencing, stdin, causal authority, response loss, restart, and deterministic
+  human/machine output.
 
 - **[cli/high] Add project lifecycle and assignment commands** — Expose open, activate,
   exact-session/thread resume, pending dispatch, handoff, close, archive, and unarchive through one

@@ -25,7 +25,7 @@ pub enum RemoteProjectCommandProgress {
         /// Exact home-authored receipt fact.
         receipt_fact: FactId,
         /// Canonical project head observed by the home.
-        received_head: FactId,
+        received_head: Option<FactId>,
         /// Semantic receipt time supplied to the home worker.
         received_at: Timestamp,
     },
@@ -34,7 +34,7 @@ pub enum RemoteProjectCommandProgress {
         /// Exact home-authored receipt fact.
         receipt_fact: FactId,
         /// Canonical project head observed before execution.
-        received_head: FactId,
+        received_head: Option<FactId>,
         /// Semantic receipt time.
         received_at: Timestamp,
         /// Exact home-authored outcome fact.

@@ -310,7 +310,7 @@ impl FactBuilder {
                 digest,
                 project_id,
                 target_home: installation_id,
-                expected_head,
+                expected_head: Some(expected_head),
                 operation,
                 body: content_text("open")?,
             },
@@ -318,7 +318,7 @@ impl FactBuilder {
                 command_id,
                 digest,
                 project_id,
-                received_head: expected_head,
+                received_head: Some(expected_head),
                 received_at: Timestamp::from_unix_millis(11),
             },
             SemanticPayload::RemoteProjectCommandOutcome {

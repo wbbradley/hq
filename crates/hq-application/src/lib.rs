@@ -64,8 +64,8 @@ pub use ports::{
 };
 pub use project::{
     AgentRetirementOutcome, AgentRetirementRequest, ControlProjects, ProjectCommandAction,
-    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, RetireAgents,
-    WorktreeProvisioningRequest,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
+    RetireAgents, WorktreeProvisioningRequest,
 };
 pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{

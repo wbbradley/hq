@@ -2,10 +2,12 @@
 
 use hq_application::{
     ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage,
+    ProjectCreationRequest,
 };
 use hq_domain::{
-    AccountId, AgentId, BoundedText, CommandDigest, CommandId, FactId, InstallationId, OperationId,
-    ProjectId, ProviderId, ResourceLocator, ResourceScheme, Timestamp,
+    AccountId, AgentId, BoundedText, CommandDigest, CommandId, FactId, InstallationId, MailboxId,
+    OperationId, ProjectId, ProviderId, ResourceId, ResourceLocator, ResourceScheme, ShortText,
+    Timestamp,
 };
 
 fn id(byte: u8) -> [u8; 32] {
@@ -55,5 +57,18 @@ fn project_command_values_are_plain_public_data() -> Result<(), Box<dyn std::err
             ..
         }
     ));
+
+    let creation = ProjectCreationRequest {
+        mailbox_id: MailboxId::from_bytes(id(10)),
+        project_name: ShortText::new("existing")?,
+        brief: None,
+        resource_id: ResourceId::from_bytes(id(11)),
+        resource: ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new("/repo/existing")?,
+        ),
+    };
+    assert_eq!(creation.project_name.as_str(), "existing");
+    assert_eq!(creation.resource.value(), "/repo/existing");
     Ok(())
 }

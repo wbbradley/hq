@@ -4,7 +4,7 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hq_application::{
-    AgentRetirementRequest, ProjectCommandAction, ProjectCommandRequest,
+    AgentRetirementRequest, ProjectCommandAction, ProjectCommandRequest, ProjectCreationRequest,
     WorktreeProvisioningRequest,
 };
 use hq_domain::{
@@ -123,6 +123,9 @@ pub fn agent_retirement_request_digest(request: &AgentRetirementRequest) -> Comm
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum WireAction {
+    Create {
+        request: WireCreation,
+    },
     Open,
     Activate {
         agent_id: String,
@@ -170,6 +173,9 @@ enum WireAction {
 impl From<&ProjectCommandAction> for WireAction {
     fn from(action: &ProjectCommandAction) -> Self {
         match action {
+            ProjectCommandAction::Create(request) => Self::Create {
+                request: WireCreation::from(request),
+            },
             ProjectCommandAction::Open => Self::Open,
             ProjectCommandAction::Activate {
                 agent_id,
@@ -242,6 +248,7 @@ impl TryFrom<WireAction> for ProjectCommandAction {
 
     fn try_from(action: WireAction) -> Result<Self, Self::Error> {
         Ok(match action {
+            WireAction::Create { request } => Self::Create(request.try_into()?),
             WireAction::Open => Self::Open,
             WireAction::Activate {
                 agent_id,
@@ -307,6 +314,49 @@ impl TryFrom<WireAction> for ProjectCommandAction {
             WireAction::ProvisionWorktree { request } => {
                 Self::ProvisionWorktree(request.try_into()?)
             }
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WireCreation {
+    mailbox_id: String,
+    project_name: String,
+    brief: Option<String>,
+    resource_id: String,
+    resource: WireLocator,
+}
+
+impl From<&ProjectCreationRequest> for WireCreation {
+    fn from(request: &ProjectCreationRequest) -> Self {
+        Self {
+            mailbox_id: id_text(request.mailbox_id.as_bytes()),
+            project_name: request.project_name.as_str().to_owned(),
+            brief: request
+                .brief
+                .as_ref()
+                .map(|brief| brief.as_str().to_owned()),
+            resource_id: id_text(request.resource_id.as_bytes()),
+            resource: WireLocator::from(&request.resource),
+        }
+    }
+}
+
+impl TryFrom<WireCreation> for ProjectCreationRequest {
+    type Error = ProjectCommandCodecError;
+
+    fn try_from(request: WireCreation) -> Result<Self, Self::Error> {
+        Ok(Self {
+            mailbox_id: hq_domain::MailboxId::from_bytes(parse_id(&request.mailbox_id)?),
+            project_name: ShortText::new(request.project_name).map_err(|_| Self::Error::Invalid)?,
+            brief: request
+                .brief
+                .map(ContentText::new)
+                .transpose()
+                .map_err(|_| Self::Error::Invalid)?,
+            resource_id: ResourceId::from_bytes(parse_id(&request.resource_id)?),
+            resource: request.resource.try_into()?,
         })
     }
 }

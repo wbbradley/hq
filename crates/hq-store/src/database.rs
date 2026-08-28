@@ -1045,7 +1045,8 @@ CREATE TABLE project_commands (
     digest BLOB NOT NULL CHECK(typeof(digest) = 'blob' AND length(digest) = 32),
     project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
     target_home BLOB NOT NULL CHECK(typeof(target_home) = 'blob' AND length(target_home) = 32),
-    expected_head BLOB NOT NULL CHECK(typeof(expected_head) = 'blob' AND length(expected_head) = 32),
+    expected_head BLOB CHECK(expected_head IS NULL OR
+        (typeof(expected_head) = 'blob' AND length(expected_head) = 32)),
     operation_provider TEXT NOT NULL CHECK(typeof(operation_provider) = 'text' AND length(CAST(operation_provider AS BLOB)) BETWEEN 1 AND 128),
     operation_session TEXT NOT NULL CHECK(typeof(operation_session) = 'text' AND length(CAST(operation_session AS BLOB)) BETWEEN 1 AND 512),
     operation_id BLOB NOT NULL CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
@@ -1054,7 +1055,8 @@ CREATE TABLE project_commands (
     request_fact BLOB NOT NULL CHECK(typeof(request_fact) = 'blob' AND length(request_fact) = 32),
     stage INTEGER NOT NULL CHECK(stage BETWEEN 1 AND 4),
     receipt_fact BLOB NOT NULL CHECK(typeof(receipt_fact) = 'blob' AND length(receipt_fact) = 32),
-    received_head BLOB NOT NULL CHECK(typeof(received_head) = 'blob' AND length(received_head) = 32),
+    received_head BLOB CHECK(received_head IS NULL OR
+        (typeof(received_head) = 'blob' AND length(received_head) = 32)),
     received_at INTEGER NOT NULL,
     outcome_fact BLOB NOT NULL CHECK(typeof(outcome_fact) = 'blob' AND length(outcome_fact) = 32),
     result_kind INTEGER NOT NULL CHECK(result_kind BETWEEN 0 AND 2),

@@ -513,7 +513,10 @@ fn payload(
                 digest: domain::CommandDigest::from_bytes(value.digest.0),
                 project_id: project(value.project),
                 target_home: installation(value.target_home),
-                expected_head: domain::FactId::from_bytes(value.expected_head.0),
+                expected_head: value
+                    .expected_head
+                    .0
+                    .map(|head| domain::FactId::from_bytes(head.0)),
                 operation: operation(&value.operation)?,
                 body: content(&value.body)?,
             }
@@ -522,7 +525,10 @@ fn payload(
             command_id: domain::CommandId::from_bytes(value.command.0),
             digest: domain::CommandDigest::from_bytes(value.digest.0),
             project_id: project(value.project),
-            received_head: domain::FactId::from_bytes(value.received_head.0),
+            received_head: value
+                .received_head
+                .0
+                .map(|head| domain::FactId::from_bytes(head.0)),
             received_at: timestamp(value.received_at)?,
         },
         model::BodyDto::RemoteProjectCommandOutcome(value) => Output::RemoteProjectCommandOutcome {

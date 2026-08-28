@@ -1325,7 +1325,7 @@ fn insert_command(
         return Err(corrupt());
     }
     let mut receipt_fact = ZERO;
-    let mut received_head = ZERO;
+    let mut received_head = None;
     let mut received_at = 0_i64;
     let mut outcome_fact = ZERO;
     let mut result_kind = 0;
@@ -1341,7 +1341,7 @@ fn insert_command(
             received_at: at,
         } => {
             receipt_fact = *fact.as_bytes();
-            received_head = *head.as_bytes();
+            received_head = head.map(|head| *head.as_bytes());
             received_at = at.as_unix_millis();
             2
         }
@@ -1354,7 +1354,7 @@ fn insert_command(
             runtime,
         } => {
             receipt_fact = *receipt.as_bytes();
-            received_head = *received.as_bytes();
+            received_head = received.map(|head| *head.as_bytes());
             received_at = at.as_unix_millis();
             outcome_fact = *outcome.as_bytes();
             match result {
@@ -1399,7 +1399,7 @@ fn insert_command(
                 view.digest.as_bytes().as_slice(),
                 view.project_id.as_bytes().as_slice(),
                 view.target_home.as_bytes().as_slice(),
-                view.expected_head.as_bytes().as_slice(),
+                view.expected_head.map(|head| *head.as_bytes()),
                 view.operation.provider().as_str(),
                 view.operation.session().as_str(),
                 view.operation.operation().as_bytes().as_slice(),
@@ -1408,7 +1408,7 @@ fn insert_command(
                 view.request_fact.as_bytes().as_slice(),
                 stage,
                 receipt_fact.as_slice(),
-                received_head.as_slice(),
+                received_head,
                 received_at,
                 outcome_fact.as_slice(),
                 result_kind,
@@ -1447,7 +1447,7 @@ fn load_command(
                     row.get::<_, Vec<u8>>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, Vec<u8>>(7)?,
@@ -1456,7 +1456,7 @@ fn load_command(
                     row.get::<_, Vec<u8>>(10)?,
                     row.get::<_, i64>(11)?,
                     row.get::<_, Vec<u8>>(12)?,
-                    row.get::<_, Vec<u8>>(13)?,
+                    row.get::<_, Option<Vec<u8>>>(13)?,
                     row.get::<_, i64>(14)?,
                     row.get::<_, Vec<u8>>(15)?,
                     row.get::<_, i64>(16)?,
@@ -1470,12 +1470,12 @@ fn load_command(
         .map_err(database)?;
     let request_fact = fixed(row.10)?;
     let receipt_fact = fixed(row.12)?;
-    let received_head = fixed(row.13)?;
+    let received_head = optional_fixed(row.13)?;
     let outcome_fact = fixed(row.15)?;
     let result_head = fixed(row.17)?;
     let stage = match row.11 {
         1 if receipt_fact == ZERO
-            && received_head == ZERO
+            && received_head.is_none()
             && row.14 == 0
             && outcome_fact == ZERO
             && row.16 == 0
@@ -1487,7 +1487,6 @@ fn load_command(
             RemoteCommandStage::Queued
         }
         2 if receipt_fact != ZERO
-            && received_head != ZERO
             && outcome_fact == ZERO
             && row.16 == 0
             && result_head == ZERO
@@ -1497,22 +1496,20 @@ fn load_command(
         {
             RemoteCommandStage::Received {
                 receipt_fact: FactId::from_bytes(receipt_fact),
-                received_head: FactId::from_bytes(received_head),
+                received_head: received_head.map(FactId::from_bytes),
                 received_at: Timestamp::from_unix_millis(row.14),
             }
         }
-        3 if receipt_fact != ZERO && received_head != ZERO && outcome_fact != ZERO => {
-            RemoteCommandStage::Terminal {
-                receipt_fact: FactId::from_bytes(receipt_fact),
-                received_head: FactId::from_bytes(received_head),
-                received_at: Timestamp::from_unix_millis(row.14),
-                outcome_fact: FactId::from_bytes(outcome_fact),
-                result: decode_result(row.16, result_head, row.18)?,
-                runtime: decode_runtime(row.19, row.20)?,
-            }
-        }
+        3 if receipt_fact != ZERO && outcome_fact != ZERO => RemoteCommandStage::Terminal {
+            receipt_fact: FactId::from_bytes(receipt_fact),
+            received_head: received_head.map(FactId::from_bytes),
+            received_at: Timestamp::from_unix_millis(row.14),
+            outcome_fact: FactId::from_bytes(outcome_fact),
+            result: decode_result(row.16, result_head, row.18)?,
+            runtime: decode_runtime(row.19, row.20)?,
+        },
         4 if receipt_fact == ZERO
-            && received_head == ZERO
+            && received_head.is_none()
             && row.14 == 0
             && outcome_fact == ZERO
             && row.16 == 0
@@ -1530,7 +1527,7 @@ fn load_command(
         digest: CommandDigest::from_bytes(fixed(row.1)?),
         project_id: ProjectId::from_bytes(fixed(row.2)?),
         target_home: InstallationId::from_bytes(fixed(row.3)?),
-        expected_head: FactId::from_bytes(fixed(row.4)?),
+        expected_head: optional_fixed(row.4)?.map(FactId::from_bytes),
         operation: OperationCorrelation::new(
             ProviderId::new(row.5).map_err(|_| corrupt())?,
             ProviderSessionId::new(row.6).map_err(|_| corrupt())?,
@@ -1822,6 +1819,10 @@ fn decode_u64(value: Vec<u8>) -> Result<u64, StoreError> {
 
 fn fixed(value: Vec<u8>) -> Result<[u8; 32], StoreError> {
     value.try_into().map_err(|_| corrupt())
+}
+
+fn optional_fixed(value: Option<Vec<u8>>) -> Result<Option<[u8; 32]>, StoreError> {
+    value.map(fixed).transpose()
 }
 
 fn fixed_sql(value: Vec<u8>) -> rusqlite::Result<[u8; 32]> {
@@ -2343,12 +2344,12 @@ mod tests {
             RemoteCommandStage::Queued,
             RemoteCommandStage::Received {
                 receipt_fact: id(91),
-                received_head: id(23),
+                received_head: None,
                 received_at: Timestamp::from_unix_millis(92),
             },
             RemoteCommandStage::Terminal {
                 receipt_fact: id(91),
-                received_head: id(23),
+                received_head: Some(id(23)),
                 received_at: Timestamp::from_unix_millis(92),
                 outcome_fact: id(93),
                 result: RemoteCommandResult::Committed(id(24)),
@@ -2356,7 +2357,7 @@ mod tests {
             },
             RemoteCommandStage::Terminal {
                 receipt_fact: id(91),
-                received_head: id(23),
+                received_head: Some(id(23)),
                 received_at: Timestamp::from_unix_millis(92),
                 outcome_fact: id(93),
                 result: RemoteCommandResult::Rejected(error("rejected")),
@@ -2364,7 +2365,7 @@ mod tests {
             },
             RemoteCommandStage::Terminal {
                 receipt_fact: id(91),
-                received_head: id(23),
+                received_head: Some(id(23)),
                 received_at: Timestamp::from_unix_millis(92),
                 outcome_fact: id(93),
                 result: RemoteCommandResult::Rejected(error("failed")),
@@ -2372,7 +2373,7 @@ mod tests {
             },
             RemoteCommandStage::Terminal {
                 receipt_fact: id(91),
-                received_head: id(23),
+                received_head: Some(id(23)),
                 received_at: Timestamp::from_unix_millis(92),
                 outcome_fact: id(93),
                 result: RemoteCommandResult::Rejected(error("uncertain")),
@@ -2406,13 +2407,17 @@ mod tests {
                     digest: CommandDigest::from_bytes([0x90 + offset; 32]),
                     project_id: project_one,
                     target_home: home,
-                    expected_head: id(30 + offset),
+                    expected_head: (offset > 1).then(|| id(30 + offset)),
                     operation: OperationCorrelation::new(
                         ProviderId::new("remote").expect("provider"),
                         ProviderSessionId::new("control").expect("session"),
                         OperationId::from_bytes([0xa0 + offset; 32]),
                     ),
-                    body: content("hq-project-command-v1:{\"action\":\"open\"}"),
+                    body: if offset > 1 {
+                        content("hq-project-command-v1:{\"action\":\"open\"}")
+                    } else {
+                        content("hq-project-command-v1:{\"action\":\"create\"}")
+                    },
                     issued_at: Timestamp::from_unix_millis(i64::from(offset) - 3),
                     request_fact,
                     stage,

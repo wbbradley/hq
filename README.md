@@ -302,7 +302,7 @@ See [docs/lan.md](docs/lan.md) for the supported retained-relay setup, systemd a
 Projects keep resource claims, conversation history, assignment epochs, and execution threads attached to one durable line of work. New human messages should normally target a project; direct agent messages remain a separate control plane.
 
 ```sh
-hq project create --path /work/widget --open widget
+hq project create widget --path /work/widget
 hq project worktree --repo /work/widget --base main --destination /work/widget-fix --branch fix/widget widget-fix
 hq project send PROJECT_ID "Investigate the failing integration test"
 hq project activate PROJECT_ID --agent alice --harness codex --new-session

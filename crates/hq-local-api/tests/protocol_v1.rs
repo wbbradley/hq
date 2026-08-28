@@ -20,14 +20,14 @@ use hq_local_api::protocol::v1::{
     LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MailboxAddressDto, MessagePurposeDto,
     MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
-    RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request, RequestEnvelope,
-    RequestId, ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
-    ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation,
-    ServerHello, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
-    SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
-    VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto,
-    agent_session_request_digest, negotiate,
+    ProjectCommandRequestDto, ProjectCreationRequestDto, RelayAccessDto, RelayAuthenticationDto,
+    RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request,
+    RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
+    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope,
+    ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto, SnapshotItem,
+    StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement, SubscriptionRequestDto,
+    SynchronizationRequestDto, V1, ValueError, VersionRange, VersionRejected, WireMessage,
+    WorktreeProvisioningRequestDto, agent_session_request_digest, negotiate,
 };
 
 fn build() -> BuildMetadata {
@@ -218,15 +218,33 @@ fn project_head_presence_matches_creation_semantics() {
             create_branch: true,
         })
     };
+    let creation = || {
+        ProjectCommandActionDto::Create(ProjectCreationRequestDto {
+            mailbox_id: id(7),
+            project_name: "project".to_owned(),
+            brief: Some("existing resource".to_owned()),
+            resource_id: id(9),
+            resource: locator(),
+        })
+    };
 
     request(None, provisioning())
         .encode_frame()
         .expect("creation has no prior project head");
+    request(None, creation())
+        .encode_frame()
+        .expect("existing-resource creation has no prior project head");
     request(Some(id(8)), ProjectCommandActionDto::Open)
         .encode_frame()
         .expect("existing-project command has a head");
     assert!(matches!(
         request(Some(id(8)), provisioning()).encode_frame(),
+        Err(EncodeError::InvalidValue(
+            ValueError::InvalidValueCombination
+        ))
+    ));
+    assert!(matches!(
+        request(Some(id(8)), creation()).encode_frame(),
         Err(EncodeError::InvalidValue(
             ValueError::InvalidValueCombination
         ))
@@ -986,7 +1004,7 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             account_id: id(23),
             project_id: id(14),
             target_home: id(24),
-            expected_head: id(25),
+            expected_head: Some(id(25)),
             operation_provider: "hq".to_owned(),
             operation_session: "project-control-v1".to_owned(),
             operation_id: id(26),
@@ -995,7 +1013,7 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             request_fact: id(27),
             progress: Box::new(RemoteCommandProgressDto::Received {
                 receipt_fact: id(28),
-                received_head: id(25),
+                received_head: Some(id(25)),
                 received_at_unix_millis: 1_700_000_000_456,
             }),
         },

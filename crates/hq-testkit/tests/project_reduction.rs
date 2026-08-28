@@ -1160,7 +1160,7 @@ fn remote_command_stages_never_mutate_project_without_a_canonical_home_transitio
             digest,
             project_id,
             target_home: world.home.installation_id(),
-            expected_head: create.id(),
+            expected_head: Some(create.id()),
             operation: OperationCorrelation::new(
                 ProviderId::new("remote")?,
                 ProviderSessionId::new("control")?,
@@ -1203,7 +1203,7 @@ fn remote_command_stages_never_mutate_project_without_a_canonical_home_transitio
             command_id,
             digest,
             project_id,
-            received_head: create.id(),
+            received_head: Some(create.id()),
             received_at: Timestamp::from_unix_millis(11),
         },
     )?;
@@ -1253,7 +1253,7 @@ fn remote_command_stages_never_mutate_project_without_a_canonical_home_transitio
         command.stage,
         RemoteCommandStage::Terminal {
             receipt_fact,
-            received_head,
+            received_head: Some(received_head),
             received_at: Timestamp::from_unix_millis(11),
             outcome_fact,
             result: RemoteCommandResult::Committed(committed.id()),
@@ -1300,7 +1300,7 @@ fn unequal_remote_request_bodies_under_one_command_identity_fail_closed()
         digest,
         project_id,
         target_home: world.home.installation_id(),
-        expected_head: create.id(),
+        expected_head: Some(create.id()),
         operation: operation.clone(),
         body,
     };
