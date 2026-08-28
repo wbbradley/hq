@@ -7,7 +7,8 @@ hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>
 ```
 
 The installed commands currently include `help`, `version`, `identity`, `config`,
-`human create|show|select|invite|join`, and `daemon run|status|readiness|stop|restart`. `daemon run` is the
+`human create|show|select|invite|join|devices|revoke`, and
+`daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
 autostart and service managers. `daemon status` never starts a process; `readiness` may start one
 candidate and waits for all concurrent candidates to converge on the sole state-directory owner.
@@ -44,6 +45,21 @@ before importing it. It then reconciles the reserved human mailbox, idempotently
 events, authors the target-key acceptance through a pure plan, and selects the account. A lost
 ordinary import response may be retried once because exact evidence ingestion is idempotent;
 re-running the command after any interruption converges without another revision.
+
+`human devices` inspects the uniquely selected account and renders the permanent creator plus every
+projected non-creator membership in installation-ID order. Each member retains every creator grant,
+acceptance, revoke, and causal-frontier fact plus every observed signing key; output never chooses a
+historical grant. The closed presentation state is `creator`, `pending`, `active`, `revoked`,
+`conflicted`, or `incomplete`. Multiple current grant lineages are conflicted, while an internally
+unsupported projection is incomplete and cannot be used for mutation planning.
+
+`human revoke INSTALLATION_ID` requires the selected account's exact creator installation. It
+rejects the creator, non-creators, missing/conflicted/incomplete membership, and ambiguous grant
+attribution. The pure plan cites the account root, exact attributed grant, and complete current
+membership frontier. Repeating an already projected revoke is a no-op, while lost mutation
+responses replay the same framed command identity. The admitted account-addressed revoke is always
+queued directly to its named device before any separately requested peer-route block can prevent
+ordinary routing.
 
 Identity output has only the installation ID, signing public key, and public fingerprint.
 Configuration output has the optional provider and the complete canonical relay list. Both are

@@ -12,9 +12,10 @@ use std::{
 };
 
 use hq_application::{
-    ApplicationError, HumanDeviceGrantRequest, LocalFactInputs, LocalInstallationAuthority,
-    plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
-    plan_human_device_grant, plan_human_mailbox_creation,
+    ApplicationError, HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs,
+    LocalInstallationAuthority, plan_human_account_creation, plan_human_account_selection,
+    plan_human_device_acceptance, plan_human_device_grant, plan_human_device_revoke,
+    plan_human_mailbox_creation,
 };
 use hq_domain::{
     AccountId, BoundedText, CommandId, FactId, GrantId, InstallationAddress, InstallationId,
@@ -140,6 +141,13 @@ pub enum HumanCommand {
         /// Existing absolute invitation source.
         source: PathBuf,
     },
+    /// Inspect complete device membership for the selected human account.
+    Devices,
+    /// Revoke one exact non-creator device from the selected human account.
+    Revoke {
+        /// Device installation to revoke.
+        installation_id: InstallationId,
+    },
 }
 
 /// Passive pairing operation result safe for human and machine output.
@@ -179,6 +187,94 @@ pub struct HumanView {
     pub selection_candidates: Vec<AccountId>,
     /// Unique active local account, when resolved.
     pub active_account: Option<AccountId>,
+}
+
+/// Closed presentation state for one human-account device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HumanDeviceState {
+    /// Permanent account creator authority.
+    Creator,
+    /// One or more grants await an exact device acceptance.
+    Pending,
+    /// Exactly one current grant lineage has active acceptance authority.
+    Active,
+    /// A creator revoke removes all known acceptance authority.
+    Revoked,
+    /// Multiple current grant lineages remain without a safe historical winner.
+    Conflicted,
+    /// The retained projection cannot support one complete device interpretation.
+    Incomplete,
+}
+
+impl HumanDeviceState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Creator => "creator",
+            Self::Pending => "pending",
+            Self::Active => "active",
+            Self::Revoked => "revoked",
+            Self::Conflicted => "conflicted",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
+/// Passive exact creator-grant presentation for one human device.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanDeviceGrantView {
+    /// Stable grant identity.
+    pub grant_id: GrantId,
+    /// Exact supporting canonical fact.
+    pub grant_fact: FactId,
+    /// Exact invited signing key.
+    pub signing_key: SigningPublicKey,
+    /// Optional signed display label.
+    pub label: Option<String>,
+    /// Signed non-authority relay hints in canonical order.
+    pub relay_hints: Vec<HumanRelayHintView>,
+    /// Whether the grant is a current causal maximum.
+    pub frontier_member: bool,
+    /// Whether a current active acceptance cites this grant.
+    pub active: bool,
+}
+
+/// Passive typed relay hint retained from one signed device grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanRelayHintView {
+    /// Closed resource-locator scheme name.
+    pub scheme: &'static str,
+    /// Bounded canonical locator value.
+    pub value: String,
+}
+
+/// Passive complete presentation of one account device and its retained history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanDeviceView {
+    /// Member installation.
+    pub installation_id: InstallationId,
+    /// Every exact signing key retained for the installation without choosing a winner.
+    pub signing_keys: Vec<SigningPublicKey>,
+    /// Derived closed presentation state.
+    pub state: HumanDeviceState,
+    /// Complete creator-issued grant history.
+    pub grants: Vec<HumanDeviceGrantView>,
+    /// Complete causal-maximal membership frontier.
+    pub frontier: Vec<FactId>,
+    /// Every usable exact acceptance fact.
+    pub acceptances: Vec<FactId>,
+    /// Every usable exact revoke fact.
+    pub revokes: Vec<FactId>,
+}
+
+/// Passive deterministic device-list presentation for one selected account.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanDevicesView {
+    /// Selected account being inspected.
+    pub account_id: AccountId,
+    /// Permanent creator installation.
+    pub creator_installation: InstallationId,
+    /// Devices in installation-ID order, including the creator.
+    pub devices: Vec<HumanDeviceView>,
 }
 
 struct LocalSelection {
@@ -631,6 +727,10 @@ fn parse_human(
         [action, source] if action == "join" => HumanCommand::Join {
             source: absolute_path(source)?,
         },
+        [action] if action == "devices" => HumanCommand::Devices,
+        [action, installation] if action == "revoke" => HumanCommand::Revoke {
+            installation_id: InstallationId::from_bytes(parse_hex32(installation)?),
+        },
         _ => return Err(CliError::Arguments),
     };
     Ok(CliCommand::Human {
@@ -941,6 +1041,19 @@ fn run_human(action: &HumanCommand, state: &StatePaths) -> Result<CliResult, Cli
             relay_hints,
         ),
         HumanCommand::Join { source } => join_pairing_invitation(&mut client, local, source),
+        HumanCommand::Devices => {
+            let snapshot = client.snapshot()?;
+            Ok(CliResult::HumanDevices(Box::new(human_devices_view(
+                &snapshot, local,
+            )?)))
+        }
+        HumanCommand::Revoke { installation_id } => {
+            revoke_human_device(&mut client, local, *installation_id)?;
+            let snapshot = client.snapshot()?;
+            Ok(CliResult::HumanDevices(Box::new(human_devices_view(
+                &snapshot, local,
+            )?)))
+        }
     }
 }
 
@@ -949,6 +1062,8 @@ struct MembershipRecord {
     state: String,
     frontier: BTreeSet<FactId>,
     grants: Vec<DeviceGrantDto>,
+    acceptances: BTreeSet<FactId>,
+    revokes: BTreeSet<FactId>,
     active_acceptances: BTreeSet<FactId>,
 }
 
@@ -1142,6 +1257,8 @@ fn membership_record(
             state,
             frontier,
             grants,
+            acceptances,
+            revokes,
             active_acceptances,
         } if account_id.bytes() == *account.as_bytes()
             && candidate.bytes() == *device.as_bytes() =>
@@ -1153,6 +1270,14 @@ fn membership_record(
                     .map(|fact| FactId::from_bytes(fact.bytes()))
                     .collect(),
                 grants: grants.clone(),
+                acceptances: acceptances
+                    .iter()
+                    .map(|fact| FactId::from_bytes(fact.bytes()))
+                    .collect(),
+                revokes: revokes
+                    .iter()
+                    .map(|fact| FactId::from_bytes(fact.bytes()))
+                    .collect(),
                 active_acceptances: active_acceptances
                     .iter()
                     .map(|fact| FactId::from_bytes(fact.bytes()))
@@ -1167,6 +1292,279 @@ fn membership_record(
         1 => Ok(matches.into_iter().next()),
         _ => Err(CliError::HumanState),
     }
+}
+
+fn human_devices_view(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+) -> Result<HumanDevicesView, CliError> {
+    let selection = local_selection(snapshot, local)?;
+    let account_id = selection.active.ok_or(CliError::HumanState)?;
+    let (_, creator_installation, _, _) =
+        account_item(snapshot, account_id).ok_or(CliError::HumanState)?;
+    let creator_keys = installation_signing_keys(snapshot, creator_installation);
+    let creator_state = match creator_keys.len() {
+        1 => HumanDeviceState::Creator,
+        0 => HumanDeviceState::Incomplete,
+        _ => HumanDeviceState::Conflicted,
+    };
+    let mut devices = vec![HumanDeviceView {
+        installation_id: creator_installation,
+        signing_keys: creator_keys,
+        state: creator_state,
+        grants: Vec::new(),
+        frontier: Vec::new(),
+        acceptances: Vec::new(),
+        revokes: Vec::new(),
+    }];
+    for item in &snapshot.items {
+        if let Some(device) = membership_device_view(item, account_id, creator_installation)? {
+            devices.push(device);
+        }
+    }
+    devices.sort_by_key(|device| device.installation_id);
+    if devices
+        .windows(2)
+        .any(|pair| pair[0].installation_id == pair[1].installation_id)
+    {
+        return Err(CliError::HumanState);
+    }
+    Ok(HumanDevicesView {
+        account_id,
+        creator_installation,
+        devices,
+    })
+}
+
+fn membership_device_view(
+    item: &SnapshotItem,
+    account_id: AccountId,
+    creator_installation: InstallationId,
+) -> Result<Option<HumanDeviceView>, CliError> {
+    let SnapshotItem::Membership {
+        account_id: candidate_account,
+        device,
+        state,
+        frontier,
+        grants,
+        acceptances,
+        revokes,
+        active_acceptances,
+    } = item
+    else {
+        return Ok(None);
+    };
+    if candidate_account.bytes() != *account_id.as_bytes() {
+        return Ok(None);
+    }
+    let installation_id = InstallationId::from_bytes(device.bytes());
+    if installation_id == creator_installation {
+        return Err(CliError::HumanState);
+    }
+    let grant_subjects_match = grants
+        .iter()
+        .all(|grant| grant.device.bytes() == *installation_id.as_bytes());
+    let mut grant_views = grants
+        .iter()
+        .map(|grant| HumanDeviceGrantView {
+            grant_id: GrantId::from_bytes(grant.grant_id.bytes()),
+            grant_fact: FactId::from_bytes(grant.grant_fact.bytes()),
+            signing_key: SigningPublicKey::from_bytes(grant.signing_key.bytes()),
+            label: grant.label.clone(),
+            relay_hints: grant
+                .relay_hints
+                .iter()
+                .map(|hint| HumanRelayHintView {
+                    scheme: resource_scheme_label(hint.scheme),
+                    value: hint.value.clone(),
+                })
+                .collect(),
+            frontier_member: grant.frontier_member,
+            active: grant.active,
+        })
+        .collect::<Vec<_>>();
+    grant_views.sort_by_key(|grant| grant.grant_id);
+    let signing_keys = grant_views
+        .iter()
+        .map(|grant| grant.signing_key)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let frontier = decode_fact_ids(frontier);
+    let acceptances = decode_fact_ids(acceptances);
+    let revokes = decode_fact_ids(revokes);
+    let active_acceptances = decode_fact_ids(active_acceptances)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let state = classify_device_state(
+        state,
+        &grant_views,
+        &frontier,
+        &acceptances,
+        &revokes,
+        &active_acceptances,
+        grant_subjects_match,
+    );
+    Ok(Some(HumanDeviceView {
+        installation_id,
+        signing_keys,
+        state,
+        grants: grant_views,
+        frontier,
+        acceptances,
+        revokes,
+    }))
+}
+
+fn decode_fact_ids(ids: &[Id32]) -> Vec<FactId> {
+    ids.iter()
+        .map(|fact| FactId::from_bytes(fact.bytes()))
+        .collect()
+}
+
+const fn resource_scheme_label(scheme: ResourceSchemeDto) -> &'static str {
+    match scheme {
+        ResourceSchemeDto::GitRepository => "git_repository",
+        ResourceSchemeDto::WorkingTree => "working_tree",
+        ResourceSchemeDto::Container => "container",
+        ResourceSchemeDto::Opaque => "opaque",
+    }
+}
+
+fn installation_signing_keys(
+    snapshot: &AuthoritativeSnapshotDto,
+    installation: InstallationId,
+) -> Vec<SigningPublicKey> {
+    snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Installation {
+                installation_id,
+                signing_key,
+                ..
+            } if installation_id.bytes() == *installation.as_bytes() => {
+                Some(SigningPublicKey::from_bytes(signing_key.bytes()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn classify_device_state(
+    projected: &str,
+    grants: &[HumanDeviceGrantView],
+    frontier: &[FactId],
+    acceptances: &[FactId],
+    revokes: &[FactId],
+    active_acceptances: &BTreeSet<FactId>,
+    grant_subjects_match: bool,
+) -> HumanDeviceState {
+    let retained = grants
+        .iter()
+        .map(|grant| grant.grant_fact)
+        .chain(acceptances.iter().copied())
+        .chain(revokes.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let active_grants = grants.iter().filter(|grant| grant.active).count();
+    let frontier_grants = grants.iter().filter(|grant| grant.frontier_member).count();
+    let incomplete = grants.is_empty()
+        || !grant_subjects_match
+        || frontier.iter().any(|fact| !retained.contains(fact))
+        || active_acceptances
+            .iter()
+            .any(|fact| !acceptances.contains(fact))
+        || (projected == "active" && (active_grants == 0 || active_acceptances.is_empty()))
+        || (projected == "pending" && frontier_grants == 0)
+        || (projected == "revoked" && revokes.is_empty());
+    if incomplete {
+        HumanDeviceState::Incomplete
+    } else if (projected == "active" && active_grants > 1)
+        || (projected == "pending" && frontier_grants > 1)
+    {
+        HumanDeviceState::Conflicted
+    } else {
+        match projected {
+            "pending" => HumanDeviceState::Pending,
+            "active" => HumanDeviceState::Active,
+            "revoked" => HumanDeviceState::Revoked,
+            _ => HumanDeviceState::Incomplete,
+        }
+    }
+}
+
+fn revoke_human_device(
+    client: &mut LocalNodeClient,
+    local: InstallationId,
+    device: InstallationId,
+) -> Result<(), CliError> {
+    if device == local {
+        return Err(CliError::HumanState);
+    }
+    let snapshot = client.snapshot()?;
+    let authority = local_authority(&snapshot, local)?;
+    let selection = local_selection(&snapshot, local)?;
+    let account_id = selection.active.ok_or(CliError::HumanState)?;
+    let (account_root, creator_installation, _, _) =
+        account_item(&snapshot, account_id).ok_or(CliError::HumanState)?;
+    if creator_installation != local {
+        return Err(CliError::HumanState);
+    }
+    let membership =
+        membership_record(&snapshot, account_id, device)?.ok_or(CliError::HumanState)?;
+    let devices = human_devices_view(&snapshot, local)?;
+    let presented = devices
+        .devices
+        .iter()
+        .find(|candidate| candidate.installation_id == device)
+        .ok_or(CliError::HumanState)?;
+    if presented.state == HumanDeviceState::Revoked {
+        return Ok(());
+    }
+    if matches!(
+        presented.state,
+        HumanDeviceState::Creator | HumanDeviceState::Conflicted | HumanDeviceState::Incomplete
+    ) {
+        return Err(CliError::HumanState);
+    }
+    let candidates = membership
+        .grants
+        .iter()
+        .filter(|grant| match presented.state {
+            HumanDeviceState::Active => grant.active,
+            HumanDeviceState::Pending => grant.frontier_member,
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    let [grant] = candidates.as_slice() else {
+        return Err(CliError::HumanState);
+    };
+    let request = HumanDeviceRevokeRequest {
+        account_id,
+        account_root,
+        creator: InstallationAddress::new(authority.installation_id, authority.signing_key),
+        grant_id: GrantId::from_bytes(grant.grant_id.bytes()),
+        grant_fact: FactId::from_bytes(grant.grant_fact.bytes()),
+        device_id: device,
+        membership_frontier: membership.frontier,
+    };
+    let plan = plan_human_device_revoke(authority, stable_inputs(), request)?;
+    if let Err(error) = submit_human_plan(client, plan) {
+        let reconciled = client.snapshot()?;
+        if membership_record(&reconciled, account_id, device)?
+            .is_some_and(|membership| membership.state == "revoked")
+        {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    let refreshed = client.snapshot()?;
+    membership_record(&refreshed, account_id, device)?
+        .filter(|membership| membership.state == "revoked")
+        .map(|_| ())
+        .ok_or(CliError::HumanState)
 }
 
 fn device_grant_matches(
@@ -1711,6 +2109,7 @@ enum CliResult {
     Configuration(Box<LocalConfiguration>),
     Human(Box<HumanView>),
     HumanPairing(HumanPairingView),
+    HumanDevices(Box<HumanDevicesView>),
     Completed {
         operation: &'static str,
     },
@@ -1744,6 +2143,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 .join(","),
         )),
         (CliOutputFormat::Human, CliResult::Human(view)) => render_human_view(view),
+        (CliOutputFormat::Human, CliResult::HumanDevices(view)) => render_human_devices(view),
         (CliOutputFormat::Human, CliResult::HumanPairing(view)) => Ok(format!(
             "completed operation={} account={} grant={} device={}\n",
             view.operation,
@@ -1804,10 +2204,45 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 "operation": view.operation,
             }),
         ),
+        (CliOutputFormat::Json, CliResult::HumanDevices(view)) => machine_record(
+            "human_devices",
+            &serde_json::json!({
+                "account_id": encode_id(view.account_id.as_bytes()),
+                "creator_installation": encode_id(view.creator_installation.as_bytes()),
+                "devices": view.devices.iter().map(device_json).collect::<Vec<_>>(),
+            }),
+        ),
         (CliOutputFormat::Json, CliResult::Completed { operation }) => {
             machine_record("completed", &serde_json::json!({ "operation": operation }))
         }
     }
+}
+
+fn device_json(device: &HumanDeviceView) -> serde_json::Value {
+    serde_json::json!({
+        "acceptances": device.acceptances.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+        "frontier": device.frontier.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+        "grants": device.grants.iter().map(|grant| serde_json::json!({
+            "active": grant.active,
+            "frontier_member": grant.frontier_member,
+            "grant_fact": encode_id(grant.grant_fact.as_bytes()),
+            "grant_id": encode_id(grant.grant_id.as_bytes()),
+            "label": grant.label,
+            "relay_hints": grant.relay_hints.iter().map(|hint| serde_json::json!({
+                "scheme": hint.scheme,
+                "value": hint.value,
+            })).collect::<Vec<_>>(),
+            "signing_key": encode_id(grant.signing_key.as_bytes()),
+        })).collect::<Vec<_>>(),
+        "installation_id": encode_id(device.installation_id.as_bytes()),
+        "revokes": device.revokes.iter().map(|fact| encode_id(fact.as_bytes())).collect::<Vec<_>>(),
+        "signing_keys": device.signing_keys.iter().map(|key| encode_id(key.as_bytes())).collect::<Vec<_>>(),
+        "state": device.state.label(),
+    })
+}
+
+fn encode_id(bytes: &[u8; 32]) -> String {
+    crate::identity::encode_hex(bytes)
 }
 
 fn render_human_view(view: &HumanView) -> Result<String, CliError> {
@@ -1839,6 +2274,70 @@ fn render_human_view(view: &HumanView) -> Result<String, CliError> {
             label,
         )
         .map_err(|_| CliError::Runtime)?;
+    }
+    Ok(output)
+}
+
+fn render_human_devices(view: &HumanDevicesView) -> Result<String, CliError> {
+    let mut output = format!(
+        "account={} creator={} devices={}\n",
+        encode_id(view.account_id.as_bytes()),
+        encode_id(view.creator_installation.as_bytes()),
+        view.devices.len(),
+    );
+    for device in &view.devices {
+        writeln!(
+            output,
+            "device={} state={} keys={} frontier={} acceptances={} revokes={} grants={}",
+            encode_id(device.installation_id.as_bytes()),
+            device.state.label(),
+            device
+                .signing_keys
+                .iter()
+                .map(|key| encode_id(key.as_bytes()))
+                .collect::<Vec<_>>()
+                .join(","),
+            device
+                .frontier
+                .iter()
+                .map(|fact| encode_id(fact.as_bytes()))
+                .collect::<Vec<_>>()
+                .join(","),
+            device
+                .acceptances
+                .iter()
+                .map(|fact| encode_id(fact.as_bytes()))
+                .collect::<Vec<_>>()
+                .join(","),
+            device
+                .revokes
+                .iter()
+                .map(|fact| encode_id(fact.as_bytes()))
+                .collect::<Vec<_>>()
+                .join(","),
+            device.grants.len(),
+        )
+        .map_err(|_| CliError::Runtime)?;
+        for grant in &device.grants {
+            let label = serde_json::to_string(&grant.label).map_err(|_| CliError::Runtime)?;
+            writeln!(
+                output,
+                "grant={} fact={} key={} active={} frontier_member={} label={} relays={}",
+                encode_id(grant.grant_id.as_bytes()),
+                encode_id(grant.grant_fact.as_bytes()),
+                encode_id(grant.signing_key.as_bytes()),
+                grant.active,
+                grant.frontier_member,
+                label,
+                grant
+                    .relay_hints
+                    .iter()
+                    .map(|hint| format!("{}:{}", hint.scheme, hint.value))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+            .map_err(|_| CliError::Runtime)?;
+        }
     }
     Ok(output)
 }
@@ -1900,7 +2399,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [command] if command == "human" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] human <COMMAND>\n\n\
              Commands:\n  create [LABEL]                         Create/reconcile and select the local creator account\n  show                                   Show authoritative account and selection state\n  select ACCOUNT_ID                      Select one actively authorized account\n\n\
-             invite INSTALLATION_ID SIGNING_KEY ABSOLUTE_PATH [--label LABEL] [--relay URL]...\n                                          Export one new signed invitation\n  join ABSOLUTE_PATH                     Verify, import, accept, and select one invitation\n\n\
+             invite INSTALLATION_ID SIGNING_KEY ABSOLUTE_PATH [--label LABEL] [--relay URL]...\n                                          Export one new signed invitation\n  join ABSOLUTE_PATH                     Verify, import, accept, and select one invitation\n  devices                               Show complete selected-account device history\n  revoke INSTALLATION_ID                Revoke one device as the account creator\n\n\
              Human commands start or connect to the local node and author only through application plans.\n",
         ),
         [command] if command == "daemon" => Some(
@@ -1918,7 +2417,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                 || (command == "human"
                     && matches!(
                         action.as_str(),
-                        "show" | "create" | "select" | "invite" | "join"
+                        "show" | "create" | "select" | "invite" | "join" | "devices" | "revoke"
                     )) =>
         {
             match command.as_str() {
@@ -2015,13 +2514,15 @@ mod tests {
 
     use super::{
         CliCommand, CliError, CliOutputFormat, ConfigurationCommand, DaemonCommand, HumanCommand,
-        IdentityCommand, execute_cli, human_view, pairing_grant_id, parse_cli, read_password,
-        run_cli,
+        HumanDeviceState, IdentityCommand, execute_cli, human_devices_view, human_view,
+        pairing_grant_id, parse_cli, read_password, run_cli,
     };
     use hq_domain::{
         AccountId, FactId, InstallationAddress, InstallationId, RelayHints, SigningPublicKey,
     };
-    use hq_local_api::protocol::v1::{AuthoritativeSnapshotDto, Id32, SnapshotItem};
+    use hq_local_api::protocol::v1::{
+        AuthoritativeSnapshotDto, DeviceGrantDto, Id32, SnapshotItem,
+    };
 
     #[test]
     fn parser_accepts_global_output_and_explicit_daemon_roles() {
@@ -2110,6 +2611,116 @@ mod tests {
                 OsString::from("--password-stdin"),
             ]),
             Err(CliError::Arguments)
+        );
+
+        let devices = parse_cli([OsString::from("human"), OsString::from("devices")])
+            .expect("device inspection parses");
+        assert!(matches!(
+            devices.command,
+            CliCommand::Human {
+                action: HumanCommand::Devices,
+                ..
+            }
+        ));
+        let revoke = parse_cli([
+            OsString::from("human"),
+            OsString::from("revoke"),
+            OsString::from("33".repeat(32)),
+        ])
+        .expect("device revoke parses");
+        assert!(matches!(
+            revoke.command,
+            CliCommand::Human {
+                action: HumanCommand::Revoke { installation_id },
+                ..
+            } if installation_id.as_bytes() == &[0x33; 32]
+        ));
+    }
+
+    #[test]
+    fn device_view_preserves_all_current_authorities_and_exposes_conflict() {
+        let local = InstallationId::from_bytes([1; 32]);
+        let account = Id32::new([2; 32]);
+        let target = Id32::new([3; 32]);
+        let snapshot = AuthoritativeSnapshotDto::new(
+            9,
+            vec![
+                SnapshotItem::Installation {
+                    installation_id: Id32::new([1; 32]),
+                    root_fact: Id32::new([4; 32]),
+                    signing_key: Id32::new([5; 32]),
+                    encryption_key: Id32::new([6; 32]),
+                    label: None,
+                },
+                SnapshotItem::Account {
+                    account_id: account,
+                    root_fact: Id32::new([7; 32]),
+                    creator_installation: Id32::new([1; 32]),
+                    label: None,
+                    selected: true,
+                },
+                SnapshotItem::AccountSelection {
+                    installation_id: Id32::new([1; 32]),
+                    candidates: vec![account],
+                    active: Some(account),
+                    frontier: vec![Id32::new([8; 32])],
+                },
+                SnapshotItem::Membership {
+                    account_id: account,
+                    device: target,
+                    state: "active".to_owned(),
+                    frontier: vec![Id32::new([11; 32]), Id32::new([12; 32])],
+                    grants: vec![
+                        DeviceGrantDto {
+                            grant_id: Id32::new([9; 32]),
+                            grant_fact: Id32::new([13; 32]),
+                            device: target,
+                            signing_key: Id32::new([14; 32]),
+                            label: Some("desktop".to_owned()),
+                            relay_hints: vec![],
+                            frontier_member: false,
+                            active: true,
+                        },
+                        DeviceGrantDto {
+                            grant_id: Id32::new([10; 32]),
+                            grant_fact: Id32::new([15; 32]),
+                            device: target,
+                            signing_key: Id32::new([16; 32]),
+                            label: Some("replacement".to_owned()),
+                            relay_hints: vec![],
+                            frontier_member: false,
+                            active: true,
+                        },
+                    ],
+                    acceptances: vec![Id32::new([11; 32]), Id32::new([12; 32])],
+                    revokes: vec![],
+                    active_acceptances: vec![Id32::new([11; 32]), Id32::new([12; 32])],
+                },
+            ],
+        )
+        .expect("snapshot");
+        let view = human_devices_view(&snapshot, local).expect("device view");
+        assert_eq!(view.devices.len(), 2);
+        let member = view
+            .devices
+            .iter()
+            .find(|device| device.installation_id.as_bytes() == &[3; 32])
+            .expect("member");
+        assert_eq!(member.state, HumanDeviceState::Conflicted);
+        assert_eq!(member.grants.len(), 2);
+        assert_eq!(member.acceptances.len(), 2);
+        assert_eq!(member.signing_keys.len(), 2);
+        assert_eq!(
+            super::classify_device_state(
+                "revoked",
+                &[],
+                &[FactId::from_bytes([17; 32])],
+                &[],
+                &[FactId::from_bytes([17; 32])],
+                &BTreeSet::new(),
+                true,
+            ),
+            HumanDeviceState::Incomplete
         );
     }
 

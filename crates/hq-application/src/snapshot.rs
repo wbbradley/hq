@@ -269,6 +269,8 @@ impl DomainSnapshot {
                             active: view.active_grants.contains(grant_id),
                         })
                         .collect(),
+                    acceptances: view.acceptances.clone(),
+                    revokes: view.revokes.clone(),
                     active_acceptances: view.active_acceptances.clone(),
                 },
                 (
@@ -591,6 +593,8 @@ pub enum ClientProjection {
         state: ClientMembershipState,
         frontier: BTreeSet<FactId>,
         grants: Vec<ClientDeviceGrant>,
+        acceptances: BTreeSet<FactId>,
+        revokes: BTreeSet<FactId>,
         active_acceptances: BTreeSet<FactId>,
     },
     AccountSelection {

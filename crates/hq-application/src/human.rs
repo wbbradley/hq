@@ -49,6 +49,25 @@ pub struct HumanDeviceGrantRequest {
     pub membership_frontier: BTreeSet<FactId>,
 }
 
+/// Passive complete intent for one creator-issued human-device revocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanDeviceRevokeRequest {
+    /// Human account whose device membership is revoked.
+    pub account_id: AccountId,
+    /// Exact immutable account creator root.
+    pub account_root: FactId,
+    /// Permanent creator address observed with the account root.
+    pub creator: InstallationAddress,
+    /// Exact creator-issued grant identity being attributed.
+    pub grant_id: GrantId,
+    /// Exact supporting grant fact.
+    pub grant_fact: FactId,
+    /// Device installation being revoked.
+    pub device_id: InstallationId,
+    /// Complete causal-maximal history for this account and device.
+    pub membership_frontier: BTreeSet<FactId>,
+}
+
 /// Plans creation of the reserved local human mailbox.
 pub fn plan_human_mailbox_creation(
     authority: LocalInstallationAuthority,
@@ -181,6 +200,42 @@ pub fn plan_human_device_acceptance(
             account_id,
             grant_id,
             device: InstallationAddress::new(authority.installation_id, authority.signing_key),
+        },
+        inputs.auxiliary_randomness,
+    ))
+}
+
+/// Plans one creator-signed, frontier-complete device revocation.
+pub fn plan_human_device_revoke(
+    authority: LocalInstallationAuthority,
+    inputs: LocalFactInputs,
+    request: HumanDeviceRevokeRequest,
+) -> Result<FactPlan, ApplicationError> {
+    if request.creator != InstallationAddress::new(authority.installation_id, authority.signing_key)
+        || request.device_id == authority.installation_id
+    {
+        return Err(invalid_request(()));
+    }
+    let mut parents = request.membership_frontier;
+    parents.insert(request.account_root);
+    parents.insert(request.grant_fact);
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new(parents).map_err(invalid_request)?,
+        [
+            AuthorityReference::new(AuthorityRole::AccountCreator, request.account_root),
+            AuthorityReference::new(AuthorityRole::DeviceGrant, request.grant_fact),
+        ],
+    )
+    .map_err(invalid_request)?;
+    Ok(FactPlan::new(
+        authority.installation_id,
+        inputs.authored_at,
+        FactScope::AccountAddressed(request.account_id),
+        causal,
+        SemanticPayload::HumanDeviceRevoked {
+            account_id: request.account_id,
+            grant_id: request.grant_id,
+            device_id: request.device_id,
         },
         inputs.auxiliary_randomness,
     ))
@@ -372,6 +427,77 @@ mod tests {
                 ),
                 label: None,
                 relay_hints: RelayHints::new([]).expect("relay hints"),
+                membership_frontier: BTreeSet::new(),
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn device_revoke_binds_creator_grant_and_complete_membership_frontier() {
+        let account = AccountId::from_bytes([22; 32]);
+        let account_root = FactId::from_bytes([23; 32]);
+        let grant_id = GrantId::from_bytes([24; 32]);
+        let grant_fact = FactId::from_bytes([25; 32]);
+        let device = InstallationId::from_bytes([26; 32]);
+        let frontier = [FactId::from_bytes([27; 32]), FactId::from_bytes([28; 32])]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let plan = plan_human_device_revoke(
+            authority(),
+            inputs(),
+            HumanDeviceRevokeRequest {
+                account_id: account,
+                account_root,
+                creator: InstallationAddress::new(
+                    authority().installation_id,
+                    authority().signing_key,
+                ),
+                grant_id,
+                grant_fact,
+                device_id: device,
+                membership_frontier: frontier.clone(),
+            },
+        )
+        .expect("revoke plan");
+        assert_eq!(
+            plan.causal().authority(AuthorityRole::AccountCreator),
+            Some(account_root)
+        );
+        assert_eq!(
+            plan.causal().authority(AuthorityRole::DeviceGrant),
+            Some(grant_fact)
+        );
+        assert!(
+            frontier
+                .iter()
+                .all(|fact| plan.causal().parents().contains(fact))
+        );
+        assert!(matches!(
+            plan.payload(),
+            SemanticPayload::HumanDeviceRevoked {
+                account_id,
+                grant_id: revoked_grant,
+                device_id,
+            } if *account_id == account && *revoked_grant == grant_id && *device_id == device
+        ));
+    }
+
+    #[test]
+    fn non_creator_cannot_plan_device_revocation() {
+        let result = plan_human_device_revoke(
+            authority(),
+            inputs(),
+            HumanDeviceRevokeRequest {
+                account_id: AccountId::from_bytes([29; 32]),
+                account_root: FactId::from_bytes([30; 32]),
+                creator: InstallationAddress::new(
+                    InstallationId::from_bytes([31; 32]),
+                    SigningPublicKey::from_bytes([32; 32]),
+                ),
+                grant_id: GrantId::from_bytes([33; 32]),
+                grant_fact: FactId::from_bytes([34; 32]),
+                device_id: InstallationId::from_bytes([35; 32]),
                 membership_frontier: BTreeSet::new(),
             },
         );

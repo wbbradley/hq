@@ -598,6 +598,8 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
                 frontier_member: false,
                 active: true,
             }],
+            acceptances: vec![id(10)],
+            revokes: vec![],
             active_acceptances: vec![id(10)],
         },
         SnapshotItem::AccountSelection {

@@ -693,6 +693,79 @@ fn human_pairing_is_target_bound_replay_safe_and_survives_restart() {
         "byte-identical evidence, acceptance, and selection are no-ops"
     );
 
+    let device_listing = human_output(&device_root, &["devices"]);
+    assert!(
+        device_listing.status.success(),
+        "device listing stderr: {:?}",
+        device_listing.stderr
+    );
+    let device_listing: serde_json::Value =
+        serde_json::from_slice(&device_listing.stdout).expect("device listing JSON");
+    assert_eq!(device_listing["kind"], "human_devices");
+    let joined_device = device_listing["data"]["devices"]
+        .as_array()
+        .expect("devices array")
+        .iter()
+        .find(|device| device["installation_id"] == device_id)
+        .expect("joined device");
+    assert_eq!(joined_device["state"], "active");
+    assert_eq!(
+        joined_device["acceptances"]
+            .as_array()
+            .expect("acceptances")
+            .len(),
+        1
+    );
+
+    let non_creator_revoke = human_output(&device_root, &["revoke", device_id]);
+    assert!(!non_creator_revoke.status.success());
+    let non_creator_error: serde_json::Value =
+        serde_json::from_slice(&non_creator_revoke.stderr).expect("non-creator error JSON");
+    assert_eq!(non_creator_error["data"]["code"], "human.state_unavailable");
+
+    let before_revoke = creator_client
+        .snapshot()
+        .expect("snapshot before revoke")
+        .revision;
+    let revoked = human_output(&creator_root, &["revoke", device_id]);
+    assert!(
+        revoked.status.success(),
+        "creator revoke stderr: {:?}",
+        revoked.stderr
+    );
+    let revoked_json: serde_json::Value =
+        serde_json::from_slice(&revoked.stdout).expect("revoked device JSON");
+    let revoked_device = revoked_json["data"]["devices"]
+        .as_array()
+        .expect("devices array")
+        .iter()
+        .find(|device| device["installation_id"] == device_id)
+        .expect("revoked device");
+    assert_eq!(revoked_device["state"], "revoked");
+    assert_eq!(
+        revoked_device["revokes"].as_array().expect("revokes").len(),
+        1
+    );
+    let revoked_revision = creator_client
+        .snapshot()
+        .expect("snapshot after revoke")
+        .revision;
+    assert_eq!(revoked_revision, before_revoke + 1);
+    let repeated_revoke = human_output(&creator_root, &["revoke", device_id]);
+    assert!(
+        repeated_revoke.status.success(),
+        "repeat revoke stderr: {:?}",
+        repeated_revoke.stderr
+    );
+    assert_eq!(
+        creator_client
+            .snapshot()
+            .expect("snapshot after repeat revoke")
+            .revision,
+        revoked_revision,
+        "repeat revoke is a semantic no-op"
+    );
+
     let tampered_path = directory.path().join("tampered-invitation.json");
     let mut tampered = fs::read(&invitation).expect("invitation reads");
     let byte = tampered
@@ -725,6 +798,28 @@ fn human_pairing_is_target_bound_replay_safe_and_survives_restart() {
     let shown: serde_json::Value =
         serde_json::from_slice(&shown.stdout).expect("joined human JSON");
     assert_eq!(shown["data"]["active_account"], account);
+
+    let creator_restarted = output("restart", &creator_root);
+    assert!(
+        creator_restarted.status.success(),
+        "creator restart stderr: {:?}",
+        creator_restarted.stderr
+    );
+    let persisted = human_output(&creator_root, &["devices"]);
+    assert!(
+        persisted.status.success(),
+        "persisted devices stderr: {:?}",
+        persisted.stderr
+    );
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&persisted.stdout).expect("persisted device JSON");
+    assert!(
+        persisted["data"]["devices"]
+            .as_array()
+            .expect("devices")
+            .iter()
+            .any(|device| device["installation_id"] == device_id && device["state"] == "revoked")
+    );
 
     for root in [&creator_root, &device_root] {
         let stopped = output("stop", root);

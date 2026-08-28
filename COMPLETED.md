@@ -7281,3 +7281,37 @@ allowed yanked `chacha20 0.10.1` warning.
   lineage, expiry policy if specified, and changed reuse before accepting and selecting membership.
   Test tampering, wrong target/key/account, missing history, duplicate replay, concurrent revoke,
   restart, unsafe paths, and deterministic human/JSON rendering.
+
+## 2026-08-28 — Human device inspection and creator revocation
+
+Added `human devices` and `human revoke INSTALLATION_ID` over the authoritative local snapshot and
+ordinary application mutation path. Device presentation includes the permanent creator and every
+non-creator device in deterministic order, retaining every exact grant, acceptance, revoke,
+membership-frontier fact, signing key, label, and relay hint. Its closed state is creator, pending,
+active, revoked, conflicted, or incomplete; multiple current grant lineages and unsupported history
+remain explicit instead of selecting a historical winner.
+
+The pure public-field revoke request binds the permanent creator address, account root, exact grant
+identity and fact, target installation, and complete current membership frontier. Non-creators,
+creator self-revoke, absent history, incomplete/conflicted state, and ambiguous grant attribution
+fail closed. Stable mutation replay handles response loss, and repeating a projected revoke is a
+semantic no-op. Store fanout explicitly retains the named revoked device as a recipient even after
+the atomic membership projection becomes inactive, so the revoke is queued before any later route
+block.
+
+The clean unshipped local API v1 shape now includes complete usable acceptance and revoke history in
+membership items. Existing normalized authority storage already retained those facts, so storage
+remains v13 in place with no field, migration, compatibility branch, or version bump. Planner,
+projection codec, conflict presentation, parser/help, fanout, real two-installation creator and
+non-creator rejection, replay, and restart tests pass. Full locked workspace tests/build, strict
+Clippy, architecture, protocol, causal, behavior-ledger, and dependency gates pass; dependency
+policy reports only the existing allowed yanked `chacha20 0.10.1` warning.
+
+### Original plan entry
+
+- **[cli/high] Inspect and revoke human account devices** — Add typed device listing and
+  creator-only revoke through authoritative snapshots and pure application plans. Preserve every
+  maximal acceptance/revoke, require exact grant attribution, fan revocation out to the named device
+  before route blocking, and expose pending/active/revoked/conflicted or incomplete states without a
+  chosen historical winner. Test non-creator rejection, stale/incomplete frontiers, concurrent
+  acceptance/revoke, regrant ancestry, response loss, restart, fanout, and human/JSON rendering.

@@ -135,10 +135,12 @@ not shipped and has no standing installations, this is the clean v1 snapshot sha
 no compatibility branch or protocol-version bump.
 
 Membership items additionally carry their complete causal-maximal grant/accept/revoke frontier and
-the complete creator-issued grant history. Each grant names its stable ID, exact signed fact,
-target installation and signing key, optional label, bounded relay hints, and derived
-causal-frontier/active status. These passive fields let clients reuse the current unrevoked grant,
-build frontier-complete regrants only after revocation, and verify exact target binding without
+the complete creator-issued grant, usable acceptance, usable revoke, and active-acceptance history.
+Each grant names its stable ID, exact signed fact, target installation and signing key, optional
+label, bounded relay hints, and derived causal-frontier/active status. These passive fields let
+clients preserve every membership maximum, expose ambiguity without selecting a historical winner,
+attribute creator revocation to one exact grant, reuse the current unrevoked grant, build
+frontier-complete regrants only after revocation, and verify exact target binding without
 reconstructing storage rows.
 
 The canonical-evidence query accepts sorted unique roots and returns their complete transitive

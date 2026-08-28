@@ -193,6 +193,8 @@ pub fn snapshot_to_v1(
                 state,
                 frontier,
                 grants,
+                acceptances,
+                revokes,
                 active_acceptances,
             } => SnapshotItem::Membership {
                 account_id: id32(account_id.as_bytes()),
@@ -222,6 +224,11 @@ pub fn snapshot_to_v1(
                         active: grant.active,
                     })
                     .collect(),
+                acceptances: acceptances
+                    .iter()
+                    .map(|fact| id32(fact.as_bytes()))
+                    .collect(),
+                revokes: revokes.iter().map(|fact| id32(fact.as_bytes())).collect(),
                 active_acceptances: active_acceptances
                     .iter()
                     .map(|fact| id32(fact.as_bytes()))

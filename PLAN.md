@@ -54,13 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Inspect and revoke human account devices** — Add typed device listing and
-  creator-only revoke through authoritative snapshots and pure application plans. Preserve every
-  maximal acceptance/revoke, require exact grant attribution, fan revocation out to the named device
-  before route blocking, and expose pending/active/revoked/conflicted or incomplete states without a
-  chosen historical winner. Test non-creator rejection, stale/incomplete frontiers, concurrent
-  acceptance/revoke, regrant ancestry, response loss, restart, fanout, and human/JSON rendering.
-
 - **[cli/high] Implement directional peers and mailbox capabilities** — Add peer add/list/distrust
   and mailbox grant/revoke/inspection commands over exact application plans and authoritative
   snapshots. Keep route trust directional and distinct from mailbox authority; preserve historical

@@ -17,9 +17,9 @@ pub use error::{
     ApplicationError, ApplicationErrorClass, ApplicationErrorCode, ApplicationValueError,
 };
 pub use human::{
-    HumanDeviceGrantRequest, LocalFactInputs, LocalInstallationAuthority,
+    HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority,
     plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
-    plan_human_device_grant, plan_human_mailbox_creation,
+    plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
 };
 pub use mutation::{
     FactMutation, FactPlan, MAX_ENCODED_MUTATION_RESULT_BYTES, MutationAttempt, MutationDecision,

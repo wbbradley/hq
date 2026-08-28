@@ -1033,6 +1033,10 @@ pub enum SnapshotItem {
         frontier: Vec<Id32>,
         /// Complete creator-issued grant history.
         grants: Vec<DeviceGrantDto>,
+        /// Every usable exact acceptance fact.
+        acceptances: Vec<Id32>,
+        /// Every usable exact revoke fact.
+        revokes: Vec<Id32>,
         /// Exact active acceptance authorities.
         active_acceptances: Vec<Id32>,
     },
@@ -1996,6 +2000,8 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 state,
                 frontier,
                 grants,
+                acceptances,
+                revokes,
                 active_acceptances,
                 ..
             } => {
@@ -2025,6 +2031,8 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                         validate_locator(locator)?;
                     }
                 }
+                validate_id_set(acceptances, 64)?;
+                validate_id_set(revokes, 64)?;
                 let has_active_grant = grants.iter().any(|grant| grant.active);
                 if (state == "active") != has_active_grant
                     || (state == "pending" && !grants.iter().any(|grant| grant.frontier_member))
@@ -2032,6 +2040,13 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                     return Err(ValueError::InvalidValueCombination);
                 }
                 validate_id_set(active_acceptances, 64)?;
+                if !active_acceptances
+                    .iter()
+                    .all(|acceptance| acceptances.contains(acceptance))
+                    || (state == "revoked" && revokes.is_empty())
+                {
+                    return Err(ValueError::InvalidValueCombination);
+                }
             }
             SnapshotItem::Agent {
                 names, lifecycle, ..

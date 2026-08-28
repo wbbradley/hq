@@ -72,7 +72,10 @@ not schedule work.
 Human-account administration uses pure planners in this crate. Each planner accepts public passive
 `LocalInstallationAuthority` and `LocalFactInputs` records and returns an ordinary `FactPlan` for
 reserved human-mailbox creation, creator-account creation, or frontier-complete account selection.
-It also plans creator-only frontier-complete device grants and exact target-key device acceptance.
+It also plans creator-only frontier-complete device grants and revocations plus exact target-key
+device acceptance. A revoke request names the permanent creator address, exact grant identity and
+fact, target device, and complete membership frontier; the planner rejects a non-creator or creator
+self-revoke before returning a plan.
 The records expose fields directly; they contain no secret or mutable capability. The CLI supplies
 only exact roots and frontiers from an authoritative snapshot, while the node-owned gateway remains
 the sole signer and commit capability.

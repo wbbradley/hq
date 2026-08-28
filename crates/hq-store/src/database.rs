@@ -2869,6 +2869,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn device_revoke_fanout_always_names_the_removed_device() {
+        let account = hq_domain::AccountId::from_bytes([0x45; 32]);
+        let target = hq_domain::InstallationId::from_bytes([0x55; 32]);
+        let plan = CanonicalEventPlan::new(
+            local_policy().local_installation(),
+            hq_domain::Timestamp::from_unix_millis(1),
+            hq_domain::FactScope::AccountAddressed(account),
+            hq_domain::CausalReferences::new(
+                hq_domain::BoundedSet::new([]).expect("empty parents"),
+                [],
+            )
+            .expect("empty causal references"),
+            hq_domain::SemanticPayload::HumanDeviceRevoked {
+                account_id: account,
+                grant_id: hq_domain::GrantId::from_bytes([0x66; 32]),
+                device_id: target,
+            },
+        );
+        let fact = plan
+            .sign(&fixture_signer(), [7; 32])
+            .expect("revoke fixture signs");
+        let empty =
+            AuthorityProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
+        assert_eq!(
+            outbox_recipients(&fact, local_policy(), &empty),
+            BTreeSet::from([target])
+        );
+    }
+
+    #[test]
     fn append_failpoints_roll_back_every_write_group() {
         let fact = fixture();
         for failpoint in [
