@@ -10,6 +10,7 @@ use hq_local_api::{
     LifecycleControl,
     protocol::v1::{BuildMetadata, LifecycleRequest, LifecycleState, LifecycleStatus},
 };
+use hq_projects::ReconcileProjectInputs;
 use hq_reducer::AuthorityPolicy;
 use tokio::{signal::unix::Signal, time::Instant};
 
@@ -99,7 +100,7 @@ where
     L: NodeComponent,
     R: NodeComponent + PublishWake + ConfigureRelays,
     H: NodeComponent + ControlHarness,
-    P: NodeComponent + InspectResource + ControlProjects + RetireAgents,
+    P: NodeComponent + InspectResource + ControlProjects + RetireAgents + ReconcileProjectInputs,
 {
     /// Opens runtime artifacts for one already-ready node owner.
     pub fn start(

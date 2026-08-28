@@ -427,6 +427,13 @@ pub enum ProjectCliCommand {
     List,
     /// Show one exact project identity.
     Show(ProjectId),
+    /// Send durable human-authored work to one project's immutable mailbox.
+    Send {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Argument body, or bounded UTF-8 stdin when absent.
+        body: Option<ContentText>,
+    },
     /// Create an initially open project over one existing working tree.
     Create {
         /// Human-visible project name.
@@ -548,6 +555,10 @@ pub struct ProjectView {
     pub project_id: ProjectId,
     /// Immutable authoritative installation.
     pub home: InstallationId,
+    /// Immutable human account whose devices address the project.
+    pub account_id: AccountId,
+    /// Immutable durable project mailbox.
+    pub mailbox: MailboxAddress,
     /// Human-visible display name.
     pub name: String,
     /// Stable open, closing, closed, or conflicted lifecycle.
@@ -814,6 +825,8 @@ pub struct MessageCommandView {
     pub mailbox: Option<MailboxAddress>,
     /// Stable root identity authored or selected by the operation.
     pub root_message: Option<MessageId>,
+    /// Project associated with this operation, when project-addressed.
+    pub project_id: Option<ProjectId>,
     /// Canonically ordered message records.
     pub messages: Vec<CliMessageView>,
     /// Whether additional incomplete-history diagnostics exist beyond the bounded snapshot.
@@ -1675,6 +1688,17 @@ fn parse_project_catalog(
         [action, project_id] if action == "show" => {
             ProjectCliCommand::Show(ProjectId::from_bytes(parse_hex32(project_id)?))
         }
+        [action, project_id] if action == "send" => ProjectCliCommand::Send {
+            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+            body: None,
+        },
+        [action, project_id, body] if action == "send" => ProjectCliCommand::Send {
+            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+            body: Some(
+                ContentText::new(body.to_str().ok_or(CliError::Arguments)?.to_owned())
+                    .map_err(|_| CliError::Arguments)?,
+            ),
+        },
         [action, rest @ ..] if action == "create" => parse_project_create(rest)?,
         _ => return Err(CliError::Arguments),
     };
@@ -2589,7 +2613,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
         CliCommand::NamedAgent { action, state } => return run_named_agent(action, state),
         CliCommand::Harness { action, state } => return run_harness(action, state),
         CliCommand::Project { action, state } => {
-            return run_project(action, state);
+            return run_project(action, state, input);
         }
         CliCommand::AgentMessage { action, state } => {
             return run_agent_message(action, state, input);
@@ -2681,7 +2705,11 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
     Ok(output)
 }
 
-fn run_project(action: &ProjectCliCommand, state: &StatePaths) -> Result<CliResult, CliError> {
+fn run_project(
+    action: &ProjectCliCommand,
+    state: &StatePaths,
+    input: &mut dyn Read,
+) -> Result<CliResult, CliError> {
     let mut client = command_client(state)?;
     let snapshot = client.snapshot()?;
     match action {
@@ -2695,7 +2723,45 @@ fn run_project(action: &ProjectCliCommand, state: &StatePaths) -> Result<CliResu
             path,
             home,
         } => create_project(&mut client, &snapshot, name, brief.as_ref(), path, *home),
+        ProjectCliCommand::Send { project_id, body } => {
+            send_project_message(&mut client, &snapshot, *project_id, body.as_ref(), input)
+        }
     }
+}
+
+fn send_project_message(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    project_id: ProjectId,
+    body: Option<&ContentText>,
+    input: &mut dyn Read,
+) -> Result<CliResult, CliError> {
+    let project = project_rows(snapshot)?
+        .remove(&project_id)
+        .ok_or(CliError::ProjectState)?;
+    let local = client.installation_id();
+    let (human, _) = human_mailbox(snapshot, local)?;
+    let message_id = random_message_id()?;
+    let plan = plan_asynchronous_message(
+        account_message_authority(snapshot, local, project.account_id, human)?,
+        stable_inputs(),
+        NewMessageRequest {
+            message_id,
+            recipient: Some(project.mailbox),
+            body: message_body(body, input)?,
+            presentation: PresentationKind::Message,
+            project_id: Some(project_id),
+        },
+    )?;
+    submit_message_plan(client, plan)?;
+    Ok(CliResult::Messages(Box::new(MessageCommandView {
+        operation: "project_send",
+        mailbox: Some(human),
+        root_message: Some(message_id),
+        project_id: Some(project_id),
+        messages: Vec::new(),
+        incomplete_truncated: snapshot_has_incomplete_truncation(snapshot),
+    })))
 }
 
 fn create_project(
@@ -2985,13 +3051,17 @@ fn project_catalog_view(
         ProjectCliCommand::Show(project_id) => {
             vec![projects.remove(project_id).ok_or(CliError::ProjectState)?]
         }
-        ProjectCliCommand::Create { .. } => return Err(CliError::ProjectState),
+        ProjectCliCommand::Create { .. } | ProjectCliCommand::Send { .. } => {
+            return Err(CliError::ProjectState);
+        }
     };
     Ok(ProjectCatalogView {
         operation: match action {
             ProjectCliCommand::List => "list",
             ProjectCliCommand::Show(_) => "show",
-            ProjectCliCommand::Create { .. } => return Err(CliError::ProjectState),
+            ProjectCliCommand::Create { .. } | ProjectCliCommand::Send { .. } => {
+                return Err(CliError::ProjectState);
+            }
         },
         projects,
         unattributed_dispatches,
@@ -3007,6 +3077,8 @@ fn project_rows(
         let SnapshotItem::Project {
             project_id,
             home,
+            account_id,
+            mailbox_id,
             name,
             lifecycle,
             archived,
@@ -3023,6 +3095,11 @@ fn project_rows(
             ProjectView {
                 project_id,
                 home: InstallationId::from_bytes(home.bytes()),
+                account_id: AccountId::from_bytes(account_id.bytes()),
+                mailbox: MailboxAddress::new(
+                    InstallationId::from_bytes(home.bytes()),
+                    MailboxId::from_bytes(mailbox_id.bytes()),
+                ),
                 name: name.clone(),
                 lifecycle: lifecycle.clone(),
                 archived: *archived,
@@ -4633,13 +4710,13 @@ fn run_agent_message(
             )?;
             submit_message_plan(&mut client, plan)?;
             let answer = wait_for_answer(&mut client, mailbox, message_id, *timeout, *interval)?;
-            Ok(CliResult::Messages(Box::new(MessageCommandView {
-                operation: "ask",
-                mailbox: Some(mailbox),
-                root_message: Some(message_id),
-                messages: vec![answer],
-                incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
-            })))
+            Ok(agent_message_result(
+                "ask",
+                mailbox,
+                Some(message_id),
+                vec![answer],
+                &snapshot,
+            ))
         }
         AgentMessageCommand::Send { body, .. } => {
             let body = message_body(body.as_ref(), input)?;
@@ -4656,13 +4733,13 @@ fn run_agent_message(
                 },
             )?;
             submit_message_plan(&mut client, plan)?;
-            Ok(CliResult::Messages(Box::new(MessageCommandView {
-                operation: "send",
-                mailbox: Some(mailbox),
-                root_message: Some(message_id),
-                messages: Vec::new(),
-                incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
-            })))
+            Ok(agent_message_result(
+                "send",
+                mailbox,
+                Some(message_id),
+                Vec::new(),
+                &snapshot,
+            ))
         }
         AgentMessageCommand::Wait {
             message_id,
@@ -4671,13 +4748,13 @@ fn run_agent_message(
             ..
         } => {
             let answer = wait_for_answer(&mut client, mailbox, *message_id, *timeout, *interval)?;
-            Ok(CliResult::Messages(Box::new(MessageCommandView {
-                operation: "wait",
-                mailbox: Some(mailbox),
-                root_message: Some(*message_id),
-                messages: vec![answer],
-                incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
-            })))
+            Ok(agent_message_result(
+                "wait",
+                mailbox,
+                Some(*message_id),
+                vec![answer],
+                &snapshot,
+            ))
         }
         AgentMessageCommand::Poll { .. } => {
             let snapshot = messaging_snapshot(&mut client)?;
@@ -4691,15 +4768,28 @@ fn run_agent_message(
                             || message.purpose == MessagePurposeDto::Asynchronous)
                 })
                 .collect();
-            Ok(CliResult::Messages(Box::new(MessageCommandView {
-                operation: "poll",
-                mailbox: Some(mailbox),
-                root_message: None,
-                messages,
-                incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
-            })))
+            Ok(agent_message_result(
+                "poll", mailbox, None, messages, &snapshot,
+            ))
         }
     }
+}
+
+fn agent_message_result(
+    operation: &'static str,
+    mailbox: MailboxAddress,
+    root_message: Option<MessageId>,
+    messages: Vec<CliMessageView>,
+    snapshot: &AuthoritativeSnapshotDto,
+) -> CliResult {
+    CliResult::Messages(Box::new(MessageCommandView {
+        operation,
+        mailbox: Some(mailbox),
+        root_message,
+        project_id: None,
+        messages,
+        incomplete_truncated: snapshot_has_incomplete_truncation(snapshot),
+    }))
 }
 
 fn run_get_message(message_id: MessageId, state: &StatePaths) -> Result<CliResult, CliError> {
@@ -4710,6 +4800,7 @@ fn run_get_message(message_id: MessageId, state: &StatePaths) -> Result<CliResul
         operation: "get",
         mailbox: None,
         root_message: Some(message_id),
+        project_id: None,
         messages: vec![message],
         incomplete_truncated: snapshot_has_incomplete_truncation(&snapshot),
     })))
@@ -4885,6 +4976,7 @@ fn human_message_result(
         operation,
         mailbox: Some(human),
         root_message,
+        project_id: None,
         messages,
         incomplete_truncated: snapshot_has_incomplete_truncation(snapshot),
     }))
@@ -5129,6 +5221,49 @@ fn message_authority(
             installation.root_fact,
         ),
         support: [installation.root_fact, mailbox_fact].into_iter().collect(),
+    })
+}
+
+fn account_message_authority(
+    snapshot: &AuthoritativeSnapshotDto,
+    local: InstallationId,
+    account_id: AccountId,
+    sender: MailboxAddress,
+) -> Result<MessageAuthoringAuthority, CliError> {
+    if local_selection(snapshot, local)
+        .map_err(|_| CliError::ProjectState)?
+        .active
+        != Some(account_id)
+    {
+        return Err(CliError::ProjectState);
+    }
+    let (account_root, creator, _, _) =
+        account_item(snapshot, account_id).ok_or(CliError::ProjectState)?;
+    let membership_fact = if creator == local {
+        account_root
+    } else {
+        let membership = membership_record(snapshot, account_id, local)?
+            .filter(|membership| membership.state == "active")
+            .ok_or(CliError::ProjectState)?;
+        match membership
+            .active_acceptances
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            [fact] => *fact,
+            _ => return Err(CliError::ProjectState),
+        }
+    };
+    let (_, mailbox_fact) =
+        local_mailbox(snapshot, local, sender.mailbox_id()).map_err(|_| CliError::ProjectState)?;
+    Ok(MessageAuthoringAuthority {
+        author: local,
+        sender,
+        scope: FactScope::AccountAddressed(account_id),
+        authority: AuthorityReference::new(AuthorityRole::AccountMembership, membership_fact),
+        support: [membership_fact, mailbox_fact].into_iter().collect(),
     })
 }
 
@@ -7338,9 +7473,11 @@ fn render_project_catalog_human(view: &ProjectCatalogView) -> Result<String, Cli
         let project_id = encode_id(project.project_id.as_bytes());
         writeln!(
             output,
-            "project id={} home={} name={:?} lifecycle={} archived={} claimable={} head={} input_sequence={}",
+            "project id={} home={} account={} mailbox={} name={:?} lifecycle={} archived={} claimable={} head={} input_sequence={}",
             project_id,
             encode_id(project.home.as_bytes()),
+            encode_id(project.account_id.as_bytes()),
+            encode_id(project.mailbox.mailbox_id().as_bytes()),
             project.name,
             project.lifecycle,
             project.archived,
@@ -7453,6 +7590,8 @@ fn project_json(project: &ProjectView) -> serde_json::Value {
         })).collect::<Vec<_>>(),
         "head": encode_id(project.head.as_bytes()),
         "home": encode_id(project.home.as_bytes()),
+        "account_id": encode_id(project.account_id.as_bytes()),
+        "mailbox_id": encode_id(project.mailbox.mailbox_id().as_bytes()),
         "input_sequence": project.input_sequence,
         "inputs": project.inputs.iter().map(|item| serde_json::json!({
             "accepted_fact": encode_id(item.accepted_fact.as_bytes()),
@@ -7666,6 +7805,17 @@ fn render_message_result(
                 |message| encode_id(message.as_bytes())
             )
         )),
+        CliOutputFormat::Human if view.operation == "project_send" => Ok(format!(
+            "project={} message={}\n",
+            view.project_id.map_or_else(
+                || "none".to_owned(),
+                |project| encode_id(project.as_bytes())
+            ),
+            view.root_message.map_or_else(
+                || "none".to_owned(),
+                |message| encode_id(message.as_bytes())
+            )
+        )),
         CliOutputFormat::Human => {
             let mut output = String::new();
             for message in &view.messages {
@@ -7709,6 +7859,7 @@ fn render_message_result(
                 "incomplete_truncated": view.incomplete_truncated,
                 "messages": view.messages.iter().map(message_json).collect::<Vec<_>>(),
                 "operation": view.operation,
+                "project_id": view.project_id.map(|project| encode_id(project.as_bytes())),
                 "root_message": view.root_message.map(|message| encode_id(message.as_bytes())),
             }),
         ),
@@ -8366,7 +8517,8 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                     ))
                 || (command == "harness"
                     && matches!(action.as_str(), "start" | "resume" | "stop"))
-                || (command == "project" && matches!(action.as_str(), "list" | "show")) =>
+                || (command == "project"
+                    && matches!(action.as_str(), "list" | "show" | "send")) =>
         {
             match command.as_str() {
                 "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
@@ -8405,8 +8557,8 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
         ),
         [command] if command == "project" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
-             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
-             Project inspection starts or connects to the local node and reads one complete authoritative snapshot. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
+             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
+             Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Project inspection starts or connects to the local node and reads one complete authoritative snapshot. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
@@ -8616,6 +8768,20 @@ mod tests {
                 ..
             } if project_id.as_bytes() == &[0x22; 32]
         ));
+        let sent = parse_cli([
+            OsString::from("project"),
+            OsString::from("send"),
+            OsString::from("22".repeat(32)),
+            OsString::from("queued work"),
+        ])
+        .expect("project send parses");
+        assert!(matches!(
+            sent.command,
+            CliCommand::Project {
+                action: ProjectCliCommand::Send { project_id, body: Some(body) },
+                ..
+            } if project_id.as_bytes() == &[0x22; 32] && body.as_str() == "queued work"
+        ));
         let created = parse_cli([
             OsString::from("project"),
             OsString::from("create"),
@@ -8643,6 +8809,9 @@ mod tests {
             vec!["project", "show"],
             vec!["project", "list", "extra"],
             vec!["project", "show", "not-an-id"],
+            vec!["project", "send"],
+            vec!["project", "send", "not-an-id"],
+            vec!["project", "send", &"22".repeat(32), "one", "two"],
             vec!["project", "create", "later"],
             vec!["project", "create", "name", "--path", "relative"],
         ] {
@@ -8767,6 +8936,8 @@ mod tests {
                 SnapshotItem::Project {
                     project_id: Id32::new([2; 32]),
                     home: Id32::new([12; 32]),
+                    account_id: Id32::new([10; 32]),
+                    mailbox_id: Id32::new([42; 32]),
                     name: "second".to_owned(),
                     lifecycle: "closed".to_owned(),
                     archived: true,
@@ -8777,6 +8948,8 @@ mod tests {
                 SnapshotItem::Project {
                     project_id: Id32::new([1; 32]),
                     home: Id32::new([11; 32]),
+                    account_id: Id32::new([10; 32]),
+                    mailbox_id: Id32::new([41; 32]),
                     name: "first project".to_owned(),
                     lifecycle: "conflicted".to_owned(),
                     archived: false,
@@ -9830,6 +10003,7 @@ mod tests {
             operation: "wait",
             mailbox: Some(mailbox),
             root_message: message.root_message,
+            project_id: None,
             messages: vec![message.clone()],
             incomplete_truncated: false,
         }));
@@ -9853,6 +10027,40 @@ mod tests {
         let completion = completion_for(&invocation, &result).expect("delivery completion");
         assert_eq!(completion.mailbox, mailbox);
         assert_eq!(completion.messages, vec![message.message_id]);
+    }
+
+    #[test]
+    fn project_send_rendering_is_exact_and_machine_readable() {
+        let project_id = ProjectId::from_bytes([7; 32]);
+        let message_id = MessageId::from_bytes([8; 32]);
+        let result = super::CliResult::Messages(Box::new(MessageCommandView {
+            operation: "project_send",
+            mailbox: None,
+            root_message: Some(message_id),
+            project_id: Some(project_id),
+            messages: Vec::new(),
+            incomplete_truncated: false,
+        }));
+        assert_eq!(
+            render_result(CliOutputFormat::Human, &result).expect("human output"),
+            format!(
+                "project={} message={}\n",
+                crate::identity::encode_hex(project_id.as_bytes()),
+                crate::identity::encode_hex(message_id.as_bytes())
+            )
+        );
+        let machine = render_result(CliOutputFormat::Json, &result).expect("machine output");
+        let value: serde_json::Value = serde_json::from_str(&machine).expect("JSON output");
+        assert_eq!(value["kind"], "messages");
+        assert_eq!(value["data"]["operation"], "project_send");
+        assert_eq!(
+            value["data"]["project_id"],
+            crate::identity::encode_hex(project_id.as_bytes())
+        );
+        assert_eq!(
+            value["data"]["root_message"],
+            crate::identity::encode_hex(message_id.as_bytes())
+        );
     }
 
     #[test]
@@ -10066,6 +10274,7 @@ mod tests {
         )
         .expect("project help");
         assert!(project.contains("show PROJECT_ID"));
+        assert!(project.contains("send PROJECT_ID [MESSAGE]"));
         assert!(project.contains("create NAME --path ABSOLUTE_PATH"));
         assert!(project.contains("never chooses a historical winner"));
     }

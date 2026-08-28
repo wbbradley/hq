@@ -500,6 +500,8 @@ pub fn snapshot_to_v1(
             ClientProjection::Project {
                 project_id,
                 home,
+                account_id,
+                mailbox,
                 name,
                 lifecycle,
                 archived,
@@ -509,6 +511,8 @@ pub fn snapshot_to_v1(
             } => SnapshotItem::Project {
                 project_id: id32(project_id.as_bytes()),
                 home: id32(home.as_bytes()),
+                account_id: id32(account_id.as_bytes()),
+                mailbox_id: id32(mailbox.mailbox_id().as_bytes()),
                 name: name.as_str().to_owned(),
                 lifecycle: match lifecycle {
                     ClientProjectLifecycle::Open => "open",

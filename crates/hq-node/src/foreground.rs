@@ -336,3 +336,12 @@ impl hq_application::RetireAgents for DormantNodeComponent {
         unavailable()
     }
 }
+
+impl hq_projects::ReconcileProjectInputs for DormantNodeComponent {
+    fn reconcile_project_inputs(
+        &self,
+        _limit: usize,
+    ) -> Result<hq_projects::ProjectInputReconciliation, ApplicationError> {
+        unavailable()
+    }
+}

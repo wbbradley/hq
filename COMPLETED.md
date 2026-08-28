@@ -1,5 +1,42 @@
 # Completed
 
+## 2026-08-28 — Project-addressed messaging CLI
+
+Added `project send PROJECT_ID [MESSAGE]` through the ordinary asynchronous-message planner. The
+command accepts one bounded argument or stdin body, resolves the immutable project account and
+mailbox from one authoritative snapshot, requires exact active human authority, and emits stable
+human and `hq-cli-output-v1` message/project identities. Account conversation addressing now permits
+a direct recipient only when paired with a typed project ID; partial, mismatched, and cross-account
+forms fail closed.
+
+Added a bounded home input reconciler that selects usable unaccepted project messages in stable fact
+order and authors contiguous `ProjectInputAccepted` facts with exact previous-state, project-home,
+and account-membership authority. It runs after committed local mutations, replicated ingest, and
+startup recovery. Acceptance uses the message's signed timestamp plus deterministic randomness,
+command ID, and digest, so response loss and restart replay the exact plan. Closed, archived, and
+unassigned projects retain sequenced pending work; dispatch remains a separate runnable-assignment
+decision.
+
+Passive project/message projections and clean relational rows now carry the immutable account,
+mailbox, account scope, and signed message time needed for planning. These unshipped storage and
+local-API shapes changed in place: storage remains v13 and local API remains v1, with no migration,
+compatibility reader, accessor facade, or duplicate stored/runtime state type.
+
+Parser, stdin, strict addressing, causal authority, cross-account rejection, deterministic output,
+stable response-loss identity, store reopen, sequencing, restart, and real daemon tests pass. Full
+locked workspace format/check/build/tests/doctests/strict-Clippy, architecture/behavior/causal/
+protocol gates, dependency policy, four-target compilation, both 512-run fuzz smokes, and frozen Go
+vet/build/tests pass. The dependency audit retains only the existing yanked `chacha20 0.10.1`
+warning. Two complete process-owning CLI-suite runs finished normally, and the final process-table
+audit found no HQ daemon.
+
+### Original plan entry
+
+- **[cli/high] Add project-addressed messaging** — Add `project send` through the ordinary
+  application message planner so closed or unassigned work remains pending for the authoritative
+  home. Test message sequencing, stdin, causal authority, response loss, restart, and deterministic
+  human/machine output.
+
 ## 2026-08-28 — Isolated process-owning CLI integration fixtures
 
 Eliminated the intermittent full-suite wait and orphaned test-daemon symptom by serializing

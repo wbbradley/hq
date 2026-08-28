@@ -312,6 +312,10 @@ hq project archive PROJECT_ID
 
 Use `hq project list`, `show`, `reopen`, `handoff`, `check`, and `resource` for inspection and lifecycle management. `project worktree` reserves its destination on the selected home before the daemon invokes Git. `--home INSTALLATION_ID` creates or provisions on another active human-account device. Remote mutations remain visibly queued until the home returns a signed received/committed/rejected result; expected-head comparison rejects delayed stale commands. Closing and archival release HQ's advisory claims but never delete files, worktrees, branches, or containers.
 
+`project send` accepts the body as its final argument or from stdin. It writes an ordinary durable
+account message to the immutable project mailbox; the authoritative home sequences it even while
+the project is closed, archived, or unassigned, and dispatch waits for a runnable assignment.
+
 ## Command summary
 
 ```text

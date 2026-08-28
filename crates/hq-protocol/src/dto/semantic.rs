@@ -559,7 +559,9 @@ fn message(
                 && recipient.is_some_and(|target| target.installation_id() == *installation)
         }
         domain::FactScope::PeerAddressed(mailbox) => recipient == Some(*mailbox),
-        domain::FactScope::AccountAddressed(_) => recipient.is_some() == project_output,
+        domain::FactScope::AccountAddressed(_) => {
+            recipient.is_some() == (project_output || value.project.0.is_some())
+        }
         domain::FactScope::RemoteControl { .. } => false,
     };
     ensure(routing_matches, FailureClass::ScopePayloadMismatch)?;

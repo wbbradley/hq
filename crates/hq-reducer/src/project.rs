@@ -68,6 +68,8 @@ pub struct ProjectView {
     pub fork_participants: BTreeSet<FactId>,
     /// Immutable project home.
     pub home: InstallationId,
+    /// Immutable human account whose devices may address and control the project.
+    pub account_id: hq_domain::AccountId,
     /// Immutable project mailbox.
     pub mailbox: MailboxAddress,
     /// Optional immutable predecessor.
@@ -479,6 +481,7 @@ struct InternalProjectState {
     root: FactId,
     head: FactId,
     home: InstallationId,
+    account_id: hq_domain::AccountId,
     mailbox_id: MailboxId,
     predecessor: Option<ProjectId>,
     name: ShortText,
@@ -809,6 +812,10 @@ fn state_at(
             root: fact.id(),
             head: fact.id(),
             home: *home,
+            account_id: match fact.scope() {
+                FactScope::AccountAddressed(account_id) => *account_id,
+                _ => return None,
+            },
             mailbox_id: *mailbox_id,
             predecessor: *predecessor,
             name: name.clone(),
@@ -1048,15 +1055,7 @@ fn apply_payload(
             ..
         } => {
             if sequence.get() != state.input_sequence + 1
-                || !valid_project_input(
-                    fact,
-                    *input_fact_id,
-                    *message_id,
-                    state.project_id,
-                    state.home,
-                    state.mailbox_id,
-                    context,
-                )
+                || !valid_project_input(fact, *input_fact_id, *message_id, state, context)
             {
                 return Err(invalid(ProjectReason::InputSequenceConflict));
             }
@@ -1185,18 +1184,18 @@ fn valid_project_input(
     fact: &Fact,
     input_fact_id: FactId,
     message_id: MessageId,
-    project_id: ProjectId,
-    home: InstallationId,
-    mailbox_id: MailboxId,
+    project: &InternalProjectState,
     context: &ReductionContext<'_, ProjectReason>,
 ) -> bool {
     fact.causal().parents().contains(&input_fact_id)
         && context.facts().get(input_fact_id).is_some_and(|candidate| {
             context.is_projected(candidate.id())
+                && candidate.scope() == &FactScope::AccountAddressed(project.account_id)
                 && message_content(candidate.payload()).is_some_and(|message| {
                     message.message_id == message_id
-                        && message.project_id == Some(project_id)
-                        && message.recipient == Some(MailboxAddress::new(home, mailbox_id))
+                        && message.project_id == Some(project.project_id)
+                        && message.recipient
+                            == Some(MailboxAddress::new(project.home, project.mailbox_id))
                 })
         })
 }
@@ -1502,6 +1501,7 @@ fn derive_projections<P: ResourceConflictPolicy>(
                     head: state.head,
                     fork_participants: fork_participants(state.head, state.project_id, context),
                     home: state.home,
+                    account_id: state.account_id,
                     mailbox: MailboxAddress::new(state.home, state.mailbox_id),
                     predecessor: state.predecessor,
                     name: state.name.clone(),

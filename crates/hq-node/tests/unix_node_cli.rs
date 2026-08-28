@@ -856,6 +856,98 @@ fn project_create_claims_one_existing_path_and_survives_restart() {
 }
 
 #[test]
+fn project_send_sequences_argument_and_stdin_work_and_survives_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("message-worktree");
+    fs::create_dir(&worktree).expect("existing working tree");
+    initialize_identity(&state_root);
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+    let created = project_json(
+        &state_root,
+        &[
+            "create",
+            "Message target",
+            "--path",
+            worktree.to_str().expect("UTF-8 worktree"),
+        ],
+    );
+    let project_id = created["data"]["project_id"]
+        .as_str()
+        .expect("project identity")
+        .to_owned();
+
+    let argument = admin_output(
+        &state_root,
+        "project",
+        &["send", &project_id, "first queued instruction"],
+    );
+    assert!(
+        argument.status.success(),
+        "argument send stderr: {:?}",
+        argument.stderr
+    );
+    let argument: serde_json::Value =
+        serde_json::from_slice(&argument.stdout).expect("argument send JSON");
+    assert_eq!(argument["kind"], "messages");
+    assert_eq!(argument["data"]["operation"], "project_send");
+    assert_eq!(argument["data"]["project_id"], project_id);
+    assert_eq!(
+        argument["data"]["root_message"].as_str().map(str::len),
+        Some(64)
+    );
+
+    let stdin = offline_output(
+        &state_root,
+        [
+            OsString::from("project"),
+            OsString::from("send"),
+            OsString::from(&project_id),
+        ],
+        Some(b"second queued instruction\n"),
+    );
+    assert!(
+        stdin.status.success(),
+        "stdin send stderr: {:?}",
+        stdin.stderr
+    );
+    let stdin: serde_json::Value = serde_json::from_slice(&stdin.stdout).expect("stdin send JSON");
+    assert_eq!(stdin["data"]["project_id"], project_id);
+
+    let shown = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(shown["data"]["projects"][0]["input_sequence"], 2);
+    let inputs = shown["data"]["projects"][0]["inputs"]
+        .as_array()
+        .expect("accepted inputs");
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0]["sequence"], 1);
+    assert_eq!(inputs[1]["sequence"], 2);
+    assert_eq!(inputs[0]["message_id"], argument["data"]["root_message"]);
+    assert_eq!(inputs[1]["message_id"], stdin["data"]["root_message"]);
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let restarted = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(restarted["data"]["projects"][0]["input_sequence"], 2);
+    assert_eq!(
+        restarted["data"]["projects"][0]["inputs"],
+        shown["data"]["projects"][0]["inputs"]
+    );
+
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
+}
+
+#[test]
 fn managed_harness_stop_and_stale_exact_resume_are_machine_readable_across_restart() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");

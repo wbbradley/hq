@@ -12,7 +12,7 @@ use hq_application::{
 use hq_domain::{
     AuthorityReference, AuthorityRole, ContentText, FactId, FactScope, InstallationId,
     MailboxAddress, MailboxId, MessageContent, MessageId, MessagePurpose, PresentationKind,
-    SemanticPayload, ThreadId, Timestamp,
+    ProjectId, SemanticPayload, ThreadId, Timestamp,
 };
 
 fn fact(byte: u8) -> FactId {
@@ -207,5 +207,52 @@ fn local_planner_rejects_cross_installation_recipient() {
             },
         )
         .is_err()
+    );
+}
+
+#[test]
+fn account_planner_allows_a_direct_recipient_only_for_typed_project_input() {
+    let installation = InstallationId::from_bytes([1; 32]);
+    let sender = MailboxAddress::new(installation, MailboxId::from_bytes([3; 32]));
+    let recipient = MailboxAddress::new(
+        InstallationId::from_bytes([7; 32]),
+        MailboxId::from_bytes([8; 32]),
+    );
+    let authority = MessageAuthoringAuthority {
+        author: installation,
+        sender,
+        scope: FactScope::AccountAddressed(hq_domain::AccountId::from_bytes([4; 32])),
+        authority: AuthorityReference::new(AuthorityRole::AccountMembership, fact(2)),
+        support: [fact(2), fact(3)].into_iter().collect(),
+    };
+    let project_id = ProjectId::from_bytes([6; 32]);
+    let request = NewMessageRequest {
+        message_id: message(5),
+        recipient: Some(recipient),
+        body: ContentText::new("queued project work").expect("bounded body"),
+        presentation: PresentationKind::Message,
+        project_id: Some(project_id),
+    };
+    let plan =
+        hq_application::plan_asynchronous_message(authority.clone(), inputs(), request.clone())
+            .expect("typed project input");
+    assert!(matches!(
+        plan.payload(),
+        SemanticPayload::AsynchronousMessageSent(content)
+            if content.recipient == Some(recipient) && content.project_id == Some(project_id)
+    ));
+
+    let mut projectless = request.clone();
+    projectless.project_id = None;
+    assert!(
+        hq_application::plan_asynchronous_message(authority.clone(), inputs(), projectless,)
+            .is_err()
+    );
+
+    let mut unaddressed_project = request;
+    unaddressed_project.recipient = None;
+    assert!(
+        hq_application::plan_asynchronous_message(authority, inputs(), unaddressed_project)
+            .is_err()
     );
 }

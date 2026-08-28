@@ -588,6 +588,9 @@ CREATE TABLE conversation_thread_ready_answers (
 CREATE TABLE conversation_messages (
     key_digest BLOB PRIMARY KEY NOT NULL REFERENCES conversation_projection_keys(key_digest),
     fact_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT,
+    authored_at INTEGER NOT NULL,
+    account_present INTEGER NOT NULL CHECK(account_present IN (0, 1)),
+    account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
     thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
     sender_installation BLOB NOT NULL CHECK(typeof(sender_installation) = 'blob' AND length(sender_installation) = 32),
     sender_mailbox BLOB NOT NULL CHECK(typeof(sender_mailbox) = 'blob' AND length(sender_mailbox) = 32),
@@ -916,6 +919,7 @@ CREATE TABLE project_projects (
     root_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT CHECK(typeof(root_id) = 'blob' AND length(root_id) = 32),
     head_id BLOB NOT NULL REFERENCES canonical_facts(fact_id) ON DELETE RESTRICT CHECK(typeof(head_id) = 'blob' AND length(head_id) = 32),
     home_id BLOB NOT NULL CHECK(typeof(home_id) = 'blob' AND length(home_id) = 32),
+    account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
     mailbox_installation BLOB NOT NULL CHECK(typeof(mailbox_installation) = 'blob' AND length(mailbox_installation) = 32),
     mailbox_id BLOB NOT NULL CHECK(typeof(mailbox_id) = 'blob' AND length(mailbox_id) = 32),
     predecessor_present INTEGER NOT NULL CHECK(predecessor_present IN (0, 1)),

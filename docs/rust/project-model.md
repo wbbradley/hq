@@ -70,6 +70,13 @@ message. `ProjectInputDispatched` binds that accepted input at most once to the 
 assignment, agent, provider session, and immutable thread. Stable input, dispatch, and sequence
 reuse with unequal semantics is a conflict.
 
+Project input is an ordinary account-addressed conversation fact with both a typed project ID and
+the project's direct mailbox recipient. The home reconciler selects usable unaccepted facts in
+stable fact-ID order, checks the immutable project account and mailbox, and authors acceptance with
+the exact previous head, project-home root, and active account-membership authority. Acceptance is
+independent of open/closed, archive, and assignment state; only dispatch requires a runnable
+assignment. Deterministic acceptance command IDs make ambiguous commit responses retry-safe.
+
 `ProjectOutputRecorded` retains the stable output ID, typed message, originating dispatch,
 assignment/provider binding, and thread. Identical retries normalize to one view; changed content or
 provenance conflicts. Output causally after its assignment ended is marked late from inactive;

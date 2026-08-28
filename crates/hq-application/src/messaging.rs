@@ -205,7 +205,7 @@ fn plan_root(
     request: NewMessageRequest,
     purpose: MessagePurpose,
 ) -> Result<FactPlan, ApplicationError> {
-    validate_authority(&authority, request.recipient)?;
+    validate_root_authority(&authority, request.recipient, request.project_id)?;
     let causal = causal(&authority, [])?;
     let content = MessageContent {
         message_id: request.message_id,
@@ -229,6 +229,19 @@ fn plan_root(
         },
         inputs.auxiliary_randomness,
     ))
+}
+
+fn validate_root_authority(
+    authority: &MessageAuthoringAuthority,
+    recipient: Option<MailboxAddress>,
+    project_id: Option<ProjectId>,
+) -> Result<(), ApplicationError> {
+    if matches!(authority.scope, FactScope::AccountAddressed(_))
+        && (recipient.is_some() != project_id.is_some())
+    {
+        return Err(invalid());
+    }
+    validate_authority_with_project(authority, recipient, project_id.is_some())
 }
 
 fn plan_message_state(
@@ -267,6 +280,14 @@ fn validate_authority(
     authority: &MessageAuthoringAuthority,
     recipient: Option<MailboxAddress>,
 ) -> Result<(), ApplicationError> {
+    validate_authority_with_project(authority, recipient, false)
+}
+
+fn validate_authority_with_project(
+    authority: &MessageAuthoringAuthority,
+    recipient: Option<MailboxAddress>,
+    project_addressed: bool,
+) -> Result<(), ApplicationError> {
     if authority.sender.installation_id() != authority.author {
         return Err(invalid());
     }
@@ -278,7 +299,9 @@ fn validate_authority(
         (FactScope::PeerAddressed(target), AuthorityRole::MailboxGrant) => {
             recipient == Some(*target)
         }
-        (FactScope::AccountAddressed(_), AuthorityRole::AccountMembership) => recipient.is_none(),
+        (FactScope::AccountAddressed(_), AuthorityRole::AccountMembership) => {
+            recipient.is_none() || project_addressed
+        }
         _ => false,
     };
     valid.then_some(()).ok_or_else(invalid)

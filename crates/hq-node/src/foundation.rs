@@ -237,6 +237,7 @@ impl NodeFoundation {
             envelope,
             self.identity.public_identity().installation_id,
             authority_policy,
+            self.signer_handle(),
             connector,
         ))
     }

@@ -11,7 +11,7 @@ The installed commands currently include `help`, `version`, `agents`, `identity`
 `peer add|list|distrust`, `mailbox list|grant|revoke`, and
 `relay add|list|remove|sync|status|repair`,
 `agent list|show|create|current|select|rename|retire`, and
-`harness start|resume|stop`, `project list|show|create`, the agent-side
+`harness start|resume|stop`, `project list|show|create|send`, the agent-side
 `ask|send|wait|poll`, human-side `get|list|answer|cancel|archive|restore`, `mailboxes`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
@@ -170,6 +170,15 @@ Output exposes accepted, running, completed, rejected, or reconcilable workflow 
 exits 1 and reconcilable uncertainty exits 3. Creation and catalog state survive restart without client-side
 state. Because HQ has no shipped installations, this capability extends local API v1 in place and
 adds no storage migration or compatibility shape.
+
+`project send PROJECT_ID [MESSAGE]` authors an ordinary asynchronous account message whose typed
+project ID and direct recipient name the project's immutable mailbox. With no argument it consumes
+one bounded UTF-8 body from stdin. The selected local human account must match the project account;
+ambiguous membership or project identity fails closed. The authoritative home assigns each usable
+message the next contiguous input sequence independently of lifecycle or assignment, so work sent
+to a closed, archived, or unassigned project remains pending rather than reopening or dispatching
+it. Message and acceptance mutations retain deterministic identities across response loss. Human
+output is exactly `project=ID message=ID`; JSON adds the same IDs to `hq-cli-output-v1`.
 
 `agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
 for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert

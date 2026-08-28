@@ -138,6 +138,13 @@ channel, writes from a fixed encoded-frame queue, emits response tickets only af
 writes, and joins its read/write halves into one exact terminal event. Listener multiplexing and
 lifecycle coordination remain in the immediately following node package.
 
+The project component owns a bounded home-input reconciler over the application query/commit ports.
+It runs during startup recovery, after committed local mutations, and after replicated canonical
+ingest. It sequences ordinary project-addressed messages without consulting lifecycle or assignment;
+the existing workflow dispatcher separately decides when pending input can enter a runnable thread.
+Acceptance commits use stable project/message/fact identities, and the local path uses the waking
+store adapter so newly authored acceptance enters relay delivery without a storage side channel.
+
 The node also owns `HarnessStoreAdapter`, the only mapping between neutral supervisor records and
 storage-owned records, plus `HarnessNodeComponent`, which composes the registry, restricted store
 handle, canonical persistence capability, injected clock/token sources, and ordered lifecycle.

@@ -880,6 +880,7 @@ mod tests {
                 head: self.head,
                 fork_participants: BTreeSet::new(),
                 home: self.home,
+                account_id: self.account,
                 mailbox: MailboxAddress::new(self.home, MailboxId::from_bytes([15; 32])),
                 predecessor: None,
                 name: ShortText::new("project").expect("name"),

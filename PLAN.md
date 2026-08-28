@@ -54,11 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Add project-addressed messaging** — Add `project send` through the ordinary
-  application message planner so closed or unassigned work remains pending for the authoritative
-  home. Test message sequencing, stdin, causal authority, response loss, restart, and deterministic
-  human/machine output.
-
 - **[cli/high] Add project lifecycle and assignment commands** — Expose open, activate,
   exact-session/thread resume, pending dispatch, handoff, close, archive, and unarchive through one
   stable project-command builder. Resolve active human, expected head, named agent, provider,

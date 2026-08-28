@@ -1553,6 +1553,10 @@ pub enum SnapshotItem {
         project_id: Id32,
         /// Immutable home installation.
         home: Id32,
+        /// Immutable human account whose devices address the project.
+        account_id: Id32,
+        /// Immutable project mailbox on the home installation.
+        mailbox_id: Id32,
         /// Display name.
         name: String,
         /// Stable lifecycle name.

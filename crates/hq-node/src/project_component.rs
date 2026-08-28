@@ -17,9 +17,10 @@ use hq_application::{
 };
 use hq_domain::{Page, PageCursor, Timestamp};
 use hq_projects::{
-    ApplicationCanonicalProjectPort, ApplicationRemoteProjectCommandPort, GitWorktreeAdapter,
-    GitWorktreeAdapterConfig, ProjectCommandRouter, ProjectRuntimePort, ProjectWorkerPort,
-    ProjectWorkflowManager,
+    ApplicationCanonicalProjectPort, ApplicationProjectInputReconciler,
+    ApplicationRemoteProjectCommandPort, GitWorktreeAdapter, GitWorktreeAdapterConfig,
+    ProjectCommandRouter, ProjectRuntimePort, ProjectWorkerPort, ProjectWorkflowManager,
+    ReconcileProjectInputs,
 };
 use hq_protocol::Bip340Signer;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
@@ -85,8 +86,11 @@ pub type StandardProjectWorker<R> = ProjectCommandRouter<
 >;
 
 /// Concrete foreground project component for one injected managed-runtime capability.
-pub type StandardProjectNodeComponent<R> =
-    ProjectNodeComponent<StandardProjectWorker<R>, ProjectResourceAdapter>;
+pub type StandardProjectNodeComponent<R> = ProjectNodeComponent<
+    StandardProjectWorker<R>,
+    ProjectResourceAdapter,
+    ApplicationProjectInputReconciler<WakingApplicationStore<RelayNodeComponent>>,
+>;
 
 /// Composes the complete standard project worker without taking store or signer ownership.
 pub fn compose_standard_project_component<R: ProjectRuntimePort>(
@@ -99,6 +103,7 @@ pub fn compose_standard_project_component<R: ProjectRuntimePort>(
     wake: RelayNodeComponent,
 ) -> StandardProjectNodeComponent<R> {
     let gateway = WakingApplicationStore::new(StoreGateway::new(store, policy, signer), wake);
+    let inputs = ApplicationProjectInputReconciler::new(gateway.clone(), home);
     let resources = ProjectResourceAdapter::system(home);
     let workflow = ProjectWorkflowManager::with_git(
         ProjectSagaStoreAdapter::new(store.project_saga_state_handle()),
@@ -112,7 +117,7 @@ pub fn compose_standard_project_component<R: ProjectRuntimePort>(
         workflow,
         ApplicationRemoteProjectCommandPort::new(gateway, home),
     );
-    ProjectNodeComponent::new(config, worker, resources)
+    ProjectNodeComponent::new(config, worker, resources, inputs)
 }
 
 /// Passive bounded project-worker lifecycle configuration.
@@ -125,20 +130,22 @@ pub struct ProjectNodeConfig {
 }
 
 /// Owns project command admission and bounded durable recovery around injected capabilities.
-pub struct ProjectNodeComponent<W, F> {
+pub struct ProjectNodeComponent<W, F, I> {
     config: ProjectNodeConfig,
     worker: W,
     resources: F,
+    inputs: I,
     accepting: AtomicBool,
 }
 
-impl<W, F> ProjectNodeComponent<W, F> {
+impl<W, F, I> ProjectNodeComponent<W, F, I> {
     /// Owns one complete project worker and its local inspection capability.
-    pub const fn new(config: ProjectNodeConfig, worker: W, resources: F) -> Self {
+    pub const fn new(config: ProjectNodeConfig, worker: W, resources: F, inputs: I) -> Self {
         Self {
             config,
             worker,
             resources,
+            inputs,
             accepting: AtomicBool::new(false),
         }
     }
@@ -156,7 +163,11 @@ impl<W, F> ProjectNodeComponent<W, F> {
     fn repair(&self) -> Result<(), ComponentError>
     where
         W: ProjectWorkerPort,
+        I: ReconcileProjectInputs,
     {
+        self.inputs
+            .reconcile_project_inputs(self.config.recovery_limit.get())
+            .map_err(|_| ComponentError::unavailable())?;
         self.worker
             .repair_pending(self.config.recovery_time, self.config.recovery_limit.get())
             .map(|_| ())
@@ -164,7 +175,7 @@ impl<W, F> ProjectNodeComponent<W, F> {
     }
 }
 
-impl<W, F> std::fmt::Debug for ProjectNodeComponent<W, F> {
+impl<W, F, I> std::fmt::Debug for ProjectNodeComponent<W, F, I> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProjectNodeComponent")
@@ -174,7 +185,9 @@ impl<W, F> std::fmt::Debug for ProjectNodeComponent<W, F> {
     }
 }
 
-impl<W: ProjectWorkerPort, F> NodeComponent for ProjectNodeComponent<W, F> {
+impl<W: ProjectWorkerPort, F, I: ReconcileProjectInputs> NodeComponent
+    for ProjectNodeComponent<W, F, I>
+{
     fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
         self.repair()?;
         self.accepting.store(true, Ordering::Release);
@@ -197,7 +210,7 @@ impl<W: ProjectWorkerPort, F> NodeComponent for ProjectNodeComponent<W, F> {
     }
 }
 
-impl<W: ProjectWorkerPort, F> ControlProjects for ProjectNodeComponent<W, F> {
+impl<W: ProjectWorkerPort, F, I> ControlProjects for ProjectNodeComponent<W, F, I> {
     fn control_project(
         &self,
         request: ProjectCommandRequest,
@@ -207,7 +220,7 @@ impl<W: ProjectWorkerPort, F> ControlProjects for ProjectNodeComponent<W, F> {
     }
 }
 
-impl<W: ProjectWorkerPort + RetireAgents, F> RetireAgents for ProjectNodeComponent<W, F> {
+impl<W: ProjectWorkerPort + RetireAgents, F, I> RetireAgents for ProjectNodeComponent<W, F, I> {
     fn retire_agent(
         &self,
         request: AgentRetirementRequest,
@@ -217,12 +230,22 @@ impl<W: ProjectWorkerPort + RetireAgents, F> RetireAgents for ProjectNodeCompone
     }
 }
 
-impl<W, F: InspectResource> InspectResource for ProjectNodeComponent<W, F> {
+impl<W, F: InspectResource, I> InspectResource for ProjectNodeComponent<W, F, I> {
     fn inspect_resource(
         &self,
         request: &EffectRequest<ResourceInspectionRequest>,
     ) -> Result<EffectOutcome<ResourceInspectionResult>, ApplicationError> {
         self.ensure_accepting()?;
         self.resources.inspect_resource(request)
+    }
+}
+
+impl<W, F, I: ReconcileProjectInputs> ReconcileProjectInputs for ProjectNodeComponent<W, F, I> {
+    fn reconcile_project_inputs(
+        &self,
+        limit: usize,
+    ) -> Result<hq_projects::ProjectInputReconciliation, ApplicationError> {
+        self.ensure_accepting()?;
+        self.inputs.reconcile_project_inputs(limit)
     }
 }

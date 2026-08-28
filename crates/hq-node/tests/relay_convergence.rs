@@ -246,6 +246,7 @@ fn component(
         EnvelopeCodec::from_secret_bytes(secret_bytes(secret)).expect("codec constructs"),
         InstallationId::from_bytes(installation),
         authority_policy,
+        Arc::new(Bip340Signer::from_secret_bytes(secret_bytes(secret)).expect("signer")),
         hub,
     )
 }

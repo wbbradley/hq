@@ -66,8 +66,9 @@ Fields have these rules:
 - `installation_id` names the installation that created the event. A message sender must belong to that installation.
 - `signer_key_id` must equal the Nostr event public key until key grants exist.
 - `sender` is present on message and activity events. A direct message route has at most one
-  `recipient`. An account question or activity omits `recipient` and names a human account in
-  `audience`.
+  `recipient`. An ordinary account question or activity omits `recipient` and names a human account
+  in `audience`; a project message names both that account and its exact project mailbox recipient,
+  together with the typed project ID.
 - `thread_id` is present on child thread events and absent on a root question or async message.
 - `parents` is a set of causal event IDs in lexical order. It may contain at most 64 IDs and no duplicate.
 - `authorities` is a typed role within that causal set: every authority ID must also occur in

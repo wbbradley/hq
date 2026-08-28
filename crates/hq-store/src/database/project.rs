@@ -485,17 +485,18 @@ fn insert_project(
     transaction
         .execute(
             "INSERT INTO project_projects( \
-                 key_digest, root_id, head_id, home_id, mailbox_installation, mailbox_id, \
+                 key_digest, root_id, head_id, home_id, account_id, mailbox_installation, mailbox_id, \
                  predecessor_present, predecessor_id, name, brief_present, brief, \
                  primary_present, primary_id, lifecycle, archived, claimable, \
                  assignment_present, input_sequence \
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                       ?14, ?15, ?16, ?17, ?18)",
+                       ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 digest.as_slice(),
                 view.root.as_bytes().as_slice(),
                 view.head.as_bytes().as_slice(),
                 view.home.as_bytes().as_slice(),
+                view.account_id.as_bytes().as_slice(),
                 view.mailbox.installation_id().as_bytes().as_slice(),
                 view.mailbox.mailbox_id().as_bytes().as_slice(),
                 predecessor_present,
@@ -582,6 +583,7 @@ fn load_project(
         Vec<u8>,
         Vec<u8>,
         Vec<u8>,
+        Vec<u8>,
         i64,
         Vec<u8>,
         String,
@@ -597,7 +599,7 @@ fn load_project(
     );
     let row: Row = connection
         .query_row(
-            "SELECT root_id, head_id, home_id, mailbox_installation, mailbox_id, \
+            "SELECT root_id, head_id, home_id, account_id, mailbox_installation, mailbox_id, \
                     predecessor_present, predecessor_id, name, brief_present, brief, \
                     primary_present, primary_id, lifecycle, archived, claimable, \
                     assignment_present, input_sequence \
@@ -622,14 +624,15 @@ fn load_project(
                     row.get(14)?,
                     row.get(15)?,
                     row.get(16)?,
+                    row.get(17)?,
                 ))
             },
         )
         .map_err(database)?;
     let home = InstallationId::from_bytes(fixed(row.2)?);
     let mailbox = MailboxAddress::new(
-        InstallationId::from_bytes(fixed(row.3)?),
-        MailboxId::from_bytes(fixed(row.4)?),
+        InstallationId::from_bytes(fixed(row.4)?),
+        MailboxId::from_bytes(fixed(row.5)?),
     );
     let resources = load_resources(connection, digest)?;
     let active_claims = load_ids(
@@ -639,7 +642,7 @@ fn load_project(
         ResourceId::from_bytes,
     )?;
     let claim_conflicts = load_claim_conflicts(connection, digest)?;
-    let assignment = match row.15 {
+    let assignment = match row.16 {
         0 => {
             if count_for_key(connection, "project_assignments", digest)? != 0
                 || count_for_key(connection, "project_assignment_support", digest)? != 0
@@ -656,19 +659,20 @@ fn load_project(
         head: FactId::from_bytes(fixed(row.1)?),
         fork_participants: load_facts(connection, "project_fork_participants", digest)?,
         home,
+        account_id: hq_domain::AccountId::from_bytes(fixed(row.3)?),
         mailbox,
-        predecessor: decode_id_option(row.5, fixed(row.6)?, ProjectId::from_bytes)?,
-        name: ShortText::new(row.7).map_err(|_| corrupt())?,
-        brief: decode_text_option(row.8, row.9, ContentText::new)?,
+        predecessor: decode_id_option(row.6, fixed(row.7)?, ProjectId::from_bytes)?,
+        name: ShortText::new(row.8).map_err(|_| corrupt())?,
+        brief: decode_text_option(row.9, row.10, ContentText::new)?,
         resources,
-        primary: decode_id_option(row.10, fixed(row.11)?, ResourceId::from_bytes)?,
-        lifecycle: decode_lifecycle(row.12).ok_or_else(corrupt)?,
-        archived: decode_bool(row.13)?,
+        primary: decode_id_option(row.11, fixed(row.12)?, ResourceId::from_bytes)?,
+        lifecycle: decode_lifecycle(row.13).ok_or_else(corrupt)?,
+        archived: decode_bool(row.14)?,
         active_claims,
         claim_conflicts,
-        claimable: decode_bool(row.14)?,
+        claimable: decode_bool(row.15)?,
         assignment,
-        input_sequence: decode_u64(row.16)?,
+        input_sequence: decode_u64(row.17)?,
     };
     validate_project(project_id, &view)?;
     Ok(view)
@@ -2202,6 +2206,7 @@ mod tests {
                     head: id(2),
                     fork_participants: set([id(3), id(4)]),
                     home,
+                    account_id: AccountId::from_bytes([0x60; 32]),
                     mailbox: MailboxAddress::new(home, MailboxId::from_bytes([0x61; 32])),
                     predecessor: Some(ProjectId::from_bytes([0x30; 32])),
                     name: short("project-one"),
@@ -2227,6 +2232,7 @@ mod tests {
                     head: id(6),
                     fork_participants: BTreeSet::new(),
                     home,
+                    account_id: AccountId::from_bytes([0x60; 32]),
                     mailbox: MailboxAddress::new(home, MailboxId::from_bytes([0x62; 32])),
                     predecessor: None,
                     name: short("project-two"),
@@ -2252,6 +2258,7 @@ mod tests {
                     head: id(8),
                     fork_participants: BTreeSet::new(),
                     home,
+                    account_id: AccountId::from_bytes([0x60; 32]),
                     mailbox: MailboxAddress::new(home, MailboxId::from_bytes([0x63; 32])),
                     predecessor: None,
                     name: short("project-three"),
@@ -2274,6 +2281,7 @@ mod tests {
                     head: id(26),
                     fork_participants: BTreeSet::new(),
                     home,
+                    account_id: AccountId::from_bytes([0x60; 32]),
                     mailbox: MailboxAddress::new(home, MailboxId::from_bytes([0x64; 32])),
                     predecessor: None,
                     name: short("project-four"),

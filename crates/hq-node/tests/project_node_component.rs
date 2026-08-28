@@ -18,7 +18,7 @@ use hq_domain::{
 use hq_node::{
     CancellationToken, ComponentDrain, NodeComponent, ProjectNodeComponent, ProjectNodeConfig,
 };
-use hq_projects::ProjectWorkerPort;
+use hq_projects::{ProjectInputReconciliation, ProjectWorkerPort, ReconcileProjectInputs};
 
 #[derive(Clone, Default)]
 struct FakeWorker {
@@ -51,6 +51,24 @@ impl ProjectWorkerPort for FakeWorker {
 
 #[derive(Clone, Copy)]
 struct FakeResources;
+
+#[derive(Clone)]
+struct FakeInputs {
+    trace: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl ReconcileProjectInputs for FakeInputs {
+    fn reconcile_project_inputs(
+        &self,
+        _limit: usize,
+    ) -> Result<ProjectInputReconciliation, ApplicationError> {
+        self.trace.lock().expect("trace").push("inputs");
+        Ok(ProjectInputReconciliation {
+            accepted: 0,
+            truncated: false,
+        })
+    }
+}
 
 impl InspectResource for FakeResources {
     fn inspect_resource(
@@ -91,6 +109,9 @@ fn startup_repairs_before_admission_and_drain_checkpoints_after_intake_closes() 
         },
         worker,
         FakeResources,
+        FakeInputs {
+            trace: Arc::clone(&trace),
+        },
     );
 
     assert!(component.control_project(request()).is_err());
@@ -111,6 +132,6 @@ fn startup_repairs_before_admission_and_drain_checkpoints_after_intake_closes() 
     );
     assert_eq!(
         trace.lock().expect("trace").as_slice(),
-        ["repair", "control", "repair"]
+        ["inputs", "repair", "control", "inputs", "repair"]
     );
 }

@@ -302,7 +302,7 @@ fn role_is_allowed(family: u64, role: RoleDto) -> bool {
             role,
             PreviousState | ProjectHome | Assignment | AccountMembership | ActiveHuman
         ),
-        43 => matches!(role, PreviousState | ProjectHome),
+        43 => matches!(role, PreviousState | ProjectHome | AccountMembership),
         44 => matches!(role, PreviousState | ProjectHome | Assignment | Dispatch),
         45 => matches!(
             role,

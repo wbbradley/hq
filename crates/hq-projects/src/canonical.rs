@@ -1466,6 +1466,7 @@ mod tests {
             head: FactId::from_bytes([11; 32]),
             fork_participants: BTreeSet::new(),
             home: InstallationId::from_bytes([3; 32]),
+            account_id: AccountId::from_bytes([22; 32]),
             mailbox: MailboxAddress::new(
                 InstallationId::from_bytes([3; 32]),
                 MailboxId::from_bytes(*project_id.as_bytes()),

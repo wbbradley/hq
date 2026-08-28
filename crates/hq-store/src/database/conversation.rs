@@ -6,9 +6,10 @@ use std::{
 };
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, ContentText, ErrorCode, FactId, InstallationId, MailboxAddress,
-    MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation, OperationId,
-    PresentationKind, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId,
+    AccountId, ActivityKind, ActivityStatus, ContentText, ErrorCode, FactId, InstallationId,
+    MailboxAddress, MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation,
+    OperationId, PresentationKind, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId,
+    Timestamp,
 };
 use hq_reducer::{
     ActionGroupView, ActivityKey, ActivityRetentionView, ActivitySessionKey, ActivityView,
@@ -519,18 +520,22 @@ fn insert_projection(
             let (correlation_present, provider, session, operation) =
                 encode_correlation(view.content.correlation.as_ref());
             let (project_present, project) = encode_id_option(view.content.project_id);
+            let (account_present, account) = encode_id_option(view.account_id);
             transaction
                 .execute(
                     "INSERT INTO conversation_messages( \
-                         key_digest, fact_id, thread_id, sender_installation, sender_mailbox, \
+                         key_digest, fact_id, authored_at, account_present, account_id, thread_id, sender_installation, sender_mailbox, \
                          recipient_present, recipient_installation, recipient_mailbox, body, purpose, \
                          presentation, correlation_present, provider, session, operation_id, \
                          project_present, project_id, open, rejected \
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                         ?14, ?15, ?16, ?17, ?18, ?19)",
+                         ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                     params![
                         digest.as_slice(),
                         view.fact_id.as_bytes().as_slice(),
+                        view.authored_at.as_unix_millis(),
+                        account_present,
+                        account.as_slice(),
                         view.thread_id.as_bytes().as_slice(),
                         view.content.sender.installation_id().as_bytes().as_slice(),
                         view.content.sender.mailbox_id().as_bytes().as_slice(),
@@ -737,6 +742,12 @@ impl IntoIdBytes for FactId {
 }
 
 impl IntoIdBytes for ProjectId {
+    fn id_bytes(self) -> [u8; 32] {
+        *self.as_bytes()
+    }
+}
+
+impl IntoIdBytes for AccountId {
     fn id_bytes(self) -> [u8; 32] {
         *self.as_bytes()
     }
@@ -1132,19 +1143,23 @@ fn load_message(
         Vec<u8>,
         i64,
         i64,
+        i64,
+        Vec<u8>,
+        i64,
     );
     let row: Row = connection
         .query_row(
             "SELECT fact_id, thread_id, sender_installation, sender_mailbox, recipient_present, \
                  recipient_installation, recipient_mailbox, body, purpose, presentation, \
                  correlation_present, provider, session, operation_id, project_present, project_id, \
-                 open, rejected FROM conversation_messages WHERE key_digest = ?1",
+                 open, rejected, account_present, account_id, authored_at FROM conversation_messages WHERE key_digest = ?1",
             [digest.as_slice()],
             |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
                     row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
                     row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?,
-                    row.get(15)?, row.get(16)?, row.get(17)?))
+                    row.get(15)?, row.get(16)?, row.get(17)?, row.get(18)?, row.get(19)?,
+                    row.get(20)?))
             },
         )
         .optional()
@@ -1155,6 +1170,7 @@ fn load_message(
     let project_id = decode_project(row.14, fixed(row.15)?)?;
     let open = decode_bool(row.16)?;
     let rejected = decode_bool(row.17)?;
+    let account_id = decode_account(row.18, fixed(row.19)?)?;
     if open && rejected {
         return Err(corrupt());
     }
@@ -1162,6 +1178,8 @@ fn load_message(
     let peer_received_by = load_child_set(connection, "conversation_message_receipts", digest)?;
     Ok(ConversationProjection::Message(Box::new(MessageView {
         fact_id: FactId::from_bytes(fixed(row.0)?),
+        authored_at: Timestamp::from_unix_millis(row.20),
+        account_id,
         thread_id: ThreadId::from_bytes(fixed(row.1)?),
         content: MessageContent {
             message_id,
@@ -1465,6 +1483,14 @@ fn decode_project(present: i64, project: [u8; 32]) -> Result<Option<ProjectId>, 
     match (present, project == ZERO) {
         (0, true) => Ok(None),
         (1, _) => Ok(Some(ProjectId::from_bytes(project))),
+        _ => Err(corrupt()),
+    }
+}
+
+fn decode_account(present: i64, account: [u8; 32]) -> Result<Option<AccountId>, StoreError> {
+    match (present, account == ZERO) {
+        (0, true) => Ok(None),
+        (1, _) => Ok(Some(AccountId::from_bytes(account))),
         _ => Err(corrupt()),
     }
 }
@@ -1861,6 +1887,8 @@ mod tests {
                 keys[1].clone(),
                 ConversationProjection::Message(Box::new(MessageView {
                     fact_id: id(5),
+                    authored_at: Timestamp::from_unix_millis(123),
+                    account_id: Some(AccountId::from_bytes([0x4a; 32])),
                     thread_id: thread,
                     content: MessageContent {
                         message_id: message,

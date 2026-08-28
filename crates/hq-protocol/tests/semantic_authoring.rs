@@ -8,7 +8,7 @@ use hq_protocol::{Bip340Signer, CanonicalEventPlan, DispatchOutcome, ProtocolNam
 #[allow(dead_code)]
 mod support;
 
-use support::{A, B, C, valid_bodies};
+use support::{A, B, C, D, valid_bodies};
 
 #[test]
 fn every_semantic_family_authors_back_to_the_exact_verified_v1_record() {
@@ -62,6 +62,14 @@ fn typed_authoring_preserves_canonical_and_control_authority_namespaces() {
             bodies[1].1.as_str(),
             format!(r#"[["c","{B}"]]"#),
             format!(r#"[["local-installation","c","{B}"]]"#),
+        ),
+        (
+            43,
+            bodies[42].1.as_str(),
+            format!(r#"[["c","{B}"],["c","{C}"],["c","{D}"]]"#),
+            format!(
+                r#"[["account-membership","c","{D}"],["previous-state","c","{B}"],["project-home","c","{C}"]]"#
+            ),
         ),
         (
             47,

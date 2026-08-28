@@ -6,6 +6,7 @@
 mod canonical;
 mod command_codec;
 mod git_worktree;
+mod input;
 mod remote;
 mod remote_canonical;
 mod workflow;
@@ -26,6 +27,10 @@ pub use command_codec::{
     encode_project_command_action, project_command_request_digest,
 };
 pub use git_worktree::{GitWorktreeAdapter, GitWorktreeAdapterConfig};
+pub use input::{
+    ApplicationProjectInputReconciler, ProjectInputAcceptanceRequest, ProjectInputReconciliation,
+    ReconcileProjectInputs, plan_project_input_acceptance,
+};
 pub use remote::*;
 pub use remote_canonical::ApplicationRemoteProjectCommandPort;
 pub use workflow::*;

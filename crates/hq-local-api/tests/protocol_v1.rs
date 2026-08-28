@@ -954,6 +954,8 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
         SnapshotItem::Project {
             project_id: id(14),
             home: id(1),
+            account_id: id(12),
+            mailbox_id: id(13),
             name: "rewrite".to_owned(),
             lifecycle: "open".to_owned(),
             archived: false,

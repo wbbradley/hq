@@ -156,10 +156,18 @@ and remote-command progress. A remote-command item retains the complete request 
 request fact. Its progress is a closed `queued`, `received`, `terminal`, or `conflicted` value;
 received and terminal values carry the exact receipt, observed head, and receipt time, while a
 terminal value also carries the exact outcome fact, typed committed/rejected result, and optional
-typed runtime observation. Project resources are separate projection items carrying display and
+typed runtime observation. Each project item also carries its immutable account and mailbox IDs so
+clients can author a strictly addressed ordinary message without storage access. Project resources
+are separate projection items carrying display and
 canonical locators, health, primary/active-claim flags, and bounded conflicting-project IDs. It is
 a client query representation, not the reducer's Rust layout or
 the store's normalized row schema.
+
+Project messaging uses the ordinary retryable mutation request, not the project-control DTO. Its
+message plan is account-addressed and contains both the typed project ID and exact project mailbox.
+The node sequences usable input at the authoritative home after local commit, replicated ingest,
+and startup recovery. These additions complete the clean, unshipped v1 shape in place; there is no
+protocol-version bump or compatibility representation.
 
 Authority projections expose the exact public evidence needed for safe client-side planning:
 installation items name their unique root fact, mailbox items name their creation fact, account

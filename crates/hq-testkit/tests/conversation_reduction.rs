@@ -6,8 +6,8 @@ use hq_domain::{
     AccountId, ActivityKind, ActivityStatus, AuthorityReference, AuthorityRole, ContentText, Fact,
     FactId, FactScope, GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
     MailboxKind, MessageContent, MessageId, MessagePurpose, OperationCorrelation, PresentationKind,
-    ProviderId, ProviderSessionId, SemanticPayload, ShortText, SigningPublicKey, ThreadId,
-    Timestamp,
+    ProjectId, ProviderId, ProviderSessionId, SemanticPayload, ShortText, SigningPublicKey,
+    ThreadId, Timestamp,
 };
 use hq_reducer::{
     ActivityKey, ActivitySessionKey, AuthorityPolicy, CausalRelation, ConversationProjection,
@@ -1013,6 +1013,99 @@ fn one_account_fact_has_identical_conversation_meaning_under_device_local_polici
     assert_eq!(
         creator_report.presentation_order(),
         device_report.presentation_order()
+    );
+    Ok(())
+}
+
+#[test]
+fn account_addressed_project_input_requires_both_project_and_direct_recipient()
+-> Result<(), Box<dyn Error>> {
+    let mut values = DeterministicValues::new(86);
+    let creator = local_world(&mut values)?;
+    let account_id = AccountId::from_bytes([9; 32]);
+    let account = FactBuilder::with_causal(
+        &mut values,
+        creator.installation,
+        Timestamp::from_unix_millis(2),
+        FactScope::InstallationPrivate(creator.installation.installation_id()),
+        [creator.installation_root.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            creator.installation_root.id(),
+        )],
+        SemanticPayload::HumanAccountCreated {
+            account_id,
+            creator: creator.installation,
+            label: Some(ShortText::new("account")?),
+        },
+    )?;
+    let project_id = ProjectId::from_bytes([10; 32]);
+    let project_mailbox = MailboxAddress::new(
+        creator.installation.installation_id(),
+        MailboxId::from_bytes([11; 32]),
+    );
+    let project_message = |values: &mut DeterministicValues,
+                           message_id,
+                           recipient,
+                           project_id|
+     -> Result<Fact, Box<dyn Error>> {
+        Ok(FactBuilder::with_causal(
+            values,
+            creator.installation,
+            Timestamp::from_unix_millis(10),
+            FactScope::AccountAddressed(account_id),
+            [account.id()],
+            [AuthorityReference::new(
+                AuthorityRole::AccountMembership,
+                account.id(),
+            )],
+            SemanticPayload::AsynchronousMessageSent(MessageContent {
+                message_id,
+                sender: creator.human,
+                recipient,
+                body: ContentText::new("project work")?,
+                purpose: MessagePurpose::Asynchronous,
+                presentation: PresentationKind::Message,
+                correlation: None,
+                project_id,
+            }),
+        )?)
+    };
+    let valid_id = values.message_id();
+    let valid = project_message(
+        &mut values,
+        valid_id,
+        Some(project_mailbox),
+        Some(project_id),
+    )?;
+    let missing_project_id = values.message_id();
+    let missing_project =
+        project_message(&mut values, missing_project_id, Some(project_mailbox), None)?;
+    let missing_recipient_id = values.message_id();
+    let missing_recipient =
+        project_message(&mut values, missing_recipient_id, None, Some(project_id))?;
+    let report = reduce_complete(
+        creator.base_facts().into_iter().chain([
+            account,
+            valid.clone(),
+            missing_project.clone(),
+            missing_recipient.clone(),
+        ]),
+        &creator.reducer(),
+    )?;
+    assert_eq!(
+        report.decisions()[&valid.id()].status(),
+        DecisionStatus::Projected
+    );
+    for invalid in [missing_project, missing_recipient] {
+        assert!(matches!(
+            report.decisions()[&invalid.id()].reason(),
+            Some(DecisionReason::Domain(ConversationReason::AddressMismatch))
+        ));
+    }
+    assert_eq!(
+        message_view(&report, valid_id)?.content.project_id,
+        Some(project_id)
     );
     Ok(())
 }

@@ -23,6 +23,7 @@ use hq_node::{
     RuntimePaths, ShutdownIssue, ShutdownStage, StateDirectoryOwner, StatePaths, TaskError,
     TaskFailureKind, TaskTracker, TaskTrackerError, bounded_mailbox,
 };
+use hq_projects::{ProjectInputReconciliation, ReconcileProjectInputs};
 use hq_reducer::AuthorityPolicy;
 
 use support::TestDirectory;
@@ -36,6 +37,18 @@ struct FakeComponent {
     fail_stop: bool,
     fail_drain: bool,
     escalate: bool,
+}
+
+impl ReconcileProjectInputs for FakeComponent {
+    fn reconcile_project_inputs(
+        &self,
+        _limit: usize,
+    ) -> Result<ProjectInputReconciliation, ApplicationError> {
+        Ok(ProjectInputReconciliation {
+            accepted: 0,
+            truncated: false,
+        })
+    }
 }
 
 impl FakeComponent {

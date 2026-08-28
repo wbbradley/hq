@@ -15,6 +15,7 @@ use hq_domain::{FactId, Page, PageCursor, Revision};
 use hq_local_api::RevisionHub;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use hq_local_api::protocol::v1::{BuildMetadata, Id32, LifecycleState, LifecycleStatus};
+use hq_projects::ReconcileProjectInputs;
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 use hq_store::StoreGateway;
 
@@ -206,9 +207,17 @@ impl<R, H, P> QueryDomain for NodeApplicationPorts<'_, R, H, P> {
     }
 }
 
-impl<R, H, P> CommitFacts for NodeApplicationPorts<'_, R, H, P> {
+impl<R, H, P: ReconcileProjectInputs> CommitFacts for NodeApplicationPorts<'_, R, H, P> {
     fn commit_facts(&self, request: FactMutation) -> Result<MutationAttempt, ApplicationError> {
-        self.store.commit_facts(request)
+        let attempt = self.store.commit_facts(request)?;
+        if matches!(
+            &attempt,
+            MutationAttempt::Completed(receipt)
+                if matches!(receipt.outcome(), hq_application::MutationOutcome::Committed)
+        ) {
+            self.project.reconcile_project_inputs(256)?;
+        }
+        Ok(attempt)
     }
 
     fn ingest_canonical_evidence(
@@ -305,7 +314,7 @@ impl<R, H, P> ApplicationPorts for NodeApplicationPorts<'_, R, H, P>
 where
     R: PublishWake + ConfigureRelays,
     H: ControlHarness,
-    P: InspectResource + ControlProjects + RetireAgents,
+    P: InspectResource + ControlProjects + RetireAgents + ReconcileProjectInputs,
 {
 }
 
@@ -394,7 +403,7 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
     where
         R: PublishWake + ConfigureRelays,
         H: ControlHarness,
-        P: InspectResource + ControlProjects + RetireAgents,
+        P: InspectResource + ControlProjects + RetireAgents + ReconcileProjectInputs,
     {
         let foundation = self.foundation.as_ref()?;
         let components = self.components.as_ref()?;

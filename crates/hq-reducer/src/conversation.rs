@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, Fact, FactId, FactScope, MailboxAddress, MessageContent,
-    MessageId, MessagePurpose, OperationCorrelation, PresentationKind, ProviderId,
-    ProviderSessionId, SemanticPayload, ShortText, ThreadId,
+    AccountId, ActivityKind, ActivityStatus, Fact, FactId, FactScope, MailboxAddress,
+    MessageContent, MessageId, MessagePurpose, OperationCorrelation, PresentationKind, ProviderId,
+    ProviderSessionId, SemanticPayload, ShortText, ThreadId, Timestamp,
 };
 
 use crate::{
@@ -250,6 +250,10 @@ pub struct ThreadView {
 pub struct MessageView {
     /// Canonical message-bearing fact.
     pub fact_id: FactId,
+    /// Signed semantic authoring time of the message fact.
+    pub authored_at: Timestamp,
+    /// Account scope for account-addressed messages.
+    pub account_id: Option<AccountId>,
     /// Derived causal thread identity.
     pub thread_id: ThreadId,
     /// Typed immutable content.
@@ -581,7 +585,9 @@ fn validate_message_address(
                     .is_some_and(|recipient| recipient.installation_id() == *installation)
         }
         FactScope::PeerAddressed(target) => message.recipient == Some(*target),
-        FactScope::AccountAddressed(_) => message.recipient.is_none(),
+        FactScope::AccountAddressed(_) => {
+            message.recipient.is_some() == message.project_id.is_some()
+        }
         FactScope::RemoteControl { .. } => false,
     };
     valid
@@ -917,6 +923,13 @@ fn message_projections(
                 ConversationProjectionKey::Message(message.message_id),
                 ConversationProjection::Message(Box::new(MessageView {
                     fact_id: fact.id(),
+                    authored_at: fact.authored_at(),
+                    account_id: match fact.scope() {
+                        FactScope::AccountAddressed(account_id) => Some(*account_id),
+                        FactScope::InstallationPrivate(_)
+                        | FactScope::PeerAddressed(_)
+                        | FactScope::RemoteControl { .. } => None,
+                    },
                     thread_id: match fact.payload() {
                         SemanticPayload::AnswerGiven { thread_id, .. } => *thread_id,
                         _ => thread_id(fact),

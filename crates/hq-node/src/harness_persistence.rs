@@ -481,7 +481,7 @@ mod tests {
         DomainSnapshot, MutationReceipt, ProjectProjectionSnapshot, ProjectionSnapshot,
     };
     use hq_domain::{
-        AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText, ContentText,
+        AccountId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText, ContentText,
         EncryptionPublicKey, FactId, MailboxKind, OperationId, ProjectId, ResourceLocator,
         ResourceScheme, Revision, ShortText, SigningPublicKey, ThreadId,
     };
@@ -766,6 +766,7 @@ mod tests {
             head: FactId::from_bytes([18; 32]),
             fork_participants: BTreeSet::new(),
             home,
+            account_id: AccountId::from_bytes([20; 32]),
             mailbox: MailboxAddress::new(home, MailboxId::from_bytes([19; 32])),
             predecessor: None,
             name: ShortText::new("project").expect("project name"),

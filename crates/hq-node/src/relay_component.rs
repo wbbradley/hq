@@ -18,6 +18,8 @@ use hq_domain::{
     BoundedText, InstallationId, RESOURCE_LOCATOR_MAX_BYTES, ResourceLocator, ResourceScheme,
     Revision,
 };
+use hq_projects::{ApplicationProjectInputReconciler, ReconcileProjectInputs};
+use hq_protocol::Bip340Signer;
 use hq_reducer::{AuthorityPolicy, AuthorityProjection, AuthorityProjectionKey, PeerRouteState};
 use hq_relay::{
     AttemptDisposition, CanonicalIngest, DesiredRelayPolicy, EnvelopeCodec, OutboxKey, RelayClock,
@@ -62,6 +64,7 @@ impl RelayNodeComponent {
         envelope: EnvelopeCodec,
         local_installation: InstallationId,
         authority_policy: AuthorityPolicy,
+        signer: Arc<Bip340Signer>,
         connector: Arc<dyn RelayConnector>,
     ) -> Self {
         let replication = store.replication_handle();
@@ -75,6 +78,10 @@ impl RelayNodeComponent {
             ingest: Arc::new(StoreCanonicalIngest {
                 store: replication,
                 authority_policy,
+                inputs: ApplicationProjectInputReconciler::new(
+                    hq_store::StoreGateway::new(store, authority_policy, signer),
+                    local_installation,
+                ),
             }),
             envelopes: Arc::new(envelope),
             clock: Arc::new(SystemRelayClock::new()),
@@ -379,6 +386,7 @@ impl RouteResolver for VerifiedRouteResolver {
 struct StoreCanonicalIngest {
     store: ReplicationHandle,
     authority_policy: AuthorityPolicy,
+    inputs: ApplicationProjectInputReconciler<hq_store::StoreGateway>,
 }
 
 impl CanonicalIngest for StoreCanonicalIngest {
@@ -388,8 +396,11 @@ impl CanonicalIngest for StoreCanonicalIngest {
             .ok_or(RelayPortError::InvalidInput)?;
         self.store
             .ingest_verified(fact, self.authority_policy)
+            .map_err(map_store_error)?;
+        self.inputs
+            .reconcile_project_inputs(256)
             .map(|_| ())
-            .map_err(map_store_error)
+            .map_err(|_| RelayPortError::Unavailable)
     }
 }
 

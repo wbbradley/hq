@@ -438,6 +438,8 @@ impl DomainSnapshot {
                     items.push(ClientProjection::Project {
                         project_id: *project_id,
                         home: view.home,
+                        account_id: view.account_id,
+                        mailbox: view.mailbox,
                         name: view.name.clone(),
                         lifecycle: match view.lifecycle {
                             ProjectLifecycle::Open => ClientProjectLifecycle::Open,
@@ -772,6 +774,8 @@ pub enum ClientProjection {
     Project {
         project_id: ProjectId,
         home: InstallationId,
+        account_id: AccountId,
+        mailbox: MailboxAddress,
         name: ShortText,
         lifecycle: ClientProjectLifecycle,
         archived: bool,
