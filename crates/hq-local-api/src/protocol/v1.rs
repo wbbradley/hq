@@ -712,7 +712,7 @@ pub struct ProjectCommandRequestDto {
     pub account_id: Id32,
     pub project_id: Id32,
     pub home: Id32,
-    pub expected_head: Id32,
+    pub expected_head: Option<Id32>,
     pub issued_at_unix_millis: i64,
     pub action: ProjectCommandActionDto,
 }
@@ -1720,6 +1720,13 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
 }
 
 fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), ValueError> {
+    let provisioning = matches!(
+        &request.action,
+        ProjectCommandActionDto::ProvisionWorktree(_)
+    );
+    if provisioning == request.expected_head.is_some() {
+        return Err(ValueError::InvalidValueCombination);
+    }
     match &request.action {
         ProjectCommandActionDto::Open
         | ProjectCommandActionDto::DispatchPending

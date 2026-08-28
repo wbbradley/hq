@@ -111,7 +111,10 @@ impl RemoteProjectCommandPort for MemoryRemote {
         assert_eq!(record.request.command_id, command_id);
         record.progress = RemoteProjectCommandProgress::Received {
             receipt_fact: FactId::from_bytes([32; 32]),
-            received_head: record.request.expected_head,
+            received_head: record
+                .request
+                .expected_head
+                .expect("remote commands target an existing project"),
             received_at,
         };
         Ok(RemoteProjectFactOutcome::Committed)
@@ -224,7 +227,7 @@ fn immutable_home_receipts_before_execution_and_authors_one_typed_outcome() {
             result: RemoteCommandResult::Committed(head),
             runtime: Some(RuntimeObservation::Uncertain(_)),
             ..
-        } if head == request.expected_head
+        } if Some(head) == request.expected_head
     ));
 }
 
@@ -296,7 +299,7 @@ fn request(home: InstallationId) -> ProjectCommandRequest {
         account_id: AccountId::from_bytes([3; 32]),
         project_id: ProjectId::from_bytes([4; 32]),
         home,
-        expected_head: FactId::from_bytes([5; 32]),
+        expected_head: Some(FactId::from_bytes([5; 32])),
         issued_at: Timestamp::from_unix_millis(6),
         action: ProjectCommandAction::Open,
     };
@@ -310,7 +313,9 @@ fn completed(
 ) -> ProjectCommandOutcome {
     ProjectCommandOutcome::Completed {
         operation_id: request.operation_id,
-        project_head: request.expected_head,
+        project_head: request
+            .expected_head
+            .expect("remote commands target an existing project"),
         runtime,
     }
 }

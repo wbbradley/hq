@@ -59,8 +59,8 @@ pub struct StoredProjectSaga {
     pub project_id: ProjectId,
     /// Immutable project home.
     pub home: InstallationId,
-    /// Expected canonical project head.
-    pub expected_head: FactId,
+    /// Expected canonical project head, absent only for new-project provisioning.
+    pub expected_head: Option<FactId>,
     /// Caller-supplied semantic time.
     pub issued_at: Timestamp,
     /// Strict versioned command bytes owned by the workflow codec.

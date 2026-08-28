@@ -403,6 +403,7 @@ dependencies = [
  "hq-protocol",
  "hq-reducer",
  "hq-relay",
+ "hq-resources",
  "hq-store",
  "nix",
  "scrypt",

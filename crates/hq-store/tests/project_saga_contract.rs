@@ -32,7 +32,7 @@ fn saga(operation: u8, digest: u8, project: u8) -> StoredProjectSaga {
         account_id: AccountId::from_bytes([1; 32]),
         project_id: ProjectId::from_bytes([project; 32]),
         home: InstallationId::from_bytes([2; 32]),
-        expected_head: FactId::from_bytes([3; 32]),
+        expected_head: Some(FactId::from_bytes([3; 32])),
         issued_at: Timestamp::from_unix_millis(4),
         command_body: b"hq-project-command-v1:open".to_vec(),
         state: StoredProjectSagaState::Running(ProjectCommandStage::Accepted),
@@ -99,6 +99,88 @@ fn exact_begin_replays_and_changed_identity_or_busy_project_is_typed() {
         store
             .begin_project_saga(competing)
             .expect("reservation conflict is typed"),
+        StoredProjectSagaBegin::ProjectBusy
+    );
+}
+
+#[test]
+fn terminal_reservations_release_only_when_external_state_is_owned_or_absent() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let reserved_destination = destination("/repo/worktrees/reusable");
+
+    let mut rejected_without_git = saga(50, 51, 52);
+    rejected_without_git.expected_head = None;
+    rejected_without_git.reservation = Some(reserved_destination.clone());
+    store
+        .begin_project_saga(rejected_without_git.clone())
+        .expect("destination reserves");
+    rejected_without_git.state = StoredProjectSagaState::Rejected(DomainError::new(
+        ErrorCategory::InvalidInput,
+        ErrorCode::new("git_request_rejected").expect("code"),
+    ));
+    rejected_without_git.updated_at_millis += 1;
+    store
+        .replace_project_saga(rejected_without_git)
+        .expect("definite no-effect rejection releases");
+
+    let mut completed_after_git = saga(53, 54, 55);
+    completed_after_git.expected_head = None;
+    completed_after_git.reservation = Some(reserved_destination.clone());
+    completed_after_git.git_operation_id = Some(OperationId::from_bytes([56; 32]));
+    completed_after_git.git_effect = StoredProjectEffectState::Accepted;
+    assert!(matches!(
+        store
+            .begin_project_saga(completed_after_git.clone())
+            .expect("released destination can be reserved again"),
+        StoredProjectSagaBegin::Inserted(_)
+    ));
+    completed_after_git.state = StoredProjectSagaState::Completed(FactId::from_bytes([57; 32]));
+    completed_after_git.updated_at_millis += 1;
+    store
+        .replace_project_saga(completed_after_git)
+        .expect("canonical ownership releases protected reservation");
+
+    let mut next = saga(58, 59, 60);
+    next.expected_head = None;
+    next.reservation = Some(reserved_destination);
+    assert!(matches!(
+        store
+            .begin_project_saga(next)
+            .expect("completed project no longer needs the saga reservation"),
+        StoredProjectSagaBegin::Inserted(_)
+    ));
+}
+
+#[test]
+fn rejected_saga_retains_a_reservation_once_git_may_have_created_state() {
+    let directory = TestDirectory::new();
+    let store = open_store(&directory.database_path());
+    let reserved_destination = destination("/repo/worktrees/orphaned");
+    let mut protected = saga(61, 62, 63);
+    protected.expected_head = None;
+    protected.reservation = Some(reserved_destination.clone());
+    protected.git_operation_id = Some(OperationId::from_bytes([64; 32]));
+    protected.git_effect = StoredProjectEffectState::Accepted;
+    store
+        .begin_project_saga(protected.clone())
+        .expect("protected destination reserves");
+    protected.state = StoredProjectSagaState::Rejected(DomainError::new(
+        ErrorCategory::Conflict,
+        ErrorCode::new("canonical_project_conflict").expect("code"),
+    ));
+    protected.updated_at_millis += 1;
+    store
+        .replace_project_saga(protected)
+        .expect("terminal failure persists");
+
+    let mut competing = saga(65, 66, 67);
+    competing.expected_head = None;
+    competing.reservation = Some(reserved_destination);
+    assert_eq!(
+        store
+            .begin_project_saga(competing)
+            .expect("external worktree keeps destination protected"),
         StoredProjectSagaBegin::ProjectBusy
     );
 }

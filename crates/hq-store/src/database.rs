@@ -1275,8 +1275,9 @@ CREATE TABLE project_sagas (
     account_id BLOB NOT NULL CHECK(typeof(account_id) = 'blob' AND length(account_id) = 32),
     project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
     home BLOB NOT NULL CHECK(typeof(home) = 'blob' AND length(home) = 32),
-    expected_head BLOB NOT NULL
-        CHECK(typeof(expected_head) = 'blob' AND length(expected_head) = 32),
+    expected_head BLOB
+        CHECK(expected_head IS NULL OR
+            (typeof(expected_head) = 'blob' AND length(expected_head) = 32)),
     issued_at_millis BLOB NOT NULL
         CHECK(typeof(issued_at_millis) = 'blob' AND length(issued_at_millis) = 8),
     command_body BLOB NOT NULL

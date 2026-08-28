@@ -13,29 +13,30 @@ use hq_protocol::{Bip340Signer, CanonicalEventPlan};
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 
 use crate::{
-    LocalMutationDecision, LocalMutationRequest, MutationResultBytes, MutationResultKind, Store,
-    StoreError, StoreErrorClass,
+    ApplicationStateHandle, LocalMutationDecision, LocalMutationRequest, MutationResultBytes,
+    MutationResultKind, Store, StoreError, StoreErrorClass,
 };
 
 /// Application-facing store adapter configured with explicit local authoring capabilities.
-pub struct StoreGateway<'a> {
-    store: &'a Store,
+#[derive(Clone)]
+pub struct StoreGateway {
+    store: ApplicationStateHandle,
     policy: AuthorityPolicy,
     signer: Arc<Bip340Signer>,
 }
 
-impl<'a> StoreGateway<'a> {
+impl StoreGateway {
     /// Constructs a gateway without exposing signer bytes or persistence details to application code.
-    pub const fn new(store: &'a Store, policy: AuthorityPolicy, signer: Arc<Bip340Signer>) -> Self {
+    pub fn new(store: &Store, policy: AuthorityPolicy, signer: Arc<Bip340Signer>) -> Self {
         Self {
-            store,
+            store: store.application_state_handle(),
             policy,
             signer,
         }
     }
 }
 
-impl fmt::Debug for StoreGateway<'_> {
+impl fmt::Debug for StoreGateway {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("StoreGateway")
@@ -44,7 +45,7 @@ impl fmt::Debug for StoreGateway<'_> {
     }
 }
 
-impl QueryDomain for StoreGateway<'_> {
+impl QueryDomain for StoreGateway {
     fn authoritative_snapshot(
         &self,
     ) -> Result<hq_application::AuthoritativeSnapshot, ApplicationError> {
@@ -63,7 +64,7 @@ impl QueryDomain for StoreGateway<'_> {
     }
 }
 
-impl CommitFacts for StoreGateway<'_> {
+impl CommitFacts for StoreGateway {
     fn commit_facts(&self, request: FactMutation) -> Result<MutationAttempt, ApplicationError> {
         let (command_id, request_digest, decide) = request.into_parts();
         let policy = self.policy;
@@ -151,12 +152,12 @@ fn map_store_error(error: StoreError) -> ApplicationError {
         StoreErrorClass::ActorClosed
         | StoreErrorClass::WorkerStopped
         | StoreErrorClass::DatabaseUnavailable
-        | StoreErrorClass::FileSystem => ApplicationErrorCode::AdapterUnavailable,
+        | StoreErrorClass::FileSystem
+        | StoreErrorClass::NotRepaired => ApplicationErrorCode::AdapterUnavailable,
         StoreErrorClass::CorruptDatabase
         | StoreErrorClass::InvalidEvidence
         | StoreErrorClass::OperationalStateCorrupt
-        | StoreErrorClass::RebuildableStateCorrupt
-        | StoreErrorClass::NotRepaired => ApplicationErrorCode::StateCorrupt,
+        | StoreErrorClass::RebuildableStateCorrupt => ApplicationErrorCode::StateCorrupt,
         StoreErrorClass::InvalidPath
         | StoreErrorClass::SymbolicLink
         | StoreErrorClass::UnsafePermissions

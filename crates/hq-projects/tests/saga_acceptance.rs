@@ -66,7 +66,7 @@ fn request(operation: u8, digest: u8, project: u8) -> ProjectCommandRequest {
         account_id: AccountId::from_bytes([1; 32]),
         project_id: ProjectId::from_bytes([project; 32]),
         home: InstallationId::from_bytes([2; 32]),
-        expected_head: FactId::from_bytes([3; 32]),
+        expected_head: Some(FactId::from_bytes([3; 32])),
         issued_at: Timestamp::from_unix_millis(4),
         action: ProjectCommandAction::Open,
     }

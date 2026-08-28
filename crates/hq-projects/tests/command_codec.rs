@@ -7,9 +7,9 @@ use std::num::NonZeroU64;
 use hq_application::{ProjectCommandAction, ProjectCommandRequest};
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, BoundedText, CommandDigest, CommandId,
-    ContentText, DispatchId, ErrorCode, FactId, InstallationId, MessageId, OperationId, ProjectId,
-    ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator,
-    ResourceScheme, RuntimeObservation, ThreadId, Timestamp,
+    ContentText, DispatchId, ErrorCode, FactId, InstallationId, MailboxId, MessageId, OperationId,
+    ProjectId, ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId,
+    ResourceLocator, ResourceScheme, RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
 use hq_projects::{
     CanonicalProjectMutation, CanonicalProjectMutationAction, PendingProjectInput,
@@ -72,7 +72,7 @@ fn request_digest_binds_every_envelope_field_and_canonical_action_body() {
         account_id: AccountId::from_bytes([62; 32]),
         project_id: ProjectId::from_bytes([63; 32]),
         home: InstallationId::from_bytes([64; 32]),
-        expected_head: FactId::from_bytes([65; 32]),
+        expected_head: Some(FactId::from_bytes([65; 32])),
         issued_at: Timestamp::from_unix_millis(66),
         action: ProjectCommandAction::Open,
     };
@@ -84,7 +84,7 @@ fn request_digest_binds_every_envelope_field_and_canonical_action_body() {
         digest
     );
     changed = request;
-    changed.expected_head = FactId::from_bytes([67; 32]);
+    changed.expected_head = Some(FactId::from_bytes([67; 32]));
     assert_ne!(
         project_command_request_digest(&changed).expect("changed head digest"),
         digest
@@ -99,7 +99,7 @@ fn in_flight_canonical_mutation_round_trips_with_complete_dispatch_attribution()
         account_id: AccountId::from_bytes([12; 32]),
         project_id: ProjectId::from_bytes([13; 32]),
         home: InstallationId::from_bytes([14; 32]),
-        expected_head: FactId::from_bytes([15; 32]),
+        expected_head: Some(FactId::from_bytes([15; 32])),
         issued_at: Timestamp::from_unix_millis(16),
         action: CanonicalProjectMutationAction::RecordDispatch {
             input: PendingProjectInput {
@@ -132,6 +132,36 @@ fn in_flight_canonical_mutation_round_trips_with_complete_dispatch_attribution()
 }
 
 #[test]
+fn canonical_creation_round_trips_without_a_magic_previous_head() {
+    let mutation = CanonicalProjectMutation {
+        command_id: CommandId::from_bytes([70; 32]),
+        request_digest: CommandDigest::from_bytes([71; 32]),
+        account_id: AccountId::from_bytes([72; 32]),
+        project_id: ProjectId::from_bytes([73; 32]),
+        home: InstallationId::from_bytes([74; 32]),
+        expected_head: None,
+        issued_at: Timestamp::from_unix_millis(75),
+        action: CanonicalProjectMutationAction::Create {
+            mailbox_id: MailboxId::from_bytes([76; 32]),
+            name: ShortText::new("project").expect("name"),
+            brief: Some(ContentText::new("brief").expect("brief")),
+            resource: ProjectResource {
+                resource_id: ResourceId::from_bytes([77; 32]),
+                display_locator: locator("/repo/worktree"),
+                canonical_locator: locator("/repo/worktree"),
+                health: ResourceHealth::Healthy,
+            },
+        },
+    };
+
+    let encoded = encode_canonical_project_mutation(&mutation).expect("creation encodes");
+    assert_eq!(
+        decode_canonical_project_mutation(&encoded).expect("creation decodes"),
+        mutation
+    );
+}
+
+#[test]
 fn in_flight_resource_mutations_round_trip_exactly() {
     let resource = ProjectResource {
         resource_id: ResourceId::from_bytes([31; 32]),
@@ -159,7 +189,7 @@ fn in_flight_resource_mutations_round_trip_exactly() {
             account_id: AccountId::from_bytes([35; 32]),
             project_id: ProjectId::from_bytes([36; 32]),
             home: InstallationId::from_bytes([37; 32]),
-            expected_head: FactId::from_bytes([38; 32]),
+            expected_head: Some(FactId::from_bytes([38; 32])),
             issued_at: Timestamp::from_unix_millis(39),
             action,
         };
@@ -201,7 +231,7 @@ fn in_flight_close_and_archive_mutations_round_trip_exactly() {
             account_id: AccountId::from_bytes([44; 32]),
             project_id: ProjectId::from_bytes([45; 32]),
             home: InstallationId::from_bytes([46; 32]),
-            expected_head: FactId::from_bytes([47; 32]),
+            expected_head: Some(FactId::from_bytes([47; 32])),
             issued_at: Timestamp::from_unix_millis(48),
             action,
         };

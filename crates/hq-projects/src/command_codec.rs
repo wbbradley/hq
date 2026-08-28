@@ -84,7 +84,13 @@ pub fn project_command_request_digest(
     digest.update(request.account_id.as_bytes());
     digest.update(request.project_id.as_bytes());
     digest.update(request.home.as_bytes());
-    digest.update(request.expected_head.as_bytes());
+    match request.expected_head {
+        Some(expected_head) => {
+            digest.update([1]);
+            digest.update(expected_head.as_bytes());
+        }
+        None => digest.update([0]),
+    }
     digest.update(request.issued_at.as_unix_millis().to_be_bytes());
     let body_bytes = body.as_str().as_bytes();
     digest.update(
@@ -493,7 +499,7 @@ struct WireCanonicalMutation {
     account_id: String,
     project_id: String,
     home: String,
-    expected_head: String,
+    expected_head: Option<String>,
     issued_at: i64,
     action: WireCanonicalAction,
 }
@@ -506,7 +512,10 @@ impl From<&CanonicalProjectMutation> for WireCanonicalMutation {
             account_id: id_text(mutation.account_id.as_bytes()),
             project_id: id_text(mutation.project_id.as_bytes()),
             home: id_text(mutation.home.as_bytes()),
-            expected_head: id_text(mutation.expected_head.as_bytes()),
+            expected_head: mutation
+                .expected_head
+                .as_ref()
+                .map(|head| id_text(head.as_bytes())),
             issued_at: mutation.issued_at.as_unix_millis(),
             action: WireCanonicalAction::from(&mutation.action),
         }
@@ -523,7 +532,12 @@ impl TryFrom<WireCanonicalMutation> for CanonicalProjectMutation {
             account_id: AccountId::from_bytes(parse_id(&mutation.account_id)?),
             project_id: ProjectId::from_bytes(parse_id(&mutation.project_id)?),
             home: InstallationId::from_bytes(parse_id(&mutation.home)?),
-            expected_head: FactId::from_bytes(parse_id(&mutation.expected_head)?),
+            expected_head: mutation
+                .expected_head
+                .as_deref()
+                .map(parse_id)
+                .transpose()?
+                .map(FactId::from_bytes),
             issued_at: Timestamp::from_unix_millis(mutation.issued_at),
             action: mutation.action.try_into()?,
         })
@@ -533,6 +547,12 @@ impl TryFrom<WireCanonicalMutation> for CanonicalProjectMutation {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum WireCanonicalAction {
+    Create {
+        mailbox_id: String,
+        name: String,
+        brief: Option<String>,
+        resource: WireProjectResource,
+    },
     Open,
     AddResource {
         resource: WireProjectResource,
@@ -587,6 +607,17 @@ enum WireCanonicalAction {
 impl From<&CanonicalProjectMutationAction> for WireCanonicalAction {
     fn from(action: &CanonicalProjectMutationAction) -> Self {
         match action {
+            CanonicalProjectMutationAction::Create {
+                mailbox_id,
+                name,
+                brief,
+                resource,
+            } => Self::Create {
+                mailbox_id: id_text(mailbox_id.as_bytes()),
+                name: name.as_str().to_owned(),
+                brief: brief.as_ref().map(|value| value.as_str().to_owned()),
+                resource: WireProjectResource::from(resource),
+            },
             CanonicalProjectMutationAction::Open => Self::Open,
             CanonicalProjectMutationAction::AddResource {
                 resource,
@@ -672,6 +703,20 @@ impl TryFrom<WireCanonicalAction> for CanonicalProjectMutationAction {
 
     fn try_from(action: WireCanonicalAction) -> Result<Self, Self::Error> {
         Ok(match action {
+            WireCanonicalAction::Create {
+                mailbox_id,
+                name,
+                brief,
+                resource,
+            } => Self::Create {
+                mailbox_id: hq_domain::MailboxId::from_bytes(parse_id(&mailbox_id)?),
+                name: ShortText::new(name).map_err(|_| Self::Error::Invalid)?,
+                brief: brief
+                    .map(ContentText::new)
+                    .transpose()
+                    .map_err(|_| Self::Error::Invalid)?,
+                resource: resource.try_into()?,
+            },
             WireCanonicalAction::Open => Self::Open,
             WireCanonicalAction::AddResource {
                 resource,

@@ -7,9 +7,10 @@ use hq_application::{
     MutationAttempt, MutationDecision, MutationOutcome, QueryDomain,
 };
 use hq_domain::{
-    AgentId, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, DomainError,
-    ErrorCategory, ErrorCode, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES,
-    MAX_FACT_PARENTS, ProjectId, ProjectResource, SemanticPayload,
+    AgentId, AuthorityReference, AuthorityRole, BoundedSet, BoundedVec, CausalReferences,
+    ContentText, DomainError, ErrorCategory, ErrorCode, FactId, FactScope, InitialProjectState,
+    InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, MailboxId, ProjectId, ProjectResource,
+    ResourceHealth, SemanticPayload, ShortText,
 };
 use hq_reducer::{
     AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityProjection,
@@ -208,6 +209,28 @@ fn build_plan(
     snapshot: &DomainSnapshot,
     mutation: &CanonicalProjectMutation,
 ) -> Result<FactPlan, DomainError> {
+    if let CanonicalProjectMutationAction::Create {
+        mailbox_id,
+        name,
+        brief,
+        resource,
+    } = &mutation.action
+    {
+        return build_creation_plan(
+            snapshot,
+            mutation,
+            *mailbox_id,
+            name,
+            brief.as_ref(),
+            resource,
+        );
+    }
+    let Some(expected_head) = mutation.expected_head else {
+        return Err(domain_error(
+            ErrorCategory::InvalidInput,
+            "project_existing_head_required",
+        ));
+    };
     let view = project_view(snapshot, mutation.project_id)
         .map_err(|_| domain_error(ErrorCategory::NotFound, "project_not_found"))?;
     if view.home != mutation.home {
@@ -216,7 +239,7 @@ fn build_plan(
             "project_wrong_home",
         ));
     }
-    if view.head != mutation.expected_head {
+    if view.head != expected_head {
         return Err(domain_error(ErrorCategory::Conflict, "project_stale_head"));
     }
     let active_human = active_human_authority(snapshot, mutation.account_id, mutation.home)
@@ -256,6 +279,92 @@ fn build_plan(
         FactScope::AccountAddressed(mutation.account_id),
         causal,
         payload,
+        *mutation.request_digest.as_bytes(),
+    ))
+}
+
+fn build_creation_plan(
+    snapshot: &DomainSnapshot,
+    mutation: &CanonicalProjectMutation,
+    mailbox_id: MailboxId,
+    name: &ShortText,
+    brief: Option<&ContentText>,
+    resource: &ProjectResource,
+) -> Result<FactPlan, DomainError> {
+    if mutation.expected_head.is_some()
+        || snapshot
+            .project()
+            .projection(ProjectProjectionKey::Project(mutation.project_id))
+            .is_some()
+        || snapshot.project().projections().values().any(|projection| {
+            matches!(projection, ProjectProjection::Project(project)
+                if project.home == mutation.home && project.mailbox.mailbox_id() == mailbox_id)
+        })
+    {
+        return Err(domain_error(
+            ErrorCategory::Conflict,
+            "project_creation_identity_conflict",
+        ));
+    }
+    if resource.health != ResourceHealth::Healthy
+        || !valid_path_resource(resource)
+        || !project_resources_are_claimable(snapshot, mutation, &[resource])
+    {
+        return Err(domain_error(
+            ErrorCategory::Conflict,
+            "project_creation_resource_conflict",
+        ));
+    }
+    let active_human = active_human_authority(snapshot, mutation.account_id, mutation.home)
+        .ok_or_else(|| domain_error(ErrorCategory::Unauthorized, "project_inactive_human"))?;
+    let installation_root = match snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::Installation(mutation.home))
+    {
+        Some(AuthorityProjection::Installation(installation)) => installation.root_fact,
+        _ => {
+            return Err(domain_error(
+                ErrorCategory::Unauthorized,
+                "project_home_missing",
+            ));
+        }
+    };
+    let parents = BoundedSet::<FactId, MAX_FACT_PARENTS>::new(BTreeSet::from([
+        installation_root,
+        active_human,
+    ]))
+    .map_err(|_| domain_error(ErrorCategory::InvariantViolation, "project_parent_overflow"))?;
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        parents,
+        [
+            AuthorityReference::new(AuthorityRole::ProjectHome, installation_root),
+            AuthorityReference::new(AuthorityRole::AccountMembership, active_human),
+            AuthorityReference::new(AuthorityRole::ActiveHuman, active_human),
+        ],
+    )
+    .map_err(|_| domain_error(ErrorCategory::InvariantViolation, "project_causal_invalid"))?;
+    let resources = BoundedVec::new([resource.clone()]).map_err(|_| {
+        domain_error(
+            ErrorCategory::InvariantViolation,
+            "project_resource_overflow",
+        )
+    })?;
+    Ok(FactPlan::new(
+        mutation.home,
+        mutation.issued_at,
+        FactScope::AccountAddressed(mutation.account_id),
+        causal,
+        SemanticPayload::ProjectCreated {
+            project_id: mutation.project_id,
+            mailbox_id,
+            home: mutation.home,
+            name: name.clone(),
+            brief: brief.cloned(),
+            predecessor: None,
+            resources,
+            primary: Some(resource.resource_id),
+            initial_state: InitialProjectState::Open,
+        },
         *mutation.request_digest.as_bytes(),
     ))
 }
@@ -849,20 +958,102 @@ mod tests {
     use hq_application::{DomainSnapshot, ProjectionSnapshot};
     use hq_domain::{
         AccountId, AgentId, AssignmentId, AssignmentIntent, AuthorityRole, BoundedText,
-        CommandDigest, CommandId, FactId, FactScope, InstallationId, MailboxAddress, MailboxId,
-        ProjectId, ProjectResource, ProviderId, ResourceHealth, ResourceId, ResourceLocator,
-        ResourceScheme, SemanticPayload, ShortText, Timestamp,
+        CommandDigest, CommandId, EncryptionPublicKey, FactId, FactScope, InstallationAddress,
+        InstallationId, MailboxAddress, MailboxId, ProjectId, ProjectResource, ProviderId,
+        ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, SemanticPayload, ShortText,
+        SigningPublicKey, Timestamp,
     };
     use hq_reducer::{
-        AgentLifecycle, AgentProjection, AgentProjectionKey, AgentView, ProjectAssignmentPhase,
-        ProjectAssignmentView, ProjectLifecycle, ProjectProjection, ProjectProjectionKey,
-        ProjectView, SelectionView,
+        AgentLifecycle, AgentProjection, AgentProjectionKey, AgentView, AuthorityProjection,
+        AuthorityProjectionKey, InstallationView, ProjectAssignmentPhase, ProjectAssignmentView,
+        ProjectLifecycle, ProjectProjection, ProjectProjectionKey, ProjectView, SelectionView,
     };
 
     use super::{
-        CanonicalProjectMutation, CanonicalProjectMutationAction, build_retirement_plan, payload,
-        resource_payload,
+        CanonicalProjectMutation, CanonicalProjectMutationAction, build_creation_plan,
+        build_retirement_plan, payload, resource_payload,
     };
+
+    #[test]
+    fn creation_has_no_previous_state_and_binds_home_and_active_human_authority() {
+        let home = InstallationId::from_bytes([3; 32]);
+        let account = AccountId::from_bytes([4; 32]);
+        let installation_root = FactId::from_bytes([5; 32]);
+        let human_root = FactId::from_bytes([6; 32]);
+        let signing_key = SigningPublicKey::from_bytes([7; 32]);
+        let snapshot = DomainSnapshot::new(
+            ProjectionSnapshot::new(
+                BTreeMap::new(),
+                BTreeMap::from([
+                    (
+                        AuthorityProjectionKey::Installation(home),
+                        AuthorityProjection::Installation(InstallationView {
+                            root_fact: installation_root,
+                            signing_key,
+                            encryption_key: EncryptionPublicKey::from_bytes([8; 32]),
+                            label: None,
+                        }),
+                    ),
+                    (
+                        AuthorityProjectionKey::Account(account),
+                        AuthorityProjection::Account {
+                            root_fact: human_root,
+                            creator: InstallationAddress::new(home, signing_key),
+                            label: None,
+                        },
+                    ),
+                ]),
+                BTreeMap::new(),
+            ),
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+            ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+        );
+        let project_id = ProjectId::from_bytes([9; 32]);
+        let mailbox_id = MailboxId::from_bytes([10; 32]);
+        let resource = resource(11, "/repo/worktree");
+        let mut mutation = mutation(
+            project_id,
+            CanonicalProjectMutationAction::Create {
+                mailbox_id,
+                name: ShortText::new("created").expect("name"),
+                brief: None,
+                resource: resource.clone(),
+            },
+        );
+        mutation.account_id = account;
+        mutation.expected_head = None;
+
+        let plan = build_creation_plan(
+            &snapshot,
+            &mutation,
+            mailbox_id,
+            &ShortText::new("created").expect("name"),
+            None,
+            &resource,
+        )
+        .expect("creation is authorized");
+        assert_eq!(plan.causal().parents().iter().len(), 2);
+        assert_eq!(plan.causal().authority(AuthorityRole::PreviousState), None);
+        assert_eq!(
+            plan.causal().authority(AuthorityRole::ProjectHome),
+            Some(installation_root)
+        );
+        assert_eq!(
+            plan.causal().authority(AuthorityRole::ActiveHuman),
+            Some(human_root)
+        );
+        assert!(matches!(
+            plan.payload(),
+            SemanticPayload::ProjectCreated {
+                project_id: created,
+                primary: Some(primary),
+                initial_state: hq_domain::InitialProjectState::Open,
+                predecessor: None,
+                ..
+            } if *created == project_id && *primary == resource.resource_id
+        ));
+    }
 
     #[test]
     fn canonical_resource_policy_uses_the_complete_resulting_active_claim_set() {
@@ -1086,7 +1277,7 @@ mod tests {
             account_id: AccountId::from_bytes([22; 32]),
             project_id,
             home: InstallationId::from_bytes([3; 32]),
-            expected_head: FactId::from_bytes([11; 32]),
+            expected_head: Some(FactId::from_bytes([11; 32])),
             issued_at: Timestamp::from_unix_millis(23),
             action,
         }

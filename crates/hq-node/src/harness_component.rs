@@ -10,10 +10,10 @@ use hq_application::{
     EffectRequest, SessionControl,
 };
 use hq_harness::{
-    HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment, HarnessError,
-    HarnessErrorClass, HarnessLaunchRequest, HarnessPersistencePort, HarnessRegistry,
-    HarnessSessionRequest, HarnessSubmission, HarnessSupervisor, HarnessSupervisorConfig,
-    HarnessSupervisorDependencies, HarnessTokenSource,
+    HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment,
+    HarnessError, HarnessErrorClass, HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken,
+    HarnessPersistencePort, HarnessRegistry, HarnessSessionRequest, HarnessSubmission,
+    HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource,
 };
 use hq_projects::{ProjectRuntimeDelivery, ProjectRuntimePort, ProjectRuntimeRequest};
 use hq_store::Store;
@@ -23,7 +23,12 @@ use crate::{
 };
 
 /// Node lifecycle owner for the complete neutral managed-runtime supervisor.
+#[derive(Clone)]
 pub struct HarnessNodeComponent {
+    inner: Arc<HarnessNodeInner>,
+}
+
+struct HarnessNodeInner {
     config: HarnessSupervisorConfig,
     dependencies: HarnessSupervisorDependencies,
     supervisor: Mutex<Option<HarnessSupervisor>>,
@@ -41,29 +46,44 @@ impl HarnessNodeComponent {
         tokens: Arc<dyn HarnessTokenSource>,
     ) -> Self {
         Self {
-            config,
-            dependencies: HarnessSupervisorDependencies {
-                registry,
-                state: Arc::new(HarnessStoreAdapter::new(store)),
-                persistence,
-                clock,
-                tokens,
-            },
-            supervisor: Mutex::new(None),
-            accepting: AtomicBool::new(false),
+            inner: Arc::new(HarnessNodeInner {
+                config,
+                dependencies: HarnessSupervisorDependencies {
+                    registry,
+                    state: Arc::new(HarnessStoreAdapter::new(store)),
+                    persistence,
+                    clock,
+                    tokens,
+                },
+                supervisor: Mutex::new(None),
+                accepting: AtomicBool::new(false),
+            }),
         }
+    }
+
+    /// Composes a durable supervisor with no registered providers for the foreground baseline.
+    pub fn without_providers(store: &Store) -> Self {
+        Self::new(
+            HarnessSupervisorConfig::default(),
+            store,
+            Arc::new(HarnessRegistry::new()),
+            Arc::new(UnavailableHarnessPersistence),
+            Arc::new(SystemHarnessClock),
+            Arc::new(RandomHarnessTokens),
+        )
     }
 
     fn with_supervisor<T>(
         &self,
         operation: impl FnOnce(&HarnessSupervisor) -> Result<T, HarnessError>,
     ) -> Result<T, ApplicationError> {
-        if !self.accepting.load(Ordering::Acquire) {
+        if !self.inner.accepting.load(Ordering::Acquire) {
             return Err(ApplicationError::new(
                 ApplicationErrorCode::AdapterUnavailable,
             ));
         }
-        self.supervisor
+        self.inner
+            .supervisor
             .lock()
             .map_err(|_| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))?
             .as_ref()
@@ -71,10 +91,11 @@ impl HarnessNodeComponent {
             .and_then(|supervisor| operation(supervisor).map_err(map_harness_error))
     }
 
-    fn shutdown_supervisor(&mut self) -> Result<ComponentDrain, ComponentError> {
+    fn shutdown_supervisor(&self) -> Result<ComponentDrain, ComponentError> {
         let supervisor = self
+            .inner
             .supervisor
-            .get_mut()
+            .lock()
             .map_err(|_| ComponentError::unavailable())?
             .take();
         supervisor.map_or(Ok(ComponentDrain::Complete), |supervisor| {
@@ -92,40 +113,87 @@ impl HarnessNodeComponent {
     }
 }
 
+struct UnavailableHarnessPersistence;
+
+impl HarnessPersistencePort for UnavailableHarnessPersistence {
+    fn persist_output(
+        &self,
+        _agent_id: hq_domain::AgentId,
+        _provider_id: &hq_domain::ProviderId,
+        _session_id: &hq_domain::ProviderSessionId,
+        _output: &HarnessOutput,
+    ) -> Result<(), HarnessError> {
+        Err(HarnessError::new(HarnessErrorClass::Unavailable))
+    }
+
+    fn persist_activity(
+        &self,
+        _agent_id: hq_domain::AgentId,
+        _provider_id: &hq_domain::ProviderId,
+        _session_id: &hq_domain::ProviderSessionId,
+        _activity: &HarnessActivity,
+    ) -> Result<(), HarnessError> {
+        Err(HarnessError::new(HarnessErrorClass::Unavailable))
+    }
+}
+
+struct SystemHarnessClock;
+
+impl HarnessClock for SystemHarnessClock {
+    fn now_millis(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+}
+
+struct RandomHarnessTokens;
+
+impl HarnessTokenSource for RandomHarnessTokens {
+    fn next_token(&self) -> Result<HarnessOwnerToken, HarnessError> {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes)
+            .map_err(|_| HarnessError::new(HarnessErrorClass::Unavailable))?;
+        HarnessOwnerToken::from_bytes(bytes)
+    }
+}
+
 impl std::fmt::Debug for HarnessNodeComponent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("HarnessNodeComponent")
-            .field("config", &self.config)
-            .field("accepting", &self.accepting.load(Ordering::Acquire))
+            .field("config", &self.inner.config)
+            .field("accepting", &self.inner.accepting.load(Ordering::Acquire))
             .finish_non_exhaustive()
     }
 }
 
 impl NodeComponent for HarnessNodeComponent {
     fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
-        if self
+        let mut supervisor = self
+            .inner
             .supervisor
-            .get_mut()
-            .map_err(|_| ComponentError::unavailable())?
-            .is_none()
-        {
-            let supervisor = HarnessSupervisor::new(self.config.clone(), self.dependencies.clone())
-                .map_err(|_| ComponentError::unavailable())?;
-            *self
-                .supervisor
-                .get_mut()
-                .map_err(|_| ComponentError::unavailable())? = Some(supervisor);
+            .lock()
+            .map_err(|_| ComponentError::unavailable())?;
+        if supervisor.is_none() {
+            let started =
+                HarnessSupervisor::new(self.inner.config.clone(), self.inner.dependencies.clone())
+                    .map_err(|_| ComponentError::unavailable())?;
+            *supervisor = Some(started);
         }
-        self.accepting.store(true, Ordering::Release);
+        self.inner.accepting.store(true, Ordering::Release);
         Ok(())
     }
 
     fn stop_intake(&mut self) -> Result<(), ComponentError> {
-        self.accepting.store(false, Ordering::Release);
+        self.inner.accepting.store(false, Ordering::Release);
         if let Some(supervisor) = self
+            .inner
             .supervisor
-            .get_mut()
+            .lock()
             .map_err(|_| ComponentError::unavailable())?
             .as_ref()
         {

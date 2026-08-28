@@ -88,11 +88,12 @@ project authority; workflow owners turn accepted observations into canonical dec
 
 ## Project lifecycle workflows
 
-`hq-projects` composes four narrow capabilities: durable saga checkpoints, transaction-consistent
-canonical project compare-and-swap, read-only resource observation, and project-bound runtime
-control. Passive snapshots, mutation requests, resource reports, runtime requests, and delivery
-records expose public fields. The managers remain opaque because they own checkpoint order,
-bounded recovery, compensation, and exact retry.
+`hq-projects` composes five narrow capabilities: durable saga checkpoints, transaction-consistent
+canonical project compare-and-swap, read-only resource observation, project-bound runtime control,
+and a separate bounded mutating Git worktree capability. Passive snapshots, mutation requests,
+resource reports, runtime requests, Git requests/results, and delivery records expose public fields.
+The managers remain opaque because they own checkpoint order, bounded recovery, compensation, and
+exact retry.
 
 A configuring assignment contains only assignment, agent, and provider intent. A fresh provider
 session cannot be known before runtime readiness, so the exact session is bound only by the
@@ -154,12 +155,25 @@ that ledger reports definite acceptance. The workflow adds no second provider qu
 concatenates backlog messages.
 
 Project workflow intake uses one public passive `ProjectCommandRequest` with stable command and
-operation identities, an exact digest, account/project/home identities, expected project head,
-explicit issue time, and a closed `ProjectCommandAction`. Results are typed accepted, running,
+operation identities, an exact digest, account/project/home identities, an optional expected
+project head, explicit issue time, and a closed `ProjectCommandAction`. Every existing-project
+action requires `Some(head)`; only `ProvisionWorktree` requires `None`, because no previous project
+exists. Results are typed accepted, running,
 completed, rejected, or reconcilable outcomes with an explicit durable checkpoint. The
 `ControlProjects` capability is opaque because its implementation owns project serialization and
 bounded recovery; the request, action payloads, provisioning request, and outcome fields are not
 hidden behind accessors.
+
+Provisioning reserves the normalized destination before crossing Git, persists a stable Git
+operation before create, and always performs exact lookup before a retry. The Git adapter validates
+the branch and proves the destination's top-level worktree, common repository, and symbolic branch;
+conflicting registrations, branches, files, symlinks, and detached or mismatched worktrees fail
+closed. Once created, the workflow identifies the path through the read-only resource capability,
+persists the exact healthy resource in the pending canonical creation, and authors one open
+`ProjectCreated` fact with no previous-state authority. Definite pre-Git rejection and committed
+project ownership release the temporary reservation. Accepted or uncertain Git state retains the
+reservation after a later rejection, and no recovery path prunes, resets, deletes, or overwrites
+external Git state.
 
 `ProjectCommandRouter` sends local-home requests directly to that workflow. A non-home call authors
 only a strict versioned `RemoteProjectCommandRequested` fact and reports `AwaitingHome`. The home

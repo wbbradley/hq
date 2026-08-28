@@ -517,6 +517,13 @@ pub(crate) fn resource_effect_to_v1(
 pub fn project_command_from_v1(
     request: ProjectCommandRequestDto,
 ) -> Result<ProjectCommandRequest, ValueError> {
+    let provisioning = matches!(
+        &request.action,
+        ProjectCommandActionDto::ProvisionWorktree(_)
+    );
+    if provisioning == request.expected_head.is_some() {
+        return Err(ValueError::InvalidValueCombination);
+    }
     Ok(ProjectCommandRequest {
         command_id: CommandId::from_bytes(request.command_id.bytes()),
         operation_id: OperationId::from_bytes(request.operation_id.bytes()),
@@ -524,7 +531,9 @@ pub fn project_command_from_v1(
         account_id: hq_domain::AccountId::from_bytes(request.account_id.bytes()),
         project_id: ProjectId::from_bytes(request.project_id.bytes()),
         home: hq_domain::InstallationId::from_bytes(request.home.bytes()),
-        expected_head: hq_domain::FactId::from_bytes(request.expected_head.bytes()),
+        expected_head: request
+            .expected_head
+            .map(|head| hq_domain::FactId::from_bytes(head.bytes())),
         issued_at: Timestamp::from_unix_millis(request.issued_at_unix_millis),
         action: project_action_from_v1(request.action)?,
     })

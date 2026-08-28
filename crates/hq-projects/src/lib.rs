@@ -5,13 +5,14 @@
 
 mod canonical;
 mod command_codec;
+mod git_worktree;
 mod remote;
 mod remote_canonical;
 mod workflow;
 
 use hq_application::{
-    ApplicationError, ApplicationErrorCode, ProjectCommandAction, ProjectCommandOutcome,
-    ProjectCommandRequest, ProjectCommandStage,
+    ApplicationError, ApplicationErrorCode, ControlProjects, ProjectCommandAction,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage,
 };
 use hq_domain::{
     AccountId, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, FactId,
@@ -24,12 +25,29 @@ pub use command_codec::{
     encode_canonical_project_mutation, encode_project_command_action,
     project_command_request_digest,
 };
+pub use git_worktree::{GitWorktreeAdapter, GitWorktreeAdapterConfig};
 pub use remote::*;
 pub use remote_canonical::ApplicationRemoteProjectCommandPort;
 pub use workflow::*;
 
 /// Maximum records returned by one startup recovery scan.
 pub const MAX_RUNNABLE_SAGAS: usize = 1_024;
+
+/// Bounded local workflow recovery used by the node-owned project worker.
+pub trait RepairLocalProjectWorkflows: ControlProjects {
+    /// Repairs one deterministic bounded prefix of durable local workflows.
+    fn repair_local(&self, limit: usize) -> Result<Vec<ProjectCommandOutcome>, ApplicationError>;
+}
+
+/// Complete project intake plus local and home-targeted startup recovery.
+pub trait ProjectWorkerPort: ControlProjects {
+    /// Repairs bounded local and remote workflow prefixes at one explicit semantic time.
+    fn repair_pending(
+        &self,
+        received_at: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<ProjectCommandOutcome>, ApplicationError>;
+}
 
 /// Definite or unknown observation of one external workflow effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,8 +107,8 @@ pub struct ProjectSagaRecord {
     pub project_id: ProjectId,
     /// Immutable project home.
     pub home: InstallationId,
-    /// Expected canonical project head.
-    pub expected_head: FactId,
+    /// Expected canonical project head, absent only for new-project provisioning.
+    pub expected_head: Option<FactId>,
     /// Caller-supplied semantic time.
     pub issued_at: Timestamp,
     /// Closed requested behavior.

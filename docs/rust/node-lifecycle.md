@@ -96,6 +96,15 @@ injected clock/token sources. Exact resume immediately reconciles durable pendin
 Stop-intake rejects new launch/control effects; drain flushes accepted events, bounds adapter wait,
 records escalation, force-stops runtime ownership, and releases exact worker leases.
 
+The foreground project slot is concrete as well. `ProjectNodeComponent` owns bounded startup and
+shutdown repair around the saga store, canonical and remote application adapters, shared harness
+runtime, read-only path resources, bounded mutating Git adapter, and relay wake scheduling. Store,
+harness, and relay owners remain singular: the project component receives only cloneable narrow
+capabilities, while component clones share opaque behavior/lifecycle state rather than duplicating
+external ownership. Fresh unrepaired projection state defers remote-command scanning without
+implicitly repairing it; operational saga repair still runs. Intake is opened only after that
+bounded pass, and each accepted command is synchronously checkpointed.
+
 The node owns a hierarchical cancellation root. A child observes cancellation by itself or any
 ancestor, but cancelling it cannot affect its parent or siblings. The node also owns a
 fixed-capacity task tracker: spawn intake is explicit, every accepted native thread handle remains
@@ -114,7 +123,8 @@ Normal component shutdown executes these stages even when an earlier stage repor
 1. enter lifecycle drain, closing mutation and launch admission;
 2. stop intake for local sessions, relays, harnesses, and project workflows in that order;
 3. cancel the node root so every component/task subtree observes shutdown;
-4. drain local sessions, relay durable handoff, provider output/activity, and project workflows;
+4. drain project workflows, provider output/activity, relay durable handoff, and local sessions in
+   reverse dependency order;
 5. force-stop only a component whose drain failed or explicitly requested escalation;
 6. close task spawn intake and join every accepted task; and
 7. close the store/foundation and release runtime, identity, and state ownership.

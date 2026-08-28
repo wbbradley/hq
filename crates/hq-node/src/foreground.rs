@@ -8,16 +8,17 @@ use hq_application::{
     RelayConfiguration, ResourceInspectionRequest, ResourceInspectionResult,
     SynchronizationRequest, WakeDisposition,
 };
-use hq_domain::{MailboxId, Revision};
+use hq_domain::{MailboxId, Revision, Timestamp};
 use hq_local_api::protocol::v1::{BuildMetadata, Id32};
 use hq_reducer::AuthorityPolicy;
 
 use crate::{
-    CancellationToken, ComponentDrain, ComponentError, LocalNodeRuntime, LocalNodeRuntimeConfig,
-    LocalNodeRuntimeError, LocalNodeRuntimeReport, LocalNodeRuntimeStartError,
-    LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent, NodeComponents,
-    NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError, NodeStartupError,
-    RelayNodeComponent, RelayNodeConfig, RuntimePaths, ShutdownIntent, StatePaths,
+    CancellationToken, ComponentDrain, ComponentError, HarnessNodeComponent, LocalNodeRuntime,
+    LocalNodeRuntimeConfig, LocalNodeRuntimeError, LocalNodeRuntimeReport,
+    LocalNodeRuntimeStartError, LocalSessionPumpConfig, LocalSessionRegistryConfig, NodeComponent,
+    NodeComponents, NodeFoundation, NodeFoundationConfig, NodeOwner, NodeOwnerStartError,
+    NodeStartupError, ProjectNodeConfig, RelayNodeComponent, RelayNodeConfig, RuntimePaths,
+    ShutdownIntent, StandardProjectNodeComponent, StatePaths, compose_standard_project_component,
 };
 
 /// Explicit capacities and paths for one foreground node process.
@@ -58,6 +59,8 @@ pub enum ForegroundNodeError {
     Runtime(LocalNodeRuntimeError),
     /// A fresh nonzero boot nonce could not be generated.
     Entropy,
+    /// A required concrete component capability was absent after foundation startup.
+    Composition,
 }
 
 impl fmt::Display for ForegroundNodeError {
@@ -68,6 +71,7 @@ impl fmt::Display for ForegroundNodeError {
             Self::RuntimeStart(error) => error.fmt(formatter),
             Self::Runtime(error) => error.fmt(formatter),
             Self::Entropy => formatter.write_str("foreground node entropy is unavailable"),
+            Self::Composition => formatter.write_str("foreground node composition is unavailable"),
         }
     }
 }
@@ -132,8 +136,8 @@ fn open_generation(
     LocalNodeRuntime<
         DormantNodeComponent,
         RelayNodeComponent,
-        DormantNodeComponent,
-        DormantNodeComponent,
+        HarnessNodeComponent,
+        StandardProjectNodeComponent<HarnessNodeComponent>,
     >,
     ForegroundNodeError,
 > {
@@ -151,14 +155,23 @@ fn open_generation(
         policy,
         Arc::new(hq_relay::WebSocketRelayConnector::default()),
     )?;
+    let store = foundation.store().ok_or(ForegroundNodeError::Composition)?;
+    let harness = HarnessNodeComponent::without_providers(store);
+    let project = compose_standard_project_component(
+        ProjectNodeConfig {
+            recovery_limit: NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN),
+            recovery_time: current_timestamp(),
+        },
+        store,
+        policy,
+        foundation.signer_handle(),
+        foundation.public_identity().installation_id(),
+        harness.clone(),
+        relay.clone(),
+    );
     let owner = NodeOwner::start(
         foundation,
-        NodeComponents::new(
-            DormantNodeComponent,
-            relay,
-            DormantNodeComponent,
-            DormantNodeComponent,
-        ),
+        NodeComponents::new(DormantNodeComponent, relay, harness, project),
         config.task_capacity,
         config.subscription_capacity,
     )?;
@@ -180,6 +193,16 @@ fn open_generation(
     )?
     .0;
     Ok(runtime)
+}
+
+fn current_timestamp() -> Timestamp {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX);
+    Timestamp::from_unix_millis(millis)
 }
 
 fn boot_nonce() -> Result<Id32, ForegroundNodeError> {

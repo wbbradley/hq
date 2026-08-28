@@ -177,6 +177,12 @@ fn request_plan(
     request: &ProjectCommandRequest,
     body: hq_domain::ContentText,
 ) -> Result<FactPlan, DomainError> {
+    let Some(expected_head) = request.expected_head else {
+        return Err(domain_error(
+            ErrorCategory::InvalidInput,
+            "remote_project_creation_requires_home",
+        ));
+    };
     let project = project_view(snapshot, request.project_id)?;
     if project.home != request.home {
         return Err(domain_error(
@@ -184,7 +190,7 @@ fn request_plan(
             "project_wrong_home",
         ));
     }
-    if project.head != request.expected_head {
+    if project.head != expected_head {
         return Err(domain_error(ErrorCategory::Conflict, "project_stale_head"));
     }
     let active_human = active_human_authority(snapshot, request.account_id, requester)
@@ -235,7 +241,7 @@ fn request_plan(
             digest: request.request_digest,
             project_id: request.project_id,
             target_home: request.home,
-            expected_head: request.expected_head,
+            expected_head,
             operation: routing_correlation(request.operation_id)?,
             body,
         },
@@ -371,7 +377,7 @@ fn command_record_from_view(
         account_id: view.account_id,
         project_id: view.project_id,
         home: view.target_home,
-        expected_head: view.expected_head,
+        expected_head: Some(view.expected_head),
         issued_at: view.issued_at,
         action,
     };
@@ -622,13 +628,46 @@ mod tests {
 
     use hq_application::ProjectionSnapshot;
     use hq_domain::{
-        EncryptionPublicKey, InstallationAddress, MailboxAddress, MailboxId, ShortText,
-        SigningPublicKey,
+        BoundedText, EncryptionPublicKey, InstallationAddress, MailboxAddress, MailboxId,
+        ResourceLocator, ResourceScheme, ShortText, SigningPublicKey,
     };
     use hq_reducer::{InstallationView, ProjectLifecycle, ProjectView};
 
     use super::*;
     use crate::ProjectCommandAction;
+
+    #[test]
+    fn project_creation_is_never_routed_to_a_non_home_installation() {
+        let fixture = Fixture::new();
+        let snapshot = fixture.snapshot(RemoteCommandStage::Queued);
+        let mut request = fixture.request();
+        request.expected_head = None;
+        request.action =
+            ProjectCommandAction::ProvisionWorktree(hq_application::WorktreeProvisioningRequest {
+                mailbox_id: MailboxId::from_bytes([90; 32]),
+                project_name: ShortText::new("created").expect("name"),
+                brief: None,
+                source: ResourceLocator::new(
+                    ResourceScheme::WorkingTree,
+                    BoundedText::new("/repo").expect("path"),
+                ),
+                destination: ResourceLocator::new(
+                    ResourceScheme::WorkingTree,
+                    BoundedText::new("/repo/worktree").expect("path"),
+                ),
+                branch: ShortText::new("feature").expect("branch"),
+                create_branch: true,
+            });
+        request.request_digest = project_command_request_digest(&request).expect("request digest");
+        let body = encode_project_command_action(&request.action).expect("action encodes");
+
+        let error = request_plan(&snapshot, fixture.requester, &request, body)
+            .expect_err("creation must execute at its home");
+        assert_eq!(
+            error.code().as_str(),
+            "remote_project_creation_requires_home"
+        );
+    }
 
     #[test]
     fn plans_bind_request_receipt_and_outcome_to_exact_authority_and_heads() {
@@ -702,7 +741,7 @@ mod tests {
         let fixture = Fixture::new();
         let queued = fixture.snapshot(RemoteCommandStage::Queued);
         let mut request = fixture.request();
-        request.expected_head = FactId::from_bytes([90; 32]);
+        request.expected_head = Some(FactId::from_bytes([90; 32]));
         let error = request_plan(
             &queued,
             fixture.requester,
@@ -767,7 +806,7 @@ mod tests {
                 account_id: self.account,
                 project_id: self.project,
                 home: self.home,
-                expected_head: self.head,
+                expected_head: Some(self.head),
                 issued_at: Timestamp::from_unix_millis(13),
                 action: ProjectCommandAction::Open,
             };

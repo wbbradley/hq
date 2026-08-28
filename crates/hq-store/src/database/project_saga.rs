@@ -17,6 +17,14 @@ pub(super) fn begin(
     connection: &mut Connection,
     proposed: &StoredProjectSaga,
 ) -> Result<StoredProjectSagaBegin, StoreError> {
+    begin_with_failpoint(connection, proposed, ProjectSagaFailpoint::Never)
+}
+
+fn begin_with_failpoint(
+    connection: &mut Connection,
+    proposed: &StoredProjectSaga,
+    failpoint: ProjectSagaFailpoint,
+) -> Result<StoredProjectSagaBegin, StoreError> {
     validate_record(proposed)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -40,8 +48,12 @@ pub(super) fn begin(
         return Ok(StoredProjectSagaBegin::ProjectBusy);
     }
     insert_record(&transaction, proposed)?;
+    fail_at(failpoint, ProjectSagaFailpoint::AfterRecordWrite)?;
     reserve(&transaction, proposed)?;
+    fail_at(failpoint, ProjectSagaFailpoint::AfterReservationWrite)?;
+    fail_at(failpoint, ProjectSagaFailpoint::BeforeCommit)?;
     transaction.commit().map_err(database)?;
+    fail_at(failpoint, ProjectSagaFailpoint::AfterCommit)?;
     Ok(StoredProjectSagaBegin::Inserted(proposed.clone()))
 }
 
@@ -49,6 +61,15 @@ pub(super) fn begin(
 pub(super) fn replace(
     connection: &mut Connection,
     proposed: &StoredProjectSaga,
+) -> Result<(), StoreError> {
+    replace_with_failpoint(connection, proposed, ProjectSagaFailpoint::Never)
+}
+
+#[allow(clippy::too_many_lines)]
+fn replace_with_failpoint(
+    connection: &mut Connection,
+    proposed: &StoredProjectSaga,
+    failpoint: ProjectSagaFailpoint,
 ) -> Result<(), StoreError> {
     validate_record(proposed)?;
     let transaction = connection
@@ -87,6 +108,7 @@ pub(super) fn replace(
         return Err(conflict());
     }
     reserve(&transaction, proposed)?;
+    fail_at(failpoint, ProjectSagaFailpoint::AfterReservationWrite)?;
     let (state_kind, stage, project_head, error_category, error_code) =
         encode_state(&proposed.state);
     let (runtime_effect, runtime_error_category, runtime_error_code) =
@@ -166,6 +188,7 @@ pub(super) fn replace(
             ],
         )
         .map_err(database)?;
+    fail_at(failpoint, ProjectSagaFailpoint::AfterRecordWrite)?;
     if proposed.reservation.is_some()
         && matches!(
             &proposed.git_effect,
@@ -180,7 +203,35 @@ pub(super) fn replace(
             )
             .map_err(database)?;
     }
-    transaction.commit().map_err(database)
+    fail_at(failpoint, ProjectSagaFailpoint::AfterProtectionWrite)?;
+    release_terminal_reservation(&transaction, proposed)?;
+    fail_at(failpoint, ProjectSagaFailpoint::AfterReservationRelease)?;
+    fail_at(failpoint, ProjectSagaFailpoint::BeforeCommit)?;
+    transaction.commit().map_err(database)?;
+    fail_at(failpoint, ProjectSagaFailpoint::AfterCommit)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "non-Never variants are exercised by unit failpoint tests"
+)]
+enum ProjectSagaFailpoint {
+    Never,
+    AfterReservationWrite,
+    AfterRecordWrite,
+    AfterProtectionWrite,
+    AfterReservationRelease,
+    BeforeCommit,
+    AfterCommit,
+}
+
+fn fail_at(actual: ProjectSagaFailpoint, expected: ProjectSagaFailpoint) -> Result<(), StoreError> {
+    if actual == expected {
+        Err(StoreError::new(StoreErrorClass::DatabaseUnavailable))
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn load_runnable(
@@ -256,7 +307,10 @@ fn insert_record(
                 record.account_id.as_bytes().as_slice(),
                 record.project_id.as_bytes().as_slice(),
                 record.home.as_bytes().as_slice(),
-                record.expected_head.as_bytes().as_slice(),
+                record
+                    .expected_head
+                    .as_ref()
+                    .map(|head| head.as_bytes().as_slice()),
                 record.issued_at.as_unix_millis().to_be_bytes().as_slice(),
                 &record.command_body,
                 state_kind,
@@ -334,7 +388,7 @@ fn decode_record(row: &Row<'_>) -> rusqlite::Result<StoredProjectSaga> {
     let account_id = AccountId::from_bytes(blob32(row.get(3)?)?);
     let project_id = ProjectId::from_bytes(blob32(row.get(4)?)?);
     let home = InstallationId::from_bytes(blob32(row.get(5)?)?);
-    let expected_head = FactId::from_bytes(blob32(row.get(6)?)?);
+    let expected_head = optional_blob32(row.get(6)?)?.map(FactId::from_bytes);
     let issued_at_millis = i64::from_be_bytes(blob8(row.get(7)?)?);
     let command_body: Vec<u8> = row.get(8)?;
     let state_kind: i64 = row.get(9)?;
@@ -471,6 +525,26 @@ fn reservation_is_busy(
         .transpose()
         .map(Option::unwrap_or_default)
         .map_err(|_| corrupt())
+}
+
+fn release_terminal_reservation(
+    transaction: &Transaction<'_>,
+    record: &StoredProjectSaga,
+) -> Result<(), StoreError> {
+    let predicate = match &record.state {
+        StoredProjectSagaState::Completed(_) => "operation_id = ?1",
+        StoredProjectSagaState::Rejected(_) => "operation_id = ?1 AND protects_external_state = 0",
+        StoredProjectSagaState::Running(_) | StoredProjectSagaState::Reconcilable { .. } => {
+            return Ok(());
+        }
+    };
+    transaction
+        .execute(
+            &format!("DELETE FROM project_saga_reservations WHERE {predicate}"),
+            [record.operation_id.as_bytes().as_slice()],
+        )
+        .map(|_| ())
+        .map_err(database)
 }
 
 fn command_exists(connection: &Connection, command_id: CommandId) -> Result<bool, StoreError> {
@@ -839,4 +913,142 @@ fn corrupt() -> StoreError {
 
 fn database(_: rusqlite::Error) -> StoreError {
     StoreError::new(StoreErrorClass::DatabaseUnavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    fn connection() -> Connection {
+        let connection = Connection::open_in_memory().expect("memory database opens");
+        connection
+            .execute_batch(super::super::SCHEMA)
+            .expect("schema creates");
+        connection
+    }
+
+    fn saga() -> StoredProjectSaga {
+        StoredProjectSaga {
+            operation_id: OperationId::from_bytes([1; 32]),
+            command_id: CommandId::from_bytes([2; 32]),
+            request_digest: CommandDigest::from_bytes([3; 32]),
+            account_id: AccountId::from_bytes([4; 32]),
+            project_id: ProjectId::from_bytes([5; 32]),
+            home: InstallationId::from_bytes([6; 32]),
+            expected_head: None,
+            issued_at: Timestamp::from_unix_millis(7),
+            command_body: b"provision-worktree".to_vec(),
+            state: StoredProjectSagaState::Running(ProjectCommandStage::Accepted),
+            runtime_operation_id: None,
+            runtime_effect: StoredProjectEffectState::NotStarted,
+            runtime_session: None,
+            selected_thread: None,
+            opened_by_workflow: false,
+            failure: None,
+            pending_canonical_mutation: None,
+            dispatch_operation_id: None,
+            dispatch_effect: StoredProjectEffectState::NotStarted,
+            git_operation_id: None,
+            git_effect: StoredProjectEffectState::NotStarted,
+            resource_operation_id: None,
+            resource_effect: StoredProjectEffectState::NotStarted,
+            reservation: Some(ResourceLocator::new(
+                ResourceScheme::WorkingTree,
+                BoundedText::new("/repo/worktrees/feature").expect("locator"),
+            )),
+            updated_at_millis: 8,
+        }
+    }
+
+    fn row_counts(connection: &Connection) -> (i64, i64) {
+        let sagas = connection
+            .query_row("SELECT count(*) FROM project_sagas", [], |row| row.get(0))
+            .expect("saga count reads");
+        let reservations = connection
+            .query_row(
+                "SELECT count(*) FROM project_saga_reservations",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reservation count reads");
+        (sagas, reservations)
+    }
+
+    #[test]
+    fn begin_failpoints_roll_back_record_and_reservation_or_replay_post_commit() {
+        let proposed = saga();
+        for failpoint in [
+            ProjectSagaFailpoint::AfterRecordWrite,
+            ProjectSagaFailpoint::AfterReservationWrite,
+            ProjectSagaFailpoint::BeforeCommit,
+        ] {
+            let mut connection = connection();
+            let error = begin_with_failpoint(&mut connection, &proposed, failpoint)
+                .expect_err("pre-commit failpoint interrupts begin");
+            assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+            assert_eq!(row_counts(&connection), (0, 0));
+        }
+
+        let mut connection = connection();
+        let error = begin_with_failpoint(
+            &mut connection,
+            &proposed,
+            ProjectSagaFailpoint::AfterCommit,
+        )
+        .expect_err("response loss follows commit");
+        assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+        assert_eq!(row_counts(&connection), (1, 1));
+        assert_eq!(
+            begin(&mut connection, &proposed).expect("exact retry reconciles"),
+            StoredProjectSagaBegin::Existing(proposed)
+        );
+    }
+
+    #[test]
+    fn replace_failpoints_preserve_the_old_pair_or_the_complete_terminal_pair() {
+        let original = saga();
+        let mut completed = original.clone();
+        completed.git_operation_id = Some(OperationId::from_bytes([9; 32]));
+        completed.git_effect = StoredProjectEffectState::Accepted;
+        completed.state = StoredProjectSagaState::Completed(FactId::from_bytes([10; 32]));
+        completed.updated_at_millis += 1;
+
+        for failpoint in [
+            ProjectSagaFailpoint::AfterReservationWrite,
+            ProjectSagaFailpoint::AfterRecordWrite,
+            ProjectSagaFailpoint::AfterProtectionWrite,
+            ProjectSagaFailpoint::AfterReservationRelease,
+            ProjectSagaFailpoint::BeforeCommit,
+        ] {
+            let mut connection = connection();
+            begin(&mut connection, &original).expect("initial pair commits");
+            let error = replace_with_failpoint(&mut connection, &completed, failpoint)
+                .expect_err("pre-commit failpoint interrupts replace");
+            assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+            assert_eq!(
+                load_operation(&connection, original.operation_id),
+                Ok(Some(original.clone()))
+            );
+            assert_eq!(row_counts(&connection), (1, 1));
+        }
+
+        let mut connection = connection();
+        begin(&mut connection, &original).expect("initial pair commits");
+        let error = replace_with_failpoint(
+            &mut connection,
+            &completed,
+            ProjectSagaFailpoint::AfterCommit,
+        )
+        .expect_err("response loss follows terminal commit");
+        assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+        assert_eq!(
+            load_operation(&connection, original.operation_id),
+            Ok(Some(completed.clone()))
+        );
+        assert_eq!(row_counts(&connection), (1, 0));
+        replace(&mut connection, &completed).expect("exact terminal retry reconciles");
+        assert_eq!(row_counts(&connection), (1, 0));
+    }
 }

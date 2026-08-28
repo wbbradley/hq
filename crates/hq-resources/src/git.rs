@@ -46,9 +46,9 @@ pub struct GitCommandOutput {
     pub stdout: Vec<u8>,
 }
 
-/// Injectable read-only Git command capability.
+/// Injectable bounded Git command capability.
 pub trait GitRunner: Clone + Send + Sync + 'static {
-    /// Runs `git -C directory` with exact read-only arguments.
+    /// Runs `git -C directory` with exact arguments selected by a higher-level capability.
     fn run(
         &self,
         directory: &std::path::Path,
@@ -74,7 +74,8 @@ impl ExecGit {
         Ok(Self { config })
     }
 
-    pub(crate) fn system() -> Self {
+    /// Creates the standard five-second, one-megabyte bounded Git runner.
+    pub fn system() -> Self {
         Self {
             config: GitCommandConfig {
                 executable: PathBuf::from("git"),

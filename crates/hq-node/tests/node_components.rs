@@ -413,7 +413,9 @@ fn transient_application_ports_delegate_store_revision_and_owned_effect_capabili
     assert_complete_ports(&ports);
     assert_eq!(
         ports.authoritative_snapshot(),
-        Err(ApplicationError::new(ApplicationErrorCode::StateCorrupt))
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable
+        ))
     );
     ports
         .register_subscription(&request)
@@ -483,11 +485,11 @@ fn shutdown_closes_admission_drains_in_order_escalates_and_releases_every_owner(
             "RelayManager:stop-intake",
             "HarnessSupervisor:stop-intake",
             "ProjectWorkflows:stop-intake",
-            "LocalSessions:drain",
-            "RelayManager:drain",
+            "ProjectWorkflows:drain",
             "HarnessSupervisor:drain",
             "HarnessSupervisor:force-stop",
-            "ProjectWorkflows:drain",
+            "RelayManager:drain",
+            "LocalSessions:drain",
         ]
     );
     let owner = StateDirectoryOwner::acquire(state).expect("all ownership released");

@@ -6558,6 +6558,8 @@ and unchanged-Go gates pass.
   other changes.
 
 
+
+
 ## 2026-08-28 — Project open and resource mutation workflows
 
 Implemented durable direct open, resource add, forced/unforced remove, and atomic replace workflows
@@ -6972,3 +6974,91 @@ unrelated case skipped.
   those. If new future work items were discovered, add them. If the plan file or completed file is
   outside the source repository or is ignored, do not try to stage it; otherwise commit it with the
   other changes.
+
+
+## 2026-08-28 — Recoverable Git worktree provisioning and concrete project workers
+
+Implemented a recoverable home-local provisioning workflow that reserves one lexically normalized
+destination, reconciles or creates an exact Git worktree under bounded execution and per-repository
+serialization, identifies it through the read-only resource adapter, and authors one initially open
+canonical project. Every external operation and pending canonical mutation has a stable identity
+and durable checkpoint; response loss resumes through lookup without duplicate Git or project
+creation. Partial branches, stale registrations, files, symlinks, changed identities, and competing
+destinations fail closed, while accepted or uncertain orphaned Git state is retained and never
+automatically pruned, reset, or deleted. Saga/reservation transaction failpoints prove complete
+rollback before commit and exact replay after lost commit responses.
+
+Project creation now represents the absence of a prior head directly with `Option<FactId>`; all
+existing-project actions require `Some(head)`, provisioning alone requires `None`, and remote
+creation is rejected outside the immutable home. Passive Rust request, configuration, state, and
+result data continues to expose public fields without accessor layers. The unshipped v13 schema was
+updated in place with a nullable head and reservation lifetime rules, with no migration or storage
+version bump. The foreground node now composes a concrete project component over the saga store,
+canonical/remote application adapters, shared harness capability, read-only resources, Git adapter,
+and post-commit relay wake scheduling, with bounded startup/drain repair and reverse-dependency
+shutdown.
+
+Locked workspace tests (excluding the previously documented relay test-harness hang), strict
+Clippy, builds/checks, architecture, behavior, causal/protocol, dependency, exact four-target
+portable checks, fuzz smoke, formatting, whitespace, and frozen-Go build/vet/uncached-test gates
+pass. Dependency policy retains the existing allowed warning for locked yanked `chacha20 0.10.1`.
+The unchanged Go race suite reproduces only its pre-existing mailbox-capability timing failure on
+macOS; all other race packages pass.
+
+### Original plan entry
+
+- **[projects/high] Implement recoverable Git worktree provisioning and compose project workers** —
+  Add a separate bounded mutating Git capability with stable lookup/create operations, short-lived
+  repository serialization, destination reservation, exact worktree/branch reconciliation,
+  read-only `hq-resources` identification, and one canonical project creation. Resume after every
+  reservation, Git, identification, and canonical boundary without duplicate worktree/project;
+  never silently delete external state on uncertainty. Compose project workflow, store, harness,
+  resources, Git, canonical mutation, wake/recovery, intake, and shutdown ownership in `hq-node`.
+  Run bounded startup scans, checkpoint all accepted work before harness/store shutdown, add
+  model/failpoint tests for every boundary and reservation conflict, and finish project,
+  application/local API, storage, behavior-ledger, acceptance, architecture, and four-target CI
+  evidence.
+
+  **Implementation plan**
+
+  - Make an existing project head an explicit optional command precondition: every existing-project
+    action requires `Some(head)`, while `ProvisionWorktree` alone requires `None`. Carry that
+    distinction through the strict command/remote codecs, projection, local API, saga record, and
+    fresh v13 tables in place. Reject remote creation at a non-home installation rather than
+    fabricating authority for a project that does not exist. Add no migration, compatibility
+    branch, storage-version bump, or accessor layer.
+  - Add a closed `GitWorktreePort` with exact lookup and create requests, matching/absent/conflict
+    observations, stable operation identity, bounded process time/output, branch validation, and
+    per-repository in-process serialization. Reconciliation must prove that the destination is the
+    requested worktree of the same common repository and exact branch. A missing destination is
+    retryable only when Git has no conflicting branch/worktree registration; partial or ambiguous
+    state remains reconcilable and is never pruned, reset, deleted, or force-overwritten.
+  - Complete the provisioning state machine over the existing durable destination reservation.
+    Checkpoint before Git create, reconcile after every uncertain response, identify the resulting
+    destination through a new read-only `ProjectResourcePort` operation, persist that exact
+    resource observation, then author one open `ProjectCreated` fact through a serialized
+    application callback. Release reservations after definite no-effect rejection or committed
+    project ownership; retain them when external Git state may exist without a canonical project.
+  - Add a concrete `ProjectNodeComponent` that owns bounded intake and startup repair around the
+    saga store, application canonical/remote authoring, harness runtime, read-only path resources,
+    mutating Git adapter, and relay wake capability. Startup scans are deterministic and bounded;
+    accepted commands are synchronously checkpointed, intake closes before repair drains, and
+    shutdown joins owned work before harness and store ownership are released. Prove composition
+    and lifecycle ordering with injected ports before wiring the real foreground generation.
+  - Add model, fake-port, real temporary-Git, store failpoint/reopen/corruption, local protocol,
+    remote rejection, node startup/drain, response-loss, partial-branch/worktree, symlink, changed
+    identity, competing destination/repository, and canonical-conflict tests. Update project,
+    application, storage, behavior-ledger, acceptance, architecture, and local API specifications,
+    then run every locked workspace, four-target, dependency, fuzz, whitespace, and frozen-Go gate.
+
+  **Risks and decisions**
+
+  - Git worktree creation and canonical project creation cannot be atomic. Once Git may have
+    created state, HQ retains the destination reservation until exact reconciliation or canonical
+    ownership; a definite canonical rejection reports the external worktree without deleting it.
+  - Git's repository lock is process-external, while HQ's per-repository lock only prevents its own
+    workers from competing. External Git activity may still race any observation, so every accepted
+    create is followed by exact lookup and any mismatch fails closed.
+  - Project creation has no previous project head. Optionality is represented directly in passive
+    command data and validated by action, rather than by a magic fact ID, ignored field, or
+    accessor-enforced convention.

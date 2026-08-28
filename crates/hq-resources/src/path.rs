@@ -189,7 +189,7 @@ pub(crate) fn resolve_path<F: PathSystem>(
     filesystem: &F,
     request: &PathIdentityRequest,
 ) -> Result<PathResourceResolution, PathResourceError> {
-    let display = normalize_absolute(&request.display_path)?;
+    let display = normalize_absolute_path(&request.display_path)?;
     let mut ancestor = display.clone();
     let mut suffix = Vec::<OsString>::new();
     let mut condition = PathCondition::Healthy;
@@ -201,7 +201,7 @@ pub(crate) fn resolve_path<F: PathSystem>(
                     for component in suffix.iter().rev() {
                         observed.push(component);
                     }
-                    let observed = normalize_absolute(&observed)?;
+                    let observed = normalize_absolute_path(&observed)?;
                     if suffix.is_empty() {
                         condition = match filesystem.followed_entry(&display) {
                             Ok(PathEntryKind::Directory) => condition,
@@ -269,7 +269,11 @@ fn locator(scheme: ResourceScheme, path: &Path) -> Result<ResourceLocator, PathR
     Ok(ResourceLocator::new(scheme, value))
 }
 
-fn normalize_absolute(path: &Path) -> Result<PathBuf, PathResourceError> {
+/// Lexically normalizes one absolute path without observing the filesystem.
+///
+/// Callers that persist path spellings can compare the result with their input to require one
+/// exact reservation identity before performing an external effect.
+pub fn normalize_absolute_path(path: &Path) -> Result<PathBuf, PathResourceError> {
     if !path.is_absolute() {
         return Err(PathResourceError::NotAbsolute);
     }

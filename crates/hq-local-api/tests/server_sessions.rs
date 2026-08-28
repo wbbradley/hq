@@ -411,7 +411,7 @@ fn every_typed_request_family_routes_without_storage_types() {
             account_id: Id32::new([19; 32]),
             project_id: Id32::new([20; 32]),
             home: Id32::new([21; 32]),
-            expected_head: Id32::new([22; 32]),
+            expected_head: Some(Id32::new([22; 32])),
             issued_at_unix_millis: 23,
             action: ProjectCommandActionDto::Open,
         })),

@@ -19,6 +19,8 @@ mod lifecycle_client;
 mod local_transport;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod node_coordinator;
+mod project_component;
+mod project_resource;
 mod project_store;
 mod relay_component;
 mod relay_store;
@@ -69,6 +71,11 @@ pub use node_coordinator::{
     NodeCoordinatorError, NodeLaunchError, NodeLauncher, NodeReady, NodeStopped,
     ProcessNodeLauncher,
 };
+pub use project_component::{
+    ProjectNodeComponent, ProjectNodeConfig, StandardProjectNodeComponent, StandardProjectWorker,
+    WakingApplicationStore, compose_standard_project_component,
+};
+pub use project_resource::ProjectResourceAdapter;
 pub use project_store::ProjectSagaStoreAdapter;
 pub use relay_component::{RelayNodeComponent, RelayNodeConfig};
 pub use relay_store::RelayStoreAdapter;

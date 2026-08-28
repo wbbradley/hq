@@ -69,7 +69,7 @@ fn project_command(command: u8, digest: u8) -> ProjectCommandRequestDto {
         account_id: Id32::new([3; 32]),
         project_id: Id32::new([4; 32]),
         home: Id32::new([5; 32]),
-        expected_head: Id32::new([6; 32]),
+        expected_head: Some(Id32::new([6; 32])),
         issued_at_unix_millis: 1_700_000_000_000,
         action: ProjectCommandActionDto::Open,
     }

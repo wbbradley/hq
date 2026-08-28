@@ -250,7 +250,7 @@ sessions, deliveries, and partial event checkpoints without ever persisting envi
 
 The same clean-sheet v13 schema includes `project_sagas` and `project_saga_reservations` without a
 storage-version increment. A saga row binds stable operation and command identities to the exact
-request digest, active account, project/home, expected head, strict versioned command body,
+request digest, active account, project/home, optional expected head, strict versioned command body,
 monotonic checkpoint, external operation correlations and dispositions, exact acknowledged runtime
 session and selected thread, whether the workflow conditionally opened the project, the original
 typed failure retained through compensation, the strict workflow-owned encoding of any in-flight
@@ -273,11 +273,14 @@ no migration path or storage-version increment.
 
 Reservations are home-qualified normalized locators. A competing operation cannot reserve the
 same destination, and accepted or uncertain Git work marks the reservation as protecting external
-state. Checkpoint replacement rejects immutable-input changes, stage or effect regression, changed
-external identities, reservation changes, and time regression. Startup recovery scans only running
-or reconcilable rows in bounded deterministic order. Projection repair excludes both tables, and
-close/reopen retains them because canonical projections cannot reconstruct whether an external
-boundary was crossed.
+state. A definite rejection before Git releases the reservation; canonical project completion also
+releases it because the projected resource claim then owns the destination. A terminal rejection
+after Git may have created state retains the reservation. Checkpoint replacement rejects
+immutable-input changes, stage or effect regression, changed external identities, reservation
+changes, and time regression. Startup recovery scans only running or reconcilable rows in bounded
+deterministic order. Projection repair excludes both tables, and close/reopen retains them because
+canonical projections cannot reconstruct whether an external boundary was crossed. These are
+clean-sheet v13 definitions in place; there is no migration or storage-version bump.
 
 Account-addressed fanout normally uses the projected creator and active devices after the atomic
 reduction. `HumanDeviceGranted` and `HumanDeviceRevoked` additionally name their subject device

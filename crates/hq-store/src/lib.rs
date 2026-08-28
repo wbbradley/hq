@@ -33,8 +33,9 @@ mod relay;
 mod snapshot;
 
 pub use actor::{
-    HarnessStateHandle, IngestOutcome, ProjectSagaStateHandle, RelayStateHandle, RepairOutcome,
-    ReplicationHandle, RevisionInvalidations, Store, VerifiedFactCorpus,
+    ApplicationStateHandle, HarnessStateHandle, IngestOutcome, ProjectSagaStateHandle,
+    RelayStateHandle, RepairOutcome, ReplicationHandle, RevisionInvalidations, Store,
+    VerifiedFactCorpus,
 };
 pub use error::{StoreError, StoreErrorClass};
 pub use gateway::StoreGateway;

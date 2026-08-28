@@ -30,7 +30,7 @@ fn request() -> ProjectCommandRequest {
         account_id: AccountId::from_bytes([4; 32]),
         project_id: ProjectId::from_bytes([5; 32]),
         home: InstallationId::from_bytes([6; 32]),
-        expected_head: FactId::from_bytes([7; 32]),
+        expected_head: Some(FactId::from_bytes([7; 32])),
         issued_at: Timestamp::from_unix_millis(8),
         action: ProjectCommandAction::Open,
     }

@@ -7,19 +7,20 @@ use hq_domain::{
     MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, SemanticPayload, ShortText, SigningPublicKey,
     Timestamp,
 };
+use hq_local_api::project_command_from_v1;
 use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
     ClientHello, ConversationKeyDto, ConversationPageDto, ConversationPageRequest, DecodeError,
-    DomainErrorDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse, FrameDecoder,
-    Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus, MAX_FRAME_BYTES,
-    MutationAttemptDto, MutationOutcomeDto, MutationRequest, ProjectCommandActionDto,
-    ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto,
-    RelayConfigurationDto, RemoteCommandProgressDto, Request, RequestEnvelope, RequestId,
-    ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
-    ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation,
-    ServerHello, SessionControlDto, SnapshotItem, SubscriptionAcknowledgement,
-    SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
-    VersionRejected, WireMessage, negotiate,
+    DomainErrorDto, EffectOutcomeDto, EffectRequestDto, EncodeError, ErrorClass, ErrorResponse,
+    FrameDecoder, Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
+    MAX_FRAME_BYTES, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
+    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto,
+    RelayAuthenticationDto, RelayConfigurationDto, RemoteCommandProgressDto, Request,
+    RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
+    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope,
+    ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto, SnapshotItem,
+    SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
+    VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto, negotiate,
 };
 
 fn build() -> BuildMetadata {
@@ -180,6 +181,67 @@ fn round_trip(message: &WireMessage) {
     );
 }
 
+#[test]
+fn project_head_presence_matches_creation_semantics() {
+    let id = |byte| Id32::new([byte; 32]);
+    let request = |expected_head, action| {
+        WireMessage::Request(RequestEnvelope::new(
+            RequestId::new(1).expect("nonzero"),
+            Request::ControlProject(Box::new(ProjectCommandRequestDto {
+                command_id: id(1),
+                operation_id: id(2),
+                request_digest: id(3),
+                account_id: id(4),
+                project_id: id(5),
+                home: id(6),
+                expected_head,
+                issued_at_unix_millis: 7,
+                action,
+            })),
+        ))
+    };
+    let provisioning = || {
+        ProjectCommandActionDto::ProvisionWorktree(WorktreeProvisioningRequestDto {
+            mailbox_id: id(7),
+            project_name: "project".to_owned(),
+            brief: None,
+            source: locator(),
+            destination: locator(),
+            branch: "feature".to_owned(),
+            create_branch: true,
+        })
+    };
+
+    request(None, provisioning())
+        .encode_frame()
+        .expect("creation has no prior project head");
+    request(Some(id(8)), ProjectCommandActionDto::Open)
+        .encode_frame()
+        .expect("existing-project command has a head");
+    assert!(matches!(
+        request(Some(id(8)), provisioning()).encode_frame(),
+        Err(EncodeError::InvalidValue(
+            ValueError::InvalidValueCombination
+        ))
+    ));
+    assert!(matches!(
+        request(None, ProjectCommandActionDto::Open).encode_frame(),
+        Err(EncodeError::InvalidValue(
+            ValueError::InvalidValueCombination
+        ))
+    ));
+    let WireMessage::Request(envelope) = request(None, ProjectCommandActionDto::Open) else {
+        unreachable!("helper always returns a request")
+    };
+    let Request::ControlProject(request) = envelope.request else {
+        unreachable!("helper always returns project control")
+    };
+    assert_eq!(
+        project_command_from_v1(*request),
+        Err(ValueError::InvalidValueCombination)
+    );
+}
+
 fn effect<T>(body: T) -> EffectRequestDto<T> {
     EffectRequestDto::new(
         Id32::new([21; 32]),
@@ -251,7 +313,7 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             account_id: Id32::new([43; 32]),
             project_id: Id32::new([44; 32]),
             home: Id32::new([45; 32]),
-            expected_head: Id32::new([46; 32]),
+            expected_head: Some(Id32::new([46; 32])),
             issued_at_unix_millis: 1_700_000_000_000,
             action: ProjectCommandActionDto::Open,
         })),

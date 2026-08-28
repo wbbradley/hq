@@ -163,7 +163,7 @@ impl CanonicalProjectPort for ScriptedCanonical {
                 ))
             });
         }
-        if mutation.expected_head != state.snapshot.head {
+        if mutation.expected_head != Some(state.snapshot.head) {
             return Ok(CanonicalProjectMutationOutcome::Rejected(domain_error(
                 ErrorCategory::Conflict,
                 "stale-head",
@@ -182,6 +182,7 @@ impl CanonicalProjectPort for ScriptedCanonical {
         }
         state.mutations.push(action.clone());
         match action.clone() {
+            CanonicalProjectMutationAction::Create { .. } => {}
             CanonicalProjectMutationAction::Open => {
                 state.snapshot.lifecycle = CanonicalProjectLifecycle::Open;
             }
@@ -257,6 +258,8 @@ impl CanonicalProjectPort for ScriptedCanonical {
             head
         };
         let boundary = match action {
+            CanonicalProjectMutationAction::Create { .. }
+            | CanonicalProjectMutationAction::RemoveResource { .. } => None,
             CanonicalProjectMutationAction::Open => Some(MutationBoundary::Open),
             CanonicalProjectMutationAction::AddResource { .. } => {
                 Some(MutationBoundary::AddResource)
@@ -286,7 +289,6 @@ impl CanonicalProjectPort for ScriptedCanonical {
             CanonicalProjectMutationAction::RecordDispatch { .. } => {
                 Some(MutationBoundary::RecordDispatch)
             }
-            CanonicalProjectMutationAction::RemoveResource { .. } => None,
         };
         if boundary.is_some() && state.uncertain_once == boundary {
             state.uncertain_once = None;
@@ -713,7 +715,7 @@ fn failed_start_compensates_assignment_and_newly_acquired_open_state() {
 #[test]
 fn stale_head_rejects_before_resource_or_runtime_effects() {
     let mut request = activation_request();
-    request.expected_head = FactId::from_bytes([99; 32]);
+    request.expected_head = Some(FactId::from_bytes([99; 32]));
     let canonical = ScriptedCanonical::new(snapshot(CanonicalProjectLifecycle::Closed));
     let runtime = ScriptedRuntime::default();
     let manager = ProjectWorkflowManager::new(
@@ -1181,7 +1183,7 @@ fn direct_mutation_preconditions_reject_without_canonical_changes() {
     let mut archived = snapshot(CanonicalProjectLifecycle::Closed);
     archived.archived = true;
     let mut stale_request = request_for(ProjectCommandAction::Open);
-    stale_request.expected_head = FactId::from_bytes([99; 32]);
+    stale_request.expected_head = Some(FactId::from_bytes([99; 32]));
     let mut inactive = snapshot(CanonicalProjectLifecycle::Closed);
     inactive.active_human = false;
     let mut conflicted = snapshot(CanonicalProjectLifecycle::Closed);
@@ -1499,7 +1501,7 @@ fn runtime_stop_failure_retains_assignment_until_a_forced_retry() {
     ));
 
     let mut request = request_for(ProjectCommandAction::Close { force: true });
-    request.expected_head = retained.head;
+    request.expected_head = Some(retained.head);
     let forced = ProjectWorkflowManager::new(
         MemorySagaStore::default(),
         canonical.clone(),
@@ -1706,7 +1708,7 @@ fn archive_and_unarchive_response_loss_reconcile_exactly_once() {
 #[test]
 fn close_and_archive_preconditions_reject_before_external_effects() {
     let mut stale = request_for(ProjectCommandAction::Close { force: false });
-    stale.expected_head = FactId::from_bytes([99; 32]);
+    stale.expected_head = Some(FactId::from_bytes([99; 32]));
     let mut inactive = snapshot(CanonicalProjectLifecycle::Open);
     inactive.active_human = false;
     let mut archived = snapshot(CanonicalProjectLifecycle::Closed);
@@ -1773,7 +1775,7 @@ fn closed_archive_and_unarchive_do_not_touch_runtime_or_resources() {
     assert!(canonical.snapshot_value().archived);
 
     let mut unarchive_request = request_for(ProjectCommandAction::SetArchived { archived: false });
-    unarchive_request.expected_head = canonical.snapshot_value().head;
+    unarchive_request.expected_head = Some(canonical.snapshot_value().head);
     let unarchived = ProjectWorkflowManager::new(
         MemorySagaStore::default(),
         canonical.clone(),
@@ -1872,7 +1874,7 @@ fn graceful_handoff_failure_blocks_until_explicit_forced_takeover() {
     ));
 
     let mut graceful_retry = request_for(handoff_action(false));
-    graceful_retry.expected_head = blocked.head;
+    graceful_retry.expected_head = Some(blocked.head);
     let still_blocked = ProjectWorkflowManager::new(
         MemorySagaStore::default(),
         canonical.clone(),
@@ -1888,7 +1890,7 @@ fn graceful_handoff_failure_blocks_until_explicit_forced_takeover() {
     assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
 
     let mut forced_request = request_for(handoff_action(true));
-    forced_request.expected_head = blocked.head;
+    forced_request.expected_head = Some(blocked.head);
     let forced = ProjectWorkflowManager::new(
         MemorySagaStore::default(),
         canonical.clone(),
@@ -2242,7 +2244,7 @@ fn assigned_retirement_blocks_on_stop_failure_then_force_retires() {
         agent_id: retiring_agent,
         force: true,
     });
-    request.expected_head = blocked.head;
+    request.expected_head = Some(blocked.head);
     let forced = ProjectWorkflowManager::new(
         MemorySagaStore::default(),
         canonical.clone(),
@@ -2380,7 +2382,7 @@ fn stale_or_inactive_handoff_and_retirement_stop_before_runtime_effects() {
         },
     ] {
         let mut stale = request_for(action.clone());
-        stale.expected_head = FactId::from_bytes([99; 32]);
+        stale.expected_head = Some(FactId::from_bytes([99; 32]));
         let mut inactive = runnable_snapshot();
         inactive.active_human = false;
         for (snapshot, request, code) in [
@@ -2419,7 +2421,7 @@ fn activation_request() -> ProjectCommandRequest {
         account_id: AccountId::from_bytes([4; 32]),
         project_id: ProjectId::from_bytes([5; 32]),
         home: InstallationId::from_bytes([6; 32]),
-        expected_head: FactId::from_bytes([7; 32]),
+        expected_head: Some(FactId::from_bytes([7; 32])),
         issued_at: Timestamp::from_unix_millis(8),
         action: ProjectCommandAction::Activate {
             agent_id: AgentId::from_bytes([9; 32]),
@@ -2439,7 +2441,7 @@ fn dispatch_request() -> ProjectCommandRequest {
         account_id: AccountId::from_bytes([4; 32]),
         project_id: ProjectId::from_bytes([5; 32]),
         home: InstallationId::from_bytes([6; 32]),
-        expected_head: FactId::from_bytes([7; 32]),
+        expected_head: Some(FactId::from_bytes([7; 32])),
         issued_at: Timestamp::from_unix_millis(8),
         action: ProjectCommandAction::DispatchPending,
     }

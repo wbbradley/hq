@@ -159,7 +159,7 @@ pub struct NodeShutdownReport {
 
 /// Transient complete application capability bundle borrowing the concrete component owners.
 pub struct NodeApplicationPorts<'a, R, H, P> {
-    store: StoreGateway<'a>,
+    store: StoreGateway,
     revisions: &'a RevisionHub,
     relay: &'a R,
     harness: &'a H,
@@ -519,20 +519,20 @@ impl<L: NodeComponent, R: NodeComponent, H: NodeComponent, P: NodeComponent> Nod
             self.cancellation.cancel();
             for (kind, component) in [
                 (
-                    ComponentKind::LocalSessions,
-                    &mut components.local as &mut dyn NodeComponent,
-                ),
-                (
-                    ComponentKind::RelayManager,
-                    &mut components.relay as &mut dyn NodeComponent,
+                    ComponentKind::ProjectWorkflows,
+                    &mut components.project as &mut dyn NodeComponent,
                 ),
                 (
                     ComponentKind::HarnessSupervisor,
                     &mut components.harness as &mut dyn NodeComponent,
                 ),
                 (
-                    ComponentKind::ProjectWorkflows,
-                    &mut components.project as &mut dyn NodeComponent,
+                    ComponentKind::RelayManager,
+                    &mut components.relay as &mut dyn NodeComponent,
+                ),
+                (
+                    ComponentKind::LocalSessions,
+                    &mut components.local as &mut dyn NodeComponent,
                 ),
             ] {
                 let drain = component.drain();

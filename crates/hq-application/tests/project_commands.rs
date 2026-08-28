@@ -21,7 +21,7 @@ fn project_command_values_are_plain_public_data() -> Result<(), Box<dyn std::err
         account_id: AccountId::from_bytes(id(4)),
         project_id: ProjectId::from_bytes(id(5)),
         home: InstallationId::from_bytes(id(6)),
-        expected_head: FactId::from_bytes(id(7)),
+        expected_head: Some(FactId::from_bytes(id(7))),
         issued_at: Timestamp::from_unix_millis(8),
         action: ProjectCommandAction::Activate {
             agent_id: AgentId::from_bytes(id(9)),

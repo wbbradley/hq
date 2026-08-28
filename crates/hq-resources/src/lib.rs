@@ -14,7 +14,7 @@ pub use git::{
 };
 pub use path::{
     PathCondition, PathEntryKind, PathIdentityRequest, PathProbeError, PathResourceError,
-    PathResourceResolution, PathSystem, StdPathSystem,
+    PathResourceResolution, PathSystem, StdPathSystem, normalize_absolute_path,
 };
 pub use policy::{
     PathClaim, PathClaimConflict, PathRelation, ReleaseDecision, ResourcePolicyError,

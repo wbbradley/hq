@@ -350,6 +350,12 @@ pub struct ProjectSagaStateHandle {
     requests: SyncSender<Request>,
 }
 
+/// Cloneable application query and canonical-mutation capability without store-worker ownership.
+#[derive(Clone)]
+pub struct ApplicationStateHandle {
+    requests: SyncSender<Request>,
+}
+
 /// Owned canonical-ingest and verified-authority query capability for background replication.
 #[derive(Clone)]
 pub struct ReplicationHandle {
@@ -385,6 +391,62 @@ impl ReplicationHandle {
         response
             .recv()
             .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+}
+
+impl ApplicationStateHandle {
+    /// Executes one retryable local fact-backed mutation in the serialized store worker.
+    pub fn execute_local_mutation(
+        &self,
+        request: LocalMutationRequest,
+    ) -> Result<MutationReceipt, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LocalMutation { request, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads revision and every application projection from one serialized store point.
+    pub fn authoritative_snapshot(&self) -> Result<AuthoritativeSnapshot, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::AuthoritativeSnapshot { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one bounded indexed conversation page.
+    pub fn load_conversation_entries(
+        &self,
+        key: &ConversationKey,
+        limit: usize,
+        cursor: Option<&PageCursor>,
+    ) -> Result<Page<ConversationEntry>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadConversationEntries {
+                key: key.clone(),
+                limit,
+                cursor: cursor.cloned(),
+                reply,
+            })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+}
+
+impl fmt::Debug for ApplicationStateHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ApplicationStateHandle")
+            .finish_non_exhaustive()
     }
 }
 
@@ -692,6 +754,13 @@ impl Store {
     /// Creates a project-workflow request capability for the owned saga worker.
     pub fn project_saga_state_handle(&self) -> ProjectSagaStateHandle {
         ProjectSagaStateHandle {
+            requests: self.requests.clone(),
+        }
+    }
+
+    /// Creates an application query/mutation capability without store shutdown ownership.
+    pub fn application_state_handle(&self) -> ApplicationStateHandle {
+        ApplicationStateHandle {
             requests: self.requests.clone(),
         }
     }

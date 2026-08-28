@@ -119,8 +119,8 @@ pub struct ProjectCommandRequest {
     pub project_id: ProjectId,
     /// Immutable authoritative installation.
     pub home: InstallationId,
-    /// Expected canonical project head used for serialization.
-    pub expected_head: FactId,
+    /// Expected canonical project head, absent only when provisioning a new project.
+    pub expected_head: Option<FactId>,
     /// Caller-supplied semantic time.
     pub issued_at: Timestamp,
     /// Closed requested behavior.

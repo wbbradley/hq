@@ -35,7 +35,12 @@ pub struct RelayNodeConfig {
 }
 
 /// Node lifecycle and application adapter around the sole concrete relay manager.
+#[derive(Clone)]
 pub struct RelayNodeComponent {
+    inner: Arc<RelayNodeInner>,
+}
+
+struct RelayNodeInner {
     config: RelayNodeConfig,
     dependencies: hq_relay::RelaySessionDependencies,
     state: Arc<dyn RelayStatePort>,
@@ -72,16 +77,19 @@ impl RelayNodeComponent {
             jitter: Arc::new(StableRelayJitter),
         };
         Self {
-            config,
-            dependencies,
-            state,
-            manager: Mutex::new(None),
-            accepting: AtomicBool::new(false),
+            inner: Arc::new(RelayNodeInner {
+                config,
+                dependencies,
+                state,
+                manager: Mutex::new(None),
+                accepting: AtomicBool::new(false),
+            }),
         }
     }
 
     fn wake(&self) -> Result<(), RelayPortError> {
-        self.manager
+        self.inner
+            .manager
             .lock()
             .map_err(|_| RelayPortError::Unavailable)?
             .as_ref()
@@ -89,10 +97,11 @@ impl RelayNodeComponent {
             .wake()
     }
 
-    fn shutdown_manager(&mut self) -> Result<(), ComponentError> {
+    fn shutdown_manager(&self) -> Result<(), ComponentError> {
         let manager = self
+            .inner
             .manager
-            .get_mut()
+            .lock()
             .map_err(|_| ComponentError::unavailable())?
             .take();
         manager.map_or(Ok(()), |manager| {
@@ -104,7 +113,7 @@ impl RelayNodeComponent {
     }
 
     fn ensure_accepting(&self) -> Result<(), ApplicationError> {
-        if self.accepting.load(Ordering::Acquire) {
+        if self.inner.accepting.load(Ordering::Acquire) {
             Ok(())
         } else {
             Err(ApplicationError::new(
@@ -118,34 +127,34 @@ impl fmt::Debug for RelayNodeComponent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RelayNodeComponent")
-            .field("config", &self.config)
-            .field("accepting", &self.accepting.load(Ordering::Acquire))
+            .field("config", &self.inner.config)
+            .field("accepting", &self.inner.accepting.load(Ordering::Acquire))
             .finish_non_exhaustive()
     }
 }
 
 impl NodeComponent for RelayNodeComponent {
     fn start(&mut self, _cancellation: CancellationToken) -> Result<(), ComponentError> {
-        if self
+        let mut manager = self
+            .inner
             .manager
-            .get_mut()
-            .map_err(|_| ComponentError::unavailable())?
-            .is_some()
-        {
+            .lock()
+            .map_err(|_| ComponentError::unavailable())?;
+        if manager.is_some() {
             return Ok(());
         }
-        let manager = RelayManager::start(self.config.manager.clone(), self.dependencies.clone())
-            .map_err(|_| ComponentError::unavailable())?;
-        *self
-            .manager
-            .get_mut()
-            .map_err(|_| ComponentError::unavailable())? = Some(manager);
-        self.accepting.store(true, Ordering::Release);
+        let started = RelayManager::start(
+            self.inner.config.manager.clone(),
+            self.inner.dependencies.clone(),
+        )
+        .map_err(|_| ComponentError::unavailable())?;
+        *manager = Some(started);
+        self.inner.accepting.store(true, Ordering::Release);
         Ok(())
     }
 
     fn stop_intake(&mut self) -> Result<(), ComponentError> {
-        self.accepting.store(false, Ordering::Release);
+        self.inner.accepting.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -174,7 +183,8 @@ impl ConfigureRelays for RelayNodeComponent {
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         self.ensure_accepting()?;
         let relay = relay_url(&request.body.endpoint)?;
-        self.state
+        self.inner
+            .state
             .apply(RelayStateMutation::Configure(RelayPolicyChange {
                 operation_id: request.operation_id,
                 request_digest: request.request_digest,

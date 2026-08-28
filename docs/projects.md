@@ -382,6 +382,13 @@ repository, merge base, worktree destination, branch name, and primary path. Pro
 explicit daemon workflow with a temporary destination reservation. Closing or archiving never
 removes the created worktree or branch.
 
+Creation has no previous project head; all other project commands carry an exact expected head.
+The daemon checkpoints reservation, Git intent/result, read-only path identification, and canonical
+creation separately. Every retry first reconciles the exact destination, common repository, and
+branch. A definite failure before Git releases the reservation, while any state that may contain an
+unowned external worktree stays reserved for explicit operator reconciliation. HQ never performs
+automatic worktree prune/reset/removal as compensation.
+
 The CLI exposes the same workflow as `hq project worktree`; both surfaces use one stable operation
 ID. A retry resumes after reservation, Git creation, or project creation rather than creating a
 second worktree or project.

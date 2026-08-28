@@ -1,19 +1,21 @@
 //! Explicit activation and at-most-once project-input dispatch workflows.
 
-use std::{collections::BTreeSet, num::NonZeroU64};
+use std::{collections::BTreeSet, num::NonZeroU64, path::Path};
 
 use hq_application::{
     EffectOutcome, EffectRequest, ProjectCommandAction, ProjectCommandOutcome,
-    ProjectCommandRequest, ProjectCommandStage,
+    ProjectCommandRequest, ProjectCommandStage, WorktreeProvisioningRequest,
 };
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, CommandDigest,
     CommandId, ContentText, DispatchId, DomainError, ErrorCategory, ErrorCode, FactId,
-    InstallationId, MessageId, OperationCorrelation, OperationId, ProjectId, ProjectResource,
-    ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator, RuntimeObservation,
-    ThreadId, Timestamp,
+    InstallationId, MailboxId, MessageId, OperationCorrelation, OperationId, ProjectId,
+    ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator,
+    ResourceScheme, RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
-use hq_resources::{PathReleaseAssessment, ReleaseDecision, decide_release};
+use hq_resources::{
+    PathReleaseAssessment, ReleaseDecision, decide_release, normalize_absolute_path,
+};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -103,6 +105,17 @@ pub struct ProjectWorkflowSnapshot {
 /// Closed canonical project mutations used by this workflow package.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CanonicalProjectMutationAction {
+    /// Create one initially open project over an exactly identified worktree.
+    Create {
+        /// Caller-allocated project mailbox.
+        mailbox_id: MailboxId,
+        /// Human-visible project name.
+        name: ShortText,
+        /// Optional project brief.
+        brief: Option<ContentText>,
+        /// Sole initial desired and primary resource.
+        resource: ProjectResource,
+    },
     /// Conditionally open a closed, unarchived, claimable project.
     Open,
     /// Add one observed desired resource.
@@ -199,8 +212,8 @@ pub struct CanonicalProjectMutation {
     pub project_id: ProjectId,
     /// Required immutable home.
     pub home: InstallationId,
-    /// Exact head checked inside the commit transaction.
-    pub expected_head: FactId,
+    /// Exact head checked inside the commit transaction, absent only for creation.
+    pub expected_head: Option<FactId>,
     /// Caller-supplied semantic time.
     pub issued_at: Timestamp,
     /// Closed transition.
@@ -247,6 +260,19 @@ pub struct ProjectResourceValidationRequest {
     pub project_id: ProjectId,
     /// Exact desired resources to re-resolve.
     pub resources: Vec<ProjectResource>,
+}
+
+/// Read-only identification request for one newly created worktree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectResourceIdentificationRequest {
+    /// Immutable home namespace.
+    pub home: InstallationId,
+    /// Project that will own the resulting desired resource.
+    pub project_id: ProjectId,
+    /// Stable resource identity derived from the provisioning operation.
+    pub resource_id: ResourceId,
+    /// Exact reserved worktree destination.
+    pub destination: ResourceLocator,
 }
 
 /// Batched read-only release assessment request.
@@ -297,6 +323,16 @@ pub struct ProjectLaunchObservation {
 
 /// Read-only resource observation capability used around external runtime startup.
 pub trait ProjectResourcePort {
+    /// Identifies one exact created path without mutating it.
+    fn identify_resource(
+        &self,
+        _request: &EffectRequest<ProjectResourceIdentificationRequest>,
+    ) -> Result<EffectOutcome<ProjectResource>, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
     /// Revalidates every desired resource as one stable read-only operation.
     fn validate_resources(
         &self,
@@ -314,6 +350,78 @@ pub trait ProjectResourcePort {
         &self,
         request: &EffectRequest<ProjectLaunchValidationRequest>,
     ) -> Result<EffectOutcome<ProjectLaunchObservation>, hq_application::ApplicationError>;
+}
+
+/// Exact declarative Git worktree operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitWorktreeRequest {
+    /// Existing repository or worktree used by Git.
+    pub source: ResourceLocator,
+    /// Exact reserved absolute destination.
+    pub destination: ResourceLocator,
+    /// Exact validated branch spelling.
+    pub branch: hq_domain::ShortText,
+    /// Whether the branch should be created from the source's current head.
+    pub create_branch: bool,
+}
+
+impl From<&WorktreeProvisioningRequest> for GitWorktreeRequest {
+    fn from(request: &WorktreeProvisioningRequest) -> Self {
+        Self {
+            source: request.source.clone(),
+            destination: request.destination.clone(),
+            branch: request.branch.clone(),
+            create_branch: request.create_branch,
+        }
+    }
+}
+
+/// Exact state observed before or after one Git worktree create attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitWorktreeState {
+    /// No destination, conflicting registration, or unsafe branch state exists.
+    ReadyToCreate,
+    /// The destination is the exact requested repository worktree and branch.
+    Created,
+}
+
+/// Bounded mutating Git capability kept separate from read-only resource identification.
+pub trait GitWorktreePort {
+    /// Reconciles the exact destination, repository, registration, and branch.
+    fn lookup(
+        &self,
+        request: &EffectRequest<GitWorktreeRequest>,
+    ) -> Result<EffectOutcome<GitWorktreeState>, hq_application::ApplicationError>;
+
+    /// Creates the exact worktree, returning accepted only after exact post-create lookup.
+    fn create(
+        &self,
+        request: &EffectRequest<GitWorktreeRequest>,
+    ) -> Result<EffectOutcome<()>, hq_application::ApplicationError>;
+}
+
+/// Closed unavailable Git port used by workflows that cannot provision worktrees.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailableGitWorktreePort;
+
+impl GitWorktreePort for UnavailableGitWorktreePort {
+    fn lookup(
+        &self,
+        _request: &EffectRequest<GitWorktreeRequest>,
+    ) -> Result<EffectOutcome<GitWorktreeState>, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    fn create(
+        &self,
+        _request: &EffectRequest<GitWorktreeRequest>,
+    ) -> Result<EffectOutcome<()>, hq_application::ApplicationError> {
+        Err(hq_application::ApplicationError::new(
+            hq_application::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
 }
 
 /// Project-bound runtime startup or exact-resume request.
@@ -368,14 +476,15 @@ pub trait ProjectRuntimePort {
 }
 
 /// Serialized bounded owner of activation, compensation, and pending-input dispatch.
-pub struct ProjectWorkflowManager<S, C, R, F> {
+pub struct ProjectWorkflowManager<S, C, R, F, G = UnavailableGitWorktreePort> {
     store: S,
     canonical: C,
     runtime: R,
     resources: F,
+    git: G,
 }
 
-impl<S, C, R, F> ProjectWorkflowManager<S, C, R, F>
+impl<S, C, R, F> ProjectWorkflowManager<S, C, R, F, UnavailableGitWorktreePort>
 where
     S: ProjectSagaStore,
     C: CanonicalProjectPort,
@@ -389,6 +498,27 @@ where
             canonical,
             runtime,
             resources,
+            git: UnavailableGitWorktreePort,
+        }
+    }
+}
+
+impl<S, C, R, F, G> ProjectWorkflowManager<S, C, R, F, G>
+where
+    S: ProjectSagaStore,
+    C: CanonicalProjectPort,
+    R: ProjectRuntimePort,
+    F: ProjectResourcePort,
+    G: GitWorktreePort,
+{
+    /// Owns every capability required by existing-project and provisioning workflows.
+    pub const fn with_git(store: S, canonical: C, runtime: R, resources: F, git: G) -> Self {
+        Self {
+            store,
+            canonical,
+            runtime,
+            resources,
+            git,
         }
     }
 
@@ -444,6 +574,31 @@ where
         if let Some(outcome) = terminal_outcome(&record) {
             return Ok(outcome);
         }
+        let provisioning = matches!(record.action, ProjectCommandAction::ProvisionWorktree(_));
+        if provisioning == record.expected_head.is_some() {
+            reject(
+                &self.store,
+                &mut record,
+                error(
+                    ErrorCategory::InvalidInput,
+                    "project_command_head_precondition_invalid",
+                ),
+            )?;
+            return Ok(progress_outcome(&record));
+        }
+        if let ProjectCommandAction::ProvisionWorktree(request) = &record.action
+            && !valid_provisioning_paths(request)
+        {
+            reject(
+                &self.store,
+                &mut record,
+                error(
+                    ErrorCategory::InvalidInput,
+                    "project_worktree_locator_not_normalized",
+                ),
+            )?;
+            return Ok(progress_outcome(&record));
+        }
         for _ in 0..MAX_PROJECT_WORKFLOW_ADVANCES {
             match record.action.clone() {
                 ProjectCommandAction::Open
@@ -495,14 +650,9 @@ where
                 ProjectCommandAction::RetireAgent { agent_id, force } => {
                     self.advance_retirement(&mut record, agent_id, force)?;
                 }
-                _ => reject(
-                    &self.store,
-                    &mut record,
-                    error(
-                        ErrorCategory::InvalidInput,
-                        "project_action_not_implemented",
-                    ),
-                )?,
+                ProjectCommandAction::ProvisionWorktree(request) => {
+                    self.advance_provisioning(&mut record, &request)?;
+                }
             }
             if let Some(outcome) = terminal_outcome(&record) {
                 return Ok(outcome);
@@ -512,6 +662,227 @@ where
             }
         }
         Ok(progress_outcome(&record))
+    }
+
+    fn advance_provisioning(
+        &self,
+        record: &mut ProjectSagaRecord,
+        request: &WorktreeProvisioningRequest,
+    ) -> Result<(), hq_application::ApplicationError> {
+        match current_stage(record) {
+            ProjectCommandStage::Accepted => checkpoint(
+                &self.store,
+                record,
+                ProjectCommandStage::ReservingDestination,
+            ),
+            ProjectCommandStage::ReservingDestination => {
+                checkpoint(&self.store, record, ProjectCommandStage::ReconcilingGit)
+            }
+            ProjectCommandStage::ReconcilingGit
+            | ProjectCommandStage::CreatingWorktree
+            | ProjectCommandStage::ReconciliationRequired => {
+                self.reconcile_or_create_worktree(record, request)
+            }
+            ProjectCommandStage::IdentifyingResource => {
+                self.identify_provisioned_resource(record, request)
+            }
+            ProjectCommandStage::CreatingProject => self.commit_provisioned_project(record),
+            _ => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
+    }
+
+    fn reconcile_or_create_worktree(
+        &self,
+        record: &mut ProjectSagaRecord,
+        request: &WorktreeProvisioningRequest,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let operation_id = record.git_operation_id.unwrap_or_else(|| {
+            derived_operation(
+                record.operation_id,
+                b"git-worktree",
+                request.destination.value().as_bytes(),
+            )
+        });
+        if record.git_operation_id.is_none() {
+            record.git_operation_id = Some(operation_id);
+            persist(&self.store, record)?;
+        }
+        let effect = git_effect_request(record, operation_id, request);
+        match self.git.lookup(&effect)? {
+            EffectOutcome::Accepted(GitWorktreeState::Created) => {
+                record.git_effect = SagaEffectState::Accepted;
+                checkpoint(
+                    &self.store,
+                    record,
+                    ProjectCommandStage::IdentifyingResource,
+                )
+            }
+            EffectOutcome::Accepted(GitWorktreeState::ReadyToCreate) => {
+                if matches!(record.git_effect, SagaEffectState::NotStarted) {
+                    record.git_effect = SagaEffectState::Pending;
+                    checkpoint(&self.store, record, ProjectCommandStage::CreatingWorktree)?;
+                }
+                match self.git.create(&effect)? {
+                    EffectOutcome::Accepted(()) => {
+                        record.git_effect = SagaEffectState::Accepted;
+                        checkpoint(
+                            &self.store,
+                            record,
+                            ProjectCommandStage::IdentifyingResource,
+                        )
+                    }
+                    EffectOutcome::Rejected(error) => {
+                        record.git_effect = SagaEffectState::Rejected(error.clone());
+                        reject(&self.store, record, error)
+                    }
+                    EffectOutcome::Uncertain(returned) if returned == operation_id => reconcile(
+                        &self.store,
+                        record,
+                        ProjectCommandStage::CreatingWorktree,
+                        effect_error("project_git_create_unknown"),
+                        EffectKind::Git,
+                    ),
+                    EffectOutcome::Uncertain(_) => Err(hq_application::ApplicationError::new(
+                        hq_application::ApplicationErrorCode::StateCorrupt,
+                    )),
+                }
+            }
+            EffectOutcome::Rejected(error)
+                if matches!(
+                    record.git_effect,
+                    SagaEffectState::Accepted | SagaEffectState::Uncertain(_)
+                ) =>
+            {
+                reconcile(
+                    &self.store,
+                    record,
+                    ProjectCommandStage::ReconcilingGit,
+                    error,
+                    EffectKind::Git,
+                )
+            }
+            EffectOutcome::Rejected(error) => {
+                record.git_effect = SagaEffectState::Rejected(error.clone());
+                reject(&self.store, record, error)
+            }
+            EffectOutcome::Uncertain(returned) if returned == operation_id => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::ReconcilingGit,
+                effect_error("project_git_lookup_unknown"),
+                EffectKind::Git,
+            ),
+            EffectOutcome::Uncertain(_) => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
+    }
+
+    fn identify_provisioned_resource(
+        &self,
+        record: &mut ProjectSagaRecord,
+        request: &WorktreeProvisioningRequest,
+    ) -> Result<(), hq_application::ApplicationError> {
+        if record.pending_canonical_mutation.is_some() {
+            return checkpoint(&self.store, record, ProjectCommandStage::CreatingProject);
+        }
+        let resource_id = ResourceId::from_bytes(hash(&[
+            b"hq-project-provisioned-resource-v1",
+            record.operation_id.as_bytes(),
+        ]));
+        let operation_id = record.resource_operation_id.unwrap_or_else(|| {
+            derived_operation(
+                record.operation_id,
+                b"identify-worktree",
+                resource_id.as_bytes(),
+            )
+        });
+        if record.resource_operation_id.is_none() {
+            record.resource_operation_id = Some(operation_id);
+            record.resource_effect = SagaEffectState::Pending;
+            persist(&self.store, record)?;
+        }
+        let effect = EffectRequest::new(
+            operation_id,
+            derived_digest(
+                record.operation_id,
+                b"identify-worktree",
+                request.destination.value().as_bytes(),
+            ),
+            record.issued_at,
+            ProjectResourceIdentificationRequest {
+                home: record.home,
+                project_id: record.project_id,
+                resource_id,
+                destination: request.destination.clone(),
+            },
+        );
+        match self.resources.identify_resource(&effect)? {
+            EffectOutcome::Accepted(resource)
+                if resource.resource_id == resource_id
+                    && resource.display_locator == request.destination
+                    && resource.health == ResourceHealth::Healthy =>
+            {
+                record.resource_effect = SagaEffectState::Accepted;
+                record.pending_canonical_mutation =
+                    Some(provisioning_creation_mutation(record, request, resource));
+                checkpoint(&self.store, record, ProjectCommandStage::CreatingProject)
+            }
+            EffectOutcome::Accepted(_) => reject(
+                &self.store,
+                record,
+                error(ErrorCategory::Conflict, "project_worktree_identity_changed"),
+            ),
+            EffectOutcome::Rejected(error) => {
+                record.resource_effect = SagaEffectState::Rejected(error.clone());
+                reject(&self.store, record, error)
+            }
+            EffectOutcome::Uncertain(returned) if returned == operation_id => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::IdentifyingResource,
+                effect_error("project_resource_identification_unknown"),
+                EffectKind::Resource,
+            ),
+            EffectOutcome::Uncertain(_) => Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            )),
+        }
+    }
+
+    fn commit_provisioned_project(
+        &self,
+        record: &mut ProjectSagaRecord,
+    ) -> Result<(), hq_application::ApplicationError> {
+        let Some(pending) = record.pending_canonical_mutation.as_ref() else {
+            return Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            ));
+        };
+        if !matches!(
+            pending.action,
+            CanonicalProjectMutationAction::Create { .. }
+        ) {
+            return Err(hq_application::ApplicationError::new(
+                hq_application::ApplicationErrorCode::StateCorrupt,
+            ));
+        }
+        match self.replay_canonical_mutation(record)? {
+            CanonicalProjectMutationOutcome::Committed { project_head } => {
+                record.state = ProjectSagaState::Completed { project_head };
+                persist(&self.store, record)
+            }
+            CanonicalProjectMutationOutcome::Rejected(error) => reject(&self.store, record, error),
+            CanonicalProjectMutationOutcome::Uncertain => reconcile(
+                &self.store,
+                record,
+                ProjectCommandStage::CreatingProject,
+                effect_error("project_creation_commit_unknown"),
+                EffectKind::None,
+            ),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -600,7 +971,7 @@ where
         thread_id: ThreadId,
         force_takeover: bool,
     ) -> Result<(), hq_application::ApplicationError> {
-        if snapshot.head != record.expected_head {
+        if Some(snapshot.head) != record.expected_head {
             return reject(
                 &self.store,
                 record,
@@ -880,7 +1251,7 @@ where
         agent_id: AgentId,
         force: bool,
     ) -> Result<(), hq_application::ApplicationError> {
-        if snapshot.head != record.expected_head {
+        if Some(snapshot.head) != record.expected_head {
             return reject(
                 &self.store,
                 record,
@@ -1072,7 +1443,7 @@ where
         snapshot: &ProjectWorkflowSnapshot,
         archive_after_close: bool,
     ) -> Result<(), hq_application::ApplicationError> {
-        if snapshot.head != record.expected_head {
+        if Some(snapshot.head) != record.expected_head {
             return reject(
                 &self.store,
                 record,
@@ -1336,7 +1707,7 @@ where
             );
         }
         if current_stage(record) == ProjectCommandStage::Accepted {
-            if snapshot.head != record.expected_head {
+            if Some(snapshot.head) != record.expected_head {
                 return reject(
                     &self.store,
                     record,
@@ -1636,7 +2007,7 @@ where
             }
         }
         if stage == ProjectCommandStage::Accepted {
-            if snapshot.head != record.expected_head {
+            if Some(snapshot.head) != record.expected_head {
                 return reject(
                     &self.store,
                     record,
@@ -2000,7 +2371,7 @@ where
             };
         }
         if current_stage(record) == ProjectCommandStage::Accepted {
-            if snapshot.head != record.expected_head {
+            if Some(snapshot.head) != record.expected_head {
                 return reject(
                     &self.store,
                     record,
@@ -2220,11 +2591,11 @@ where
         }
         let mutation = CanonicalProjectMutation {
             command_id: derived_command(record.operation_id, tag, expected_head.as_bytes()),
-            request_digest: mutation_digest(record.operation_id, tag, expected_head, &action),
+            request_digest: mutation_digest(record.operation_id, tag, Some(expected_head), &action),
             account_id: record.account_id,
             project_id: record.project_id,
             home: record.home,
-            expected_head,
+            expected_head: Some(expected_head),
             issued_at: record.issued_at,
             action,
         };
@@ -2258,19 +2629,66 @@ where
     }
 }
 
+fn valid_provisioning_paths(request: &WorktreeProvisioningRequest) -> bool {
+    exact_normalized_path(
+        &request.source,
+        &[ResourceScheme::GitRepository, ResourceScheme::WorkingTree],
+    ) && exact_normalized_path(&request.destination, &[ResourceScheme::WorkingTree])
+}
+
+fn exact_normalized_path(locator: &ResourceLocator, schemes: &[ResourceScheme]) -> bool {
+    let original = Path::new(locator.value());
+    schemes.contains(&locator.scheme())
+        && normalize_absolute_path(original)
+            .is_ok_and(|normalized| normalized.as_os_str() == original.as_os_str())
+}
+
+impl<S, C, R, F, G> hq_application::ControlProjects for ProjectWorkflowManager<S, C, R, F, G>
+where
+    S: ProjectSagaStore,
+    C: CanonicalProjectPort,
+    R: ProjectRuntimePort,
+    F: ProjectResourcePort,
+    G: GitWorktreePort,
+{
+    fn control_project(
+        &self,
+        request: ProjectCommandRequest,
+    ) -> Result<ProjectCommandOutcome, hq_application::ApplicationError> {
+        self.control(request)
+    }
+}
+
+impl<S, C, R, F, G> crate::RepairLocalProjectWorkflows for ProjectWorkflowManager<S, C, R, F, G>
+where
+    S: ProjectSagaStore,
+    C: CanonicalProjectPort,
+    R: ProjectRuntimePort,
+    F: ProjectResourcePort,
+    G: GitWorktreePort,
+{
+    fn repair_local(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProjectCommandOutcome>, hq_application::ApplicationError> {
+        self.repair(limit)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum EffectKind {
     None,
     Runtime,
     Dispatch,
     Resource,
+    Git,
 }
 
 fn direct_precondition_error(
     record: &ProjectSagaRecord,
     snapshot: &ProjectWorkflowSnapshot,
 ) -> Option<DomainError> {
-    if snapshot.head != record.expected_head {
+    if Some(snapshot.head) != record.expected_head {
         return Some(error(ErrorCategory::Conflict, "project_stale_head"));
     }
     if !snapshot.active_human {
@@ -2504,6 +2922,7 @@ fn reconcile<S: ProjectSagaStore>(
         }
         EffectKind::None | EffectKind::Dispatch => {}
         EffectKind::Resource => record.resource_effect = SagaEffectState::Uncertain(error.clone()),
+        EffectKind::Git => record.git_effect = SagaEffectState::Uncertain(error.clone()),
     }
     record.state = ProjectSagaState::Reconcilable { stage, error };
     persist(store, record)
@@ -2591,6 +3010,53 @@ fn derived_digest(operation: OperationId, tag: &[u8], extra: &[u8]) -> CommandDi
     ]))
 }
 
+fn git_effect_request(
+    record: &ProjectSagaRecord,
+    operation_id: OperationId,
+    request: &WorktreeProvisioningRequest,
+) -> EffectRequest<GitWorktreeRequest> {
+    let mut digest = Sha256::new();
+    put(&mut digest, b"hq-project-git-worktree-v1");
+    put(&mut digest, record.operation_id.as_bytes());
+    put_locator(&mut digest, &request.source);
+    put_locator(&mut digest, &request.destination);
+    put(&mut digest, request.branch.as_str().as_bytes());
+    put(&mut digest, &[u8::from(request.create_branch)]);
+    EffectRequest::new(
+        operation_id,
+        CommandDigest::from_bytes(digest.finalize().into()),
+        record.issued_at,
+        GitWorktreeRequest::from(request),
+    )
+}
+
+fn provisioning_creation_mutation(
+    record: &ProjectSagaRecord,
+    request: &WorktreeProvisioningRequest,
+    resource: ProjectResource,
+) -> CanonicalProjectMutation {
+    let action = CanonicalProjectMutationAction::Create {
+        mailbox_id: request.mailbox_id,
+        name: request.project_name.clone(),
+        brief: request.brief.clone(),
+        resource,
+    };
+    CanonicalProjectMutation {
+        command_id: derived_command(
+            record.operation_id,
+            b"create-project",
+            record.project_id.as_bytes(),
+        ),
+        request_digest: mutation_digest(record.operation_id, b"create-project", None, &action),
+        account_id: record.account_id,
+        project_id: record.project_id,
+        home: record.home,
+        expected_head: None,
+        issued_at: record.issued_at,
+        action,
+    }
+}
+
 fn derived_dispatch(project: ProjectId, message: MessageId, sequence: NonZeroU64) -> DispatchId {
     DispatchId::from_bytes(hash(&[
         b"hq-project-dispatch-v1",
@@ -2623,18 +3089,40 @@ fn delivery_digest(
     ]))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "closed canonical mutation digest table"
+)]
 fn mutation_digest(
     operation: OperationId,
     tag: &[u8],
-    expected_head: FactId,
+    expected_head: Option<FactId>,
     action: &CanonicalProjectMutationAction,
 ) -> CommandDigest {
     let mut digest = Sha256::new();
     put(&mut digest, b"hq-project-canonical-mutation-v1");
     put(&mut digest, operation.as_bytes());
     put(&mut digest, tag);
-    put(&mut digest, expected_head.as_bytes());
+    match expected_head {
+        Some(expected_head) => {
+            put(&mut digest, &[1]);
+            put(&mut digest, expected_head.as_bytes());
+        }
+        None => put(&mut digest, &[0]),
+    }
     match action {
+        CanonicalProjectMutationAction::Create {
+            mailbox_id,
+            name,
+            brief,
+            resource,
+        } => {
+            put(&mut digest, b"create");
+            put(&mut digest, mailbox_id.as_bytes());
+            put(&mut digest, name.as_str().as_bytes());
+            put_optional_text(&mut digest, brief.as_ref().map(ContentText::as_str));
+            put_resource(&mut digest, resource);
+        }
         CanonicalProjectMutationAction::Open => put(&mut digest, b"open"),
         CanonicalProjectMutationAction::AddResource {
             resource,
@@ -2757,6 +3245,16 @@ fn put_resource(digest: &mut Sha256, resource: &ProjectResource) {
         ResourceHealth::Unavailable => 4,
     };
     put(digest, &[health]);
+}
+
+fn put_optional_text(digest: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            put(digest, &[1]);
+            put(digest, value.as_bytes());
+        }
+        None => put(digest, &[0]),
+    }
 }
 
 fn put_runtime_observation(digest: &mut Sha256, observation: Option<&RuntimeObservation>) {

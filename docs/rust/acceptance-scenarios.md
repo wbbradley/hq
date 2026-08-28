@@ -230,6 +230,9 @@ sleeps, ambient clocks/randomness, public relays, installed providers, or Go out
   inspection, typed project command/progress, subscription, response, error, and invalidation
   family round-trips through the one v1
   codec; decoded values reapply all constructor bounds.
+- Existing-project commands require an expected project head, while worktree provisioning forbids
+  one. Both semantic frame validation and DTO conversion reject the inverse combinations before
+  project workflow intake.
 - Every one of the 48 semantic fact families round-trips through the unsigned local planning bridge.
   The exact mutation digest binds canonical plan bytes plus auxiliary randomness; changing either
   under the same command ID changes or invalidates the digest.

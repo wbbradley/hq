@@ -9,7 +9,7 @@ use hq_domain::{
     RuntimeObservation, Timestamp,
 };
 
-use crate::project_command_request_digest;
+use crate::{ProjectWorkerPort, RepairLocalProjectWorkflows, project_command_request_digest};
 
 /// Maximum remote commands inspected by one home recovery call.
 pub const MAX_REMOTE_PROJECT_REPAIRS: usize = 1_024;
@@ -272,6 +272,26 @@ where
                 "project_remote_request_unknown",
             )),
         }
+    }
+}
+
+impl<L, R> ProjectWorkerPort for ProjectCommandRouter<L, R>
+where
+    L: RepairLocalProjectWorkflows,
+    R: RemoteProjectCommandPort,
+{
+    fn repair_pending(
+        &self,
+        received_at: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<ProjectCommandOutcome>, ApplicationError> {
+        let mut outcomes = self.local.repair_local(limit)?;
+        match self.repair_remote(received_at, limit) {
+            Ok(remote) => outcomes.extend(remote),
+            Err(error) if error.code() == ApplicationErrorCode::AdapterUnavailable => {}
+            Err(error) => return Err(error),
+        }
+        Ok(outcomes)
     }
 }
 

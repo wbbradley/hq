@@ -54,18 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[projects/high] Implement recoverable Git worktree provisioning and compose project workers** —
-  Add a separate bounded mutating Git capability with stable lookup/create operations, short-lived
-  repository serialization, destination reservation, exact worktree/branch reconciliation,
-  read-only `hq-resources` identification, and one canonical project creation. Resume after every
-  reservation, Git, identification, and canonical boundary without duplicate worktree/project;
-  never silently delete external state on uncertainty. Compose project workflow, store, harness,
-  resources, Git, canonical mutation, wake/recovery, intake, and shutdown ownership in `hq-node`.
-  Run bounded startup scans, checkpoint all accepted work before harness/store shutdown, add
-  model/failpoint tests for every boundary and reservation conflict, and finish project,
-  application/local API, storage, behavior-ledger, acceptance, architecture, and four-target CI
-  evidence.
-
 - **[cli/medium] Complete the Rust command-line client** — Implement the retained command workflows
   from the behavior ledger over `hq-local-api` only, including identity/account, messaging, peers,
   relays/status/sync, named agents and sessions, projects/resources/worktrees, lifecycle control,
