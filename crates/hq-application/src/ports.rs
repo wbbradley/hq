@@ -1,6 +1,6 @@
 //! Consumer-owned capability ports and neutral external-operation values.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 use hq_domain::{
     AgentId, CommandDigest, ContentText, FactId, OperationId, Page, PageCursor, ProjectId,
@@ -30,8 +30,8 @@ pub struct EvidenceIngestOutcome {
 use hq_reducer::ConversationKey;
 
 use crate::{
-    ApplicationError, ApplicationValueError, AuthoritativeSnapshot, ConversationEntry,
-    FactMutation, MutationAttempt,
+    ApplicationError, ApplicationErrorCode, ApplicationValueError, AuthoritativeSnapshot,
+    ConversationEntry, FactMutation, MutationAttempt,
 };
 
 /// Maximum relay policies in one bounded application observation.
@@ -341,8 +341,107 @@ pub enum SessionControl {
     Stop,
 }
 
+/// Maximum copied environment entries accepted at one local control boundary.
+pub const MAX_LAUNCH_ENVIRONMENT_ENTRIES: usize = 512;
+/// Maximum bytes accepted in one environment name.
+pub const MAX_LAUNCH_ENVIRONMENT_NAME_BYTES: usize = 256;
+/// Maximum bytes accepted in one environment value.
+pub const MAX_LAUNCH_ENVIRONMENT_VALUE_BYTES: usize = 32_768;
+/// Maximum aggregate bytes accepted across one copied environment.
+pub const MAX_LAUNCH_ENVIRONMENT_BYTES: usize = 1_048_576;
+
+struct SecretLaunchEnvironmentEntry {
+    name: String,
+    value: Vec<u8>,
+}
+
+impl Drop for SecretLaunchEnvironmentEntry {
+    fn drop(&mut self) {
+        self.value.fill(0);
+    }
+}
+
+/// Opaque copied launch environment whose secret values are redacted and zeroed on drop.
+#[derive(Default)]
+pub struct LaunchEnvironment {
+    entries: Vec<SecretLaunchEnvironmentEntry>,
+}
+
+impl LaunchEnvironment {
+    /// Copies and validates a complete caller environment.
+    pub fn copy_from<'a>(
+        entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+    ) -> Result<Self, ApplicationError> {
+        let mut copied = Vec::new();
+        let mut total = 0_usize;
+        for (name, value) in entries {
+            if copied.len() == MAX_LAUNCH_ENVIRONMENT_ENTRIES
+                || name.is_empty()
+                || name.len() > MAX_LAUNCH_ENVIRONMENT_NAME_BYTES
+                || name.as_bytes().contains(&0)
+                || name.as_bytes().contains(&b'=')
+                || value.len() > MAX_LAUNCH_ENVIRONMENT_VALUE_BYTES
+                || value.contains(&0)
+            {
+                return Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest));
+            }
+            total = total
+                .checked_add(name.len())
+                .and_then(|size| size.checked_add(value.len()))
+                .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::InvalidRequest))?;
+            if total > MAX_LAUNCH_ENVIRONMENT_BYTES {
+                return Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest));
+            }
+            copied.push(SecretLaunchEnvironmentEntry {
+                name: name.to_owned(),
+                value: value.to_vec(),
+            });
+        }
+        copied.sort_by(|left, right| left.name.cmp(&right.name));
+        if copied.windows(2).any(|pair| pair[0].name == pair[1].name) {
+            return Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest));
+        }
+        Ok(Self { entries: copied })
+    }
+
+    /// Visits copied values without transferring or retaining ownership.
+    pub fn visit(&self, mut visitor: impl FnMut(&str, &[u8])) {
+        for entry in &self.entries {
+            visitor(&entry.name, &entry.value);
+        }
+    }
+
+    /// Returns the number of copied entries without exposing values.
+    pub const fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Reports whether the copied environment is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl fmt::Debug for LaunchEnvironment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LaunchEnvironment")
+            .field("entry_count", &self.entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Memory-only caller launch context for a start or exact resume.
+#[derive(Debug)]
+pub struct AgentLaunchContext {
+    /// Absolute caller-selected launch directory.
+    pub directory: ResourceLocator,
+    /// Complete copied caller environment.
+    pub environment: LaunchEnvironment,
+}
+
 /// Application-level named-agent session request.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct AgentSessionRequest {
     /// Durable named-agent identity.
     pub agent_id: AgentId,
@@ -350,15 +449,23 @@ pub struct AgentSessionRequest {
     pub provider: ProviderId,
     /// Requested lifecycle action.
     pub control: SessionControl,
+    /// Required memory-only launch context for start/resume; absent for stop.
+    pub launch: Option<AgentLaunchContext>,
 }
 
 impl AgentSessionRequest {
     /// Constructs a neutral session request.
-    pub const fn new(agent_id: AgentId, provider: ProviderId, control: SessionControl) -> Self {
+    pub const fn new(
+        agent_id: AgentId,
+        provider: ProviderId,
+        control: SessionControl,
+        launch: Option<AgentLaunchContext>,
+    ) -> Self {
         Self {
             agent_id,
             provider,
             control,
+            launch,
         }
     }
 }

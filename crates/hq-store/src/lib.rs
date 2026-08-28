@@ -42,7 +42,8 @@ pub use gateway::StoreGateway;
 pub use harness::{
     HarnessLeaseOutcome, MAX_HARNESS_STATE_QUERY_ITEMS, StoredHarnessDelivery,
     StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessLease,
-    StoredHarnessReadySession, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
+    StoredHarnessReadySession, StoredHarnessSessionOperation, StoredHarnessSessionOperationKind,
+    StoredHarnessSessionOperationState, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
 };
 pub use hq_application::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, ConversationEntry,

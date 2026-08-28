@@ -260,6 +260,12 @@ decoding rejects malformed identities, text, booleans, state codes, tokens, and 
 Projection repair excludes every harness operational table. Close/reopen preserves leases, ready
 sessions, deliveries, and partial event checkpoints without ever persisting environment values.
 
+`harness_session_operations` is the exact retry ledger for managed start, resume, and stop. It binds
+operation ID to request digest, agent, provider, action, optional requested session, and monotonic
+prepared/uncertain/ready/stopped/rejected state. Terminal states are absorbing, exact replay is
+idempotent, and changed identity reuse is a collision. The table was added directly to the unshipped
+clean-sheet v13 schema; there is no migration, compatibility codec, or storage-version bump.
+
 The same clean-sheet v13 schema includes `project_sagas` and `project_saga_reservations` without a
 storage-version increment. A saga row binds stable operation and command identities to the exact
 request digest, active account, project/home, optional expected head, strict versioned command body,

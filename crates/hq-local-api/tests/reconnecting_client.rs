@@ -6,16 +6,19 @@ use std::{collections::VecDeque, fmt, num::NonZeroUsize, time::Duration};
 
 use hq_domain::{
     BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactScope, InstallationId,
-    MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, SemanticPayload, ShortText, SigningPublicKey,
-    Timestamp,
+    MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, OperationId, SemanticPayload, ShortText,
+    SigningPublicKey, Timestamp,
 };
 use hq_local_api::protocol::v1::{
-    AgentRetirementOutcomeDto, AgentRetirementRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
-    ClientHello, ErrorClass, ErrorResponse, Id32, InvalidationTopic, LifecycleRequest,
-    LifecycleState, LifecycleStatus, MutationAttemptDto, MutationRequest, ProjectCommandActionDto,
-    ProjectCommandOutcomeDto, ProjectCommandRequestDto, Request, RequestId, ResponseEnvelope,
-    ResponseResult, RevisionInvalidation, ServerHello, SubscriptionAcknowledgement, V1,
-    VersionRange, VersionRejected, WireMessage,
+    AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
+    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
+    ClientHello, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse, Id32,
+    InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
+    MutationAttemptDto, MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+    ProjectCommandRequestDto, Request, RequestId, ResourceLocatorDto, ResourceSchemeDto,
+    ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto,
+    SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
+    agent_session_request_digest,
 };
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientAction, ClientError,
@@ -149,6 +152,36 @@ fn agent_retirement(command: u8, digest: u8) -> AgentRetirementRequestDto {
         issued_at_unix_millis: 1_700_000_000_000,
         force: false,
     }
+}
+
+fn agent_session(operation: u8) -> EffectRequestDto<AgentSessionRequestDto> {
+    let body = AgentSessionRequestDto::new(
+        Id32::new([4; 32]),
+        "fake".to_owned(),
+        SessionControlDto::Start,
+        Some(AgentLaunchContextDto {
+            directory: ResourceLocatorDto::new(
+                ResourceSchemeDto::WorkingTree,
+                "/work/hq".to_owned(),
+            )
+            .expect("launch directory"),
+            environment: LaunchEnvironmentDto::copy_from([("HQ_TOKEN", b"do-not-log".as_slice())])
+                .expect("launch environment"),
+        }),
+    )
+    .expect("session body");
+    let mut request = EffectRequestDto::new(
+        Id32::new([operation; 32]),
+        Id32::new([0; 32]),
+        1_700_000_000_000,
+        body,
+    );
+    request.request_digest = Id32::new(
+        *agent_session_request_digest(&request)
+            .expect("session digest")
+            .as_bytes(),
+    );
+    request
 }
 
 fn snapshot_response(request_id: u64, revision: u64) -> Vec<u8> {
@@ -439,6 +472,101 @@ fn lost_agent_retirement_response_replays_exact_frame_and_retains_terminal_ident
     changed.request_digest = Id32::new([95; 32]);
     assert_eq!(
         client.submit_agent_retirement(changed),
+        Err(ClientError::ChangedCommandIdentity)
+    );
+}
+
+#[test]
+fn lost_agent_session_response_replays_exact_secret_bearing_frame() {
+    let mut client = client();
+    let request = agent_session(96);
+    assert!(
+        client
+            .submit_agent_session(request.clone())
+            .expect("queue agent session")
+            .actions
+            .is_empty()
+    );
+    let (first, _) = only_connect(&client.start().expect("start").actions);
+    let _ = client.connected(first).expect("connect");
+    let negotiated = client
+        .receive_frame(
+            first,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([97; 32])))
+                .encode_frame()
+                .expect("hello frame"),
+        )
+        .expect("negotiates");
+    let original = negotiated
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientAction::Write { frame, .. }
+                if matches!(
+                    WireMessage::decode_frame(frame),
+                    Ok(WireMessage::Request(envelope))
+                        if matches!(envelope.request, Request::ControlAgentSession(_))
+                ) =>
+            {
+                Some(frame.clone())
+            }
+            _ => None,
+        })
+        .expect("managed session frame");
+
+    let (second, _) = only_connect(&client.disconnected(first).expect("lost response").actions);
+    let _ = client.connected(second).expect("reconnect");
+    let replay = client
+        .receive_frame(
+            second,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([98; 32])))
+                .encode_frame()
+                .expect("hello frame"),
+        )
+        .expect("renegotiates");
+    assert!(
+        replay.actions.iter().any(
+            |action| matches!(action, ClientAction::Write { frame, .. } if frame == &original)
+        )
+    );
+
+    let WireMessage::Request(envelope) = WireMessage::decode_frame(&original).expect("request")
+    else {
+        panic!("expected managed session request")
+    };
+    let completed = WireMessage::Response(ResponseEnvelope::success(
+        envelope.id,
+        ResponseResult::AgentSession(EffectOutcomeDto::Accepted(AgentSessionResultDto::Ready(
+            "session-1".to_owned(),
+        ))),
+    ))
+    .encode_frame()
+    .expect("completion frame");
+    let transition = client
+        .receive_frame(second, &completed)
+        .expect("completion accepted");
+    assert!(matches!(
+        transition.events.as_slice(),
+        [ClientEvent::AgentSession { operation_id, outcome: EffectOutcomeDto::Accepted(AgentSessionResultDto::Ready(session)) }]
+            if *operation_id == OperationId::from_bytes([96; 32]) && session == "session-1"
+    ));
+    assert!(
+        client
+            .submit_agent_session(request.clone())
+            .expect("terminal replay is local")
+            .actions
+            .is_empty()
+    );
+
+    let mut changed = request;
+    changed.body.provider = "other".to_owned();
+    changed.request_digest = Id32::new(
+        *agent_session_request_digest(&changed)
+            .expect("changed digest")
+            .as_bytes(),
+    );
+    assert_eq!(
+        client.submit_agent_session(changed),
         Err(ClientError::ChangedCommandIdentity)
     );
 }

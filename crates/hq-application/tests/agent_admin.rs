@@ -3,10 +3,11 @@
 use std::collections::BTreeSet;
 
 use hq_application::{
-    AgentNameClaimRequest, AgentRetirementPlanRequest, AgentSessionRenameRequest,
-    AgentSessionSelectionRequest, LocalFactInputs, LocalInstallationAuthority,
-    plan_agent_mailbox_creation, plan_agent_name_claim, plan_agent_retirement,
-    plan_agent_session_rename, plan_agent_session_selection,
+    AgentNameClaimRequest, AgentRetirementPlanRequest, AgentSessionBindingRequest,
+    AgentSessionContextRequest, AgentSessionRenameRequest, AgentSessionSelectionRequest,
+    LocalFactInputs, LocalInstallationAuthority, plan_agent_mailbox_creation,
+    plan_agent_name_claim, plan_agent_retirement, plan_agent_session_binding,
+    plan_agent_session_context, plan_agent_session_rename, plan_agent_session_selection,
 };
 use hq_domain::{
     AgentId, AuthorityRole, BoundedText, FactId, FactScope, InstallationId, MailboxAddress,
@@ -173,6 +174,57 @@ fn selection_and_rename_plans_include_exact_support_and_complete_register_fronti
     {
         assert!(rename.causal().parents().contains(&parent));
     }
+    Ok(())
+}
+
+#[test]
+fn ready_session_support_plans_bind_the_exact_mailbox_root()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = authority();
+    let mailbox_id = MailboxId::from_bytes(id(6));
+    let mailbox = MailboxAddress::new(authority.installation_id, mailbox_id);
+    let mailbox_root = FactId::from_bytes(id(7));
+    let provider = ProviderId::new("provider")?;
+    let session = ProviderSessionId::new("session-1")?;
+    let repository_context = context()?;
+
+    let binding = plan_agent_session_binding(
+        authority,
+        inputs(),
+        AgentSessionBindingRequest {
+            mailbox,
+            mailbox_root,
+            provider: provider.clone(),
+            session: session.clone(),
+        },
+    )?;
+    assert_eq!(
+        binding.payload(),
+        &SemanticPayload::MailboxSessionBound {
+            mailbox_id,
+            provider,
+            session,
+        }
+    );
+    assert!(binding.causal().parents().contains(&mailbox_root));
+
+    let recorded = plan_agent_session_context(
+        authority,
+        inputs(),
+        AgentSessionContextRequest {
+            mailbox,
+            mailbox_root,
+            context: repository_context.clone(),
+        },
+    )?;
+    assert_eq!(
+        recorded.payload(),
+        &SemanticPayload::MailboxContextRecorded {
+            mailbox_id,
+            context: repository_context,
+        }
+    );
+    assert!(recorded.causal().parents().contains(&mailbox_root));
     Ok(())
 }
 

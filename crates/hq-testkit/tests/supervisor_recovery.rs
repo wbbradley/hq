@@ -23,10 +23,12 @@ use hq_harness::{
     HarnessEventCheckpoint, HarnessEventPoll, HarnessFactory, HarnessInstance,
     HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessLaunchRequest, HarnessLeaseOutcome,
     HarnessOutput, HarnessOutputKind, HarnessOwnerToken, HarnessPersistencePort,
-    HarnessReadySession, HarnessRegistry, HarnessSession, HarnessSessionRequest,
-    HarnessStateMutation, HarnessStatePort, HarnessStateSnapshot, HarnessSubmission,
-    HarnessSubmissionLookup, HarnessSubmissionOutcome, HarnessSupervisor, HarnessSupervisorConfig,
-    HarnessSupervisorDependencies, HarnessTokenSource, HarnessWorkerLease, OpenedHarnessSession,
+    HarnessReadySession, HarnessRegistry, HarnessSession, HarnessSessionControlOutcome,
+    HarnessSessionOperation, HarnessSessionOperationKind, HarnessSessionOperationState,
+    HarnessSessionRequest, HarnessStateMutation, HarnessStatePort, HarnessStateSnapshot,
+    HarnessSubmission, HarnessSubmissionLookup, HarnessSubmissionOutcome, HarnessSupervisor,
+    HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource, HarnessWorkerLease,
+    OpenedHarnessSession,
 };
 
 #[test]
@@ -171,6 +173,109 @@ fn stable_output_identity_rejects_changed_content() {
     );
 }
 
+#[test]
+fn managed_session_control_replays_exact_readiness_and_preserves_uncertainty() {
+    let agent = AgentId::from_bytes([31; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let session_id = ProviderSessionId::new("durable-session").expect("session validates");
+    let provider = Arc::new(ProviderState::default());
+    let state = Arc::new(MemoryState::default());
+    let runtime = supervisor(dependencies(
+        registry(provider_id.clone(), session_id.clone(), provider),
+        state.clone(),
+        Arc::new(MemoryPersistence::with_one_activity_failure()),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    let operation = HarnessSessionOperation {
+        operation_id: OperationId::from_bytes([32; 32]),
+        request_digest: CommandDigest::from_bytes([33; 32]),
+        agent_id: agent,
+        provider_id: provider_id.clone(),
+        kind: HarnessSessionOperationKind::Start,
+        state: HarnessSessionOperationState::Prepared,
+    };
+    assert_eq!(
+        runtime
+            .control_session(
+                &operation,
+                Some(launch(
+                    agent,
+                    provider_id.clone(),
+                    HarnessSessionRequest::Start,
+                )),
+            )
+            .expect("new session becomes ready"),
+        HarnessSessionControlOutcome::Ready(session_id.clone())
+    );
+    assert_eq!(
+        runtime
+            .control_session(
+                &operation,
+                Some(launch(
+                    agent,
+                    provider_id.clone(),
+                    HarnessSessionRequest::Start,
+                )),
+            )
+            .expect("exact response-loss replay returns retained readiness"),
+        HarnessSessionControlOutcome::Ready(session_id)
+    );
+    let mut changed = operation;
+    changed.request_digest = CommandDigest::from_bytes([99; 32]);
+    assert_eq!(
+        runtime
+            .control_session(
+                &changed,
+                Some(launch(
+                    agent,
+                    provider_id.clone(),
+                    HarnessSessionRequest::Start,
+                )),
+            )
+            .expect_err("changed operation identity fails closed")
+            .class,
+        HarnessErrorClass::PersistenceCollision
+    );
+
+    let uncertain = HarnessSessionOperation {
+        operation_id: OperationId::from_bytes([34; 32]),
+        request_digest: CommandDigest::from_bytes([35; 32]),
+        agent_id: AgentId::from_bytes([36; 32]),
+        provider_id: provider_id.clone(),
+        kind: HarnessSessionOperationKind::Resume(
+            ProviderSessionId::new("missing-session").expect("session"),
+        ),
+        state: HarnessSessionOperationState::Prepared,
+    };
+    state
+        .apply(HarnessStateMutation::QueueSessionOperation(
+            uncertain.clone(),
+        ))
+        .expect("operation prepares");
+    state
+        .apply(HarnessStateMutation::SetSessionOperationState {
+            operation_id: uncertain.operation_id,
+            state: HarnessSessionOperationState::Uncertain,
+        })
+        .expect("uncertainty checkpoints");
+    assert_eq!(
+        runtime
+            .control_session(
+                &uncertain,
+                Some(launch(
+                    AgentId::from_bytes([36; 32]),
+                    provider_id,
+                    HarnessSessionRequest::Resume {
+                        session_id: ProviderSessionId::new("missing-session").expect("session"),
+                    },
+                )),
+            )
+            .expect("restart observation remains explicit"),
+        HarnessSessionControlOutcome::Uncertain
+    );
+}
+
 fn supervisor(dependencies: HarnessSupervisorDependencies) -> HarnessSupervisor {
     HarnessSupervisor::new(
         HarnessSupervisorConfig {
@@ -255,6 +360,7 @@ fn launch(
     HarnessLaunchRequest {
         agent_id,
         project_id: None,
+        launch_directory: None,
         provider_id,
         session,
         environment: HarnessEnvironment::copy_from([(
@@ -337,6 +443,7 @@ struct MemoryState {
 struct MemoryStateData {
     leases: BTreeMap<AgentId, HarnessWorkerLease>,
     ready: BTreeMap<AgentId, HarnessReadySession>,
+    session_operations: BTreeMap<OperationId, HarnessSessionOperation>,
     deliveries: BTreeMap<(AgentId, MessageId), HarnessDeliveryRecord>,
     events: BTreeMap<(AgentId, MessageId), HarnessEventCheckpoint>,
 }
@@ -347,6 +454,7 @@ impl MemoryState {
         HarnessStateSnapshot {
             leases: state.leases.values().copied().collect(),
             ready_sessions: state.ready.values().cloned().collect(),
+            session_operations: state.session_operations.values().cloned().collect(),
             deliveries: state.deliveries.values().cloned().collect(),
             events: state.events.values().cloned().collect(),
         }
@@ -374,6 +482,7 @@ impl MemoryState {
 }
 
 impl HarnessStatePort for MemoryState {
+    #[allow(clippy::too_many_lines)]
     fn apply(&self, mutation: HarnessStateMutation) -> Result<HarnessLeaseOutcome, HarnessError> {
         let mut state = self
             .inner
@@ -419,6 +528,45 @@ impl HarnessStatePort for MemoryState {
             HarnessStateMutation::SetReadySession { owner_token, ready } => {
                 exact_owner(&state, ready.agent_id, owner_token)?;
                 state.ready.insert(ready.agent_id, ready);
+                Ok(HarnessLeaseOutcome::Acquired)
+            }
+            HarnessStateMutation::QueueSessionOperation(operation) => {
+                if state
+                    .session_operations
+                    .get(&operation.operation_id)
+                    .is_some_and(|prior| {
+                        prior.request_digest != operation.request_digest
+                            || prior.agent_id != operation.agent_id
+                            || prior.provider_id != operation.provider_id
+                            || prior.kind != operation.kind
+                    })
+                {
+                    return Err(HarnessError::new(HarnessErrorClass::PersistenceCollision));
+                }
+                state
+                    .session_operations
+                    .entry(operation.operation_id)
+                    .or_insert(operation);
+                Ok(HarnessLeaseOutcome::Acquired)
+            }
+            HarnessStateMutation::SetSessionOperationState {
+                operation_id,
+                state: next,
+            } => {
+                let operation = state
+                    .session_operations
+                    .get_mut(&operation_id)
+                    .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
+                if matches!(
+                    operation.state,
+                    HarnessSessionOperationState::Ready(_)
+                        | HarnessSessionOperationState::Stopped
+                        | HarnessSessionOperationState::Rejected
+                ) && operation.state != next
+                {
+                    return Err(HarnessError::new(HarnessErrorClass::PersistenceCollision));
+                }
+                operation.state = next;
                 Ok(HarnessLeaseOutcome::Acquired)
             }
             HarnessStateMutation::QueueDelivery(delivery) => {
@@ -482,6 +630,19 @@ impl HarnessStatePort for MemoryState {
             return Err(HarnessError::new(HarnessErrorClass::InvalidInput));
         }
         Ok(self.snapshot())
+    }
+
+    fn session_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<Option<HarnessSessionOperation>, HarnessError> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("state lock")
+            .session_operations
+            .get(&operation_id)
+            .cloned())
     }
 
     fn delivery(

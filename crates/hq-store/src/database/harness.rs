@@ -8,8 +8,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use crate::{
     HarnessLeaseOutcome, MAX_HARNESS_STATE_QUERY_ITEMS, StoreError, StoreErrorClass,
     StoredHarnessDelivery, StoredHarnessDeliveryState, StoredHarnessEventCheckpoint,
-    StoredHarnessLease, StoredHarnessReadySession, StoredHarnessStateMutation,
-    StoredHarnessStateSnapshot,
+    StoredHarnessLease, StoredHarnessReadySession, StoredHarnessSessionOperation,
+    StoredHarnessSessionOperationKind, StoredHarnessSessionOperationState,
+    StoredHarnessStateMutation, StoredHarnessStateSnapshot,
 };
 
 pub(super) fn apply(
@@ -39,6 +40,17 @@ pub(super) fn apply(
         StoredHarnessStateMutation::SetReadySession { owner_token, ready } => {
             ensure_owner(&transaction, ready.agent_id, owner_token)?;
             set_ready_session(&transaction, &ready)?;
+            HarnessLeaseOutcome::Acquired
+        }
+        StoredHarnessStateMutation::QueueSessionOperation(operation) => {
+            queue_session_operation(&transaction, &operation)?;
+            HarnessLeaseOutcome::Acquired
+        }
+        StoredHarnessStateMutation::SetSessionOperationState {
+            operation_id,
+            state,
+        } => {
+            set_session_operation_state(&transaction, operation_id, &state)?;
             HarnessLeaseOutcome::Acquired
         }
         StoredHarnessStateMutation::QueueDelivery(delivery) => {
@@ -89,9 +101,80 @@ pub(super) fn load(
     Ok(StoredHarnessStateSnapshot {
         leases: load_leases(connection, limit)?,
         ready_sessions: load_ready_sessions(connection, limit)?,
+        session_operations: load_session_operations(connection, limit)?,
         deliveries: load_deliveries(connection, limit)?,
         events: load_events(connection, limit)?,
     })
+}
+
+fn queue_session_operation(
+    transaction: &Transaction<'_>,
+    operation: &StoredHarnessSessionOperation,
+) -> Result<(), StoreError> {
+    if operation.state != StoredHarnessSessionOperationState::Prepared {
+        return Err(invalid());
+    }
+    if let Some(stored) = load_session_operation(transaction, operation.operation_id)? {
+        return if same_session_operation_identity(&stored, operation) {
+            Ok(())
+        } else {
+            Err(conflict())
+        };
+    }
+    let (control_kind, requested_session) = encode_session_operation_kind(&operation.kind);
+    transaction
+        .execute(
+            "INSERT INTO harness_session_operations(\
+                operation_id, request_digest, agent_id, provider_id, control_kind,\
+                requested_session, operation_state, ready_session\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, NULL)",
+            params![
+                operation.operation_id.as_bytes().as_slice(),
+                operation.request_digest.as_bytes().as_slice(),
+                operation.agent_id.as_bytes().as_slice(),
+                operation.provider_id.as_str(),
+                control_kind,
+                requested_session,
+            ],
+        )
+        .map_err(database)?;
+    Ok(())
+}
+
+fn same_session_operation_identity(
+    stored: &StoredHarnessSessionOperation,
+    proposed: &StoredHarnessSessionOperation,
+) -> bool {
+    stored.operation_id == proposed.operation_id
+        && stored.request_digest == proposed.request_digest
+        && stored.agent_id == proposed.agent_id
+        && stored.provider_id == proposed.provider_id
+        && stored.kind == proposed.kind
+}
+
+fn set_session_operation_state(
+    transaction: &Transaction<'_>,
+    operation_id: OperationId,
+    proposed: &StoredHarnessSessionOperationState,
+) -> Result<(), StoreError> {
+    let stored = load_session_operation(transaction, operation_id)?.ok_or_else(conflict)?;
+    if stored.state == *proposed {
+        return Ok(());
+    }
+    if session_operation_rank(proposed) <= session_operation_rank(&stored.state)
+        || session_operation_terminal(&stored.state)
+    {
+        return Err(conflict());
+    }
+    let (state, ready_session) = encode_session_operation_state(proposed);
+    transaction
+        .execute(
+            "UPDATE harness_session_operations SET operation_state = ?2, ready_session = ?3 \
+             WHERE operation_id = ?1",
+            params![operation_id.as_bytes().as_slice(), state, ready_session],
+        )
+        .map_err(database)?;
+    Ok(())
 }
 
 fn set_ready_session(
@@ -400,6 +483,80 @@ fn load_ready_sessions(
         .collect()
 }
 
+fn load_session_operations(
+    connection: &Connection,
+    limit: i64,
+) -> Result<Vec<StoredHarnessSessionOperation>, StoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT operation_id, request_digest, agent_id, provider_id, control_kind, \
+                    requested_session, operation_state, ready_session \
+             FROM harness_session_operations ORDER BY operation_id LIMIT ?1",
+        )
+        .map_err(database)?;
+    statement
+        .query_map([limit], session_operation_row)
+        .map_err(database)?
+        .map(|row| decode_session_operation(row.map_err(database)?))
+        .collect()
+}
+
+/// Loads one exact managed-session operation.
+pub(super) fn load_session_operation(
+    connection: &Connection,
+    operation_id: OperationId,
+) -> Result<Option<StoredHarnessSessionOperation>, StoreError> {
+    connection
+        .query_row(
+            "SELECT operation_id, request_digest, agent_id, provider_id, control_kind, \
+                    requested_session, operation_state, ready_session \
+             FROM harness_session_operations WHERE operation_id = ?1",
+            [operation_id.as_bytes().as_slice()],
+            session_operation_row,
+        )
+        .optional()
+        .map_err(database)?
+        .map(decode_session_operation)
+        .transpose()
+}
+
+type SessionOperationRow = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    String,
+    i64,
+    Option<String>,
+    i64,
+    Option<String>,
+);
+
+fn session_operation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionOperationRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
+}
+
+fn decode_session_operation(
+    row: SessionOperationRow,
+) -> Result<StoredHarnessSessionOperation, StoreError> {
+    Ok(StoredHarnessSessionOperation {
+        operation_id: OperationId::from_bytes(fixed(row.0)?),
+        request_digest: CommandDigest::from_bytes(fixed(row.1)?),
+        agent_id: AgentId::from_bytes(fixed(row.2)?),
+        provider_id: ProviderId::new(row.3).map_err(|_| corrupt())?,
+        kind: decode_session_operation_kind(row.4, row.5)?,
+        state: decode_session_operation_state(row.6, row.7)?,
+    })
+}
+
 fn load_events(
     connection: &Connection,
     limit: i64,
@@ -578,6 +735,75 @@ fn decode_delivery_state(value: i64) -> Result<StoredHarnessDeliveryState, Store
         4 => Ok(StoredHarnessDeliveryState::Rejected),
         _ => Err(corrupt()),
     }
+}
+
+fn encode_session_operation_kind(kind: &StoredHarnessSessionOperationKind) -> (i64, Option<&str>) {
+    match kind {
+        StoredHarnessSessionOperationKind::Start => (1, None),
+        StoredHarnessSessionOperationKind::Resume(session) => (2, Some(session.as_str())),
+        StoredHarnessSessionOperationKind::Stop => (3, None),
+    }
+}
+
+fn decode_session_operation_kind(
+    kind: i64,
+    requested_session: Option<String>,
+) -> Result<StoredHarnessSessionOperationKind, StoreError> {
+    match (kind, requested_session) {
+        (1, None) => Ok(StoredHarnessSessionOperationKind::Start),
+        (2, Some(session)) => ProviderSessionId::new(session)
+            .map(StoredHarnessSessionOperationKind::Resume)
+            .map_err(|_| corrupt()),
+        (3, None) => Ok(StoredHarnessSessionOperationKind::Stop),
+        _ => Err(corrupt()),
+    }
+}
+
+fn encode_session_operation_state(
+    state: &StoredHarnessSessionOperationState,
+) -> (i64, Option<&str>) {
+    match state {
+        StoredHarnessSessionOperationState::Prepared => (1, None),
+        StoredHarnessSessionOperationState::Uncertain => (2, None),
+        StoredHarnessSessionOperationState::Ready(session) => (3, Some(session.as_str())),
+        StoredHarnessSessionOperationState::Stopped => (4, None),
+        StoredHarnessSessionOperationState::Rejected => (5, None),
+    }
+}
+
+fn decode_session_operation_state(
+    state: i64,
+    ready_session: Option<String>,
+) -> Result<StoredHarnessSessionOperationState, StoreError> {
+    match (state, ready_session) {
+        (1, None) => Ok(StoredHarnessSessionOperationState::Prepared),
+        (2, None) => Ok(StoredHarnessSessionOperationState::Uncertain),
+        (3, Some(session)) => ProviderSessionId::new(session)
+            .map(StoredHarnessSessionOperationState::Ready)
+            .map_err(|_| corrupt()),
+        (4, None) => Ok(StoredHarnessSessionOperationState::Stopped),
+        (5, None) => Ok(StoredHarnessSessionOperationState::Rejected),
+        _ => Err(corrupt()),
+    }
+}
+
+const fn session_operation_rank(state: &StoredHarnessSessionOperationState) -> u8 {
+    match state {
+        StoredHarnessSessionOperationState::Prepared => 1,
+        StoredHarnessSessionOperationState::Uncertain => 2,
+        StoredHarnessSessionOperationState::Ready(_)
+        | StoredHarnessSessionOperationState::Stopped
+        | StoredHarnessSessionOperationState::Rejected => 3,
+    }
+}
+
+const fn session_operation_terminal(state: &StoredHarnessSessionOperationState) -> bool {
+    matches!(
+        state,
+        StoredHarnessSessionOperationState::Ready(_)
+            | StoredHarnessSessionOperationState::Stopped
+            | StoredHarnessSessionOperationState::Rejected
+    )
 }
 
 const fn encode_bool(value: bool) -> i64 {

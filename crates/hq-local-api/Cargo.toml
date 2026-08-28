@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 hq-application.workspace = true
 hq-domain.workspace = true
 hq-protocol.workspace = true

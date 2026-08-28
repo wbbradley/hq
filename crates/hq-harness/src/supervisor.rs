@@ -81,6 +81,49 @@ pub struct HarnessReadySession {
     pub session_id: ProviderSessionId,
 }
 
+/// Exact provider-neutral lifecycle action retained for request reconciliation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HarnessSessionOperationKind {
+    /// Create a fresh durable provider session.
+    Start,
+    /// Resume exactly the cited durable provider session.
+    Resume(ProviderSessionId),
+    /// Stop only the current local runtime owner.
+    Stop,
+}
+
+/// Monotonic durable disposition of one managed-session control operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HarnessSessionOperationState {
+    /// Exact request identity is durable but no provider call has begun.
+    Prepared,
+    /// The provider boundary may have been crossed and requires observation.
+    Uncertain,
+    /// The exact provider session was acknowledged ready.
+    Ready(ProviderSessionId),
+    /// The local runtime was authoritatively stopped.
+    Stopped,
+    /// The operation was authoritatively rejected.
+    Rejected,
+}
+
+/// Passive durable managed-session operation without environment or path data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessSessionOperation {
+    /// Stable external-operation identity.
+    pub operation_id: hq_domain::OperationId,
+    /// Digest of the complete exact request, including sensitive launch inputs.
+    pub request_digest: CommandDigest,
+    /// Named agent whose local runtime is controlled.
+    pub agent_id: AgentId,
+    /// Neutral provider namespace.
+    pub provider_id: ProviderId,
+    /// Exact requested lifecycle behavior.
+    pub kind: HarnessSessionOperationKind,
+    /// Current monotonic disposition.
+    pub state: HarnessSessionOperationState,
+}
+
 /// Monotonic durable delivery state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HarnessDeliveryState {
@@ -154,6 +197,15 @@ pub enum HarnessStateMutation {
         /// Acknowledged ready session.
         ready: HarnessReadySession,
     },
+    /// Insert one exact prepared managed-session operation idempotently.
+    QueueSessionOperation(HarnessSessionOperation),
+    /// Advance one existing managed-session operation monotonically.
+    SetSessionOperationState {
+        /// Stable external-operation identity.
+        operation_id: hq_domain::OperationId,
+        /// New monotonic disposition.
+        state: HarnessSessionOperationState,
+    },
     /// Queue one exact provider input idempotently.
     QueueDelivery(HarnessDeliveryRecord),
     /// Advance one delivery under the exact live token.
@@ -183,6 +235,8 @@ pub struct HarnessStateSnapshot {
     pub leases: Vec<HarnessWorkerLease>,
     /// Ready sessions in agent order.
     pub ready_sessions: Vec<HarnessReadySession>,
+    /// Managed-session operations in stable identity order.
+    pub session_operations: Vec<HarnessSessionOperation>,
     /// Deliveries in durable queue order.
     pub deliveries: Vec<HarnessDeliveryRecord>,
     /// Event checkpoints in stable identity order.
@@ -196,6 +250,12 @@ pub trait HarnessStatePort: Send + Sync {
 
     /// Loads one bounded deterministic repair snapshot.
     fn load(&self, limit: usize) -> Result<HarnessStateSnapshot, HarnessError>;
+
+    /// Loads one exact managed-session control operation for response-loss replay.
+    fn session_operation(
+        &self,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<Option<HarnessSessionOperation>, HarnessError>;
 
     /// Loads one exact durable delivery for idempotent client replay.
     fn delivery(
@@ -293,6 +353,8 @@ pub struct HarnessLaunchRequest {
     pub agent_id: AgentId,
     /// Optional project binding.
     pub project_id: Option<ProjectId>,
+    /// Optional validated launch directory passed without filesystem interpretation.
+    pub launch_directory: Option<hq_domain::ResourceLocator>,
     /// Registered neutral provider namespace.
     pub provider_id: ProviderId,
     /// Exact start or resume request.
@@ -301,12 +363,26 @@ pub struct HarnessLaunchRequest {
     pub environment: HarnessEnvironment,
 }
 
+/// Definite or explicitly reconcilable managed-session control result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HarnessSessionControlOutcome {
+    /// The exact provider session is live and acknowledged.
+    Ready(ProviderSessionId),
+    /// The local runtime is authoritatively absent.
+    Stopped,
+    /// The request was authoritatively rejected.
+    Rejected,
+    /// Completion is unknown and exact operation replay is required.
+    Uncertain,
+}
+
 impl fmt::Debug for HarnessLaunchRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("HarnessLaunchRequest")
             .field("agent_id", &self.agent_id)
             .field("project_id", &self.project_id)
+            .field("launch_directory", &self.launch_directory)
             .field("provider_id", &self.provider_id)
             .field("session", &self.session)
             .field("environment", &self.environment)
@@ -363,6 +439,166 @@ impl HarnessSupervisor {
         })
     }
 
+    /// Performs or reconciles one exact durable managed-session operation.
+    pub fn control_session(
+        &self,
+        operation: &HarnessSessionOperation,
+        launch: Option<HarnessLaunchRequest>,
+    ) -> Result<HarnessSessionControlOutcome, HarnessError> {
+        validate_session_control(operation, launch.as_ref())?;
+        self.dependencies
+            .state
+            .apply(HarnessStateMutation::QueueSessionOperation(
+                operation.clone(),
+            ))?;
+        let retained = self
+            .dependencies
+            .state
+            .session_operation(operation.operation_id)?
+            .ok_or_else(|| HarnessError::new(HarnessErrorClass::Unavailable))?;
+        if !same_session_operation_identity(operation, &retained) {
+            return Err(HarnessError::new(HarnessErrorClass::PersistenceCollision));
+        }
+        if let Some(outcome) = terminal_session_outcome(&retained.state) {
+            return Ok(outcome);
+        }
+        if retained.state == HarnessSessionOperationState::Uncertain
+            && let Some(outcome) = self.observe_uncertain_session_operation(&retained)?
+        {
+            return Ok(outcome);
+        }
+        if retained.state == HarnessSessionOperationState::Uncertain {
+            return Ok(HarnessSessionControlOutcome::Uncertain);
+        }
+        self.set_session_operation_state(
+            retained.operation_id,
+            HarnessSessionOperationState::Uncertain,
+        )?;
+        match retained.kind {
+            HarnessSessionOperationKind::Start | HarnessSessionOperationKind::Resume(_) => {
+                let request =
+                    launch.ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
+                let result = if matches!(retained.kind, HarnessSessionOperationKind::Resume(_)) {
+                    self.recover(request)
+                } else {
+                    self.launch(request)
+                };
+                match result {
+                    Ok(session) => {
+                        self.set_session_operation_state(
+                            retained.operation_id,
+                            HarnessSessionOperationState::Ready(session.clone()),
+                        )?;
+                        Ok(HarnessSessionControlOutcome::Ready(session))
+                    }
+                    Err(error) if definitive_session_rejection(error.class) => {
+                        self.set_session_operation_state(
+                            retained.operation_id,
+                            HarnessSessionOperationState::Rejected,
+                        )?;
+                        Ok(HarnessSessionControlOutcome::Rejected)
+                    }
+                    Err(_) => Ok(HarnessSessionControlOutcome::Uncertain),
+                }
+            }
+            HarnessSessionOperationKind::Stop => match self.stop(retained.agent_id) {
+                Ok(report) if report.failures.is_empty() => {
+                    self.set_session_operation_state(
+                        retained.operation_id,
+                        HarnessSessionOperationState::Stopped,
+                    )?;
+                    Ok(HarnessSessionControlOutcome::Stopped)
+                }
+                Err(error) if error.class == HarnessErrorClass::Unavailable => {
+                    self.set_session_operation_state(
+                        retained.operation_id,
+                        HarnessSessionOperationState::Stopped,
+                    )?;
+                    Ok(HarnessSessionControlOutcome::Stopped)
+                }
+                Ok(_) | Err(_) => Ok(HarnessSessionControlOutcome::Uncertain),
+            },
+        }
+    }
+
+    fn observe_uncertain_session_operation(
+        &self,
+        operation: &HarnessSessionOperation,
+    ) -> Result<Option<HarnessSessionControlOutcome>, HarnessError> {
+        let workers = self.lock_workers()?;
+        let worker = workers
+            .get(&operation.agent_id)
+            .map(|worker| (worker.provider_id.clone(), worker.session_id.clone()));
+        drop(workers);
+        match &operation.kind {
+            HarnessSessionOperationKind::Start
+                if worker
+                    .as_ref()
+                    .is_some_and(|(provider, _)| provider == &operation.provider_id) =>
+            {
+                let session = worker
+                    .map(|(_, session)| session)
+                    .ok_or_else(|| HarnessError::new(HarnessErrorClass::PersistenceCollision))?;
+                self.set_session_operation_state(
+                    operation.operation_id,
+                    HarnessSessionOperationState::Ready(session.clone()),
+                )?;
+                Ok(Some(HarnessSessionControlOutcome::Ready(session)))
+            }
+            HarnessSessionOperationKind::Resume(expected)
+                if worker.as_ref().is_some_and(|(provider, session)| {
+                    provider == &operation.provider_id && session == expected
+                }) =>
+            {
+                self.set_session_operation_state(
+                    operation.operation_id,
+                    HarnessSessionOperationState::Ready(expected.clone()),
+                )?;
+                Ok(Some(HarnessSessionControlOutcome::Ready(expected.clone())))
+            }
+            HarnessSessionOperationKind::Stop if worker.is_none() => {
+                self.set_session_operation_state(
+                    operation.operation_id,
+                    HarnessSessionOperationState::Stopped,
+                )?;
+                Ok(Some(HarnessSessionControlOutcome::Stopped))
+            }
+            HarnessSessionOperationKind::Stop
+                if worker
+                    .as_ref()
+                    .is_some_and(|(provider, _)| provider == &operation.provider_id) =>
+            {
+                let report = self.stop(operation.agent_id)?;
+                if report.failures.is_empty() {
+                    self.set_session_operation_state(
+                        operation.operation_id,
+                        HarnessSessionOperationState::Stopped,
+                    )?;
+                    Ok(Some(HarnessSessionControlOutcome::Stopped))
+                } else {
+                    Ok(Some(HarnessSessionControlOutcome::Uncertain))
+                }
+            }
+            HarnessSessionOperationKind::Start
+            | HarnessSessionOperationKind::Resume(_)
+            | HarnessSessionOperationKind::Stop => Ok(None),
+        }
+    }
+
+    fn set_session_operation_state(
+        &self,
+        operation_id: hq_domain::OperationId,
+        state: HarnessSessionOperationState,
+    ) -> Result<(), HarnessError> {
+        self.dependencies
+            .state
+            .apply(HarnessStateMutation::SetSessionOperationState {
+                operation_id,
+                state,
+            })
+            .map(|_| ())
+    }
+
     /// Claims and opens one exact logical worker, returning acknowledged readiness.
     pub fn launch(&self, request: HarnessLaunchRequest) -> Result<ProviderSessionId, HarnessError> {
         self.ensure_accepting()?;
@@ -390,6 +626,7 @@ impl HarnessSupervisor {
             HarnessInstanceRequest {
                 agent_id: request.agent_id,
                 project_id: request.project_id,
+                launch_directory: request.launch_directory,
                 environment: request.environment,
             },
             request.session,
@@ -677,6 +914,78 @@ fn reconcile_delivery(
             Err(HarnessError::new(class))
         }
     }
+}
+
+fn validate_session_control(
+    operation: &HarnessSessionOperation,
+    launch: Option<&HarnessLaunchRequest>,
+) -> Result<(), HarnessError> {
+    match (&operation.kind, launch) {
+        (HarnessSessionOperationKind::Stop, None) => Ok(()),
+        (HarnessSessionOperationKind::Start, Some(launch))
+            if launch.agent_id == operation.agent_id
+                && launch.provider_id == operation.provider_id
+                && launch.session == HarnessSessionRequest::Start =>
+        {
+            Ok(())
+        }
+        (HarnessSessionOperationKind::Resume(expected), Some(launch))
+            if launch.agent_id == operation.agent_id
+                && launch.provider_id == operation.provider_id
+                && launch.session
+                    == (HarnessSessionRequest::Resume {
+                        session_id: expected.clone(),
+                    }) =>
+        {
+            Ok(())
+        }
+        (
+            HarnessSessionOperationKind::Start
+            | HarnessSessionOperationKind::Resume(_)
+            | HarnessSessionOperationKind::Stop,
+            _,
+        ) => Err(HarnessError::new(HarnessErrorClass::InvalidInput)),
+    }
+}
+
+fn same_session_operation_identity(
+    proposed: &HarnessSessionOperation,
+    retained: &HarnessSessionOperation,
+) -> bool {
+    proposed.operation_id == retained.operation_id
+        && proposed.request_digest == retained.request_digest
+        && proposed.agent_id == retained.agent_id
+        && proposed.provider_id == retained.provider_id
+        && proposed.kind == retained.kind
+}
+
+fn terminal_session_outcome(
+    state: &HarnessSessionOperationState,
+) -> Option<HarnessSessionControlOutcome> {
+    match state {
+        HarnessSessionOperationState::Prepared | HarnessSessionOperationState::Uncertain => None,
+        HarnessSessionOperationState::Ready(session) => {
+            Some(HarnessSessionControlOutcome::Ready(session.clone()))
+        }
+        HarnessSessionOperationState::Stopped => Some(HarnessSessionControlOutcome::Stopped),
+        HarnessSessionOperationState::Rejected => Some(HarnessSessionControlOutcome::Rejected),
+    }
+}
+
+const fn definitive_session_rejection(class: HarnessErrorClass) -> bool {
+    matches!(
+        class,
+        HarnessErrorClass::InvalidInput
+            | HarnessErrorClass::Unsupported
+            | HarnessErrorClass::ProviderNotRegistered
+            | HarnessErrorClass::RegistrationConflict
+            | HarnessErrorClass::UnsafeRecovery
+            | HarnessErrorClass::SessionIdentityMismatch
+            | HarnessErrorClass::SessionNotFound
+            | HarnessErrorClass::SecretInputRejected
+            | HarnessErrorClass::IntakeClosed
+            | HarnessErrorClass::OwnershipConflict
+    )
 }
 
 fn renew_worker(

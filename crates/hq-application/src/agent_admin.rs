@@ -61,6 +61,30 @@ pub struct AgentSessionSelectionRequest {
     pub selection_frontier: BTreeSet<FactId>,
 }
 
+/// Passive complete intent for one immutable mailbox/provider-session binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentSessionBindingRequest {
+    /// Exact installation-qualified agent mailbox.
+    pub mailbox: MailboxAddress,
+    /// Exact projected agent-mailbox creation fact.
+    pub mailbox_root: FactId,
+    /// Neutral provider namespace.
+    pub provider: ProviderId,
+    /// Exact immutable provider session acknowledged ready.
+    pub session: ProviderSessionId,
+}
+
+/// Passive complete intent for one mailbox repository-context record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentSessionContextRequest {
+    /// Exact installation-qualified agent mailbox.
+    pub mailbox: MailboxAddress,
+    /// Exact projected agent-mailbox creation fact.
+    pub mailbox_root: FactId,
+    /// Validated repository and launch-directory context.
+    pub context: RepositoryContext,
+}
+
 /// Passive complete intent for one exact provider-session display rename or clear.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentSessionRenameRequest {
@@ -149,6 +173,51 @@ pub fn plan_agent_retirement(
         SemanticPayload::AgentRetired {
             agent_id: request.agent_id,
             mailbox_id: request.mailbox.mailbox_id(),
+        },
+        inputs.auxiliary_randomness,
+    ))
+}
+
+/// Plans one immutable provider-session binding after exact runtime readiness.
+pub fn plan_agent_session_binding(
+    authority: LocalInstallationAuthority,
+    inputs: LocalFactInputs,
+    request: AgentSessionBindingRequest,
+) -> Result<FactPlan, ApplicationError> {
+    if request.mailbox.installation_id() != authority.installation_id {
+        return Err(invalid_request());
+    }
+    Ok(FactPlan::new(
+        authority.installation_id,
+        inputs.authored_at,
+        FactScope::InstallationPrivate(authority.installation_id),
+        local_causal(authority, BTreeSet::from([request.mailbox_root]))?,
+        SemanticPayload::MailboxSessionBound {
+            mailbox_id: request.mailbox.mailbox_id(),
+            provider: request.provider,
+            session: request.session,
+        },
+        inputs.auxiliary_randomness,
+    ))
+}
+
+/// Plans one immutable repository context after validating the launch directory.
+pub fn plan_agent_session_context(
+    authority: LocalInstallationAuthority,
+    inputs: LocalFactInputs,
+    request: AgentSessionContextRequest,
+) -> Result<FactPlan, ApplicationError> {
+    if request.mailbox.installation_id() != authority.installation_id {
+        return Err(invalid_request());
+    }
+    Ok(FactPlan::new(
+        authority.installation_id,
+        inputs.authored_at,
+        FactScope::InstallationPrivate(authority.installation_id),
+        local_causal(authority, BTreeSet::from([request.mailbox_root]))?,
+        SemanticPayload::MailboxContextRecorded {
+            mailbox_id: request.mailbox.mailbox_id(),
+            context: request.context,
         },
         inputs.auxiliary_randomness,
     ))

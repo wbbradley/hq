@@ -46,7 +46,7 @@ use crate::{
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 13;
 const SCHEMA_MARKER: &str = "hq-store-v13-project-remote-routing-2026-08-28";
-const SCHEMA_TABLES: [&str; 116] = [
+const SCHEMA_TABLES: [&str; 117] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -159,6 +159,7 @@ const SCHEMA_TABLES: [&str; 116] = [
     "relay_quarantine",
     "harness_worker_leases",
     "harness_ready_sessions",
+    "harness_session_operations",
     "harness_deliveries",
     "harness_event_checkpoints",
     "project_sagas",
@@ -1239,6 +1240,28 @@ CREATE TABLE harness_ready_sessions (
         CHECK(typeof(session_id) = 'text' AND length(CAST(session_id AS BLOB)) BETWEEN 1 AND 256)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE harness_session_operations (
+    operation_id BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    request_digest BLOB NOT NULL
+        CHECK(typeof(request_digest) = 'blob' AND length(request_digest) = 32),
+    agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
+    provider_id TEXT NOT NULL
+        CHECK(typeof(provider_id) = 'text' AND length(CAST(provider_id AS BLOB)) BETWEEN 1 AND 64),
+    control_kind INTEGER NOT NULL CHECK(control_kind BETWEEN 1 AND 3),
+    requested_session TEXT
+        CHECK(requested_session IS NULL OR
+            (typeof(requested_session) = 'text' AND
+             length(CAST(requested_session AS BLOB)) BETWEEN 1 AND 256)),
+    operation_state INTEGER NOT NULL CHECK(operation_state BETWEEN 1 AND 5),
+    ready_session TEXT
+        CHECK(ready_session IS NULL OR
+            (typeof(ready_session) = 'text' AND
+             length(CAST(ready_session AS BLOB)) BETWEEN 1 AND 256)),
+    CHECK((control_kind = 2) = (requested_session IS NOT NULL)),
+    CHECK((operation_state = 3) = (ready_session IS NOT NULL))
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE harness_deliveries (
     agent_id BLOB NOT NULL CHECK(typeof(agent_id) = 'blob' AND length(agent_id) = 32),
     submission_id BLOB NOT NULL
@@ -1683,6 +1706,13 @@ impl Database {
         submission_id: hq_domain::MessageId,
     ) -> Result<Option<crate::StoredHarnessDelivery>, StoreError> {
         harness::load_delivery(&self.connection, agent_id, submission_id)
+    }
+
+    pub(super) fn load_harness_session_operation(
+        &self,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<Option<crate::StoredHarnessSessionOperation>, StoreError> {
+        harness::load_session_operation(&self.connection, operation_id)
     }
 
     pub(super) fn load_runnable_harness_deliveries(

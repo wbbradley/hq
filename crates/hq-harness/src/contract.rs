@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64, time::Durat
 
 use hq_domain::{
     ActivityKind, ActivityStatus, AgentId, BoundedVec, CommandDigest, ContentText, MessageId,
-    OperationId, ProjectId, ProviderSessionId, ShortText,
+    OperationId, ProjectId, ProviderSessionId, ResourceLocator, ShortText,
 };
 
 use crate::HarnessEnvironment;
@@ -111,6 +111,8 @@ pub struct HarnessInstanceRequest {
     pub agent_id: AgentId,
     /// Optional project binding; absence denotes a direct named-agent worker.
     pub project_id: Option<ProjectId>,
+    /// Optional validated launch directory; direct managed-session control always supplies it.
+    pub launch_directory: Option<ResourceLocator>,
     /// Memory-only copied launch environment; values are redacted and never durable.
     pub environment: HarnessEnvironment,
 }
@@ -121,6 +123,7 @@ impl fmt::Debug for HarnessInstanceRequest {
             .debug_struct("HarnessInstanceRequest")
             .field("agent_id", &self.agent_id)
             .field("project_id", &self.project_id)
+            .field("launch_directory", &self.launch_directory)
             .field("environment", &self.environment)
             .finish()
     }

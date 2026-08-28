@@ -40,6 +40,49 @@ pub struct StoredHarnessReadySession {
     pub session_id: ProviderSessionId,
 }
 
+/// Exact provider-neutral lifecycle action retained for replay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoredHarnessSessionOperationKind {
+    /// Create a fresh durable provider session.
+    Start,
+    /// Resume exactly the cited durable provider session.
+    Resume(ProviderSessionId),
+    /// Stop the current local runtime.
+    Stop,
+}
+
+/// Monotonic durable disposition of one managed-session control operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoredHarnessSessionOperationState {
+    /// Exact request identity is durable before provider I/O.
+    Prepared,
+    /// Provider completion is unknown and requires observation.
+    Uncertain,
+    /// The exact session was acknowledged ready.
+    Ready(ProviderSessionId),
+    /// The local runtime was authoritatively stopped.
+    Stopped,
+    /// The request was authoritatively rejected.
+    Rejected,
+}
+
+/// Durable managed-session operation containing no launch path or environment data.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredHarnessSessionOperation {
+    /// Stable external-operation identity.
+    pub operation_id: OperationId,
+    /// Digest of the complete exact request.
+    pub request_digest: CommandDigest,
+    /// Named agent whose runtime is controlled.
+    pub agent_id: AgentId,
+    /// Neutral provider namespace.
+    pub provider_id: ProviderId,
+    /// Exact requested lifecycle behavior.
+    pub kind: StoredHarnessSessionOperationKind,
+    /// Current monotonic disposition.
+    pub state: StoredHarnessSessionOperationState,
+}
+
 /// Monotonic durable provider-delivery state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoredHarnessDeliveryState {
@@ -119,6 +162,15 @@ pub enum StoredHarnessStateMutation {
         /// Ready durable provider session.
         ready: StoredHarnessReadySession,
     },
+    /// Insert one exact prepared managed-session operation idempotently.
+    QueueSessionOperation(StoredHarnessSessionOperation),
+    /// Advance one managed-session operation monotonically.
+    SetSessionOperationState {
+        /// Stable external-operation identity.
+        operation_id: OperationId,
+        /// New monotonic disposition.
+        state: StoredHarnessSessionOperationState,
+    },
     /// Queue one exact provider delivery idempotently.
     QueueDelivery(StoredHarnessDelivery),
     /// Advance one existing delivery monotonically.
@@ -148,6 +200,8 @@ pub struct StoredHarnessStateSnapshot {
     pub leases: Vec<StoredHarnessLease>,
     /// Exact acknowledged durable sessions in agent identity order.
     pub ready_sessions: Vec<StoredHarnessReadySession>,
+    /// Managed-session operations in stable identity order.
+    pub session_operations: Vec<StoredHarnessSessionOperation>,
     /// Delivery rows in queue-time, agent, and submission order.
     pub deliveries: Vec<StoredHarnessDelivery>,
     /// Event checkpoints in agent and event identity order.

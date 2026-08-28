@@ -46,6 +46,11 @@ owner tokens and copied secret environments remain opaque. `hq-testkit` owns the
 `docs/testing/conformance-v1.md`. Production adapters depend inward on the neutral contract; the
 neutral contract never imports a provider adapter or its wire vocabulary.
 
+The neutral session-operation record and the store-owned row record are intentionally separate
+public-field DTOs. `hq-node` performs one exhaustive mechanical mapping between them, preserving
+`hq-harness` independence from SQLite and `hq-store` independence from runtime policy without an
+accessor facade or compatibility layer.
+
 `hq-codex` implements the pinned provider boundary in `docs/codex-adapter-v1.md`. Passive launch and
 factory configuration use public fields; child ownership, RPC identities, recovery maps, pending
 interactive requests, and mutable session state remain opaque capabilities. Its private synchronous

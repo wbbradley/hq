@@ -54,12 +54,13 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[runtime/high] Compose managed named-agent provider sessions** — Add neutral start,
-  exact-resume, and stop commands over the local API; securely copy the caller environment and
-  launch directory only at the control boundary; register the Codex adapter in the foreground
-  node; durably reconcile provider output/activity; and bind, contextualize, and select the exact
-  ready session. Test stale sessions, resume mismatch, runtime uncertainty, redacted diagnostics,
-  restart recovery, and local API-only architecture.
+- **[runtime/high] Compose Codex workers and canonical harness persistence** — Register the Codex
+  adapter only in the foreground node composition root, resolve validated launch directories and
+  provider-private options there, continuously drain normalized provider events into idempotent
+  canonical output/activity persistence, and expose the completed `hq harness` client workflow.
+  Test process/runtime teardown, partial output-then-activity recovery, environment and diagnostic
+  redaction, exact Codex start/resume behavior, real foreground restart behavior, and local
+  API-only CLI architecture.
 
 - **[cli/high] Implement project/resource/worktree commands and audit non-TUI parity** — Expose
   project list/show/create/send/open/activate/handoff/close/archive/unarchive, desired-resource

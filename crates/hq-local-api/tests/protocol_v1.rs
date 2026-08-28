@@ -9,24 +9,25 @@ use hq_domain::{
 };
 use hq_local_api::project_command_from_v1;
 use hq_local_api::protocol::v1::{
-    AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSelectionCandidateDto,
-    AgentSessionBindingDto, AgentSessionNameCandidateDto, AgentSessionRequestDto,
-    AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto,
-    CanonicalEvidenceRequestDto, ClientHello, ConversationEntryDto, ConversationKeyDto,
-    ConversationMessageDto, ConversationPageDto, ConversationPageRequest, DecodeError,
-    DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto,
-    EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto, FrameDecoder,
-    HealthDomainDto, Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
-    MAX_FRAME_BYTES, MailboxAddressDto, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto,
-    MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto,
-    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto, RelayAccessDto,
-    RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto,
-    RemoteCommandProgressDto, Request, RequestEnvelope, RequestId, ResourceHealthDto,
-    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
-    ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
-    SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
+    AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
+    AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
+    AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
+    CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationEntryDto,
+    ConversationKeyDto, ConversationMessageDto, ConversationPageDto, ConversationPageRequest,
+    DecodeError, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
+    EffectRequestDto, EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto,
+    FrameDecoder, HealthDomainDto, Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest,
+    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MailboxAddressDto, MessagePurposeDto,
+    MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
+    PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+    ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
+    RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request, RequestEnvelope,
+    RequestId, ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
+    ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation,
+    ServerHello, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
     SubscriptionAcknowledgement, SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError,
-    VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto, negotiate,
+    VersionRange, VersionRejected, WireMessage, WorktreeProvisioningRequestDto,
+    agent_session_request_digest, negotiate,
 };
 
 fn build() -> BuildMetadata {
@@ -262,6 +263,67 @@ fn locator() -> ResourceLocatorDto {
         .expect("bounded locator")
 }
 
+#[test]
+fn launch_environment_is_binary_safe_redacted_and_bound_into_session_identity() {
+    let environment = LaunchEnvironmentDto::copy_from([
+        ("HQ_TOKEN", &[0xff, 0x80, b'x'][..]),
+        ("PATH", b"/usr/bin".as_slice()),
+    ])
+    .expect("valid environment");
+    let diagnostic = format!("{environment:?}");
+    assert_eq!(diagnostic, "LaunchEnvironmentDto { entry_count: 2, .. }");
+    assert!(!diagnostic.contains("HQ_TOKEN"));
+    assert!(!diagnostic.contains("/usr/bin"));
+
+    let body = AgentSessionRequestDto::new(
+        Id32::new([41; 32]),
+        "fake".to_owned(),
+        SessionControlDto::Start,
+        Some(AgentLaunchContextDto {
+            directory: locator(),
+            environment,
+        }),
+    )
+    .expect("session request");
+    let request = EffectRequestDto::new(
+        Id32::new([42; 32]),
+        Id32::new([0; 32]),
+        1_700_000_000_000,
+        body,
+    );
+    let digest = agent_session_request_digest(&request).expect("request digest");
+    let encoded = serde_json::to_vec(&request).expect("wire JSON");
+    let decoded: EffectRequestDto<AgentSessionRequestDto> =
+        serde_json::from_slice(&encoded).expect("binary environment round trips");
+    assert_eq!(
+        agent_session_request_digest(&decoded).expect("decoded digest"),
+        digest
+    );
+
+    let changed_environment =
+        LaunchEnvironmentDto::copy_from([("HQ_TOKEN", b"different".as_slice())])
+            .expect("changed environment");
+    let changed = EffectRequestDto::new(
+        request.operation_id,
+        Id32::new([0; 32]),
+        request.issued_at_unix_millis,
+        AgentSessionRequestDto::new(
+            request.body.agent_id,
+            request.body.provider,
+            SessionControlDto::Start,
+            Some(AgentLaunchContextDto {
+                directory: locator(),
+                environment: changed_environment,
+            }),
+        )
+        .expect("changed request"),
+    );
+    assert_ne!(
+        agent_session_request_digest(&changed).expect("changed digest"),
+        digest
+    );
+}
+
 fn repair_state_request() -> Request {
     Request::RepairState {
         operation_id: Id32::new([39; 32]),
@@ -360,14 +422,18 @@ fn every_request_notification_and_negotiation_family_interoperates() {
         Request::RelayStatus,
         Request::StateHealth,
         repair_state_request(),
-        Request::ControlAgentSession(effect(
+        Request::ControlAgentSession(Box::new(effect(
             AgentSessionRequestDto::new(
                 Id32::new([4; 32]),
                 "fake".to_owned(),
                 SessionControlDto::Resume("session-1".to_owned()),
+                Some(AgentLaunchContextDto {
+                    directory: locator(),
+                    environment: LaunchEnvironmentDto::default(),
+                }),
             )
             .expect("agent request"),
-        )),
+        ))),
         Request::InspectResource(effect(ResourceInspectionRequestDto {
             project_id: Id32::new([5; 32]),
             resource_id: Id32::new([6; 32]),

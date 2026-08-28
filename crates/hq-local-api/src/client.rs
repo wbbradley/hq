@@ -8,14 +8,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hq_domain::{CommandDigest, CommandId};
+use hq_domain::{CommandDigest, CommandId, OperationId};
 use sha2::{Digest, Sha256};
 
 use crate::protocol::v1::{
-    AgentRetirementOutcomeDto, AgentRetirementRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
-    ClientHello, DecodeError, ErrorResponse, Id32, InvalidationTopic, MutationAttemptDto,
+    AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSessionRequestDto,
+    AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata, ClientHello, DecodeError,
+    EffectOutcomeDto, EffectRequestDto, ErrorResponse, Id32, InvalidationTopic, MutationAttemptDto,
     MutationRequest, ProjectCommandOutcomeDto, ProjectCommandRequestDto, Request, RequestEnvelope,
     RequestId, Response, ResponseResult, SubscriptionRequestDto, V1, VersionRange, WireMessage,
+    agent_session_request_digest,
 };
 
 /// Maximum simultaneous exact retryable frames retained for response-loss replay.
@@ -186,6 +188,13 @@ pub enum ClientEvent {
         /// Typed workflow result or checkpoint.
         outcome: AgentRetirementOutcomeDto,
     },
+    /// A retry-safe managed-session operation returned typed durable progress.
+    AgentSession {
+        /// Stable external operation identity from the submitted request.
+        operation_id: OperationId,
+        /// Definite or explicitly uncertain runtime outcome.
+        outcome: EffectOutcomeDto<AgentSessionResultDto>,
+    },
     /// A correlated ordinary request completed successfully.
     Response {
         /// Original request correlation identity.
@@ -223,6 +232,8 @@ pub enum ClientOperation {
     Project(CommandId),
     /// Retry-safe node-owned named-agent retirement.
     AgentRetirement(CommandId),
+    /// Retry-safe managed named-agent session control.
+    AgentSession(OperationId),
 }
 
 /// Pure actions and semantic events produced by one state transition.
@@ -255,6 +266,8 @@ pub enum ClientError {
     IdentityExhausted,
     /// Subscription topics did not satisfy the closed v1 bounds.
     InvalidSubscription,
+    /// A managed-session body or its exact request digest is invalid.
+    InvalidAgentSessionRequest,
     /// An ordinary request was submitted without an active negotiated connection.
     NotConnected,
     /// Mutation, subscription, and refresh requests require their dedicated client methods.
@@ -291,6 +304,21 @@ struct PendingAgentRetirement {
 }
 
 #[derive(Clone, Debug)]
+struct PendingAgentSession {
+    request_id: RequestId,
+    digest: CommandDigest,
+    frame: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RetryableResponseIdentity {
+    mutation: Option<CommandId>,
+    project: Option<CommandId>,
+    retirement: Option<CommandId>,
+    session: Option<OperationId>,
+}
+
+#[derive(Clone, Debug)]
 struct SubscriptionIntent {
     seed: Id32,
     topics: Vec<InvalidationTopic>,
@@ -324,6 +352,7 @@ pub struct ReconnectingClient {
     pending_mutations: BTreeMap<CommandId, PendingMutation>,
     pending_project_commands: BTreeMap<CommandId, PendingProjectCommand>,
     pending_agent_retirements: BTreeMap<CommandId, PendingAgentRetirement>,
+    pending_agent_sessions: BTreeMap<OperationId, PendingAgentSession>,
     completed_digests: BTreeMap<CommandId, CommandDigest>,
     completed_order: VecDeque<CommandId>,
     completed_capacity: usize,
@@ -358,6 +387,7 @@ impl ReconnectingClient {
             pending_mutations: BTreeMap::new(),
             pending_project_commands: BTreeMap::new(),
             pending_agent_retirements: BTreeMap::new(),
+            pending_agent_sessions: BTreeMap::new(),
             completed_digests: BTreeMap::new(),
             completed_order: VecDeque::new(),
             completed_capacity: completed_identity_capacity,
@@ -568,6 +598,46 @@ impl ReconnectingClient {
         })
     }
 
+    /// Queues or sends exact managed-session control and retains its frame across response loss.
+    pub fn submit_agent_session(
+        &mut self,
+        request: EffectRequestDto<AgentSessionRequestDto>,
+    ) -> Result<ClientTransition, ClientError> {
+        let operation_id = OperationId::from_bytes(request.operation_id.bytes());
+        let identity = CommandId::from_bytes(request.operation_id.bytes());
+        let digest = CommandDigest::from_bytes(request.request_digest.bytes());
+        let computed = agent_session_request_digest(&request)
+            .map_err(|_| ClientError::InvalidAgentSessionRequest)?;
+        if computed != digest {
+            return Err(ClientError::InvalidAgentSessionRequest);
+        }
+        if self.retryable_identity_exists(identity, digest)? {
+            return Ok(ClientTransition::default());
+        }
+        if self.retryable_command_count() >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS {
+            return Err(ClientError::RetryableCommandCapacity);
+        }
+        let request_id = self.allocate_request_id()?;
+        let frame = request_frame(request_id, Request::ControlAgentSession(Box::new(request)))?;
+        self.pending_agent_sessions.insert(
+            operation_id,
+            PendingAgentSession {
+                request_id,
+                digest,
+                frame: frame.clone(),
+            },
+        );
+        let actions = self
+            .active_generation()
+            .map_or_else(Vec::new, |generation| {
+                vec![ClientAction::Write { generation, frame }]
+            });
+        Ok(ClientTransition {
+            actions,
+            events: Vec::new(),
+        })
+    }
+
     fn retryable_identity_exists(
         &self,
         command_id: CommandId,
@@ -586,6 +656,11 @@ impl ReconnectingClient {
                 self.pending_agent_retirements
                     .get(&command_id)
                     .map(|pending| pending.digest)
+            })
+            .or_else(|| {
+                self.pending_agent_sessions
+                    .get(&OperationId::from_bytes(*command_id.as_bytes()))
+                    .map(|pending| pending.digest)
             });
         let completed_digest = self.completed_digests.get(&command_id).copied();
         if pending_digest
@@ -602,6 +677,7 @@ impl ReconnectingClient {
         self.pending_mutations.len()
             + self.pending_project_commands.len()
             + self.pending_agent_retirements.len()
+            + self.pending_agent_sessions.len()
     }
 
     /// Sends one ordinary typed request through the shared correlation and loss path.
@@ -611,6 +687,7 @@ impl ReconnectingClient {
             Request::Mutation(_)
                 | Request::ControlProject(_)
                 | Request::RetireAgent(_)
+                | Request::ControlAgentSession(_)
                 | Request::Subscribe(_)
                 | Request::AuthoritativeSnapshot
         ) {
@@ -727,6 +804,14 @@ impl ReconnectingClient {
                             frame: pending.frame.clone(),
                         }
                     }));
+                transition
+                    .actions
+                    .extend(self.pending_agent_sessions.values().map(|pending| {
+                        ClientAction::Write {
+                            generation,
+                            frame: pending.frame.clone(),
+                        }
+                    }));
                 Ok(transition)
             }
             WireMessage::VersionRejected(_) => {
@@ -804,15 +889,22 @@ impl ReconnectingClient {
                 .find_map(|(command_id, pending)| {
                     (pending.request_id == response.id).then_some(*command_id)
                 });
+        let session_operation =
+            self.pending_agent_sessions
+                .iter()
+                .find_map(|(operation_id, pending)| {
+                    (pending.request_id == response.id).then_some(*operation_id)
+                });
+        let retryable = RetryableResponseIdentity {
+            mutation: mutation_command,
+            project: project_command,
+            retirement: retirement_command,
+            session: session_operation,
+        };
         match response.response {
-            Response::Error(error) => self.handle_error_response(
-                generation,
-                response.id,
-                error,
-                mutation_command,
-                project_command,
-                retirement_command,
-            ),
+            Response::Error(error) => {
+                self.handle_error_response(generation, response.id, error, retryable)
+            }
             Response::Success(result) => match result {
                 ResponseResult::Mutation(attempt) => {
                     let Some(command_id) = mutation_command else {
@@ -905,6 +997,39 @@ impl ReconnectingClient {
                         }],
                     })
                 }
+                ResponseResult::AgentSession(outcome) => {
+                    let Some(operation_id) = session_operation else {
+                        return Err(ClientError::ProtocolOrder);
+                    };
+                    let pending = self
+                        .pending_agent_sessions
+                        .get(&operation_id)
+                        .ok_or(ClientError::ProtocolOrder)?;
+                    let digest = pending.digest;
+                    let terminal = !matches!(outcome, EffectOutcomeDto::Uncertain(_));
+                    let mut transition = ClientTransition {
+                        actions: Vec::new(),
+                        events: vec![ClientEvent::AgentSession {
+                            operation_id,
+                            outcome,
+                        }],
+                    };
+                    if terminal {
+                        self.pending_agent_sessions
+                            .remove(&operation_id)
+                            .ok_or(ClientError::ProtocolOrder)?;
+                        self.remember_completed(
+                            CommandId::from_bytes(*operation_id.as_bytes()),
+                            digest,
+                        );
+                    } else {
+                        transition.actions.push(ClientAction::Close { generation });
+                        let reconnect = self.prepare_reconnect()?;
+                        transition.actions.extend(reconnect.actions);
+                        transition.events.extend(reconnect.events);
+                    }
+                    Ok(transition)
+                }
                 ResponseResult::Lifecycle(_)
                 | ResponseResult::ConversationPage(_)
                 | ResponseResult::CanonicalEvidence(_)
@@ -913,7 +1038,6 @@ impl ReconnectingClient {
                 | ResponseResult::RelayStatus(_)
                 | ResponseResult::StateHealth(_)
                 | ResponseResult::StateRepair(_)
-                | ResponseResult::AgentSession(_)
                 | ResponseResult::ResourceInspection(_)
                 | ResponseResult::Empty => {
                     if self.pending_requests.remove(&response.id) != Some(PendingRequest::Ordinary)
@@ -937,11 +1061,9 @@ impl ReconnectingClient {
         generation: ConnectionGeneration,
         request_id: RequestId,
         error: ErrorResponse,
-        mutation_command: Option<CommandId>,
-        project_command: Option<CommandId>,
-        retirement_command: Option<CommandId>,
+        retryable: RetryableResponseIdentity,
     ) -> Result<ClientTransition, ClientError> {
-        if let Some(command_id) = mutation_command {
+        if let Some(command_id) = retryable.mutation {
             if let Some(pending) = self.pending_mutations.remove(&command_id) {
                 self.remember_completed(command_id, pending.digest);
             }
@@ -952,7 +1074,7 @@ impl ReconnectingClient {
             ));
         }
 
-        if let Some(command_id) = project_command {
+        if let Some(command_id) = retryable.project {
             self.pending_project_commands
                 .remove(&command_id)
                 .ok_or(ClientError::ProtocolOrder)?;
@@ -963,13 +1085,24 @@ impl ReconnectingClient {
             ));
         }
 
-        if let Some(command_id) = retirement_command {
+        if let Some(command_id) = retryable.retirement {
             self.pending_agent_retirements
                 .remove(&command_id)
                 .ok_or(ClientError::ProtocolOrder)?;
             return Ok(error_transition(
                 request_id,
                 ClientOperation::AgentRetirement(command_id),
+                error,
+            ));
+        }
+
+        if let Some(operation_id) = retryable.session {
+            self.pending_agent_sessions
+                .remove(&operation_id)
+                .ok_or(ClientError::ProtocolOrder)?;
+            return Ok(error_transition(
+                request_id,
+                ClientOperation::AgentSession(operation_id),
                 error,
             ));
         }
@@ -1161,6 +1294,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },
@@ -1190,6 +1324,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },
@@ -1239,6 +1374,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     | ClientEvent::Snapshot(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },
@@ -1284,6 +1420,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },
@@ -1329,6 +1466,53 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                     | ClientEvent::Mutation(_)
                     | ClientEvent::ProjectCommand { .. }
                     | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_)
+                    | ClientEvent::Error { .. },
+                )
+                | None => {}
+            }
+        }
+    }
+
+    /// Executes or replays one managed-session operation through its next definite outcome.
+    pub fn agent_session(
+        &mut self,
+        request: EffectRequestDto<AgentSessionRequestDto>,
+    ) -> Result<ClientEvent, BlockingClientError> {
+        let deadline = self.execution_deadline();
+        let operation_id = OperationId::from_bytes(request.operation_id.bytes());
+        self.begin_execution();
+        let transition = self
+            .client
+            .submit_agent_session(request)
+            .map_err(BlockingClientError::Client)?;
+        self.enqueue(transition);
+        self.ensure_started()?;
+        loop {
+            match self.step(deadline)? {
+                Some(
+                    event @ ClientEvent::AgentSession {
+                        operation_id: completed,
+                        outcome: EffectOutcomeDto::Accepted(_) | EffectOutcomeDto::Rejected(_),
+                    },
+                ) if completed == operation_id => return Ok(event),
+                Some(
+                    event @ ClientEvent::Error {
+                        operation: ClientOperation::AgentSession(failed),
+                        ..
+                    },
+                ) if failed == operation_id => return Ok(event),
+                Some(ClientEvent::IncompatibleVersion) => {
+                    return Err(BlockingClientError::Incompatible);
+                }
+                Some(
+                    ClientEvent::Snapshot(_)
+                    | ClientEvent::Mutation(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
                     | ClientEvent::Response { .. }
                     | ClientEvent::RequestLost(_)
                     | ClientEvent::Error { .. },

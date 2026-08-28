@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt, num::NonZeroU64};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use hq_application::FactPlan;
 use hq_domain::{
     CONTENT_MAX_BYTES, CommandDigest, CommandId, ERROR_CODE_MAX_BYTES, PROVIDER_ID_MAX_BYTES,
@@ -35,6 +36,7 @@ pub const MAX_CANONICAL_EVIDENCE_BYTES: usize = 512 * 1024;
 pub const MAX_RELAY_STATUS_POLICIES: usize = hq_application::MAX_RELAY_STATUS_POLICIES;
 
 const MUTATION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mutation\0";
+const AGENT_SESSION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-agent-session\0";
 
 /// Fixed-width identifier representation owned by local API v1.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -692,6 +694,80 @@ pub enum SessionControlDto {
     Stop,
 }
 
+/// One sensitive environment entry encoded without requiring UTF-8 values.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchEnvironmentEntryDto {
+    name: String,
+    #[serde(with = "environment_value")]
+    value: Vec<u8>,
+}
+
+impl Drop for LaunchEnvironmentEntryDto {
+    fn drop(&mut self) {
+        self.value.fill(0);
+    }
+}
+
+/// Opaque sensitive environment snapshot with redacted diagnostics.
+#[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct LaunchEnvironmentDto(Vec<LaunchEnvironmentEntryDto>);
+
+impl LaunchEnvironmentDto {
+    /// Copies a caller environment into independently owned wire values.
+    pub fn copy_from<'a>(
+        entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+    ) -> Result<Self, ValueError> {
+        let copied = hq_application::LaunchEnvironment::copy_from(entries)
+            .map_err(|_| ValueError::InvalidText)?;
+        let mut values = Vec::with_capacity(copied.len());
+        copied.visit(|name, value| {
+            values.push(LaunchEnvironmentEntryDto {
+                name: name.to_owned(),
+                value: value.to_vec(),
+            });
+        });
+        Ok(Self(values))
+    }
+
+    /// Visits sensitive values without transferring ownership.
+    pub fn visit(&self, mut visitor: impl FnMut(&str, &[u8])) {
+        for entry in &self.0 {
+            visitor(&entry.name, &entry.value);
+        }
+    }
+
+    /// Returns the number of copied entries without exposing names or values.
+    pub const fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Reports whether the copied environment is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for LaunchEnvironmentDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LaunchEnvironmentDto")
+            .field("entry_count", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Sensitive start/resume context interpreted only by the owning node.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLaunchContextDto {
+    /// Absolute launch directory selected by the caller.
+    pub directory: ResourceLocatorDto,
+    /// Complete copied caller environment.
+    pub environment: LaunchEnvironmentDto,
+}
+
 /// Provider-neutral named-agent control body.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -702,6 +778,8 @@ pub struct AgentSessionRequestDto {
     pub provider: String,
     /// Provider-neutral session action.
     pub control: SessionControlDto,
+    /// Required sensitive launch context for start/resume; absent for stop.
+    pub launch: Option<AgentLaunchContextDto>,
 }
 
 impl AgentSessionRequestDto {
@@ -710,16 +788,114 @@ impl AgentSessionRequestDto {
         agent_id: Id32,
         provider: String,
         control: SessionControlDto,
+        launch: Option<AgentLaunchContextDto>,
     ) -> Result<Self, ValueError> {
-        validate_text(&provider, PROVIDER_ID_MAX_BYTES)?;
-        if let SessionControlDto::Resume(session) = &control {
-            validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
-        }
-        Ok(Self {
+        let request = Self {
             agent_id,
             provider,
             control,
-        })
+            launch,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    fn validate(&self) -> Result<(), ValueError> {
+        validate_text(&self.provider, PROVIDER_ID_MAX_BYTES)?;
+        if let SessionControlDto::Resume(session) = &self.control {
+            validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+        }
+        if matches!(self.control, SessionControlDto::Stop) != self.launch.is_none() {
+            return Err(ValueError::InvalidText);
+        }
+        if let Some(launch) = &self.launch {
+            validate_locator(&launch.directory)?;
+            let mut entries = Vec::with_capacity(launch.environment.len());
+            launch
+                .environment
+                .visit(|name, value| entries.push((name.to_owned(), value.to_vec())));
+            hq_application::LaunchEnvironment::copy_from(
+                entries
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_slice())),
+            )
+            .map_err(|_| ValueError::InvalidText)?;
+        }
+        Ok(())
+    }
+}
+
+/// Derives the exact digest for one retry-safe managed-session request.
+pub fn agent_session_request_digest(
+    request: &EffectRequestDto<AgentSessionRequestDto>,
+) -> Result<CommandDigest, ValueError> {
+    request.body.validate()?;
+    let mut digest = Sha256::new();
+    digest.update(AGENT_SESSION_DIGEST_DOMAIN);
+    digest.update(request.operation_id.bytes());
+    digest.update(request.issued_at_unix_millis.to_be_bytes());
+    digest.update(request.body.agent_id.bytes());
+    update_sized(&mut digest, request.body.provider.as_bytes())?;
+    match &request.body.control {
+        SessionControlDto::Start => digest.update([0]),
+        SessionControlDto::Resume(session) => {
+            digest.update([1]);
+            update_sized(&mut digest, session.as_bytes())?;
+        }
+        SessionControlDto::Stop => digest.update([2]),
+    }
+    match &request.body.launch {
+        None => digest.update([0]),
+        Some(launch) => {
+            digest.update([1]);
+            digest.update([match launch.directory.scheme {
+                ResourceSchemeDto::GitRepository => 0,
+                ResourceSchemeDto::WorkingTree => 1,
+                ResourceSchemeDto::Container => 2,
+                ResourceSchemeDto::Opaque => 3,
+            }]);
+            update_sized(&mut digest, launch.directory.value.as_bytes())?;
+            let count =
+                u32::try_from(launch.environment.len()).map_err(|_| ValueError::InvalidText)?;
+            digest.update(count.to_be_bytes());
+            launch.environment.visit(|name, value| {
+                // Validation above proves these conversions fit in u32.
+                let name_len = u32::try_from(name.len()).unwrap_or(u32::MAX);
+                let value_len = u32::try_from(value.len()).unwrap_or(u32::MAX);
+                digest.update(name_len.to_be_bytes());
+                digest.update(name.as_bytes());
+                digest.update(value_len.to_be_bytes());
+                digest.update(value);
+            });
+        }
+    }
+    Ok(CommandDigest::from_bytes(digest.finalize().into()))
+}
+
+fn update_sized(digest: &mut Sha256, value: &[u8]) -> Result<(), ValueError> {
+    let len = u32::try_from(value.len()).map_err(|_| ValueError::InvalidText)?;
+    digest.update(len.to_be_bytes());
+    digest.update(value);
+    Ok(())
+}
+
+mod environment_value {
+    use super::*;
+    use serde::{Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD_NO_PAD.encode(value))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        let decoded = STANDARD_NO_PAD
+            .decode(encoded.as_bytes())
+            .map_err(D::Error::custom)?;
+        if STANDARD_NO_PAD.encode(&decoded) != encoded {
+            return Err(D::Error::custom("noncanonical environment value"));
+        }
+        Ok(decoded)
     }
 }
 
@@ -1028,7 +1204,7 @@ pub enum Request {
         operation_id: Id32,
     },
     /// Control one provider-neutral named-agent session.
-    ControlAgentSession(EffectRequestDto<AgentSessionRequestDto>),
+    ControlAgentSession(Box<EffectRequestDto<AgentSessionRequestDto>>),
     /// Inspect one typed project resource.
     InspectResource(EffectRequestDto<ResourceInspectionRequestDto>),
     /// Execute, route, or reconcile one exact project command.

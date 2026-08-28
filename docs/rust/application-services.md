@@ -39,6 +39,13 @@ Ports name capabilities needed by the application. They do not mirror methods of
 socket, relay library, process client, filesystem library, or UI. The node composition root supplies
 one `ApplicationPorts` bundle whose implementations may delegate to independently owned adapters.
 
+Managed-session requests carry public agent/provider/action fields and an optional launch context.
+Start and exact resume require that context; stop forbids it. The launch directory is passive, but
+the copied environment is an opaque secret-owning value: construction enforces entry and aggregate
+bounds, diagnostics expose only a count, and values are zeroed on drop. After provider readiness,
+pure binding and context planners cite the exact agent-mailbox creation root, while selection cites
+the acknowledged binding/context facts and the complete prior selection frontier.
+
 `ApplicationError` has closed classes and codes. Adapters discard implementation prose and map
 failures to invalid input, conflict, unauthorized, unresolved, not found, capacity, unavailable,
 corrupt state, or invariant violation. Only later client and UI layers add safe presentation text.

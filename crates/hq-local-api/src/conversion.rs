@@ -18,17 +18,17 @@ use crate::protocol::v1::{
     StateRepairReportDto, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
-    AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest, AgentSessionResult,
-    ApplicationError, ApplicationErrorClass, AuthoritativeSnapshot, CanonicalEvidence,
-    ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState, ClientProjectLifecycle,
-    ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
-    ConversationKey, DomainHealth, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
-    FactMutation, HealthDomain, MutationAttempt, MutationDecision, MutationOutcome,
-    MutationReceipt, ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest,
-    ProjectCommandStage, RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus,
-    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
-    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
-    WorktreeProvisioningRequest,
+    AgentLaunchContext, AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest,
+    AgentSessionResult, ApplicationError, ApplicationErrorClass, AuthoritativeSnapshot,
+    CanonicalEvidence, ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState,
+    ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage,
+    ConversationEntry, ConversationKey, DomainHealth, EffectOutcome, EffectRequest,
+    EvidenceIngestOutcome, FactMutation, HealthDomain, LaunchEnvironment, MutationAttempt,
+    MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
+    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, RelayAccess,
+    RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
+    SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
 };
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
@@ -819,6 +819,35 @@ pub(crate) fn synchronization_effect_from_v1(
 pub(crate) fn agent_effect_from_v1(
     request: &EffectRequestDto<AgentSessionRequestDto>,
 ) -> Result<EffectRequest<AgentSessionRequest>, ValueError> {
+    if crate::protocol::v1::agent_session_request_digest(request)?
+        != CommandDigest::from_bytes(request.request_digest.bytes())
+    {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    if matches!(request.body.control, SessionControlDto::Stop) != request.body.launch.is_none() {
+        return Err(ValueError::InvalidText);
+    }
+    let launch = request
+        .body
+        .launch
+        .as_ref()
+        .map(|launch| -> Result<AgentLaunchContext, ValueError> {
+            let mut entries = Vec::with_capacity(launch.environment.len());
+            launch
+                .environment
+                .visit(|name, value| entries.push((name.to_owned(), value.to_vec())));
+            let environment = LaunchEnvironment::copy_from(
+                entries
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_slice())),
+            )
+            .map_err(|_| ValueError::InvalidText)?;
+            Ok(AgentLaunchContext {
+                directory: locator_from_v1(launch.directory.clone())?,
+                environment,
+            })
+        })
+        .transpose()?;
     let body = AgentSessionRequest::new(
         AgentId::from_bytes(request.body.agent_id.bytes()),
         ProviderId::new(request.body.provider.clone()).map_err(|_| ValueError::InvalidText)?,
@@ -829,6 +858,7 @@ pub(crate) fn agent_effect_from_v1(
             },
             SessionControlDto::Stop => SessionControl::Stop,
         },
+        launch,
     );
     Ok(effect_from_v1(request, body))
 }

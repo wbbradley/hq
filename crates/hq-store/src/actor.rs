@@ -320,6 +320,10 @@ enum HarnessRequest {
         limit: usize,
         reply: SyncSender<Result<Vec<crate::StoredHarnessDelivery>, StoreError>>,
     },
+    SessionOperation {
+        operation_id: OperationId,
+        reply: SyncSender<Result<Option<crate::StoredHarnessSessionOperation>, StoreError>>,
+    },
 }
 
 enum ProjectSagaRequest {
@@ -690,6 +694,25 @@ impl HarnessStateHandle {
                 HarnessRequest::RunnableDeliveries {
                     agent_id,
                     limit,
+                    reply,
+                },
+            )))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads one exact managed-session control operation.
+    pub fn session_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<Option<crate::StoredHarnessSessionOperation>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Harness(Box::new(
+                HarnessRequest::SessionOperation {
+                    operation_id,
                     reply,
                 },
             )))
@@ -1354,6 +1377,12 @@ fn handle_harness_request(database: &mut Database, request: HarnessRequest) {
             reply,
         } => {
             let _ = reply.send(database.load_runnable_harness_deliveries(agent_id, limit));
+        }
+        HarnessRequest::SessionOperation {
+            operation_id,
+            reply,
+        } => {
+            let _ = reply.send(database.load_harness_session_operation(operation_id));
         }
     }
 }

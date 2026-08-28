@@ -17,9 +17,11 @@ use hq_reducer::{GraphOnlyReducer, GraphReductionReport, ReduceError, reduce_com
 pub use hq_reducer::ConversationKey;
 
 pub use agent_admin::{
-    AgentNameClaimRequest, AgentRetirementPlanRequest, AgentSessionRenameRequest,
-    AgentSessionSelectionRequest, plan_agent_mailbox_creation, plan_agent_name_claim,
-    plan_agent_retirement, plan_agent_session_rename, plan_agent_session_selection,
+    AgentNameClaimRequest, AgentRetirementPlanRequest, AgentSessionBindingRequest,
+    AgentSessionContextRequest, AgentSessionRenameRequest, AgentSessionSelectionRequest,
+    plan_agent_mailbox_creation, plan_agent_name_claim, plan_agent_retirement,
+    plan_agent_session_binding, plan_agent_session_context, plan_agent_session_rename,
+    plan_agent_session_selection,
 };
 pub use authority_admin::{
     MailboxGrantRequest, MailboxRevokeRequest, PeerRouteRequest, plan_mailbox_grant,
@@ -44,11 +46,13 @@ pub use mutation::{
     decode_mutation_outcome, encode_mutation_outcome,
 };
 pub use ports::{
-    AgentSessionRequest, AgentSessionResult, ApplicationPorts, CanonicalEvidence, CommitFacts,
-    ConfigureRelays, ControlHarness, DomainHealth, EffectOutcome, EffectRequest,
-    EvidenceIngestOutcome, HealthDomain, InspectResource, MAX_RELAY_STATUS_POLICIES,
-    MAX_SUBSCRIPTION_TOPICS, ObserveRevisions, PublishWake, QueryDomain, RelayAccess,
-    RelayAuthentication, RelayConfiguration, RelayPolicyStatus, RelayStatus,
+    AgentLaunchContext, AgentSessionRequest, AgentSessionResult, ApplicationPorts,
+    CanonicalEvidence, CommitFacts, ConfigureRelays, ControlHarness, DomainHealth, EffectOutcome,
+    EffectRequest, EvidenceIngestOutcome, HealthDomain, InspectResource, LaunchEnvironment,
+    MAX_LAUNCH_ENVIRONMENT_BYTES, MAX_LAUNCH_ENVIRONMENT_ENTRIES,
+    MAX_LAUNCH_ENVIRONMENT_NAME_BYTES, MAX_LAUNCH_ENVIRONMENT_VALUE_BYTES,
+    MAX_RELAY_STATUS_POLICIES, MAX_SUBSCRIPTION_TOPICS, ObserveRevisions, PublishWake, QueryDomain,
+    RelayAccess, RelayAuthentication, RelayConfiguration, RelayPolicyStatus, RelayStatus,
     ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
     StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
     WakeDisposition,

@@ -1,5 +1,44 @@
 # Completed
 
+## 2026-08-28 — Managed named-agent session lifecycle reconciliation
+
+Added provider-neutral start, exact-resume, and stop as a dedicated retry-safe local API family.
+The reconnecting client retains and replays the exact encoded frame after response loss or explicit
+uncertainty, shares changed-identity detection with every retryable command family, and completes
+only on a definite accepted or rejected result. Both client and server recompute a canonical digest
+covering operation/time, agent/provider/action, launch directory, and every copied environment
+entry. Binary environment values use canonical base64; secret-owning environment fields remain
+opaque, redact diagnostics, enforce strict bounds, and zero values on drop.
+
+Added a durable managed-session operation ledger across the neutral supervisor and clean-sheet v13
+store schema. Prepared operations checkpoint uncertainty before provider I/O; ready, stopped, and
+rejected states are absorbing; equal replay is idempotent; changed reuse collides; and restart
+observation never guesses through unresolved runtime state. The deterministic injected provider
+proves exact readiness replay, changed identity, missing resume uncertainty, worker ownership, and
+restart repair. Environment values and provider diagnostics never enter storage.
+
+The node now validates the active installation-local named agent and canonical absolute launch path
+before provider work. Only the exact acknowledged provider session can then author its immutable
+mailbox binding, repository context, and complete-frontier selection through deterministic,
+replay-safe canonical mutations. Passive request/state/result records expose public fields. The
+separate neutral and store operation records preserve crate decoupling through one exhaustive
+record-only node mapping; they are not compatibility types and add no accessor facade.
+
+Because HQ has never shipped and has no standing installations, local API v1 and storage v13 were
+evolved directly in place with no protocol bump, storage-version bump, migration, or compatibility
+scaffolding. Full locked workspace tests, strict all-feature Clippy, architecture, dependency,
+behavior-ledger, causal/spec, protocol-spec, and bounded fuzz gates pass.
+
+### Original plan entry
+
+- **[runtime/high] Reconcile managed named-agent session lifecycle** — Add retry-safe neutral start,
+  exact-resume, and stop commands over the local API; securely copy the caller environment and
+  launch directory only at the control boundary; durably reconcile request identity, readiness,
+  uncertainty, and restart repair; and bind, contextualize, and select only the exact acknowledged
+  session. Exercise the workflow with an injected provider and test stale sessions, resume
+  mismatch, response loss, runtime uncertainty, redacted diagnostics, restart recovery, and
+  in-place storage/API evolution without compatibility scaffolding.
+
 ## 2026-08-28 — Mailbox messaging and repository-aware discovery
 
 Added `ask`, `send`, `wait`, `poll`, `get`, `mailboxes`, and human `list`, `answer`, `cancel`,

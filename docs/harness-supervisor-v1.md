@@ -18,6 +18,15 @@ Every delivery transition and persistence checkpoint MUST cite the current exact
 deletes only a matching token, so a stale daemon cannot mutate or release its successor. Failure to
 open readiness releases the claim. Competing workers for different agents remain independent.
 
+Managed start, exact-resume, and stop requests additionally use a durable operation ledger keyed by
+the caller's stable operation ID. The immutable record binds the exact request digest, agent,
+provider, action, and requested resume identity. `Prepared` advances to `Uncertain` before provider
+I/O; `Ready`, `Stopped`, and `Rejected` are absorbing. Equal replay returns the retained result and
+changed reuse fails closed. After restart, an uncertain start/resume becomes ready only when the
+same live worker exposes the matching provider/session; an uncertain stop becomes stopped only when
+no worker remains or the matching worker is authoritatively stopped. Otherwise uncertainty remains
+explicit. No migration or compatibility representation is involved.
+
 ## Durable delivery and recovery
 
 Before provider I/O, a delivery durably records its agent, provider, session, stable submission ID,
@@ -65,6 +74,12 @@ redacted, cloning secret-bearing environment values is not exposed, and owned by
 on drop. Environment values are memory-only: they do not appear in ready state, leases, delivery or
 event records, errors, reports, or persistence calls. Restart requires the caller to reconstruct a
 launch environment from its authorized secret source.
+
+The caller's absolute launch directory and copied environment enter only at application control.
+The operation digest binds their exact normalized values, but the operation ledger persists neither
+the directory nor environment. Canonical binding, repository context, and session selection occur
+only after the provider acknowledges the exact ready session; exact resume must already name an
+unconflicted binding to the same installation-local agent mailbox.
 
 ## Intake, cancellation, and shutdown
 

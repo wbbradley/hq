@@ -54,6 +54,8 @@ All limits are inclusive. A larger value is rejected before it can become applic
 | canonical evidence transfer | 64 exact events and 524,288 aggregate event bytes |
 | provider namespace | 64 bytes, nonempty |
 | provider session | 256 bytes, nonempty |
+| launch environment | 512 entries and 1,048,576 aggregate name/value bytes |
+| launch environment name/value | 256 / 32,768 bytes |
 | resource locator | 4,096 bytes, nonempty |
 | relay policies in one status | 256, sorted and unique |
 | short names, states, categories, and error codes | 128 bytes, nonempty |
@@ -116,6 +118,16 @@ External effects retain their stable operation ID, exact request digest, issue t
 Their result is `accepted`, `rejected`, or `uncertain`. An uncertain effect must be reconciled under
 the same operation ID before retry; it is not silently translated into success or failure.
 
+Managed-session control is a dedicated retryable external-effect family. `start` and exact `resume`
+require an absolute typed launch directory and a complete copied caller environment; `stop` forbids
+launch context. Environment values use canonical unpadded base64 so non-UTF-8 process values remain
+lossless, while DTO diagnostics expose only the entry count. The SHA-256 request digest binds the
+operation ID, issue time, agent, provider, action/resume identity, locator, and every ordered
+length-prefixed environment name/value. Client and server both reject a mismatched digest. The
+reconnecting client retains the original encoded frame, replays the same bytes after response loss
+or an uncertain result, rejects changed identity reuse across all retryable command families, and
+retires the frame only on a definite accepted/rejected outcome.
+
 Named-agent retirement is an exact retryable request family rather than a generic effect or a
 client-authored mutation. It carries command and operation identities, exact request digest,
 authorizing account, agent, expected claim, immutable home, issue time, and explicit force policy.
@@ -129,8 +141,10 @@ positive generation plus bounded delivery-state counts and an explicit truncatio
 always carries one positive serialized revision and exactly the stable ordered authority,
 conversation, agent, and project domain records. Repair requests carry a caller-selected 32-byte
 operation identity; their report echoes it with the revision and the same complete domain catalog.
-These are passive public-field DTOs. Because HQ has not shipped, the additions complete clean local
-API v1 in place with no compatibility branch or version bump.
+These are passive public-field DTOs. Secret-bearing environment entries are the deliberate
+exception: their fields remain opaque so values can be redacted and zeroed. Because HQ has not
+shipped, the additions complete clean local API v1 in place with no compatibility branch or version
+bump.
 
 ## Authoritative queries
 

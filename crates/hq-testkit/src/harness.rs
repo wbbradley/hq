@@ -730,6 +730,7 @@ fn instance_request() -> HarnessInstanceRequest {
     HarnessInstanceRequest {
         agent_id: AgentId::from_bytes([1; 32]),
         project_id: None,
+        launch_directory: None,
         environment: hq_harness::HarnessEnvironment::default(),
     }
 }

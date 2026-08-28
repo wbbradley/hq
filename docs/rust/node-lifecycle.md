@@ -105,6 +105,14 @@ injected clock/token sources. Exact resume immediately reconciles durable pendin
 Stop-intake rejects new launch/control effects; drain flushes accepted events, bounds adapter wait,
 records escalation, force-stops runtime ownership, and releases exact worker leases.
 
+Managed named-agent control validates the authoritative active claim and unique local agent mailbox
+before provider I/O. The node resolves and canonicalizes the absolute launch directory, then passes
+only copied environment bytes to the neutral supervisor. After exact readiness it idempotently
+authors the immutable mailbox/session binding, repository context, and complete-frontier selection;
+an uncertain canonical commit remains uncertain and is replayed under deterministic stage
+identities. Foreground composition injects this canonical adapter, while concrete provider
+registration and event draining remain the next runtime package.
+
 The foreground project slot is concrete as well. `ProjectNodeComponent` owns bounded startup and
 shutdown repair around the saga store, canonical and remote application adapters, shared harness
 runtime, read-only path resources, bounded mutating Git adapter, and relay wake scheduling. Store,

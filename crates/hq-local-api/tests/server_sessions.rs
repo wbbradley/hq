@@ -26,7 +26,7 @@ use hq_local_api::protocol::v1::{
     RelayAuthenticationDto, RelayConfigurationDto, Request, RequestEnvelope, RequestId,
     ResourceInspectionRequestDto, ResourceLocatorDto, ResourceSchemeDto, Response, ResponseResult,
     SessionControlDto, SubscriptionRequestDto, SynchronizationRequestDto, V1, VersionRange,
-    WireMessage,
+    WireMessage, agent_session_request_digest,
 };
 use hq_local_api::{
     LifecycleControl, RevisionHub, ServerSession, ServerSessionError, ServerWriteDisposition,
@@ -309,6 +309,21 @@ fn effect<T>(body: T) -> EffectRequestDto<T> {
     )
 }
 
+fn agent_effect(body: AgentSessionRequestDto) -> EffectRequestDto<AgentSessionRequestDto> {
+    let mut request = EffectRequestDto::new(
+        Id32::new([31; 32]),
+        Id32::new([0; 32]),
+        1_700_000_000_000,
+        body,
+    );
+    request.request_digest = Id32::new(
+        *agent_session_request_digest(&request)
+            .expect("valid session request")
+            .as_bytes(),
+    );
+    request
+}
+
 fn locator() -> ResourceLocatorDto {
     ResourceLocatorDto::new(ResourceSchemeDto::WorkingTree, "/work/hq".to_owned())
         .expect("bounded locator")
@@ -506,14 +521,15 @@ fn every_typed_request_family_routes_without_storage_types() {
         Request::RepairState {
             operation_id: Id32::new([24; 32]),
         },
-        Request::ControlAgentSession(effect(
+        Request::ControlAgentSession(Box::new(agent_effect(
             AgentSessionRequestDto::new(
                 Id32::new([13; 32]),
                 "codex".to_owned(),
                 SessionControlDto::Stop,
+                None,
             )
             .expect("agent request"),
-        )),
+        ))),
         Request::InspectResource(effect(ResourceInspectionRequestDto {
             project_id: Id32::new([14; 32]),
             resource_id: Id32::new([15; 32]),

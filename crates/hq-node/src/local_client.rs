@@ -7,8 +7,8 @@ use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientEvent, ClientTransport,
     InitialView, ReconnectPolicy, ReconnectingClient,
     protocol::v1::{
-        AgentRetirementRequestDto, AuthoritativeSnapshotDto, BuildMetadata, MutationRequest,
-        ProjectCommandRequestDto, Request,
+        AgentRetirementRequestDto, AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
+        EffectRequestDto, MutationRequest, ProjectCommandRequestDto, Request,
     },
 };
 
@@ -221,6 +221,16 @@ impl LocalNodeClient {
     ) -> Result<ClientEvent, LocalNodeClientError> {
         self.runner
             .agent_retirement(request)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Executes or reconciles one retry-safe managed named-agent session operation.
+    pub fn agent_session(
+        &mut self,
+        request: EffectRequestDto<AgentSessionRequestDto>,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .agent_session(request)
             .map_err(LocalNodeClientError::Execution)
     }
 }

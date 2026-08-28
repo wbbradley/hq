@@ -11,6 +11,7 @@ mod foreground;
 mod foundation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod graceful_runtime;
+mod harness_canonical;
 mod harness_component;
 mod harness_store;
 mod identity;
@@ -66,6 +67,10 @@ pub use foundation::{
 pub use graceful_runtime::{
     LocalNodeRuntime, LocalNodeRuntimeConfig, LocalNodeRuntimeError, LocalNodeRuntimeReport,
     LocalNodeRuntimeStartError, UnixShutdownSignals, UnixSignalRegistrationError,
+};
+pub use harness_canonical::{
+    AgentSessionCanonicalPort, AgentSessionSelectionOutcome, ApplicationAgentSessionCanonicalPort,
+    PreparedAgentSessionSelection,
 };
 pub use harness_component::HarnessNodeComponent;
 pub use harness_store::HarnessStoreAdapter;

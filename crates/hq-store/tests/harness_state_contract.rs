@@ -7,7 +7,8 @@ use hq_domain::{
 };
 use hq_store::{
     HarnessLeaseOutcome, StoreErrorClass, StoredHarnessDelivery, StoredHarnessDeliveryState,
-    StoredHarnessEventCheckpoint, StoredHarnessStateMutation,
+    StoredHarnessEventCheckpoint, StoredHarnessSessionOperation, StoredHarnessSessionOperationKind,
+    StoredHarnessSessionOperationState, StoredHarnessStateMutation,
 };
 
 mod support;
@@ -173,6 +174,78 @@ fn delivery_and_event_checkpoints_are_exact_monotonic_and_restart_durable() {
     );
     assert_eq!(state.events, vec![checkpoint]);
     assert_eq!(state.leases.len(), 1);
+}
+
+#[test]
+fn session_operations_reject_changed_identity_and_survive_reopen_without_launch_secrets() {
+    let directory = TestDirectory::new();
+    let database = directory.database_path();
+    let store = open_store(&database);
+    let operation = StoredHarnessSessionOperation {
+        operation_id: OperationId::from_bytes([21; 32]),
+        request_digest: CommandDigest::from_bytes([22; 32]),
+        agent_id: AgentId::from_bytes([23; 32]),
+        provider_id: ProviderId::new("scripted").expect("provider"),
+        kind: StoredHarnessSessionOperationKind::Resume(
+            ProviderSessionId::new("exact-session").expect("session"),
+        ),
+        state: StoredHarnessSessionOperationState::Prepared,
+    };
+    store
+        .apply_harness_state(StoredHarnessStateMutation::QueueSessionOperation(
+            operation.clone(),
+        ))
+        .expect("operation queues");
+    store
+        .apply_harness_state(StoredHarnessStateMutation::QueueSessionOperation(
+            operation.clone(),
+        ))
+        .expect("exact replay is idempotent");
+    let mut changed = operation.clone();
+    changed.request_digest = CommandDigest::from_bytes([99; 32]);
+    assert_eq!(
+        store
+            .apply_harness_state(StoredHarnessStateMutation::QueueSessionOperation(changed))
+            .expect_err("changed operation identity collides")
+            .class(),
+        StoreErrorClass::HarnessStateConflict
+    );
+    store
+        .apply_harness_state(StoredHarnessStateMutation::SetSessionOperationState {
+            operation_id: operation.operation_id,
+            state: StoredHarnessSessionOperationState::Uncertain,
+        })
+        .expect("uncertainty precedes provider I/O");
+    let ready = ProviderSessionId::new("exact-session").expect("session");
+    store
+        .apply_harness_state(StoredHarnessStateMutation::SetSessionOperationState {
+            operation_id: operation.operation_id,
+            state: StoredHarnessSessionOperationState::Ready(ready.clone()),
+        })
+        .expect("readiness commits");
+    store.close().expect("store closes");
+
+    let reopened = open_store(&database);
+    let retained = reopened
+        .harness_state_handle()
+        .session_operation(operation.operation_id)
+        .expect("operation loads")
+        .expect("operation remains");
+    assert_eq!(
+        retained.state,
+        StoredHarnessSessionOperationState::Ready(ready)
+    );
+    assert_eq!(retained.request_digest, operation.request_digest);
+    assert_eq!(
+        reopened
+            .apply_harness_state(StoredHarnessStateMutation::SetSessionOperationState {
+                operation_id: operation.operation_id,
+                state: StoredHarnessSessionOperationState::Stopped,
+            })
+            .expect_err("terminal operation cannot change meaning")
+            .class(),
+        StoreErrorClass::HarnessStateConflict
+    );
 }
 
 fn delivery() -> StoredHarnessDelivery {

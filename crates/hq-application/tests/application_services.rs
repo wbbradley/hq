@@ -369,6 +369,7 @@ fn external_use_cases_preserve_stable_uncertain_and_accepted_outcomes() -> Resul
             hq_domain::AgentId::from_bytes([0x44; 32]),
             hq_domain::ProviderId::new("scripted")?,
             SessionControl::Stop,
+            None,
         ),
     );
     assert_eq!(

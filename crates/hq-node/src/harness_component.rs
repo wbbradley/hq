@@ -12,14 +12,17 @@ use hq_application::{
 use hq_harness::{
     HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment,
     HarnessError, HarnessErrorClass, HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken,
-    HarnessPersistencePort, HarnessRegistry, HarnessSessionRequest, HarnessSubmission,
-    HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource,
+    HarnessPersistencePort, HarnessRegistry, HarnessSessionControlOutcome, HarnessSessionOperation,
+    HarnessSessionOperationKind, HarnessSessionOperationState, HarnessSessionRequest,
+    HarnessSubmission, HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies,
+    HarnessTokenSource,
 };
 use hq_projects::{ProjectRuntimeDelivery, ProjectRuntimePort, ProjectRuntimeRequest};
 use hq_store::Store;
 
 use crate::{
-    CancellationToken, ComponentDrain, ComponentError, HarnessStoreAdapter, NodeComponent,
+    AgentSessionCanonicalPort, AgentSessionSelectionOutcome, CancellationToken, ComponentDrain,
+    ComponentError, HarnessStoreAdapter, NodeComponent, PreparedAgentSessionSelection,
 };
 
 /// Node lifecycle owner for the complete neutral managed-runtime supervisor.
@@ -31,8 +34,14 @@ pub struct HarnessNodeComponent {
 struct HarnessNodeInner {
     config: HarnessSupervisorConfig,
     dependencies: HarnessSupervisorDependencies,
+    canonical: Arc<dyn AgentSessionCanonicalPort>,
     supervisor: Mutex<Option<HarnessSupervisor>>,
     accepting: AtomicBool,
+}
+
+enum CanonicalPreparation {
+    Ready(Option<Box<PreparedAgentSessionSelection>>),
+    Rejected,
 }
 
 impl HarnessNodeComponent {
@@ -44,6 +53,7 @@ impl HarnessNodeComponent {
         persistence: Arc<dyn HarnessPersistencePort>,
         clock: Arc<dyn HarnessClock>,
         tokens: Arc<dyn HarnessTokenSource>,
+        canonical: Arc<dyn AgentSessionCanonicalPort>,
     ) -> Self {
         Self {
             inner: Arc::new(HarnessNodeInner {
@@ -55,6 +65,7 @@ impl HarnessNodeComponent {
                     clock,
                     tokens,
                 },
+                canonical,
                 supervisor: Mutex::new(None),
                 accepting: AtomicBool::new(false),
             }),
@@ -63,6 +74,14 @@ impl HarnessNodeComponent {
 
     /// Composes a durable supervisor with no registered providers for the foreground baseline.
     pub fn without_providers(store: &Store) -> Self {
+        Self::without_providers_with_canonical(store, Arc::new(UnavailableAgentSessionCanonical))
+    }
+
+    /// Composes the foreground baseline with canonical readiness selection but no providers.
+    pub fn without_providers_with_canonical(
+        store: &Store,
+        canonical: Arc<dyn AgentSessionCanonicalPort>,
+    ) -> Self {
         Self::new(
             HarnessSupervisorConfig::default(),
             store,
@@ -70,7 +89,113 @@ impl HarnessNodeComponent {
             Arc::new(UnavailableHarnessPersistence),
             Arc::new(SystemHarnessClock),
             Arc::new(RandomHarnessTokens),
+            canonical,
         )
+    }
+
+    fn prepare_session(
+        &self,
+        request: &EffectRequest<hq_application::AgentSessionRequest>,
+    ) -> Result<CanonicalPreparation, ApplicationError> {
+        let (context, resume) = match (&request.body.control, request.body.launch.as_ref()) {
+            (SessionControl::Start, Some(context)) => (context, None),
+            (SessionControl::Resume { session }, Some(context)) => (context, Some(session)),
+            (SessionControl::Stop, None) => return Ok(CanonicalPreparation::Ready(None)),
+            (SessionControl::Start | SessionControl::Resume { .. }, None)
+            | (SessionControl::Stop, Some(_)) => {
+                return Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest));
+            }
+        };
+        match self.inner.canonical.prepare(
+            request.body.agent_id,
+            &request.body.provider,
+            resume,
+            &context.directory,
+        ) {
+            Ok(prepared) => Ok(CanonicalPreparation::Ready(Some(Box::new(prepared)))),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    ApplicationErrorCode::InvalidRequest
+                        | ApplicationErrorCode::StateIdentityConflict
+                        | ApplicationErrorCode::ItemNotFound
+                ) =>
+            {
+                Ok(CanonicalPreparation::Rejected)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn launch_request(
+        request: &EffectRequest<hq_application::AgentSessionRequest>,
+    ) -> Result<Option<HarnessLaunchRequest>, ApplicationError> {
+        let Some(context) = request.body.launch.as_ref() else {
+            return if matches!(request.body.control, SessionControl::Stop) {
+                Ok(None)
+            } else {
+                Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest))
+            };
+        };
+        let session = match &request.body.control {
+            SessionControl::Start => HarnessSessionRequest::Start,
+            SessionControl::Resume { session } => HarnessSessionRequest::Resume {
+                session_id: session.clone(),
+            },
+            SessionControl::Stop => {
+                return Err(ApplicationError::new(ApplicationErrorCode::InvalidRequest));
+            }
+        };
+        Ok(Some(HarnessLaunchRequest {
+            agent_id: request.body.agent_id,
+            project_id: None,
+            launch_directory: Some(context.directory.clone()),
+            provider_id: request.body.provider.clone(),
+            session,
+            environment: copy_launch_environment(&context.environment)?,
+        }))
+    }
+
+    fn finish_session_control(
+        &self,
+        request: &EffectRequest<hq_application::AgentSessionRequest>,
+        prepared: Option<&PreparedAgentSessionSelection>,
+        outcome: HarnessSessionControlOutcome,
+    ) -> Result<EffectOutcome<AgentSessionResult>, ApplicationError> {
+        match outcome {
+            HarnessSessionControlOutcome::Ready(session) => {
+                let prepared = prepared.ok_or_else(|| {
+                    ApplicationError::new(ApplicationErrorCode::InvariantViolation)
+                })?;
+                match self.inner.canonical.select_ready(
+                    request.operation_id,
+                    request.request_digest,
+                    request.issued_at,
+                    prepared,
+                    &request.body.provider,
+                    &session,
+                )? {
+                    AgentSessionSelectionOutcome::Complete => {
+                        Ok(EffectOutcome::Accepted(AgentSessionResult::Ready(session)))
+                    }
+                    AgentSessionSelectionOutcome::Uncertain => {
+                        Ok(EffectOutcome::Uncertain(request.operation_id))
+                    }
+                    AgentSessionSelectionOutcome::Rejected => Ok(EffectOutcome::Rejected(
+                        harness_domain_error("managed_session_selection_rejected"),
+                    )),
+                }
+            }
+            HarnessSessionControlOutcome::Stopped => {
+                Ok(EffectOutcome::Accepted(AgentSessionResult::Stopped))
+            }
+            HarnessSessionControlOutcome::Rejected => Ok(EffectOutcome::Rejected(
+                harness_domain_error("managed_session_rejected"),
+            )),
+            HarnessSessionControlOutcome::Uncertain => {
+                Ok(EffectOutcome::Uncertain(request.operation_id))
+            }
+        }
     }
 
     fn with_supervisor<T>(
@@ -114,6 +239,36 @@ impl HarnessNodeComponent {
 }
 
 struct UnavailableHarnessPersistence;
+
+struct UnavailableAgentSessionCanonical;
+
+impl AgentSessionCanonicalPort for UnavailableAgentSessionCanonical {
+    fn prepare(
+        &self,
+        _agent_id: hq_domain::AgentId,
+        _provider: &hq_domain::ProviderId,
+        _resume_session: Option<&hq_domain::ProviderSessionId>,
+        _directory: &hq_domain::ResourceLocator,
+    ) -> Result<PreparedAgentSessionSelection, ApplicationError> {
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    fn select_ready(
+        &self,
+        _operation_id: hq_domain::OperationId,
+        _request_digest: hq_domain::CommandDigest,
+        _issued_at: hq_domain::Timestamp,
+        _prepared: &PreparedAgentSessionSelection,
+        _provider: &hq_domain::ProviderId,
+        _session: &hq_domain::ProviderSessionId,
+    ) -> Result<AgentSessionSelectionOutcome, ApplicationError> {
+        Err(ApplicationError::new(
+            ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
 
 impl HarnessPersistencePort for UnavailableHarnessPersistence {
     fn persist_output(
@@ -218,32 +373,47 @@ impl ControlHarness for HarnessNodeComponent {
         &self,
         request: &EffectRequest<hq_application::AgentSessionRequest>,
     ) -> Result<EffectOutcome<AgentSessionResult>, ApplicationError> {
-        self.with_supervisor(|supervisor| match &request.body.control {
-            SessionControl::Start => supervisor
-                .launch(HarnessLaunchRequest {
-                    agent_id: request.body.agent_id,
-                    project_id: None,
-                    provider_id: request.body.provider.clone(),
-                    session: HarnessSessionRequest::Start,
-                    environment: HarnessEnvironment::default(),
-                })
-                .map(|session| EffectOutcome::Accepted(AgentSessionResult::Ready(session))),
-            SessionControl::Resume { session } => supervisor
-                .recover(HarnessLaunchRequest {
-                    agent_id: request.body.agent_id,
-                    project_id: None,
-                    provider_id: request.body.provider.clone(),
-                    session: HarnessSessionRequest::Resume {
-                        session_id: session.clone(),
-                    },
-                    environment: HarnessEnvironment::default(),
-                })
-                .map(|ready| EffectOutcome::Accepted(AgentSessionResult::Ready(ready))),
-            SessionControl::Stop => supervisor
-                .stop(request.body.agent_id)
-                .map(|_| EffectOutcome::Accepted(AgentSessionResult::Stopped)),
-        })
+        let kind = match &request.body.control {
+            SessionControl::Start => HarnessSessionOperationKind::Start,
+            SessionControl::Resume { session } => {
+                HarnessSessionOperationKind::Resume(session.clone())
+            }
+            SessionControl::Stop => HarnessSessionOperationKind::Stop,
+        };
+        let prepared = match self.prepare_session(request)? {
+            CanonicalPreparation::Ready(prepared) => prepared,
+            CanonicalPreparation::Rejected => {
+                return Ok(EffectOutcome::Rejected(harness_domain_error(
+                    "managed_session_precondition",
+                )));
+            }
+        };
+        let launch = Self::launch_request(request)?;
+        let operation = HarnessSessionOperation {
+            operation_id: request.operation_id,
+            request_digest: request.request_digest,
+            agent_id: request.body.agent_id,
+            provider_id: request.body.provider.clone(),
+            kind,
+            state: HarnessSessionOperationState::Prepared,
+        };
+        let outcome =
+            self.with_supervisor(|supervisor| supervisor.control_session(&operation, launch))?;
+        self.finish_session_control(request, prepared.as_deref(), outcome)
     }
+}
+
+fn copy_launch_environment(
+    source: &hq_application::LaunchEnvironment,
+) -> Result<HarnessEnvironment, ApplicationError> {
+    let mut entries = Vec::with_capacity(source.len());
+    source.visit(|name, value| entries.push((name.to_owned(), value.to_vec())));
+    HarnessEnvironment::copy_from(
+        entries
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_slice())),
+    )
+    .map_err(map_harness_error)
 }
 
 impl ProjectRuntimePort for HarnessNodeComponent {
@@ -255,6 +425,7 @@ impl ProjectRuntimePort for HarnessNodeComponent {
             let launch = HarnessLaunchRequest {
                 agent_id: request.body.agent_id,
                 project_id: Some(request.body.project_id),
+                launch_directory: None,
                 provider_id: request.body.provider.clone(),
                 session: request.body.resume_session.as_ref().map_or(
                     HarnessSessionRequest::Start,
