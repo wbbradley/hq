@@ -517,6 +517,7 @@ dependencies = [
  "hq-relay",
  "hq-resources",
  "hq-store",
+ "hq-tui",
  "nix",
  "scrypt",
  "serde",

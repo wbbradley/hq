@@ -1,14 +1,23 @@
 //! Bounded blocking Unix transport for the pure reconnecting local API client.
 
-use std::{error::Error, fmt, num::NonZeroUsize, os::unix::net::UnixStream, time::Duration};
+use std::{
+    collections::VecDeque,
+    error::Error,
+    fmt,
+    io::Read as _,
+    num::NonZeroUsize,
+    os::unix::net::UnixStream,
+    time::{Duration, Instant},
+};
 
 use hq_domain::InstallationId;
 use hq_local_api::{
-    BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientEvent, ClientTransport,
-    InitialView, ReconnectPolicy, ReconnectingClient,
+    BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientConnectionState,
+    ClientEvent, ClientTransport, InitialView, ReconnectPolicy, ReconnectingClient,
     protocol::v1::{
         AgentRetirementRequestDto, AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
-        EffectRequestDto, MutationRequest, ProjectCommandRequestDto, Request,
+        EffectRequestDto, FrameDecoder, Id32, InvalidationTopic, MutationRequest,
+        ProjectCommandRequestDto, Request,
     },
 };
 
@@ -106,6 +115,18 @@ pub struct LocalNodeClient {
     runner: BlockingClientRunner<UnixClientTransport>,
 }
 
+/// Long-lived subscribed local client for interactive event-driven frontends.
+pub struct LocalNodeEventClient {
+    installation_id: InstallationId,
+    runner: BlockingClientRunner<UnixClientTransport>,
+}
+
+#[derive(Clone, Copy)]
+enum SubscriptionMode {
+    None,
+    All,
+}
+
 impl LocalNodeClient {
     /// Converges readiness through the installed executable and opens a bounded command client.
     pub fn connect(config: LocalNodeClientConfig) -> Result<Self, LocalNodeClientError> {
@@ -119,56 +140,7 @@ impl LocalNodeClient {
         config: LocalNodeClientConfig,
         launcher: L,
     ) -> Result<Self, LocalNodeClientError> {
-        let runtime = RuntimePaths::new(config.state.root().join("runtime"))
-            .map_err(|_error: RuntimePathError| LocalNodeClientError::RuntimePath)?;
-        let probe = LifecycleClient::new(LifecycleClientConfig {
-            runtime: runtime.clone(),
-            build: config.build.clone(),
-            io_timeout: config.io_timeout,
-        })
-        .map_err(|_| LocalNodeClientError::Client)?;
-        let mut coordinator = NodeClientCoordinator::new(
-            probe,
-            launcher,
-            NodeCoordinatorConfig {
-                state_root: config.state.root().to_path_buf(),
-                readiness_timeout: config.readiness_timeout,
-                retry_interval: config.readiness_retry_interval,
-            },
-        )
-        .map_err(LocalNodeClientError::Coordinator)?;
-        let ready = coordinator
-            .ensure_ready()
-            .map_err(LocalNodeClientError::Coordinator)?;
-        let installation_id = ready
-            .observation
-            .readiness
-            .as_ref()
-            .map(|readiness| InstallationId::from_bytes(readiness.installation_id.bytes()))
-            .ok_or(LocalNodeClientError::Client)?;
-        let transport = UnixClientTransport::new(UnixClientTransportConfig {
-            runtime,
-            io_timeout: config.io_timeout,
-        })
-        .map_err(LocalNodeClientError::Transport)?;
-        let reconnect = ReconnectPolicy::new(config.reconnect_initial, config.reconnect_maximum)
-            .map_err(|_| LocalNodeClientError::Client)?;
-        let client = ReconnectingClient::new(
-            config.build,
-            reconnect,
-            config.completed_identity_capacity.get(),
-            config.initial_view,
-        )
-        .map_err(|_| LocalNodeClientError::Client)?;
-        let runner = BlockingClientRunner::new(
-            BlockingClientConfig {
-                deadline: config.command_deadline,
-                max_connection_attempts: config.max_connection_attempts,
-            },
-            client,
-            transport,
-        )
-        .map_err(LocalNodeClientError::Execution)?;
+        let (installation_id, runner) = connect_runner(config, launcher, SubscriptionMode::None)?;
         Ok(Self {
             installation_id,
             runner,
@@ -235,10 +207,142 @@ impl LocalNodeClient {
     }
 }
 
+impl LocalNodeEventClient {
+    /// Converges readiness and opens a broad-invalidation subscribed local client.
+    pub fn connect(config: LocalNodeClientConfig) -> Result<Self, LocalNodeClientError> {
+        let launcher =
+            ProcessNodeLauncher::current_executable().map_err(LocalNodeClientError::Launcher)?;
+        Self::connect_with_launcher(config, launcher)
+    }
+
+    /// Converges readiness through an injected launcher before subscribing to all revisions.
+    pub fn connect_with_launcher<L: NodeLauncher>(
+        config: LocalNodeClientConfig,
+        launcher: L,
+    ) -> Result<Self, LocalNodeClientError> {
+        let (installation_id, runner) = connect_runner(config, launcher, SubscriptionMode::All)?;
+        Ok(Self {
+            installation_id,
+            runner,
+        })
+    }
+
+    /// Returns the installation authenticated by coordinator readiness.
+    pub const fn installation_id(&self) -> InstallationId {
+        self.installation_id
+    }
+
+    /// Drives connection, subscription, and invalidation refresh work for a bounded interval.
+    pub fn poll_event(
+        &mut self,
+        wait: Duration,
+    ) -> Result<Option<ClientEvent>, LocalNodeClientError> {
+        self.runner
+            .poll_event(wait)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Loads one explicit complete authoritative snapshot on the same subscribed connection.
+    pub fn snapshot(&mut self) -> Result<AuthoritativeSnapshotDto, LocalNodeClientError> {
+        self.runner
+            .snapshot()
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Returns the generation-scoped reconnecting-client state.
+    pub const fn connection_state(&self) -> ClientConnectionState {
+        self.runner.connection_state()
+    }
+}
+
+fn connect_runner<L: NodeLauncher>(
+    config: LocalNodeClientConfig,
+    launcher: L,
+    subscription: SubscriptionMode,
+) -> Result<(InstallationId, BlockingClientRunner<UnixClientTransport>), LocalNodeClientError> {
+    let runtime = RuntimePaths::new(config.state.root().join("runtime"))
+        .map_err(|_error: RuntimePathError| LocalNodeClientError::RuntimePath)?;
+    let probe = LifecycleClient::new(LifecycleClientConfig {
+        runtime: runtime.clone(),
+        build: config.build.clone(),
+        io_timeout: config.io_timeout,
+    })
+    .map_err(|_| LocalNodeClientError::Client)?;
+    let mut coordinator = NodeClientCoordinator::new(
+        probe,
+        launcher,
+        NodeCoordinatorConfig {
+            state_root: config.state.root().to_path_buf(),
+            readiness_timeout: config.readiness_timeout,
+            retry_interval: config.readiness_retry_interval,
+        },
+    )
+    .map_err(LocalNodeClientError::Coordinator)?;
+    let ready = coordinator
+        .ensure_ready()
+        .map_err(LocalNodeClientError::Coordinator)?;
+    let installation_id = ready
+        .observation
+        .readiness
+        .as_ref()
+        .map(|readiness| InstallationId::from_bytes(readiness.installation_id.bytes()))
+        .ok_or(LocalNodeClientError::Client)?;
+    let transport = UnixClientTransport::new(UnixClientTransportConfig {
+        runtime,
+        io_timeout: config.io_timeout,
+    })
+    .map_err(LocalNodeClientError::Transport)?;
+    let reconnect = ReconnectPolicy::new(config.reconnect_initial, config.reconnect_maximum)
+        .map_err(|_| LocalNodeClientError::Client)?;
+    let mut client = ReconnectingClient::new(
+        config.build,
+        reconnect,
+        config.completed_identity_capacity.get(),
+        config.initial_view,
+    )
+    .map_err(|_| LocalNodeClientError::Client)?;
+    if matches!(subscription, SubscriptionMode::All) {
+        client
+            .configure_subscription(
+                Id32::new(*installation_id.as_bytes()),
+                vec![InvalidationTopic::All],
+            )
+            .map_err(|_| LocalNodeClientError::Client)?;
+    }
+    let runner = BlockingClientRunner::new(
+        BlockingClientConfig {
+            deadline: config.command_deadline,
+            max_connection_attempts: config.max_connection_attempts,
+        },
+        client,
+        transport,
+    )
+    .map_err(LocalNodeClientError::Execution)?;
+    Ok((installation_id, runner))
+}
+
 /// Standard blocking transport that owns no state beyond validated configuration.
 #[derive(Clone, Debug)]
 pub struct UnixClientTransport {
     config: UnixClientTransportConfig,
+}
+
+/// One Unix client connection with an incremental frame decoder retained across idle polls.
+#[derive(Debug)]
+pub struct UnixClientConnection {
+    stream: UnixStream,
+    decoder: FrameDecoder,
+    ready_frames: VecDeque<Vec<u8>>,
+}
+
+impl UnixClientConnection {
+    fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            decoder: FrameDecoder::new(),
+            ready_frames: VecDeque::new(),
+        }
+    }
 }
 
 impl UnixClientTransport {
@@ -252,7 +356,7 @@ impl UnixClientTransport {
 }
 
 impl ClientTransport for UnixClientTransport {
-    type Connection = UnixStream;
+    type Connection = UnixClientConnection;
     type Error = UnixClientTransportError;
 
     fn connect(&mut self) -> Result<Self::Connection, Self::Error> {
@@ -270,7 +374,7 @@ impl ClientTransport for UnixClientTransport {
             .set_read_timeout(Some(self.config.io_timeout))
             .and_then(|()| stream.set_write_timeout(Some(self.config.io_timeout)))
             .map_err(|_| UnixClientTransportError::Transport)?;
-        Ok(stream)
+        Ok(UnixClientConnection::new(stream))
     }
 
     fn write(
@@ -280,9 +384,11 @@ impl ClientTransport for UnixClientTransport {
         timeout: Duration,
     ) -> Result<(), Self::Error> {
         connection
+            .stream
             .set_write_timeout(Some(timeout.min(self.config.io_timeout)))
             .map_err(|_| UnixClientTransportError::Transport)?;
-        unix_frame::write_frame(connection, frame).map_err(|_| UnixClientTransportError::Transport)
+        unix_frame::write_frame(&mut connection.stream, frame)
+            .map_err(|_| UnixClientTransportError::Transport)
     }
 
     fn read_frame(
@@ -290,23 +396,124 @@ impl ClientTransport for UnixClientTransport {
         connection: &mut Self::Connection,
         timeout: Duration,
     ) -> Result<Vec<u8>, Self::Error> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(UnixClientTransportError::Transport)?;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or(UnixClientTransportError::Transport)?;
+            if let Some(frame) = self.poll_frame(connection, remaining)? {
+                return Ok(frame);
+            }
+        }
+    }
+
+    fn poll_frame(
+        &mut self,
+        connection: &mut Self::Connection,
+        timeout: Duration,
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        if let Some(frame) = connection.ready_frames.pop_front() {
+            return Ok(Some(frame));
+        }
+        if timeout.is_zero() {
+            return Ok(None);
+        }
         connection
+            .stream
             .set_read_timeout(Some(timeout.min(self.config.io_timeout)))
             .map_err(|_| UnixClientTransportError::Transport)?;
-        unix_frame::read_frame(connection).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::InvalidData {
-                UnixClientTransportError::Protocol
-            } else {
-                UnixClientTransportError::Transport
+        let mut bytes = [0_u8; 8_192];
+        let count = match connection.stream.read(&mut bytes) {
+            Ok(0) if connection.decoder.buffered_len() == 0 => {
+                return Err(UnixClientTransportError::Transport);
             }
-        })
+            Ok(0) => return Err(UnixClientTransportError::Protocol),
+            Ok(count) => count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(_) => return Err(UnixClientTransportError::Transport),
+        };
+        let mut next = connection.decoder.push(&bytes[..count]);
+        loop {
+            let message = match next {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(_) => return Err(UnixClientTransportError::Protocol),
+            };
+            connection.ready_frames.push_back(
+                message
+                    .encode_frame()
+                    .map_err(|_| UnixClientTransportError::Protocol)?,
+            );
+            next = connection.decoder.push(&[]);
+        }
+        Ok(connection.ready_frames.pop_front())
     }
 
     fn close(&mut self, connection: Self::Connection) {
-        let _ = connection.shutdown(std::net::Shutdown::Both);
+        let _ = connection.stream.shutdown(std::net::Shutdown::Both);
     }
 
     fn wait(&mut self, delay: Duration) {
         std::thread::sleep(delay);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use std::{io::Write as _, os::unix::net::UnixStream, time::Duration};
+
+    use hq_local_api::{
+        ClientTransport,
+        protocol::v1::{BuildMetadata, Id32, ServerHello, V1, WireMessage},
+    };
+
+    use super::{UnixClientConnection, UnixClientTransport, UnixClientTransportConfig};
+    use crate::RuntimePaths;
+
+    #[test]
+    fn unix_poll_preserves_a_partial_frame_across_an_idle_timeout() {
+        let (mut writer, reader) = UnixStream::pair().expect("socket pair");
+        let mut connection = UnixClientConnection::new(reader);
+        let mut transport = UnixClientTransport::new(UnixClientTransportConfig {
+            runtime: RuntimePaths::new(
+                std::env::temp_dir().join("hq-local-client-partial-frame-test"),
+            )
+            .expect("absolute runtime path"),
+            io_timeout: Duration::from_millis(10),
+        })
+        .expect("transport");
+        let frame = WireMessage::ServerHello(ServerHello::new(
+            V1,
+            BuildMetadata::new("hq-test", "0.1.0", None::<String>).expect("build"),
+            Id32::new([7; 32]),
+        ))
+        .encode_frame()
+        .expect("frame");
+
+        writer.write_all(&frame[..2]).expect("partial prefix");
+        assert_eq!(
+            transport
+                .poll_frame(&mut connection, Duration::from_millis(1))
+                .expect("idle partial poll"),
+            None
+        );
+        writer.write_all(&frame[2..]).expect("remaining frame");
+        assert_eq!(
+            transport
+                .poll_frame(&mut connection, Duration::from_millis(10))
+                .expect("completed poll"),
+            Some(frame)
+        );
     }
 }

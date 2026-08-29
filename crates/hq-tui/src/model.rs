@@ -135,6 +135,8 @@ pub struct UiRow {
 /// Passive complete UI snapshot produced from one authoritative local-API snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiSnapshot {
+    /// Semantic section represented by these rows.
+    pub section: UiSection,
     /// Serialized authoritative revision.
     pub revision: u64,
     /// Reducer-ordered shell-normalized rows for the selected foundation view.
@@ -199,6 +201,13 @@ pub enum UiEvent {
         /// State observed for that generation.
         state: UiConnectionState,
     },
+    /// The reconnecting client reported a stable generation-scoped failure.
+    ClientFailed {
+        /// Monotonic shell connection generation.
+        generation: u64,
+        /// Stable actionable client failure.
+        failure: UiFailure,
+    },
 }
 
 /// Closed side effects emitted by pure UI transitions.
@@ -208,6 +217,8 @@ pub enum UiEffect {
     LoadSnapshot {
         /// Identity required on the completion event.
         id: EffectId,
+        /// Semantic section that the complete snapshot must represent.
+        section: UiSection,
     },
     /// Schedule one bounded timer through the shell clock.
     ScheduleTimer {
@@ -240,6 +251,8 @@ pub enum UiError {
     AlreadyStarted,
     /// The process-local effect identity space was exhausted.
     EffectIdentityExhausted,
+    /// A shell returned snapshot rows for a section other than the requested section.
+    SnapshotSectionMismatch,
 }
 
 impl std::fmt::Display for UiError {
@@ -253,6 +266,7 @@ impl std::error::Error for UiError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PendingSnapshot {
     id: EffectId,
+    section: UiSection,
     minimum_revision: u64,
 }
 
@@ -371,9 +385,13 @@ impl UiModel {
         });
         self.pending_snapshot = Some(PendingSnapshot {
             id,
+            section: self.section,
             minimum_revision,
         });
-        effects.push(UiEffect::LoadSnapshot { id });
+        effects.push(UiEffect::LoadSnapshot {
+            id,
+            section: self.section,
+        });
         Ok(())
     }
 
@@ -435,7 +453,7 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
     let mut effects = Vec::new();
     match event {
         UiEvent::Started => start(&mut model, &mut effects)?,
-        UiEvent::Input(value) => apply_input(&mut model, value, &mut effects),
+        UiEvent::Input(value) => apply_input(&mut model, value, &mut effects)?,
         UiEvent::Resized(viewport) => {
             if model.viewport != viewport {
                 model.viewport = viewport;
@@ -456,6 +474,10 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::ConnectionObserved { generation, state } => {
             connection_observed(&mut model, generation, state, &mut effects)?;
         }
+        UiEvent::ClientFailed {
+            generation,
+            failure,
+        } => client_failed(&mut model, generation, failure, &mut effects),
     }
     Ok(UiTransition { model, effects })
 }
@@ -472,7 +494,11 @@ fn start(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<(), UiError
     Ok(())
 }
 
-fn apply_input(model: &mut UiModel, input: UiInput, effects: &mut Vec<UiEffect>) {
+fn apply_input(
+    model: &mut UiModel,
+    input: UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
     let changed = match input {
         UiInput::Quit => {
             if model.should_exit {
@@ -492,10 +518,16 @@ fn apply_input(model: &mut UiModel, input: UiInput, effects: &mut Vec<UiEffect>)
         }
         UiInput::NextSection => {
             model.section = model.section.next();
+            model.snapshot = None;
+            model.selected_row = None;
+            model.request_snapshot(effects)?;
             true
         }
         UiInput::PreviousSection => {
             model.section = model.section.previous();
+            model.snapshot = None;
+            model.selected_row = None;
+            model.request_snapshot(effects)?;
             true
         }
         UiInput::NextItem => model.move_selection(true),
@@ -505,6 +537,7 @@ fn apply_input(model: &mut UiModel, input: UiInput, effects: &mut Vec<UiEffect>)
     if changed {
         effects.push(UiEffect::RequestRedraw);
     }
+    Ok(())
 }
 
 fn timer_elapsed(
@@ -538,13 +571,22 @@ fn snapshot_loaded(
     else {
         return Ok(());
     };
+    if snapshot.section != pending.section {
+        return Err(UiError::SnapshotSectionMismatch);
+    }
     model.pending_snapshot = None;
     model.retry_timer = None;
     model.connection = UiConnectionState::Ready;
     model.last_failure = None;
-    let current_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
-    if snapshot.revision >= current_revision {
-        model.apply_snapshot(snapshot);
+    if pending.section == model.section {
+        let current_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
+        if snapshot.revision >= current_revision {
+            model.apply_snapshot(snapshot);
+        }
+    } else {
+        model.request_snapshot(effects)?;
+        effects.push(UiEffect::RequestRedraw);
+        return Ok(());
     }
     let observed_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
     let required_revision = model
@@ -623,6 +665,21 @@ fn connection_observed(
     }
     effects.push(UiEffect::RequestRedraw);
     Ok(())
+}
+
+fn client_failed(
+    model: &mut UiModel,
+    generation: u64,
+    failure: UiFailure,
+    effects: &mut Vec<UiEffect>,
+) {
+    if generation < model.connection_generation {
+        return;
+    }
+    model.connection_generation = generation;
+    model.connection = UiConnectionState::Reconnecting;
+    model.last_failure = Some(failure);
+    effects.push(UiEffect::RequestRedraw);
 }
 
 #[cfg(test)]

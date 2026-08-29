@@ -21,9 +21,14 @@ fn startup_allocates_explicit_snapshot_tick_and_redraw_effects() {
     .expect("startup transition");
     assert_eq!(transition.model.connection(), UiConnectionState::Connecting);
     assert_eq!(transition.effects.len(), 3);
-    let UiEffect::LoadSnapshot { id: snapshot_id } = &transition.effects[0] else {
+    let UiEffect::LoadSnapshot {
+        id: snapshot_id,
+        section,
+    } = &transition.effects[0]
+    else {
         panic!("first effect loads a snapshot");
     };
+    assert_eq!(*section, UiSection::Inbox);
     let UiEffect::ScheduleTimer {
         id,
         kind: UiTimerKind::PeriodicRefresh,
@@ -217,6 +222,41 @@ fn reload_preserves_a_logical_selection_and_falls_back_when_it_disappears() {
 }
 
 #[test]
+fn section_change_rejects_the_old_sections_in_flight_snapshot() {
+    let started = started_model();
+    let inbox_id = snapshot_effect(&started.effects);
+    let sent = update(started.model, UiEvent::Input(UiInput::NextSection))
+        .expect("section changes while inbox is pending");
+    assert_eq!(sent.model.section(), UiSection::Sent);
+
+    let old_section = update(
+        sent.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: inbox_id,
+            snapshot: snapshot_for(UiSection::Inbox, 4, &["inbox"]),
+        },
+    )
+    .expect("old section response schedules selected section");
+    assert!(old_section.model.snapshot().is_none());
+    let (sent_id, requested_section) = snapshot_effect_with_section(&old_section.effects);
+    assert_eq!(requested_section, UiSection::Sent);
+
+    let current_section = update(
+        old_section.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: sent_id,
+            snapshot: snapshot_for(UiSection::Sent, 4, &["sent"]),
+        },
+    )
+    .expect("selected section applies");
+    assert_eq!(
+        current_section.model.snapshot().map(|value| value.section),
+        Some(UiSection::Sent)
+    );
+    assert_eq!(current_section.model.selected_row(), Some("sent"));
+}
+
+#[test]
 fn connection_observations_ignore_older_generations() {
     let started = started_model();
     let reconnecting = update(
@@ -256,6 +296,51 @@ fn connection_observations_ignore_older_generations() {
 }
 
 #[test]
+fn client_failures_are_scoped_to_the_current_connection_generation() {
+    let started = started_model();
+    let current = update(
+        started.model,
+        UiEvent::ClientFailed {
+            generation: 4,
+            failure: UiFailure {
+                code: "connection_lost".to_owned(),
+                action: "waiting to reconnect".to_owned(),
+            },
+        },
+    )
+    .expect("current failure applies");
+    assert_eq!(current.model.connection(), UiConnectionState::Reconnecting);
+    assert_eq!(
+        current
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("connection_lost")
+    );
+    assert_eq!(redraw_count(&current.effects), 1);
+
+    let stale = update(
+        current.model,
+        UiEvent::ClientFailed {
+            generation: 3,
+            failure: UiFailure {
+                code: "stale_failure".to_owned(),
+                action: "ignore old generation".to_owned(),
+            },
+        },
+    )
+    .expect("older failure is inert");
+    assert_eq!(
+        stale
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("connection_lost")
+    );
+    assert!(stale.effects.is_empty());
+}
+
+#[test]
 fn stale_timer_completions_cannot_repeat_effects() {
     let started = started_model();
     let periodic_id = timer_effect(&started.effects, UiTimerKind::PeriodicRefresh);
@@ -285,7 +370,12 @@ fn stale_timer_completions_cannot_repeat_effects() {
 }
 
 fn snapshot(revision: u64, ids: &[&str]) -> UiSnapshot {
+    snapshot_for(UiSection::Inbox, revision, ids)
+}
+
+fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
     UiSnapshot {
+        section,
         revision,
         rows: ids
             .iter()
@@ -311,10 +401,14 @@ fn started_model() -> hq_tui::UiTransition {
 }
 
 fn snapshot_effect(effects: &[UiEffect]) -> hq_tui::EffectId {
+    snapshot_effect_with_section(effects).0
+}
+
+fn snapshot_effect_with_section(effects: &[UiEffect]) -> (hq_tui::EffectId, UiSection) {
     effects
         .iter()
         .find_map(|effect| match effect {
-            UiEffect::LoadSnapshot { id } => Some(*id),
+            UiEffect::LoadSnapshot { id, section } => Some((*id, *section)),
             _ => None,
         })
         .expect("snapshot effect")

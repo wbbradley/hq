@@ -54,12 +54,11 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Compose the Ratatui terminal and reconnecting local-client shell** — Add terminal
-  input mapping, one effect executor, bounded redraw/tick scheduling, reconnect and invalidation
-  integration, the installed `hq tui` and bare-terminal roles, and RAII terminal restoration. Add
-  scripted local-client tests plus normal, error, cancellation, and panic restoration tests.
-  Complete this work when the shell renders and reconnects through the ordinary local API with no
-  domain/storage side channel.
+- **[tui/high] Compose the Crossterm terminal shell and installed TUI routes** — Add terminal input
+  mapping, the redraw/event loop, installed `hq tui` and bare-terminal roles, and RAII terminal
+  restoration. Add normal, error, cancellation, and panic restoration tests plus installed-binary
+  pseudo-terminal coverage. Complete this work when the shell is usable, restores every terminal
+  mode on every exit path, and reaches state only through the TUI effect executor.
 
 - **[tui/high] Implement retained mailbox, agent, and project workflows** — Add authoritative
   snapshot reload, conversation/activity presentation in reducer order, inbox filtering, typed

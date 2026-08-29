@@ -41,6 +41,8 @@ mod session_pump;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session_registry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod tui_client;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix_frame;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -92,8 +94,8 @@ pub use lifecycle_client::{
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local_client::{
-    LocalNodeClient, LocalNodeClientConfig, LocalNodeClientError, UnixClientTransport,
-    UnixClientTransportConfig, UnixClientTransportError,
+    LocalNodeClient, LocalNodeClientConfig, LocalNodeClientError, LocalNodeEventClient,
+    UnixClientConnection, UnixClientTransport, UnixClientTransportConfig, UnixClientTransportError,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local_transport::{
@@ -134,6 +136,11 @@ pub use session_registry::{
     LocalSessionInvalidationFailure, LocalSessionInvalidationReport, LocalSessionRegistry,
     LocalSessionRegistryConfig, LocalSessionShutdownReport, LocalSessionTaskFailure,
     LocalSessionTaskFailureKind,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use tui_client::{
+    LocalTuiClient, MonotonicTuiClock, TuiClientObservation, TuiClientPort, TuiClock,
+    TuiEffectExecutor, TuiExecutorError, tui_snapshot,
 };
 
 use hq_application::InMemoryApplication;

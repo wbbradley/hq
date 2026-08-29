@@ -42,8 +42,11 @@ It has no internal workspace dependency and no runtime, transport, storage, file
 domain capability. Passive shell-normalized records expose public fields. `UiModel` and `EffectId`
 remain opaque because they maintain relational invariants between outstanding effect identities,
 timers, snapshot revisions, reconnect generations, and logical selection. The `hq-node`
-composition layer owns terminal and local-client capabilities and will map ordinary local API
-snapshots into those passive presentation records.
+composition layer owns the subscribed ordinary local client, section-specific snapshot mapping,
+bounded effect/timer queues, and joined worker lifecycle. Its TUI client source is mechanically
+forbidden from importing domain, application, storage, relay, harness, provider, resource,
+project, filesystem, or process APIs. Terminal ownership and input mapping remain the next outer
+shell layer.
 
 `hq-harness` implements the synchronous object-safe boundary in
 `docs/harness-contract-v1.md`: passive capability and event records have public fields, while the

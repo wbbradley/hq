@@ -34,7 +34,8 @@ use hq_local_api::{
 };
 use hq_node::{
     LifecycleClient, LifecycleClientConfig, LocalNodeClient, LocalNodeClientConfig,
-    ProcessNodeLauncher, RuntimePaths, StateDirectoryOwner, StatePaths, execute_cli_with_input,
+    LocalNodeEventClient, ProcessNodeLauncher, RuntimePaths, StateDirectoryOwner, StatePaths,
+    execute_cli_with_input,
 };
 
 use support::TestDirectory;
@@ -251,24 +252,36 @@ fn encode_hex(bytes: [u8; 32]) -> String {
         .collect()
 }
 
+fn local_client_config(state: StatePaths, initial_view: InitialView) -> LocalNodeClientConfig {
+    LocalNodeClientConfig {
+        state,
+        build: BuildMetadata::new("hq-test", "0.1.0", Some("cli-e2e")).expect("build"),
+        initial_view,
+        io_timeout: Duration::from_secs(2),
+        command_deadline: Duration::from_secs(5),
+        max_connection_attempts: NonZeroUsize::new(8).expect("positive attempts"),
+        readiness_timeout: Duration::from_secs(5),
+        readiness_retry_interval: Duration::from_millis(10),
+        reconnect_initial: Duration::from_millis(10),
+        reconnect_maximum: Duration::from_millis(40),
+        completed_identity_capacity: NonZeroUsize::new(16).expect("positive history"),
+    }
+}
+
 fn local_client(state: StatePaths, initial_view: InitialView) -> LocalNodeClient {
     LocalNodeClient::connect_with_launcher(
-        LocalNodeClientConfig {
-            state,
-            build: BuildMetadata::new("hq-test", "0.1.0", Some("cli-e2e")).expect("build"),
-            initial_view,
-            io_timeout: Duration::from_secs(2),
-            command_deadline: Duration::from_secs(5),
-            max_connection_attempts: NonZeroUsize::new(8).expect("positive attempts"),
-            readiness_timeout: Duration::from_secs(5),
-            readiness_retry_interval: Duration::from_millis(10),
-            reconnect_initial: Duration::from_millis(10),
-            reconnect_maximum: Duration::from_millis(40),
-            completed_identity_capacity: NonZeroUsize::new(16).expect("positive history"),
-        },
+        local_client_config(state, initial_view),
         ProcessNodeLauncher::new(env!("CARGO_BIN_EXE_hq").into()),
     )
     .expect("local command client")
+}
+
+fn local_event_client(state: StatePaths) -> LocalNodeEventClient {
+    LocalNodeEventClient::connect_with_launcher(
+        local_client_config(state, InitialView::OnDemand),
+        ProcessNodeLauncher::new(env!("CARGO_BIN_EXE_hq").into()),
+    )
+    .expect("subscribed local event client")
 }
 
 fn commit_plan(client: &mut LocalNodeClient, identity: u8, plan: FactPlan) {
@@ -401,6 +414,64 @@ fn setup_direct_agent_session(
         ),
     );
     (agent_mailbox, provider, session)
+}
+
+#[test]
+fn subscribed_local_event_client_refreshes_and_reconnects_to_a_real_node() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _stop = DaemonStopGuard(state_root.clone());
+    let state = StatePaths::new(state_root.clone()).expect("state paths");
+    let mut subscriber = local_event_client(state);
+    let initial_revision = subscriber.snapshot().expect("initial snapshot").revision;
+    let initial_connection = subscriber.connection_state();
+
+    let created = human_output(&state_root, &["create", "Subscribed"]);
+    assert!(
+        created.status.success(),
+        "human create stderr: {:?}",
+        created.stderr
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let event = subscriber
+            .poll_event(Duration::from_millis(100))
+            .expect("subscribed client poll");
+        if matches!(
+            event,
+            Some(ClientEvent::Snapshot(ref snapshot)) if snapshot.revision > initial_revision
+        ) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "subscribed client did not refresh after invalidation"
+        );
+    }
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let event = subscriber
+            .poll_event(Duration::from_millis(100))
+            .expect("reconnecting subscribed client poll");
+        if subscriber.connection_state() != initial_connection
+            && matches!(event, Some(ClientEvent::Snapshot(_)))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "subscribed client did not reconnect with a fresh snapshot"
+        );
+    }
 }
 
 #[test]

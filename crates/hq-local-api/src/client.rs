@@ -56,6 +56,17 @@ pub trait ClientTransport {
         connection: &mut Self::Connection,
         timeout: Duration,
     ) -> Result<Vec<u8>, Self::Error>;
+    /// Polls for one complete frame, returning `None` when the bounded wait elapsed normally.
+    ///
+    /// Blocking command transports may use the default implementation. Interactive transports
+    /// override this method so an idle socket is distinct from a disconnected socket.
+    fn poll_frame(
+        &mut self,
+        connection: &mut Self::Connection,
+        timeout: Duration,
+    ) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.read_frame(connection, timeout).map(Some)
+    }
     /// Closes one connection idempotently.
     fn close(&mut self, connection: Self::Connection);
     /// Waits for one deterministic reconnect delay.
@@ -102,10 +113,15 @@ pub struct BlockingClientRunner<T: ClientTransport> {
     client: ReconnectingClient,
     transport: T,
     connection: Option<(ConnectionGeneration, T::Connection)>,
-    actions: VecDeque<ClientAction>,
+    actions: VecDeque<QueuedClientAction>,
     events: VecDeque<ClientEvent>,
     connection_attempts: usize,
     response_pending: bool,
+}
+
+struct QueuedClientAction {
+    action: ClientAction,
+    not_before: Instant,
 }
 
 /// Nonzero client-local connection attempt identity used to discard stale events.
@@ -117,6 +133,21 @@ impl ConnectionGeneration {
     pub const fn value(self) -> u64 {
         self.0.get()
     }
+}
+
+/// Closed observable connection phase for long-lived client shells.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientConnectionState {
+    /// No connection attempt has started.
+    Idle,
+    /// A delayed or immediate connection attempt is pending.
+    Connecting(ConnectionGeneration),
+    /// A transport is open and version negotiation is pending.
+    Negotiating(ConnectionGeneration),
+    /// The current generation completed negotiation.
+    Active(ConnectionGeneration),
+    /// The current generation has no compatible local API version.
+    Incompatible(ConnectionGeneration),
 }
 
 /// Deterministic exponential reconnect schedule with an inclusive maximum delay.
@@ -725,6 +756,17 @@ impl ReconnectingClient {
         }
     }
 
+    /// Returns the current generation-scoped connection phase.
+    pub const fn connection_state(&self) -> ClientConnectionState {
+        match self.phase {
+            Phase::Idle => ClientConnectionState::Idle,
+            Phase::Connecting(generation) => ClientConnectionState::Connecting(generation),
+            Phase::Negotiating(generation) => ClientConnectionState::Negotiating(generation),
+            Phase::Active(generation) => ClientConnectionState::Active(generation),
+            Phase::Incompatible(generation) => ClientConnectionState::Incompatible(generation),
+        }
+    }
+
     /// Returns the connection-specific subscription identity after negotiation.
     pub const fn active_subscription_id(&self) -> Option<Id32> {
         self.active_subscription_id
@@ -1265,7 +1307,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             .submit_request(request)
             .map_err(BlockingClientError::Client)?;
         let request_id = submitted_request_id(&transition)?;
-        self.enqueue(transition);
+        self.enqueue(transition)?;
         loop {
             match self.step(deadline)? {
                 Some(
@@ -1313,7 +1355,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             .client
             .refresh_snapshot()
             .map_err(BlockingClientError::Client)?;
-        self.enqueue(transition);
+        self.enqueue(transition)?;
         loop {
             match self.step(deadline)? {
                 Some(ClientEvent::Snapshot(snapshot)) => return Ok(snapshot),
@@ -1346,7 +1388,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             .client
             .submit_mutation(request)
             .map_err(BlockingClientError::Client)?;
-        self.enqueue(transition);
+        self.enqueue(transition)?;
         self.ensure_started()?;
         loop {
             match self.step(deadline)? {
@@ -1396,7 +1438,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             .client
             .submit_project_command(request)
             .map_err(BlockingClientError::Client)?;
-        self.enqueue(transition);
+        self.enqueue(transition)?;
         self.ensure_started()?;
         loop {
             match self.step(deadline)? {
@@ -1442,7 +1484,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             .client
             .submit_agent_retirement(request)
             .map_err(BlockingClientError::Client)?;
-        self.enqueue(transition);
+        self.enqueue(transition)?;
         self.ensure_started()?;
         loop {
             match self.step(deadline)? {
@@ -1488,7 +1530,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             .client
             .submit_agent_session(request)
             .map_err(BlockingClientError::Client)?;
-        self.enqueue(transition);
+        self.enqueue(transition)?;
         self.ensure_started()?;
         loop {
             match self.step(deadline)? {
@@ -1530,6 +1572,40 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
         self.transport
     }
 
+    /// Drives connection, subscription, and refresh work for at most the supplied wait.
+    ///
+    /// A normal idle timeout returns `Ok(None)` without closing the active connection. Semantic
+    /// client events remain ordered and are returned one at a time.
+    pub fn poll_event(
+        &mut self,
+        wait: Duration,
+    ) -> Result<Option<ClientEvent>, BlockingClientError> {
+        if let Some(event) = self.events.pop_front() {
+            return Ok(Some(event));
+        }
+        if wait.is_zero() {
+            return Ok(None);
+        }
+        let deadline = Instant::now()
+            .checked_add(wait)
+            .ok_or(BlockingClientError::Deadline)?;
+        self.connection_attempts = 0;
+        self.ensure_started()?;
+        loop {
+            match self.step(deadline) {
+                Ok(Some(event)) => return Ok(Some(event)),
+                Ok(None) => {}
+                Err(BlockingClientError::Deadline) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Returns the generation-scoped state of the owned reconnecting client.
+    pub const fn connection_state(&self) -> ClientConnectionState {
+        self.client.connection_state()
+    }
+
     fn begin_execution(&mut self) {
         self.connection_attempts = 0;
         self.events.clear();
@@ -1538,7 +1614,7 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
     fn ensure_started(&mut self) -> Result<(), BlockingClientError> {
         if self.client.current_generation().is_none() {
             let transition = self.client.start().map_err(BlockingClientError::Client)?;
-            self.enqueue(transition);
+            self.enqueue(transition)?;
         }
         Ok(())
     }
@@ -1561,8 +1637,19 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             return Ok(Some(event));
         }
         if !self.response_pending
-            && let Some(action) = self.actions.pop_front()
+            && let Some(queued) = self.actions.front()
         {
+            let now = Instant::now();
+            if queued.not_before > now {
+                let delay = queued.not_before.duration_since(now);
+                self.transport.wait(delay.min(remaining(deadline)?));
+                return Ok(None);
+            }
+            let action = self
+                .actions
+                .pop_front()
+                .ok_or(BlockingClientError::Client(ClientError::ProtocolOrder))?
+                .action;
             self.apply_action(action, deadline)?;
             return Ok(None);
         }
@@ -1570,33 +1657,38 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
             return Err(BlockingClientError::ConnectionAttemptsExhausted);
         };
         let timeout = remaining(deadline)?;
-        let transition = if let Ok(frame) = self.transport.read_frame(connection, timeout) {
-            let completes_response = matches!(
-                WireMessage::decode_frame(&frame),
-                Ok(WireMessage::ServerHello(_)
-                    | WireMessage::VersionRejected(_)
-                    | WireMessage::Response(_))
-            );
-            let transition = self
-                .client
-                .receive_frame(*generation, &frame)
-                .map_err(BlockingClientError::Client)?;
-            if completes_response {
-                self.response_pending = false;
+        let polled = self.transport.poll_frame(connection, timeout);
+        let transition = match polled {
+            Ok(Some(frame)) => {
+                let completes_response = matches!(
+                    WireMessage::decode_frame(&frame),
+                    Ok(WireMessage::ServerHello(_)
+                        | WireMessage::VersionRejected(_)
+                        | WireMessage::Response(_))
+                );
+                let transition = self
+                    .client
+                    .receive_frame(*generation, &frame)
+                    .map_err(BlockingClientError::Client)?;
+                if completes_response {
+                    self.response_pending = false;
+                }
+                transition
             }
-            transition
-        } else {
-            let (generation, connection) = self
-                .connection
-                .take()
-                .ok_or(BlockingClientError::ConnectionAttemptsExhausted)?;
-            self.transport.close(connection);
-            self.response_pending = false;
-            self.client
-                .disconnected(generation)
-                .map_err(BlockingClientError::Client)?
+            Ok(None) => ClientTransition::default(),
+            Err(_) => {
+                let (generation, connection) = self
+                    .connection
+                    .take()
+                    .ok_or(BlockingClientError::ConnectionAttemptsExhausted)?;
+                self.transport.close(connection);
+                self.response_pending = false;
+                self.client
+                    .disconnected(generation)
+                    .map_err(BlockingClientError::Client)?
+            }
         };
-        self.enqueue(transition);
+        self.enqueue(transition)?;
         Ok(None)
     }
 
@@ -1606,18 +1698,11 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
         deadline: Instant,
     ) -> Result<(), BlockingClientError> {
         let transition = match action {
-            ClientAction::ConnectAfter { generation, delay } => {
+            ClientAction::ConnectAfter { generation, .. } => {
                 self.connection_attempts = self.connection_attempts.saturating_add(1);
                 if self.connection_attempts > self.config.max_connection_attempts.get() {
                     return Err(BlockingClientError::ConnectionAttemptsExhausted);
                 }
-                if Instant::now()
-                    .checked_add(delay)
-                    .is_none_or(|ready| ready > deadline)
-                {
-                    return Err(BlockingClientError::Deadline);
-                }
-                self.transport.wait(delay);
                 let connected = self.transport.connect();
                 if Instant::now() >= deadline {
                     if let Ok(connection) = connected {
@@ -1675,13 +1760,25 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
                 ClientTransition::default()
             }
         };
-        self.enqueue(transition);
+        self.enqueue(transition)?;
         Ok(())
     }
 
-    fn enqueue(&mut self, transition: ClientTransition) {
-        self.actions.extend(transition.actions);
+    fn enqueue(&mut self, transition: ClientTransition) -> Result<(), BlockingClientError> {
+        let now = Instant::now();
+        for action in transition.actions {
+            let delay = match action {
+                ClientAction::ConnectAfter { delay, .. } => delay,
+                ClientAction::Write { .. } | ClientAction::Close { .. } => Duration::ZERO,
+            };
+            let not_before = now
+                .checked_add(delay)
+                .ok_or(BlockingClientError::Deadline)?;
+            self.actions
+                .push_back(QueuedClientAction { action, not_before });
+        }
         self.events.extend(transition.events);
+        Ok(())
     }
 
     fn execution_deadline(&self) -> Instant {

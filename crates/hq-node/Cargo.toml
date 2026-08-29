@@ -23,6 +23,7 @@ hq-relay.workspace = true
 hq-reducer.workspace = true
 hq-resources.workspace = true
 hq-store.workspace = true
+hq-tui.workspace = true
 scrypt.workspace = true
 serde.workspace = true
 serde_json.workspace = true

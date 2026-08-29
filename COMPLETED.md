@@ -8041,3 +8041,42 @@ reports only the existing allowed yanked `chacha20 0.10.1` warning.
   an assigned runtime through the owning project workflow, and requires explicit force before HQ
   authority can outlive an uncertain stop. Test idle and assigned agents, project races, stale
   heads, response loss, restart repair, runtime uncertainty, and local API-only architecture.
+
+## 2026-08-28 — Interruptible reconnecting TUI client and effect executor
+
+Extended the ordinary reconnecting local API runner with bounded idle polling and observable
+generation-scoped connection phases. Delayed reconnect actions retain monotonic deadlines across
+short polls instead of being consumed by a poll timeout. The Unix adapter now owns an incremental
+frame decoder per connection, so idle timeouts preserve partial frames and normal inactivity is not
+misclassified as disconnection. A subscribed `LocalNodeEventClient` shares the ordinary client
+composition and broad revision subscription; a real foreground test proves mutation invalidation,
+full-snapshot refresh, daemon restart, a new negotiated generation, re-subscription, and recovery.
+
+Added the node-owned `LocalTuiClient` and one bounded `TuiEffectExecutor` worker. Snapshot effects
+name their exact semantic section, authoritative local API snapshots map deterministically into
+small passive presentation records, and old-section or old-generation results cannot overwrite the
+current model. The executor preserves effect identity, releases timers once, coalesces redraws,
+reports stable connection failures, and joins on explicit shutdown or drop. Its shutdown drains
+bounded results while retrying the stop command, with a regression test that saturates both worker
+channels. Architecture checks mechanically prevent the TUI client/executor from importing domain,
+application, storage, relay, harness, provider, resource, project, filesystem, or process APIs.
+
+No storage shape, storage version, protocol version, migration, compatibility reader, or accessor
+facade was added. Passive snapshot, row, size, failure, and observation records expose public fields;
+only invariant-bearing model/effect identities and live capabilities remain opaque.
+
+The locked full workspace check, strict Clippy, all-target/all-feature tests and build, formatting,
+architecture, behavior-ledger, causal-spec, protocol-spec, dependency-policy, and protocol-fuzz
+gates pass. Dependency policy reports only Ratatui's allowed duplicate `hashbrown`/`syn` versions
+and the existing allowed yanked `chacha20 0.10.1` warning. An exact executable-name audit found no
+running `hq` daemon after the tests.
+
+### Original plan entry
+
+- **[tui/high] Build the interruptible reconnecting TUI client and effect executor** — Extend the
+  ordinary local API client driver with bounded idle polling, preserve partial frames across poll
+  timeouts, and compose subscription/reconnect observations into one TUI effect executor. Add
+  section-bound snapshot effects, deterministic local-API-to-presentation mapping, stale-result and
+  invalidation tests, bounded timer/redraw coalescing, and joined worker shutdown. Complete this
+  work when the executor remains responsive during reconnect and performs no direct domain/storage
+  access.

@@ -251,9 +251,19 @@ done < <(grep -El '^name[[:space:]]*=[[:space:]]*"hq"[[:space:]]*$' \
 
 if grep -Eq '(hq_store|hq_relay|hq_codex|hq_resources|rusqlite|std::fs)' \
   "$repository_root/crates/hq-node/src/cli.rs" \
-  "$repository_root/crates/hq-node/src/local_client.rs"; then
+  "$repository_root/crates/hq-node/src/local_client.rs" \
+  "$repository_root/crates/hq-node/src/tui_client.rs"; then
   fail "the CLI/local client may cross only node coordination and hq-local-api boundaries"
 fi
+if grep -Eq '(hq_(domain|application|store|relay|harness|codex|resources|projects)|rusqlite|std::fs|std::process)' \
+  "$repository_root/crates/hq-node/src/tui_client.rs"; then
+  fail "the TUI client executor may cross only hq-tui and ordinary local API boundaries"
+fi
+grep -Fq 'impl TuiClientPort for LocalTuiClient' \
+  "$repository_root/crates/hq-node/src/tui_client.rs" ||
+  fail "hq-node must map the subscribed ordinary local client into the TUI client port"
+grep -Fq 'LocalNodeEventClient' "$repository_root/crates/hq-node/src/tui_client.rs" ||
+  fail "the TUI client port must use the subscribed ordinary local API client"
 if grep -Eq '(StoreGateway|Bip340Signer|FactMutation|SemanticPayload::(AgentNameClaimed|ProviderSessionSelected|ProviderSessionRenamed))' \
   "$repository_root/crates/hq-node/src/cli.rs" \
   "$repository_root/crates/hq-node/src/local_client.rs"; then

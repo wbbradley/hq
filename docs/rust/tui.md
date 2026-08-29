@@ -4,8 +4,9 @@ Status: Active pure-client contract
 
 `hq-tui` owns deterministic presentation state and borrowed Ratatui rendering. It does not own a
 terminal, clock, task runtime, local connection, storage handle, signer, filesystem, process, or
-domain mutation capability. The outer `hq-node` shell will normalize terminal and ordinary local
-API observations into the closed event vocabulary and execute the returned closed effects.
+domain mutation capability. The outer `hq-node` composition normalizes ordinary local API
+observations into the closed event vocabulary and executes returned effects; the terminal shell
+only needs to add terminal input, resize, and rendering ownership.
 
 ## Transition boundary
 
@@ -16,9 +17,9 @@ UiModel + UiEvent -> Result<(UiModel, [UiEffect]), UiError>
 ```
 
 `UiEvent` covers one-time startup, normalized input, complete resizes, identity-bearing timer and
-snapshot completions, revision-only invalidations, and generation-scoped connection observations.
-`UiEffect` covers complete-snapshot requests, timers, redraw requests, and exit. The transition
-function performs no I/O and has no domain mutation port.
+snapshot completions, revision-only invalidations, and generation-scoped connection states and
+failures. `UiEffect` covers section-bound complete-snapshot requests, timers, redraw requests, and
+exit. The transition function performs no I/O and has no domain mutation port.
 
 Every asynchronous request receives a nonzero process-local `EffectId`. A completion changes state
 only while that exact identity is outstanding for its effect kind. Older snapshot successes and
@@ -31,6 +32,28 @@ the shell's monotonic generation.
 The model preserves selection by stable row identity, not by screen coordinate or vector index.
 Reload keeps the selected identity when it remains present and selects the first logical row when
 it disappears. Resize changes dimensions only; it does not rewrite logical focus or selection.
+
+## Reconnecting client and effect executor
+
+`hq-node::LocalNodeEventClient` is the long-lived subscribed form of the ordinary local API client.
+Its bounded poll distinguishes an idle socket from a disconnect, and its Unix connection retains an
+incremental frame decoder so a read timeout cannot discard a partial frame. Reconnect delays remain
+queued against monotonic deadlines across short shell polls. Every negotiated generation registers
+the broad invalidation subscription before its acknowledged authoritative snapshot is exposed.
+
+`LocalTuiClient` maps only complete authoritative local API snapshots into the exact requested
+`UiSection`. The protocol `AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately
+different records: one is canonical local-API data, while the other is a small section-specific
+view containing only safe rendering fields. Neither is a storage compatibility shape, and both
+passive records expose their fields directly.
+
+`TuiEffectExecutor` owns one named worker and bounded command/result channels. The worker alone owns
+the subscribed client; the shell cannot reach storage, domain planners, signers, relays, providers,
+or files through this boundary. The executor preserves snapshot effect identity, releases each
+timer once, coalesces redraw requests, and joins its worker on explicit shutdown or drop. Shutdown
+drains bounded results while enqueueing the stop command, so saturated queues cannot deadlock the
+join. Client failures and connection observations retain their generation so older results cannot
+overwrite newer UI state.
 
 ## Data and encapsulation
 
@@ -74,5 +97,6 @@ The terminal/client shell must:
 6. coalesce redraw work without dropping the latest model; and
 7. restore terminal state through shell-owned RAII on every exit path.
 
-Terminal ownership, key-event decoding, reconnect execution, snapshot mapping, and restoration are
-intentionally outside this package and belong to the next shell composition package.
+Terminal ownership, key-event decoding, event-loop composition, and restoration remain outside the
+pure crate and belong to the terminal-shell package. The terminal shell must reach state only
+through `TuiEffectExecutor`; reconnect execution and snapshot mapping are already composed there.

@@ -77,7 +77,7 @@ fn ready_model(size: UiSize) -> UiModel {
         .effects
         .iter()
         .find_map(|effect| match effect {
-            UiEffect::LoadSnapshot { id } => Some(*id),
+            UiEffect::LoadSnapshot { id, .. } => Some(*id),
             _ => None,
         })
         .expect("snapshot request");
@@ -86,6 +86,7 @@ fn ready_model(size: UiSize) -> UiModel {
         UiEvent::SnapshotLoaded {
             effect_id: request,
             snapshot: UiSnapshot {
+                section: hq_tui::UiSection::Inbox,
                 revision: 42,
                 rows: vec![
                     row("build-17", "Build release", "agent-1", UiRowState::Open),

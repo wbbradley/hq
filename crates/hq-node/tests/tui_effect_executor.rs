@@ -1,0 +1,438 @@
+//! Scripted TUI client and effect-executor contracts.
+
+#![allow(clippy::expect_used, clippy::panic)]
+
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
+
+use hq_local_api::protocol::v1::{
+    AuthoritativeSnapshotDto, ConversationKeyDto, Id32, SnapshotItem,
+};
+use hq_node::{
+    TuiClientObservation, TuiClientPort, TuiClock, TuiEffectExecutor, TuiExecutorError,
+    tui_snapshot,
+};
+use hq_tui::{
+    UiConnectionState, UiEffect, UiEvent, UiFailure, UiModel, UiSection, UiSize, UiSnapshot,
+    UiTimerKind, update,
+};
+
+#[test]
+fn executor_loads_the_effects_exact_section_and_preserves_identity() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let stopped = Arc::new(Mutex::new(false));
+    let client = ScriptedTuiClient {
+        requests: Arc::clone(&requests),
+        snapshots: VecDeque::from([Ok(UiSnapshot {
+            section: UiSection::Inbox,
+            revision: 7,
+            rows: Vec::new(),
+        })]),
+        observations: VecDeque::new(),
+        stopped: Arc::clone(&stopped),
+    };
+    let clock = ManualClock::default();
+    let mut executor = TuiEffectExecutor::spawn(client, clock.clone()).expect("spawn executor");
+    let started = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start model");
+    let expected_id = started
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadSnapshot { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("load effect");
+
+    executor.execute(started.effects).expect("execute effects");
+    let event = receive_event(&mut executor);
+    assert!(matches!(
+        event,
+        UiEvent::SnapshotLoaded { effect_id, snapshot }
+            if effect_id == expected_id
+                && snapshot.section == UiSection::Inbox
+                && snapshot.revision == 7
+    ));
+    assert_eq!(
+        requests.lock().expect("requests lock").as_slice(),
+        &[UiSection::Inbox]
+    );
+    assert!(executor.take_redraw_request());
+    assert!(!executor.take_redraw_request());
+
+    executor.shutdown().expect("joined shutdown");
+    assert!(*stopped.lock().expect("stopped lock"));
+}
+
+#[test]
+fn executor_coalesces_redraw_and_releases_each_timer_once() {
+    let clock = ManualClock::default();
+    let client = ScriptedTuiClient::empty();
+    let mut executor = TuiEffectExecutor::spawn(client, clock.clone()).expect("spawn executor");
+    let started = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start model");
+    let timer_id = started
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::ScheduleTimer {
+                id,
+                kind: UiTimerKind::PeriodicRefresh,
+                ..
+            } => Some(*id),
+            _ => None,
+        })
+        .expect("timer effect");
+    executor
+        .execute(
+            started
+                .effects
+                .into_iter()
+                .filter(|effect| !matches!(effect, UiEffect::LoadSnapshot { .. })),
+        )
+        .expect("execute non-client effects");
+    executor
+        .execute([UiEffect::RequestRedraw, UiEffect::RequestRedraw])
+        .expect("coalesce redraw");
+    assert!(executor.take_redraw_request());
+    assert!(!executor.take_redraw_request());
+    assert!(executor.poll_event().is_none());
+
+    clock.advance(Duration::from_secs(300));
+    assert_eq!(
+        executor.poll_event(),
+        Some(UiEvent::TimerElapsed {
+            effect_id: timer_id
+        })
+    );
+    assert!(executor.poll_event().is_none());
+    executor.shutdown().expect("joined shutdown");
+}
+
+#[test]
+fn executor_forwards_subscription_and_connection_observations() {
+    let client = ScriptedTuiClient {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        snapshots: VecDeque::new(),
+        observations: VecDeque::from([
+            TuiClientObservation::Connection {
+                generation: 3,
+                state: UiConnectionState::Reconnecting,
+            },
+            TuiClientObservation::Invalidated { revision: 12 },
+            TuiClientObservation::Failure {
+                generation: 3,
+                failure: UiFailure {
+                    code: "local_client_unavailable".to_owned(),
+                    action: "waiting to reconnect".to_owned(),
+                },
+            },
+        ]),
+        stopped: Arc::new(Mutex::new(false)),
+    };
+    let mut executor =
+        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("spawn executor");
+
+    assert!(matches!(
+        receive_event(&mut executor),
+        UiEvent::ConnectionObserved {
+            generation: 3,
+            state: UiConnectionState::Reconnecting
+        }
+    ));
+    assert_eq!(
+        receive_event(&mut executor),
+        UiEvent::Invalidated { revision: 12 }
+    );
+    assert!(matches!(
+        receive_event(&mut executor),
+        UiEvent::ClientFailed { generation: 3, failure }
+            if failure.code == "local_client_unavailable"
+    ));
+    executor.shutdown().expect("joined shutdown");
+}
+
+#[test]
+fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
+    let source = AuthoritativeSnapshotDto::new(
+        21,
+        vec![
+            SnapshotItem::Conversation {
+                key: ConversationKeyDto::Thread {
+                    counterparty_installation: Id32::new([1; 32]),
+                    counterparty_mailbox: Id32::new([2; 32]),
+                    thread: Id32::new([3; 32]),
+                },
+                latest_fact: Some(Id32::new([4; 32])),
+                open_messages: 2,
+            },
+            SnapshotItem::Agent {
+                agent_id: Id32::new([5; 32]),
+                claims: vec![Id32::new([6; 32])],
+                names: vec!["builder".to_owned()],
+                mailboxes: Vec::new(),
+                retirements: Vec::new(),
+                lifecycle: "ready".to_owned(),
+                runnable: true,
+            },
+            SnapshotItem::Project {
+                project_id: Id32::new([7; 32]),
+                home: Id32::new([8; 32]),
+                account_id: Id32::new([9; 32]),
+                mailbox_id: Id32::new([10; 32]),
+                name: "release".to_owned(),
+                lifecycle: "open".to_owned(),
+                archived: false,
+                claimable: false,
+                head: Id32::new([11; 32]),
+                input_sequence: 0,
+            },
+        ],
+    )
+    .expect("authoritative snapshot");
+
+    let inbox = tui_snapshot(UiSection::Inbox, source.clone());
+    assert_eq!(inbox.revision, 21);
+    assert_eq!(inbox.section, UiSection::Inbox);
+    assert_eq!(inbox.rows.len(), 1);
+    assert_eq!(inbox.rows[0].title, "Thread 030303030303");
+    assert_eq!(inbox.rows[0].detail, "2 open messages");
+
+    let agents = tui_snapshot(UiSection::Agents, source.clone());
+    assert_eq!(agents.rows.len(), 1);
+    assert_eq!(agents.rows[0].title, "builder");
+    assert_eq!(agents.rows[0].state, hq_tui::UiRowState::Open);
+
+    let projects = tui_snapshot(UiSection::Projects, source.clone());
+    assert_eq!(projects.rows.len(), 1);
+    assert_eq!(projects.rows[0].title, "release");
+    assert_eq!(projects.rows[0].state, hq_tui::UiRowState::Attention);
+    assert!(tui_snapshot(UiSection::Sent, source).rows.is_empty());
+}
+
+#[test]
+fn authoritative_snapshot_mapping_never_forwards_terminal_controls() {
+    let source = AuthoritativeSnapshotDto::new(
+        1,
+        vec![SnapshotItem::Agent {
+            agent_id: Id32::new([1; 32]),
+            claims: Vec::new(),
+            names: vec!["builder\u{1b}[31m".to_owned()],
+            mailboxes: Vec::new(),
+            retirements: Vec::new(),
+            lifecycle: "ready\nspoof".to_owned(),
+            runnable: true,
+        }],
+    )
+    .expect("authoritative snapshot");
+
+    let snapshot = tui_snapshot(UiSection::Agents, source);
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].title, "builder [31m");
+    assert_eq!(snapshot.rows[0].detail, "ready spoof");
+    assert!(
+        snapshot.rows[0]
+            .title
+            .chars()
+            .chain(snapshot.rows[0].detail.chars())
+            .all(|character| !character.is_control())
+    );
+}
+
+#[test]
+fn worker_panics_are_joined_and_reported() {
+    let mut executor =
+        TuiEffectExecutor::spawn(PanickingClient, ManualClock::default()).expect("spawn executor");
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(executor.shutdown(), Err(TuiExecutorError::WorkerPanicked));
+}
+
+#[test]
+fn shutdown_drains_saturated_worker_results_before_joining() {
+    let effects = snapshot_load_effects(25);
+    let mut executor = TuiEffectExecutor::spawn(ImmediateSnapshotClient, ManualClock::default())
+        .expect("spawn executor");
+
+    for effect in &effects[..8] {
+        executor
+            .execute([effect.clone()])
+            .expect("first command batch");
+    }
+    thread::sleep(Duration::from_millis(50));
+    for effect in &effects[8..16] {
+        executor
+            .execute([effect.clone()])
+            .expect("second command batch");
+    }
+    thread::sleep(Duration::from_millis(50));
+    for effect in &effects[16..] {
+        if let Err(error) = executor.execute([effect.clone()]) {
+            assert_eq!(error, TuiExecutorError::WorkerUnavailable);
+            break;
+        }
+    }
+
+    executor.shutdown().expect("saturated worker joins");
+}
+
+#[derive(Clone, Default)]
+struct ManualClock {
+    now: Arc<Mutex<Duration>>,
+}
+
+impl ManualClock {
+    fn advance(&self, duration: Duration) {
+        let mut now = self.now.lock().expect("clock lock");
+        *now = now.saturating_add(duration);
+    }
+}
+
+impl TuiClock for ManualClock {
+    fn now(&self) -> Duration {
+        *self.now.lock().expect("clock lock")
+    }
+}
+
+struct ScriptedTuiClient {
+    requests: Arc<Mutex<Vec<UiSection>>>,
+    snapshots: VecDeque<Result<UiSnapshot, UiFailure>>,
+    observations: VecDeque<TuiClientObservation>,
+    stopped: Arc<Mutex<bool>>,
+}
+
+impl ScriptedTuiClient {
+    fn empty() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            snapshots: VecDeque::new(),
+            observations: VecDeque::new(),
+            stopped: Arc::new(Mutex::new(false)),
+        }
+    }
+}
+
+impl TuiClientPort for ScriptedTuiClient {
+    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+        self.requests.lock().expect("requests lock").push(section);
+        self.snapshots.pop_front().unwrap_or_else(|| {
+            Err(UiFailure {
+                code: "script_exhausted".to_owned(),
+                action: "add a scripted snapshot".to_owned(),
+            })
+        })
+    }
+
+    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
+        if let Some(observation) = self.observations.pop_front() {
+            vec![observation]
+        } else {
+            thread::sleep(wait);
+            Vec::new()
+        }
+    }
+}
+
+impl Drop for ScriptedTuiClient {
+    fn drop(&mut self) {
+        *self.stopped.lock().expect("stopped lock") = true;
+    }
+}
+
+struct PanickingClient;
+
+impl TuiClientPort for PanickingClient {
+    fn load_snapshot(&mut self, _section: UiSection) -> Result<UiSnapshot, UiFailure> {
+        panic!("scripted worker failure");
+    }
+
+    fn poll(&mut self, _wait: Duration) -> Vec<TuiClientObservation> {
+        panic!("scripted worker failure");
+    }
+}
+
+struct ImmediateSnapshotClient;
+
+impl TuiClientPort for ImmediateSnapshotClient {
+    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+        Ok(UiSnapshot {
+            section,
+            revision: 1,
+            rows: Vec::new(),
+        })
+    }
+
+    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
+        thread::sleep(wait);
+        Vec::new()
+    }
+}
+
+fn snapshot_load_effects(count: usize) -> Vec<UiEffect> {
+    let mut transition = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start model");
+    let mut effects = Vec::with_capacity(count);
+    for revision in 1..=count {
+        let effect = transition
+            .effects
+            .iter()
+            .find(|effect| matches!(effect, UiEffect::LoadSnapshot { .. }))
+            .cloned()
+            .expect("snapshot effect");
+        let UiEffect::LoadSnapshot { id, section } = effect.clone() else {
+            unreachable!("matched snapshot effect")
+        };
+        effects.push(effect);
+        let loaded = update(
+            transition.model,
+            UiEvent::SnapshotLoaded {
+                effect_id: id,
+                snapshot: UiSnapshot {
+                    section,
+                    revision: revision as u64,
+                    rows: Vec::new(),
+                },
+            },
+        )
+        .expect("complete generated snapshot effect");
+        transition = update(
+            loaded.model,
+            UiEvent::Invalidated {
+                revision: revision as u64 + 1,
+            },
+        )
+        .expect("generate next snapshot effect");
+    }
+    effects
+}
+
+fn receive_event<C: TuiClock>(executor: &mut TuiEffectExecutor<C>) -> UiEvent {
+    for _ in 0..200 {
+        if let Some(event) = executor.poll_event() {
+            return event;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    panic!("executor event did not arrive");
+}
