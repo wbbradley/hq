@@ -108,20 +108,7 @@ jobs:
           --target "${{ matrix.target }}"
 
   rust-qualification:
-    name: Rust qualification (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.98.0 --profile minimal
-      - name: Run integrated budgets and record platform evidence
-        run: scripts/verify-rust-qualification.sh
+    uses: ./.github/workflows/rust-qualification.yml
 
   rust-protocol-fuzz:
     name: Rust protocol fuzz smoke

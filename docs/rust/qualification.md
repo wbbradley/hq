@@ -90,10 +90,19 @@ release build, and prints a platform record containing the operating system, arc
 host, git revision, build duration, and all budget values. It does not alter the ordinary target
 directory.
 
-Native runtime evidence is required on Linux and macOS. ADR-0001 additionally requires portable
-crate compilation for x86-64 and ARM64 on both systems. Cross-compilation proves only that the
-portable code compiles for that target; it does not prove kernel credentials, Unix-socket lifecycle,
-terminal behavior, installed providers, resident memory, or process shutdown on that target.
+Native runtime evidence is required on Linux and macOS. `qualification/platform-matrix.tsv` maps
+the four required OS/architecture combinations to explicit native GitHub runner labels and Rust
+hosts. `.github/workflows/rust-qualification.yml` runs the complete qualification command on every
+row, uploads one immutable environment record per target, and aggregates the records only after
+their schemas, Git revision, host identities, budgets, and exact target set agree. The aggregate
+artifact and workflow summary are the durable evidence for a particular commit.
+`scripts/test-rust-qualification-matrix.sh` exercises both acceptance and rejection paths for the
+record-set validator without claiming simulated records as platform evidence.
+
+ADR-0001 additionally requires portable crate compilation for x86-64 and ARM64 on both systems.
+Cross-compilation proves only that the portable code compiles for that target; it does not prove
+kernel credentials, Unix-socket lifecycle, terminal behavior, installed providers, resident memory,
+or process shutdown on that target. Those claims therefore come only from the native matrix.
 
 Any missing row, unexplained failure, untested invariant, or exceeded budget is new work for
 `PLAN.md`. It is not waived by raising a limit during the same qualification run.

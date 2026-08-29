@@ -29,3 +29,4 @@ Security/operations|crates/hq-node/tests/node_components.rs|test:cancellation_ma
 Security/operations|crates/hq-node/tests/unix_node_cli.rs|test:relay_administration_is_idempotent_redacted_and_restart_durable|Integrated repair restart durability and redacted administration
 Security/operations|scripts/verify-rust-architecture.sh|command|Dependency capability and secret ownership boundaries
 Security/operations|qualification/budgets.env|configuration|Explicit bounded resource and performance limits
+Security/operations|qualification/platform-matrix.tsv|configuration|Required native runner and Rust host matrix

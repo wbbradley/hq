@@ -1,0 +1,94 @@
+name: Rust qualification
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare native qualification matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Generate matrix from the acceptance contract
+        id: targets
+        run: |
+          targets=$(scripts/rust-qualification-matrix-json.sh)
+          jq -e '.include | length == 4' <<<"$targets" >/dev/null
+          printf 'targets=%s\n' "$targets" >>"$GITHUB_OUTPUT"
+
+  qualify:
+    name: Native qualification (${{ matrix.rust_host }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.targets) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Verify native Rust host
+        env:
+          EXPECTED_RUST_HOST: ${{ matrix.rust_host }}
+        run: |
+          actual_rust_host=$(rustc -vV | sed -n 's/^host: //p')
+          test "$actual_rust_host" = "$EXPECTED_RUST_HOST"
+      - name: Run integrated budgets and record platform evidence
+        env:
+          EVIDENCE_FILE: ${{ matrix.evidence }}
+        run: |
+          evidence_directory="$RUNNER_TEMP/hq-rust-qualification"
+          mkdir -p "$evidence_directory"
+          HQ_QUALIFICATION_EVIDENCE_OUTPUT="$evidence_directory/$EVIDENCE_FILE" \
+            scripts/verify-rust-qualification.sh
+      - name: Upload native qualification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-qualification-${{ matrix.rust_host }}
+          path: ${{ runner.temp }}/hq-rust-qualification/${{ matrix.evidence }}
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    name: Verify native qualification matrix
+    needs: qualify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Test matrix evidence validator
+        run: scripts/test-rust-qualification-matrix.sh
+      - name: Download native qualification evidence
+        uses: actions/download-artifact@v8
+        with:
+          pattern: rust-qualification-*
+          path: ${{ runner.temp }}/hq-rust-qualification-matrix
+          merge-multiple: true
+      - name: Verify complete native matrix
+        run: |
+          scripts/verify-rust-qualification-matrix.sh \
+            "$RUNNER_TEMP/hq-rust-qualification-matrix" "${{ github.sha }}" \
+            | tee "$RUNNER_TEMP/rust-qualification-matrix.md"
+          cat "$RUNNER_TEMP/rust-qualification-matrix.md" >>"$GITHUB_STEP_SUMMARY"
+      - name: Add summary to combined evidence
+        run: >-
+          cp "$RUNNER_TEMP/rust-qualification-matrix.md"
+          "$RUNNER_TEMP/hq-rust-qualification-matrix/matrix-summary.md"
+      - name: Upload combined qualification evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-qualification-matrix-${{ github.sha }}
+          path: ${{ runner.temp }}/hq-rust-qualification-matrix
+          if-no-files-found: error
+          retention-days: 30

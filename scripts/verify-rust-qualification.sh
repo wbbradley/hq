@@ -5,9 +5,14 @@ set -euo pipefail
 repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 budget_file="$repository_root/qualification/budgets.env"
 evidence_file=${HQ_QUALIFICATION_EVIDENCE_FILE:-"$repository_root/qualification/acceptance-evidence.tsv"}
+evidence_output=${HQ_QUALIFICATION_EVIDENCE_OUTPUT:-}
 qualification_directory=$(mktemp -d "${TMPDIR:-/tmp}/hq-rust-qualification.XXXXXX")
+evidence_output_temporary=
 
 cleanup() {
+  if [[ -n "$evidence_output_temporary" ]]; then
+    rm -f "$evidence_output_temporary"
+  fi
   rm -rf "$qualification_directory"
 }
 trap cleanup EXIT
@@ -21,6 +26,13 @@ fail() {
 [[ -f "$evidence_file" ]] || fail "missing acceptance evidence inventory"
 if (($# > 1)) || [[ ${1:-} != '' && ${1:-} != '--validate-only' ]]; then
   fail "usage: scripts/verify-rust-qualification.sh [--validate-only]"
+fi
+if [[ -n "$evidence_output" ]]; then
+  [[ "$evidence_output" == /* ]] || fail "evidence output path must be absolute"
+  evidence_output_parent=$(dirname "$evidence_output")
+  [[ -d "$evidence_output_parent" ]] || fail "evidence output parent does not exist"
+  [[ ! -e "$evidence_output" && ! -L "$evidence_output" ]] ||
+    fail "evidence output already exists"
 fi
 
 if grep -Ev '^(#.*|[A-Z][A-Z0-9_]*=[0-9]+|[[:space:]]*)$' "$budget_file" >/dev/null; then
@@ -88,8 +100,10 @@ while IFS='|' read -r area evidence proof purpose remainder; do
       [[ -x "$repository_root/$evidence" ]] || fail "command evidence is not executable: $evidence"
       ;;
     configuration)
-      [[ "$evidence" == 'qualification/budgets.env' ]] ||
-        fail "unknown configuration evidence: $evidence"
+      case "$evidence" in
+        qualification/budgets.env | qualification/platform-matrix.tsv) ;;
+        *) fail "unknown configuration evidence: $evidence" ;;
+      esac
       ;;
     *)
       fail "unknown evidence proof: $proof"
@@ -128,10 +142,25 @@ fi
 
 rust_host=$(rustc -vV | sed -n 's/^host: //p')
 git_revision=$(git rev-parse HEAD)
-printf 'qualification_schema=hq-rust-qualification-v1\n'
-printf 'operating_system=%s\n' "$(uname -s)"
-printf 'architecture=%s\n' "$(uname -m)"
-printf 'rust_host=%s\n' "$rust_host"
-printf 'git_revision=%s\n' "$git_revision"
-printf 'release_build_seconds=%s\n' "$release_build_seconds"
-grep -E '^[A-Z][A-Z0-9_]*=[0-9]+$' "$budget_file"
+
+emit_evidence() {
+  printf 'qualification_schema=hq-rust-qualification-v1\n'
+  printf 'operating_system=%s\n' "$(uname -s)"
+  printf 'architecture=%s\n' "$(uname -m)"
+  printf 'rust_host=%s\n' "$rust_host"
+  printf 'git_revision=%s\n' "$git_revision"
+  printf 'release_build_seconds=%s\n' "$release_build_seconds"
+  grep -E '^[A-Z][A-Z0-9_]*=[0-9]+$' "$budget_file"
+}
+
+if [[ -z "$evidence_output" ]]; then
+  emit_evidence
+else
+  umask 077
+  evidence_output_temporary=$(mktemp "$evidence_output_parent/.hq-rust-qualification-evidence.XXXXXX")
+  emit_evidence | tee "$evidence_output_temporary"
+  chmod 600 "$evidence_output_temporary"
+  ln "$evidence_output_temporary" "$evidence_output" || fail "could not publish evidence output"
+  rm -f "$evidence_output_temporary"
+  evidence_output_temporary=
+fi
