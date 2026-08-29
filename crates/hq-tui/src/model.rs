@@ -8,6 +8,7 @@ const DRAFT_AUTOSAVE_DELAY: Duration = Duration::from_millis(250);
 const MAX_DRAFT_BYTES: usize = 16 * 1024;
 const MAX_AGENT_TEXT_BYTES: usize = 256;
 const MAX_PROJECT_TEXT_BYTES: usize = 16 * 1024;
+pub(crate) const WIDE_WIDTH: u16 = 96;
 
 /// Stable identity attached to an asynchronous UI effect and its completion.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -26,6 +27,17 @@ pub enum UiConnectionState {
     Reconnecting,
     /// The local endpoint has no compatible protocol version.
     Incompatible,
+}
+
+/// Current local human-account availability derived by the authoritative client mapper.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiHumanState {
+    /// No uniquely selected active human account is currently available.
+    Unavailable,
+    /// One uniquely selected active human account is available.
+    Ready,
+    /// Local selection or authority history is present but ambiguous.
+    Ambiguous,
 }
 
 /// Top-level semantic section selected by the user.
@@ -967,18 +979,39 @@ pub struct UiConversation {
 /// Passive complete UI snapshot produced from one authoritative local-API snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiSnapshot {
-    /// Semantic section represented by these rows.
-    pub section: UiSection,
     /// Serialized authoritative revision.
     pub revision: u64,
-    /// Reducer-ordered shell-normalized rows for the selected foundation view.
-    pub rows: Vec<UiRow>,
+    /// Current local human-account availability.
+    pub human_state: UiHumanState,
+    /// Reducer-ordered open human mailbox rows.
+    pub inbox_rows: Vec<UiRow>,
+    /// Reducer-ordered human-authored rows.
+    pub sent_rows: Vec<UiRow>,
+    /// Reducer-ordered archived human mailbox rows.
+    pub archived_rows: Vec<UiRow>,
+    /// Stable named-agent summary rows.
+    pub agent_rows: Vec<UiRow>,
+    /// Stable project summary rows.
+    pub project_rows: Vec<UiRow>,
     /// Resolved named-agent mailboxes available for direct composition.
     pub direct_targets: Vec<UiDirectTarget>,
-    /// Complete named-agent records when the selected section is Agents.
+    /// Complete named-agent records for cached navigation and detail views.
     pub agents: Vec<UiAgent>,
-    /// Complete passive project catalog in stable identity order.
+    /// Complete passive project catalog for cached navigation and detail views.
     pub projects: Vec<UiProject>,
+}
+
+impl UiSnapshot {
+    /// Borrows the rows for one selected semantic section.
+    pub fn rows(&self, section: UiSection) -> &[UiRow] {
+        match section {
+            UiSection::Inbox => &self.inbox_rows,
+            UiSection::Sent => &self.sent_rows,
+            UiSection::Archived => &self.archived_rows,
+            UiSection::Agents => &self.agent_rows,
+            UiSection::Projects => &self.project_rows,
+        }
+    }
 }
 
 /// Passive stable actionable failure shown without behavioral prose parsing.
@@ -1151,8 +1184,6 @@ pub enum UiEffect {
     LoadSnapshot {
         /// Identity required on the completion event.
         id: EffectId,
-        /// Semantic section that the complete snapshot must represent.
-        section: UiSection,
     },
     /// Request one bounded reducer-ordered conversation page.
     LoadConversation {
@@ -1238,8 +1269,6 @@ pub enum UiError {
     AlreadyStarted,
     /// The process-local effect identity space was exhausted.
     EffectIdentityExhausted,
-    /// A shell returned snapshot rows for a section other than the requested section.
-    SnapshotSectionMismatch,
     /// A shell returned a page for a row other than the exact requested row.
     ConversationRowMismatch,
 }
@@ -1255,7 +1284,6 @@ impl std::error::Error for UiError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PendingSnapshot {
     id: EffectId,
-    section: UiSection,
     minimum_revision: u64,
 }
 
@@ -1391,6 +1419,23 @@ impl UiModel {
         self.snapshot.as_ref()
     }
 
+    /// Borrows the latest rows for the selected semantic section.
+    pub fn rows(&self) -> Option<&[UiRow]> {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.rows(self.section))
+    }
+
+    /// Returns current local human-account availability when a snapshot exists.
+    pub fn human_state(&self) -> Option<UiHumanState> {
+        self.snapshot.as_ref().map(|snapshot| snapshot.human_state)
+    }
+
+    /// Reports whether a fresh authoritative snapshot is loading behind retained content.
+    pub const fn refreshing(&self) -> bool {
+        self.snapshot.is_some() && self.pending_snapshot.is_some()
+    }
+
     /// Returns the selected stable row identity.
     pub fn selected_row(&self) -> Option<&str> {
         self.selected_row.as_deref()
@@ -1513,13 +1558,9 @@ impl UiModel {
         });
         self.pending_snapshot = Some(PendingSnapshot {
             id,
-            section: self.section,
             minimum_revision,
         });
-        effects.push(UiEffect::LoadSnapshot {
-            id,
-            section: self.section,
-        });
+        effects.push(UiEffect::LoadSnapshot { id });
         Ok(())
     }
 
@@ -1673,16 +1714,14 @@ impl UiModel {
         self.pending_conversation = None;
     }
 
-    fn change_section(
-        &mut self,
-        next: UiSection,
-        effects: &mut Vec<UiEffect>,
-    ) -> Result<(), UiError> {
+    fn change_section(&mut self, next: UiSection) {
+        if self.section == next {
+            return;
+        }
         self.save_section_workspace();
         self.section = next;
-        self.snapshot = None;
         self.restore_section_workspace();
-        self.request_snapshot(effects)
+        self.reconcile_current_section();
     }
 
     fn schedule_timer(
@@ -1702,22 +1741,26 @@ impl UiModel {
     }
 
     fn move_row_selection(&mut self, forward: bool) -> bool {
-        let Some(snapshot) = &self.snapshot else {
+        let Some(rows) = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.rows(self.section))
+        else {
             return false;
         };
-        if snapshot.rows.is_empty() {
+        if rows.is_empty() {
             return false;
         }
         let current = self
             .selected_row
             .as_deref()
-            .and_then(|selected| snapshot.rows.iter().position(|row| row.id == selected));
+            .and_then(|selected| rows.iter().position(|row| row.id == selected));
         let next = match (current, forward) {
-            (Some(index), true) => (index + 1).min(snapshot.rows.len() - 1),
+            (Some(index), true) => (index + 1).min(rows.len() - 1),
             (Some(index), false) => index.saturating_sub(1),
             (None, _) => 0,
         };
-        let selected = snapshot.rows[next].id.clone();
+        let selected = rows[next].id.clone();
         if self.selected_row.as_ref() == Some(&selected) {
             false
         } else {
@@ -1759,7 +1802,7 @@ impl UiModel {
         self.selected_row.as_ref().is_some_and(|selected| {
             self.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot
-                    .rows
+                    .rows(self.section)
                     .iter()
                     .any(|row| &row.id == selected && row.kind == UiRowKind::Conversation)
             })
@@ -1777,24 +1820,6 @@ impl UiModel {
     }
 
     fn apply_snapshot(&mut self, snapshot: UiSnapshot) {
-        let keep = self.selected_row.as_ref().and_then(|selected| {
-            snapshot
-                .rows
-                .iter()
-                .find(|row| &row.id == selected)
-                .map(|row| row.id.clone())
-        });
-        self.selected_row = keep.or_else(|| snapshot.rows.first().map(|row| row.id.clone()));
-        let conversation_survives = self.conversation.as_ref().is_some_and(|conversation| {
-            self.selected_row.as_ref() == Some(&conversation.row_id)
-                && snapshot
-                    .rows
-                    .iter()
-                    .any(|row| row.id == conversation.row_id && row.kind == UiRowKind::Conversation)
-        });
-        if !conversation_survives {
-            self.close_conversation();
-        }
         if let Some(UiMailboxModal::SelectDirect { selected, targets }) = &mut self.mailbox_modal {
             let keep = selected.filter(|(installation, mailbox)| {
                 snapshot.direct_targets.iter().any(|target| {
@@ -1812,8 +1837,33 @@ impl UiModel {
         refresh_agent_modal(self, &snapshot);
         refresh_project_modal(self, &snapshot);
         self.snapshot = Some(snapshot);
+        self.reconcile_current_section();
         select_agent_search_match(self, false);
         select_project_search_match(self, false);
+    }
+
+    fn reconcile_current_section(&mut self) {
+        let Some(snapshot) = &self.snapshot else {
+            self.selected_row = None;
+            self.close_conversation();
+            return;
+        };
+        let rows = snapshot.rows(self.section);
+        let keep = self.selected_row.as_ref().and_then(|selected| {
+            rows.iter()
+                .find(|row| &row.id == selected)
+                .map(|row| row.id.clone())
+        });
+        self.selected_row = keep.or_else(|| rows.first().map(|row| row.id.clone()));
+        let conversation_survives = self.conversation.as_ref().is_some_and(|conversation| {
+            self.selected_row.as_ref() == Some(&conversation.row_id)
+                && rows
+                    .iter()
+                    .any(|row| row.id == conversation.row_id && row.kind == UiRowKind::Conversation)
+        });
+        if !conversation_survives {
+            self.close_conversation();
+        }
     }
 }
 
@@ -1958,20 +2008,42 @@ fn apply_input(
             };
             true
         }
-        UiInput::NextSection => {
-            model.change_section(model.section.next(), effects)?;
-            true
-        }
-        UiInput::PreviousSection => {
-            model.change_section(model.section.previous(), effects)?;
-            true
-        }
+        UiInput::NextSection => match (model.viewport.width >= WIDE_WIDTH, model.focus) {
+            (true, UiFocus::Navigation) => {
+                model.focus = UiFocus::Content;
+                true
+            }
+            (false, _) => {
+                model.change_section(model.section.next());
+                true
+            }
+            _ => false,
+        },
+        UiInput::PreviousSection => match (model.viewport.width >= WIDE_WIDTH, model.focus) {
+            (true, UiFocus::Content | UiFocus::Conversation) => {
+                model.focus = UiFocus::Navigation;
+                true
+            }
+            (false, _) => {
+                model.change_section(model.section.previous());
+                true
+            }
+            _ => false,
+        },
         UiInput::NextItem => match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(true),
+            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
+                model.change_section(model.section.next());
+                true
+            }
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(true),
         },
         UiInput::PreviousItem => match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(false),
+            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
+                model.change_section(model.section.previous());
+                true
+            }
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(false),
         },
         UiInput::Activate => activate(model, effects)?,
@@ -4093,19 +4165,43 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'h' => {
-            model.change_section(model.section.previous(), effects)?;
-            Ok(true)
+            if model.viewport.width < WIDE_WIDTH {
+                model.change_section(model.section.previous());
+                Ok(true)
+            } else if model.viewport.width >= WIDE_WIDTH
+                && matches!(model.focus, UiFocus::Content | UiFocus::Conversation)
+            {
+                model.focus = UiFocus::Navigation;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
         'l' => {
-            model.change_section(model.section.next(), effects)?;
-            Ok(true)
+            if model.viewport.width < WIDE_WIDTH {
+                model.change_section(model.section.next());
+                Ok(true)
+            } else if model.viewport.width >= WIDE_WIDTH && model.focus == UiFocus::Navigation {
+                model.focus = UiFocus::Content;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
         'j' => Ok(match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(true),
+            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
+                model.change_section(model.section.next());
+                true
+            }
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(true),
         }),
         'k' => Ok(match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(false),
+            UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
+                model.change_section(model.section.previous());
+                true
+            }
             UiFocus::Navigation | UiFocus::Content => model.move_row_selection(false),
         }),
         _ => Ok(false),
@@ -4173,6 +4269,10 @@ fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
 }
 
 fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
+    if model.viewport.width >= WIDE_WIDTH && model.focus == UiFocus::Navigation {
+        model.focus = UiFocus::Content;
+        return Ok(true);
+    }
     if model.focus == UiFocus::Conversation && model.conversation_anchor.is_some() {
         model.technical_visible = !model.technical_visible;
         return Ok(true);
@@ -4275,22 +4375,13 @@ fn snapshot_loaded(
     else {
         return Ok(());
     };
-    if snapshot.section != pending.section {
-        return Err(UiError::SnapshotSectionMismatch);
-    }
     model.pending_snapshot = None;
     model.retry_timer = None;
     model.connection = UiConnectionState::Ready;
     model.last_failure = None;
-    if pending.section == model.section {
-        let current_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
-        if snapshot.revision >= current_revision {
-            model.apply_snapshot(snapshot);
-        }
-    } else {
-        model.request_snapshot(effects)?;
-        effects.push(UiEffect::RequestRedraw);
-        return Ok(());
+    let current_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
+    if snapshot.revision >= current_revision {
+        model.apply_snapshot(snapshot);
     }
     let observed_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
     let required_revision = model
@@ -4822,8 +4913,8 @@ mod tests {
     use std::num::NonZeroU64;
 
     use super::{
-        UiEffect, UiError, UiEvent, UiInput, UiModel, UiProject, UiProjectAction, UiProjectModal,
-        UiProjectResourceCheck, UiSection, UiSize, UiSnapshot, apply_project_modal_input,
+        UiEffect, UiError, UiEvent, UiHumanState, UiInput, UiModel, UiProject, UiProjectAction,
+        UiProjectModal, UiProjectResourceCheck, UiSize, UiSnapshot, apply_project_modal_input,
         refresh_project_modal, update,
     };
 
@@ -4906,9 +4997,13 @@ mod tests {
         refresh_project_modal(
             &mut model,
             &UiSnapshot {
-                section: UiSection::Projects,
                 revision: 2,
-                rows: Vec::new(),
+                human_state: UiHumanState::Ready,
+                inbox_rows: Vec::new(),
+                sent_rows: Vec::new(),
+                archived_rows: Vec::new(),
+                agent_rows: Vec::new(),
+                project_rows: Vec::new(),
                 direct_targets: Vec::new(),
                 agents: Vec::new(),
                 projects: vec![project("new name")],

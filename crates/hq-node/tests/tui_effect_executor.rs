@@ -14,8 +14,8 @@ use std::{
 
 use hq_local_api::protocol::v1::{
     ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
-    ConversationMessageDto, ConversationPageDto, Id32, MailboxAddressDto, MessagePurposeDto,
-    PresentationKindDto, SnapshotItem,
+    ConversationMessageDto, ConversationPageDto, DeviceGrantDto, Id32, MailboxAddressDto,
+    MessagePurposeDto, PresentationKindDto, SnapshotItem,
 };
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiEffectExecutor,
@@ -23,30 +23,23 @@ use hq_node::{
 };
 use hq_tui::{
     UiAgentAction, UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect,
-    UiEvent, UiFailure, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
-    UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome, UiProjectResourceCheck,
-    UiProjectResult, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiEvent, UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft,
+    UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome,
+    UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
     UiTechnicalSection, UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
 #[test]
-fn executor_loads_the_effects_exact_section_and_preserves_identity() {
-    let requests = Arc::new(Mutex::new(Vec::new()));
+fn executor_loads_the_complete_snapshot_and_preserves_identity() {
+    let requests = Arc::new(AtomicUsize::new(0));
     let stopped = Arc::new(Mutex::new(false));
     let client = ScriptedTuiClient {
         requests: Arc::clone(&requests),
         conversation_requests: Arc::new(Mutex::new(Vec::new())),
-        snapshots: VecDeque::from([Ok(UiSnapshot {
-            section: UiSection::Inbox,
-            revision: 7,
-            rows: Vec::new(),
-            direct_targets: Vec::new(),
-            agents: Vec::new(),
-            projects: Vec::new(),
-        })]),
+        snapshots: VecDeque::from([Ok(empty_snapshot(7))]),
         observations: VecDeque::new(),
         stopped: Arc::clone(&stopped),
     };
@@ -75,13 +68,9 @@ fn executor_loads_the_effects_exact_section_and_preserves_identity() {
         event,
         UiEvent::SnapshotLoaded { effect_id, snapshot }
             if effect_id == expected_id
-                && snapshot.section == UiSection::Inbox
                 && snapshot.revision == 7
     ));
-    assert_eq!(
-        requests.lock().expect("requests lock").as_slice(),
-        &[UiSection::Inbox]
-    );
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
     assert!(executor.take_redraw_request());
     assert!(!executor.take_redraw_request());
 
@@ -163,18 +152,14 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
         UiEvent::SnapshotLoaded {
             effect_id: snapshot_id,
             snapshot: UiSnapshot {
-                section: UiSection::Inbox,
-                revision: 1,
-                rows: vec![UiRow {
+                inbox_rows: vec![UiRow {
                     id: "thread-a".to_owned(),
                     title: "Thread A".to_owned(),
                     detail: "1 open message".to_owned(),
                     state: UiRowState::Open,
                     kind: UiRowKind::Conversation,
                 }],
-                direct_targets: Vec::new(),
-                agents: Vec::new(),
-                projects: Vec::new(),
+                ..empty_snapshot(1)
             },
         },
     )
@@ -190,7 +175,7 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
         .expect("conversation effect");
     let requests = Arc::new(Mutex::new(Vec::new()));
     let client = ScriptedTuiClient {
-        requests: Arc::new(Mutex::new(Vec::new())),
+        requests: Arc::new(AtomicUsize::new(0)),
         conversation_requests: Arc::clone(&requests),
         snapshots: VecDeque::new(),
         observations: VecDeque::new(),
@@ -443,7 +428,7 @@ fn executor_preserves_exact_resource_check_target_and_typed_failure_evidence() {
 #[test]
 fn executor_forwards_subscription_and_connection_observations() {
     let client = ScriptedTuiClient {
-        requests: Arc::new(Mutex::new(Vec::new())),
+        requests: Arc::new(AtomicUsize::new(0)),
         conversation_requests: Arc::new(Mutex::new(Vec::new())),
         snapshots: VecDeque::new(),
         observations: VecDeque::from([
@@ -553,7 +538,7 @@ fn executor_runs_draft_autosave_and_stable_mailbox_command_in_order() {
 }
 
 #[test]
-fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
+fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
     let source = AuthoritativeSnapshotDto::new(
         21,
         vec![
@@ -597,41 +582,44 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
     )
     .expect("authoritative snapshot");
 
-    let inbox = tui_snapshot(UiSection::Inbox, source.clone());
-    assert_eq!(inbox.revision, 21);
-    assert_eq!(inbox.section, UiSection::Inbox);
-    assert_eq!(inbox.rows.len(), 2);
-    assert_eq!(inbox.rows[0].title, "Thread 030303030303");
-    assert_eq!(inbox.rows[0].detail, "2 open messages");
-    assert_eq!(inbox.rows[1].state, hq_tui::UiRowState::Attention);
-    assert_eq!(inbox.direct_targets.len(), 1);
-    assert_eq!(inbox.direct_targets[0].label, "builder");
-    assert_eq!(inbox.direct_targets[0].installation_id, [15; 32]);
-    assert_eq!(inbox.direct_targets[0].mailbox_id, [16; 32]);
+    let snapshot = tui_snapshot([99; 32], &source);
+    assert_eq!(snapshot.revision, 21);
+    assert_eq!(snapshot.human_state, UiHumanState::Unavailable);
+    assert_eq!(snapshot.inbox_rows.len(), 2);
+    assert_eq!(snapshot.inbox_rows[0].title, "Thread 030303030303");
+    assert_eq!(snapshot.inbox_rows[0].detail, "2 open messages");
+    assert_eq!(snapshot.inbox_rows[1].state, hq_tui::UiRowState::Attention);
+    assert_eq!(snapshot.direct_targets.len(), 1);
+    assert_eq!(snapshot.direct_targets[0].label, "builder");
+    assert_eq!(snapshot.direct_targets[0].installation_id, [15; 32]);
+    assert_eq!(snapshot.direct_targets[0].mailbox_id, [16; 32]);
 
-    let agents = tui_snapshot(UiSection::Agents, source.clone());
-    assert_eq!(agents.rows.len(), 1);
-    assert_eq!(agents.rows[0].title, "builder");
-    assert_eq!(agents.rows[0].state, hq_tui::UiRowState::Open);
-    assert_eq!(agents.agents.len(), 1);
-    assert_eq!(agents.agents[0].agent_id, [5; 32]);
-    assert_eq!(agents.agents[0].names, ["builder"]);
-    assert_eq!(agents.agents[0].mailboxes[0].installation_id, [15; 32]);
-    assert_eq!(agents.agents[0].lifecycle, hq_tui::UiAgentLifecycle::Active);
+    assert_eq!(snapshot.agent_rows.len(), 1);
+    assert_eq!(snapshot.agent_rows[0].title, "builder");
+    assert_eq!(snapshot.agent_rows[0].state, hq_tui::UiRowState::Open);
+    assert_eq!(snapshot.agents.len(), 1);
+    assert_eq!(snapshot.agents[0].agent_id, [5; 32]);
+    assert_eq!(snapshot.agents[0].names, ["builder"]);
+    assert_eq!(snapshot.agents[0].mailboxes[0].installation_id, [15; 32]);
+    assert_eq!(
+        snapshot.agents[0].lifecycle,
+        hq_tui::UiAgentLifecycle::Active
+    );
 
-    let projects = tui_snapshot(UiSection::Projects, source.clone());
-    assert_eq!(projects.rows.len(), 1);
-    assert_eq!(projects.rows[0].title, "release");
-    assert_eq!(projects.rows[0].state, hq_tui::UiRowState::Attention);
-    assert_eq!(projects.projects.len(), 1);
-    assert_eq!(projects.projects[0].project_id, [7; 32]);
-    assert_eq!(projects.projects[0].home, [8; 32]);
-    assert_eq!(projects.projects[0].name, "release");
-    assert_eq!(projects.projects[0].head, [11; 32]);
-    assert_eq!(tui_snapshot(UiSection::Sent, source.clone()).rows.len(), 1);
-    let archived = tui_snapshot(UiSection::Archived, source);
-    assert_eq!(archived.rows.len(), 1);
-    assert_eq!(archived.rows[0].detail, "3 archived messages");
+    assert_eq!(snapshot.project_rows.len(), 1);
+    assert_eq!(snapshot.project_rows[0].title, "release");
+    assert_eq!(
+        snapshot.project_rows[0].state,
+        hq_tui::UiRowState::Attention
+    );
+    assert_eq!(snapshot.projects.len(), 1);
+    assert_eq!(snapshot.projects[0].project_id, [7; 32]);
+    assert_eq!(snapshot.projects[0].home, [8; 32]);
+    assert_eq!(snapshot.projects[0].name, "release");
+    assert_eq!(snapshot.projects[0].head, [11; 32]);
+    assert_eq!(snapshot.sent_rows.len(), 1);
+    assert_eq!(snapshot.archived_rows.len(), 1);
+    assert_eq!(snapshot.archived_rows[0].detail, "3 archived messages");
 }
 
 #[test]
@@ -650,16 +638,63 @@ fn authoritative_snapshot_mapping_never_forwards_terminal_controls() {
     )
     .expect("authoritative snapshot");
 
-    let snapshot = tui_snapshot(UiSection::Agents, source);
-    assert_eq!(snapshot.rows.len(), 1);
-    assert_eq!(snapshot.rows[0].title, "builder [31m");
-    assert_eq!(snapshot.rows[0].detail, "ready spoof");
+    let snapshot = tui_snapshot([99; 32], &source);
+    assert_eq!(snapshot.agent_rows.len(), 1);
+    assert_eq!(snapshot.agent_rows[0].title, "builder [31m");
+    assert_eq!(snapshot.agent_rows[0].detail, "ready spoof");
     assert!(
-        snapshot.rows[0]
+        snapshot.agent_rows[0]
             .title
             .chars()
-            .chain(snapshot.rows[0].detail.chars())
+            .chain(snapshot.agent_rows[0].detail.chars())
             .all(|character| !character.is_control())
+    );
+}
+
+#[test]
+fn authoritative_snapshot_human_state_requires_local_selection_and_active_membership() {
+    let local = [42; 32];
+    let account = Id32::new([41; 32]);
+    let source = AuthoritativeSnapshotDto::new(
+        1,
+        vec![
+            SnapshotItem::AccountSelection {
+                installation_id: Id32::new(local),
+                candidates: vec![account],
+                active: Some(account),
+                frontier: vec![Id32::new([40; 32])],
+            },
+            SnapshotItem::Membership {
+                account_id: account,
+                device: Id32::new(local),
+                state: "active".to_owned(),
+                frontier: vec![Id32::new([43; 32])],
+                grants: vec![DeviceGrantDto {
+                    grant_id: Id32::new([39; 32]),
+                    grant_fact: Id32::new([38; 32]),
+                    device: Id32::new(local),
+                    signing_key: Id32::new([37; 32]),
+                    label: Some("joined machine".to_owned()),
+                    relay_hints: Vec::new(),
+                    frontier_member: false,
+                    active: true,
+                }],
+                acceptances: vec![Id32::new([43; 32])],
+                revokes: Vec::new(),
+                active_acceptances: vec![Id32::new([43; 32])],
+            },
+        ],
+    )
+    .expect("authoritative snapshot");
+
+    assert_eq!(
+        tui_snapshot(local, &source).human_state,
+        UiHumanState::Ready
+    );
+    assert_eq!(
+        tui_snapshot([99; 32], &source).human_state,
+        UiHumanState::Unavailable,
+        "another machine's valid selection must not authorize this installation"
     );
 }
 
@@ -823,7 +858,7 @@ impl TuiClock for ManualClock {
 }
 
 struct ScriptedTuiClient {
-    requests: Arc<Mutex<Vec<UiSection>>>,
+    requests: Arc<AtomicUsize>,
     conversation_requests: ConversationRequests,
     snapshots: VecDeque<Result<UiSnapshot, UiFailure>>,
     observations: VecDeque<TuiClientObservation>,
@@ -833,7 +868,7 @@ struct ScriptedTuiClient {
 impl ScriptedTuiClient {
     fn empty() -> Self {
         Self {
-            requests: Arc::new(Mutex::new(Vec::new())),
+            requests: Arc::new(AtomicUsize::new(0)),
             conversation_requests: Arc::new(Mutex::new(Vec::new())),
             snapshots: VecDeque::new(),
             observations: VecDeque::new(),
@@ -843,8 +878,8 @@ impl ScriptedTuiClient {
 }
 
 impl TuiClientPort for ScriptedTuiClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
-        self.requests.lock().expect("requests lock").push(section);
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
         self.snapshots.pop_front().unwrap_or_else(|| {
             Err(UiFailure {
                 code: "script_exhausted".to_owned(),
@@ -919,15 +954,8 @@ struct ProjectTuiClient {
 }
 
 impl TuiClientPort for ProjectTuiClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
-        Ok(UiSnapshot {
-            section,
-            revision: 1,
-            rows: Vec::new(),
-            direct_targets: Vec::new(),
-            agents: Vec::new(),
-            projects: Vec::new(),
-        })
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        Ok(empty_snapshot(1))
     }
 
     fn load_conversation(
@@ -1015,15 +1043,8 @@ impl TuiClientPort for ProjectTuiClient {
 }
 
 impl TuiClientPort for ManagedSessionTuiClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
-        Ok(UiSnapshot {
-            section,
-            revision: 1,
-            rows: Vec::new(),
-            direct_targets: Vec::new(),
-            agents: Vec::new(),
-            projects: Vec::new(),
-        })
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        Ok(empty_snapshot(1))
     }
 
     fn load_conversation(
@@ -1078,15 +1099,8 @@ impl TuiClientPort for ManagedSessionTuiClient {
 }
 
 impl TuiClientPort for AgentTuiClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
-        Ok(UiSnapshot {
-            section,
-            revision: 1,
-            rows: Vec::new(),
-            direct_targets: Vec::new(),
-            agents: Vec::new(),
-            projects: Vec::new(),
-        })
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        Ok(empty_snapshot(1))
     }
 
     fn load_conversation(
@@ -1132,7 +1146,7 @@ impl TuiClientPort for AgentTuiClient {
 }
 
 impl TuiClientPort for PanickingClient {
-    fn load_snapshot(&mut self, _section: UiSection) -> Result<UiSnapshot, UiFailure> {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
         panic!("scripted worker failure");
     }
 
@@ -1175,17 +1189,10 @@ struct SlowSnapshotClient {
 }
 
 impl TuiClientPort for SlowSnapshotClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         thread::sleep(Duration::from_millis(100));
-        Ok(UiSnapshot {
-            section,
-            revision: 1,
-            rows: Vec::new(),
-            direct_targets: Vec::new(),
-            agents: Vec::new(),
-            projects: Vec::new(),
-        })
+        Ok(empty_snapshot(1))
     }
 
     fn load_conversation(
@@ -1226,15 +1233,8 @@ impl TuiClientPort for SlowSnapshotClient {
 }
 
 impl TuiClientPort for ImmediateSnapshotClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
-        Ok(UiSnapshot {
-            section,
-            revision: 1,
-            rows: Vec::new(),
-            direct_targets: Vec::new(),
-            agents: Vec::new(),
-            projects: Vec::new(),
-        })
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        Ok(empty_snapshot(1))
     }
 
     fn load_conversation(
@@ -1279,19 +1279,12 @@ struct MailboxTuiClient {
 }
 
 impl TuiClientPort for MailboxTuiClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
         self.calls
             .lock()
             .expect("calls lock")
             .push("snapshot".to_owned());
-        Ok(UiSnapshot {
-            section,
-            revision: 1,
-            rows: Vec::new(),
-            direct_targets: Vec::new(),
-            agents: Vec::new(),
-            projects: Vec::new(),
-        })
+        Ok(empty_snapshot(1))
     }
 
     fn load_conversation(
@@ -1374,7 +1367,7 @@ fn snapshot_load_effects(count: usize) -> Vec<UiEffect> {
             .find(|effect| matches!(effect, UiEffect::LoadSnapshot { .. }))
             .cloned()
             .expect("snapshot effect");
-        let UiEffect::LoadSnapshot { id, section } = effect.clone() else {
+        let UiEffect::LoadSnapshot { id } = effect.clone() else {
             unreachable!("matched snapshot effect")
         };
         effects.push(effect);
@@ -1382,14 +1375,7 @@ fn snapshot_load_effects(count: usize) -> Vec<UiEffect> {
             transition.model,
             UiEvent::SnapshotLoaded {
                 effect_id: id,
-                snapshot: UiSnapshot {
-                    section,
-                    revision: revision as u64,
-                    rows: Vec::new(),
-                    direct_targets: Vec::new(),
-                    agents: Vec::new(),
-                    projects: Vec::new(),
-                },
+                snapshot: empty_snapshot(revision as u64),
             },
         )
         .expect("complete generated snapshot effect");
@@ -1402,6 +1388,21 @@ fn snapshot_load_effects(count: usize) -> Vec<UiEffect> {
         .expect("generate next snapshot effect");
     }
     effects
+}
+
+fn empty_snapshot(revision: u64) -> UiSnapshot {
+    UiSnapshot {
+        revision,
+        human_state: UiHumanState::Ready,
+        inbox_rows: Vec::new(),
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: Vec::new(),
+        project_rows: Vec::new(),
+        direct_targets: Vec::new(),
+        agents: Vec::new(),
+        projects: Vec::new(),
+    }
 }
 
 fn unsupported_failure() -> UiFailure {

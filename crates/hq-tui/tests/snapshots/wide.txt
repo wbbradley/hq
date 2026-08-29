@@ -15,4 +15,4 @@
                        │
                        │
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- tab focus · ↑/↓ select · r reply · d direct · n note · a/u state · q quit
+ ←/h navigation · ↑/↓ select · r reply · d direct · n note · a/u state · q quit

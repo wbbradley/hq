@@ -5,7 +5,8 @@
 use std::time::{Duration, Instant};
 
 use hq_tui::{
-    UiEffect, UiEvent, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, update,
+    UiEffect, UiEvent, UiHumanState, UiModel, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
+    update,
 };
 
 const REPRESENTATIVE_ROW_COUNT: usize = 10_000;
@@ -37,9 +38,9 @@ fn invalidation_of_a_large_ready_model_requests_redraw_within_the_declared_budge
         })
         .expect("startup requests a snapshot");
     let snapshot = UiSnapshot {
-        section: UiSection::Inbox,
         revision: 1,
-        rows: (0..REPRESENTATIVE_ROW_COUNT)
+        human_state: UiHumanState::Ready,
+        inbox_rows: (0..REPRESENTATIVE_ROW_COUNT)
             .map(|index| UiRow {
                 id: format!("conversation-{index}"),
                 title: format!("Conversation {index}"),
@@ -48,6 +49,10 @@ fn invalidation_of_a_large_ready_model_requests_redraw_within_the_declared_budge
                 kind: UiRowKind::Conversation,
             })
             .collect(),
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: Vec::new(),
+        project_rows: Vec::new(),
         direct_targets: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),

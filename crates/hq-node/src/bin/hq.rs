@@ -31,9 +31,9 @@ fn main() {
         }) = invocation
     {
         let result = hq_node::run_installed_tui(state);
-        if result.is_err() {
-            let _ = std::io::stderr()
-                .write_all(b"hq: tui.failed: the interactive terminal session failed\n");
+        if let Err(error) = result {
+            let (code, action) = error.diagnostic();
+            let _ = writeln!(std::io::stderr(), "hq: {code}: {action}");
             std::process::exit(1);
         }
         return;

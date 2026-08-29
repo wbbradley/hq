@@ -122,23 +122,7 @@ impl StateDirectoryOwner {
 
     /// Loads and validates the complete private identity file.
     pub fn load_identity(&self) -> Result<InstallationIdentity, IdentityError> {
-        let bytes = Zeroizing::new(
-            read_private_bounded(
-                self.paths.identity_file(),
-                IDENTITY_MAX_BYTES,
-                IdentityErrorClass::IdentityMalformed,
-            )
-            .map_err(|error| {
-                if error.class() == IdentityErrorClass::FileSystem
-                    && !self.paths.identity_file().exists()
-                {
-                    IdentityError::new(IdentityErrorClass::IdentityMissing)
-                } else {
-                    error
-                }
-            })?,
-        );
-        decode_identity(&bytes)
+        load_identity(self.paths.identity_file())
     }
 
     /// Exports only identity authority in a new encrypted package created without overwrite.
@@ -193,6 +177,35 @@ impl StateDirectoryOwner {
         let bytes = config::encode(&validated)?;
         atomic_write(self.paths.configuration_file(), &bytes, WriteMode::Replace)
     }
+}
+
+impl StatePaths {
+    /// Validates installed identity state without acquiring live node ownership.
+    ///
+    /// Identity publication is atomic, so a concurrent initializer exposes either absence or one
+    /// complete value. This read-only probe grants no signing capability and does not replace the
+    /// node's authoritative startup validation.
+    pub(crate) fn validate_identity(&self) -> Result<PublicIdentity, IdentityError> {
+        load_identity(self.identity_file()).map(|identity| identity.public_identity())
+    }
+}
+
+fn load_identity(path: &Path) -> Result<InstallationIdentity, IdentityError> {
+    let bytes = Zeroizing::new(
+        read_private_bounded(
+            path,
+            IDENTITY_MAX_BYTES,
+            IdentityErrorClass::IdentityMalformed,
+        )
+        .map_err(|error| {
+            if error.class() == IdentityErrorClass::FileSystem && !path.exists() {
+                IdentityError::new(IdentityErrorClass::IdentityMissing)
+            } else {
+                error
+            }
+        })?,
+    );
+    decode_identity(&bytes)
 }
 
 fn reject_identity_destination(path: &Path) -> Result<(), IdentityError> {

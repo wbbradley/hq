@@ -24,12 +24,13 @@ use hq_local_api::{
 use hq_tui::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox,
     UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
-    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiMailboxAction,
-    UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
-    UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
-    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
-    UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanState,
+    UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject,
+    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection,
+    UiTimerKind,
 };
 
 use crate::{
@@ -99,8 +100,8 @@ pub enum TuiClientObservation {
 
 /// Capability boundary consumed by the worker-owned effect executor.
 pub trait TuiClientPort: Send {
-    /// Loads and maps one complete authoritative snapshot for the exact requested section.
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure>;
+    /// Loads and maps one complete authoritative snapshot for every semantic section.
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure>;
 
     /// Loads one bounded reducer-ordered page for an exact snapshot row identity.
     fn load_conversation(
@@ -187,7 +188,8 @@ impl LocalTuiClient {
 }
 
 impl TuiClientPort for LocalTuiClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, UiFailure> {
+        let local_installation = *self.client.installation_id().as_bytes();
         let snapshot = self
             .client
             .snapshot()
@@ -204,7 +206,11 @@ impl TuiClientPort for LocalTuiClient {
             })
             .collect();
         let projects = tui_project_catalog(&snapshot).map_err(|error| project_failure(&error))?;
-        Ok(tui_snapshot_with_projects(section, snapshot, projects))
+        Ok(tui_snapshot_with_projects(
+            local_installation,
+            &snapshot,
+            projects,
+        ))
     }
 
     fn load_conversation(
@@ -665,7 +671,6 @@ struct ScheduledTimer {
 enum WorkerCommand {
     LoadSnapshot {
         id: EffectId,
-        section: UiSection,
     },
     LoadConversation {
         id: EffectId,
@@ -754,12 +759,12 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
     ) -> Result<(), TuiExecutorError> {
         for effect in effects {
             match effect {
-                UiEffect::LoadSnapshot { id, section } => {
+                UiEffect::LoadSnapshot { id } => {
                     if self.effect_is_outstanding(id) {
                         return Err(TuiExecutorError::DuplicateEffectIdentity);
                     }
                     self.commands
-                        .try_send(WorkerCommand::LoadSnapshot { id, section })
+                        .try_send(WorkerCommand::LoadSnapshot { id })
                         .map_err(|error| match error {
                             TrySendError::Full(_) | TrySendError::Disconnected(_) => {
                                 TuiExecutorError::WorkerUnavailable
@@ -977,8 +982,8 @@ fn client_worker<P: TuiClientPort>(
         }
         match commands.recv_timeout(COMMAND_WAIT) {
             Ok(_) if cancellation.load(Ordering::SeqCst) => break,
-            Ok(WorkerCommand::LoadSnapshot { id, section }) => {
-                let event = match client.load_snapshot(section) {
+            Ok(WorkerCommand::LoadSnapshot { id }) => {
+                let event = match client.load_snapshot() {
                     Ok(snapshot) => UiEvent::SnapshotLoaded {
                         effect_id: id,
                         snapshot,
@@ -1129,18 +1134,22 @@ fn client_worker<P: TuiClientPort>(
     }
 }
 
-/// Maps one authoritative local API snapshot into passive section-specific presentation rows.
-pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> UiSnapshot {
-    let projects = tui_project_catalog(&snapshot).unwrap_or_default();
-    tui_snapshot_with_projects(section, snapshot, projects)
+/// Maps one authoritative local API snapshot into one complete passive presentation snapshot.
+pub fn tui_snapshot(
+    local_installation: [u8; 32],
+    snapshot: &AuthoritativeSnapshotDto,
+) -> UiSnapshot {
+    let projects = tui_project_catalog(snapshot).unwrap_or_default();
+    tui_snapshot_with_projects(local_installation, snapshot, projects)
 }
 
 fn tui_snapshot_with_projects(
-    section: UiSection,
-    snapshot: AuthoritativeSnapshotDto,
+    local_installation: [u8; 32],
+    snapshot: &AuthoritativeSnapshotDto,
     projects: Vec<LocalProject>,
 ) -> UiSnapshot {
-    let agents = tui_named_agent_catalog(&snapshot)
+    let human_state = tui_human_state(local_installation, snapshot);
+    let agents = tui_named_agent_catalog(snapshot)
         .into_iter()
         .map(|agent| UiAgent {
             agent_id: *agent.agent_id.as_bytes(),
@@ -1209,18 +1218,70 @@ fn tui_snapshot_with_projects(
             right.mailbox_id,
         ))
     });
-    let rows = snapshot
-        .items
-        .into_iter()
-        .filter_map(|item| snapshot_row(section, item))
-        .collect();
+    let rows = |section| {
+        snapshot
+            .items
+            .iter()
+            .filter_map(|item| snapshot_row(section, item))
+            .collect()
+    };
     UiSnapshot {
-        section,
         revision: snapshot.revision,
-        rows,
+        human_state,
+        inbox_rows: rows(UiSection::Inbox),
+        sent_rows: rows(UiSection::Sent),
+        archived_rows: rows(UiSection::Archived),
+        agent_rows: rows(UiSection::Agents),
+        project_rows: rows(UiSection::Projects),
         direct_targets,
         agents,
         projects,
+    }
+}
+
+fn tui_human_state(
+    local_installation: [u8; 32],
+    snapshot: &AuthoritativeSnapshotDto,
+) -> UiHumanState {
+    let selections = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::AccountSelection {
+                installation_id,
+                candidates,
+                active,
+                ..
+            } if installation_id.bytes() == local_installation => Some((candidates, active)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match selections.as_slice() {
+        [] => UiHumanState::Unavailable,
+        [(candidates, None)] if candidates.is_empty() => UiHumanState::Unavailable,
+        [(_, Some(account))] => {
+            let active_membership = snapshot.items.iter().any(|item| {
+                matches!(
+                    item,
+                    SnapshotItem::Membership {
+                        account_id,
+                        device,
+                        state,
+                        active_acceptances,
+                        ..
+                    } if *account_id == *account
+                        && device.bytes() == local_installation
+                        && state == "active"
+                        && !active_acceptances.is_empty()
+                )
+            });
+            if active_membership {
+                UiHumanState::Ready
+            } else {
+                UiHumanState::Ambiguous
+            }
+        }
+        _ => UiHumanState::Ambiguous,
     }
 }
 
@@ -1485,7 +1546,7 @@ fn tui_projects(projects: Vec<LocalProject>) -> Vec<UiProject> {
         .collect()
 }
 
-fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
+fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
     match (section, item) {
         (
             section @ (UiSection::Inbox | UiSection::Sent | UiSection::Archived),
@@ -1497,18 +1558,18 @@ fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
                 ..
             },
         ) if match section {
-            UiSection::Inbox => open_messages > 0,
-            UiSection::Sent => sent_messages > 0,
-            UiSection::Archived => archived_messages > 0,
+            UiSection::Inbox => *open_messages > 0,
+            UiSection::Sent => *sent_messages > 0,
+            UiSection::Archived => *archived_messages > 0,
             UiSection::Agents | UiSection::Projects => false,
         } =>
         {
             conversation_row(
                 section,
-                key,
-                open_messages,
-                sent_messages,
-                archived_messages,
+                key.clone(),
+                *open_messages,
+                *sent_messages,
+                *archived_messages,
             )
         }
         (
@@ -1521,8 +1582,8 @@ fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
                 ..
             },
         ) => Some(UiRow {
-            id: full_id(message_id),
-            title: terminal_text(&content),
+            id: full_id(*message_id),
+            title: terminal_text(content),
             detail: format!(
                 "{} missing · {} unusable dependencies",
                 missing_dependencies.len(),
@@ -1549,11 +1610,11 @@ fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
                 ..
             },
         ) => Some(agent_row(
-            agent_id,
-            &names,
+            *agent_id,
+            names,
             retirements.is_empty(),
-            &lifecycle,
-            runnable,
+            lifecycle,
+            *runnable,
         )),
         (
             UiSection::Projects,
@@ -1566,12 +1627,12 @@ fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
                 ..
             },
         ) => Some(UiRow {
-            id: full_id(project_id),
-            title: terminal_text(&name),
-            detail: terminal_text(&lifecycle),
-            state: if archived {
+            id: full_id(*project_id),
+            title: terminal_text(name),
+            detail: terminal_text(lifecycle),
+            state: if *archived {
                 UiRowState::Archived
-            } else if !claimable {
+            } else if !*claimable {
                 UiRowState::Attention
             } else {
                 UiRowState::Open

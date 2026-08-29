@@ -4,11 +4,12 @@
 
 use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentMailbox, UiAgentSession,
-    UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiInput,
-    UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject, UiProjectAction,
-    UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
-    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
-    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
+    UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent,
+    UiHumanState, UiInput, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel,
+    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection, render,
+    update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -43,6 +44,25 @@ fn too_small_layout_matches_snapshot_without_mutating_the_model() {
         }),
         include_str!("snapshots/too-small.txt"),
     );
+}
+
+#[test]
+fn identity_only_state_renders_setup_and_recovery_actions() {
+    let model = loaded_snapshot_model(
+        UiSize {
+            width: 104,
+            height: 18,
+        },
+        UiSnapshot {
+            human_state: UiHumanState::Unavailable,
+            ..empty_render_snapshot(1)
+        },
+    );
+    let rendered = render_text(&model);
+    assert!(rendered.contains("No active human account"));
+    assert!(rendered.contains("hq human create"));
+    assert!(rendered.contains("hq human join"));
+    assert!(rendered.contains("hq relay sync"));
 }
 
 #[test]
@@ -604,47 +624,75 @@ fn render_text(model: &UiModel) -> String {
 }
 
 fn ready_model(size: UiSize) -> UiModel {
+    let model = loaded_snapshot_model(
+        size,
+        UiSnapshot {
+            revision: 42,
+            human_state: UiHumanState::Ready,
+            inbox_rows: vec![
+                row("build-17", "Build release", "agent-1", UiRowState::Open),
+                row(
+                    "deploy-9",
+                    "Deploy production",
+                    "waiting for approval",
+                    UiRowState::Waiting,
+                ),
+                row(
+                    "incident-4",
+                    "Investigate timeout",
+                    "relay needs attention",
+                    UiRowState::Attention,
+                ),
+            ],
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: Vec::new(),
+            project_rows: Vec::new(),
+            direct_targets: Vec::new(),
+            agents: Vec::new(),
+            projects: Vec::new(),
+        },
+    );
+    let focused = update(model, UiEvent::Input(UiInput::NextFocus)).expect("focus content");
+    update(focused.model, UiEvent::Input(UiInput::NextItem))
+        .expect("select second row")
+        .model
+}
+
+fn loaded_snapshot_model(size: UiSize, snapshot: UiSnapshot) -> UiModel {
     let started = update(UiModel::new(size), UiEvent::Started).expect("start model");
     let request = started
         .effects
         .iter()
         .find_map(|effect| match effect {
-            UiEffect::LoadSnapshot { id, .. } => Some(*id),
+            UiEffect::LoadSnapshot { id } => Some(*id),
             _ => None,
         })
         .expect("snapshot request");
-    let loaded = update(
+    update(
         started.model,
         UiEvent::SnapshotLoaded {
             effect_id: request,
-            snapshot: UiSnapshot {
-                section: hq_tui::UiSection::Inbox,
-                revision: 42,
-                rows: vec![
-                    row("build-17", "Build release", "agent-1", UiRowState::Open),
-                    row(
-                        "deploy-9",
-                        "Deploy production",
-                        "waiting for approval",
-                        UiRowState::Waiting,
-                    ),
-                    row(
-                        "incident-4",
-                        "Investigate timeout",
-                        "relay needs attention",
-                        UiRowState::Attention,
-                    ),
-                ],
-                direct_targets: Vec::new(),
-                agents: Vec::new(),
-                projects: Vec::new(),
-            },
+            snapshot,
         },
     )
-    .expect("load snapshot");
-    update(loaded.model, UiEvent::Input(UiInput::NextItem))
-        .expect("select second row")
-        .model
+    .expect("load snapshot")
+    .model
+}
+
+fn empty_render_snapshot(revision: u64) -> UiSnapshot {
+    UiSnapshot {
+        revision,
+        human_state: UiHumanState::Ready,
+        inbox_rows: Vec::new(),
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: Vec::new(),
+        project_rows: Vec::new(),
+        direct_targets: Vec::new(),
+        agents: Vec::new(),
+        projects: Vec::new(),
+    }
 }
 
 fn row(id: &str, title: &str, detail: &str, state: UiRowState) -> UiRow {
@@ -658,68 +706,59 @@ fn row(id: &str, title: &str, detail: &str, state: UiRowState) -> UiRow {
 }
 
 fn agent_details_model(size: UiSize) -> UiModel {
-    let mut model = ready_model(size);
-    for section in [UiSection::Sent, UiSection::Archived, UiSection::Agents] {
-        let moving = update(model, UiEvent::Input(UiInput::Character('l'))).expect("next section");
-        let request = moving
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                UiEffect::LoadSnapshot { id, .. } => Some(*id),
-                _ => None,
-            })
-            .expect("section snapshot");
-        let agent = UiAgent {
-            agent_id: [1; 32],
-            names: vec!["builder".to_owned()],
-            mailboxes: vec![UiAgentMailbox {
-                installation_id: [2; 32],
-                mailbox_id: [3; 32],
-            }],
-            lifecycle: UiAgentLifecycle::Active,
-            runnable: true,
-            sessions: vec![UiAgentSession {
-                provider: "codex".to_owned(),
-                session: "session-1".to_owned(),
-                mailbox: None,
-                conflicted: false,
-                selected: true,
-                name_resolved: true,
-                display_name: Some("live".to_owned()),
-            }],
-        };
-        let snapshot = UiSnapshot {
-            section,
+    let agent = UiAgent {
+        agent_id: [1; 32],
+        names: vec!["builder".to_owned()],
+        mailboxes: vec![UiAgentMailbox {
+            installation_id: [2; 32],
+            mailbox_id: [3; 32],
+        }],
+        lifecycle: UiAgentLifecycle::Active,
+        runnable: true,
+        sessions: vec![UiAgentSession {
+            provider: "codex".to_owned(),
+            session: "session-1".to_owned(),
+            mailbox: None,
+            conflicted: false,
+            selected: true,
+            name_resolved: true,
+            display_name: Some("live".to_owned()),
+        }],
+    };
+    let mut model = loaded_snapshot_model(
+        size,
+        UiSnapshot {
             revision: 43,
-            rows: if section == UiSection::Agents {
-                vec![UiRow {
-                    id: "01".repeat(32),
-                    title: "builder".to_owned(),
-                    detail: "active".to_owned(),
-                    state: UiRowState::Open,
-                    kind: UiRowKind::Agent,
-                }]
-            } else {
-                Vec::new()
-            },
+            human_state: UiHumanState::Ready,
+            inbox_rows: Vec::new(),
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: vec![UiRow {
+                id: "01".repeat(32),
+                title: "builder".to_owned(),
+                detail: "active".to_owned(),
+                state: UiRowState::Open,
+                kind: UiRowKind::Agent,
+            }],
+            project_rows: Vec::new(),
             direct_targets: Vec::new(),
-            agents: if section == UiSection::Agents {
-                vec![agent]
-            } else {
-                Vec::new()
-            },
+            agents: vec![agent],
             projects: Vec::new(),
-        };
-        model = update(
-            moving.model,
-            UiEvent::SnapshotLoaded {
-                effect_id: request,
-                snapshot,
-            },
-        )
-        .expect("section loaded")
-        .model;
+        },
+    );
+    let section_input = if size.width >= 96 {
+        UiInput::NextItem
+    } else {
+        UiInput::Character('l')
+    };
+    for _ in 0..3 {
+        model = update(model, UiEvent::Input(section_input.clone()))
+            .expect("next cached section")
+            .model;
     }
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("focus agent content")
+        .model;
     update(model, UiEvent::Input(UiInput::Activate))
         .expect("inspect agent")
         .model
@@ -741,127 +780,110 @@ fn project_model_with_state(
     lifecycle: &str,
     archived: bool,
 ) -> UiModel {
-    let mut model = ready_model(size);
-    for section in [
-        UiSection::Sent,
-        UiSection::Archived,
-        UiSection::Agents,
-        UiSection::Projects,
-    ] {
-        let moving = update(model, UiEvent::Input(UiInput::Character('l'))).expect("next section");
-        let request = moving
-            .effects
-            .iter()
-            .find_map(|effect| match effect {
-                UiEffect::LoadSnapshot { id, .. } => Some(*id),
-                _ => None,
-            })
-            .expect("section snapshot");
-        let projects = if section == UiSection::Projects {
-            vec![UiProject {
-                project_id: [1; 32],
-                home: [2; 32],
-                name: "release".to_owned(),
-                lifecycle: lifecycle.to_owned(),
-                archived,
-                claimable: true,
-                assignment: assigned.then(|| UiProjectAssignment {
-                    assignment_id: [8; 32],
-                    agent_id: [5; 32],
-                    provider: "codex".to_owned(),
-                    session: Some("project-session".to_owned()),
-                    phase: "blocked".to_owned(),
-                    thread_id: Some([6; 32]),
-                    launch_directory: Some("/workspace/release".to_owned()),
-                    blocked: Some("runtime_stop_uncertain".to_owned()),
-                    cardinality_conflicted: false,
-                    runnable: false,
-                }),
-                threads: vec![
-                    UiProjectThread {
-                        agent_id: [5; 32],
-                        provider: "codex".to_owned(),
-                        session: "project-session".to_owned(),
-                        thread_id: [6; 32],
-                    },
-                    UiProjectThread {
-                        agent_id: [9; 32],
-                        provider: "codex".to_owned(),
-                        session: "target-session".to_owned(),
-                        thread_id: [10; 32],
-                    },
-                ],
-                head: [3; 32],
-                input_sequence: 0,
-                resources: vec![UiProjectResource {
-                    resource_id: [4; 32],
-                    display_path: "/workspace/release".to_owned(),
-                    canonical_path: "/workspace/release".to_owned(),
-                    health: "healthy".to_owned(),
-                    primary: true,
-                    active_claim: true,
-                    conflicting_projects: Vec::new(),
-                }],
-            }]
-        } else {
-            Vec::new()
-        };
-        let rows = projects
-            .iter()
-            .map(|project| UiRow {
+    let projects = vec![UiProject {
+        project_id: [1; 32],
+        home: [2; 32],
+        name: "release".to_owned(),
+        lifecycle: lifecycle.to_owned(),
+        archived,
+        claimable: true,
+        assignment: assigned.then(|| UiProjectAssignment {
+            assignment_id: [8; 32],
+            agent_id: [5; 32],
+            provider: "codex".to_owned(),
+            session: Some("project-session".to_owned()),
+            phase: "blocked".to_owned(),
+            thread_id: Some([6; 32]),
+            launch_directory: Some("/workspace/release".to_owned()),
+            blocked: Some("runtime_stop_uncertain".to_owned()),
+            cardinality_conflicted: false,
+            runnable: false,
+        }),
+        threads: vec![
+            UiProjectThread {
+                agent_id: [5; 32],
+                provider: "codex".to_owned(),
+                session: "project-session".to_owned(),
+                thread_id: [6; 32],
+            },
+            UiProjectThread {
+                agent_id: [9; 32],
+                provider: "codex".to_owned(),
+                session: "target-session".to_owned(),
+                thread_id: [10; 32],
+            },
+        ],
+        head: [3; 32],
+        input_sequence: 0,
+        resources: vec![UiProjectResource {
+            resource_id: [4; 32],
+            display_path: "/workspace/release".to_owned(),
+            canonical_path: "/workspace/release".to_owned(),
+            health: "healthy".to_owned(),
+            primary: true,
+            active_claim: true,
+            conflicting_projects: Vec::new(),
+        }],
+    }];
+    let agents = [
+        (5_u8, "agent-5", "project-session"),
+        (9_u8, "agent-9", "target-session"),
+    ]
+    .into_iter()
+    .map(|(byte, name, session)| UiAgent {
+        agent_id: [byte; 32],
+        names: vec![name.to_owned()],
+        mailboxes: vec![UiAgentMailbox {
+            installation_id: [2; 32],
+            mailbox_id: [byte.saturating_add(1); 32],
+        }],
+        lifecycle: UiAgentLifecycle::Active,
+        runnable: true,
+        sessions: vec![UiAgentSession {
+            provider: "codex".to_owned(),
+            session: session.to_owned(),
+            mailbox: None,
+            conflicted: false,
+            selected: true,
+            name_resolved: true,
+            display_name: None,
+        }],
+    })
+    .collect();
+    let mut model = loaded_snapshot_model(
+        size,
+        UiSnapshot {
+            revision: 44,
+            human_state: UiHumanState::Ready,
+            inbox_rows: Vec::new(),
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: Vec::new(),
+            project_rows: vec![UiRow {
                 id: "01".repeat(32),
-                title: project.name.clone(),
-                detail: project.lifecycle.clone(),
+                title: "release".to_owned(),
+                detail: lifecycle.to_owned(),
                 state: UiRowState::Open,
                 kind: UiRowKind::Project,
-            })
-            .collect();
-        model = update(
-            moving.model,
-            UiEvent::SnapshotLoaded {
-                effect_id: request,
-                snapshot: UiSnapshot {
-                    section,
-                    revision: 44,
-                    rows,
-                    direct_targets: Vec::new(),
-                    agents: if section == UiSection::Projects {
-                        [
-                            (5, "agent-5", "project-session"),
-                            (9, "agent-9", "target-session"),
-                        ]
-                        .into_iter()
-                        .map(|(byte, name, session)| UiAgent {
-                            agent_id: [byte; 32],
-                            names: vec![name.to_owned()],
-                            mailboxes: vec![UiAgentMailbox {
-                                installation_id: [2; 32],
-                                mailbox_id: [byte.saturating_add(1); 32],
-                            }],
-                            lifecycle: UiAgentLifecycle::Active,
-                            runnable: true,
-                            sessions: vec![UiAgentSession {
-                                provider: "codex".to_owned(),
-                                session: session.to_owned(),
-                                mailbox: None,
-                                conflicted: false,
-                                selected: true,
-                                name_resolved: true,
-                                display_name: None,
-                            }],
-                        })
-                        .collect()
-                    } else {
-                        Vec::new()
-                    },
-                    projects,
-                },
-            },
-        )
-        .expect("section loaded")
-        .model;
+            }],
+            direct_targets: Vec::new(),
+            agents,
+            projects,
+        },
+    );
+    let section_input = if size.width >= 96 {
+        UiInput::NextItem
+    } else {
+        UiInput::Character('l')
+    };
+    for _ in 0..4 {
+        model = update(model, UiEvent::Input(section_input.clone()))
+            .expect("next cached section")
+            .model;
     }
-    model
+    update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("focus project content")
+        .model
 }
 
 fn conversation_model(size: UiSize) -> UiModel {

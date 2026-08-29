@@ -7,13 +7,13 @@ use std::time::Duration;
 use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox, UiAgentModal,
     UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
-    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiInput,
-    UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
-    UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectModal,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHumanState,
+    UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
+    UiMessageTarget, UiModel, UiProject, UiProjectAction, UiProjectAssignment,
+    UiProjectExternalWarning, UiProjectModal, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
+    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -28,14 +28,9 @@ fn startup_allocates_explicit_snapshot_tick_and_redraw_effects() {
     .expect("startup transition");
     assert_eq!(transition.model.connection(), UiConnectionState::Connecting);
     assert_eq!(transition.effects.len(), 3);
-    let UiEffect::LoadSnapshot {
-        id: snapshot_id,
-        section,
-    } = &transition.effects[0]
-    else {
+    let UiEffect::LoadSnapshot { id: snapshot_id } = &transition.effects[0] else {
         panic!("first effect loads a snapshot");
     };
-    assert_eq!(*section, UiSection::Inbox);
     let UiEffect::ScheduleTimer {
         id,
         kind: UiTimerKind::PeriodicRefresh,
@@ -189,6 +184,76 @@ fn logical_selection_focus_section_resize_and_quit_are_pure_transitions() {
 }
 
 #[test]
+fn wide_sidebar_uses_vertical_keys_and_horizontal_keys_only_change_focus() {
+    let started = update(
+        UiModel::new(UiSize {
+            width: 120,
+            height: 30,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start wide model");
+    let request = snapshot_effect(&started.effects);
+    let mut source = snapshot(1, &["inbox"]);
+    source.sent_rows = snapshot_for(UiSection::Sent, 1, &["sent-a", "sent-b"]).sent_rows;
+    let loaded = update(
+        started.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: request,
+            snapshot: source,
+        },
+    )
+    .expect("load complete snapshot");
+
+    let sent = update(loaded.model, UiEvent::Input(UiInput::NextItem)).expect("down in sidebar");
+    assert_eq!(sent.model.section(), UiSection::Sent);
+    assert_eq!(sent.model.focus(), UiFocus::Navigation);
+    assert_eq!(sent.model.selected_row(), Some("sent-a"));
+
+    let archived =
+        update(sent.model, UiEvent::Input(UiInput::Character('j'))).expect("j in sidebar");
+    assert_eq!(archived.model.section(), UiSection::Archived);
+    let sent =
+        update(archived.model, UiEvent::Input(UiInput::Character('k'))).expect("k in sidebar");
+    assert_eq!(sent.model.section(), UiSection::Sent);
+
+    let content =
+        update(sent.model, UiEvent::Input(UiInput::NextSection)).expect("right focuses content");
+    assert_eq!(content.model.section(), UiSection::Sent);
+    assert_eq!(content.model.focus(), UiFocus::Content);
+    let second =
+        update(content.model, UiEvent::Input(UiInput::NextItem)).expect("down moves content row");
+    assert_eq!(second.model.selected_row(), Some("sent-b"));
+    let navigation = update(second.model, UiEvent::Input(UiInput::PreviousSection))
+        .expect("left returns to sidebar");
+    assert_eq!(navigation.model.section(), UiSection::Sent);
+    assert_eq!(navigation.model.focus(), UiFocus::Navigation);
+}
+
+#[test]
+fn authoritative_refresh_retains_visible_rows_until_replacement_arrives() {
+    let model = loaded_model(snapshot(1, &["retained"]));
+    let refreshing =
+        update(model, UiEvent::Invalidated { revision: 2 }).expect("start background refresh");
+    assert!(refreshing.model.refreshing());
+    assert_eq!(refreshing.model.selected_row(), Some("retained"));
+    assert_eq!(
+        refreshing
+            .model
+            .rows()
+            .and_then(|rows| rows.first())
+            .map(|row| row.id.as_str()),
+        Some("retained")
+    );
+    assert!(
+        refreshing
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::LoadSnapshot { .. }))
+    );
+}
+
+#[test]
 fn reload_preserves_a_logical_selection_and_falls_back_when_it_disappears() {
     let started = started_model();
     let first_id = snapshot_effect(&started.effects);
@@ -229,38 +294,41 @@ fn reload_preserves_a_logical_selection_and_falls_back_when_it_disappears() {
 }
 
 #[test]
-fn section_change_rejects_the_old_sections_in_flight_snapshot() {
+fn section_change_uses_the_complete_in_flight_snapshot_without_another_request() {
     let started = started_model();
-    let inbox_id = snapshot_effect(&started.effects);
+    let snapshot_id = snapshot_effect(&started.effects);
     let sent = update(started.model, UiEvent::Input(UiInput::NextSection))
-        .expect("section changes while inbox is pending");
+        .expect("section changes while complete snapshot is pending");
     assert_eq!(sent.model.section(), UiSection::Sent);
 
-    let old_section = update(
+    let mut complete = snapshot(4, &["inbox"]);
+    complete.sent_rows = snapshot_for(UiSection::Sent, 4, &["sent"]).sent_rows;
+    let loaded = update(
         sent.model,
         UiEvent::SnapshotLoaded {
-            effect_id: inbox_id,
-            snapshot: snapshot_for(UiSection::Inbox, 4, &["inbox"]),
+            effect_id: snapshot_id,
+            snapshot: complete,
         },
     )
-    .expect("old section response schedules selected section");
-    assert!(old_section.model.snapshot().is_none());
-    let (sent_id, requested_section) = snapshot_effect_with_section(&old_section.effects);
-    assert_eq!(requested_section, UiSection::Sent);
-
-    let current_section = update(
-        old_section.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: sent_id,
-            snapshot: snapshot_for(UiSection::Sent, 4, &["sent"]),
-        },
-    )
-    .expect("selected section applies");
-    assert_eq!(
-        current_section.model.snapshot().map(|value| value.section),
-        Some(UiSection::Sent)
+    .expect("complete snapshot applies to selected section");
+    assert_eq!(loaded.model.selected_row(), Some("sent"));
+    assert!(
+        !loaded
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::LoadSnapshot { .. }))
     );
-    assert_eq!(current_section.model.selected_row(), Some("sent"));
+
+    let inbox = update(loaded.model, UiEvent::Input(UiInput::PreviousSection))
+        .expect("cached inbox is immediately available");
+    assert_eq!(inbox.model.section(), UiSection::Inbox);
+    assert_eq!(inbox.model.selected_row(), Some("inbox"));
+    assert!(
+        !inbox
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::LoadSnapshot { .. }))
+    );
 }
 
 #[test]
@@ -1318,45 +1386,40 @@ fn managed_session_uncertainty_retains_operation_and_reconciliation_identity() {
 
 #[test]
 fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
-    let mut model = opened_conversation(vec![entry("message-a", false)]);
-    assert_eq!(model.conversation_anchor(), Some("message-a"));
-    for section in [UiSection::Sent, UiSection::Archived, UiSection::Agents] {
-        let moved = update(model, UiEvent::Input(UiInput::Character('l'))).expect("next section");
-        let id = snapshot_effect(&moved.effects);
-        model = update(
-            moved.model,
-            UiEvent::SnapshotLoaded {
-                effect_id: id,
-                snapshot: if section == UiSection::Agents {
-                    agents_snapshot(1, vec![agent(9, "runtime")])
-                } else {
-                    snapshot_for(section, 1, &[])
-                },
+    let mut source = snapshot(1, &["thread-a"]);
+    let agent_source = agents_snapshot(1, vec![agent(9, "runtime")]);
+    source.agent_rows = agent_source.agent_rows;
+    source.agents = agent_source.agents;
+    let model = loaded_model(source);
+    let opening = update(model, UiEvent::Input(UiInput::Activate)).expect("open conversation");
+    let (effect_id, _, _) = conversation_effect(&opening.effects);
+    let mut model = update(
+        opening.model,
+        UiEvent::ConversationLoaded {
+            effect_id,
+            page: UiConversationPage {
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message-a", false)],
+                next_cursor: None,
             },
-        )
-        .expect("section snapshot")
-        .model;
+        },
+    )
+    .expect("conversation loaded")
+    .model;
+    assert_eq!(model.conversation_anchor(), Some("message-a"));
+    for _ in 0..3 {
+        model = update(model, UiEvent::Input(UiInput::Character('l')))
+            .expect("next cached section")
+            .model;
     }
     let details = update(model, UiEvent::Input(UiInput::Activate)).expect("agent details");
     model = update(details.model, UiEvent::Input(UiInput::Escape))
         .expect("close details")
         .model;
-    for section in [UiSection::Archived, UiSection::Sent, UiSection::Inbox] {
-        let moved = update(model, UiEvent::Input(UiInput::Character('h'))).expect("previous");
-        let id = snapshot_effect(&moved.effects);
-        model = update(
-            moved.model,
-            UiEvent::SnapshotLoaded {
-                effect_id: id,
-                snapshot: if section == UiSection::Inbox {
-                    snapshot(1, &["thread-a"])
-                } else {
-                    snapshot_for(section, 1, &[])
-                },
-            },
-        )
-        .expect("restored snapshot")
-        .model;
+    for _ in 0..3 {
+        model = update(model, UiEvent::Input(UiInput::Character('h')))
+            .expect("previous cached section")
+            .model;
     }
     assert_eq!(model.selected_row(), Some("thread-a"));
     assert_eq!(model.conversation_anchor(), Some("message-a"));
@@ -2242,62 +2305,79 @@ fn snapshot(revision: u64, ids: &[&str]) -> UiSnapshot {
 }
 
 fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
+    let rows = ids
+        .iter()
+        .map(|id| UiRow {
+            id: (*id).to_owned(),
+            title: format!("{id} title"),
+            detail: format!("{id} detail"),
+            state: UiRowState::Open,
+            kind: UiRowKind::Conversation,
+        })
+        .collect::<Vec<_>>();
     UiSnapshot {
-        section,
         revision,
+        human_state: UiHumanState::Ready,
+        inbox_rows: if section == UiSection::Inbox {
+            rows.clone()
+        } else {
+            Vec::new()
+        },
+        sent_rows: if section == UiSection::Sent {
+            rows.clone()
+        } else {
+            Vec::new()
+        },
+        archived_rows: if section == UiSection::Archived {
+            rows.clone()
+        } else {
+            Vec::new()
+        },
+        agent_rows: if section == UiSection::Agents {
+            rows.clone()
+        } else {
+            Vec::new()
+        },
+        project_rows: if section == UiSection::Projects {
+            rows
+        } else {
+            Vec::new()
+        },
         direct_targets: Vec::new(),
         agents: Vec::new(),
         projects: Vec::new(),
-        rows: ids
-            .iter()
-            .map(|id| UiRow {
-                id: (*id).to_owned(),
-                title: format!("{id} title"),
-                detail: format!("{id} detail"),
-                state: UiRowState::Open,
-                kind: UiRowKind::Conversation,
-            })
-            .collect(),
     }
 }
 
 fn loaded_agents_model(revision: u64, agents: &[UiAgent]) -> UiModel {
-    let mut model = loaded_model(snapshot(0, &[]));
-    for section in [UiSection::Sent, UiSection::Archived, UiSection::Agents] {
-        let moved = update(model, UiEvent::Input(UiInput::Character('l'))).expect("next section");
-        let id = snapshot_effect(&moved.effects);
-        let source = if section == UiSection::Agents {
-            agents_snapshot(revision, agents.to_owned())
-        } else {
-            snapshot_for(section, revision, &[])
-        };
-        model = update(
-            moved.model,
-            UiEvent::SnapshotLoaded {
-                effect_id: id,
-                snapshot: source,
-            },
-        )
-        .expect("section loaded")
-        .model;
+    let mut model = loaded_model(agents_snapshot(revision, agents.to_owned()));
+    for _ in 0..3 {
+        model = update(model, UiEvent::Input(UiInput::Character('l')))
+            .expect("next cached section")
+            .model;
     }
     model
 }
 
 fn agents_snapshot(revision: u64, agents: Vec<UiAgent>) -> UiSnapshot {
+    let rows = agents
+        .iter()
+        .map(|agent| UiRow {
+            id: agent_row_id(agent.agent_id[0]),
+            title: agent.names.first().cloned().unwrap_or_default(),
+            detail: "active".to_owned(),
+            state: UiRowState::Open,
+            kind: UiRowKind::Agent,
+        })
+        .collect();
     UiSnapshot {
-        section: UiSection::Agents,
         revision,
-        rows: agents
-            .iter()
-            .map(|agent| UiRow {
-                id: agent_row_id(agent.agent_id[0]),
-                title: agent.names.first().cloned().unwrap_or_default(),
-                detail: "active".to_owned(),
-                state: UiRowState::Open,
-                kind: UiRowKind::Agent,
-            })
-            .collect(),
+        human_state: UiHumanState::Ready,
+        inbox_rows: Vec::new(),
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: rows,
+        project_rows: Vec::new(),
         direct_targets: Vec::new(),
         agents,
         projects: Vec::new(),
@@ -2305,18 +2385,13 @@ fn agents_snapshot(revision: u64, agents: Vec<UiAgent>) -> UiSnapshot {
 }
 
 fn loaded_projects_model(revision: u64, projects: Vec<UiProject>) -> UiModel {
-    let model = loaded_agents_model(revision, &[]);
-    let moved = update(model, UiEvent::Input(UiInput::Character('l'))).expect("projects section");
-    let request = snapshot_effect(&moved.effects);
-    update(
-        moved.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: request,
-            snapshot: projects_snapshot(revision, projects),
-        },
-    )
-    .expect("projects loaded")
-    .model
+    let mut model = loaded_model(projects_snapshot(revision, projects));
+    for _ in 0..4 {
+        model = update(model, UiEvent::Input(UiInput::Character('l')))
+            .expect("next cached section")
+            .model;
+    }
+    model
 }
 
 fn loaded_projects_model_with_agents(
@@ -2324,20 +2399,17 @@ fn loaded_projects_model_with_agents(
     projects: Vec<UiProject>,
     agents: Vec<UiAgent>,
 ) -> UiModel {
-    let model = loaded_agents_model(revision, &agents);
-    let moved = update(model, UiEvent::Input(UiInput::Character('l'))).expect("projects section");
-    let request = snapshot_effect(&moved.effects);
     let mut snapshot = projects_snapshot(revision, projects);
-    snapshot.agents = agents;
-    update(
-        moved.model,
-        UiEvent::SnapshotLoaded {
-            effect_id: request,
-            snapshot,
-        },
-    )
-    .expect("projects loaded")
-    .model
+    let agent_source = agents_snapshot(revision, agents);
+    snapshot.agent_rows = agent_source.agent_rows;
+    snapshot.agents = agent_source.agents;
+    let mut model = loaded_model(snapshot);
+    for _ in 0..4 {
+        model = update(model, UiEvent::Input(UiInput::Character('l')))
+            .expect("next cached section")
+            .model;
+    }
+    model
 }
 
 fn project_agent(byte: u8, home: [u8; 32]) -> UiAgent {
@@ -2363,19 +2435,24 @@ fn project_agent(byte: u8, home: [u8; 32]) -> UiAgent {
 }
 
 fn projects_snapshot(revision: u64, projects: Vec<UiProject>) -> UiSnapshot {
+    let rows = projects
+        .iter()
+        .map(|project| UiRow {
+            id: agent_row_id(project.project_id[0]),
+            title: project.name.clone(),
+            detail: project.lifecycle.clone(),
+            state: UiRowState::Open,
+            kind: UiRowKind::Project,
+        })
+        .collect();
     UiSnapshot {
-        section: UiSection::Projects,
         revision,
-        rows: projects
-            .iter()
-            .map(|project| UiRow {
-                id: agent_row_id(project.project_id[0]),
-                title: project.name.clone(),
-                detail: project.lifecycle.clone(),
-                state: UiRowState::Open,
-                kind: UiRowKind::Project,
-            })
-            .collect(),
+        human_state: UiHumanState::Ready,
+        inbox_rows: Vec::new(),
+        sent_rows: Vec::new(),
+        archived_rows: Vec::new(),
+        agent_rows: Vec::new(),
+        project_rows: rows,
         direct_targets: Vec::new(),
         agents: Vec::new(),
         projects,
@@ -2501,14 +2578,10 @@ fn opened_conversation(entries: Vec<UiConversationEntry>) -> UiModel {
 }
 
 fn snapshot_effect(effects: &[UiEffect]) -> hq_tui::EffectId {
-    snapshot_effect_with_section(effects).0
-}
-
-fn snapshot_effect_with_section(effects: &[UiEffect]) -> (hq_tui::EffectId, UiSection) {
     effects
         .iter()
         .find_map(|effect| match effect {
-            UiEffect::LoadSnapshot { id, section } => Some((*id, *section)),
+            UiEffect::LoadSnapshot { id } => Some(*id),
             _ => None,
         })
         .expect("snapshot effect")

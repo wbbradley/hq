@@ -20,7 +20,7 @@ UiModel + UiEvent -> Result<(UiModel, [UiEffect]), UiError>
 snapshot, conversation, draft, mailbox-command, named-agent administration, and managed-session
 completions,
 revision-only invalidations, and
-generation-scoped connection states and failures. `UiEffect` covers section-bound complete-snapshot
+generation-scoped connection states and failures. `UiEffect` covers complete all-section snapshot
 requests, bounded reducer-ordered conversation-page requests, draft open/autosave, stable mailbox
 commands, typed named-agent and managed-session commands, timers, redraw requests, and exit. The transition function
 performs no I/O and has no domain mutation port.
@@ -98,17 +98,20 @@ incremental frame decoder so a read timeout cannot discard a partial frame. Reco
 queued against monotonic deadlines across short shell polls. Every negotiated generation registers
 the broad invalidation subscription before its acknowledged authoritative snapshot is exposed.
 
-`LocalTuiClient` maps only complete authoritative local API snapshots into the exact requested
-`UiSection`. Conversation summaries carry store-derived open, archived, and local-human-authored
-counts, so Inbox, Archived, and Sent filters do not scan or reorder message bodies. Activating a
-summary issues the ordinary `ConversationPage` request with an opaque cursor. Returned
+`LocalTuiClient` maps each complete authoritative local API snapshot into one presentation bundle
+containing Inbox, Sent, Archived, Agents, and Projects. Section navigation selects an already
+mapped slice and performs no client request, so it never replaces visible content with a loading
+state. Invalidation and periodic repair load a replacement bundle in the background while the
+previous complete bundle remains visible. Conversation summaries carry store-derived open,
+archived, and local-human-authored counts, so mailbox filters do not scan or reorder message
+bodies. Activating a summary issues the ordinary `ConversationPage` request with an opaque cursor. Returned
 message/activity unions remain in reducer order; selected/coalesced activity is presented as
 non-actionable and is never converted into a message target. The mapper also exposes only uniquely
 named, uniquely bound, non-retired agent mailboxes as passive direct-target candidates. The protocol
 `AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately different records: one
-is canonical local-API data, while the other is a small section-specific view containing only safe
-rendering fields. Neither is a storage compatibility shape, and both passive records expose their
-fields directly.
+is canonical local-API data, while the other is a small complete navigation cache containing only
+safe rendering fields. Neither is a storage compatibility shape, and both passive records expose
+their fields directly.
 
 For the Agents section, the mapper reuses the installed named-agent catalog projection rather than
 reimplementing binding, selection, or display-name reduction. Exact provider/session identities
@@ -160,7 +163,12 @@ The first responsive layouts are semantic Rust-era layouts, not Bubble Tea compa
 - 40 through 95 columns: compact horizontal section navigation above content;
 - below 40 columns or 10 rows: a bounded resize message that retains the quit hint.
 
-The header reports the selected section, connection state, and authoritative revision. Rows expose
+In the wide layout, Up/Down and `k`/`j` move through the vertical section list, while Left/Right
+and `h`/`l` move focus between navigation and content. In compact layouts, Left/Right and `h`/`l`
+continue to move through the horizontal section navigation.
+
+The header reports the selected section, connection state, authoritative revision, and background
+refresh state without hiding retained rows. Rows expose
 selection, stable presentation state, and bounded detail. An activated conversation uses a
 responsive second pane, centers rendering around the stable fact anchor, labels activity as
 non-actionable, and expands only typed routing, semantics, evidence, or activity sections. Enter
@@ -196,3 +204,10 @@ The installed `hq tui` role accepts only human output with both stdin and stdout
 terminal. A bare `hq` selects the same role when both streams are terminals and retains the
 noninteractive `list` role otherwise. The binary returns from the guarded shell before translating
 failure into a process exit, so it never exits while terminal modes are still owned.
+
+Before activating the terminal or attempting daemon ownership, the installed shell performs a
+read-only validation of the installation identity. A missing identity fails immediately with the
+stable `setup.identity_required` diagnostic and the `hq identity init` action. Identity-only nodes
+remain supported: after the first authoritative snapshot the TUI presents explicit `human create`,
+`human join`, relay-recovery, and inspection guidance instead of treating the absent human account
+as a shell failure.

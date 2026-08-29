@@ -29,6 +29,44 @@ const AUTHORITATIVE_STATE_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_INACTIVITY_WATCHDOG: Duration = Duration::from_secs(30);
 
 #[test]
+fn installed_tui_without_an_identity_fails_fast_before_terminal_activation() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+
+    for explicit in [true, false] {
+        let started = Instant::now();
+        let run = run_in_pty(&state_root, explicit, PtyInteraction::QuitOnStart);
+        assert!(!run.status.success(), "uninitialized TUI unexpectedly ran");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "identity preflight did not fail fast: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            run.bytes
+                .windows(b"setup.identity_required".len())
+                .any(|window| window == b"setup.identity_required"),
+            "missing typed setup diagnostic: {:?}",
+            run.bytes
+        );
+        assert!(
+            run.bytes
+                .windows(b"hq identity init".len())
+                .any(|window| window == b"hq identity init"),
+            "missing identity setup action: {:?}",
+            run.bytes
+        );
+        assert!(
+            !run.bytes
+                .windows(ENTER_ALTERNATE_SCREEN.len())
+                .any(|window| window == ENTER_ALTERNATE_SCREEN),
+            "identity preflight activated the terminal"
+        );
+        assert_eq!(run.before, run.after, "preflight changed terminal modes");
+    }
+}
+
+#[test]
 fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -36,7 +74,7 @@ fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
     let _daemon = DaemonStopGuard(&state_root);
 
     for explicit in [true, false] {
-        let run = run_in_pty(&state_root, explicit, PtyInteraction::QuitOnStart);
+        let run = run_in_pty(&state_root, explicit, PtyInteraction::QuitAfterSetup);
         assert!(run.status.success(), "TUI process failed: {:?}", run.bytes);
         assert!(
             run.bytes
@@ -47,6 +85,12 @@ fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
         assert!(
             run.bytes.windows(2).any(|window| window == b"HQ"),
             "TUI did not render its title"
+        );
+        assert!(
+            run.bytes
+                .windows(b"No active human account".len())
+                .any(|window| window == b"No active human account"),
+            "identity-only TUI did not render setup and recovery guidance"
         );
         assert!(
             run.bytes
@@ -437,6 +481,7 @@ struct PtyRun {
 #[derive(Clone, Copy)]
 enum PtyInteraction<'content> {
     QuitOnStart,
+    QuitAfterSetup,
     SubmitSelfNote(&'content str),
     CreateAgent(&'content str),
     StartRejectedSession,
@@ -541,25 +586,32 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         let alternate_screen_entered = bytes
             .windows(ENTER_ALTERNATE_SCREEN.len())
             .any(|window| window == ENTER_ALTERNATE_SCREEN);
-        if !initial_key_sent && alternate_screen_entered {
+        let interaction_ready = !matches!(interaction, PtyInteraction::QuitAfterSetup)
+            || bytes
+                .windows(b"No active human account".len())
+                .any(|window| window == b"No active human account");
+        if !initial_key_sent && alternate_screen_entered && interaction_ready {
             let key = match interaction {
-                PtyInteraction::QuitOnStart => b"q".as_slice(),
+                PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup => b"q".as_slice(),
                 PtyInteraction::SubmitSelfNote(_) => b"n".as_slice(),
-                PtyInteraction::CreateAgent(_) => b"lllc".as_slice(),
-                PtyInteraction::StartRejectedSession => b"lll".as_slice(),
-                PtyInteraction::CreateExistingProject { .. } => b"llllc".as_slice(),
+                PtyInteraction::CreateAgent(_) => b"jjjc".as_slice(),
+                PtyInteraction::StartRejectedSession => b"jjjl".as_slice(),
+                PtyInteraction::CreateExistingProject { .. } => b"jjjjc".as_slice(),
                 PtyInteraction::SendProjectInput { .. }
                 | PtyInteraction::DispatchProjectInput { .. }
                 | PtyInteraction::AddProjectResource { .. }
                 | PtyInteraction::CloseProject { .. }
                 | PtyInteraction::OpenProject { .. }
-                | PtyInteraction::SetProjectArchived { .. } => b"llll".as_slice(),
-                PtyInteraction::CreateWorktreeProject { .. } => b"llllw".as_slice(),
+                | PtyInteraction::SetProjectArchived { .. } => b"jjjjl".as_slice(),
+                PtyInteraction::CreateWorktreeProject { .. } => b"jjjjw".as_slice(),
             };
             master.write_all(key).expect("initial TUI key writes");
             master.flush().expect("initial TUI key flushes");
             initial_key_sent = true;
-            exit_sent = matches!(interaction, PtyInteraction::QuitOnStart);
+            exit_sent = matches!(
+                interaction,
+                PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup
+            );
         }
         if let PtyInteraction::SubmitSelfNote(content) = interaction
             && initial_key_sent

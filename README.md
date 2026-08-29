@@ -61,6 +61,11 @@ hq human create
 hq tui
 ```
 
+Starting `hq` before an installation identity exists fails immediately with an actionable
+`hq identity init` diagnostic. Starting after identity initialization but before human creation is
+supported: the TUI opens in setup/recovery mode and offers `human create`, `human join`, and relay
+recovery guidance.
+
 Add a retained relay when synchronization is required:
 
 ```sh

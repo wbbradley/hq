@@ -17,8 +17,8 @@ use hq_node::{
     TuiTerminalEvent, TuiTerminalPort, normalize_crossterm_event, run_tui_shell,
 };
 use hq_tui::{
-    UiFailure, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiModel, UiSection,
-    UiSize, UiSnapshot,
+    UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
+    UiModel, UiSize, UiSnapshot,
 };
 
 #[test]
@@ -266,11 +266,15 @@ impl TuiTerminalPort for ScriptedTerminal {
 struct EmptyClient;
 
 impl TuiClientPort for EmptyClient {
-    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, hq_tui::UiFailure> {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, hq_tui::UiFailure> {
         Ok(UiSnapshot {
-            section,
             revision: 1,
-            rows: Vec::new(),
+            human_state: UiHumanState::Ready,
+            inbox_rows: Vec::new(),
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: Vec::new(),
+            project_rows: Vec::new(),
             direct_targets: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
@@ -317,7 +321,7 @@ impl TuiClientPort for EmptyClient {
 struct PanickingClient;
 
 impl TuiClientPort for PanickingClient {
-    fn load_snapshot(&mut self, _section: UiSection) -> Result<UiSnapshot, hq_tui::UiFailure> {
+    fn load_snapshot(&mut self) -> Result<UiSnapshot, hq_tui::UiFailure> {
         panic!("scripted client failure")
     }
 

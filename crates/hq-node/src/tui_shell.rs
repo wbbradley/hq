@@ -16,8 +16,9 @@ use hq_tui::{UiEvent, UiInput, UiModel, UiSize, update};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
-    LocalNodeEventClient, LocalTuiClient, MonotonicTuiClock, StatePaths, TuiClientPort, TuiClock,
-    TuiEffectExecutor, local_client::installed_local_client_config,
+    IdentityError, IdentityErrorClass, LocalNodeEventClient, LocalTuiClient, MonotonicTuiClock,
+    StatePaths, TuiClientPort, TuiClock, TuiEffectExecutor,
+    local_client::installed_local_client_config,
 };
 
 const MAX_TERMINAL_WAIT: Duration = Duration::from_millis(50);
@@ -59,6 +60,8 @@ impl std::error::Error for TuiTerminalError {}
 /// Closed outer-shell failure without terminal, transport, or model prose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TuiShellError {
+    /// Installed identity state is absent, unsafe, or invalid.
+    Identity(IdentityError),
     /// The terminal boundary failed.
     Terminal(TuiTerminalError),
     /// The pure UI model rejected an event.
@@ -78,6 +81,46 @@ impl fmt::Display for TuiShellError {
 }
 
 impl std::error::Error for TuiShellError {}
+
+impl TuiShellError {
+    /// Returns the stable installed diagnostic code and actionable human message.
+    pub const fn diagnostic(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Identity(error)
+                if matches!(error.class(), IdentityErrorClass::IdentityMissing) =>
+            {
+                (
+                    "setup.identity_required",
+                    "run `hq identity init`, or import an existing installation identity",
+                )
+            }
+            Self::Identity(_) => (
+                "setup.identity_invalid",
+                "inspect or restore the installation identity before starting the TUI",
+            ),
+            Self::Terminal(_) => (
+                "tui.terminal_failed",
+                "the interactive terminal could not be activated, drawn, or restored",
+            ),
+            Self::Model => (
+                "tui.model_failed",
+                "the interactive model rejected a terminal or client event",
+            ),
+            Self::Executor => (
+                "tui.executor_failed",
+                "the interactive client worker stopped unexpectedly",
+            ),
+            Self::Client => (
+                "tui.client_failed",
+                "the local node client could not be started or connected",
+            ),
+            Self::Build => (
+                "tui.build_invalid",
+                "the installed build metadata is invalid",
+            ),
+        }
+    }
+}
 
 impl From<TuiTerminalError> for TuiShellError {
     fn from(error: TuiTerminalError) -> Self {
@@ -283,6 +326,7 @@ where
 
 /// Composes the installed subscribed client and real terminal shell for one state root.
 pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
+    state.validate_identity().map_err(TuiShellError::Identity)?;
     let build = BuildMetadata::new(
         "hq",
         env!("CARGO_PKG_VERSION"),

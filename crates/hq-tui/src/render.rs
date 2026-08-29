@@ -12,15 +12,14 @@ use ratatui::{
 
 use crate::{
     UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentModal, UiConnectionState,
-    UiConversationEntry, UiConversationEntryKind, UiFocus, UiMailboxAction, UiMailboxDraftTarget,
-    UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel,
-    UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread, UiRow,
-    UiRowState, UiSection, UiTechnicalSection,
+    UiConversationEntry, UiConversationEntryKind, UiFocus, UiHumanState, UiMailboxAction,
+    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiMessageState, UiModel, UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome,
+    UiProjectThread, UiRow, UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
 const MINIMUM_HEIGHT: u16 = 10;
-const WIDE_WIDTH: u16 = 96;
 const NAVIGATION_WIDTH: u16 = 24;
 
 /// Renders the complete model without mutation or I/O.
@@ -1054,6 +1053,7 @@ fn render_too_small(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
 fn render_header(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     let revision = model.snapshot().map(|snapshot| snapshot.revision);
     let status = match revision {
+        Some(value) if model.refreshing() => format!("refreshing · revision {value}"),
         Some(value) => format!(
             "{} · revision {value}",
             connection_label(model.connection())
@@ -1155,7 +1155,7 @@ fn render_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
 }
 
 fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
-    let count = model.snapshot().map_or(0, |snapshot| snapshot.rows.len());
+    let count = model.rows().map_or(0, <[UiRow]>::len);
     let mut lines = vec![
         Line::styled(
             format!(" {} · {count} items", section_label(model.section())),
@@ -1163,12 +1163,34 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         ),
         Line::default(),
     ];
-    match model.snapshot() {
-        Some(snapshot) if snapshot.rows.is_empty() => {
+    match model.human_state() {
+        Some(UiHumanState::Unavailable) => {
+            lines.push(Line::styled(
+                " No active human account is currently available",
+                Style::new().fg(Color::Yellow).bold(),
+            ));
+            lines.push(Line::from(" New: hq human create · Join: hq human join"));
+            lines.push(Line::from(
+                " Recover: hq relay sync / hq relay repair · Inspect: hq human show",
+            ));
+            lines.push(Line::default());
+        }
+        Some(UiHumanState::Ambiguous) => {
+            lines.push(Line::styled(
+                " Human account selection or authority is ambiguous",
+                Style::new().fg(Color::Yellow).bold(),
+            ));
+            lines.push(Line::from(" Inspect and resolve with: hq human show"));
+            lines.push(Line::default());
+        }
+        Some(UiHumanState::Ready) | None => {}
+    }
+    match model.rows() {
+        Some([]) => {
             lines.push(Line::styled(" No items", Style::new().fg(Color::DarkGray)));
         }
-        Some(snapshot) => {
-            for row in &snapshot.rows {
+        Some(rows) => {
+            for row in rows {
                 lines.extend(render_row(model, row));
             }
         }
@@ -1367,9 +1389,13 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
 fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     let content = model.last_failure().map_or_else(
         || {
-            if model.section() == UiSection::Agents {
+            if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
+                " ↑/↓ or j/k section · Enter/→/l content · q quit".to_owned()
+            } else if model.focus() == UiFocus::Navigation {
+                " ←/→ or h/l section · ↑/↓ or j/k select · Enter open · q quit".to_owned()
+            } else if model.section() == UiSection::Agents {
                 format!(
-                    " / search ({}) · Enter inspect · c create · q quit",
+                    " ←/h navigation · / search ({}) · Enter inspect · c create · q quit",
                     if model.agent_search().is_empty() {
                         "all"
                     } else {
@@ -1378,7 +1404,7 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
                 )
             } else if model.section() == UiSection::Projects {
                 format!(
-                    " / search ({}) · Enter inspect · c existing · w worktree · q quit",
+                    " ←/h navigation · / search ({}) · Enter inspect · c existing · w worktree · q quit",
                     if model.project_search().is_empty() {
                         "all"
                     } else {
@@ -1386,7 +1412,7 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
                     }
                 )
             } else if model.viewport().width >= WIDE_WIDTH {
-                " tab focus · ↑/↓ select · r reply · d direct · n note · a/u state · q quit"
+                " ←/h navigation · ↑/↓ select · r reply · d direct · n note · a/u state · q quit"
                     .to_owned()
             } else {
                 " ↑/↓ select · r reply · d direct · n note · a/u state · q quit".to_owned()
