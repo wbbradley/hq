@@ -54,13 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Add project handoff and takeover commands** — Reuse the authoritative assignment and
-  historical-thread views to hand a project to an exact agent, provider, session, thread, and
-  launch directory. Require explicit confirmation, keep forced takeover separate from ordinary
-  handoff, and render every workflow stage, rejection, runtime failure/uncertainty, and reconcilable
-  operation. Test same-agent and busy-target rejection, threadless targets, blocked and forced
-  takeover, stale heads, response loss, restart repair, and real foreground execution.
-
 - **[cli/high] Add desired-resource inspection and mutation commands** — Expose resource add,
   remove, replace, primary selection, and check through the project and read-only inspection ports.
   Identify display/canonical locators at the boundary, preserve stable resource identities, and

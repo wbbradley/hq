@@ -206,6 +206,13 @@ includes the current assignment and deduplicated historical thread bindings as p
 records. These additions evolve the unshipped local API v1 in place without a migration, compatibility
 shape, or second stored representation.
 
+`project handoff PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER (--new-session | --session
+SESSION) --thread THREAD_ID [--dir ABSOLUTE_PATH] --yes [--force]` resolves the current assignment
+and exact target history from the same authoritative snapshot. Handoff always requires explicit
+confirmation. `--force` is independent takeover authority used only after normal quiescence is
+blocked or uncertain; it does not replace `--yes`. The stable project-command path preserves stale
+head rejection, response-loss replay, restart repair, and complete workflow/runtime rendering.
+
 `agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
 for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert
 dependency-incomplete history, and the boundary that humans own identity, authority, durable

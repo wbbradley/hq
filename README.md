@@ -307,6 +307,7 @@ hq project worktree --repo /work/widget --base main --destination /work/widget-f
 hq project send PROJECT_ID "Investigate the failing integration test"
 hq project activate PROJECT_ID --agent alice --provider codex --new-session
 hq project dispatch PROJECT_ID
+hq project handoff PROJECT_ID --agent bob --provider codex --new-session --thread THREAD_ID --yes
 hq project close PROJECT_ID --yes
 hq project archive PROJECT_ID
 hq project unarchive PROJECT_ID
@@ -314,6 +315,10 @@ hq project open PROJECT_ID
 ```
 
 Use `hq project list`, `show`, `open`, `activate`, `dispatch`, `handoff`, `check`, and `resource` for inspection and lifecycle management. Activation requires either `--new-session` or an exact `--session SESSION --thread THREAD_ID`; a new provider session may optionally continue one historical project thread. Without `--dir`, activation launches from the authoritative primary resource. `dispatch` reconciles and drains pending accepted inputs in home-assigned order. Close requires `--yes`; `--force` separately authorizes dirty/unknown release or failed/uncertain runtime cessation. `project worktree` reserves its destination on the selected home before the daemon invokes Git. `--home INSTALLATION_ID` creates or provisions on another active human-account device. Remote mutations remain visibly queued until the home returns a signed received/committed/rejected result; expected-head comparison rejects delayed stale commands. Closing and archival release HQ's advisory claims but never delete files, worktrees, branches, or containers.
+
+Handoff requires an exact historical target thread and `--yes`. `--force` is separate takeover
+authorization used only after ordinary quiescence is blocked or uncertain; it never substitutes for
+confirmation.
 
 `project send` accepts the body as its final argument or from stdin. It writes an ordinary durable
 account message to the immutable project mailbox; the authoritative home sequences it even while

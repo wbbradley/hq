@@ -1071,7 +1071,7 @@ fn project_send_sequences_argument_and_stdin_work_and_survives_restart() {
 }
 
 #[test]
-fn project_activation_and_dispatch_execute_against_the_foreground_node_and_survive_restart() {
+fn project_assignment_commands_execute_against_the_foreground_node_and_survive_restart() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
     let worktree = directory.path().join("activation-worktree");
@@ -1138,6 +1138,29 @@ fn project_activation_and_dispatch_execute_against_the_foreground_node_and_survi
         serde_json::from_slice(&dispatch.stdout).expect("dispatch JSON");
     assert_eq!(dispatch["data"]["operation"], "dispatch");
     assert_eq!(dispatch["data"]["status"], "rejected");
+
+    let handoff = admin_output(
+        &state_root,
+        "project",
+        &[
+            "handoff",
+            &project_id,
+            "--agent",
+            "runtime-agent",
+            "--provider",
+            "unregistered",
+            "--new-session",
+            "--thread",
+            &"44".repeat(32),
+            "--yes",
+            "--force",
+        ],
+    );
+    assert_eq!(handoff.status.code(), Some(1));
+    let handoff: serde_json::Value =
+        serde_json::from_slice(&handoff.stderr).expect("handoff error JSON");
+    assert_eq!(handoff["kind"], "error");
+    assert_eq!(handoff["data"]["code"], "project.state_unavailable");
 
     let restarted = output("restart", &state_root);
     assert!(

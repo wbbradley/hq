@@ -463,6 +463,23 @@ pub enum ProjectCliCommand {
     },
     /// Reconcile and dispatch every pending accepted input in order.
     Dispatch(ProjectId),
+    /// Quiesce the current assignment and activate one exact target.
+    Handoff {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Exact target agent identity or permanent name.
+        agent: NamedAgentSelector,
+        /// Explicit provider namespace.
+        provider: ProviderId,
+        /// Exact provider session to resume, or `None` to start one.
+        resume_session: Option<ProviderSessionId>,
+        /// Exact historical target project thread.
+        thread_id: ThreadId,
+        /// Optional normalized absolute launch directory override.
+        directory: Option<PathBuf>,
+        /// Whether blocked quiescence may revoke the prior assignment.
+        force: bool,
+    },
     /// Close one exact project after explicit confirmation.
     Close {
         /// Stable project identity.
@@ -1780,6 +1797,7 @@ fn parse_project_catalog(
         [action, project_id] if action == "dispatch" => {
             ProjectCliCommand::Dispatch(ProjectId::from_bytes(parse_hex32(project_id)?))
         }
+        [action, rest @ ..] if action == "handoff" => parse_project_handoff(rest)?,
         [action, rest @ ..] if action == "close" => parse_project_close(rest)?,
         [action, project_id] if action == "archive" => {
             ProjectCliCommand::Archive(ProjectId::from_bytes(parse_hex32(project_id)?))
@@ -1792,6 +1810,84 @@ fn parse_project_catalog(
     Ok(CliCommand::Project {
         action,
         state: parsed_state(state_root)?,
+    })
+}
+
+fn parse_project_handoff(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
+    let project_id =
+        ProjectId::from_bytes(parse_hex32(arguments.first().ok_or(CliError::Arguments)?)?);
+    let mut agent = None;
+    let mut provider = None;
+    let mut resume_session = None;
+    let mut thread_id = None;
+    let mut new_session = false;
+    let mut directory = None;
+    let mut confirmed = false;
+    let mut force = false;
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--agent") if agent.is_none() => {
+                agent = Some(parse_named_agent_selector(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                )?);
+                index += 2;
+            }
+            Some("--provider") if provider.is_none() => {
+                provider = Some(
+                    ProviderId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--session") if resume_session.is_none() && !new_session => {
+                resume_session = Some(
+                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
+                        .map_err(|_| CliError::Arguments)?,
+                );
+                index += 2;
+            }
+            Some("--new-session") if resume_session.is_none() && !new_session => {
+                new_session = true;
+                index += 1;
+            }
+            Some("--thread") if thread_id.is_none() => {
+                thread_id = Some(ThreadId::from_bytes(parse_hex32(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                )?));
+                index += 2;
+            }
+            Some("--dir") if directory.is_none() => {
+                directory = Some(PathBuf::from(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                ));
+                index += 2;
+            }
+            Some("--yes") if !confirmed => {
+                confirmed = true;
+                index += 1;
+            }
+            Some("--force") if !force => {
+                force = true;
+                index += 1;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    if resume_session.is_some() == new_session || !confirmed {
+        return Err(CliError::Arguments);
+    }
+    let directory = directory
+        .map(|directory| normalized_existing_resource(&directory).map(|_| directory))
+        .transpose()?;
+    Ok(ProjectCliCommand::Handoff {
+        project_id,
+        agent: agent.ok_or(CliError::Arguments)?,
+        provider: provider.ok_or(CliError::Arguments)?,
+        resume_session,
+        thread_id: thread_id.ok_or(CliError::Arguments)?,
+        directory,
+        force,
     })
 }
 
@@ -2933,6 +3029,27 @@ fn run_project(
             *project_id,
             ProjectCommandAction::DispatchPending,
         ),
+        ProjectCliCommand::Handoff {
+            project_id,
+            agent,
+            provider,
+            resume_session,
+            thread_id,
+            directory,
+            force,
+        } => {
+            let action = project_handoff_action(
+                &snapshot,
+                *project_id,
+                agent,
+                provider,
+                resume_session.as_ref(),
+                *thread_id,
+                directory.as_deref(),
+                *force,
+            )?;
+            control_project(&mut client, &snapshot, "handoff", *project_id, action)
+        }
         ProjectCliCommand::Close { project_id, force } => control_project(
             &mut client,
             &snapshot,
@@ -2955,6 +3072,56 @@ fn run_project(
             ProjectCommandAction::SetArchived { archived: false },
         ),
     }
+}
+
+#[allow(clippy::too_many_arguments, reason = "exact handoff selection")]
+fn project_handoff_action(
+    snapshot: &AuthoritativeSnapshotDto,
+    project_id: ProjectId,
+    agent: &NamedAgentSelector,
+    provider: &ProviderId,
+    resume_session: Option<&ProviderSessionId>,
+    thread_id: ThreadId,
+    directory: Option<&Path>,
+    force: bool,
+) -> Result<ProjectCommandAction, CliError> {
+    let assignments = snapshot
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(item, SnapshotItem::ProjectAssignment { project_id: candidate, .. }
+                if candidate.bytes() == *project_id.as_bytes())
+        })
+        .count();
+    if assignments != 1 {
+        return Err(CliError::ProjectState);
+    }
+    let ProjectCommandAction::Activate {
+        agent_id,
+        provider,
+        resume_session,
+        resume_thread: Some(resolved_thread),
+        launch_directory,
+    } = project_activation_action(
+        snapshot,
+        project_id,
+        agent,
+        provider,
+        resume_session,
+        Some(thread_id),
+        directory,
+    )?
+    else {
+        return Err(CliError::ProjectState);
+    };
+    Ok(ProjectCommandAction::Handoff {
+        agent_id,
+        provider,
+        resume_session,
+        thread_id: resolved_thread,
+        launch_directory,
+        force_takeover: force,
+    })
 }
 
 #[allow(clippy::too_many_arguments, reason = "exact activation selection")]
@@ -3471,6 +3638,7 @@ fn project_catalog_view(
         | ProjectCliCommand::Open(_)
         | ProjectCliCommand::Activate { .. }
         | ProjectCliCommand::Dispatch(_)
+        | ProjectCliCommand::Handoff { .. }
         | ProjectCliCommand::Close { .. }
         | ProjectCliCommand::Archive(_)
         | ProjectCliCommand::Unarchive(_) => {
@@ -3486,6 +3654,7 @@ fn project_catalog_view(
             | ProjectCliCommand::Open(_)
             | ProjectCliCommand::Activate { .. }
             | ProjectCliCommand::Dispatch(_)
+            | ProjectCliCommand::Handoff { .. }
             | ProjectCliCommand::Close { .. }
             | ProjectCliCommand::Archive(_)
             | ProjectCliCommand::Unarchive(_) => {
@@ -9119,8 +9288,8 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
         [command] if command == "project" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
              Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
-  open PROJECT_ID                           Open one closed project\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --new-session [--thread THREAD_ID] [--dir ABSOLUTE_PATH]\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --session SESSION --thread THREAD_ID [--dir ABSOLUTE_PATH]\n                                            Activate one exact agent assignment\n  dispatch PROJECT_ID                       Dispatch all pending accepted inputs\n  close PROJECT_ID --yes [--force]          Close and release advisory claims\n  archive PROJECT_ID                        Gracefully close and hide one project\n  unarchive PROJECT_ID                      Restore one archived project as closed\n\n\
-             Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Without --dir, activation uses the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
+  open PROJECT_ID                           Open one closed project\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --new-session [--thread THREAD_ID] [--dir ABSOLUTE_PATH]\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --session SESSION --thread THREAD_ID [--dir ABSOLUTE_PATH]\n                                            Activate one exact agent assignment\n  dispatch PROJECT_ID                       Dispatch all pending accepted inputs\n  handoff PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER (--new-session | --session SESSION) --thread THREAD_ID [--dir ABSOLUTE_PATH] --yes [--force]\n                                            Hand off to one exact historical target\n  close PROJECT_ID --yes [--force]          Close and release advisory claims\n  archive PROJECT_ID                        Gracefully close and hide one project\n  unarchive PROJECT_ID                      Restore one archived project as closed\n\n\
+             Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Handoff always requires one historical target thread and explicit --yes; --force separately authorizes takeover after blocked or uncertain quiescence. Without --dir, assignment commands use the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
@@ -9222,10 +9391,10 @@ mod tests {
         execute_cli, harness_request, human_devices_view, human_view, mailbox_discovery_view,
         message_body, named_agent_catalog_view, normalized_existing_resource, pairing_grant_id,
         parse_cli, project_activation_action, project_catalog_view, project_command_request,
-        project_creation_request, project_operation_view, read_password, render_project_catalog,
-        render_result, resolve_environment_session, resolve_named_agent_id, run_cli,
-        session_binding_fact, session_context, stable_relay_effect, stable_repair_operation,
-        successful_result_exit_code,
+        project_creation_request, project_handoff_action, project_operation_view, read_password,
+        render_project_catalog, render_result, resolve_environment_session, resolve_named_agent_id,
+        run_cli, session_binding_fact, session_context, stable_relay_effect,
+        stable_repair_operation, successful_result_exit_code,
     };
     use hq_application::ProjectCommandAction;
     use hq_domain::{
@@ -9570,6 +9739,90 @@ mod tests {
     }
 
     #[test]
+    fn parser_requires_confirmed_project_handoff_and_separate_force() {
+        let project = "22".repeat(32);
+        let thread = "33".repeat(32);
+        let parsed = parse_cli(
+            [
+                "project",
+                "handoff",
+                &project,
+                "--agent",
+                "fred",
+                "--provider",
+                "codex",
+                "--new-session",
+                "--thread",
+                &thread,
+                "--yes",
+                "--force",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .expect("forced handoff parses");
+        assert!(matches!(parsed.command, CliCommand::Project {
+            action: ProjectCliCommand::Handoff {
+                project_id,
+                agent: NamedAgentSelector::Name(name),
+                provider,
+                resume_session: None,
+                thread_id,
+                directory: None,
+                force: true,
+            }, ..
+        } if project_id.as_bytes() == &[0x22; 32]
+            && name.as_str() == "fred"
+            && provider.as_str() == "codex"
+            && thread_id.as_bytes() == &[0x33; 32]));
+
+        for arguments in [
+            vec![
+                "project",
+                "handoff",
+                &project,
+                "--agent",
+                "fred",
+                "--provider",
+                "codex",
+                "--new-session",
+                "--thread",
+                &thread,
+            ],
+            vec![
+                "project",
+                "handoff",
+                &project,
+                "--agent",
+                "fred",
+                "--provider",
+                "codex",
+                "--new-session",
+                "--yes",
+            ],
+            vec![
+                "project",
+                "handoff",
+                &project,
+                "--agent",
+                "fred",
+                "--provider",
+                "codex",
+                "--session",
+                "session-1",
+                "--thread",
+                &thread,
+                "--force",
+            ],
+        ] {
+            assert_eq!(
+                parse_cli(arguments.into_iter().map(OsString::from)),
+                Err(CliError::Arguments)
+            );
+        }
+    }
+
+    #[test]
     fn project_command_request_binds_exact_snapshot_authority_and_head() {
         let command_id = hq_domain::CommandId::from_bytes([1; 32]);
         let operation_id = OperationId::from_bytes([2; 32]);
@@ -9689,6 +9942,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn project_handoff_requires_an_assignment_and_preserves_takeover_authorization() {
+        let snapshot = activation_snapshot();
+        let provider = ProviderId::new("fake").expect("provider");
+        let action = project_handoff_action(
+            &snapshot,
+            ProjectId::from_bytes([1; 32]),
+            &NamedAgentSelector::Id(AgentId::from_bytes([4; 32])),
+            &provider,
+            None,
+            ThreadId::from_bytes([9; 32]),
+            None,
+            true,
+        )
+        .expect("handoff target resolves");
+        assert!(matches!(action, ProjectCommandAction::Handoff {
+            agent_id,
+            provider: selected_provider,
+            resume_session: None,
+            thread_id,
+            force_takeover: true,
+            ..
+        } if agent_id.as_bytes() == &[4; 32]
+            && selected_provider == provider
+            && thread_id.as_bytes() == &[9; 32]));
+
+        let mut unassigned = snapshot;
+        unassigned
+            .items
+            .retain(|item| !matches!(item, SnapshotItem::ProjectAssignment { .. }));
+        assert_eq!(
+            project_handoff_action(
+                &unassigned,
+                ProjectId::from_bytes([1; 32]),
+                &NamedAgentSelector::Id(AgentId::from_bytes([4; 32])),
+                &provider,
+                None,
+                ThreadId::from_bytes([9; 32]),
+                None,
+                false,
+            ),
+            Err(CliError::ProjectState)
+        );
+    }
+
     fn activation_snapshot() -> AuthoritativeSnapshotDto {
         AuthoritativeSnapshotDto {
             revision: 1,
@@ -9722,6 +10020,26 @@ mod tests {
                     primary: true,
                     active_claim: true,
                     conflicting_projects: vec![],
+                },
+                SnapshotItem::ProjectAssignment {
+                    project_id: Id32::new([1; 32]),
+                    assignment_id: Id32::new([40; 32]),
+                    agent_id: Id32::new([41; 32]),
+                    provider: "fake".to_owned(),
+                    session: Some("current-session".to_owned()),
+                    phase: "runnable".to_owned(),
+                    thread_id: Some(Id32::new([42; 32])),
+                    launch_directory: Some(
+                        ResourceLocatorDto::new(
+                            ResourceSchemeDto::WorkingTree,
+                            "/work/project".to_owned(),
+                        )
+                        .expect("launch directory"),
+                    ),
+                    blocked: None,
+                    cardinality_conflicted: false,
+                    runnable: true,
+                    support: vec![Id32::new([43; 32])],
                 },
                 SnapshotItem::Agent {
                     agent_id: Id32::new([4; 32]),
@@ -11280,6 +11598,7 @@ mod tests {
         assert!(project.contains("open PROJECT_ID"));
         assert!(project.contains("activate PROJECT_ID --agent NAME|AGENT_ID"));
         assert!(project.contains("dispatch PROJECT_ID"));
+        assert!(project.contains("handoff PROJECT_ID --agent NAME|AGENT_ID"));
         assert!(project.contains("close PROJECT_ID --yes [--force]"));
         assert!(project.contains("unarchive PROJECT_ID"));
         assert!(project.contains("never chooses a historical winner"));

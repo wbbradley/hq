@@ -1,5 +1,36 @@
 # Completed
 
+## 2026-08-28 — Project handoff and takeover CLI
+
+Added `project handoff` through the stable project-command path. The command resolves exactly one
+current assignment plus the target named agent, provider, historical thread, optional exact session,
+launch directory, immutable project home, active account, and current head from one authoritative
+snapshot. It requires `--yes` for every handoff; `--force` remains separate takeover authority for
+blocked or uncertain quiescence and cannot substitute for confirmation.
+
+Handoff reuses activation's exact session/thread and primary-directory validation, then sends the
+existing closed `ProjectCommandAction::Handoff` and renders the complete accepted/running/completed,
+rejected, runtime failure/uncertainty, or reconcilable outcome. No domain policy was copied into the
+CLI: same-agent, busy/retired/threadless target, blocked takeover, forced uncertainty, stale-head,
+response-loss, and restart behavior remain owned and exhaustively tested by the pure workflow.
+
+Parser, confirmation, force separation, authoritative assignment/target resolution, foreground
+threadless rejection, full handoff workflow, response-loss recovery, and restart tests pass. Full
+workspace all-target/all-feature tests, strict Clippy, format/check, architecture, behavior-ledger,
+causal, protocol, and dependency gates pass. The dependency audit retains only the existing yanked
+`chacha20 0.10.1` warning, and the final process-table audit found no HQ daemon. The change uses the
+existing unshipped local API v1 and storage v13 shapes without a version bump, migration,
+compatibility layer, accessor facade, or duplicate stored/runtime record.
+
+### Original plan entry
+
+- **[cli/high] Add project handoff and takeover commands** — Reuse the authoritative assignment and
+  historical-thread views to hand a project to an exact agent, provider, session, thread, and
+  launch directory. Require explicit confirmation, keep forced takeover separate from ordinary
+  handoff, and render every workflow stage, rejection, runtime failure/uncertainty, and reconcilable
+  operation. Test same-agent and busy-target rejection, threadless targets, blocked and forced
+  takeover, stale heads, response loss, restart repair, and real foreground execution.
+
 ## 2026-08-28 — Project activation and pending-dispatch CLI
 
 Added `project activate` with explicit fresh-session or exact-session/thread selection and `project
