@@ -680,6 +680,20 @@ mod tests {
         );
         assert_eq!(opened.metadata.sender_public_key, sender.public_key());
 
+        let relay_value: serde_json::Value =
+            serde_json::from_slice(restored.exact_wire()).expect("relay parses wrapper JSON");
+        let relay_bytes =
+            serde_json::to_vec_pretty(&relay_value).expect("relay reserializes wrapper JSON");
+        assert_ne!(relay_bytes, restored.exact_wire());
+        let relayed = recipient
+            .open(&relay_bytes)
+            .expect("recipient opens reformatted relay event");
+        assert_eq!(relayed.metadata.wrapper_id, restored.metadata.wrapper_id);
+        assert_eq!(
+            relayed.canonical_event.as_ref(),
+            canonical.verified_event().exact_event_bytes()
+        );
+
         let second = sender
             .prepare(
                 &canonical,

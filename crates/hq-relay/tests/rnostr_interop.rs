@@ -68,7 +68,7 @@ fn controlled_rnostr_auth_publish_retained_and_reconnect() {
     assert_retained(
         &mut *reader,
         subscription,
-        &exact_wrapper,
+        wrapper_id,
         &receiver,
         &canonical,
     );
@@ -79,7 +79,7 @@ fn controlled_rnostr_auth_publish_retained_and_reconnect() {
     assert_retained(
         &mut *reconnected,
         subscription,
-        &exact_wrapper,
+        wrapper_id,
         &receiver,
         &canonical,
     );
@@ -131,7 +131,7 @@ fn request_retained(connection: &mut dyn RelayConnection, subscription: &str, re
 fn assert_retained(
     connection: &mut dyn RelayConnection,
     subscription_prefix: &str,
-    expected_wrapper: &[u8],
+    expected_wrapper_id: [u8; 32],
     receiver: &EnvelopeCodec,
     canonical: &VerifiedSemanticFact,
 ) {
@@ -147,8 +147,9 @@ fn assert_retained(
                 subscription: candidate,
                 exact_event,
             } if candidate == subscription => {
-                if exact_event == expected_wrapper {
-                    let opened = receiver.open(&exact_event).expect("retained wrapper opens");
+                if let Ok(opened) = receiver.open(&exact_event)
+                    && opened.metadata.wrapper_id == expected_wrapper_id
+                {
                     assert_eq!(
                         opened.canonical_event.as_ref(),
                         canonical.verified_event().exact_event_bytes(),
