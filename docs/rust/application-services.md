@@ -158,7 +158,7 @@ Assigned-agent retirement reuses this durable checkpoint machinery. Graceful sto
 uncertainty blocks the assignment; explicit force is required before ending it and authoring the
 absorbing retirement fact. Startup repair and response-loss replay retain the exact operation,
 request digest, expected project head, action, and runtime observation. Idle retirement needs no
-saga row and is validated again in the fact commit transaction. The existing unshipped storage v13
+saga row and is validated again in the fact commit transaction. The clean-sheet storage v1
 schema and local API v1 were extended in place: there is no migration, compatibility facade, or
 version bump.
 
@@ -273,7 +273,7 @@ Agent waits have no overall deadline unless the caller requests one, but each sn
 connection attempt retains a fixed bound and reconnect retry budget. Ready delivery is at least
 once: the executable writes stdout before authoring the reversible archive completion. Failure in
 that window repeats a stable message identity instead of losing content. Direct `get` and human
-list operations do not create a completion. The clean unshipped local API v1 and storage v13
+list operations do not create a completion. The clean-sheet local API v1 and storage v1
 contracts were completed in place; no migration, compatibility accessor, or version bump exists.
 
 Local human composition is a node-resolved service rather than a client-authored `FactPlan`.

@@ -58,7 +58,7 @@ expected_clauses=$(mktemp "$output_parent/.hq-rust-cutover-expected.XXXXXX")
 actual_clauses=$(mktemp "$output_parent/.hq-rust-cutover-actual.XXXXXX")
 temporary_output=$(mktemp "$output_parent/.hq-rust-cutover-evidence.XXXXXX")
 cleanup() {
-  rm -f "$expected_clauses" "$actual_clauses" "$temporary_output"
+  rm -f "$expected_clauses" "$actual_clauses" "$temporary_output" "${evidence_keys:-}"
 }
 trap cleanup EXIT
 
@@ -88,6 +88,7 @@ EOF
 header=$(head -n 1 "$contract")
 [[ "$header" == 'clause|evidence|proof|purpose' ]] || fail 'cutover contract has an unknown header'
 : >"$actual_clauses"
+evidence_keys=$(mktemp "$output_parent/.hq-rust-cutover-keys.XXXXXX")
 while IFS='|' read -r clause evidence proof purpose remainder; do
   [[ "$clause" == 'clause' ]] && continue
   [[ -n "$clause" && -n "$evidence" && -n "$proof" && -n "$purpose" && -z "${remainder:-}" ]] ||
@@ -116,10 +117,13 @@ while IFS='|' read -r clause evidence proof purpose remainder; do
     *) fail "unknown cutover proof: $proof" ;;
   esac
   printf '%s\n' "$clause" >>"$actual_clauses"
+  printf '%s|%s|%s\n' "$clause" "$evidence" "$proof" >>"$evidence_keys"
 done <"$contract"
 LC_ALL=C sort "$expected_clauses" -o "$expected_clauses"
-LC_ALL=C sort "$actual_clauses" -o "$actual_clauses"
+LC_ALL=C sort -u "$actual_clauses" -o "$actual_clauses"
 diff -u "$expected_clauses" "$actual_clauses" || fail 'cutover clauses differ'
+duplicate_evidence=$(LC_ALL=C sort "$evidence_keys" | uniq -d)
+[[ -z "$duplicate_evidence" ]] || fail "duplicate cutover evidence proof: $duplicate_evidence"
 
 clauses=$(jq -Rsc 'split("\n") | map(select(length > 0))' <"$actual_clauses")
 jq -cn \

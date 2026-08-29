@@ -4,18 +4,32 @@ set -euo pipefail
 repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 protocol_root="$repository_root/docs/protocol"
 
-required_files=(
+required_markdown=(
+  "$repository_root/docs/adr/0001-rust-platform-and-packaging.md"
+  "$repository_root/docs/adr/0002-rust-identity-backup-boundary.md"
+  "$repository_root/docs/adr/0003-rust-client-and-provider-workflows.md"
   "$repository_root/docs/adr/0004-canonical-fact-nostr-carriage.md"
   "$protocol_root/canonical-fact-v1.md"
+  "$protocol_root/human-pairing-v1.md"
+  "$protocol_root/local-api-v1.md"
+  "$protocol_root/nostr-envelope-v1.md"
   "$protocol_root/remote-control-v1.md"
   "$protocol_root/payload-mapping-v1.md"
+  "$protocol_root/relay-sync-v1.md"
   "$protocol_root/trust-transitions.md"
+  "$repository_root/docs/harness-contract-v1.md"
+  "$repository_root/docs/harness-supervisor-v1.md"
+  "$repository_root/docs/codex-adapter-v1.md"
+  "$repository_root/docs/testing/conformance-v1.md"
+)
+
+required_vectors=(
   "$protocol_root/vectors/canonical-installation-v1.json"
   "$protocol_root/vectors/remote-command-v1.json"
   "$protocol_root/vectors/adversarial-v1.json"
 )
 
-for required_file in "${required_files[@]}"; do
+for required_file in "${required_markdown[@]}" "${required_vectors[@]}"; do
   test -s "$required_file"
 done
 
@@ -66,7 +80,9 @@ done < <(
       $directory =~ s{/[^/]+$}{};
       print File::Spec->rel2abs($target, $directory), "\n";
     }
-  ' "${required_files[@]:0:5}"
+  ' "${required_markdown[@]}"
 )
 
-cargo test -p hq-protocol --test spec_consistency
+cargo test --locked -p hq-protocol --test spec_consistency
+cargo test --locked -p hq-local-api --test spec_consistency
+cargo test --locked -p hq-relay --test relay_sync_spec

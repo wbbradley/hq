@@ -75,7 +75,7 @@ fn relative_database_paths_are_rejected() {
 }
 
 #[test]
-fn an_unclaimed_empty_sqlite_file_is_initialized_as_storage_v13() {
+fn an_unclaimed_empty_sqlite_file_is_initialized_as_storage_v1() {
     let directory = TestDirectory::new();
     let database = directory.database_path();
     fs::create_dir_all(database.parent().expect("database parent exists"))

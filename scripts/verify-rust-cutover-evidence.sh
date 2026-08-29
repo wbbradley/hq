@@ -35,7 +35,7 @@ recovery_sha256=$(sha256_file "$evidence_directory/recovery-manifest.json")
 controlled_sha256=$(sha256_file "$evidence_directory/controlled-failure.json")
 rollback_sha256=$(sha256_file "$evidence_directory/cutover-rollback.json")
 contract_sha256=$(sha256_file "$contract")
-clauses=$(tail -n +2 "$contract" | cut -d '|' -f 1 | LC_ALL=C sort |
+clauses=$(tail -n +2 "$contract" | cut -d '|' -f 1 | LC_ALL=C sort -u |
   jq -Rsc 'split("\n") | map(select(length > 0))')
 
 jq -e \

@@ -260,7 +260,7 @@ constants remain evidence only unless a row below explicitly adopts the underlyi
 | CLI-007 | redesign | required | Current-session mailbox discovery | Detect Codex/Claude Code/Pi context or explicit custom identity without ambiguous multi-provider routing. | `docs/rust/cli.md`; CLI provider-environment unit/redaction and foreground E2E tests |
 | CLI-008 | redesign | required | Known-message inspection | Typed direct-ID inspection is non-consuming and does not become an authority bypass. | README and agent help; application/CLI packages |
 | CLI-009 | redesign | required | Human list/answer/cancel/restore workflows | Expose typed filtering, reply, archive/cancel, restore, delivery, and causal state through application services. | README and CLI dispatcher; node-resolved mailbox-command service, stable replay/stale-target tests, and installed CLI restart test |
-| CLI-010 | redesign | required | Administrative workflows | Identity, human, peer, capability, relay, sync, status, repair, node, agent/session, and configuration operations have client commands. Identity/configuration are implemented as exclusive offline commands; remaining administration uses the local API. | `docs/rust/cli.md`; named-agent catalog and retirement application/client/foreground E2E tests; runtime/project packages remain queued |
+| CLI-010 | redesign | required | Administrative workflows | Identity, human, peer, capability, relay, sync, status, repair, node, agent/session, and configuration operations have client commands. Identity/configuration are implemented as exclusive offline commands; remaining administration uses the local API. | `docs/rust/cli.md`; administration parser/help/machine-output tests; named-agent, relay, repair, runtime, and project foreground E2E tests |
 | CLI-011 | redesign | required | Project workflows | Expose every required project/resource/worktree/remote-result operation from ADR 0003. | `docs/projects.md`; complete project/resource parser and machine-output tests; fake and real-Git worktree response-loss/restart tests; foreground lifecycle, mutation, worktree, and restart E2E; remote-home signed-warning fixture |
 | CLI-012 | redesign | required | Machine-readable automation | Supported commands emit stable typed Rust-era data and errors without preserving Go JSON. | `docs/rust/cli.md`; CLI machine-output, project catalog/operation determinism, and redaction fixtures |
 | CLI-013 | redesign | required | Pure Ratatui state/effect architecture | `UiModel + UiEvent` produces effects; renderer performs no I/O or mutation and stale completions carry identity. | `docs/rust/tui.md`; `hq-tui` stale snapshot/page/section/generation model tests and buffer snapshots; `hq-node` snapshot/page effect identity, timer, saturation/join, mapping, and observation tests; architecture verifier |
@@ -348,7 +348,8 @@ row. It proves workflow coverage; it does not reserve the command names.
 The 2026-08-28 non-TUI parity audit matched every retained row above against the closed parser,
 root/topic help snapshots, stable human/JSON renderers, and foreground Unix tests. It closed the
 last two gaps: recoverable `project worktree` provisioning and bare noninteractive `hq` inbox
-listing. Terminal-only rows remain owned by the explicitly queued Ratatui packages.
+listing. Terminal-only rows are covered by the pure Ratatui model and render suites plus installed
+pseudoterminal workflow tests.
 
 | Documented TUI workflow | Product outcome | Classification and row |
 | --- | --- | --- |

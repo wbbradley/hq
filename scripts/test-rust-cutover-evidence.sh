@@ -28,6 +28,11 @@ bundle="$fixture_directory/cutover-evidence.json"
 "$repository_root/scripts/generate-rust-cutover-evidence.sh" \
   "$fixture_directory" "$revision" "$bundle"
 
+jq -e '
+  .acceptance_and_definition_clauses as $clauses |
+  ($clauses | length) == ($clauses | unique | length)
+' "$bundle" >/dev/null
+
 jq '.cutover_authorization = "not_required"' "$bundle" >"$bundle.invalid"
 if "$repository_root/scripts/verify-rust-cutover-evidence.sh" \
   "$bundle.invalid" "$fixture_directory" "$revision" >/dev/null 2>&1; then

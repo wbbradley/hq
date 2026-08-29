@@ -11,9 +11,12 @@ acceptance:Projects|qualification/acceptance-evidence.tsv|acceptance-area|Accept
 acceptance:TUI/CLI|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix TUI and CLI row
 acceptance:Security/operations|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix security and operations row
 definition:reviewed-requirements-and-algebra|crates/hq-reducer/tests/causal_laws.rs|test:generated_dags_have_exact_frontiers_and_parent_first_order|Reviewed product requirements and algebraic contract are executable
-definition:rust-era-protocol-specifications|docs/rust/protocol-boundary.md|specification|Required external and durable protocols have Rust-era specifications
-definition:durable-and-external-recovery|scripts/rehearse-rust-recovery.sh|command|Durable state and external-effect boundaries have recovery evidence
-definition:go-independent-normal-operation|scripts/verify-rust-architecture.sh|command|Rust normal operation has no Go code or data dependency
+definition:rust-era-protocol-specifications|scripts/verify-rust-protocol-spec.sh|command|Required external and durable protocols have verified Rust-era specifications
+definition:durable-and-external-recovery|scripts/rehearse-rust-recovery.sh|command|Identity database backup repair restart and replacement recovery
+definition:durable-and-external-recovery|scripts/rehearse-rust-controlled-failure.sh|command|Relay outage catch-up and provider crash recovery
+definition:durable-and-external-recovery|crates/hq-projects/tests/activation_dispatch.rs|test:committed_canonical_response_loss_reconciles_at_every_activation_boundary|Project saga canonical commit response-loss recovery
+definition:durable-and-external-recovery|scripts/rehearse-rust-cutover-rollback.sh|command|Archived-Go isolation and offline rollback selection
+definition:go-independent-normal-operation|scripts/verify-rust-go-independence.sh|command|Rust build runtime release packaging services and state exclude Go dependencies
 definition:causal-authority|crates/hq-testkit/tests/authority_reduction.rs|test:every_named_authority_scenario_is_mapped_to_an_executable_case|Causal authority is explicit and testable
 definition:convergence|crates/hq-node/tests/relay_convergence.rs|test:concrete_two_replica_composition_converges_despite_order_outage_restart_and_response_loss|Replica convergence is explicit and testable
 definition:atomicity|crates/hq-store/src/database.rs|test:atomic_ingest_failpoints_reopen_to_the_complete_old_or_new_state|Persistence atomicity is explicit and testable

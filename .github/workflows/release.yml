@@ -158,6 +158,8 @@ jobs:
         uses: actions/checkout@v7
       - name: Test release artifact validator
         run: |
+          scripts/test-rust-go-independence.sh
+          scripts/verify-rust-go-independence.sh
           scripts/test-rust-release-artifacts.sh
           scripts/test-rust-recovery-rehearsal.sh
           scripts/test-rust-controlled-failure.sh

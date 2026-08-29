@@ -216,5 +216,5 @@ operational observations and cannot be promoted into these semantic stages.
 
 Adding a first-release semantic family requires a new `FCT-*` row, conflict rule, normalized
 observation, and at least one positive and one adverse named acceptance scenario. Changing a row's
-scope, authority, conflict, projection, or retention is a reviewed semantic change even when the
-wire and database have not yet been implemented.
+scope, authority, conflict, projection, or retention remains a reviewed semantic change across the
+implemented wire, storage, reduction, and application boundaries.

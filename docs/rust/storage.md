@@ -2,10 +2,10 @@
 
 Status: normative persistence specification
 
-HQ storage v13 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
+HQ storage v1 is a new Rust-owned SQLite database. It does not open, migrate, repair, reset, or
 otherwise interpret a Go database. The database has application ID `0x48515253` (`HQRS`) and user
-version `13`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
-release or standing installation exists yet, the clean-sheet v13 definition may change in place;
+version `1`; any other nonempty SQLite file is incompatible normal-startup input. Because no Rust
+release or standing installation exists yet, the clean-sheet v1 definition may change in place;
 ordinary pre-release schema work needs neither a migration nor a storage-version bump.
 
 ## Ownership and durability
@@ -23,7 +23,7 @@ another process running as the same operating-system user.
 
 ## Data classes
 
-| Class | Storage v13 ownership | Rebuildable |
+| Class | Storage v1 ownership | Rebuildable |
 | --- | --- | ---: |
 | Canonical knowledge | Exact verified signed event bytes keyed by content-derived fact ID | No |
 | Canonical evidence indexes | Normalized parent and typed historical-authority edges | No; verified against exact signed bytes on every corpus load |
@@ -175,7 +175,7 @@ The narrow application-state capability also offers a serialized `(revision, red
 health snapshot and `(revision, repaired reduction index)` explicit repair. Each pair is produced by one actor
 request, so a concurrent ingest cannot attach a later revision to an earlier health index. The
 repair operation identity is application audit data and does not enter schema tables. This extends
-the existing clean v13 API in place; it adds no table, migration, compatibility path, or storage
+the existing clean v1 API in place; it adds no table, migration, compatibility path, or storage
 version bump.
 
 ## Durable operational primitives
@@ -255,7 +255,7 @@ recomputes wrapper/staging digests and rejects malformed fixed-width values, clo
 impossible optionality, or invalid monotonic generations. Explicit projection repair never deletes,
 rewrites, or derives any receipt, revision, outbox, or relay operational row.
 
-The current clean-sheet v13 schema includes harness operational state. `harness_worker_leases`
+The current clean-sheet v1 schema includes harness operational state. `harness_worker_leases`
 binds one named agent to an
 opaque exact owner token and full-width injected expiry. Claim permits absent, same-token renewal,
 or expired takeover; release and every external-effect mutation require the exact live token.
@@ -279,9 +279,9 @@ sessions, deliveries, and partial event checkpoints without ever persisting envi
 operation ID to request digest, agent, provider, action, optional requested session, and monotonic
 prepared/uncertain/ready/stopped/rejected state. Terminal states are absorbing, exact replay is
 idempotent, and changed identity reuse is a collision. The table was added directly to the unshipped
-clean-sheet v13 schema; there is no migration, compatibility codec, or storage-version bump.
+clean-sheet v1 schema; there is no migration, compatibility codec, or storage-version bump.
 
-The same clean-sheet v13 schema includes `project_sagas` and `project_saga_reservations` without a
+The same clean-sheet v1 schema includes `project_sagas` and `project_saga_reservations` without a
 storage-version increment. A saga row binds stable operation and command identities to the exact
 request digest, active account, project/home, optional expected head, strict versioned command body,
 monotonic checkpoint, external operation correlations and dispositions, exact acknowledged runtime
@@ -294,14 +294,14 @@ index permits at most one running or reconcilable state-changing command per pro
 
 Rebuildable `project_assignments` rows retain a session-free assignment intent while configuring.
 The session column is empty in that phase and becomes a validated provider-session identity only
-after runtime readiness and the canonical runnable transition. This is a clean-sheet v13 shape
+after runtime readiness and the canonical runnable transition. This is a clean-sheet v1 shape
 change in place, not a migration or storage-version increment.
 
 Rebuildable `project_commands` rows retain the complete remote-control request envelope and exact
 control-plane attribution: account, project, target home, expected head, operation correlation,
 strict command body, issue time, request fact, and structured receipt/outcome facts, heads, times,
 results, and runtime observations. Strict load requires those exact facts to appear in projection
-support. This completed the existing unshipped clean-sheet v13 table definition in place; it added
+support. This completed the clean-sheet v1 table definition in place; it added
 no migration path or storage-version increment.
 
 Reservations are home-qualified normalized locators. A competing operation cannot reserve the
@@ -313,7 +313,7 @@ immutable-input changes, stage or effect regression, changed external identities
 changes, and time regression. Startup recovery scans only running or reconcilable rows in bounded
 deterministic order. Projection repair excludes both tables, and close/reopen retains them because
 canonical projections cannot reconstruct whether an external boundary was crossed. These are
-clean-sheet v13 definitions in place; there is no migration or storage-version bump.
+clean-sheet v1 definitions in place; there is no migration or storage-version bump.
 
 Account-addressed fanout normally uses the projected creator and active devices after the atomic
 reduction. `HumanDeviceGranted` and `HumanDeviceRevoked` additionally name their subject device
@@ -352,7 +352,7 @@ digest over every authority row before returning it. Unknown, partial, orphaned,
 cross-key, oversized, or valid-looking changed rows return `RebuildableStateCorrupt`; repair remains
 the only recovery path.
 
-The exact capability grant fact was added directly to the clean v13 authority-capability table and
+The exact capability grant fact was added directly to the clean v1 authority-capability table and
 its digest/load codecs. HQ has not shipped and has no standing databases, so this is an in-place
 schema definition change with no migration, compatibility path, or storage-version bump.
 

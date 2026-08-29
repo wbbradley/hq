@@ -80,7 +80,7 @@ file names, contents, stderr, environment, or operating-system diagnostics.
 body codec, exact-replay intake, transaction-consistent canonical project mutation decisions,
 session-free configuring intent, activation/compensation, and at-most-once pending-input dispatch.
 It does not own SQLite or provider processes. `hq-node` maps its checkpoint capability to
-store-owned v13 records and maps project runtime operations to the neutral harness supervisor's
+store-owned v1 records and maps project runtime operations to the neutral harness supervisor's
 sole durable delivery ledger; explicit workflow handlers inject canonical, runtime, resource, and
 Git capabilities without reversing dependencies.
 

@@ -48,8 +48,8 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 13;
-const SCHEMA_MARKER: &str = "hq-store-v13-project-remote-routing-2026-08-28";
+const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_MARKER: &str = "hq-store-v1";
 const SCHEMA_TABLES: [&str; 118] = [
     "storage_metadata",
     "canonical_facts",
