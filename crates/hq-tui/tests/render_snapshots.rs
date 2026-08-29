@@ -5,11 +5,12 @@
 use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentLifecycle, UiAgentMailbox,
     UiAgentProjectAssignment, UiAgentSession, UiAgentStatus, UiConversationEntry,
-    UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiHumanState, UiInput,
-    UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject, UiProjectAction,
-    UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
-    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
-    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
+    UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiFailure, UiHumanState,
+    UiInput, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject,
+    UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -76,7 +77,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     let confirmation = render_text(&confirmation);
     assert!(confirmation.contains("Archive the selected message?"));
     assert!(confirmation.contains("Only this message changes state"));
-    assert!(confirmation.contains("the thread and its history are kept"));
+    assert!(confirmation.contains("conversation history stays intact"));
 }
 
 #[test]
@@ -140,7 +141,7 @@ fn human_account_issues_have_specific_recovery_and_technical_evidence() {
                     frontier: vec![[3; 32]],
                 }],
             },
-            "More than one local account-selection record",
+            "conflicting account choices on this device",
             "human_selection_records_conflict",
         ),
         (
@@ -148,7 +149,7 @@ fn human_account_issues_have_specific_recovery_and_technical_evidence() {
                 account_id: [7; 32],
                 selection_frontier: vec![[3; 32]],
             },
-            "selected account has no authority",
+            "device is not allowed to use the selected account",
             "human_selected_without_authority",
         ),
         (
@@ -172,7 +173,7 @@ fn human_account_issues_have_specific_recovery_and_technical_evidence() {
                     ..membership(hq_tui::UiHumanMembershipStatus::Active)
                 }],
             },
-            "conflicting active evidence",
+            "conflicting records for this device's account access",
             "human_membership_authority_conflict",
         ),
     ];
@@ -373,8 +374,8 @@ fn contextual_help_covers_every_section_with_and_without_a_selection() {
         .expect("show failure evidence")
         .model;
     let rendered = render_text(&technical);
-    assert!(rendered.contains("Recovery evidence: connection_lost"));
-    assert!(rendered.contains("waiting to reconnect"));
+    assert!(rendered.contains("Recovery code: connection_lost"));
+    assert!(rendered.contains("Recovery action: waiting to reconnect"));
 }
 
 #[test]
@@ -396,7 +397,7 @@ fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
         .find("activity · running")
         .expect("activity rendered");
     assert!(message < activity, "reducer page order is retained");
-    assert!(rendered.contains("non-actionable · compiling"));
+    assert!(rendered.contains("update · information only · compiling"));
     assert!(rendered.contains("Conversation · complete"));
 }
 
@@ -475,7 +476,14 @@ fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
         assert!(rendered.contains("builder"));
         assert!(rendered.contains("Status: Unassigned"));
         assert!(rendered.contains("codex/session-1"));
-        assert!(rendered.contains("r rename/clear"));
+        if size.width >= 120 {
+            assert!(rendered.contains("r name/clear"));
+        } else {
+            assert!(
+                rendered.contains("r name"),
+                "agent details at {size:?}:\n{rendered}"
+            );
+        }
         assert!(!rendered.contains("runnable:"));
     }
 }
@@ -511,7 +519,9 @@ fn assigned_agent_details_show_plain_status_and_exact_assignment_evidence() {
         let rendered = snapshot_text(terminal.backend().buffer());
         assert!(rendered.contains("Status: Assigned to release · ready"));
         assert!(rendered.contains("Project: release (040404040404)"));
-        assert!(rendered.contains("Assignment: 050505050505 · codex · session-1"));
+        assert!(rendered.contains("Technical assignment: 050505050505"));
+        assert!(rendered.contains("service codex"));
+        assert!(rendered.contains("conversation session-1"));
         assert!(!rendered.contains("runnable:"));
     }
 }
@@ -570,10 +580,10 @@ fn managed_session_switch_confirmation_is_responsive_and_explicit_about_runtime_
             .expect("render managed-session confirmation");
         assert_eq!(model, before);
         let rendered = snapshot_text(terminal.backend().buffer());
-        assert!(rendered.contains("Confirm managed-session switch"));
-        assert!(rendered.contains("Start fresh on codex"));
-        assert!(rendered.contains("Runtime presence"));
-        assert!(rendered.contains("inferred"));
+        assert!(rendered.contains("Switch the agent's conversation?"));
+        assert!(rendered.contains("Start a new conversation using codex"));
+        assert!(rendered.contains("already running"));
+        assert!(!rendered.contains("runtime presence"));
     }
 }
 
@@ -594,7 +604,7 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
             .expect("worktree form")
             .model;
         let rendered = render_text(&form);
-        assert!(rendered.contains("recoverable Git worktree"));
+        assert!(rendered.contains("isolated Git worktree"));
         assert!(rendered.contains("Source:"));
         assert!(rendered.contains("Destination:"));
 
@@ -651,10 +661,14 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
         .expect("typed outcome")
         .model;
         let rendered = render_text(&outcome);
-        assert!(rendered.contains("Project operation outcome"));
-        assert!(rendered.contains("Runtime: uncertain/response_lost"));
+        assert!(rendered.contains("Project change"));
+        assert!(rendered.contains("Technical runtime: uncertain/response_lost"));
+        assert!(rendered.contains("could not confirm whether the change finished"));
         assert!(rendered.contains("response_lost"));
-        assert!(rendered.contains("retained_worktree"));
+        assert!(
+            rendered.contains("retained_worktree"),
+            "worktree outcome at {size:?}:\n{rendered}"
+        );
     }
 }
 
@@ -674,16 +688,16 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
             .expect("project details")
             .model;
         let rendered = render_text(&details);
-        assert!(rendered.contains("Desired resources"));
+        assert!(rendered.contains("Folders and resources"));
         if size.height >= 24 {
             assert!(rendered.contains("check selected"));
         }
 
         for (key, expected) in [
-            ('a', "Add desired resource"),
-            ('e', "Replace desired resource"),
-            ('x', "Confirm desired-resource removal"),
-            ('p', "Confirm primary resource"),
+            ('a', "Add a folder or resource"),
+            ('e', "Change a folder or resource"),
+            ('x', "Remove this project resource?"),
+            ('p', "Use as the primary project resource?"),
         ] {
             let modal = update(details.clone(), UiEvent::Input(UiInput::Character(key)))
                 .expect("resource modal")
@@ -734,9 +748,9 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
         .expect("preview outcome")
         .model;
         let rendered = render_text(&preview);
-        assert!(rendered.contains("Preview desired-resource addition"));
+        assert!(rendered.contains("Check a folder or resource before adding it"));
         assert!(rendered.contains("descendant"));
-        assert!(rendered.contains("Claim conflicts block mutation"));
+        assert!(rendered.contains("Another project already owns this path"));
     }
 }
 
@@ -759,8 +773,12 @@ fn project_activation_form_is_responsive_and_discloses_exact_resume() {
             .expect("activation")
             .model;
         let rendered = render_text(&activation);
-        assert!(rendered.contains("Activate project assignment"));
-        assert!(rendered.contains("new session"));
+        assert!(rendered.contains("Set up project work"));
+        if size.width >= 120 {
+            assert!(rendered.contains("start a new conversation"));
+        } else {
+            assert!(rendered.contains("Conversation: new"));
+        }
         assert!(rendered.contains("agent-5"));
         assert!(rendered.contains("/workspace/release"));
     }
@@ -788,12 +806,14 @@ fn project_handoff_form_separates_confirmation_force_and_runtime_truth() {
             .expect("handoff")
             .model;
         let rendered = render_text(&handoff);
-        assert!(rendered.contains("Confirm project handoff"));
-        assert!(rendered.contains("Confirmed: false"));
+        assert!(rendered.contains("Move project work to another agent"));
+        assert!(
+            rendered.contains("I understand: No"),
+            "handoff at {size:?}:\n{rendered}"
+        );
         if size.width >= 120 {
-            assert!(rendered.contains("Force takeover: false"));
-            assert!(rendered.contains("Force revokes HQ authority"));
-            assert!(rendered.contains("does not prove external runtime cessation"));
+            assert!(rendered.contains("Override safety check: No"));
+            assert!(rendered.contains("may still be running elsewhere"));
         }
     }
 }
@@ -866,8 +886,8 @@ fn project_lifecycle_controls_are_responsive_confirmed_and_force_gated() {
         assert!(rendered.contains("Confirm project close"));
         assert!(rendered.contains("release=dirty"));
         if size.width >= 120 {
-            assert!(rendered.contains("Confirmed: false"));
-            assert!(rendered.contains("retains external paths"));
+            assert!(rendered.contains("I understand: No"));
+            assert!(rendered.contains("keeps folders"));
         }
         let cancelled = update(confirmation.clone(), UiEvent::Input(UiInput::Escape))
             .expect("close cancellation");
@@ -956,6 +976,140 @@ fn project_lifecycle_controls_are_responsive_confirmed_and_force_gated() {
             ..
         }
     )));
+}
+
+#[test]
+fn ordinary_surfaces_use_user_intentions_and_label_technical_evidence() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 18,
+        },
+    ] {
+        let workspace = render_text(&ready_model(size));
+        assert!(workspace.contains("Connected"));
+        assert!(!workspace.contains("authoritative"));
+        assert!(!workspace.contains("revision"));
+
+        let project = update(project_model(size), UiEvent::Input(UiInput::Activate))
+            .expect("project details")
+            .model;
+        let project_details = render_text(&project);
+        assert!(project_details.contains("Folders and resources"));
+        assert!(
+            project_details.contains("Assigned agent"),
+            "project details at {size:?}:\n{project_details}"
+        );
+        assert!(project_details.contains("Technical details"));
+        assert!(!project_details.contains("Desired resources"));
+        assert!(!project_details.contains("runnable true"));
+
+        let activation = update(project, UiEvent::Input(UiInput::Character('v')))
+            .expect("project setup")
+            .model;
+        let activation = render_text(&activation);
+        assert!(activation.contains("Set up project work"));
+        assert!(activation.contains("Conversation:"));
+        assert!(activation.contains("Agent service:"));
+        assert!(activation.contains("Working folder:"));
+        assert!(!activation.contains("Activate project assignment"));
+
+        let agent = agent_details_model(size);
+        let agent_details = render_text(&agent);
+        assert!(agent_details.contains("Saved conversations"));
+        assert!(agent_details.contains("Technical details"));
+        assert!(!agent_details.contains("Durable sessions"));
+
+        let provider = update(agent, UiEvent::Input(UiInput::Character('s')))
+            .expect("agent service choice")
+            .model;
+        let provider = render_text(&provider);
+        assert!(provider.contains("Start an agent conversation"));
+        assert!(provider.contains("Agent service:"));
+        assert!(!provider.contains("Provider namespace"));
+
+        let conversation = update(conversation_model(size), UiEvent::Input(UiInput::NextItem))
+            .expect("select conversation update")
+            .model;
+        let conversation = render_text(&conversation);
+        assert!(
+            conversation.contains("update · information only"),
+            "conversation at {size:?}:\n{conversation}"
+        );
+        assert!(!conversation.contains("non-actionable"));
+
+        let human = loaded_snapshot_model(
+            size,
+            UiSnapshot {
+                human_state: UiHumanState::NeedsAttention(
+                    hq_tui::UiHumanIssue::SelectedWithoutAuthority {
+                        account_id: [7; 32],
+                        selection_frontier: vec![[8; 32]],
+                    },
+                ),
+                ..empty_render_snapshot(9)
+            },
+        );
+        let human = render_text(&human);
+        assert!(human.contains("This device is not allowed to use the selected account"));
+        assert!(!human.contains("authority"));
+    }
+}
+
+#[test]
+fn failure_codes_stay_in_technical_help_while_the_footer_explains_recovery() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 18,
+        },
+    ] {
+        let refreshing = update(ready_model(size), UiEvent::Invalidated { revision: 43 })
+            .expect("request refresh");
+        let effect_id = refreshing
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::LoadSnapshot { id } => Some(*id),
+                _ => None,
+            })
+            .expect("snapshot request");
+        let failed = update(
+            refreshing.model,
+            UiEvent::SnapshotFailed {
+                effect_id,
+                failure: UiFailure {
+                    code: "relay.transport_unavailable".to_owned(),
+                    action: "Check the connection and retry".to_owned(),
+                },
+            },
+        )
+        .expect("typed failure")
+        .model;
+
+        let ordinary = render_text(&failed);
+        assert!(ordinary.contains("Could not complete that action"));
+        assert!(ordinary.contains("Check the connection and retry"));
+        assert!(!ordinary.contains("relay.transport_unavailable"));
+
+        let help = update(failed, UiEvent::Input(UiInput::Character('?')))
+            .expect("open help")
+            .model;
+        let technical = update(help, UiEvent::Input(UiInput::Character('t')))
+            .expect("technical help")
+            .model;
+        let technical = render_text(&technical);
+        assert!(technical.contains("relay.transport_unavailable"));
+        assert!(technical.contains("Check the connection and retry"));
+    }
 }
 
 fn assert_snapshot(model: &UiModel, expected: &str) {

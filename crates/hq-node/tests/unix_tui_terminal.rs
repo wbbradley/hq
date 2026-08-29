@@ -192,8 +192,8 @@ fn installed_tui_starts_explicit_provider_and_renders_typed_rejection() {
     assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
     assert!(
         run.bytes
-            .windows(b"Rejected:".len())
-            .any(|window| window == b"Rejected:"),
+            .windows(b"reason:".len())
+            .any(|window| window == b"reason:"),
         "TUI did not render the typed rejected outcome: {:?}",
         run.bytes
     );
@@ -261,8 +261,8 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
     );
     assert!(
         sent.bytes
-            .windows(b"Project operation outcome".len())
-            .any(|window| window == b"Project operation outcome"),
+            .windows(b"Project change".len())
+            .any(|window| window == b"Project change"),
         "TUI did not render typed input completion: {:?}",
         sent.bytes
     );
@@ -280,8 +280,8 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
     assert!(
         dispatched
             .bytes
-            .windows(b"Rejected:".len())
-            .any(|window| window == b"Rejected:"),
+            .windows(b"HQ could not make this change".len())
+            .any(|window| window == b"HQ could not make this change"),
         "unassigned dispatch did not retain typed rejection: {:?}",
         dispatched.bytes
     );
@@ -630,8 +630,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && initial_key_sent
             && !content_sent
             && bytes
-                .windows(b"Permanent".len())
-                .any(|window| window == b"Permanent")
+                .windows(b"lowercase".len())
+                .any(|window| window == b"lowercase")
         {
             master
                 .write_all(format!("{name}\r").as_bytes())
@@ -764,8 +764,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_provider_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"operation outcome".len())
-                    .any(|window| window == b"operation outcome")
+                    .windows(b"request".len())
+                    .any(|window| window == b"request")
             })
         {
             master.write_all(b"\r").expect("close assessment accepts");
@@ -778,8 +778,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !resource_commit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Fresh release assessment".len())
-                    .any(|window| window == b"Fresh release assessment")
+                    .windows(b"authorize".len())
+                    .any(|window| window == b"authorize")
             })
         {
             master
@@ -822,9 +822,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_provider_sent
         {
             let title = if archived {
-                b"Archiving closes the project".as_slice()
+                b"Archiving".as_slice()
             } else {
-                b"unarchive ".as_slice()
+                b"Unarchiving".as_slice()
             };
             if completion_offset.is_some_and(|offset| {
                 bytes[offset..]
@@ -888,8 +888,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !resource_commit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Canonical:".len())
-                    .any(|window| window == b"Canonical:")
+                    .windows(b"Resolved".len())
+                    .any(|window| window == b"Resolved")
             })
         {
             master.write_all(b"\r").expect("resource commit writes");
@@ -917,8 +917,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_provider_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Input:".len())
-                    .any(|window| window == b"Input:")
+                    .windows(b"Instructions:".len())
+                    .any(|window| window == b"Instructions:")
             })
         {
             master
@@ -933,8 +933,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_action_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Durable sessions".len())
-                    .any(|window| window == b"Durable sessions")
+                    .windows(b"Saved conversations".len())
+                    .any(|window| window == b"Saved conversations")
             })
         {
             master.write_all(b"s").expect("managed start key writes");
@@ -947,8 +947,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !managed_provider_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Provider namespace".len())
-                    .any(|window| window == b"Provider namespace")
+                    .windows(b"Agent service:".len())
+                    .any(|window| window == b"Agent service:")
             })
         {
             master
@@ -998,8 +998,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Completed".len())
-                    .any(|window| window == b"Completed")
+                    .windows(b"version".len())
+                    .any(|window| window == b"version")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1011,8 +1011,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Completed".len())
-                    .any(|window| window == b"Completed")
+                    .windows(b"request".len())
+                    .any(|window| window == b"request")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1024,8 +1024,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Project operation outcome".len())
-                    .any(|window| window == b"Project operation outcome")
+                    .windows(b"request".len())
+                    .any(|window| window == b"request")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1037,8 +1037,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Rejected:".len())
-                    .any(|window| window == b"Rejected:")
+                    .windows(b"request".len())
+                    .any(|window| window == b"request")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1050,8 +1050,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"at head".len())
-                    .any(|window| window == b"at head")
+                    .windows(b"version".len())
+                    .any(|window| window == b"version")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1063,8 +1063,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"Rejected:".len())
-                    .any(|window| window == b"Rejected:")
+                    .windows(b"Technical".len())
+                    .any(|window| window == b"Technical")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1077,7 +1077,10 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         if Instant::now().duration_since(last_output_at) >= PROCESS_INACTIVITY_WATCHDOG {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("TUI process timed out; bytes: {bytes:?}");
+            panic!(
+                "TUI process timed out (content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); output: {}",
+                String::from_utf8_lossy(&bytes)
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     };

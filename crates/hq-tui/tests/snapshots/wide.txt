@@ -1,14 +1,14 @@
  HQ   Inbox
- local workspace ready · revision 42
+ this device Connected
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- › Inbox               │ Inbox · 3 items
+ › Inbox               │ Inbox · 3 conversations
    Sent                │
    Archived            │   Build release
    Agents              │     open · agent-1
    Projects            │ › Deploy production
                        │     waiting · waiting for approval
                        │   Investigate timeout
-                       │     attention · relay needs attention
+                       │     needs attention · relay needs attention
                        │
                        │
                        │

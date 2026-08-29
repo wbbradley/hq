@@ -758,12 +758,12 @@ fn authoritative_snapshot_maps_current_project_assignment_states_onto_agents() {
     assert_eq!(row("blocked").state, hq_tui::UiRowState::Attention);
     assert_eq!(
         row("conflicted").detail,
-        "needs attention · identity conflict"
+        "needs attention · saved names disagree"
     );
     assert_eq!(row("conflicted").state, hq_tui::UiRowState::Attention);
     assert_eq!(
         row("double-booked").detail,
-        "needs attention · assignment conflict"
+        "needs attention · assigned to more than one project"
     );
     assert_eq!(row("double-booked").state, hq_tui::UiRowState::Attention);
     assert_eq!(row("retired").detail, "retired");
@@ -869,7 +869,7 @@ fn authoritative_snapshot_mapping_never_forwards_terminal_controls() {
     assert_eq!(snapshot.agent_rows[0].title, "builder [31m");
     assert_eq!(
         snapshot.agent_rows[0].detail,
-        "needs attention · identity conflict"
+        "needs attention · saved names disagree"
     );
     assert!(
         snapshot.agent_rows[0]

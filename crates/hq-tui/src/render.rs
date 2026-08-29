@@ -90,7 +90,7 @@ fn contextual_help_lines(model: &UiModel) -> Vec<Line<'static>> {
         lines.push(Line::from(format!("Selected: {}", row.title)));
         lines.push(Line::from(format!(
             "State: {} · {}",
-            row_state_help_label(row.state),
+            row_state_label(model.section(), row.state),
             row.detail
         )));
     } else {
@@ -129,7 +129,7 @@ fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
         )));
         lines.push(Line::from(format!(
             "Presentation state: {}",
-            row_state_help_label(row.state)
+            row_state_technical_label(row.state)
         )));
         lines.push(Line::from(
             "Open the item with Enter for its complete typed evidence.",
@@ -139,9 +139,10 @@ fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
     }
     if let Some(failure) = model.last_failure() {
         lines.push(Line::styled(
-            format!("Recovery evidence: {} · {}", failure.code, failure.action),
+            format!("Recovery code: {}", failure.code),
             Style::new().fg(Color::Yellow),
         ));
+        lines.push(Line::from(format!("Recovery action: {}", failure.action)));
     } else {
         lines.push(Line::from("Recovery evidence: none"));
     }
@@ -331,7 +332,7 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
     actions
 }
 
-const fn row_state_help_label(state: UiRowState) -> &'static str {
+const fn row_state_technical_label(state: UiRowState) -> &'static str {
     match state {
         UiRowState::Open => "open",
         UiRowState::Waiting => "waiting",
@@ -355,7 +356,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         return;
     };
     let width = available.width.saturating_sub(4).clamp(1, 88);
-    let height = available.height.saturating_sub(2).clamp(1, 22);
+    let height = available.height.clamp(1, 22);
     let area = Rect {
         x: available.x + available.width.saturating_sub(width) / 2,
         y: available.y + available.height.saturating_sub(height) / 2,
@@ -369,7 +370,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             vec![
                 Line::from(format!("Query: {query}")),
                 Line::default(),
-                Line::from("Type to match names, resource paths, or stable IDs"),
+                Line::from("Type to match names or resource paths; technical IDs also work"),
                 Line::from("↑/↓ cycle matches · Enter inspect · Esc keep query"),
             ],
         ),
@@ -379,19 +380,41 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         } => {
             let mut lines = vec![
                 Line::styled(project.name.as_str(), Style::new().fg(Color::Cyan).bold()),
-                Line::from(format!("Identity: {}", short_identity(project.project_id))),
                 Line::from(format!(
-                    "Lifecycle: {} · archived: {} · claimable: {}",
-                    project.lifecycle, project.archived, project.claimable
+                    "Status: {} · {}",
+                    project_status_label(project),
+                    if project.claimable {
+                        "folders available"
+                    } else {
+                        "folder ownership needs attention"
+                    }
                 )),
-                Line::from(format!(
-                    "Head: {} · next input: {}",
+            ];
+            if model.viewport().width >= WIDE_WIDTH {
+                lines.push(Line::styled(
+                    "Technical details",
+                    Style::new().fg(Color::DarkGray),
+                ));
+                lines.push(Line::from(format!(
+                    "Project {} · version {} · next message {}",
+                    short_identity(project.project_id),
                     short_identity(project.head),
                     project.input_sequence
-                )),
-                Line::default(),
-                Line::styled("Desired resources", Style::new().fg(Color::Cyan)),
-            ];
+                )));
+            } else {
+                lines.push(Line::styled(
+                    format!(
+                        "Technical details: project {}",
+                        short_identity(project.project_id)
+                    ),
+                    Style::new().fg(Color::DarkGray),
+                ));
+            }
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Folders and resources",
+                Style::new().fg(Color::Cyan),
+            ));
             for resource in &project.resources {
                 let selected = *selected_resource == Some(resource.resource_id);
                 lines.push(Line::from(format!(
@@ -399,36 +422,56 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                     if selected { '›' } else { ' ' },
                     if resource.primary { "primary " } else { "" },
                     resource.display_path,
-                    resource.health,
+                    resource_health_label(&resource.health),
                     if resource.active_claim {
-                        "claimed"
+                        "owned here"
                     } else {
-                        "unclaimed"
+                        "ownership needs attention"
                     }
                 )));
+                if model.viewport().width >= WIDE_WIDTH {
+                    lines.push(Line::from(format!(
+                        "   Technical: resource {} · canonical {} · conflicts {}",
+                        short_identity(resource.resource_id),
+                        resource.canonical_path,
+                        resource.conflicting_projects.len()
+                    )));
+                }
             }
             if project.resources.is_empty() {
-                lines.push(Line::from(" No desired resources"));
+                lines.push(Line::from(" No folders or resources recorded"));
             }
             lines.push(Line::default());
-            lines.push(Line::styled("Assignment", Style::new().fg(Color::Cyan)));
+            lines.push(Line::styled("Assigned agent", Style::new().fg(Color::Cyan)));
             if let Some(assignment) = &project.assignment {
                 lines.push(Line::from(format!(
-                    "{} · agent {} · provider {} · runnable {}",
-                    assignment.phase,
-                    short_identity(assignment.agent_id),
-                    assignment.provider,
-                    assignment.runnable
+                    "{} · agent {}",
+                    project_assignment_status_label(assignment),
+                    short_identity(assignment.agent_id)
                 )));
+                if model.viewport().width >= WIDE_WIDTH {
+                    lines.push(Line::from(format!(
+                        "Technical: assignment {} · service {} · conversation {} · thread {}",
+                        short_identity(assignment.assignment_id),
+                        assignment.provider,
+                        assignment.session.as_deref().unwrap_or("not started"),
+                        assignment
+                            .thread_id
+                            .map_or_else(|| "not started".to_owned(), short_identity)
+                    )));
+                    if let Some(folder) = &assignment.launch_directory {
+                        lines.push(Line::from(format!("Working folder: {folder}")));
+                    }
+                }
                 if let Some(blocked) = &assignment.blocked {
                     lines.push(Line::styled(
-                        format!("Blocked: {blocked}"),
+                        format!("Needs attention: {blocked}"),
                         Style::new().fg(Color::Yellow),
                     ));
                 }
                 if assignment.cardinality_conflicted {
                     lines.push(Line::styled(
-                        "Assignment cardinality conflict",
+                        "More than one agent is assigned to this project. HQ will not guess.",
                         Style::new().fg(Color::Red),
                     ));
                 }
@@ -438,9 +481,9 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             lines.push(Line::default());
             lines.push(Line::from("↑/↓ resource · a add · e replace · x remove"));
             lines.push(Line::from(
-                "p primary · k check selected · K check all · n send input",
+                "p primary · k check selected · K check all · n send instructions",
             ));
-            lines.push(Line::from("v activate · d dispatch pending · h handoff"));
+            lines.push(Line::from("v set up work · d send pending · h move agent"));
             lines.push(Line::from(if project.lifecycle == "closed" {
                 "o reopen · z archive/unarchive"
             } else {
@@ -455,14 +498,19 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             field,
             submitting,
         } => (
-            " Create project from existing tree ",
+            " Create project from folder ",
             vec![
                 project_field_line("Name", name, *field == UiProjectFormField::Name),
-                project_field_line("Brief", brief, *field == UiProjectFormField::Brief),
-                project_field_line("Path", path, *field == UiProjectFormField::Path),
+                project_field_line(
+                    "Brief (optional)",
+                    brief,
+                    *field == UiProjectFormField::Brief,
+                ),
+                project_field_line("Folder", path, *field == UiProjectFormField::Path),
+                Line::from("HQ will record this folder as a resource owned by the project."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Reconciling one stable create operation…"
+                    "Creating the project safely…"
                 } else {
                     "↑/↓ field · Enter create · Esc cancel"
                 }),
@@ -478,10 +526,14 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             field,
             submitting,
         } => (
-            " Create recoverable Git worktree project ",
+            " Create an isolated Git worktree ",
             vec![
                 project_field_line("Name", name, *field == UiProjectFormField::Name),
-                project_field_line("Brief", brief, *field == UiProjectFormField::Brief),
+                project_field_line(
+                    "Brief (optional)",
+                    brief,
+                    *field == UiProjectFormField::Brief,
+                ),
                 project_field_line("Source", source, *field == UiProjectFormField::Source),
                 project_field_line(
                     "Destination",
@@ -490,11 +542,12 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 ),
                 project_field_line("Branch", branch, *field == UiProjectFormField::Branch),
                 project_field_line("Base", base, *field == UiProjectFormField::Base),
+                Line::from("HQ creates a separate branch and folder; you keep normal Git control."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Reconciling worktree provisioning without removing external state…"
+                    "Creating the worktree; external files will be kept if setup is interrupted…"
                 } else {
-                    "↑/↓ field · Enter provision · Esc cancel"
+                    "↑/↓ field · Enter create · Esc cancel"
                 }),
             ],
         ),
@@ -503,13 +556,14 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             content,
             submitting,
         } => (
-            " Send project input ",
+            " Send instructions to this project ",
             vec![
                 Line::from(format!("Project: {}", project.name)),
-                project_field_line("Input", content, true),
+                project_field_line("Instructions", content, true),
+                Line::from("The assigned agent will receive these instructions once."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Submitting through the ordinary local API…"
+                    "Sending instructions…"
                 } else {
                     "Enter send · Esc cancel"
                 }),
@@ -521,14 +575,15 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             make_primary,
             submitting,
         } => (
-            " Add desired resource ",
+            " Add a folder or resource ",
             vec![
                 Line::from(format!("Project: {}", project.name)),
                 project_field_line("Path", path, true),
-                Line::from(format!("Make primary: {make_primary}")),
+                Line::from(format!("Use as primary: {}", yes_no(*make_primary))),
+                Line::from("HQ checks project ownership before saving this path."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Inspecting canonical identity and claim conflicts…"
+                    "Checking whether another project owns this path…"
                 } else {
                     "↑/↓ toggle primary · Enter preview · Esc cancel"
                 }),
@@ -540,14 +595,15 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             path,
             submitting,
         } => (
-            " Replace desired resource ",
+            " Change a folder or resource ",
             vec![
                 Line::from(format!("Project: {}", project.name)),
                 Line::from(format!("Replace: {}", short_identity(*resource_id))),
                 project_field_line("Path", path, true),
+                Line::from("HQ checks project ownership before replacing the recorded path."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Inspecting canonical identity and claim conflicts…"
+                    "Checking whether another project owns this path…"
                 } else {
                     "Enter preview · Esc cancel"
                 }),
@@ -559,20 +615,22 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             force,
             submitting,
         } => (
-            " Confirm desired-resource removal ",
+            " Remove this project resource? ",
             vec![
                 Line::from(format!("Project: {}", project.name)),
                 Line::from(format!("Resource: {}", short_identity(*resource_id))),
-                Line::from(format!(
-                    "Assigned: {} · force: {force}",
-                    project.assignment.is_some()
-                )),
-                Line::from("External paths, files, worktrees, and branches are retained."),
+                Line::from(if project.assignment.is_some() {
+                    "An agent is assigned to this project. Removal needs extra confirmation."
+                } else {
+                    "No agent is assigned to this project."
+                }),
+                Line::from(format!("Override safety check: {}", yes_no(*force))),
+                Line::from("HQ keeps the folder, files, worktree, and branch on disk."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Reconciling removal…"
+                    "Removing the resource from the project…"
                 } else {
-                    "f toggle force · Enter remove · Esc cancel"
+                    "f toggle override · Enter remove · Esc cancel"
                 }),
             ],
         ),
@@ -581,13 +639,14 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             resource_id,
             submitting,
         } => (
-            " Confirm primary resource ",
+            " Use as the primary project resource? ",
             vec![
                 Line::from(format!("Project: {}", project.name)),
                 Line::from(format!("Resource: {}", short_identity(*resource_id))),
+                Line::from("The primary resource is the default folder for project work."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Reconciling primary selection…"
+                    "Saving the primary resource…"
                 } else {
                     "Enter confirm · Esc cancel"
                 }),
@@ -604,7 +663,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             field,
             submitting,
         } => (
-            " Activate project assignment ",
+            " Set up project work ",
             project_activation_lines(
                 project,
                 agents,
@@ -615,6 +674,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 directory,
                 *field,
                 None,
+                model.viewport().width >= WIDE_WIDTH,
                 *submitting,
             ),
         ),
@@ -631,7 +691,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             force_takeover,
             submitting,
         } => (
-            " Confirm project handoff ",
+            " Move project work to another agent ",
             project_activation_lines(
                 project,
                 agents,
@@ -642,6 +702,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 directory,
                 *field,
                 Some((*confirmed, *force_takeover)),
+                model.viewport().width >= WIDE_WIDTH,
                 *submitting,
             ),
         ),
@@ -655,20 +716,24 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             let mut lines = vec![
                 Line::from(format!("Project: {}", project.name)),
                 Line::from(format!(
-                    "Lifecycle: {} · assigned: {}",
-                    project.lifecycle,
-                    project.assignment.is_some()
+                    "Status: {} · agent assigned: {}",
+                    project_status_label(project),
+                    yes_no(project.assignment.is_some())
                 )),
                 Line::default(),
-                Line::styled("Fresh release assessment", Style::new().fg(Color::Cyan)),
+                Line::styled("Folder release check", Style::new().fg(Color::Cyan)),
             ];
             if checks.is_empty() {
-                lines.push(Line::from("No desired resources"));
+                lines.push(Line::from("No folders or resources are recorded."));
             }
             for check in checks {
                 lines.push(Line::from(format!(
-                    "{} · {} · health={} · release={}",
+                    "{} · {}",
                     short_identity(check.resource_id),
+                    resource_check_summary(check)
+                )));
+                lines.push(Line::from(format!(
+                    "  Technical: status={} · health={} · release={}",
                     check.status,
                     check.health.as_deref().unwrap_or("unknown"),
                     check.release.as_deref().unwrap_or("unknown")
@@ -685,15 +750,17 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             }
             lines.push(Line::default());
             lines.push(Line::from(format!(
-                "Confirmed: {confirmed} · force recovery: {force}"
+                "I understand: {} · override safety check: {}",
+                yes_no(*confirmed),
+                yes_no(*force)
             )));
             lines.push(Line::from(
-                "Closing retains external paths, files, worktrees, and branches.",
+                "Closing keeps folders, files, worktrees, and branches on disk.",
             ));
             lines.push(Line::from(if *submitting {
-                "Reconciling one stable close operation…"
+                "Closing the project safely…"
             } else {
-                "c confirm · f authorize force · Enter close · Esc cancel"
+                "c confirm · f authorize override · Enter close · Esc cancel"
             }));
             (" Confirm project close ", lines)
         }
@@ -709,15 +776,15 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             },
             vec![
                 Line::from(format!("Project: {}", project.name)),
-                Line::from(format!("Lifecycle: {}", project.lifecycle)),
+                Line::from(format!("Current status: {}", project_status_label(project))),
                 Line::from(if *archived {
-                    "Archiving closes the project while retaining external state."
+                    "Archiving closes the project but keeps its folders and history."
                 } else {
-                    "Unarchiving retains the project in its authoritative lifecycle state."
+                    "Unarchiving returns the project to its current open or closed status."
                 }),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Reconciling one stable archive operation…"
+                    "Saving the archive change…"
                 } else {
                     "Enter confirm · Esc cancel"
                 }),
@@ -725,15 +792,25 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         ),
         UiProjectModal::Outcome { result } => {
             let mut lines = vec![Line::from(project_action_label(&result.action))];
-            lines.push(Line::from(format!(
-                "Project: {} · operation: {}",
-                short_identity(result.project_id),
-                short_identity(result.operation_id)
-            )));
-            lines.push(Line::default());
+            lines.push(Line::from(if model.viewport().width >= WIDE_WIDTH {
+                format!(
+                    "Technical details: project {} · request {}",
+                    short_identity(result.project_id),
+                    short_identity(result.operation_id)
+                )
+            } else {
+                format!(
+                    "Technical IDs: {} / {}",
+                    short_identity(result.project_id),
+                    short_identity(result.operation_id)
+                )
+            }));
+            if model.viewport().width >= WIDE_WIDTH {
+                lines.push(Line::default());
+            }
             if let Some(runtime_state) = &result.runtime_state {
                 lines.push(Line::from(format!(
-                    "Runtime: {runtime_state}{}",
+                    "Technical runtime: {runtime_state}{}",
                     result
                         .runtime_code
                         .as_ref()
@@ -742,19 +819,26 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             }
             match &result.outcome {
                 UiProjectOutcome::Completed { project_head } => lines.push(Line::from(format!(
-                    "Completed{}",
+                    "Done{}",
                     project_head.map_or_else(String::new, |head| format!(
-                        " at head {}",
+                        " · technical version {}",
                         short_identity(head)
                     ))
                 ))),
                 UiProjectOutcome::Running { stage } => {
-                    lines.push(Line::from(format!("In progress: {stage}")));
+                    lines.push(Line::from("HQ is still finishing this change."));
+                    lines.push(Line::from(format!("Technical stage: {stage}")));
                 }
-                UiProjectOutcome::Rejected { category, code } => lines.push(Line::styled(
-                    format!("Rejected: {category}/{code}"),
-                    Style::new().fg(Color::Red),
-                )),
+                UiProjectOutcome::Rejected { category, code } => {
+                    lines.push(Line::styled(
+                        "HQ could not make this change.",
+                        Style::new().fg(Color::Red),
+                    ));
+                    lines.push(Line::from(
+                        "Review the technical reason, correct the problem, and try again.",
+                    ));
+                    lines.push(Line::from(format!("Technical reason: {category}/{code}")));
+                }
                 UiProjectOutcome::Reconcilable {
                     stage,
                     category,
@@ -762,43 +846,57 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                     warning,
                 } => {
                     lines.push(Line::styled(
-                        format!("Reconcile {stage}: {category}/{code}"),
+                        "HQ could not confirm whether the change finished.",
                         Style::new().fg(Color::Yellow),
                     ));
                     if let Some(warning) = warning {
+                        lines.push(Line::from(format!("Technical kind: {}", warning.kind)));
                         lines.push(Line::from(format!(
-                            "Retained {}: {} ({})",
-                            warning.kind, warning.destination, warning.branch
+                            "Kept worktree {} on branch {}.",
+                            warning.destination, warning.branch
                         )));
                     }
+                    lines.push(Line::from(
+                        "HQ will retry the same request; do not repeat it manually.",
+                    ));
+                    lines.push(Line::from(format!(
+                        "Technical stage and reason: {stage} · {category}/{code}"
+                    )));
                 }
-                UiProjectOutcome::InputSent { message_id } => lines.push(Line::from(format!(
-                    "Input accepted as {}",
-                    short_identity(*message_id)
-                ))),
+                UiProjectOutcome::InputSent { message_id } => {
+                    lines.push(Line::from("Instructions sent."));
+                    lines.push(Line::from(format!(
+                        "Technical message ID: {}",
+                        short_identity(*message_id)
+                    )));
+                }
                 UiProjectOutcome::ResourcePreview {
                     display_path,
                     canonical_path,
                     conflicts,
                 } => {
-                    lines.push(Line::from(format!("Display: {display_path}")));
-                    lines.push(Line::from(format!("Canonical: {canonical_path}")));
+                    lines.push(Line::from(format!("Requested path: {display_path}")));
+                    lines.push(Line::from(format!("Resolved path: {canonical_path}")));
                     if conflicts.is_empty() {
                         lines.push(Line::styled(
-                            "No authoritative claim conflicts · Enter commit",
+                            "No other project owns this path · Enter add",
                             Style::new().fg(Color::Green),
                         ));
                     } else {
                         lines.push(Line::styled(
-                            "Claim conflicts block mutation:",
+                            "Another project already owns this path:",
                             Style::new().fg(Color::Red),
                         ));
                         for conflict in conflicts {
                             lines.push(Line::from(format!(
-                                " {} {} · {}",
-                                conflict.relationship,
+                                " Project {} owns {}",
                                 short_identity(conflict.project_id),
                                 conflict.canonical_path
+                            )));
+                            lines.push(Line::from(format!(
+                                "  Technical relationship: {} · resource {}",
+                                conflict.relationship,
+                                short_identity(conflict.resource_id)
                             )));
                         }
                     }
@@ -806,8 +904,12 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 UiProjectOutcome::ResourceChecks { checks } => {
                     for check in checks {
                         lines.push(Line::from(format!(
-                            "{} · {} · health={} · release={}",
+                            "{} · {}",
                             short_identity(check.resource_id),
+                            resource_check_summary(check)
+                        )));
+                        lines.push(Line::from(format!(
+                            "  Technical: status={} · health={} · release={}",
                             check.status,
                             check.health.as_deref().unwrap_or("unknown"),
                             check.release.as_deref().unwrap_or("unknown")
@@ -816,7 +918,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                             (&check.error_category, &check.error_code)
                         {
                             lines.push(Line::styled(
-                                format!("  rejected: {category}/{code}"),
+                                format!("  Technical reason: {category}/{code}"),
                                 Style::new().fg(Color::Red),
                             ));
                         }
@@ -825,7 +927,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             }
             lines.push(Line::default());
             lines.push(Line::from("Esc close"));
-            (" Project operation outcome ", lines)
+            (" Project change ", lines)
         }
     };
     frame.render_widget(
@@ -858,6 +960,7 @@ fn project_activation_lines<'value>(
     directory: &'value str,
     field: UiProjectFormField,
     handoff: Option<(bool, bool)>,
+    wide: bool,
     submitting: bool,
 ) -> Vec<Line<'value>> {
     let agent = agent_id
@@ -865,58 +968,93 @@ fn project_activation_lines<'value>(
         .and_then(|agent| agent.names.first().map(String::as_str))
         .unwrap_or("none");
     let thread_label = thread.map_or_else(
-        || "none".to_owned(),
+        || "start a new conversation".to_owned(),
         |thread| {
             format!(
-                "{}/{} · {}",
+                "continue saved conversation · {}/{} · {}",
                 thread.provider,
                 thread.session,
                 short_identity(thread.thread_id)
             )
         },
     );
-    let mut lines = vec![
-        Line::from(format!("Project: {}", project.name)),
-        project_choice_line("Agent", agent, field == UiProjectFormField::Agent),
-        project_choice_line(
-            "Mode",
-            if new_session {
-                "new session"
+    let mut lines = vec![Line::from(format!("Project: {}", project.name))];
+    if wide {
+        lines.push(Line::from(if handoff.is_some() {
+            "Choose the agent that should take over this project's work."
+        } else {
+            "Choose an agent and conversation; HQ will connect them to this project."
+        }));
+    }
+    lines.push(project_choice_line(
+        "Agent",
+        agent,
+        field == UiProjectFormField::Agent,
+    ));
+    lines.push(project_choice_line(
+        "Conversation",
+        if new_session {
+            if wide {
+                "start a new conversation"
             } else {
-                "exact resume"
-            },
-            field == UiProjectFormField::SessionMode,
-        ),
-        project_choice_line("Thread", &thread_label, field == UiProjectFormField::Thread),
-        project_field_line("Provider", provider, field == UiProjectFormField::Provider),
-        project_field_line(
-            "Directory",
-            directory,
-            field == UiProjectFormField::Directory,
-        ),
-    ];
+                "new"
+            }
+        } else if wide {
+            "continue the selected conversation"
+        } else {
+            "continue"
+        },
+        field == UiProjectFormField::SessionMode,
+    ));
+    if !new_session {
+        lines.push(project_choice_line(
+            if wide { "Saved conversation" } else { "Saved" },
+            &thread_label,
+            field == UiProjectFormField::Thread,
+        ));
+    }
+    lines.push(project_field_line(
+        "Agent service",
+        provider,
+        field == UiProjectFormField::Provider,
+    ));
+    lines.push(project_field_line(
+        "Working folder",
+        directory,
+        field == UiProjectFormField::Directory,
+    ));
     if let Some((confirmed, force)) = handoff {
         lines.push(project_choice_line(
-            "Confirmed",
-            if confirmed { "true" } else { "false" },
+            "I understand",
+            yes_no(confirmed),
             field == UiProjectFormField::Confirmation,
         ));
         lines.push(project_choice_line(
-            "Force takeover",
-            if force { "true" } else { "false" },
+            "Override safety check",
+            yes_no(force),
             field == UiProjectFormField::Force,
         ));
-        lines.push(Line::from(
-            "Force revokes HQ authority; it does not prove external runtime cessation.",
-        ));
+        lines.push(Line::from(if wide {
+            "The previous agent may still be running elsewhere."
+        } else {
+            "The previous agent may still be running."
+        }));
     }
-    lines.push(Line::default());
+    if wide {
+        lines.push(Line::default());
+    }
     lines.push(Line::from(if submitting {
-        "Reconciling one stable project operation…"
+        "Setting up project work safely…"
     } else if handoff.is_some() {
-        "Tab field · ↑/↓ change choice · Enter handoff"
+        if wide {
+            "Tab field · ↑/↓ change choice · Enter move work"
+        } else {
+            "Tab field · ↑/↓ choose · Enter move"
+        }
+    } else if wide {
+        "Tab field · ↑/↓ change choice · Enter set up work"
     } else {
-        "Tab field · ↑/↓ change choice · Enter activate"
+        "Tab field · ↑/↓ choose · Enter set up"
     }));
     lines
 }
@@ -932,28 +1070,88 @@ fn project_choice_line(label: &str, value: &str, selected: bool) -> Line<'static
     )
 }
 
+const fn yes_no(value: bool) -> &'static str {
+    if value { "Yes" } else { "No" }
+}
+
+fn project_status_label(project: &crate::UiProject) -> &'static str {
+    if project.archived {
+        "Archived"
+    } else if project.lifecycle == "closed" {
+        "Closed"
+    } else if project.lifecycle == "open" {
+        "Open"
+    } else {
+        "Needs attention"
+    }
+}
+
+fn project_assignment_status_label(assignment: &crate::UiProjectAssignment) -> &'static str {
+    if assignment.cardinality_conflicted {
+        "Needs attention"
+    } else if assignment.blocked.is_some() {
+        "Blocked"
+    } else if assignment.runnable {
+        "Ready to work"
+    } else {
+        "Setting up"
+    }
+}
+
+fn resource_check_summary(check: &crate::UiProjectResourceCheck) -> &'static str {
+    if check.status != "accepted" {
+        "HQ could not finish checking this resource"
+    } else if check
+        .health
+        .as_deref()
+        .is_some_and(|health| health != "healthy")
+    {
+        "The resource needs attention"
+    } else {
+        match check.release.as_deref() {
+            Some("clean") => "Ready to release",
+            Some("dirty") => "Local changes would be kept",
+            Some(_) | None => "Release status needs review",
+        }
+    }
+}
+
+fn resource_health_label(health: &str) -> &str {
+    match health {
+        "healthy" => "available",
+        "missing" => "not found",
+        "inaccessible" => "cannot be opened",
+        _ => "needs attention",
+    }
+}
+
 fn project_action_label(action: &UiProjectAction) -> String {
     match action {
-        UiProjectAction::CreateExisting { name, .. } => format!("Create {name} from existing tree"),
-        UiProjectAction::CreateWorktree { name, .. } => format!("Provision worktree for {name}"),
-        UiProjectAction::SendInput { .. } => "Send project input".to_owned(),
+        UiProjectAction::CreateExisting { name, .. } => format!("Create {name} from a folder"),
+        UiProjectAction::CreateWorktree { name, .. } => {
+            format!("Create an isolated worktree for {name}")
+        }
+        UiProjectAction::SendInput { .. } => "Send project instructions".to_owned(),
         UiProjectAction::PreviewAddResource { .. } => {
-            "Preview desired-resource addition".to_owned()
+            "Check a folder or resource before adding it".to_owned()
         }
-        UiProjectAction::AddResource { .. } => "Add desired resource".to_owned(),
+        UiProjectAction::AddResource { .. } => "Add a folder or resource".to_owned(),
         UiProjectAction::PreviewReplaceResource { .. } => {
-            "Preview desired-resource replacement".to_owned()
+            "Check a replacement folder or resource".to_owned()
         }
-        UiProjectAction::ReplaceResource { .. } => "Replace desired resource".to_owned(),
-        UiProjectAction::RemoveResource { .. } => "Remove desired resource".to_owned(),
-        UiProjectAction::SetPrimaryResource { .. } => "Select primary resource".to_owned(),
-        UiProjectAction::CheckResources { .. } => "Check desired resources".to_owned(),
-        UiProjectAction::Activate { .. } => "Activate project assignment".to_owned(),
-        UiProjectAction::DispatchPending { .. } => "Dispatch pending project input".to_owned(),
-        UiProjectAction::Handoff { .. } => "Hand off project assignment".to_owned(),
+        UiProjectAction::ReplaceResource { .. } => "Change a folder or resource".to_owned(),
+        UiProjectAction::RemoveResource { .. } => "Remove a project resource".to_owned(),
+        UiProjectAction::SetPrimaryResource { .. } => "Choose the primary resource".to_owned(),
+        UiProjectAction::CheckResources { .. } => "Check project resources".to_owned(),
+        UiProjectAction::Activate { .. } => "Set up project work".to_owned(),
+        UiProjectAction::DispatchPending { .. } => "Send pending project instructions".to_owned(),
+        UiProjectAction::Handoff { .. } => "Move project work to another agent".to_owned(),
         UiProjectAction::Open { .. } => "Reopen project".to_owned(),
         UiProjectAction::PreviewClose { .. } => "Assess project close".to_owned(),
-        UiProjectAction::Close { force, .. } => format!("Close project · force={force}"),
+        UiProjectAction::Close { force: true, .. } => {
+            "Close project with safety override".to_owned()
+        }
+        UiProjectAction::Close { force: false, .. } => "Close project".to_owned(),
         UiProjectAction::SetArchived { archived, .. } => {
             if *archived {
                 "Archive project".to_owned()
@@ -984,7 +1182,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             vec![
                 Line::from(format!("Query: {query}")),
                 Line::default(),
-                Line::from("Type to select matching names, sessions, or IDs"),
+                Line::from("Type to match agent or conversation names; technical IDs also work"),
                 Line::from("↑/↓ cycle matches · Enter inspect · Esc keep query"),
             ],
         ),
@@ -995,9 +1193,14 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             let mut lines = agent_summary(agent);
             lines.push(Line::default());
             lines.push(Line::styled(
-                "Durable sessions",
+                "Saved conversations",
                 Style::new().fg(Color::Cyan),
             ));
+            if model.viewport().width >= WIDE_WIDTH {
+                lines.push(Line::from(
+                    "Start a new conversation or continue one previously used by this agent.",
+                ));
+            }
             for session in &agent.sessions {
                 let selected = selected_session.as_ref().is_some_and(|(provider, value)| {
                     *provider == session.provider && *value == session.session
@@ -1005,17 +1208,17 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 let name = session.display_name.as_deref().unwrap_or("unnamed");
                 lines.push(Line::styled(
                     format!(
-                        " {} {}/{} · {}{}{}",
+                        " {} {}{}{} · technical {}/{}",
                         if selected { '›' } else { ' ' },
-                        session.provider,
-                        session.session,
                         name,
-                        if session.selected { " · selected" } else { "" },
+                        if session.selected { " · current" } else { "" },
                         if session.conflicted {
-                            " · conflicted"
+                            " · needs attention"
                         } else {
                             ""
-                        }
+                        },
+                        session.provider,
+                        session.session
                     ),
                     if selected {
                         selected_style(true)
@@ -1025,22 +1228,32 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 ));
             }
             if agent.sessions.is_empty() {
-                lines.push(Line::from(" No durable provider sessions"));
+                lines.push(Line::from(" No saved conversations yet"));
             }
-            lines.push(Line::default());
-            lines.push(Line::from(
-                "↑/↓ session · s start · e exact resume · t stop",
-            ));
-            lines.push(Line::from("r rename/clear · x retire · Esc close"));
+            if model.viewport().width >= WIDE_WIDTH {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(if model.viewport().width >= WIDE_WIDTH {
+                "↑/↓ conversation · s start new · e continue · t stop"
+            } else {
+                "↑/↓ choose · s new · e continue · t stop"
+            }));
+            lines.push(Line::from(if model.viewport().width >= WIDE_WIDTH {
+                "r name/clear · x retire agent · Esc close"
+            } else {
+                "r name · x retire · Esc close"
+            }));
             (" Agent details ", lines)
         }
         UiAgentModal::Create { name, submitting } => (
-            " Create named agent ",
+            " Create agent ",
             vec![
-                Line::from(format!("Permanent lowercase name: {name}")),
+                Line::from(format!("Name: {name}")),
+                Line::from("Use a permanent lowercase name without spaces."),
+                Line::from("You can assign this agent to projects and message it directly."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Reconciling create command…"
+                    "Creating the agent…"
                 } else {
                     "Enter create · Esc cancel"
                 }),
@@ -1053,15 +1266,16 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             submitting,
             ..
         } => (
-            " Rename durable session ",
+            " Name saved conversation ",
             vec![
-                Line::from(format!("Target: {provider}/{session}")),
-                Line::from(format!("Display name: {display_name}")),
+                Line::from(format!("Technical conversation: {provider}/{session}")),
+                Line::from(format!("Name: {display_name}")),
+                Line::from("This optional name helps you recognize the conversation later."),
                 Line::default(),
                 Line::from(if *submitting {
-                    "Reconciling rename command…"
+                    "Saving the conversation name…"
                 } else {
-                    "Enter rename (empty clears) · Esc cancel"
+                    "Enter save (empty clears) · Esc cancel"
                 }),
             ],
         ),
@@ -1078,79 +1292,92 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                         format!("Retire {name}? This cannot be undone."),
                         Style::new().fg(Color::Yellow),
                     ),
-                    Line::from(format!("Force assigned/runtime takeover: {force}")),
+                    Line::from(format!(
+                        "Override active-work safety check: {}",
+                        yes_no(*force)
+                    )),
+                    Line::from("An override does not stop an agent running outside HQ."),
                     Line::default(),
                     Line::from(if *submitting {
-                        "Reconciling retirement…"
+                        "Retiring the agent…"
                     } else {
-                        "f toggle force · Enter confirm · Esc cancel"
+                        "f toggle override · Enter confirm · Esc cancel"
                     }),
                 ],
             )
         }
         UiAgentModal::ManagedProvider { provider, .. } => (
-            " Start managed session ",
+            " Start an agent conversation ",
             vec![
-                Line::from(format!("Provider namespace: {provider}")),
+                Line::from(format!("Agent service: {provider}")),
+                Line::from("This service will run the agent's conversation."),
                 Line::default(),
                 Line::from("Enter continue · Esc cancel"),
             ],
         ),
         UiAgentModal::ConfirmManagedSession { action, .. } => (
-            " Confirm managed-session switch ",
+            " Switch the agent's conversation? ",
             vec![
                 Line::styled(
-                    "This target differs from the durable selected session.",
+                    "This differs from the agent's currently saved conversation.",
                     Style::new().fg(Color::Yellow),
                 ),
                 Line::from(managed_session_target(action)),
                 Line::default(),
-                Line::from("Runtime presence is checked by the node, not inferred here."),
+                Line::from("HQ will check whether the agent is already running before switching."),
                 Line::from("Enter confirm · Esc cancel"),
             ],
         ),
         UiAgentModal::ManagingSession { action, .. } => (
-            " Managing session ",
+            " Updating agent conversation ",
             vec![
                 Line::from(managed_session_target(action)),
                 Line::default(),
-                Line::from("Reconciling one stable operation across reconnects…"),
+                Line::from("HQ is confirming the request and will keep checking after reconnects…"),
             ],
         ),
         UiAgentModal::ManagedSessionOutcome { result, .. } => {
             let mut lines = vec![Line::from(managed_session_target(&result.action))];
             lines.push(Line::from(format!(
-                "Operation: {}",
+                "Technical request: {}",
                 short_identity(result.operation_id)
             )));
             lines.push(Line::default());
             match &result.outcome {
                 UiManagedSessionOutcome::Ready { session } => {
-                    lines.push(Line::from(format!("Ready session: {session}")));
+                    lines.push(Line::from("The agent conversation is ready."));
+                    lines.push(Line::from(format!("Technical session: {session}")));
                 }
                 UiManagedSessionOutcome::Stopped => {
                     lines.push(Line::from(
-                        "Local runtime stopped; durable history retained.",
+                        "The agent stopped on this device. Its saved conversation was kept.",
                     ));
                 }
                 UiManagedSessionOutcome::Rejected { category, code } => {
                     lines.push(Line::styled(
-                        format!("Rejected: {category}/{code}"),
+                        "HQ could not change the agent conversation.",
                         Style::new().fg(Color::Red),
                     ));
-                    lines.push(Line::from("Reload and reselect an exact current target."));
+                    lines.push(Line::from(format!("Technical reason: {category}/{code}")));
+                    lines.push(Line::from(
+                        "Reload the agent, choose a current conversation, and try again.",
+                    ));
                 }
                 UiManagedSessionOutcome::Uncertain { reconciliation_id } => {
                     lines.push(Line::styled(
-                        format!("Uncertain: {}", short_identity(*reconciliation_id)),
+                        "HQ could not confirm whether the change finished.",
                         Style::new().fg(Color::Yellow),
                     ));
-                    lines.push(Line::from("HQ will reconcile the same stable request."));
+                    lines.push(Line::from(format!(
+                        "Technical recovery ID: {}",
+                        short_identity(*reconciliation_id)
+                    )));
+                    lines.push(Line::from("HQ will keep checking the same request."));
                 }
             }
             lines.push(Line::default());
             lines.push(Line::from("Esc close"));
-            (" Managed-session outcome ", lines)
+            (" Agent conversation change ", lines)
         }
     };
     frame.render_widget(
@@ -1163,11 +1390,15 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
 
 fn managed_session_target(action: &UiManagedSessionAction) -> String {
     match action {
-        UiManagedSessionAction::Start { provider, .. } => format!("Start fresh on {provider}"),
+        UiManagedSessionAction::Start { provider, .. } => {
+            format!("Start a new conversation using {provider}")
+        }
         UiManagedSessionAction::Resume {
             provider, session, ..
-        } => format!("Resume exactly {provider}/{session}"),
-        UiManagedSessionAction::Stop { provider, .. } => format!("Stop runtime on {provider}"),
+        } => format!("Continue saved conversation {provider}/{session}"),
+        UiManagedSessionAction::Stop { provider, .. } => {
+            format!("Stop the agent running through {provider}")
+        }
     }
 }
 
@@ -1196,8 +1427,9 @@ fn agent_summary(agent: &UiAgent) -> Vec<Line<'_>> {
             Style::new().fg(Color::Cyan).bold(),
         ),
         Line::from(format!("Status: {}", agent_status_label(&agent.status))),
+        Line::styled("Technical details", Style::new().fg(Color::DarkGray)),
         Line::from(format!(
-            "Identity: {:02x}{:02x}{:02x}{:02x}… · mailboxes: {}",
+            "Agent ID {:02x}{:02x}{:02x}{:02x}… · mailboxes {}",
             agent.agent_id[0],
             agent.agent_id[1],
             agent.agent_id[2],
@@ -1230,9 +1462,9 @@ fn agent_status_label(status: &UiAgentStatus) -> String {
         UiAgentStatus::NeedsAttention { reason, .. } => format!(
             "Needs attention · {}",
             match reason {
-                UiAgentAttentionReason::IdentityConflict => "identity conflict",
-                UiAgentAttentionReason::AssignmentConflict => "assignment conflict",
-                UiAgentAttentionReason::AssignmentBlocked => "assignment blocked",
+                UiAgentAttentionReason::IdentityConflict => "saved names disagree",
+                UiAgentAttentionReason::AssignmentConflict => "assigned to more than one project",
+                UiAgentAttentionReason::AssignmentBlocked => "project setup is blocked",
             }
         ),
         UiAgentStatus::Retired => "Retired".to_owned(),
@@ -1255,7 +1487,7 @@ fn agent_assignment_evidence(assignment: &UiAgentProjectAssignment) -> Vec<Line<
             short_identity(assignment.project_id)
         )),
         Line::from(format!(
-            "Assignment: {} · {} · {}",
+            "Technical assignment: {} · service {} · conversation {}",
             short_identity(assignment.assignment_id),
             assignment.provider,
             assignment.session.as_deref().unwrap_or("session pending")
@@ -1273,7 +1505,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         return;
     };
     let width = available.width.saturating_sub(4).clamp(1, 76);
-    let height = available.height.saturating_sub(2).clamp(1, 18);
+    let height = available.height.clamp(1, 18);
     let area = Rect {
         x: available.x + available.width.saturating_sub(width) / 2,
         y: available.y + available.height.saturating_sub(height) / 2,
@@ -1284,9 +1516,14 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
     match interaction {
         UiMailboxModal::SelectDirect { targets, selected } => {
             let mut lines = vec![Line::styled(
-                "Choose a resolved named agent",
+                "Choose who to message",
                 Style::new().fg(Color::Cyan),
             )];
+            if !targets.is_empty() {
+                lines.push(Line::from(
+                    "HQ lists agents—and, in the future, people—you can reach directly.",
+                ));
+            }
             lines.push(Line::default());
             for target in targets {
                 let is_selected = *selected == Some((target.installation_id, target.mailbox_id));
@@ -1327,7 +1564,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         UiMailboxModal::LoadingDraft { target } => {
             frame.render_widget(
                 Paragraph::new(format!("Loading {} draft…", draft_target_label(target)))
-                    .block(Block::bordered().title(" Mailbox draft ")),
+                    .block(Block::bordered().title(" Preparing message ")),
                 area,
             );
         }
@@ -1340,9 +1577,9 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             let status = if *closing {
                 "saving and closing"
             } else if *submitting {
-                "submitting"
+                "sending"
             } else if *dirty {
-                "autosave pending"
+                "saving"
             } else {
                 "saved"
             };
@@ -1375,17 +1612,22 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             let (label, explanation) = match action {
                 UiMailboxAction::Archive { .. } => (
                     "Archive the selected message?",
-                    Some("Only this message changes state; the thread and its history are kept."),
+                    Some("Only this message changes state. The conversation history stays intact."),
                 ),
                 UiMailboxAction::Restore { .. } => (
                     "Restore the selected message?",
                     Some(
-                        "Only this message returns to open views; the rest of the thread is unchanged.",
+                        "Only this message returns to open views; the rest of the conversation is unchanged.",
                     ),
                 ),
-                UiMailboxAction::Reply { .. }
-                | UiMailboxAction::Direct { .. }
-                | UiMailboxAction::SelfNote => ("Submit this mailbox command?", None),
+                UiMailboxAction::Reply { .. } | UiMailboxAction::Direct { .. } => (
+                    "Send this message?",
+                    Some("The recipient will see it in their HQ conversation."),
+                ),
+                UiMailboxAction::SelfNote => (
+                    "Save this personal note?",
+                    Some("Only you will receive this note."),
+                ),
             };
             let mut lines = vec![Line::from(label), Line::default()];
             if let Some(explanation) = explanation {
@@ -1395,7 +1637,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             lines.push(Line::from("Enter confirm · Esc cancel"));
             frame.render_widget(
                 Paragraph::new(lines)
-                    .block(Block::bordered().title(" Confirm mailbox action "))
+                    .block(Block::bordered().title(" Confirm message change "))
                     .wrap(Wrap { trim: false }),
                 area,
             );
@@ -1435,14 +1677,10 @@ fn render_too_small(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
 }
 
 fn render_header(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
-    let revision = model.snapshot().map(|snapshot| snapshot.revision);
-    let status = match revision {
-        Some(value) if model.refreshing() => format!("refreshing · revision {value}"),
-        Some(value) => format!(
-            "{} · revision {value}",
-            connection_label(model.connection())
-        ),
-        None => connection_label(model.connection()).to_owned(),
+    let status = if model.refreshing() {
+        "Updating…"
+    } else {
+        workspace_connection_label(model.connection())
     };
     let title = Line::from(vec![
         Span::styled(" HQ ", Style::new().fg(Color::Black).bg(Color::Cyan).bold()),
@@ -1450,7 +1688,7 @@ fn render_header(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         Span::styled(section_label(model.section()), Style::new().bold()),
     ]);
     let context = Line::from(vec![
-        Span::styled(" local workspace ", Style::new().fg(Color::DarkGray)),
+        Span::styled(" this device ", Style::new().fg(Color::DarkGray)),
         Span::styled(status, connection_style(model.connection())),
     ]);
     frame.render_widget(
@@ -1542,7 +1780,11 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     let count = model.rows().map_or(0, <[UiRow]>::len);
     let mut lines = vec![
         Line::styled(
-            format!(" {} · {count} items", section_label(model.section())),
+            format!(
+                " {} · {count} {}",
+                section_label(model.section()),
+                section_item_label(model.section(), count)
+            ),
             Style::new().fg(Color::Cyan).bold(),
         ),
         Line::default(),
@@ -1562,7 +1804,7 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
             }
         }
         None => lines.push(Line::styled(
-            " Loading authoritative snapshot…",
+            " Loading your workspace…",
             Style::new().fg(Color::Yellow),
         )),
     }
@@ -1573,10 +1815,7 @@ fn human_issue_lines(issue: &UiHumanIssue) -> Vec<Line<'static>> {
     let heading = Style::new().fg(Color::Yellow).bold();
     match issue {
         UiHumanIssue::NoAccountSelected => vec![
-            Line::styled(
-                " No human account is selected on this installation.",
-                heading,
-            ),
+            Line::styled(" No human account is selected on this device.", heading),
             Line::from(" Create one: hq human create"),
             Line::from(" Join one: hq human join ABSOLUTE_INVITATION_PATH"),
         ],
@@ -1590,40 +1829,40 @@ fn human_issue_lines(issue: &UiHumanIssue) -> Vec<Line<'static>> {
         ],
         UiHumanIssue::SelectionRecords { .. } => vec![
             Line::styled(
-                " More than one local account-selection record is present.",
+                " HQ found conflicting account choices on this device.",
                 heading,
             ),
-            Line::from(" Recover evidence: hq relay sync · hq relay repair"),
+            Line::from(" Try restoring shared records: hq relay sync · hq relay repair"),
             Line::from(" Press ? then t for the conflicting records."),
         ],
         UiHumanIssue::SelectedWithoutAuthority { .. } => vec![
             Line::styled(
-                " The selected account has no authority for this installation.",
+                " This device is not allowed to use the selected account.",
                 heading,
             ),
-            Line::from(" Recover evidence: hq relay sync · hq relay repair"),
+            Line::from(" Try restoring shared records: hq relay sync · hq relay repair"),
             Line::from(" New device? Rejoin with: hq human join ABSOLUTE_INVITATION_PATH"),
         ],
         UiHumanIssue::MembershipPending(_) => vec![
             Line::styled(
-                " This installation has not finished joining the account.",
+                " This device has not finished joining the account.",
                 heading,
             ),
             Line::from(" Finish joining: hq human join ABSOLUTE_INVITATION_PATH"),
         ],
         UiHumanIssue::MembershipRevoked(_) => vec![
             Line::styled(
-                " This installation was removed from the selected account.",
+                " This device was removed from the selected account.",
                 heading,
             ),
             Line::from(" Ask the account owner for a new invitation, then run hq human join."),
         ],
         UiHumanIssue::MembershipAuthorityConflict { .. } => vec![
             Line::styled(
-                " Local account authority has conflicting active evidence.",
+                " HQ found conflicting records for this device's account access.",
                 heading,
             ),
-            Line::from(" Recover evidence: hq relay sync · hq relay repair"),
+            Line::from(" Try restoring shared records: hq relay sync · hq relay repair"),
             Line::from(" Press ? then t for the exact membership evidence."),
         ],
     }
@@ -1723,13 +1962,13 @@ fn render_conversation_entry<'entry>(
     };
     let kind = match entry.kind {
         UiConversationEntryKind::Message => "message",
-        UiConversationEntryKind::Activity => "activity",
+        UiConversationEntryKind::Activity => "update",
     };
     let state = match entry.message_state {
         Some(UiMessageState::Open) => "open",
         Some(UiMessageState::Archived) => "archived",
         Some(UiMessageState::Rejected) => "rejected",
-        None => "non-actionable",
+        None => "information only",
     };
     let mut lines = vec![
         Line::from(vec![
@@ -1837,7 +2076,10 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
     } else {
         Line::from(vec![
             Span::raw("     "),
-            Span::styled(row_state_label(row.state), row_state_style(row.state)),
+            Span::styled(
+                row_state_label(model.section(), row.state),
+                row_state_style(row.state),
+            ),
             Span::raw(" · "),
             Span::styled(row.detail.as_str(), Style::new().fg(Color::DarkGray)),
         ])
@@ -1858,7 +2100,10 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
             UiHelpPage::Technical => " t contextual help · ?/Esc close help".to_owned(),
         }
     } else if let Some(failure) = model.last_failure() {
-        format!(" {} · {}", failure.code, failure.action)
+        format!(
+            " Could not complete that action · {} · ? details",
+            failure.action
+        )
     } else if let Some(hint) = model.transient_help() {
         format!(" Hint · {hint}")
     } else if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
@@ -1949,6 +2194,16 @@ const fn connection_label(state: UiConnectionState) -> &'static str {
     }
 }
 
+const fn workspace_connection_label(state: UiConnectionState) -> &'static str {
+    match state {
+        UiConnectionState::Disconnected => "Offline",
+        UiConnectionState::Connecting => "Connecting…",
+        UiConnectionState::Ready => "Connected",
+        UiConnectionState::Reconnecting => "Reconnecting…",
+        UiConnectionState::Incompatible => "Update required",
+    }
+}
+
 fn connection_style(state: UiConnectionState) -> Style {
     let color = match state {
         UiConnectionState::Ready => Color::Green,
@@ -1968,12 +2223,24 @@ const fn section_label(section: UiSection) -> &'static str {
     }
 }
 
-const fn row_state_label(state: UiRowState) -> &'static str {
-    match state {
-        UiRowState::Open => "open",
-        UiRowState::Waiting => "waiting",
-        UiRowState::Archived => "archived",
-        UiRowState::Attention => "attention",
+const fn row_state_label(section: UiSection, state: UiRowState) -> &'static str {
+    match (section, state) {
+        (UiSection::Sent, UiRowState::Waiting) => "sent",
+        (_, UiRowState::Open) => "open",
+        (_, UiRowState::Waiting) => "waiting",
+        (_, UiRowState::Archived) => "archived",
+        (_, UiRowState::Attention) => "needs attention",
+    }
+}
+
+const fn section_item_label(section: UiSection, count: usize) -> &'static str {
+    match (section, count) {
+        (UiSection::Inbox | UiSection::Sent | UiSection::Archived, 1) => "conversation",
+        (UiSection::Inbox | UiSection::Sent | UiSection::Archived, _) => "conversations",
+        (UiSection::Agents, 1) => "agent",
+        (UiSection::Agents, _) => "agents",
+        (UiSection::Projects, 1) => "project",
+        (UiSection::Projects, _) => "projects",
     }
 }
 

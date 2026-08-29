@@ -130,7 +130,7 @@ pub trait TuiClientPort: Send {
     fn submit_agent_command(&mut self, _action: UiAgentAction) -> Result<u64, UiFailure> {
         Err(UiFailure {
             code: "agent_command_unavailable".to_owned(),
-            action: "use a client that supports named-agent administration".to_owned(),
+            action: "restart HQ with support for agent changes".to_owned(),
         })
     }
 
@@ -141,7 +141,7 @@ pub trait TuiClientPort: Send {
     ) -> Result<UiManagedSessionResult, UiFailure> {
         Err(UiFailure {
             code: "managed_session_unavailable".to_owned(),
-            action: "use a client that supports managed-session control".to_owned(),
+            action: "restart HQ with support for agent conversations".to_owned(),
         })
     }
 
@@ -152,7 +152,7 @@ pub trait TuiClientPort: Send {
     ) -> Result<UiProjectResult, UiFailure> {
         Err(UiFailure {
             code: "project_command_unavailable".to_owned(),
-            action: "use a client that supports project workflows".to_owned(),
+            action: "restart HQ with support for project changes".to_owned(),
         })
     }
 
@@ -226,11 +226,11 @@ impl TuiClientPort for LocalTuiClient {
             .cloned()
             .ok_or_else(|| UiFailure {
                 code: "conversation_stale".to_owned(),
-                action: "reload the authoritative mailbox snapshot".to_owned(),
+                action: "reload the Inbox and select the conversation again".to_owned(),
             })?;
         let request = ConversationPageRequest::new(key, 100, cursor).map_err(|_| UiFailure {
             code: "conversation_page_invalid".to_owned(),
-            action: "reload the authoritative mailbox snapshot".to_owned(),
+            action: "reload the Inbox and select the conversation again".to_owned(),
         })?;
         match self
             .client
@@ -243,7 +243,7 @@ impl TuiClientPort for LocalTuiClient {
             } => Ok(tui_conversation_page(row_id, page)),
             _ => Err(UiFailure {
                 code: "conversation_response_invalid".to_owned(),
-                action: "reload the authoritative mailbox snapshot".to_owned(),
+                action: "reload the Inbox and select the conversation again".to_owned(),
             }),
         }
     }
@@ -398,13 +398,13 @@ impl TuiClientPort for LocalTuiClient {
                 action: if code == "mailbox_target_stale" {
                     "reselect the target; the draft text is preserved".to_owned()
                 } else {
-                    "correct the mailbox command and retry".to_owned()
+                    "review the message or selected item and try again".to_owned()
                 },
                 code,
             }),
             _ => Err(UiFailure {
                 code: "mailbox_command_uncertain".to_owned(),
-                action: "keep the draft open while HQ reconciles the same command".to_owned(),
+                action: "keep this draft open while HQ checks whether it was sent".to_owned(),
             }),
         }
     }
@@ -436,10 +436,11 @@ impl TuiClientPort for LocalTuiClient {
             .to_owned(),
             action: match error {
                 crate::cli::CliError::AgentState => {
-                    "reload and reselect an active unconflicted agent or session".to_owned()
+                    "reload Agents and choose an active agent or saved conversation again"
+                        .to_owned()
                 }
                 crate::cli::CliError::Arguments => {
-                    "correct the agent name or session display name and retry".to_owned()
+                    "correct the agent or conversation name and try again".to_owned()
                 }
                 _ => "wait for the local node to recover, then retry".to_owned(),
             },
@@ -484,15 +485,15 @@ impl TuiClientPort for LocalTuiClient {
                 .to_owned(),
                 action: match error {
                     crate::cli::CliError::Arguments => {
-                        "correct the exact provider or session target and retry"
+                        "choose an available agent service or saved conversation and try again"
                     }
                     crate::cli::CliError::AgentState => {
-                        "reload and reselect an active unconflicted named agent"
+                        "reload Agents and choose an active agent again"
                     }
                     crate::cli::CliError::HarnessState => {
-                        "reload durable sessions before retrying this operation"
+                        "reload the agent's saved conversations before trying again"
                     }
-                    _ => "wait for the local node to recover, then retry the same target",
+                    _ => "wait for HQ to recover, then retry the same conversation",
                 }
                 .to_owned(),
             })?;
@@ -562,7 +563,7 @@ impl TuiClientPort for LocalTuiClient {
                 generation: connection_generation(state),
                 failure: UiFailure {
                     code: "unexpected_local_client_event".to_owned(),
-                    action: "waiting for a fresh authoritative snapshot".to_owned(),
+                    action: "waiting for HQ to reload your workspace".to_owned(),
                 },
             }),
             Err(error) => observations.push(TuiClientObservation::Failure {
@@ -594,7 +595,7 @@ fn draft_protocol_error() -> TuiDraftError {
     TuiDraftError {
         failure: UiFailure {
             code: "draft_response_invalid".to_owned(),
-            action: "reopen the draft from a fresh authoritative client".to_owned(),
+            action: "close and reopen the draft after HQ reconnects".to_owned(),
         },
         current: None,
     }
@@ -1667,7 +1668,7 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
             id: full_id(*message_id),
             title: terminal_text(content),
             detail: format!(
-                "{} missing · {} unusable dependencies",
+                "waiting for {} related records · {} records could not be used",
                 missing_dependencies.len(),
                 unusable_dependencies.len()
             ),
@@ -1677,7 +1678,7 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
         (UiSection::Inbox, SnapshotItem::IncompleteMessagesTruncated) => Some(UiRow {
             id: "incomplete-messages-truncated".to_owned(),
             title: "Additional incomplete messages".to_owned(),
-            detail: "reload after causal history synchronizes".to_owned(),
+            detail: "HQ will retry after more message history arrives".to_owned(),
             state: UiRowState::Attention,
             kind: UiRowKind::Diagnostic,
         }),
@@ -1694,7 +1695,15 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
         ) => Some(UiRow {
             id: full_id(*project_id),
             title: terminal_text(name),
-            detail: terminal_text(lifecycle),
+            detail: if *archived {
+                "archived".to_owned()
+            } else if !*claimable {
+                "needs attention · folder ownership conflict".to_owned()
+            } else if lifecycle == "closed" {
+                "closed".to_owned()
+            } else {
+                "open".to_owned()
+            },
             state: if *archived {
                 UiRowState::Archived
             } else if !*claimable {
@@ -1734,13 +1743,13 @@ fn agent_row(agent: &UiAgent) -> UiRow {
         } => {
             let detail = match reason {
                 UiAgentAttentionReason::IdentityConflict => {
-                    "needs attention · identity conflict".to_owned()
+                    "needs attention · saved names disagree".to_owned()
                 }
                 UiAgentAttentionReason::AssignmentConflict => {
-                    "needs attention · assignment conflict".to_owned()
+                    "needs attention · assigned to more than one project".to_owned()
                 }
                 UiAgentAttentionReason::AssignmentBlocked => assignments.first().map_or_else(
-                    || "needs attention · assignment blocked".to_owned(),
+                    || "needs attention · project setup is blocked".to_owned(),
                     |assignment| format!("needs attention · {} blocked", assignment.project_name),
                 ),
             };
@@ -2078,15 +2087,15 @@ fn project_failure(error: &crate::cli::CliError) -> UiFailure {
         ),
         crate::cli::CliError::ProjectState => (
             "project_state_stale_or_uncertain",
-            "reload and reselect the current project or working tree",
+            "reload Projects and select the current project or folder again",
         ),
         crate::cli::CliError::MessagingState => (
             "project_input_target_stale",
-            "reload and reselect the project's current mailbox",
+            "reload the project and select its current conversation again",
         ),
         _ => (
             "project_command_unavailable",
-            "wait for the local node to recover, then retry the same operation",
+            "wait for HQ to recover, then retry the same change",
         ),
     };
     UiFailure {

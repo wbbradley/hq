@@ -119,7 +119,8 @@ previous complete bundle remains visible. Conversation summaries carry store-der
 archived, and local-human-authored counts, so mailbox filters do not scan or reorder message
 bodies. Activating a summary issues the ordinary `ConversationPage` request with an opaque cursor. Returned
 message/activity unions remain in reducer order; selected/coalesced activity is presented as
-non-actionable and is never converted into a message target. The mapper also exposes only uniquely
+an `update` marked `information only` on ordinary screens and is never converted into a message
+target. Its typed activity identity and status remain in technical details. The mapper also exposes only uniquely
 named, uniquely bound, non-retired agent mailboxes as passive direct-target candidates. The protocol
 `AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately different records: one
 is canonical local-API data, while the other is a small complete navigation cache containing only
@@ -180,9 +181,10 @@ In the wide layout, Up/Down and `k`/`j` move through the vertical section list, 
 and `h`/`l` move focus between navigation and content. In compact layouts, Left/Right and `h`/`l`
 continue to move through the horizontal section navigation.
 
-The header reports the selected section, connection state, authoritative revision, and background
-refresh state without hiding retained rows. Rows expose selection, stable presentation state, and
-bounded detail. `?` opens contextual help from every ordinary section screen, whether or not that
+The header reports the selected section and plain device state (`Connected`, `Connecting…`,
+`Reconnecting…`, `Offline`, `Update required`, or `Updating…`) without hiding retained rows.
+The authoritative revision and raw connection state appear only in technical help. Rows expose
+selection, plain presentation state, and bounded detail. `?` opens contextual help from every ordinary section screen, whether or not that
 section contains or selects an item. The first help page explains the section's purpose, the
 selected item's plain-language state, and every action available in that context. `t` switches to a
 separate technical page containing stable identity, authoritative revision, connection state, and
@@ -209,16 +211,43 @@ available path, and notes that people in the user's HQ network may also appear t
 only `Esc close`; selection and composition controls remain hidden and inert until a target exists.
 
 An activated conversation uses a
-responsive second pane, centers rendering around the stable fact anchor, labels activity as
-non-actionable, and expands only typed routing, semantics, evidence, or activity sections. Enter
+responsive second pane, centers rendering around the stable fact anchor, labels activity as an
+information-only update, and expands only typed routing, semantics, evidence, or activity sections. Enter
 opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
 page; Escape collapses details and then the conversation. The conversation footer spells out the
 applicable `a archive` or `u restore` control for the selected exact message; contextual help carries
 the wider reply, direct-message, note, navigation, and quit reference. Stable failures replace the
-ordinary footer with their code and operator action. The Agents and Projects footers expose their
+ordinary footer with a plain failure statement and recovery action; their stable code remains in
+technical help. The Agents and Projects footers expose their
 primary inspect, create, search, and help controls; responsive
 modal tests cover wide and compact draft, agent-detail, and managed-switch rendering. Styling
 supplements these text markers and is not the sole carrier of state.
+
+### User-facing vocabulary and progressive disclosure
+
+Ordinary TUI copy starts from the decision a first-time user is making. It uses `folders and
+resources` for project-owned paths, `assigned agent` for who is responsible for project work,
+`saved conversation` for durable provider/session history, `agent service` for a provider choice,
+`working folder` for launch context, and `instructions` for work sent to a project. It says that HQ
+is creating, saving, checking, sending, or confirming a change instead of exposing local-API,
+reducer, reconciliation, authority, or provider-session mechanics. Boolean safety choices render
+as `Yes` or `No`, and conflict copy names the competing project, account choice, or assigned agent
+rather than reporting cardinality.
+
+Dialogs lead with what will change and why HQ needs the input. Project details first show status,
+folder ownership, and the assigned agent; agent details first show assignment-aware status and
+saved conversations; mailbox dialogs say who will receive a message or that a personal note is
+private. Destructive confirmations say what HQ keeps on disk and distinguish an explicit safety
+override from ordinary confirmation. Compact dialogs omit or shorten secondary evidence before
+they hide a required field, warning, action, or recovery instruction.
+
+Technical evidence is preserved, not translated away. Detail views and the `?` then `t` page label
+project, resource, assignment, message, request, provider/session, thread, revision, frontier,
+runtime, and recovery values as technical. Exceptional outcomes lead with `done`, `still
+finishing`, `could not make this change`, or `could not confirm whether the change finished`, then
+show the exact state/category/code, request identity, retained external state, and retry guidance.
+Render contracts cover these boundaries at wide and compact terminal sizes, including the rule
+that a stable failure code is absent from the ordinary footer and present in technical help.
 
 ## Shell obligations
 
