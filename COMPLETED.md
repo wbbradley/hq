@@ -1,5 +1,40 @@
 # Completed
 
+## 2026-08-29 — Bounded Linux workspace test-process lifecycles
+
+Split the Ubuntu Rust suite into fourteen independently bounded crate owners while retaining the
+aggregate macOS workspace suite and Ubuntu check, Clippy, and build gates. This preserved complete
+coverage without serializing unrelated tests, and changed failures from a silent whole-runner
+timeout into an exact crate, test, assertion, elapsed time, and retained terminal transcript.
+
+The isolated failures exposed three independent lifecycle defects. TUI shutdown now uses an
+out-of-band cancellation flag so queued client work cannot delay the shell's owning join. GNU
+`kill` receives `--` before a negative process-group identity, so timed-out Git descendants and
+their inherited output descriptors are terminated and reaped on Linux. Installed PTY tests now
+synchronize durable agent and project mutations against authoritative snapshots rather than
+assuming Ratatui's differential byte stream contains contiguous rendered phrases; the old raw
+`Completed` and `revision ` checks could omit unchanged terminal cells and never send the exit key.
+
+The exact final SHA passed the formerly flaky project lifecycle and agent-creation tests thirty
+consecutive times each, the complete installed terminal target, strict package Clippy, and the
+locked full workspace architecture, check, strict Clippy, all-target/all-feature test, and build
+gates. CI runs 33250380569 and 33250517661 each completed all fourteen Linux owners successfully;
+the first also completed the aggregate macOS Rust workspace successfully. The final exact
+executable-name process audits found no HQ daemon. No production record accessor facade, storage
+shape or version, migration, compatibility reader, duplicate stored/runtime state, dependency, or
+lockfile changed.
+
+### Original plan entry
+
+- **[test/high] Bound Linux workspace test-process lifecycles** — The complete Ubuntu Rust suite
+  reaches the job timeout twice after entering `cargo test`, retains the runner through its
+  cancellation grace period, and publishes no log blob, while the same revision's native Linux
+  qualification workloads and macOS workspace suite pass. Split the Linux suite into independently
+  bounded owning groups, identify the test process or daemon retaining completion, and correct its
+  lifecycle without serializing unrelated tests or weakening coverage. Complete this work when the
+  full Linux workspace suite terminates normally on repeated runs, every spawned owner is reaped,
+  and a failed test can still publish actionable diagnostics.
+
 ## 2026-08-29 — Integrated acceptance and performance gap closure
 
 Audited every integrated acceptance row against the complete passing workspace and replaced
