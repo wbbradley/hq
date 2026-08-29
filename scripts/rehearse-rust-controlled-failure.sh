@@ -131,7 +131,7 @@ jq -e '.ok == true and .kind == "lifecycle" and .data.state == "ready"' \
 relay_add=$(hq_command relay add "$relay_url") || fail 'release candidate relay policy failed'
 jq -e \
   '.ok == true and .kind == "relay_admin" and .data.operation == "relay_add" and
-   (.data.policies | any(.endpoint.value == $relay and .enabled == true))' \
+   (.data.policies | any(.endpoint == $relay and .enabled == true))' \
   --arg relay "$relay_url" <<<"$relay_add" >/dev/null || fail 'release relay policy was incomplete'
 
 HQ_RUN_CONTROLLED_RELAY_SMOKE=1 HQ_CONTROLLED_RELAY_URL="$relay_url" \
@@ -161,7 +161,7 @@ hq_command relay sync "$relay_url" >/dev/null || fail 'post-recovery synchroniza
 recovery_status=$(hq_command relay status) || fail 'post-recovery relay status failed'
 jq -e \
   '.ok == true and .kind == "relay_admin" and
-   (.data.policies | any(.endpoint.value == $relay and .enabled == true))' \
+   (.data.policies | any(.endpoint == $relay and .enabled == true))' \
   --arg relay "$relay_url" <<<"$recovery_status" >/dev/null ||
   fail 'release relay policy was not retained after recovery'
 
