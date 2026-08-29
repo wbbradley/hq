@@ -32,11 +32,11 @@ Every behavioral inventory row names one exact `test:function_name`; command and
 rows use closed proof kinds. The complete workspace suite remains the proof that the named tests
 pass together; the inventory is checked traceability, not a second hand-maintained test list.
 
-## Integrated gap audit
+## Integrated acceptance audit
 
-The native Apple-Silicon audit on 2026-08-29 resolved every acceptance-matrix requirement to a
-current exact test, command, or configuration proof. It found no unexplained behavioral failure,
-untested in-process invariant, or exceeded budget. In particular, direct evidence exists for:
+The four-host audit on 2026-08-29 resolved every acceptance-matrix requirement to a current exact
+test, command, or configuration proof. It found no unexplained behavioral failure, untested
+in-process invariant, or exceeded budget. In particular, direct evidence exists for:
 
 - generated algebra and authorization schedules, strict protocol vectors, and fuzz boundaries;
 - atomic failpoints, corrupt-projection recovery, indexed cursors, and incremental/batch equality;
@@ -45,11 +45,11 @@ untested in-process invariant, or exceeded budget. In particular, direct evidenc
 - pure TUI workflows, responsive rendering, installed terminal restoration, and CLI repair; and
 - secret/environment redaction, bounded queues and tasks, and every quantitative resource gate.
 
-Evidence that inherently depends on another native target or an operator-controlled external
-system remains explicit work, not a waived gap. Native Linux/macOS target records belong to the
-next qualification queue item. Controlled relay/provider smoke, backup/restore, catch-up, node
-replacement, and read-only Go archival rehearsals belong to the queued release-candidate item and
-retain their separate authority boundaries.
+Native Linux and macOS evidence is recorded below. Evidence that inherently depends on an
+operator-controlled external system remains explicit work, not a waived gap. Controlled
+relay/provider smoke, backup/restore, catch-up, node replacement, and read-only Go archival
+rehearsals belong to the queued release-candidate item and retain their separate authority
+boundaries.
 
 ## Performance workloads and budgets
 
@@ -103,6 +103,39 @@ ADR-0001 additionally requires portable crate compilation for x86-64 and ARM64 o
 Cross-compilation proves only that the portable code compiles for that target; it does not prove
 kernel credentials, Unix-socket lifecycle, terminal behavior, installed providers, resident memory,
 or process shutdown on that target. Those claims therefore come only from the native matrix.
+
+## Recorded native qualification
+
+Implementation revision `762f0785059a87cf8c9bfeb34a6bd11bdc54de4a` passed the complete native
+matrix in [GitHub Actions run 33250739592](https://github.com/wbbradley/hq/actions/runs/33250739592).
+The combined artifact is
+`rust-qualification-matrix-762f0785059a87cf8c9bfeb34a6bd11bdc54de4a`. Its four environment
+records were downloaded together and independently revalidated with
+`scripts/verify-rust-qualification-matrix.sh` against that exact revision:
+
+| Runner | Operating system | Architecture | Rust host | Release build |
+| --- | --- | --- | --- | ---: |
+| `ubuntu-24.04` | Linux | x86_64 | `x86_64-unknown-linux-gnu` | 95 s |
+| `ubuntu-24.04-arm` | Linux | aarch64 | `aarch64-unknown-linux-gnu` | 94 s |
+| `macos-15-intel` | Darwin | x86_64 | `x86_64-apple-darwin` | 184 s |
+| `macos-15` | Darwin | arm64 | `aarch64-apple-darwin` | 165 s |
+
+Every record names the same full revision, the expected native host, the complete checked-in budget
+set, and a clean release build below the 900-second limit. The aggregate validator also rejects a
+missing, extra, malformed, host-mismatched, budget-mismatched, or different-revision record.
+
+The final acceptance audit additionally reran the installed TUI terminal lifecycle target, the
+provider-neutral harness conformance suite, the real Codex adapter seam, the architecture gate, the
+evidence inventory validator, and the matrix validator's acceptance and rejection cases. The eleven
+acceptance rows therefore have direct current behavioral or configuration evidence, all Rust-era
+protocol and ownership boundaries remain architecture-checked, durable and external-effect
+boundaries retain deterministic recovery evidence, and normal Rust operation has no Go code path,
+protocol, or state dependency.
+
+The audit does not claim operator-controlled dogfood or cutover evidence. Those remaining
+definition-of-done proofs are already the next release-candidate task: controlled relay and
+provider operation, backup/restore, offline catch-up, failure and repair drills, node replacement,
+read-only Go archival, and rollback rehearsal. No additional integrated acceptance gap was found.
 
 Any missing row, unexplained failure, untested invariant, or exceeded budget is new work for
 `PLAN.md`. It is not waived by raising a limit during the same qualification run.
