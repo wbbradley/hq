@@ -1,5 +1,70 @@
 # Completed
 
+## 2026-08-29 — Final completion-evidence hardening
+
+Expanded the acceptance inventory from representative area-level examples to 70 direct current
+proofs. The domain row names all nine algebra laws individually; the remaining rows directly bind
+incremental/batch equality, stable cursor concatenation, concurrent readiness, nondisruptive relay
+wakes, harness backpressure and worker release, expected-head and resource conflicts, retained pure
+and installed TUI workflows, every quantitative budget, and each recovery drill. The validator
+continues to reject missing paths, renamed selectors, duplicate proofs, and unknown proof kinds.
+
+Strengthened the definition-of-done contract without duplicating its semantic clauses. Durable and
+external recovery now has separate evidence for identity/database recovery, relay/provider failure,
+project-saga response loss, and archived-Go rollback. The protocol verifier checks all four ADRs,
+canonical/control/local/envelope/relay/pairing specifications, harness and Codex contracts,
+conformance trace, vectors, links, and three executable consistency suites. The new Go-independence
+gate proves Cargo metadata, production Rust sources, release packaging, the native release workflow,
+service definitions, and Rust state paths do not invoke or include Go; tamper fixtures prove it
+rejects a Go command and a Go release payload.
+
+Applied the pre-release rules directly: the one unshipped clean-sheet SQLite schema is v1, with no
+migration or compatibility path, and stale pre-implementation wording is gone. The shared
+`HarnessSessionOperationState` remains the single stored/runtime state type. Existing contract tests
+prove passive application, harness, relay, project, local-API, and TUI records expose fields
+directly while invariant, capability, and secret-bearing types remain opaque. Replaced yanked
+`chacha20` 0.10.1 with the compatible RustCrypto 0.10.2 release; the dependency audit reports no
+yanked package.
+
+The clean worktree passed formatting, architecture and Go-independence gates, behavior-ledger and
+causal-spec validation, every required protocol-spec consistency suite, dependency policy, strict
+workspace Clippy, locked check/build, the complete all-target/all-feature test suite, all local
+qualification budgets, and every release/recovery validator fixture. No exact workspace-built HQ
+daemon or executable-name `hq` process remained after the suite.
+
+Actions run 33264900059 passed exact revision
+`7317efae3aea99150c5d4d5eb3c729517fd11bb1` on Linux x86-64, Linux ARM64, Intel macOS, and Apple
+Silicon, then passed controlled relay/provider failure, synthetic archived-Go rollback, and the
+aggregate verifier. A fresh independent download passed all five validators and regenerated the
+release, recovery, and cutover manifests byte-for-byte. The release, recovery, controlled-failure,
+rollback, and cutover SHA-256 digests are respectively
+`b71510aaa50ea743f924500b8e6c3026e4560eddd499a5edf41cd061dbe22d92`,
+`4244542c918dec9490c216ed3d57334dea32a6cf61e241d702eec9fc5fc0c293`,
+`a21cb98a5bf826c4661a50f5dad4e99953b6d23e94fd1b4c561e014ff78776c5`,
+`36c9a975a14d12087326fac5ba4840032ccf14aba51e71e1472637ee8234b08a`, and
+`d40e56906b5a35d88b0e4b1398c4f9701c9d0b6c828a7d1167d1318d700c13a0`.
+
+The final governing-design audit found all 147 required ledger rows implemented, all 11 deferred
+rows still explicitly outside first-release scope, and all 33 exclusions preserved. Every one of
+the 11 acceptance rows and nine definition-of-done clauses has direct current evidence. All seven
+pre-coding decisions are resolved in ADRs or named specifications. The release remains a v0.1.0
+candidate only: no tag, publication, production identity access, live service activation, soak,
+or cutover occurred.
+
+### Original plan entry
+
+- **[verification/high] Close completion-evidence coverage gaps** — Expand the acceptance inventory
+  so every required subclaim in each matrix row names direct current executable evidence, bind the
+  definition-of-done recovery clause to identity/database, relay/provider, project-saga, and
+  archived-Go rollback evidence, and add an explicit verifier proving normal Rust build/runtime
+  inputs have no Go code, state, protocol, service, or toolchain dependency. Remove stale
+  pre-implementation markers from normative Rust documents, and normalize the unshipped
+  clean-sheet storage schema to v1 without a migration or compatibility path. Replace any yanked
+  cryptographic dependency discovered by the final dependency audit. Complete this work only after
+  the exact revision passes local gates and the native release workflow, independently downloaded
+  artifacts reproduce the release, recovery, and cutover manifests, and a final requirement audit
+  finds no weak or missing proof.
+
 ## 2026-08-29 — Rust cutover package and evidence audit
 
 Replaced the supported install and operator surface with the first Rust v0.1.0 candidate: four

@@ -140,11 +140,28 @@ validates that inventory and emits `hq-rust-cutover-evidence-v1`, binding the na
 recovery, controlled-failure, and rollback records by SHA-256. The record explicitly preserves two
 unperformed operator decisions: soak authorization and separate cutover authorization.
 
-The complete cutover audit passed in GitHub Actions run
-[33257580370](https://github.com/wbbradley/hq/actions/runs/33257580370) for exact revision
-`f408702866faeeb2530ecedff4a25f9786bea8be`. An independent download passed all five validators and
-reproduced the release, recovery, and cutover aggregates byte-for-byte. The final bundle contains
-exactly 11 acceptance clauses and nine definition-of-done clauses; no acceptance gap was found.
+The final completion audit passed in GitHub Actions run
+[33264900059](https://github.com/wbbradley/hq/actions/runs/33264900059) for exact revision
+`7317efae3aea99150c5d4d5eb3c729517fd11bb1`. The acceptance inventory now contains 70 direct proofs:
+all nine algebra laws individually, every acceptance subclaim, representative retained installed
+workflows, every quantitative budget, and every recovery drill. The cutover contract retains the
+same exact 11 acceptance clauses and nine definition-of-done clauses while binding the recovery
+clause separately to identity/database, relay/provider, project-saga, and archived-Go rollback
+evidence. Protocol proof now checks every required Rust-era specification and its executable
+consistency suites. Normal-operation proof separately rejects Go code, tooling, state, packaging,
+and service inputs, including positive and tampered fixtures.
+
+An independent fresh download passed all five validators and reproduced the release, recovery, and
+cutover aggregates byte-for-byte. Their SHA-256 digests are respectively
+`b71510aaa50ea743f924500b8e6c3026e4560eddd499a5edf41cd061dbe22d92`,
+`4244542c918dec9490c216ed3d57334dea32a6cf61e241d702eec9fc5fc0c293`, and
+`d40e56906b5a35d88b0e4b1398c4f9701c9d0b6c828a7d1167d1318d700c13a0`; the controlled-failure and
+rollback evidence digests are `a21cb98a5bf826c4661a50f5dad4e99953b6d23e94fd1b4c561e014ff78776c5`
+and `36c9a975a14d12087326fac5ba4840032ccf14aba51e71e1472637ee8234b08a`.
+The unshipped clean-sheet database identifies itself as storage v1 and has no migration path, the
+stored and runtime harness operation state is one shared type, passive records keep idiomatic public
+fields, and the dependency audit contains no yanked cryptographic package. No acceptance or
+definition-of-done gap remains.
 
 Any missing row, unexplained failure, untested invariant, or exceeded budget is new work for
 `PLAN.md`. It is not waived by raising a limit during the same qualification run.

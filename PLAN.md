@@ -54,14 +54,4 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[verification/high] Close completion-evidence coverage gaps** — Expand the acceptance inventory
-  so every required subclaim in each matrix row names direct current executable evidence, bind the
-  definition-of-done recovery clause to identity/database, relay/provider, project-saga, and
-  archived-Go rollback evidence, and add an explicit verifier proving normal Rust build/runtime
-  inputs have no Go code, state, protocol, service, or toolchain dependency. Remove stale
-  pre-implementation markers from normative Rust documents, and normalize the unshipped
-  clean-sheet storage schema to v1 without a migration or compatibility path. Replace any yanked
-  cryptographic dependency discovered by the final dependency audit. Complete this work only after
-  the exact revision passes local gates and the native release workflow, independently downloaded
-  artifacts reproduce the release, recovery, and cutover manifests, and a final requirement audit
-  finds no weak or missing proof.
+_No remaining tasks._
