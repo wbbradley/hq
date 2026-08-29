@@ -30,14 +30,84 @@ pub enum UiConnectionState {
 }
 
 /// Current local human-account availability derived by the authoritative client mapper.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiHumanState {
-    /// No uniquely selected active human account is currently available.
-    Unavailable,
     /// One uniquely selected active human account is available.
     Ready,
-    /// Local selection or authority history is present but ambiguous.
-    Ambiguous,
+    /// A typed condition prevents safe human-account use.
+    NeedsAttention(UiHumanIssue),
+}
+
+/// Exact reason the local human account cannot currently be used.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiHumanIssue {
+    /// This installation has no account selection or candidates.
+    NoAccountSelected,
+    /// One selection record has candidates but no unique active account.
+    SelectionCandidates {
+        /// Exact causal-maximal account candidates.
+        candidates: Vec<[u8; 32]>,
+        /// Complete selection frontier.
+        frontier: Vec<[u8; 32]>,
+    },
+    /// More than one local selection projection was present.
+    SelectionRecords {
+        /// Complete conflicting local selection records.
+        records: Vec<UiHumanSelectionEvidence>,
+    },
+    /// An account is selected but no local creator or membership authority exists.
+    SelectedWithoutAuthority {
+        /// Selected human account.
+        account_id: [u8; 32],
+        /// Complete selection frontier.
+        selection_frontier: Vec<[u8; 32]>,
+    },
+    /// This installation has not completed the selected account invitation.
+    MembershipPending(UiHumanMembershipEvidence),
+    /// This installation was revoked from the selected account.
+    MembershipRevoked(UiHumanMembershipEvidence),
+    /// Local membership projections or active acceptances are not unique.
+    MembershipAuthorityConflict {
+        /// Complete matching local membership records.
+        records: Vec<UiHumanMembershipEvidence>,
+    },
+}
+
+/// Technical evidence for one local human-account selection projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiHumanSelectionEvidence {
+    /// Exact causal-maximal account candidates.
+    pub candidates: Vec<[u8; 32]>,
+    /// Unique selected account claimed by this record.
+    pub active: Option<[u8; 32]>,
+    /// Complete selection frontier.
+    pub frontier: Vec<[u8; 32]>,
+}
+
+/// Closed local membership classification used by human recovery presentation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiHumanMembershipStatus {
+    /// A grant exists without a current exact acceptance.
+    Pending,
+    /// One or more current exact acceptances exist.
+    Active,
+    /// A current revoke removes local membership.
+    Revoked,
+    /// Evidence did not match the closed membership vocabulary.
+    Conflicted,
+}
+
+/// Technical evidence for one local membership projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiHumanMembershipEvidence {
+    /// Selected human account.
+    pub account_id: [u8; 32],
+    /// Closed projected membership status.
+    pub status: UiHumanMembershipStatus,
+    /// Complete membership frontier.
+    pub frontier: Vec<[u8; 32]>,
+    /// Exact active acceptance authorities.
+    pub active_acceptances: Vec<[u8; 32]>,
 }
 
 /// Top-level semantic section selected by the user.
@@ -1522,8 +1592,8 @@ impl UiModel {
     }
 
     /// Returns current local human-account availability when a snapshot exists.
-    pub fn human_state(&self) -> Option<UiHumanState> {
-        self.snapshot.as_ref().map(|snapshot| snapshot.human_state)
+    pub fn human_state(&self) -> Option<&UiHumanState> {
+        self.snapshot.as_ref().map(|snapshot| &snapshot.human_state)
     }
 
     /// Reports whether a fresh authoritative snapshot is loading behind retained content.

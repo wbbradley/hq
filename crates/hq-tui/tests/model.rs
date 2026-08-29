@@ -311,6 +311,36 @@ fn authoritative_refresh_retains_visible_rows_until_replacement_arrives() {
 }
 
 #[test]
+fn authoritative_refresh_replaces_the_typed_human_recovery_condition() {
+    let loaded = loaded_model(snapshot(1, &["thread"]));
+    assert_eq!(loaded.human_state(), Some(&UiHumanState::Ready));
+
+    let invalidated = update(loaded, UiEvent::Invalidated { revision: 2 })
+        .expect("request authoritative refresh");
+    let refresh_id = snapshot_effect(&invalidated.effects);
+    let mut refreshed_snapshot = snapshot(2, &["thread"]);
+    refreshed_snapshot.human_state =
+        UiHumanState::NeedsAttention(hq_tui::UiHumanIssue::SelectedWithoutAuthority {
+            account_id: [7; 32],
+            selection_frontier: vec![[8; 32]],
+        });
+    let refreshed = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: refresh_id,
+            snapshot: refreshed_snapshot,
+        },
+    )
+    .expect("replace human recovery condition");
+    assert!(matches!(
+        refreshed.model.human_state(),
+        Some(UiHumanState::NeedsAttention(
+            hq_tui::UiHumanIssue::SelectedWithoutAuthority { account_id, .. }
+        )) if *account_id == [7; 32]
+    ));
+}
+
+#[test]
 fn reload_preserves_a_logical_selection_and_falls_back_when_it_disappears() {
     let started = started_model();
     let first_id = snapshot_effect(&started.effects);

@@ -13,11 +13,11 @@ use ratatui::{
 use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
     UiAgentProjectAssignment, UiAgentStatus, UiConnectionState, UiConversationEntry,
-    UiConversationEntryKind, UiFocus, UiHelpPage, UiHumanState, UiMailboxAction,
-    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiMessageState, UiModel, UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome,
-    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection,
-    model::WIDE_WIDTH,
+    UiConversationEntryKind, UiFocus, UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence,
+    UiHumanMembershipStatus, UiHumanState, UiMailboxAction, UiMailboxDraftTarget, UiMailboxModal,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel, UiProjectAction,
+    UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread, UiRow, UiRowKind,
+    UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -119,7 +119,9 @@ fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
             |snapshot| format!("Authoritative revision: {}", snapshot.revision),
         )),
     ];
-    if let Some(row) = model.selected_row_data() {
+    if let Some(UiHumanState::NeedsAttention(issue)) = model.human_state() {
+        lines.extend(technical_human_lines(model, issue));
+    } else if let Some(row) = model.selected_row_data() {
         lines.push(Line::from(format!("Stable item ID: {}", row.id)));
         lines.push(Line::from(format!(
             "Item type: {}",
@@ -145,6 +147,140 @@ fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
     }
     lines.push(Line::from("t — contextual help · ? / Esc — close help"));
     lines
+}
+
+fn technical_human_lines(model: &UiModel, issue: &UiHumanIssue) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        format!("Human recovery code: {}", human_issue_code(issue)),
+        Style::new().fg(Color::Yellow),
+    )];
+    match issue {
+        UiHumanIssue::NoAccountSelected => {
+            lines.push(Line::from("Selection evidence: no local account selection"));
+        }
+        UiHumanIssue::SelectionCandidates {
+            candidates,
+            frontier,
+        } => {
+            for candidate in candidates.iter().take(3) {
+                lines.push(Line::from(format!(
+                    "Candidate account: {}",
+                    technical_identity(model, *candidate)
+                )));
+            }
+            push_omitted_evidence(&mut lines, candidates.len(), 3);
+            lines.push(evidence_ids_line(model, "Selection frontier", frontier));
+        }
+        UiHumanIssue::SelectionRecords { records } => {
+            for (index, record) in records.iter().take(3).enumerate() {
+                lines.push(Line::from(format!(
+                    "Selection record {}: active={} · {} candidates · {} frontier facts",
+                    index + 1,
+                    record
+                        .active
+                        .map_or_else(|| "none".to_owned(), |id| technical_identity(model, id)),
+                    record.candidates.len(),
+                    record.frontier.len()
+                )));
+            }
+            push_omitted_evidence(&mut lines, records.len(), 3);
+        }
+        UiHumanIssue::SelectedWithoutAuthority {
+            account_id,
+            selection_frontier,
+        } => {
+            lines.push(Line::from(format!(
+                "Selected account: {}",
+                technical_identity(model, *account_id)
+            )));
+            lines.push(evidence_ids_line(
+                model,
+                "Selection frontier",
+                selection_frontier,
+            ));
+        }
+        UiHumanIssue::MembershipPending(evidence) | UiHumanIssue::MembershipRevoked(evidence) => {
+            lines.extend(technical_membership_lines(model, evidence));
+        }
+        UiHumanIssue::MembershipAuthorityConflict { records } => {
+            for evidence in records.iter().take(2) {
+                lines.extend(technical_membership_lines(model, evidence));
+            }
+            push_omitted_evidence(&mut lines, records.len(), 2);
+        }
+    }
+    lines
+}
+
+fn technical_membership_lines(
+    model: &UiModel,
+    evidence: &UiHumanMembershipEvidence,
+) -> Vec<Line<'static>> {
+    let status = match evidence.status {
+        UiHumanMembershipStatus::Pending => "pending",
+        UiHumanMembershipStatus::Active => "active",
+        UiHumanMembershipStatus::Revoked => "revoked",
+        UiHumanMembershipStatus::Conflicted => "conflicted",
+    };
+    vec![
+        Line::from(format!(
+            "Membership: account {} · {status}",
+            technical_identity(model, evidence.account_id)
+        )),
+        evidence_ids_line(model, "Membership frontier", &evidence.frontier),
+        evidence_ids_line(model, "Active acceptances", &evidence.active_acceptances),
+    ]
+}
+
+fn technical_identity(model: &UiModel, identity: [u8; 32]) -> String {
+    if model.viewport().width >= WIDE_WIDTH {
+        full_identity(identity)
+    } else {
+        short_identity(identity)
+    }
+}
+
+fn evidence_ids_line(model: &UiModel, label: &'static str, evidence: &[[u8; 32]]) -> Line<'static> {
+    let shown = evidence
+        .iter()
+        .take(3)
+        .map(|identity| technical_identity(model, *identity))
+        .collect::<Vec<_>>();
+    let suffix = if evidence.len() > shown.len() {
+        format!(" · {} more in hq human show", evidence.len() - shown.len())
+    } else {
+        String::new()
+    };
+    Line::from(format!(
+        "{label} ({}): {}{suffix}",
+        evidence.len(),
+        if shown.is_empty() {
+            "none".to_owned()
+        } else {
+            shown.join(", ")
+        }
+    ))
+}
+
+fn push_omitted_evidence(lines: &mut Vec<Line<'static>>, count: usize, shown: usize) {
+    if count > shown {
+        lines.push(Line::from(format!(
+            "{} more records · hq human show lists complete evidence",
+            count - shown
+        )));
+    }
+}
+
+const fn human_issue_code(issue: &UiHumanIssue) -> &'static str {
+    match issue {
+        UiHumanIssue::NoAccountSelected => "human_no_account_selected",
+        UiHumanIssue::SelectionCandidates { .. } => "human_selection_candidates",
+        UiHumanIssue::SelectionRecords { .. } => "human_selection_records_conflict",
+        UiHumanIssue::SelectedWithoutAuthority { .. } => "human_selected_without_authority",
+        UiHumanIssue::MembershipPending(_) => "human_membership_pending",
+        UiHumanIssue::MembershipRevoked(_) => "human_membership_revoked",
+        UiHumanIssue::MembershipAuthorityConflict { .. } => "human_membership_authority_conflict",
+    }
 }
 
 const fn section_help_text(section: UiSection) -> &'static str {
@@ -1044,6 +1180,15 @@ fn short_identity(identity: [u8; 32]) -> String {
         })
 }
 
+fn full_identity(identity: [u8; 32]) -> String {
+    identity
+        .iter()
+        .fold(String::with_capacity(64), |mut rendered, byte| {
+            let _ = write!(rendered, "{byte:02x}");
+            rendered
+        })
+}
+
 fn agent_summary(agent: &UiAgent) -> Vec<Line<'_>> {
     let mut lines = vec![
         Line::styled(
@@ -1403,23 +1548,8 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         Line::default(),
     ];
     match model.human_state() {
-        Some(UiHumanState::Unavailable) => {
-            lines.push(Line::styled(
-                " No active human account is currently available",
-                Style::new().fg(Color::Yellow).bold(),
-            ));
-            lines.push(Line::from(" New: hq human create · Join: hq human join"));
-            lines.push(Line::from(
-                " Recover: hq relay sync / hq relay repair · Inspect: hq human show",
-            ));
-            lines.push(Line::default());
-        }
-        Some(UiHumanState::Ambiguous) => {
-            lines.push(Line::styled(
-                " Human account selection or authority is ambiguous",
-                Style::new().fg(Color::Yellow).bold(),
-            ));
-            lines.push(Line::from(" Inspect and resolve with: hq human show"));
+        Some(UiHumanState::NeedsAttention(issue)) => {
+            lines.extend(human_issue_lines(issue));
             lines.push(Line::default());
         }
         Some(UiHumanState::Ready) | None => {}
@@ -1437,6 +1567,66 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         )),
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn human_issue_lines(issue: &UiHumanIssue) -> Vec<Line<'static>> {
+    let heading = Style::new().fg(Color::Yellow).bold();
+    match issue {
+        UiHumanIssue::NoAccountSelected => vec![
+            Line::styled(
+                " No human account is selected on this installation.",
+                heading,
+            ),
+            Line::from(" Create one: hq human create"),
+            Line::from(" Join one: hq human join ABSOLUTE_INVITATION_PATH"),
+        ],
+        UiHumanIssue::SelectionCandidates { .. } => vec![
+            Line::styled(
+                " The human account selection is unresolved; HQ will not guess.",
+                heading,
+            ),
+            Line::from(" Choose one: hq human select ACCOUNT_ID"),
+            Line::from(" Press ? then t for the candidate account IDs."),
+        ],
+        UiHumanIssue::SelectionRecords { .. } => vec![
+            Line::styled(
+                " More than one local account-selection record is present.",
+                heading,
+            ),
+            Line::from(" Recover evidence: hq relay sync · hq relay repair"),
+            Line::from(" Press ? then t for the conflicting records."),
+        ],
+        UiHumanIssue::SelectedWithoutAuthority { .. } => vec![
+            Line::styled(
+                " The selected account has no authority for this installation.",
+                heading,
+            ),
+            Line::from(" Recover evidence: hq relay sync · hq relay repair"),
+            Line::from(" New device? Rejoin with: hq human join ABSOLUTE_INVITATION_PATH"),
+        ],
+        UiHumanIssue::MembershipPending(_) => vec![
+            Line::styled(
+                " This installation has not finished joining the account.",
+                heading,
+            ),
+            Line::from(" Finish joining: hq human join ABSOLUTE_INVITATION_PATH"),
+        ],
+        UiHumanIssue::MembershipRevoked(_) => vec![
+            Line::styled(
+                " This installation was removed from the selected account.",
+                heading,
+            ),
+            Line::from(" Ask the account owner for a new invitation, then run hq human join."),
+        ],
+        UiHumanIssue::MembershipAuthorityConflict { .. } => vec![
+            Line::styled(
+                " Local account authority has conflicting active evidence.",
+                heading,
+            ),
+            Line::from(" Recover evidence: hq relay sync · hq relay repair"),
+            Line::from(" Press ? then t for the exact membership evidence."),
+        ],
+    }
 }
 
 fn empty_section_lines(section: UiSection) -> Vec<Line<'static>> {

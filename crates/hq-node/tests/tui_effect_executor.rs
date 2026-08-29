@@ -23,7 +23,8 @@ use hq_node::{
 };
 use hq_tui::{
     UiAgentAction, UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect,
-    UiEvent, UiFailure, UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft,
+    UiEvent, UiFailure, UiHumanIssue, UiHumanMembershipEvidence, UiHumanMembershipStatus,
+    UiHumanSelectionEvidence, UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft,
     UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
     UiMessageState, UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome,
     UiProjectResourceCheck, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
@@ -31,6 +32,56 @@ use hq_tui::{
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+fn human_selection(
+    installation: [u8; 32],
+    account: [u8; 32],
+    frontier: Vec<[u8; 32]>,
+) -> SnapshotItem {
+    SnapshotItem::AccountSelection {
+        installation_id: Id32::new(installation),
+        candidates: vec![Id32::new(account)],
+        active: Some(Id32::new(account)),
+        frontier: frontier.into_iter().map(Id32::new).collect(),
+    }
+}
+
+fn human_membership(
+    installation: [u8; 32],
+    account: [u8; 32],
+    state: &str,
+    frontier: Vec<[u8; 32]>,
+    active_acceptances: Vec<[u8; 32]>,
+) -> SnapshotItem {
+    let frontier_fact = frontier.first().copied();
+    let grants = matches!(state, "pending" | "active")
+        .then(|| DeviceGrantDto {
+            grant_id: Id32::new([20; 32]),
+            grant_fact: Id32::new(frontier_fact.unwrap_or([21; 32])),
+            device: Id32::new(installation),
+            signing_key: Id32::new([22; 32]),
+            label: None,
+            relay_hints: Vec::new(),
+            frontier_member: true,
+            active: state == "active",
+        })
+        .into_iter()
+        .collect();
+    SnapshotItem::Membership {
+        account_id: Id32::new(account),
+        device: Id32::new(installation),
+        state: state.to_owned(),
+        frontier: frontier.into_iter().map(Id32::new).collect(),
+        grants,
+        acceptances: active_acceptances.iter().copied().map(Id32::new).collect(),
+        revokes: (state == "revoked")
+            .then_some(frontier_fact.map(Id32::new))
+            .flatten()
+            .into_iter()
+            .collect(),
+        active_acceptances: active_acceptances.into_iter().map(Id32::new).collect(),
+    }
+}
 
 #[test]
 fn executor_loads_the_complete_snapshot_and_preserves_identity() {
@@ -584,7 +635,10 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
 
     let snapshot = tui_snapshot([99; 32], &source);
     assert_eq!(snapshot.revision, 21);
-    assert_eq!(snapshot.human_state, UiHumanState::Unavailable);
+    assert_eq!(
+        snapshot.human_state,
+        UiHumanState::NeedsAttention(UiHumanIssue::NoAccountSelected)
+    );
     assert_eq!(snapshot.inbox_rows.len(), 2);
     assert_eq!(snapshot.inbox_rows[0].title, "Thread 030303030303");
     assert_eq!(snapshot.inbox_rows[0].detail, "2 open messages");
@@ -868,7 +922,7 @@ fn authoritative_snapshot_human_state_requires_local_selection_and_active_member
     );
     assert_eq!(
         tui_snapshot([99; 32], &source).human_state,
-        UiHumanState::Unavailable,
+        UiHumanState::NeedsAttention(UiHumanIssue::NoAccountSelected),
         "another machine's valid selection must not authorize this installation"
     );
 }
@@ -901,6 +955,152 @@ fn authoritative_snapshot_human_state_accepts_local_account_creator_authority() 
         tui_snapshot(local, &source).human_state,
         UiHumanState::Ready
     );
+}
+
+#[test]
+fn authoritative_snapshot_distinguishes_local_human_selection_failures() {
+    let local = [42; 32];
+    let first = Id32::new([1; 32]);
+    let second = Id32::new([2; 32]);
+    let frontier = Id32::new([3; 32]);
+
+    let absent = AuthoritativeSnapshotDto::new(1, Vec::new()).expect("empty snapshot");
+    assert_eq!(
+        tui_snapshot(local, &absent).human_state,
+        UiHumanState::NeedsAttention(UiHumanIssue::NoAccountSelected)
+    );
+
+    let candidates = AuthoritativeSnapshotDto::new(
+        1,
+        vec![SnapshotItem::AccountSelection {
+            installation_id: Id32::new(local),
+            candidates: vec![first, second],
+            active: None,
+            frontier: vec![frontier],
+        }],
+    )
+    .expect("candidate selection snapshot");
+    assert_eq!(
+        tui_snapshot(local, &candidates).human_state,
+        UiHumanState::NeedsAttention(UiHumanIssue::SelectionCandidates {
+            candidates: vec![[1; 32], [2; 32]],
+            frontier: vec![[3; 32]],
+        })
+    );
+
+    let records = AuthoritativeSnapshotDto::new(
+        1,
+        vec![
+            SnapshotItem::AccountSelection {
+                installation_id: Id32::new(local),
+                candidates: vec![first],
+                active: Some(first),
+                frontier: vec![frontier],
+            },
+            SnapshotItem::AccountSelection {
+                installation_id: Id32::new(local),
+                candidates: vec![second],
+                active: Some(second),
+                frontier: vec![Id32::new([4; 32])],
+            },
+        ],
+    )
+    .expect("conflicting selection records");
+    assert_eq!(
+        tui_snapshot(local, &records).human_state,
+        UiHumanState::NeedsAttention(UiHumanIssue::SelectionRecords {
+            records: vec![
+                UiHumanSelectionEvidence {
+                    candidates: vec![[1; 32]],
+                    active: Some([1; 32]),
+                    frontier: vec![[3; 32]],
+                },
+                UiHumanSelectionEvidence {
+                    candidates: vec![[2; 32]],
+                    active: Some([2; 32]),
+                    frontier: vec![[4; 32]],
+                },
+            ],
+        })
+    );
+}
+
+#[test]
+fn authoritative_snapshot_distinguishes_local_human_authority_failures() {
+    let local = [42; 32];
+    let account = [7; 32];
+    let selection_frontier = vec![[8; 32]];
+
+    let without_authority = AuthoritativeSnapshotDto::new(
+        1,
+        vec![human_selection(local, account, selection_frontier.clone())],
+    )
+    .expect("selected account without local authority");
+    assert_eq!(
+        tui_snapshot(local, &without_authority).human_state,
+        UiHumanState::NeedsAttention(UiHumanIssue::SelectedWithoutAuthority {
+            account_id: account,
+            selection_frontier: selection_frontier.clone(),
+        })
+    );
+
+    let pending = AuthoritativeSnapshotDto::new(
+        1,
+        vec![
+            human_selection(local, account, selection_frontier.clone()),
+            human_membership(local, account, "pending", vec![[9; 32]], Vec::new()),
+        ],
+    )
+    .expect("pending local membership");
+    assert_eq!(
+        tui_snapshot(local, &pending).human_state,
+        UiHumanState::NeedsAttention(UiHumanIssue::MembershipPending(UiHumanMembershipEvidence {
+            account_id: account,
+            status: UiHumanMembershipStatus::Pending,
+            frontier: vec![[9; 32]],
+            active_acceptances: Vec::new(),
+        }))
+    );
+
+    let revoked = AuthoritativeSnapshotDto::new(
+        1,
+        vec![
+            human_selection(local, account, selection_frontier.clone()),
+            human_membership(local, account, "revoked", vec![[10; 32]], Vec::new()),
+        ],
+    )
+    .expect("revoked local membership");
+    assert_eq!(
+        tui_snapshot(local, &revoked).human_state,
+        UiHumanState::NeedsAttention(UiHumanIssue::MembershipRevoked(UiHumanMembershipEvidence {
+            account_id: account,
+            status: UiHumanMembershipStatus::Revoked,
+            frontier: vec![[10; 32]],
+            active_acceptances: Vec::new(),
+        }))
+    );
+
+    let conflicted = AuthoritativeSnapshotDto::new(
+        1,
+        vec![
+            human_selection(local, account, selection_frontier),
+            human_membership(
+                local,
+                account,
+                "active",
+                vec![[11; 32], [12; 32]],
+                vec![[11; 32], [12; 32]],
+            ),
+        ],
+    )
+    .expect("conflicting local membership authority");
+    assert!(matches!(
+        tui_snapshot(local, &conflicted).human_state,
+        UiHumanState::NeedsAttention(UiHumanIssue::MembershipAuthorityConflict { records })
+            if records.len() == 1
+                && records[0].status == UiHumanMembershipStatus::Active
+                && records[0].active_acceptances == [[11; 32], [12; 32]]
+    ));
 }
 
 #[test]

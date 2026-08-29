@@ -250,5 +250,19 @@ Before activating the terminal or attempting daemon ownership, the installed she
 read-only validation of the installation identity. A missing identity fails immediately with the
 stable `setup.identity_required` diagnostic and the `hq identity init` action. Identity-only nodes
 remain supported: after the first authoritative snapshot the TUI presents explicit `human create`,
-`human join`, relay-recovery, and inspection guidance instead of treating the absent human account
+`human join`, selection, and relay-recovery guidance instead of treating the absent human account
 as a shell failure.
+
+Human-account recovery is a closed typed presentation, not one aggregate ambiguous flag. The node
+mapper distinguishes no local selection, unresolved selection candidates, multiple local selection
+records, a selected account without local authority, pending membership, revoked membership, and
+non-unique membership authority. Ordinary screens explain the exact condition and only applicable
+create, join, select, sync, or repair action. They never ask the user to run `hq human show` merely
+to discover which category failed.
+
+Contextual technical help assigns each condition a stable `human_*` recovery code and retains the
+directly relevant account candidates, selection frontier, membership status/frontier, and active
+acceptance identities. Wide layouts show complete candidate account IDs for direct use with
+`hq human select`; bounded layouts use short evidence and direct `hq human show` only when the full
+bounded evidence set cannot fit. A local creator root or exactly one active local membership
+acceptance produces `Ready`; evidence owned by another installation never does.

@@ -98,15 +98,141 @@ fn identity_only_state_renders_setup_and_recovery_actions() {
             height: 18,
         },
         UiSnapshot {
-            human_state: UiHumanState::Unavailable,
+            human_state: UiHumanState::NeedsAttention(hq_tui::UiHumanIssue::NoAccountSelected),
             ..empty_render_snapshot(1)
         },
     );
     let rendered = render_text(&model);
-    assert!(rendered.contains("No active human account"));
+    assert!(rendered.contains("No human account is selected"));
     assert!(rendered.contains("hq human create"));
     assert!(rendered.contains("hq human join"));
-    assert!(rendered.contains("hq relay sync"));
+    assert!(!rendered.contains("hq human show"));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn human_account_issues_have_specific_recovery_and_technical_evidence() {
+    let membership = |status| hq_tui::UiHumanMembershipEvidence {
+        account_id: [7; 32],
+        status,
+        frontier: vec![[8; 32]],
+        active_acceptances: Vec::new(),
+    };
+    let cases = vec![
+        (
+            hq_tui::UiHumanIssue::NoAccountSelected,
+            "No human account is selected",
+            "human_no_account_selected",
+        ),
+        (
+            hq_tui::UiHumanIssue::SelectionCandidates {
+                candidates: vec![[1; 32], [2; 32]],
+                frontier: vec![[3; 32]],
+            },
+            "human account selection is unresolved",
+            "human_selection_candidates",
+        ),
+        (
+            hq_tui::UiHumanIssue::SelectionRecords {
+                records: vec![hq_tui::UiHumanSelectionEvidence {
+                    candidates: vec![[1; 32]],
+                    active: Some([1; 32]),
+                    frontier: vec![[3; 32]],
+                }],
+            },
+            "More than one local account-selection record",
+            "human_selection_records_conflict",
+        ),
+        (
+            hq_tui::UiHumanIssue::SelectedWithoutAuthority {
+                account_id: [7; 32],
+                selection_frontier: vec![[3; 32]],
+            },
+            "selected account has no authority",
+            "human_selected_without_authority",
+        ),
+        (
+            hq_tui::UiHumanIssue::MembershipPending(membership(
+                hq_tui::UiHumanMembershipStatus::Pending,
+            )),
+            "not finished joining",
+            "human_membership_pending",
+        ),
+        (
+            hq_tui::UiHumanIssue::MembershipRevoked(membership(
+                hq_tui::UiHumanMembershipStatus::Revoked,
+            )),
+            "removed from the selected account",
+            "human_membership_revoked",
+        ),
+        (
+            hq_tui::UiHumanIssue::MembershipAuthorityConflict {
+                records: vec![hq_tui::UiHumanMembershipEvidence {
+                    active_acceptances: vec![[9; 32], [10; 32]],
+                    ..membership(hq_tui::UiHumanMembershipStatus::Active)
+                }],
+            },
+            "conflicting active evidence",
+            "human_membership_authority_conflict",
+        ),
+    ];
+
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 18,
+        },
+    ] {
+        for (issue, explanation, code) in &cases {
+            let model = loaded_snapshot_model(
+                size,
+                UiSnapshot {
+                    human_state: UiHumanState::NeedsAttention(issue.clone()),
+                    ..empty_render_snapshot(42)
+                },
+            );
+            let rendered = render_text(&model);
+            assert!(rendered.contains(explanation), "{code} at {size:?}");
+            assert!(!rendered.contains("selection or authority is ambiguous"));
+
+            let help = update(model, UiEvent::Input(UiInput::Character('?')))
+                .expect("open account help")
+                .model;
+            let technical = update(help, UiEvent::Input(UiInput::Character('t')))
+                .expect("open account evidence")
+                .model;
+            let technical = render_text(&technical);
+            assert!(technical.contains(code), "{code} at {size:?}");
+        }
+    }
+
+    let candidate_model = loaded_snapshot_model(
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSnapshot {
+            human_state: UiHumanState::NeedsAttention(hq_tui::UiHumanIssue::SelectionCandidates {
+                candidates: vec![[1; 32], [2; 32]],
+                frontier: vec![[3; 32]],
+            }),
+            ..empty_render_snapshot(42)
+        },
+    );
+    let help = update(candidate_model, UiEvent::Input(UiInput::Character('?')))
+        .expect("candidate help")
+        .model;
+    let technical = update(help, UiEvent::Input(UiInput::Character('t')))
+        .expect("candidate evidence")
+        .model;
+    let rendered = render_text(&technical);
+    assert!(rendered.contains(&"01".repeat(32)));
+    assert!(rendered.contains(&"02".repeat(32)));
+    assert!(rendered.contains(&"03".repeat(32)));
 }
 
 #[test]

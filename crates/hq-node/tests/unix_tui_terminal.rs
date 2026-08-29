@@ -88,8 +88,8 @@ fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
         );
         assert!(
             run.bytes
-                .windows(b"No active human account".len())
-                .any(|window| window == b"No active human account"),
+                .windows(b"No human account is selected".len())
+                .any(|window| window == b"No human account is selected"),
             "identity-only TUI did not render setup and recovery guidance"
         );
         assert!(
@@ -588,8 +588,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             .any(|window| window == ENTER_ALTERNATE_SCREEN);
         let interaction_ready = !matches!(interaction, PtyInteraction::QuitAfterSetup)
             || bytes
-                .windows(b"No active human account".len())
-                .any(|window| window == b"No active human account");
+                .windows(b"No human account is selected".len())
+                .any(|window| window == b"No human account is selected");
         if !initial_key_sent && alternate_screen_entered && interaction_ready {
             let key = match interaction {
                 PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup => b"q".as_slice(),

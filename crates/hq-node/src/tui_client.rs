@@ -25,7 +25,8 @@ use hq_tui::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
     UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentProjectAssignment,
     UiAgentSession, UiAgentStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
-    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanState,
+    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanIssue,
+    UiHumanMembershipEvidence, UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject,
     UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
@@ -1257,15 +1258,33 @@ fn tui_human_state(
                 installation_id,
                 candidates,
                 active,
-                ..
-            } if installation_id.bytes() == local_installation => Some((candidates, active)),
+                frontier,
+            } if installation_id.bytes() == local_installation => Some(UiHumanSelectionEvidence {
+                candidates: candidates.iter().map(|id| id.bytes()).collect(),
+                active: active.map(Id32::bytes),
+                frontier: frontier.iter().map(|id| id.bytes()).collect(),
+            }),
             _ => None,
         })
         .collect::<Vec<_>>();
     match selections.as_slice() {
-        [] => UiHumanState::Unavailable,
-        [(candidates, None)] if candidates.is_empty() => UiHumanState::Unavailable,
-        [(_, Some(account))] => {
+        [] => UiHumanState::NeedsAttention(UiHumanIssue::NoAccountSelected),
+        [selection] if selection.active.is_none() && selection.candidates.is_empty() => {
+            UiHumanState::NeedsAttention(UiHumanIssue::NoAccountSelected)
+        }
+        [selection] if selection.active.is_none() => {
+            UiHumanState::NeedsAttention(UiHumanIssue::SelectionCandidates {
+                candidates: selection.candidates.clone(),
+                frontier: selection.frontier.clone(),
+            })
+        }
+        [selection] => {
+            let Some(account) = selection.active else {
+                return UiHumanState::NeedsAttention(UiHumanIssue::SelectionCandidates {
+                    candidates: selection.candidates.clone(),
+                    frontier: selection.frontier.clone(),
+                });
+            };
             let creator_authority = snapshot.items.iter().any(|item| {
                 matches!(
                     item,
@@ -1273,33 +1292,79 @@ fn tui_human_state(
                         account_id,
                         creator_installation,
                         ..
-                    } if *account_id == *account
+                    } if account_id.bytes() == account
                         && creator_installation.bytes() == local_installation
                 )
             });
-            let device_authority = snapshot.items.iter().any(|item| {
-                matches!(
-                    item,
-                    SnapshotItem::Membership {
-                        account_id,
-                        device,
-                        state,
-                        active_acceptances,
-                        ..
-                    } if *account_id == *account
-                        && device.bytes() == local_installation
-                        && state == "active"
-                        && !active_acceptances.is_empty()
-                )
-            });
-            if creator_authority || device_authority {
-                UiHumanState::Ready
-            } else {
-                UiHumanState::Ambiguous
+            if creator_authority {
+                return UiHumanState::Ready;
+            }
+
+            let memberships = local_human_memberships(snapshot, local_installation, account);
+            match memberships.as_slice() {
+                [] => UiHumanState::NeedsAttention(UiHumanIssue::SelectedWithoutAuthority {
+                    account_id: account,
+                    selection_frontier: selection.frontier.clone(),
+                }),
+                [membership] if membership.status == UiHumanMembershipStatus::Pending => {
+                    UiHumanState::NeedsAttention(UiHumanIssue::MembershipPending(
+                        membership.clone(),
+                    ))
+                }
+                [membership] if membership.status == UiHumanMembershipStatus::Revoked => {
+                    UiHumanState::NeedsAttention(UiHumanIssue::MembershipRevoked(
+                        membership.clone(),
+                    ))
+                }
+                [membership]
+                    if membership.status == UiHumanMembershipStatus::Active
+                        && membership.active_acceptances.len() == 1 =>
+                {
+                    UiHumanState::Ready
+                }
+                _ => UiHumanState::NeedsAttention(UiHumanIssue::MembershipAuthorityConflict {
+                    records: memberships,
+                }),
             }
         }
-        _ => UiHumanState::Ambiguous,
+        _ => UiHumanState::NeedsAttention(UiHumanIssue::SelectionRecords {
+            records: selections,
+        }),
     }
+}
+
+fn local_human_memberships(
+    snapshot: &AuthoritativeSnapshotDto,
+    local_installation: [u8; 32],
+    account: [u8; 32],
+) -> Vec<UiHumanMembershipEvidence> {
+    snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Membership {
+                account_id,
+                device,
+                state,
+                frontier,
+                active_acceptances,
+                ..
+            } if account_id.bytes() == account && device.bytes() == local_installation => {
+                Some(UiHumanMembershipEvidence {
+                    account_id: account,
+                    status: match state.as_str() {
+                        "pending" => UiHumanMembershipStatus::Pending,
+                        "active" => UiHumanMembershipStatus::Active,
+                        "revoked" => UiHumanMembershipStatus::Revoked,
+                        _ => UiHumanMembershipStatus::Conflicted,
+                    },
+                    frontier: frontier.iter().map(|id| id.bytes()).collect(),
+                    active_acceptances: active_acceptances.iter().map(|id| id.bytes()).collect(),
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_lines)]
