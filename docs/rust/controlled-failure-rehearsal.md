@@ -49,17 +49,17 @@ not authorize a soak, cutover, tag, publication, or live service-manager change.
 
 ## Verified candidate
 
-GitHub Actions run [33256363580](https://github.com/wbbradley/hq/actions/runs/33256363580)
+GitHub Actions run [33257580370](https://github.com/wbbradley/hq/actions/runs/33257580370)
 passed the complete four-target release and recovery matrix, controlled-failure job, and aggregate
-validator for revision `140d7d2d1ff7fa1183606f71a5c90f33263d9a78`. The controlled job completed
-in 94 seconds against the pinned relay digest above.
+validator for revision `f408702866faeeb2530ecedff4a25f9786bea8be`. The controlled job completed
+in 103 seconds against the pinned relay digest above.
 
 The combined artifact
-`rust-release-candidate-140d7d2d1ff7fa1183606f71a5c90f33263d9a78` was downloaded independently.
-Fresh validators accepted all four release records, all four recovery records, and the controlled
-failure record. Regenerated release and recovery manifests were byte-for-byte equal to the
-workflow manifests. Their SHA-256 digests are:
+`rust-release-candidate-f408702866faeeb2530ecedff4a25f9786bea8be` was downloaded independently.
+Fresh validators accepted all four release records, all four recovery records, the controlled
+failure record, the rollback record, and the cutover bundle. Regenerated release, recovery, and
+cutover manifests were byte-for-byte equal to the workflow manifests. Relevant SHA-256 digests are:
 
-- controlled failure: `c8a173b6adef05e0b655d09258bc92f08dcddec723863a88fcd595df700ffef7`
-- release manifest: `79bad23377aaa7484a7e0618c4387d5550199604ee5d2210a14e7dee13fdf97f`
-- recovery manifest: `507cb73b70504e1f53934346de4758fe175893f3d4f6154e97782419e4cd0cda`
+- controlled failure: `0ca19febf61c787d3a24f46df6164ef8cb71a08211653a13fe5b9e47bc499bf0`
+- release manifest: `cbb974f52877497c568e6bb45f3ce8505e064df1ac95bf7e80455826e97ce7ba`
+- recovery manifest: `84a6548c24127ab3ea72057a3866863270c88a1f42bbef4e0ec27c3b31b16377`

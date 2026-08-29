@@ -1,5 +1,54 @@
 # Completed
 
+## 2026-08-29 — Rust cutover package and evidence audit
+
+Replaced the supported install and operator surface with the first Rust v0.1.0 candidate: four
+native target mappings, checksum and embedded-revision verification, exact Rust state paths, the
+pinned Codex 0.150.1 provider, and one-executable service management. The systemd definition now
+uses an absolute executable marker and contains no Go path; both systemd and launchd guidance keeps
+provider lookup narrow. The changelog states plainly that HQ has never shipped, so there is no
+storage upgrade, migration, legacy compatibility, or standing-installation obligation.
+
+Added an authorization-separated operator checklist. Soak permits only a new identity and state on
+controlled relays; production cutover remains a later independent decision. The checklist covers
+process/state-root inventory, read-only archival, exact service selection, recovery limits,
+rollback triggers, and the invariant that unrelated HQ daemons are never killed by name.
+
+Added a Linux packaged-binary rollback drill around an inaccessible synthetic Go binary, key,
+database, and log. It starts only an explicit ephemeral Rust state, proves readiness and clean
+shutdown, atomically changes an offline operator selector, compares archive metadata, and compares
+the pre/post target-directory HQ process inventory. It never executes the Go binary, opens its
+state after archival, touches production identity, or signals an unrelated process. Positive and
+tamper fixtures enforce every evidence field.
+
+The cutover contract covers all eleven acceptance-matrix areas and nine definition-of-done clauses.
+Its aggregate binds the contract, four-host release manifest, four-host recovery manifest,
+controlled relay/provider failure, and synthetic rollback evidence by SHA-256 while recording that
+soak and cutover authorization remain unperformed.
+
+Actions run 33257580370 passed every native package/recovery lane, the 103-second controlled failure
+job, the 15-second rollback job, and aggregate validation for exact revision
+`f408702866faeeb2530ecedff4a25f9786bea8be`. The combined artifact was downloaded independently;
+all five validators passed and the release, recovery, and cutover manifests regenerated
+byte-for-byte. The cutover bundle SHA-256 is
+`b61b0997c87c46fd9a9c155f26e690e2c0925fd41bb1db3d5bc27338358a6fdf`.
+
+Formatting, action/workflow syntax, ShellCheck, strict workspace Clippy, the locked complete
+all-target/all-feature test suite, qualification inventory, and validator tamper tests pass. The
+final acceptance and definition-of-done audit found no gap. No accessor facade, duplicate
+stored/runtime state, storage/protocol bump, dependency, or lockfile changed; no tag, publication,
+live service change, production identity access, soak, or cutover occurred.
+
+### Original plan entry
+
+- **[release/high] Complete the Rust cutover package and evidence audit** — Update supported-install
+  and operator documentation, service-manager guidance, recovery boundaries, and the release
+  changelog/version candidate. Rehearse rollback to an untouched archived synthetic Go
+  installation without starting it or opening its state, produce the cutover checklist and
+  evidence bundle, and audit every acceptance-matrix row and definition-of-done clause. Complete
+  this work when an operator can separately authorize soak and cutover with known rollback steps;
+  do not tag, publish, replace, disable, or activate any live installation.
+
 ## 2026-08-29 — Controlled relay and provider failure rehearsal
 
 Added an isolated Linux x86-64 release-candidate drill that consumes the already packaged binary,

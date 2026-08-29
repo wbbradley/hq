@@ -54,10 +54,4 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[release/high] Complete the Rust cutover package and evidence audit** — Update supported-install
-  and operator documentation, service-manager guidance, recovery boundaries, and the release
-  changelog/version candidate. Rehearse rollback to an untouched archived synthetic Go
-  installation without starting it or opening its state, produce the cutover checklist and
-  evidence bundle, and audit every acceptance-matrix row and definition-of-done clause. Complete
-  this work when an operator can separately authorize soak and cutover with known rollback steps;
-  do not tag, publish, replace, disable, or activate any live installation.
+_No remaining tasks._

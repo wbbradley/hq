@@ -62,15 +62,15 @@ unrelated HQ processes. See [cutover.md](cutover.md).
 ## Recorded recovery evidence
 
 GitHub Actions run
-[33252489386](https://github.com/wbbradley/hq/actions/runs/33252489386) built revision
-`6abdcf43f4820f1b55c19d3db55db1b78e647099` and passed the isolated recovery drill on Linux
+[33257580370](https://github.com/wbbradley/hq/actions/runs/33257580370) built revision
+`f408702866faeeb2530ecedff4a25f9786bea8be` and passed the isolated recovery drill on Linux
 x86-64, Linux ARM64, macOS x86-64, and Apple Silicon. Every native record reports exact identity
 round-trip, identity-only backup scope, unsupported database-history restoration, successful
 projection repair, original restart, replacement startup, clean shutdown, prohibited Go-state
 access, and unchanged inaccessible Go sentinels.
 
 The combined artifact is
-`rust-release-candidate-6abdcf43f4820f1b55c19d3db55db1b78e647099`. It was downloaded into a
+`rust-release-candidate-f408702866faeeb2530ecedff4a25f9786bea8be`. It was downloaded into a
 new temporary directory, where fresh release-artifact and recovery-matrix validation passed. The
 regenerated recovery manifest was byte-for-byte equal to the workflow-produced manifest. This is
 recovery rehearsal evidence, not authorization to duplicate an identity on live hosts or restore,

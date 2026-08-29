@@ -140,5 +140,11 @@ validates that inventory and emits `hq-rust-cutover-evidence-v1`, binding the na
 recovery, controlled-failure, and rollback records by SHA-256. The record explicitly preserves two
 unperformed operator decisions: soak authorization and separate cutover authorization.
 
+The complete cutover audit passed in GitHub Actions run
+[33257580370](https://github.com/wbbradley/hq/actions/runs/33257580370) for exact revision
+`f408702866faeeb2530ecedff4a25f9786bea8be`. An independent download passed all five validators and
+reproduced the release, recovery, and cutover aggregates byte-for-byte. The final bundle contains
+exactly 11 acceptance clauses and nine definition-of-done clauses; no acceptance gap was found.
+
 Any missing row, unexplained failure, untested invariant, or exceeded budget is new work for
 `PLAN.md`. It is not waived by raising a limit during the same qualification run.
