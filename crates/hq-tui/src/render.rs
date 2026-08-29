@@ -1156,12 +1156,22 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             }
             if targets.is_empty() {
                 lines.push(Line::styled(
-                    "No unconflicted local agent mailbox is available",
-                    Style::new().fg(Color::Yellow),
+                    "No reachable recipients yet.",
+                    Style::new().fg(Color::Yellow).bold(),
+                ));
+                lines.push(Line::from(
+                    "Create an agent from the Agents section, then return here.",
+                ));
+                lines.push(Line::from(
+                    "People in your HQ network can appear here when they are reachable.",
                 ));
             }
             lines.push(Line::default());
-            lines.push(Line::from("↑/↓ select · Enter compose · Esc cancel"));
+            lines.push(Line::from(if targets.is_empty() {
+                "Esc close"
+            } else {
+                "↑/↓ select · Enter compose · Esc cancel"
+            }));
             frame.render_widget(
                 Paragraph::new(lines)
                     .block(Block::bordered().title(" Direct message "))
@@ -1415,9 +1425,7 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         Some(UiHumanState::Ready) | None => {}
     }
     match model.rows() {
-        Some([]) => {
-            lines.push(Line::styled(" No items", Style::new().fg(Color::DarkGray)));
-        }
+        Some([]) => lines.extend(empty_section_lines(model.section())),
         Some(rows) => {
             for row in rows {
                 lines.extend(render_row(model, row));
@@ -1429,6 +1437,36 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         )),
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn empty_section_lines(section: UiSection) -> Vec<Line<'static>> {
+    let heading = Style::new().fg(Color::Cyan).bold();
+    match section {
+        UiSection::Inbox => vec![
+            Line::styled(" No conversations need your attention.", heading),
+            Line::from(" Start one now: d message · n note"),
+        ],
+        UiSection::Sent => vec![
+            Line::styled(
+                " You have not started or replied to a conversation.",
+                heading,
+            ),
+            Line::from(" Start one now: d message · n note"),
+        ],
+        UiSection::Archived => vec![
+            Line::styled(" You have not put any conversations away.", heading),
+            Line::from(" Browse Inbox or Sent to find an active conversation."),
+        ],
+        UiSection::Agents => vec![
+            Line::styled(" No named workers yet.", heading),
+            Line::from(" Press c create an agent you can assign and contact."),
+        ],
+        UiSection::Projects => vec![
+            Line::styled(" No projects yet.", heading),
+            Line::from(" A project records work and ownership of its folders and resources."),
+            Line::from(" Press c create a project from a folder."),
+        ],
+    }
 }
 
 fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {

@@ -196,6 +196,18 @@ shortcut is transient presentation state rather than an operation failure. It ex
 prerequisite—for example, selecting a message rather than an activity update—and disappears on the
 next meaningful input. Stable failures remain visually and behaviorally distinct.
 
+Empty sections never collapse to a generic `No items` label. Inbox, Sent, and Archived each explain
+the kind of conversation that normally appears there and name only an action the user can take from
+that screen. Empty Agents offers creation of a named worker. Empty Projects explains that a project
+records work and ownership of folders and resources, then offers creation from a folder without
+making Git worktree management the primary concept. Empty-state footers and contextual help omit
+`Enter` actions when there is no selected item.
+
+The direct-message chooser treats recipients as a future-extensible typed catalog. When it is
+empty, it explains that no reachable recipient exists, points to agent creation as the currently
+available path, and notes that people in the user's HQ network may also appear there. It renders
+only `Esc close`; selection and composition controls remain hidden and inert until a target exists.
+
 An activated conversation uses a
 responsive second pane, centers rendering around the stable fact anchor, labels activity as
 non-actionable, and expands only typed routing, semantics, evidence, or activity sections. Enter

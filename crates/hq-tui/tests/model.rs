@@ -987,6 +987,29 @@ fn direct_target_reselection_survives_authoritative_reorder() {
 }
 
 #[test]
+fn empty_direct_recipient_selection_is_inert_and_cancelable() {
+    let loaded = loaded_model(snapshot(1, &[]));
+    let opened =
+        update(loaded, UiEvent::Input(UiInput::Character('d'))).expect("open recipient chooser");
+    assert!(matches!(
+        opened.model.mailbox_modal(),
+        Some(UiMailboxModal::SelectDirect { targets, selected: None }) if targets.is_empty()
+    ));
+
+    for input in [UiInput::NextItem, UiInput::PreviousItem, UiInput::Activate] {
+        let inert = update(opened.model.clone(), UiEvent::Input(input))
+            .expect("unavailable recipient action is inert");
+        assert!(inert.effects.is_empty());
+        assert_eq!(inert.model, opened.model);
+    }
+
+    let closed = update(opened.model, UiEvent::Input(UiInput::Escape))
+        .expect("close empty recipient chooser");
+    assert!(closed.model.mailbox_modal().is_none());
+    assert_eq!(redraw_count(&closed.effects), 1);
+}
+
+#[test]
 fn direct_archive_and_restore_emit_only_their_typed_commands() {
     let mut source = snapshot(1, &["thread-a"]);
     source.direct_targets = vec![direct_target("builder", 5)];

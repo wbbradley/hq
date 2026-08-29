@@ -110,6 +110,70 @@ fn identity_only_state_renders_setup_and_recovery_actions() {
 }
 
 #[test]
+fn empty_sections_and_recipient_chooser_explain_exact_next_actions() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 18,
+        },
+    ] {
+        for (section, explanation, action) in [
+            (
+                UiSection::Inbox,
+                "No conversations need your attention.",
+                "d message · n note",
+            ),
+            (
+                UiSection::Sent,
+                "You have not started or replied to a conversation.",
+                "d message · n note",
+            ),
+            (
+                UiSection::Archived,
+                "You have not put any conversations away.",
+                "Browse Inbox or Sent",
+            ),
+            (
+                UiSection::Agents,
+                "No named workers yet.",
+                "c create an agent",
+            ),
+            (
+                UiSection::Projects,
+                "No projects yet.",
+                "c create a project from a folder",
+            ),
+        ] {
+            let model = empty_section_model(size, section);
+            let rendered = render_text(&model);
+            assert!(rendered.contains(explanation), "{section:?} at {size:?}");
+            assert!(rendered.contains(action), "{section:?} at {size:?}");
+            assert!(!rendered.contains(" No items"));
+            if section == UiSection::Projects {
+                assert!(rendered.contains("ownership of its folders"));
+                assert!(!rendered.contains("worktree"));
+            }
+        }
+
+        let empty_inbox = empty_section_model(size, UiSection::Inbox);
+        let chooser = update(empty_inbox, UiEvent::Input(UiInput::Character('d')))
+            .expect("open empty recipient chooser")
+            .model;
+        let rendered = render_text(&chooser);
+        assert!(rendered.contains("No reachable recipients yet."));
+        assert!(rendered.contains("Create an agent from the Agents section"));
+        assert!(rendered.contains("People in your HQ network can appear here"));
+        assert!(rendered.contains("Esc close"));
+        assert!(!rendered.contains("Enter compose"));
+        assert!(!rendered.contains("↑/↓ select"));
+    }
+}
+
+#[test]
 fn contextual_help_covers_every_section_with_and_without_a_selection() {
     for size in [
         UiSize {
@@ -866,6 +930,30 @@ fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> Ui
     }
     update(model, UiEvent::Input(UiInput::Character('?')))
         .expect("open contextual help")
+        .model
+}
+
+fn empty_section_model(size: UiSize, section: UiSection) -> UiModel {
+    let mut model = loaded_snapshot_model(size, empty_render_snapshot(42));
+    let section_steps = match section {
+        UiSection::Inbox => 0,
+        UiSection::Sent => 1,
+        UiSection::Archived => 2,
+        UiSection::Agents => 3,
+        UiSection::Projects => 4,
+    };
+    let section_input = if size.width >= 96 {
+        UiInput::NextItem
+    } else {
+        UiInput::NextSection
+    };
+    for _ in 0..section_steps {
+        model = update(model, UiEvent::Input(section_input.clone()))
+            .expect("select empty section")
+            .model;
+    }
+    update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("focus empty section")
         .model
 }
 
