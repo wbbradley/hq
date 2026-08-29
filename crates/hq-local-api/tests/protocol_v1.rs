@@ -10,7 +10,7 @@ use hq_domain::{
     ShortText, SigningPublicKey, Timestamp,
 };
 use hq_local_api::protocol::v1::{
-    AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
+    ActivityStatusDto, AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
     AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
     CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ClientHello, ConversationEntryDto,
@@ -776,6 +776,35 @@ fn conversation_message_page_preserves_addressing_state_and_ready_thread_semanti
 }
 
 #[test]
+fn conversation_activity_status_preserves_typed_failure_reason() {
+    let entry = ConversationEntryDto::Activity {
+        fact_id: Id32::new([1; 32]),
+        sequence: 1,
+        status: ActivityStatusDto::Failed {
+            reason: "provider_unavailable".to_owned(),
+        },
+        content: "operation failed".to_owned(),
+        truncated: false,
+    };
+    let page = ConversationPageDto::new(vec![entry], None).expect("typed activity validates");
+    round_trip(&WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(1).expect("nonzero"),
+        ResponseResult::ConversationPage(page),
+    )));
+
+    let invalid = ConversationEntryDto::Activity {
+        fact_id: Id32::new([1; 32]),
+        sequence: 1,
+        status: ActivityStatusDto::Failed {
+            reason: "x".repeat(1_000),
+        },
+        content: "operation failed".to_owned(),
+        truncated: false,
+    };
+    assert!(ConversationPageDto::new(vec![invalid], None).is_err());
+}
+
+#[test]
 fn incomplete_addressed_message_round_trips_as_inert_snapshot_diagnostic() {
     let snapshot = AuthoritativeSnapshotDto::new(
         7,
@@ -1003,6 +1032,8 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             key: conversation,
             latest_fact: Some(id(11)),
             open_messages: 1,
+            archived_messages: 0,
+            sent_messages: 1,
         },
         SnapshotItem::Agent {
             agent_id: id(12),

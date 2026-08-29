@@ -1,6 +1,7 @@
 //! Reconnecting local-client mapping and the single TUI effect executor.
 
 use std::{
+    collections::BTreeMap,
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -8,11 +9,16 @@ use std::{
 
 use hq_local_api::{
     BlockingClientError, ClientConnectionState, ClientEvent,
-    protocol::v1::{AuthoritativeSnapshotDto, ConversationKeyDto, Id32, SnapshotItem},
+    protocol::v1::{
+        ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
+        ConversationMessageDto, ConversationPageRequest, Id32, MessagePurposeDto,
+        PresentationKindDto, Request, ResponseResult, SnapshotItem,
+    },
 };
 use hq_tui::{
-    EffectId, UiConnectionState, UiEffect, UiEvent, UiFailure, UiRow, UiRowState, UiSection,
-    UiSnapshot, UiTimerKind,
+    EffectId, UiActivityStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
+    UiConversationPage, UiEffect, UiEvent, UiFailure, UiMessageState, UiRow, UiRowKind, UiRowState,
+    UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{LocalNodeClientError, LocalNodeEventClient};
@@ -77,6 +83,13 @@ pub trait TuiClientPort: Send {
     /// Loads and maps one complete authoritative snapshot for the exact requested section.
     fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure>;
 
+    /// Loads one bounded reducer-ordered page for an exact snapshot row identity.
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure>;
+
     /// Polls subscribed invalidation and reconnect observations for a bounded interval.
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation>;
 }
@@ -85,6 +98,7 @@ pub trait TuiClientPort: Send {
 pub struct LocalTuiClient {
     client: LocalNodeEventClient,
     observed_connection: Option<ClientConnectionState>,
+    conversation_keys: BTreeMap<String, ConversationKeyDto>,
 }
 
 impl LocalTuiClient {
@@ -93,16 +107,62 @@ impl LocalTuiClient {
         Self {
             client,
             observed_connection: None,
+            conversation_keys: BTreeMap::new(),
         }
     }
 }
 
 impl TuiClientPort for LocalTuiClient {
     fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
-        self.client
+        let snapshot = self
+            .client
             .snapshot()
-            .map(|snapshot| tui_snapshot(section, snapshot))
-            .map_err(|error| client_failure(&error))
+            .map_err(|error| client_failure(&error))?;
+        self.conversation_keys = snapshot
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SnapshotItem::Conversation { key, .. } => {
+                    let (row_id, _) = conversation_identity(key.clone());
+                    Some((row_id, key.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        Ok(tui_snapshot(section, snapshot))
+    }
+
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        let key = self
+            .conversation_keys
+            .get(row_id)
+            .cloned()
+            .ok_or_else(|| UiFailure {
+                code: "conversation_stale".to_owned(),
+                action: "reload the authoritative mailbox snapshot".to_owned(),
+            })?;
+        let request = ConversationPageRequest::new(key, 100, cursor).map_err(|_| UiFailure {
+            code: "conversation_page_invalid".to_owned(),
+            action: "reload the authoritative mailbox snapshot".to_owned(),
+        })?;
+        match self
+            .client
+            .request(Request::ConversationPage(request))
+            .map_err(|error| client_failure(&error))?
+        {
+            ClientEvent::Response {
+                result: ResponseResult::ConversationPage(page),
+                ..
+            } => Ok(tui_conversation_page(row_id, page)),
+            _ => Err(UiFailure {
+                code: "conversation_response_invalid".to_owned(),
+                action: "reload the authoritative mailbox snapshot".to_owned(),
+            }),
+        }
     }
 
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
@@ -175,7 +235,15 @@ struct ScheduledTimer {
 }
 
 enum WorkerCommand {
-    LoadSnapshot { id: EffectId, section: UiSection },
+    LoadSnapshot {
+        id: EffectId,
+        section: UiSection,
+    },
+    LoadConversation {
+        id: EffectId,
+        row_id: String,
+        cursor: Option<String>,
+    },
     Shutdown,
 }
 
@@ -228,6 +296,19 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                     }
                     self.commands
                         .try_send(WorkerCommand::LoadSnapshot { id, section })
+                        .map_err(|error| match error {
+                            TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                                TuiExecutorError::WorkerUnavailable
+                            }
+                        })?;
+                    self.outstanding_snapshots.push(id);
+                }
+                UiEffect::LoadConversation { id, row_id, cursor } => {
+                    if self.effect_is_outstanding(id) {
+                        return Err(TuiExecutorError::DuplicateEffectIdentity);
+                    }
+                    self.commands
+                        .try_send(WorkerCommand::LoadConversation { id, row_id, cursor })
                         .map_err(|error| match error {
                             TrySendError::Full(_) | TrySendError::Disconnected(_) => {
                                 TuiExecutorError::WorkerUnavailable
@@ -330,7 +411,9 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
     fn complete_snapshot_identity(&mut self, event: &UiEvent) {
         let completed = match event {
             UiEvent::SnapshotLoaded { effect_id, .. }
-            | UiEvent::SnapshotFailed { effect_id, .. } => Some(*effect_id),
+            | UiEvent::SnapshotFailed { effect_id, .. }
+            | UiEvent::ConversationLoaded { effect_id, .. }
+            | UiEvent::ConversationFailed { effect_id, .. } => Some(*effect_id),
             UiEvent::Started
             | UiEvent::Input(_)
             | UiEvent::Resized(_)
@@ -366,6 +449,21 @@ fn client_worker<P: TuiClientPort>(
                         snapshot,
                     },
                     Err(failure) => UiEvent::SnapshotFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::LoadConversation { id, row_id, cursor }) => {
+                let event = match client.load_conversation(&row_id, cursor) {
+                    Ok(page) => UiEvent::ConversationLoaded {
+                        effect_id: id,
+                        page,
+                    },
+                    Err(failure) => UiEvent::ConversationFailed {
                         effect_id: id,
                         failure,
                     },
@@ -418,18 +516,28 @@ pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> U
 fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
     match (section, item) {
         (
-            UiSection::Inbox,
+            section @ (UiSection::Inbox | UiSection::Sent | UiSection::Archived),
             SnapshotItem::Conversation {
-                key, open_messages, ..
+                key,
+                open_messages,
+                archived_messages,
+                sent_messages,
+                ..
             },
-        ) if open_messages > 0 => {
-            let (id, title) = conversation_identity(key);
-            Some(UiRow {
-                id,
-                title,
-                detail: format!("{open_messages} open messages"),
-                state: UiRowState::Open,
-            })
+        ) if match section {
+            UiSection::Inbox => open_messages > 0,
+            UiSection::Sent => sent_messages > 0,
+            UiSection::Archived => archived_messages > 0,
+            UiSection::Agents | UiSection::Projects => false,
+        } =>
+        {
+            conversation_row(
+                section,
+                key,
+                open_messages,
+                sent_messages,
+                archived_messages,
+            )
         }
         (
             UiSection::Inbox,
@@ -449,6 +557,14 @@ fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
                 unusable_dependencies.len()
             ),
             state: UiRowState::Attention,
+            kind: UiRowKind::Diagnostic,
+        }),
+        (UiSection::Inbox, SnapshotItem::IncompleteMessagesTruncated) => Some(UiRow {
+            id: "incomplete-messages-truncated".to_owned(),
+            title: "Additional incomplete messages".to_owned(),
+            detail: "reload after causal history synchronizes".to_owned(),
+            state: UiRowState::Attention,
+            kind: UiRowKind::Diagnostic,
         }),
         (
             UiSection::Agents,
@@ -460,28 +576,13 @@ fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
                 runnable,
                 ..
             },
-        ) => {
-            let title = match names.as_slice() {
-                [name] => terminal_text(name),
-                [] => format!("Agent {}", short_id(agent_id)),
-                _ => format!("Conflicted agent {}", short_id(agent_id)),
-            };
-            let state = if names.len() > 1 {
-                UiRowState::Attention
-            } else if !retirements.is_empty() {
-                UiRowState::Archived
-            } else if runnable {
-                UiRowState::Open
-            } else {
-                UiRowState::Waiting
-            };
-            Some(UiRow {
-                id: full_id(agent_id),
-                title,
-                detail: terminal_text(&lifecycle),
-                state,
-            })
-        }
+        ) => Some(agent_row(
+            agent_id,
+            &names,
+            retirements.is_empty(),
+            &lifecycle,
+            runnable,
+        )),
         (
             UiSection::Projects,
             SnapshotItem::Project {
@@ -503,8 +604,192 @@ fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
             } else {
                 UiRowState::Open
             },
+            kind: UiRowKind::Project,
         }),
         _ => None,
+    }
+}
+
+fn agent_row(
+    agent_id: Id32,
+    names: &[String],
+    active: bool,
+    lifecycle: &str,
+    runnable: bool,
+) -> UiRow {
+    let title = match names {
+        [name] => terminal_text(name),
+        [] => format!("Agent {}", short_id(agent_id)),
+        _ => format!("Conflicted agent {}", short_id(agent_id)),
+    };
+    let state = if names.len() > 1 {
+        UiRowState::Attention
+    } else if !active {
+        UiRowState::Archived
+    } else if runnable {
+        UiRowState::Open
+    } else {
+        UiRowState::Waiting
+    };
+    UiRow {
+        id: full_id(agent_id),
+        title,
+        detail: terminal_text(lifecycle),
+        state,
+        kind: UiRowKind::Agent,
+    }
+}
+
+fn conversation_row(
+    section: UiSection,
+    key: ConversationKeyDto,
+    open_messages: u32,
+    sent_messages: u32,
+    archived_messages: u32,
+) -> Option<UiRow> {
+    let (id, title) = conversation_identity(key);
+    let (count, label, state) = match section {
+        UiSection::Inbox => (open_messages, "open messages", UiRowState::Open),
+        UiSection::Sent => (sent_messages, "sent messages", UiRowState::Waiting),
+        UiSection::Archived => (archived_messages, "archived messages", UiRowState::Archived),
+        UiSection::Agents | UiSection::Projects => return None,
+    };
+    Some(UiRow {
+        id,
+        title,
+        detail: format!("{count} {label}"),
+        state,
+        kind: UiRowKind::Conversation,
+    })
+}
+
+/// Maps one bounded reducer-ordered local-API page into passive TUI presentation.
+pub fn tui_conversation_page(
+    row_id: &str,
+    page: hq_local_api::protocol::v1::ConversationPageDto,
+) -> UiConversationPage {
+    UiConversationPage {
+        row_id: row_id.to_owned(),
+        entries: page.items.into_iter().map(tui_conversation_entry).collect(),
+        next_cursor: page.next_cursor,
+    }
+}
+
+fn tui_conversation_entry(entry: ConversationEntryDto) -> UiConversationEntry {
+    match entry {
+        ConversationEntryDto::Message(message) => tui_message_entry(*message),
+        ConversationEntryDto::Activity {
+            fact_id,
+            sequence,
+            status,
+            content,
+            truncated,
+        } => {
+            let status = tui_activity_status(status);
+            UiConversationEntry {
+                id: full_id(fact_id),
+                kind: UiConversationEntryKind::Activity,
+                content: terminal_text(&content),
+                summary: format!("activity · {}", activity_status_label(&status)),
+                message_state: None,
+                technical: vec![UiTechnicalSection::Activity {
+                    sequence,
+                    status,
+                    truncated,
+                }],
+            }
+        }
+    }
+}
+
+fn tui_activity_status(status: ActivityStatusDto) -> UiActivityStatus {
+    match status {
+        ActivityStatusDto::Snapshot => UiActivityStatus::Snapshot,
+        ActivityStatusDto::Running => UiActivityStatus::Running,
+        ActivityStatusDto::Succeeded => UiActivityStatus::Succeeded,
+        ActivityStatusDto::Failed { reason } => UiActivityStatus::Failed {
+            reason: terminal_text(&reason),
+        },
+        ActivityStatusDto::Interrupted => UiActivityStatus::Interrupted,
+    }
+}
+
+const fn activity_status_label(status: &UiActivityStatus) -> &str {
+    match status {
+        UiActivityStatus::Snapshot => "snapshot",
+        UiActivityStatus::Running => "running",
+        UiActivityStatus::Succeeded => "succeeded",
+        UiActivityStatus::Failed { .. } => "failed",
+        UiActivityStatus::Interrupted => "interrupted",
+    }
+}
+
+fn tui_message_entry(message: ConversationMessageDto) -> UiConversationEntry {
+    let state = if message.rejected {
+        UiMessageState::Rejected
+    } else if message.open {
+        UiMessageState::Open
+    } else {
+        UiMessageState::Archived
+    };
+    let purpose = message_purpose_label(message.purpose).to_owned();
+    let presentation = presentation_label(message.presentation).to_owned();
+    let sender = mailbox_address(message.sender_installation, message.sender_mailbox);
+    let recipient = message
+        .recipient_installation
+        .zip(message.recipient_mailbox)
+        .map(|(installation, mailbox)| mailbox_address(installation, mailbox));
+    UiConversationEntry {
+        id: full_id(message.fact_id),
+        kind: UiConversationEntryKind::Message,
+        content: terminal_text(&message.content),
+        summary: format!("{purpose} · {}", short_id(message.sender_mailbox)),
+        message_state: Some(state),
+        technical: vec![
+            UiTechnicalSection::Routing { sender, recipient },
+            UiTechnicalSection::Semantics {
+                purpose,
+                presentation,
+                provider: message
+                    .correlation_provider
+                    .map(|value| terminal_text(&value)),
+                session: message
+                    .correlation_session
+                    .map(|value| terminal_text(&value)),
+                operation: message.correlation_operation.map(full_id),
+                project: message.project_id.map(full_id),
+            },
+            UiTechnicalSection::Evidence {
+                message_id: full_id(message.message_id),
+                thread_id: full_id(message.thread_id),
+                state_frontier: message.state_frontier.into_iter().map(full_id).collect(),
+                peer_received_by: message.peer_received_by.into_iter().map(full_id).collect(),
+                root_fact: message.root_fact.map(full_id),
+                root_message: message.root_message.map(full_id),
+                ready_answer: message.ready_answer,
+                thread_cancelled: message.thread_cancelled,
+            },
+        ],
+    }
+}
+
+fn mailbox_address(installation: Id32, mailbox: Id32) -> String {
+    format!("{}:{}", full_id(installation), full_id(mailbox))
+}
+
+const fn message_purpose_label(purpose: MessagePurposeDto) -> &'static str {
+    match purpose {
+        MessagePurposeDto::Question => "question",
+        MessagePurposeDto::Asynchronous => "asynchronous",
+        MessagePurposeDto::ProjectOutput => "project output",
+    }
+}
+
+const fn presentation_label(presentation: PresentationKindDto) -> &'static str {
+    match presentation {
+        PresentationKindDto::Message => "message",
+        PresentationKindDto::FinalAnswer => "final answer",
+        PresentationKindDto::Status => "status",
     }
 }
 

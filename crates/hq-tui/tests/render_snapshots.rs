@@ -3,7 +3,9 @@
 #![allow(clippy::expect_used)]
 
 use hq_tui::{
-    UiEffect, UiEvent, UiInput, UiModel, UiRow, UiRowState, UiSize, UiSnapshot, render, update,
+    UiActivityStatus, UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect,
+    UiEvent, UiInput, UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
+    UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -38,6 +40,29 @@ fn too_small_layout_matches_snapshot_without_mutating_the_model() {
         }),
         include_str!("snapshots/too-small.txt"),
     );
+}
+
+#[test]
+fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
+    let model = conversation_model(UiSize {
+        width: 120,
+        height: 24,
+    });
+    let before = model.clone();
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &model))
+        .expect("render buffer");
+    assert_eq!(model, before, "rendering must only borrow the model");
+    let rendered = snapshot_text(terminal.backend().buffer());
+    let message = rendered.find("question · peer").expect("message rendered");
+    let activity = rendered
+        .find("activity · running")
+        .expect("activity rendered");
+    assert!(message < activity, "reducer page order is retained");
+    assert!(rendered.contains("non-actionable · compiling"));
+    assert!(rendered.contains("Conversation · complete"));
 }
 
 fn assert_snapshot(model: &UiModel, expected: &str) {
@@ -118,5 +143,53 @@ fn row(id: &str, title: &str, detail: &str, state: UiRowState) -> UiRow {
         title: title.to_owned(),
         detail: detail.to_owned(),
         state,
+        kind: UiRowKind::Conversation,
     }
+}
+
+fn conversation_model(size: UiSize) -> UiModel {
+    let ready = ready_model(size);
+    let opening = update(ready, UiEvent::Input(UiInput::Activate)).expect("open conversation");
+    let effect_id = opening
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadConversation { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("conversation request");
+    update(
+        opening.model,
+        UiEvent::ConversationLoaded {
+            effect_id,
+            page: UiConversationPage {
+                row_id: "deploy-9".to_owned(),
+                entries: vec![
+                    UiConversationEntry {
+                        id: "message-1".to_owned(),
+                        kind: UiConversationEntryKind::Message,
+                        content: "Can we ship?".to_owned(),
+                        summary: "question · peer".to_owned(),
+                        message_state: Some(UiMessageState::Open),
+                        technical: Vec::new(),
+                    },
+                    UiConversationEntry {
+                        id: "activity-2".to_owned(),
+                        kind: UiConversationEntryKind::Activity,
+                        content: "compiling".to_owned(),
+                        summary: "activity · running".to_owned(),
+                        message_state: None,
+                        technical: vec![UiTechnicalSection::Activity {
+                            sequence: 2,
+                            status: UiActivityStatus::Running,
+                            truncated: false,
+                        }],
+                    },
+                ],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("conversation page")
+    .model
 }

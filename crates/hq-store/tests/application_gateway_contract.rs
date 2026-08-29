@@ -55,6 +55,8 @@ fn authoritative_snapshot_is_one_revisioned_application_view() -> Result<(), Box
     assert_eq!(snapshot.conversations().len(), 1);
     assert_eq!(snapshot.conversations()[0].latest_fact, Some(question_id));
     assert_eq!(snapshot.conversations()[0].open_messages, 1);
+    assert_eq!(snapshot.conversations()[0].archived_messages, 0);
+    assert_eq!(snapshot.conversations()[0].sent_messages, 1);
     Ok(())
 }
 

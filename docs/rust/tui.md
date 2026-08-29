@@ -18,20 +18,25 @@ UiModel + UiEvent -> Result<(UiModel, [UiEffect]), UiError>
 
 `UiEvent` covers one-time startup, normalized input, complete resizes, identity-bearing timer and
 snapshot completions, revision-only invalidations, and generation-scoped connection states and
-failures. `UiEffect` covers section-bound complete-snapshot requests, timers, redraw requests, and
-exit. The transition function performs no I/O and has no domain mutation port.
+failures. `UiEffect` covers section-bound complete-snapshot requests, bounded reducer-ordered
+conversation-page requests, timers, redraw requests, and exit. The transition function performs no
+I/O and has no domain mutation port.
 
 Every asynchronous request receives a nonzero process-local `EffectId`. A completion changes state
-only while that exact identity is outstanding for its effect kind. Older snapshot successes and
-failures cannot overwrite a newer snapshot or connection state, and an elapsed timer cannot run
+only while that exact identity is outstanding for its effect kind. Older snapshot or conversation
+successes and failures cannot overwrite a newer request or connection state, and an elapsed timer cannot run
 twice. Invalidation revisions coalesce into one greatest required revision. If an in-flight
 snapshot is older than that requirement, its matching completion schedules one follow-up request;
 it is never treated as current merely because the request succeeded. Connection observations obey
 the shell's monotonic generation.
 
-The model preserves selection by stable row identity, not by screen coordinate or vector index.
-Reload keeps the selected identity when it remains present and selects the first logical row when
-it disappears. Resize changes dimensions only; it does not rewrite logical focus or selection.
+The model preserves summary selection and conversation scroll anchors by stable row/fact identity,
+not by screen coordinate or vector index. Reload keeps each identity while it remains present and
+falls back to the first logical item when it disappears. An invalidation cancels the model's claim
+on an in-flight old conversation page; after the required snapshot arrives, the selected
+conversation reloads from its first page and retains the fact anchor when still present. Reconnect
+uses the same repair path. Resize changes dimensions only; it does not rewrite logical focus,
+selection, the open conversation, or typed-detail disclosure.
 
 ## Reconnecting client and effect executor
 
@@ -42,10 +47,15 @@ queued against monotonic deadlines across short shell polls. Every negotiated ge
 the broad invalidation subscription before its acknowledged authoritative snapshot is exposed.
 
 `LocalTuiClient` maps only complete authoritative local API snapshots into the exact requested
-`UiSection`. The protocol `AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately
-different records: one is canonical local-API data, while the other is a small section-specific
-view containing only safe rendering fields. Neither is a storage compatibility shape, and both
-passive records expose their fields directly.
+`UiSection`. Conversation summaries carry store-derived open, archived, and local-human-authored
+counts, so Inbox, Archived, and Sent filters do not scan or reorder message bodies. Activating a
+summary issues the ordinary `ConversationPage` request with an opaque cursor. Returned
+message/activity unions remain in reducer order; selected/coalesced activity is presented as
+non-actionable and is never converted into a message target. The protocol
+`AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately different records: one
+is canonical local-API data, while the other is a small section-specific view containing only safe
+rendering fields. Neither is a storage compatibility shape, and both passive records expose their
+fields directly.
 
 `TuiEffectExecutor` owns one named worker and bounded command/result channels. The worker alone owns
 the subscribed client; the shell cannot reach storage, domain planners, signers, relays, providers,
@@ -57,9 +67,9 @@ overwrite newer UI state.
 
 ## Data and encapsulation
 
-Shell-normalized snapshots, rows, sizes, and failures are passive records and expose public fields.
-Their text is bounded and sanitized before entering this crate. There is no accessor facade around
-those DTOs.
+Shell-normalized snapshots, rows, conversation pages/entries, typed technical sections, sizes, and
+failures are passive records and expose public fields. Their text is bounded and sanitized before
+entering this crate. There is no accessor facade around those DTOs.
 
 `UiModel` is not a passive record. It keeps the outstanding snapshot and timer identities aligned
 with minimum revisions, reconnect generations, retry state, selection, and one-time startup/exit
@@ -79,7 +89,11 @@ The first responsive layouts are semantic Rust-era layouts, not Bubble Tea compa
 - below 40 columns or 10 rows: a bounded resize message that retains the quit hint.
 
 The header reports the selected section, connection state, and authoritative revision. Rows expose
-selection, stable presentation state, and bounded detail. The footer exposes discoverable controls
+selection, stable presentation state, and bounded detail. An activated conversation uses a
+responsive second pane, centers rendering around the stable fact anchor, labels activity as
+non-actionable, and expands only typed routing, semantics, evidence, or activity sections. Enter
+opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
+page; Escape collapses details and then the conversation. The footer exposes discoverable controls
 or the latest stable failure code and operator action. Styling supplements these text markers and
 is not the sole carrier of state.
 

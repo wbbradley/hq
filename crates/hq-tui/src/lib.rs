@@ -8,7 +8,9 @@ mod model;
 mod render;
 
 pub use model::{
-    EffectId, UiConnectionState, UiEffect, UiError, UiEvent, UiFailure, UiFocus, UiInput, UiModel,
-    UiRow, UiRowState, UiSection, UiSize, UiSnapshot, UiTimerKind, UiTransition, update,
+    EffectId, UiActivityStatus, UiConnectionState, UiConversation, UiConversationEntry,
+    UiConversationEntryKind, UiConversationPage, UiEffect, UiError, UiEvent, UiFailure, UiFocus,
+    UiInput, UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, UiTransition, update,
 };
 pub use render::render;

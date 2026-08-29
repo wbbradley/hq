@@ -10,16 +10,21 @@ use std::{
 };
 
 use hq_local_api::protocol::v1::{
-    AuthoritativeSnapshotDto, ConversationKeyDto, Id32, SnapshotItem,
+    ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
+    ConversationMessageDto, ConversationPageDto, Id32, MessagePurposeDto, PresentationKindDto,
+    SnapshotItem,
 };
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiEffectExecutor, TuiExecutorError,
-    tui_snapshot,
+    tui_conversation_page, tui_snapshot,
 };
 use hq_tui::{
-    UiConnectionState, UiEffect, UiEvent, UiFailure, UiModel, UiSection, UiSize, UiSnapshot,
-    UiTimerKind, update,
+    UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiFailure,
+    UiInput, UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, update,
 };
+
+type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
 #[test]
 fn executor_loads_the_effects_exact_section_and_preserves_identity() {
@@ -27,6 +32,7 @@ fn executor_loads_the_effects_exact_section_and_preserves_identity() {
     let stopped = Arc::new(Mutex::new(false));
     let client = ScriptedTuiClient {
         requests: Arc::clone(&requests),
+        conversation_requests: Arc::new(Mutex::new(Vec::new())),
         snapshots: VecDeque::from([Ok(UiSnapshot {
             section: UiSection::Inbox,
             revision: 7,
@@ -126,9 +132,78 @@ fn executor_coalesces_redraw_and_releases_each_timer_once() {
 }
 
 #[test]
+fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
+    let started = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start");
+    let snapshot_id = started
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadSnapshot { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("snapshot id");
+    let loaded = update(
+        started.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: UiSnapshot {
+                section: UiSection::Inbox,
+                revision: 1,
+                rows: vec![UiRow {
+                    id: "thread-a".to_owned(),
+                    title: "Thread A".to_owned(),
+                    detail: "1 open message".to_owned(),
+                    state: UiRowState::Open,
+                    kind: UiRowKind::Conversation,
+                }],
+            },
+        },
+    )
+    .expect("snapshot applies");
+    let opening = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("activate");
+    let (expected_id, effect) = opening
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadConversation { id, .. } => Some((id, effect)),
+            _ => None,
+        })
+        .expect("conversation effect");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let client = ScriptedTuiClient {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        conversation_requests: Arc::clone(&requests),
+        snapshots: VecDeque::new(),
+        observations: VecDeque::new(),
+        stopped: Arc::new(Mutex::new(false)),
+    };
+    let mut executor =
+        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("executor starts");
+    executor.execute([effect]).expect("execute page effect");
+    assert!(matches!(
+        receive_event(&mut executor),
+        UiEvent::ConversationLoaded { effect_id, page }
+            if effect_id == expected_id && page.row_id == "thread-a"
+    ));
+    assert_eq!(
+        requests.lock().expect("requests lock").as_slice(),
+        &[("thread-a".to_owned(), None)]
+    );
+    executor.shutdown().expect("shutdown");
+}
+
+#[test]
 fn executor_forwards_subscription_and_connection_observations() {
     let client = ScriptedTuiClient {
         requests: Arc::new(Mutex::new(Vec::new())),
+        conversation_requests: Arc::new(Mutex::new(Vec::new())),
         snapshots: VecDeque::new(),
         observations: VecDeque::from([
             TuiClientObservation::Connection {
@@ -181,6 +256,8 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
                 },
                 latest_fact: Some(Id32::new([4; 32])),
                 open_messages: 2,
+                archived_messages: 3,
+                sent_messages: 1,
             },
             SnapshotItem::Agent {
                 agent_id: Id32::new([5; 32]),
@@ -203,6 +280,7 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
                 head: Id32::new([11; 32]),
                 input_sequence: 0,
             },
+            SnapshotItem::IncompleteMessagesTruncated,
         ],
     )
     .expect("authoritative snapshot");
@@ -210,9 +288,10 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
     let inbox = tui_snapshot(UiSection::Inbox, source.clone());
     assert_eq!(inbox.revision, 21);
     assert_eq!(inbox.section, UiSection::Inbox);
-    assert_eq!(inbox.rows.len(), 1);
+    assert_eq!(inbox.rows.len(), 2);
     assert_eq!(inbox.rows[0].title, "Thread 030303030303");
     assert_eq!(inbox.rows[0].detail, "2 open messages");
+    assert_eq!(inbox.rows[1].state, hq_tui::UiRowState::Attention);
 
     let agents = tui_snapshot(UiSection::Agents, source.clone());
     assert_eq!(agents.rows.len(), 1);
@@ -223,7 +302,10 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
     assert_eq!(projects.rows.len(), 1);
     assert_eq!(projects.rows[0].title, "release");
     assert_eq!(projects.rows[0].state, hq_tui::UiRowState::Attention);
-    assert!(tui_snapshot(UiSection::Sent, source).rows.is_empty());
+    assert_eq!(tui_snapshot(UiSection::Sent, source.clone()).rows.len(), 1);
+    let archived = tui_snapshot(UiSection::Archived, source);
+    assert_eq!(archived.rows.len(), 1);
+    assert_eq!(archived.rows[0].detail, "3 archived messages");
 }
 
 #[test]
@@ -253,6 +335,72 @@ fn authoritative_snapshot_mapping_never_forwards_terminal_controls() {
             .chain(snapshot.rows[0].detail.chars())
             .all(|character| !character.is_control())
     );
+}
+
+#[test]
+fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
+    let page = ConversationPageDto::new(
+        vec![
+            ConversationEntryDto::Message(Box::new(ConversationMessageDto {
+                fact_id: Id32::new([1; 32]),
+                message_id: Id32::new([2; 32]),
+                thread_id: Id32::new([3; 32]),
+                content: "hello\nworld".to_owned(),
+                sender_installation: Id32::new([4; 32]),
+                sender_mailbox: Id32::new([5; 32]),
+                recipient_installation: Some(Id32::new([6; 32])),
+                recipient_mailbox: Some(Id32::new([7; 32])),
+                purpose: MessagePurposeDto::Question,
+                presentation: PresentationKindDto::Message,
+                correlation_provider: Some("codex".to_owned()),
+                correlation_session: Some("thread-1".to_owned()),
+                correlation_operation: Some(Id32::new([8; 32])),
+                project_id: None,
+                open: false,
+                rejected: false,
+                state_frontier: vec![Id32::new([9; 32])],
+                peer_received_by: vec![Id32::new([10; 32])],
+                root_fact: Some(Id32::new([11; 32])),
+                root_message: Some(Id32::new([12; 32])),
+                ready_answer: true,
+                thread_cancelled: false,
+            })),
+            ConversationEntryDto::Activity {
+                fact_id: Id32::new([13; 32]),
+                sequence: 4,
+                status: ActivityStatusDto::Running,
+                content: "building".to_owned(),
+                truncated: false,
+            },
+        ],
+        Some("opaque-next".to_owned()),
+    )
+    .expect("valid page");
+
+    let mapped = tui_conversation_page("thread-row", page);
+    assert_eq!(mapped.row_id, "thread-row");
+    assert_eq!(mapped.next_cursor.as_deref(), Some("opaque-next"));
+    assert_eq!(mapped.entries.len(), 2);
+    assert_eq!(mapped.entries[0].kind, UiConversationEntryKind::Message);
+    assert_eq!(
+        mapped.entries[0].message_state,
+        Some(UiMessageState::Archived)
+    );
+    assert_eq!(mapped.entries[0].content, "hello world");
+    assert!(matches!(
+        mapped.entries[0].technical.as_slice(),
+        [
+            UiTechnicalSection::Routing { .. },
+            UiTechnicalSection::Semantics { purpose, .. },
+            UiTechnicalSection::Evidence { ready_answer: true, .. }
+        ] if purpose == "question"
+    ));
+    assert_eq!(mapped.entries[1].kind, UiConversationEntryKind::Activity);
+    assert_eq!(mapped.entries[1].message_state, None);
+    assert!(matches!(
+        mapped.entries[1].technical.as_slice(),
+        [UiTechnicalSection::Activity { sequence: 4, .. }]
+    ));
 }
 
 #[test]
@@ -311,6 +459,7 @@ impl TuiClock for ManualClock {
 
 struct ScriptedTuiClient {
     requests: Arc<Mutex<Vec<UiSection>>>,
+    conversation_requests: ConversationRequests,
     snapshots: VecDeque<Result<UiSnapshot, UiFailure>>,
     observations: VecDeque<TuiClientObservation>,
     stopped: Arc<Mutex<bool>>,
@@ -320,6 +469,7 @@ impl ScriptedTuiClient {
     fn empty() -> Self {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
+            conversation_requests: Arc::new(Mutex::new(Vec::new())),
             snapshots: VecDeque::new(),
             observations: VecDeque::new(),
             stopped: Arc::new(Mutex::new(false)),
@@ -335,6 +485,22 @@ impl TuiClientPort for ScriptedTuiClient {
                 code: "script_exhausted".to_owned(),
                 action: "add a scripted snapshot".to_owned(),
             })
+        })
+    }
+
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        self.conversation_requests
+            .lock()
+            .expect("conversation requests lock")
+            .push((row_id.to_owned(), cursor));
+        Ok(UiConversationPage {
+            row_id: row_id.to_owned(),
+            entries: Vec::new(),
+            next_cursor: None,
         })
     }
 
@@ -361,6 +527,14 @@ impl TuiClientPort for PanickingClient {
         panic!("scripted worker failure");
     }
 
+    fn load_conversation(
+        &mut self,
+        _row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        panic!("scripted worker failure");
+    }
+
     fn poll(&mut self, _wait: Duration) -> Vec<TuiClientObservation> {
         panic!("scripted worker failure");
     }
@@ -374,6 +548,18 @@ impl TuiClientPort for ImmediateSnapshotClient {
             section,
             revision: 1,
             rows: Vec::new(),
+        })
+    }
+
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        Ok(UiConversationPage {
+            row_id: row_id.to_owned(),
+            entries: Vec::new(),
+            next_cursor: None,
         })
     }
 

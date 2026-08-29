@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Present authoritative mailbox conversations and activity** — Extend the ordinary
-  local-API TUI client and pure model with open, sent, and archived filters; reducer-ordered mixed
-  conversation/activity pages; typed technical disclosure; stable conversation selection; and
-  logical scroll anchors. Preserve those presentation choices across authoritative reload,
-  invalidation, reconnect, and resize, consume reducer activity coalescing without reimplementing
-  it, and show stale or conflicted data as typed actionable state. Complete this work when mailbox
-  browsing is fully snapshot-driven and pure model/render tests prove canonical presentation and
-  state preservation.
-
 - **[tui/high] Implement durable mailbox composition and actions** — Add reply, direct-message,
   self-note, archive, and restore workflows through ordinary local-API mutations. Persist
   installation-local drafts, focus, target reselection, and modal state across reload/reconnect and

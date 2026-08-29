@@ -1461,6 +1461,10 @@ pub enum SnapshotItem {
         latest_fact: Option<Id32>,
         /// Number of currently open actionable messages.
         open_messages: u32,
+        /// Number of messages outside the open view.
+        archived_messages: u32,
+        /// Number of messages authored by the reserved local human mailbox.
+        sent_messages: u32,
     },
     /// Inert message whose required causal history is incomplete.
     IncompleteMessage {
@@ -1878,13 +1882,32 @@ pub enum ConversationEntryDto {
         fact_id: Id32,
         /// Positive source sequence.
         sequence: u64,
-        /// Stable status name.
-        status: String,
+        /// Typed activity status and optional stable failure reason.
+        status: ActivityStatusDto,
         /// Bounded display content.
         content: String,
         /// Whether authoring truncated the content.
         truncated: bool,
     },
+}
+
+/// Typed activity status on the stable local protocol.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ActivityStatusDto {
+    /// Informational snapshot without a lifecycle claim.
+    Snapshot,
+    /// Correlated work remains active.
+    Running,
+    /// Correlated work completed successfully.
+    Succeeded,
+    /// Correlated work failed with a stable reason code.
+    Failed {
+        /// Stable bounded failure reason.
+        reason: String,
+    },
+    /// Correlated work was explicitly interrupted.
+    Interrupted,
 }
 
 /// Passive typed message presentation carried by one conversation page item.
@@ -3267,8 +3290,13 @@ fn validate_page(page: &ConversationPageDto) -> Result<(), ValueError> {
                     message.correlation_operation.as_ref(),
                 )?;
             }
-            ConversationEntryDto::Activity { content, .. } => {
+            ConversationEntryDto::Activity {
+                status, content, ..
+            } => {
                 validate_text(content, CONTENT_MAX_BYTES)?;
+                if let ActivityStatusDto::Failed { reason } = status {
+                    validate_text(reason, ERROR_CODE_MAX_BYTES)?;
+                }
             }
         }
         if matches!(item, ConversationEntryDto::Activity { sequence: 0, .. }) {

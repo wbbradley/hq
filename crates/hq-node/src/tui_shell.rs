@@ -225,6 +225,7 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
         KeyCode::Down | KeyCode::Char('j' | 'J') if plain => UiInput::NextItem,
         KeyCode::Up | KeyCode::Char('k' | 'K') if plain => UiInput::PreviousItem,
         KeyCode::Enter if plain => UiInput::Activate,
+        KeyCode::PageDown if plain => UiInput::LoadMore,
         KeyCode::Esc => UiInput::Escape,
         _ => return None,
     };

@@ -271,6 +271,10 @@ grep -Fq 'impl TuiClientPort for LocalTuiClient' \
   fail "hq-node must map the subscribed ordinary local client into the TUI client port"
 grep -Fq 'LocalNodeEventClient' "$repository_root/crates/hq-node/src/tui_client.rs" ||
   fail "the TUI client port must use the subscribed ordinary local API client"
+grep -Fq 'Request::ConversationPage' "$repository_root/crates/hq-node/src/tui_client.rs" ||
+  fail "the TUI must load mixed history through the ordinary bounded conversation query"
+grep -Fq 'UiEffect::LoadConversation' "$repository_root/crates/hq-node/src/tui_client.rs" ||
+  fail "the TUI executor must preserve conversation-page effect identity"
 if grep -Eq '(hq_(domain|application|store|relay|harness|codex|resources|projects)|rusqlite|std::fs|std::process)' \
   "$repository_root/crates/hq-node/src/tui_shell.rs"; then
   fail "the TUI terminal shell may cross only hq-tui and ordinary local API boundaries"

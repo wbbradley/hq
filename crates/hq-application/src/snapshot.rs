@@ -839,6 +839,8 @@ pub enum ClientProjection {
         key: hq_reducer::ConversationKey,
         latest_fact: Option<FactId>,
         open_messages: u32,
+        archived_messages: u32,
+        sent_messages: u32,
     },
     IncompleteMessage {
         message: IncompleteMessageSummary,
@@ -1028,6 +1030,8 @@ impl AuthoritativeSnapshot {
                 key: summary.key.clone(),
                 latest_fact: summary.latest_fact,
                 open_messages: summary.open_messages,
+                archived_messages: summary.archived_messages,
+                sent_messages: summary.sent_messages,
             }
         }));
         projections.extend(
@@ -1067,6 +1071,10 @@ pub struct ConversationSummary {
     pub latest_fact: Option<FactId>,
     /// Number of currently open actionable messages.
     pub open_messages: u32,
+    /// Number of messages outside the open view, including absorbing rejection history.
+    pub archived_messages: u32,
+    /// Number of messages authored by the reserved local human mailbox.
+    pub sent_messages: u32,
 }
 
 /// One actionable message or non-actionable activity in canonical conversation order.

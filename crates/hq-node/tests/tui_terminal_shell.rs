@@ -45,6 +45,7 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
             UiInput::PreviousItem,
         ),
         (KeyCode::Enter, KeyModifiers::NONE, UiInput::Activate),
+        (KeyCode::PageDown, KeyModifiers::NONE, UiInput::LoadMore),
         (KeyCode::Esc, KeyModifiers::NONE, UiInput::Escape),
     ];
     for (code, modifiers, expected) in cases {
@@ -247,6 +248,18 @@ impl TuiClientPort for EmptyClient {
         })
     }
 
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<hq_tui::UiConversationPage, hq_tui::UiFailure> {
+        Ok(hq_tui::UiConversationPage {
+            row_id: row_id.to_owned(),
+            entries: Vec::new(),
+            next_cursor: None,
+        })
+    }
+
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
         thread::sleep(wait);
         Vec::new()
@@ -257,6 +270,14 @@ struct PanickingClient;
 
 impl TuiClientPort for PanickingClient {
     fn load_snapshot(&mut self, _section: UiSection) -> Result<UiSnapshot, hq_tui::UiFailure> {
+        panic!("scripted client failure")
+    }
+
+    fn load_conversation(
+        &mut self,
+        _row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<hq_tui::UiConversationPage, hq_tui::UiFailure> {
         panic!("scripted client failure")
     }
 

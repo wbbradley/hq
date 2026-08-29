@@ -59,6 +59,12 @@ source, provider/session/operation/item, runtime, positive sequence, public iden
 Messages precede activity only on an exact ready-key time tie. These fields order presentation; they
 never grant authority or resolve domain conflicts.
 
+The authoritative client snapshot exposes conversation discovery summaries with the latest
+presented fact plus open, archived, and reserved-local-human-authored message counts. These counts
+are derived from the same projected message set and explicit local authority policy; they are
+filter metadata, not canonical facts or ordering inputs. Clients load history only through bounded
+opaque-cursor pages and must preserve the returned union order unchanged.
+
 ## Non-actionable activity
 
 `HarnessActivityRecorded` carries a full source mailbox, provider/session/operation and optional

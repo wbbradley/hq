@@ -1765,16 +1765,25 @@ fn conversation_summaries(
     index: &ReductionIndexSnapshot,
     snapshot: &ConversationProjectionSnapshot,
 ) -> Result<Vec<ConversationSummary>, StoreError> {
-    let open_messages = snapshot
+    let local_human = hq_domain::MailboxAddress::new(
+        index.policy().local_installation(),
+        index.policy().local_human_mailbox(),
+    );
+    let messages = snapshot
         .projections()
         .values()
         .filter_map(|projection| match projection {
-            ConversationProjection::Message(message) => Some((message.fact_id, message.open)),
+            ConversationProjection::Message(message) => Some((
+                message.fact_id,
+                message.open,
+                message.content.sender == local_human,
+            )),
             ConversationProjection::Thread(_)
             | ConversationProjection::ActionGroup(_)
             | ConversationProjection::Activity(_)
             | ConversationProjection::ActivityRetention(_) => None,
         })
+        .map(|(fact_id, open, sent)| (fact_id, (open, sent)))
         .collect::<BTreeMap<_, _>>();
 
     index
@@ -1783,12 +1792,24 @@ fn conversation_summaries(
         .map(|(key, order)| {
             let open_messages = order
                 .iter()
-                .filter(|fact_id| open_messages.get(fact_id).is_some_and(|open| *open))
+                .filter(|fact_id| messages.get(fact_id).is_some_and(|(open, _)| *open))
+                .count();
+            let archived_messages = order
+                .iter()
+                .filter(|fact_id| messages.get(fact_id).is_some_and(|(open, _)| !open))
+                .count();
+            let sent_messages = order
+                .iter()
+                .filter(|fact_id| messages.get(fact_id).is_some_and(|(_, sent)| *sent))
                 .count();
             Ok(ConversationSummary {
                 key: key.clone(),
                 latest_fact: order.last().copied(),
                 open_messages: u32::try_from(open_messages)
+                    .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?,
+                archived_messages: u32::try_from(archived_messages)
+                    .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?,
+                sent_messages: u32::try_from(sent_messages)
                     .map_err(|_| StoreError::new(StoreErrorClass::RebuildableStateCorrupt))?,
             })
         })

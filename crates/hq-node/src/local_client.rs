@@ -276,6 +276,13 @@ impl LocalNodeEventClient {
             .map_err(LocalNodeClientError::Execution)
     }
 
+    /// Executes one non-retryable typed request on the subscribed connection.
+    pub fn request(&mut self, request: Request) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .request(request)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
     /// Returns the generation-scoped reconnecting-client state.
     pub const fn connection_state(&self) -> ClientConnectionState {
         self.runner.connection_state()

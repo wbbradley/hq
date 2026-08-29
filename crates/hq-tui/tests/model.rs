@@ -5,8 +5,10 @@
 use std::time::Duration;
 
 use hq_tui::{
-    UiConnectionState, UiEffect, UiEvent, UiFailure, UiFocus, UiInput, UiModel, UiRow, UiRowState,
-    UiSection, UiSize, UiSnapshot, UiTimerKind, update,
+    UiActivityStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
+    UiConversationPage, UiEffect, UiEvent, UiFailure, UiFocus, UiInput, UiMessageState, UiModel,
+    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    update,
 };
 
 #[test]
@@ -369,6 +371,224 @@ fn stale_timer_completions_cannot_repeat_effects() {
     assert!(stale.effects.is_empty());
 }
 
+#[test]
+fn conversation_pages_preserve_reducer_order_and_use_stable_entry_anchors() {
+    let started = started_model();
+    let snapshot_id = snapshot_effect(&started.effects);
+    let loaded = update(
+        started.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: snapshot(1, &["thread-a"]),
+        },
+    )
+    .expect("mailbox snapshot");
+    let content = update(loaded.model, UiEvent::Input(UiInput::NextFocus)).expect("content focus");
+    let opening = update(content.model, UiEvent::Input(UiInput::Activate)).expect("open thread");
+    let (page_id, row_id, cursor) = conversation_effect(&opening.effects);
+    assert_eq!(row_id, "thread-a");
+    assert_eq!(cursor, None);
+
+    let opened = update(
+        opening.model,
+        UiEvent::ConversationLoaded {
+            effect_id: page_id,
+            page: UiConversationPage {
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message-1", false), entry("activity-2", true)],
+                next_cursor: Some("next-page".to_owned()),
+            },
+        },
+    )
+    .expect("page applies");
+    assert_eq!(opened.model.focus(), UiFocus::Conversation);
+    assert_eq!(opened.model.conversation_anchor(), Some("message-1"));
+    assert_eq!(
+        opened
+            .model
+            .conversation()
+            .expect("conversation")
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["message-1", "activity-2"]
+    );
+
+    let moved = update(opened.model, UiEvent::Input(UiInput::NextItem)).expect("move anchor");
+    assert_eq!(moved.model.conversation_anchor(), Some("activity-2"));
+    let technical = update(moved.model, UiEvent::Input(UiInput::Activate)).expect("show details");
+    assert!(technical.model.technical_visible());
+    let resized = update(
+        technical.model,
+        UiEvent::Resized(UiSize {
+            width: 66,
+            height: 17,
+        }),
+    )
+    .expect("resize");
+    assert_eq!(resized.model.conversation_anchor(), Some("activity-2"));
+    assert!(resized.model.technical_visible());
+
+    let more = update(resized.model, UiEvent::Input(UiInput::LoadMore)).expect("load more");
+    let (more_id, more_row, more_cursor) = conversation_effect(&more.effects);
+    assert_eq!(more_row, "thread-a");
+    assert_eq!(more_cursor, Some("next-page"));
+    let appended = update(
+        more.model,
+        UiEvent::ConversationLoaded {
+            effect_id: more_id,
+            page: UiConversationPage {
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message-3", false)],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("next page appends");
+    assert_eq!(
+        appended
+            .model
+            .conversation()
+            .expect("conversation")
+            .entries
+            .len(),
+        3
+    );
+    assert_eq!(appended.model.conversation_anchor(), Some("activity-2"));
+}
+
+#[test]
+fn invalidation_reloads_an_open_conversation_and_ignores_its_stale_page() {
+    let started = started_model();
+    let snapshot_id = snapshot_effect(&started.effects);
+    let loaded = update(
+        started.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: snapshot(1, &["thread-a"]),
+        },
+    )
+    .expect("snapshot");
+    let opening = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let (first_page_id, _, _) = conversation_effect(&opening.effects);
+    let opened = update(
+        opening.model,
+        UiEvent::ConversationLoaded {
+            effect_id: first_page_id,
+            page: UiConversationPage {
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message-1", false), entry("message-2", false)],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("page");
+    let anchored = update(opened.model, UiEvent::Input(UiInput::NextItem)).expect("anchor second");
+    let invalidated =
+        update(anchored.model, UiEvent::Invalidated { revision: 2 }).expect("invalidate");
+    let reload_id = snapshot_effect(&invalidated.effects);
+    assert_eq!(invalidated.model.conversation_anchor(), Some("message-2"));
+
+    let reloaded = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: reload_id,
+            snapshot: snapshot(2, &["thread-a"]),
+        },
+    )
+    .expect("reload snapshot");
+    let (fresh_page_id, _, _) = conversation_effect(&reloaded.effects);
+    let stale = update(
+        reloaded.model,
+        UiEvent::ConversationLoaded {
+            effect_id: first_page_id,
+            page: UiConversationPage {
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("stale", false)],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("stale page ignored");
+    assert_eq!(stale.model.conversation_anchor(), Some("message-2"));
+    let fresh = update(
+        stale.model,
+        UiEvent::ConversationLoaded {
+            effect_id: fresh_page_id,
+            page: UiConversationPage {
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message-0", true), entry("message-2", false)],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("fresh page applies");
+    assert_eq!(fresh.model.conversation_anchor(), Some("message-2"));
+}
+
+#[test]
+fn reconnect_preserves_the_open_conversation_until_authoritative_repair() {
+    let started = started_model();
+    let snapshot_id = snapshot_effect(&started.effects);
+    let loaded = update(
+        started.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: snapshot(1, &["thread-a"]),
+        },
+    )
+    .expect("snapshot");
+    let opening = update(loaded.model, UiEvent::Input(UiInput::Activate)).expect("open");
+    let (page_id, _, _) = conversation_effect(&opening.effects);
+    let opened = update(
+        opening.model,
+        UiEvent::ConversationLoaded {
+            effect_id: page_id,
+            page: UiConversationPage {
+                row_id: "thread-a".to_owned(),
+                entries: vec![entry("message-1", false)],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("page");
+    let failed = update(
+        opened.model,
+        UiEvent::ClientFailed {
+            generation: 2,
+            failure: UiFailure {
+                code: "connection_lost".to_owned(),
+                action: "waiting to reconnect".to_owned(),
+            },
+        },
+    )
+    .expect("disconnect");
+    assert_eq!(failed.model.conversation_anchor(), Some("message-1"));
+    let connected = update(
+        failed.model,
+        UiEvent::ConnectionObserved {
+            generation: 3,
+            state: UiConnectionState::Ready,
+        },
+    )
+    .expect("reconnect");
+    let repair_id = snapshot_effect(&connected.effects);
+    assert_eq!(connected.model.conversation_anchor(), Some("message-1"));
+    let repaired = update(
+        connected.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: repair_id,
+            snapshot: snapshot(2, &["thread-a"]),
+        },
+    )
+    .expect("authoritative repair");
+    assert!(matches!(
+        conversation_effect(&repaired.effects),
+        (_, "thread-a", None)
+    ));
+}
+
 fn snapshot(revision: u64, ids: &[&str]) -> UiSnapshot {
     snapshot_for(UiSection::Inbox, revision, ids)
 }
@@ -384,6 +604,7 @@ fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
                 title: format!("{id} title"),
                 detail: format!("{id} detail"),
                 state: UiRowState::Open,
+                kind: UiRowKind::Conversation,
             })
             .collect(),
     }
@@ -429,4 +650,39 @@ fn timer_effect(effects: &[UiEffect], expected: UiTimerKind) -> hq_tui::EffectId
             _ => None,
         })
         .expect("timer effect")
+}
+
+fn conversation_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &str, Option<&str>) {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadConversation { id, row_id, cursor } => {
+                Some((*id, row_id.as_str(), cursor.as_deref()))
+            }
+            _ => None,
+        })
+        .expect("conversation effect")
+}
+
+fn entry(id: &str, activity: bool) -> UiConversationEntry {
+    UiConversationEntry {
+        id: id.to_owned(),
+        kind: if activity {
+            UiConversationEntryKind::Activity
+        } else {
+            UiConversationEntryKind::Message
+        },
+        content: format!("{id} content"),
+        summary: format!("{id} summary"),
+        message_state: (!activity).then_some(UiMessageState::Open),
+        technical: if activity {
+            vec![UiTechnicalSection::Activity {
+                sequence: 2,
+                status: UiActivityStatus::Running,
+                truncated: false,
+            }]
+        } else {
+            Vec::new()
+        },
+    }
 }

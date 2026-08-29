@@ -301,10 +301,14 @@ pub fn snapshot_to_v1(
                 key,
                 latest_fact,
                 open_messages,
+                archived_messages,
+                sent_messages,
             } => SnapshotItem::Conversation {
                 key: conversation_key_to_v1(&key),
                 latest_fact: latest_fact.map(|fact| id32(fact.as_bytes())),
                 open_messages,
+                archived_messages,
+                sent_messages,
             },
             ClientProjection::IncompleteMessage { message } => SnapshotItem::IncompleteMessage {
                 fact_id: id32(message.fact_id.as_bytes()),
@@ -1612,7 +1616,7 @@ fn conversation_entry_to_v1(entry: &ConversationEntry) -> ConversationEntryDto {
         ConversationEntry::Activity(activity) => ConversationEntryDto::Activity {
             fact_id: id32(activity.fact_id.as_bytes()),
             sequence: activity.sequence.get(),
-            status: activity_status(&activity.status).to_owned(),
+            status: activity_status_to_v1(&activity.status),
             content: activity.content.as_str().to_owned(),
             truncated: activity.truncated,
         },
@@ -1688,13 +1692,15 @@ const fn error_category(category: ErrorCategory) -> &'static str {
     }
 }
 
-const fn activity_status(status: &ActivityStatus) -> &'static str {
+fn activity_status_to_v1(status: &ActivityStatus) -> crate::protocol::v1::ActivityStatusDto {
     match status {
-        ActivityStatus::Snapshot => "snapshot",
-        ActivityStatus::Running => "running",
-        ActivityStatus::Succeeded => "succeeded",
-        ActivityStatus::Failed(_) => "failed",
-        ActivityStatus::Interrupted => "interrupted",
+        ActivityStatus::Snapshot => crate::protocol::v1::ActivityStatusDto::Snapshot,
+        ActivityStatus::Running => crate::protocol::v1::ActivityStatusDto::Running,
+        ActivityStatus::Succeeded => crate::protocol::v1::ActivityStatusDto::Succeeded,
+        ActivityStatus::Failed(reason) => crate::protocol::v1::ActivityStatusDto::Failed {
+            reason: reason.as_str().to_owned(),
+        },
+        ActivityStatus::Interrupted => crate::protocol::v1::ActivityStatusDto::Interrupted,
     }
 }
 

@@ -8,7 +8,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::{UiConnectionState, UiFocus, UiModel, UiRow, UiRowState, UiSection};
+use crate::{
+    UiActivityStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind, UiFocus,
+    UiMessageState, UiModel, UiRow, UiRowState, UiSection, UiTechnicalSection,
+};
 
 const MINIMUM_WIDTH: u16 = 40;
 const MINIMUM_HEIGHT: u16 = 10;
@@ -144,6 +147,26 @@ fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
 }
 
 fn render_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+    if model.conversation().is_some() {
+        if area.width >= 72 {
+            let [summaries, conversation] =
+                Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
+                    .areas(area);
+            render_summary_rows(frame, model, summaries);
+            render_conversation(frame, model, conversation);
+        } else {
+            let [summaries, conversation] =
+                Layout::vertical([Constraint::Percentage(35), Constraint::Percentage(65)])
+                    .areas(area);
+            render_summary_rows(frame, model, summaries);
+            render_conversation(frame, model, conversation);
+        }
+    } else {
+        render_summary_rows(frame, model, area);
+    }
+}
+
+fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     let count = model.snapshot().map_or(0, |snapshot| snapshot.rows.len());
     let mut lines = vec![
         Line::styled(
@@ -167,6 +190,168 @@ fn render_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         )),
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+    let Some(conversation) = model.conversation() else {
+        return;
+    };
+    let selected = model.conversation_anchor();
+    let entry_height = if model.technical_visible() { 6 } else { 3 };
+    let capacity = usize::from(area.height.saturating_sub(2))
+        .checked_div(entry_height)
+        .unwrap_or(0)
+        .max(1);
+    let selected_index = selected
+        .and_then(|anchor| {
+            conversation
+                .entries
+                .iter()
+                .position(|entry| entry.id == anchor)
+        })
+        .unwrap_or(0);
+    let start = selected_index
+        .saturating_sub(capacity / 2)
+        .min(conversation.entries.len().saturating_sub(capacity));
+    let mut lines = Vec::new();
+    for entry in conversation.entries.iter().skip(start).take(capacity) {
+        lines.extend(render_conversation_entry(model, entry));
+    }
+    if conversation.entries.is_empty() {
+        lines.push(Line::styled(
+            " No conversation entries",
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    let paging = conversation
+        .next_cursor
+        .as_ref()
+        .map_or("complete", |_| "PageDown loads more");
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::bordered()
+                    .title(format!(" Conversation · {paging} "))
+                    .border_style(if model.focus() == UiFocus::Conversation {
+                        Style::new().fg(Color::Cyan)
+                    } else {
+                        Style::new().fg(Color::DarkGray)
+                    }),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_conversation_entry<'entry>(
+    model: &UiModel,
+    entry: &'entry UiConversationEntry,
+) -> Vec<Line<'entry>> {
+    let selected = model.conversation_anchor() == Some(entry.id.as_str());
+    let marker = if selected { " › " } else { "   " };
+    let style = if selected {
+        selected_style(model.focus() == UiFocus::Conversation)
+    } else {
+        Style::new()
+    };
+    let kind = match entry.kind {
+        UiConversationEntryKind::Message => "message",
+        UiConversationEntryKind::Activity => "activity",
+    };
+    let state = match entry.message_state {
+        Some(UiMessageState::Open) => "open",
+        Some(UiMessageState::Archived) => "archived",
+        Some(UiMessageState::Rejected) => "rejected",
+        None => "non-actionable",
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(marker, style),
+            Span::styled(entry.summary.as_str(), style),
+        ]),
+        Line::from(format!("     {kind} · {state} · {}", entry.content)),
+        Line::default(),
+    ];
+    if selected && model.technical_visible() {
+        for section in &entry.technical {
+            lines.push(Line::styled(
+                format!("     {}", technical_summary(section)),
+                Style::new().fg(Color::DarkGray),
+            ));
+        }
+    }
+    lines
+}
+
+fn technical_summary(section: &UiTechnicalSection) -> String {
+    match section {
+        UiTechnicalSection::Routing { sender, recipient } => format!(
+            "routing sender={} recipient={}",
+            short_technical(sender),
+            recipient.as_deref().map_or("account", short_technical)
+        ),
+        UiTechnicalSection::Semantics {
+            purpose,
+            presentation,
+            provider,
+            session,
+            operation,
+            project,
+        } => {
+            format!(
+                "semantics purpose={purpose} presentation={presentation} operation={} project={}",
+                operation.as_deref().map_or("none", short_technical),
+                project.as_deref().map_or("none", short_technical)
+            ) + &provider
+                .as_ref()
+                .zip(session.as_ref())
+                .map_or_else(String::new, |(provider, session)| {
+                    format!(" provider={provider}/{session}")
+                })
+        }
+        UiTechnicalSection::Evidence {
+            message_id,
+            thread_id,
+            state_frontier,
+            peer_received_by,
+            root_fact,
+            root_message,
+            ready_answer,
+            thread_cancelled,
+        } => format!(
+            "evidence message={} thread={} frontier={} receipts={} root_fact={} root={} ready={} cancelled={}",
+            short_technical(message_id),
+            short_technical(thread_id),
+            state_frontier.len(),
+            peer_received_by.len(),
+            root_fact.as_deref().map_or("none", short_technical),
+            root_message.as_deref().map_or("none", short_technical),
+            ready_answer,
+            thread_cancelled
+        ),
+        UiTechnicalSection::Activity {
+            sequence,
+            status,
+            truncated,
+        } => format!(
+            "activity sequence={sequence} status={} truncated={truncated}",
+            activity_status_label(status)
+        ),
+    }
+}
+
+fn activity_status_label(status: &UiActivityStatus) -> String {
+    match status {
+        UiActivityStatus::Snapshot => "snapshot".to_owned(),
+        UiActivityStatus::Running => "running".to_owned(),
+        UiActivityStatus::Succeeded => "succeeded".to_owned(),
+        UiActivityStatus::Failed { reason } => format!("failed:{reason}"),
+        UiActivityStatus::Interrupted => "interrupted".to_owned(),
+    }
+}
+
+fn short_technical(value: &str) -> &str {
+    value.get(..12).unwrap_or(value)
 }
 
 fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {

@@ -8148,3 +8148,44 @@ or accessor facade changed.
   cleanup, and exact executable-path audits find no orphaned test daemons. Complete this work when
   the Unix CLI suite finishes without manual daemon intervention and every spawned owner is
   independently stoppable and reapable.
+
+## 2026-08-28 — Authoritative TUI mailbox conversations and activity
+
+The pure TUI now presents open, sent, and archived conversation summaries from store-derived
+projection counts, then loads mixed message/activity history through the ordinary bounded local-API
+conversation query. Opaque cursors and exact effect identities reach the single client worker;
+stale page results cannot replace a newer selection or post-invalidation repair. The model retains
+summary selection, open conversation, reducer fact anchor, focus, and typed-detail disclosure
+across applicable reload, reconnect, invalidation, and resize paths.
+
+Conversation pages remain in reducer order and the TUI performs no activity coalescing or domain
+ordering. Activity is a distinct non-actionable entry family. Its local-protocol status is now a
+closed enum that preserves bounded failure reasons rather than a behaviorally interpreted string.
+Messages expose typed routing, semantic correlation, causal frontier, receipt, thread, state, and
+project disclosure. Passive snapshots, rows, pages, entries, and disclosure records have public
+fields; only the invariant-bearing model and effect identity retain private state.
+
+The responsive renderer adds an anchored conversation pane, paging and detail controls, explicit
+non-actionable activity labels, incomplete/truncated diagnostic rows, and stable actionable page
+failures. Model, renderer, mapping, protocol, executor, and key-normalization tests cover
+open/sent/archived filtering, reducer order, pagination, stale completion, reconnect repair,
+invalidation, resize, typed activity failure, and terminal sanitization.
+
+Formatting, locked full-workspace check, strict Clippy, all-target/all-feature tests and build,
+architecture, behavior-ledger, causal-spec, protocol-spec, dependency-policy, and 512-run protocol
+fuzz gates pass. No storage schema or storage version changed. Because HQ is unshipped, the derived
+snapshot fields and typed activity status update the current local protocol v1 directly without a
+migration, compatibility shape, or protocol-version bump. Dependency policy reports only the
+existing allowed Ratatui duplicate and yanked-transitive warnings. An executable-path process audit
+finds no remaining debug or release `hq` daemon.
+
+### Original plan entry
+
+- **[tui/high] Present authoritative mailbox conversations and activity** — Extend the ordinary
+  local-API TUI client and pure model with open, sent, and archived filters; reducer-ordered mixed
+  conversation/activity pages; typed technical disclosure; stable conversation selection; and
+  logical scroll anchors. Preserve those presentation choices across authoritative reload,
+  invalidation, reconnect, and resize, consume reducer activity coalescing without reimplementing
+  it, and show stale or conflicted data as typed actionable state. Complete this work when mailbox
+  browsing is fully snapshot-driven and pure model/render tests prove canonical presentation and
+  state preservation.
