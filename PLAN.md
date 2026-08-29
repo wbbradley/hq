@@ -54,13 +54,25 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[release/high] Produce and rehearse the cutover-ready Rust release candidate** — Build the
-  single-executable Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon release artifacts, complete
-  operator and recovery documentation, verify identity backup behavior in
-  first-release scope, and dogfood only with new identities and new state directories on controlled
-  relays. Rehearse installation, startup, offline catch-up, relay loss, provider crash, database
-  repair, backup/restore where supported, node replacement, clean shutdown, and rollback to an
-  untouched archived Go installation. Produce a cutover checklist and evidence bundle without
-  opening or mutating Go state and without switching a live production identity. Complete this work
-  when the definition of done is proven and an operator can separately authorize soak and cutover
-  with known rollback steps.
+- **[release/high] Build and verify native Rust release artifacts** — Replace the frozen Go release
+  path with a Rust release-candidate workflow that builds one `hq` executable for Linux x86-64,
+  Linux ARM64, macOS x86-64, and Apple Silicon. Package each target with checksums and a machine-
+  readable manifest, prove that downloaded artifacts have the expected revision and host
+  architecture, and rehearse installation, startup, and clean shutdown with a new identity and
+  isolated state directory. Do not tag or publish a release as part of this task.
+- **[operations/high] Rehearse isolated identity and database recovery** — Add a repeatable drill
+  that uses only newly generated Rust identities and temporary state roots to prove encrypted
+  identity export/import, backup boundaries, database repair, node replacement, restart, and clean
+  shutdown. Prove that unsupported database-history restoration is described truthfully and that
+  neither a Go key nor a Go database is opened or mutated.
+- **[operations/high] Rehearse controlled relay and provider failure** — Dogfood the release
+  candidate only with new identities and new state directories on controlled relays. Exercise
+  startup, offline catch-up, relay loss and recovery, provider crash and drain behavior, and final
+  clean shutdown with bounded, reproducible evidence and no production identity or live cutover.
+- **[release/high] Complete the Rust cutover package and evidence audit** — Update supported-install
+  and operator documentation, service-manager guidance, recovery boundaries, and the release
+  changelog/version candidate. Rehearse rollback to an untouched archived synthetic Go
+  installation without starting it or opening its state, produce the cutover checklist and
+  evidence bundle, and audit every acceptance-matrix row and definition-of-done clause. Complete
+  this work when an operator can separately authorize soak and cutover with known rollback steps;
+  do not tag, publish, replace, disable, or activate any live installation.
