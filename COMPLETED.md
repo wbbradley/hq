@@ -1,5 +1,45 @@
 # Completed
 
+## 2026-08-29 — Controlled relay and provider failure rehearsal
+
+Added an isolated Linux x86-64 release-candidate drill that consumes the already packaged binary,
+creates a new identity and state root, and owns a loopback-only pinned rnostr v0.4.9 container and
+fresh relay data. The authenticated interoperability contract publishes a signed encrypted
+kind-1059 wrapper, verifies retained recipient-filtered catch-up by the signed wrapper identity,
+decrypts byte-identical embedded canonical data, and repeats after reconnect. This correctly
+allows a Nostr relay to reserialize the outer JSON without weakening wrapper ID, signature,
+recipient, or canonical-byte verification.
+
+The drill stops the exact controlled relay, proves its endpoint is unreachable while the packaged
+HQ daemon stays ready and accepts a synchronization wake, restarts the same relay data, repeats
+catch-up, and verifies retained policy. Deterministic provider seams then prove redacted transport
+crash containment, exact worker-lease release, response-loss and partial-persistence reconciliation,
+forced teardown ownership release, ordered node drain, clean shutdown, and offline state-root
+reacquisition. Exact traps remove only the rehearsal's temporary state and container; no standing
+HQ state, identity, credential, relay, or unrelated process is inspected or changed.
+
+Actions run 33256363580 passed all four native package and recovery lanes, the 94-second controlled
+failure job, and aggregate validation for exact revision
+`140d7d2d1ff7fa1183606f71a5c90f33263d9a78`. The combined artifact
+`rust-release-candidate-140d7d2d1ff7fa1183606f71a5c90f33263d9a78` was downloaded independently.
+Fresh release, recovery, and controlled-failure validation passed; regenerated release and recovery
+manifests were byte-for-byte equal to CI's. The controlled evidence SHA-256 is
+`c8a173b6adef05e0b655d09258bc92f08dcddec723863a88fcd595df700ffef7`.
+
+The locked relay tests and strict targeted Clippy pass, including a unit regression for relay JSON
+reformatting. A native build of the exact pinned relay reproduced the prior failure and passed the
+corrected contract twice before clean shutdown. Final executable-path inspection found no HQ
+daemon. No record accessor facade, storage shape or version, migration, compatibility reader,
+duplicate stored/runtime state, dependency, or lockfile changed; no tag, release, soak, identity
+activation, production service change, or cutover occurred.
+
+### Original plan entry
+
+- **[operations/high] Rehearse controlled relay and provider failure** — Dogfood the release
+  candidate only with new identities and new state directories on controlled relays. Exercise
+  startup, offline catch-up, relay loss and recovery, provider crash and drain behavior, and final
+  clean shutdown with bounded, reproducible evidence and no production identity or live cutover.
+
 ## 2026-08-29 — Isolated identity and database recovery rehearsal
 
 Added a release-binary recovery drill that owns a short, bounded `/tmp` rehearsal namespace and

@@ -54,10 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[operations/high] Rehearse controlled relay and provider failure** — Dogfood the release
-  candidate only with new identities and new state directories on controlled relays. Exercise
-  startup, offline catch-up, relay loss and recovery, provider crash and drain behavior, and final
-  clean shutdown with bounded, reproducible evidence and no production identity or live cutover.
 - **[release/high] Complete the Rust cutover package and evidence audit** — Update supported-install
   and operator documentation, service-manager guidance, recovery boundaries, and the release
   changelog/version candidate. Rehearse rollback to an untouched archived synthetic Go
