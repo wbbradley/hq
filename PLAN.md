@@ -54,12 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[release/high] Build and verify native Rust release artifacts** — Replace the frozen Go release
-  path with a Rust release-candidate workflow that builds one `hq` executable for Linux x86-64,
-  Linux ARM64, macOS x86-64, and Apple Silicon. Package each target with checksums and a machine-
-  readable manifest, prove that downloaded artifacts have the expected revision and host
-  architecture, and rehearse installation, startup, and clean shutdown with a new identity and
-  isolated state directory. Do not tag or publish a release as part of this task.
 - **[operations/high] Rehearse isolated identity and database recovery** — Add a repeatable drill
   that uses only newly generated Rust identities and temporary state roots to prove encrypted
   identity export/import, backup boundaries, database repair, node replacement, restart, and clean

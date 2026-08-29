@@ -1,5 +1,40 @@
 # Completed
 
+## 2026-08-29 — Native Rust release artifacts
+
+Replaced the write-enabled GoReleaser tag workflow with a manually dispatched, read-only Rust
+release-candidate matrix. Each native runner builds the sole `hq` executable with its complete Git
+revision embedded, packages an archive containing only that executable, emits a portable SHA-256
+file, and publishes a target manifest only after an extracted installation initializes a new
+identity, reaches ready state in an isolated state root, reports ready status, and shuts down
+cleanly. Repository-owned validators reject unsafe names, nonnative hosts, missing or extra
+targets, mixed versions or revisions, changed hashes, and absent lifecycle evidence. Their fixture
+test proves both the complete four-target path and corrupted-archive rejection.
+
+Actions run 33251594731 passed Linux x86-64, Linux ARM64, macOS x86-64, Apple Silicon, and the
+aggregate verifier for exact revision `af7625225c4b41bf86c12d148a53e87755ac6e1f`. The native build
+steps completed in 134, 100, 457, and 165 seconds respectively, all below the 900-second release
+build limit. The combined artifact
+`rust-release-candidate-af7625225c4b41bf86c12d148a53e87755ac6e1f` was downloaded independently;
+a fresh aggregate audit verified all four archive hashes and reproduced the workflow manifest
+byte-for-byte.
+
+The locked full workspace passed formatting, architecture validation, strict Clippy, and every
+all-target/all-feature test. The packaging scripts passed Bash syntax and ShellCheck. No HQ daemon
+remained after local installation rehearsal or the test suite. No tag or release was published,
+and no default, Go, or production identity/state path was opened. No production record accessor
+facade, storage shape or version, migration, compatibility reader, duplicate stored/runtime state,
+dependency, or lockfile changed.
+
+### Original plan entry
+
+- **[release/high] Build and verify native Rust release artifacts** — Replace the frozen Go release
+  path with a Rust release-candidate workflow that builds one `hq` executable for Linux x86-64,
+  Linux ARM64, macOS x86-64, and Apple Silicon. Package each target with checksums and a machine-
+  readable manifest, prove that downloaded artifacts have the expected revision and host
+  architecture, and rehearse installation, startup, and clean shutdown with a new identity and
+  isolated state directory. Do not tag or publish a release as part of this task.
+
 ## 2026-08-29 — Cross-platform qualification and acceptance audit
 
 Recorded the complete ADR-0001 native matrix for implementation revision

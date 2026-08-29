@@ -57,5 +57,25 @@ scripts/test-rust-release-artifacts.sh
 
 ## Recorded release-candidate evidence
 
-The exact source revision, Actions run, combined artifact name, and independent download audit are
-recorded here after a four-target rehearsal succeeds. Until then, no release candidate is attested.
+GitHub Actions run
+[33251594731](https://github.com/wbbradley/hq/actions/runs/33251594731) built and verified source
+revision `af7625225c4b41bf86c12d148a53e87755ac6e1f` on 2026-08-29. All four native jobs and the
+aggregate verifier passed. The build steps took 100 seconds on Linux ARM64, 134 seconds on Linux
+x86-64, 165 seconds on Apple Silicon, and 457 seconds on Intel macOS, each below the 900-second
+release-build acceptance limit.
+
+The combined artifact is
+`rust-release-candidate-af7625225c4b41bf86c12d148a53e87755ac6e1f`. An independent download to a
+new temporary directory passed a fresh `verify-rust-release-matrix.sh` invocation. Its regenerated
+aggregate manifest was byte-for-byte equal to the workflow-produced manifest. The verified archive
+SHA-256 values are:
+
+| Rust host | SHA-256 |
+| --- | --- |
+| `aarch64-apple-darwin` | `246e2b2e971cc8073ef728cb37c82abcacc0066f8beb4f6041b6bdc3c3ac1f94` |
+| `aarch64-unknown-linux-gnu` | `1cf8b3d518bc4facde688829e9f6f6b0f7841a1cf16f47996c73d76cda1aea4c` |
+| `x86_64-apple-darwin` | `abea57bdaf03453b9ff58c561093387a937941f0bcaacd05ed1661ef8db981d2` |
+| `x86_64-unknown-linux-gnu` | `17006477999f3ee394a998d65c09b1436ffb18713200b12de442daa4bed07f66` |
+
+This attests release-candidate artifact production only. It is not a tag, published release,
+production soak, or cutover authorization.
