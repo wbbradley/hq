@@ -55,6 +55,10 @@ controlled_home="$rehearsal_root/home"
 relay_data="$rehearsal_root/relay-data"
 relay_config="$rehearsal_root/rnostr.toml"
 container="hq-rust-controlled-failure-$$"
+relay_port=${HQ_CONTROLLED_RELAY_PORT:-17448}
+[[ "$relay_port" =~ ^[0-9]+$ && "$relay_port" -ge 1024 && "$relay_port" -le 65535 ]] ||
+  fail 'controlled relay port must be an unprivileged TCP port'
+relay_url="ws://127.0.0.1:$relay_port"
 temporary_evidence=
 
 hq_command() {
@@ -111,13 +115,10 @@ sed \
   "$repository_root/deploy/rnostr/rnostr.toml.example" >"$relay_config"
 
 docker run -d --name "$container" \
-  -p '127.0.0.1::8080' \
+  -p "127.0.0.1:$relay_port:8080" \
   -v "$relay_config:/rnostr/config/rnostr.toml:ro" \
   -v "$relay_data:/rnostr/data" \
   "$relay_image" >/dev/null || fail 'controlled relay did not start'
-relay_port=$(docker port "$container" 8080/tcp | sed -n 's/.*://p')
-[[ "$relay_port" =~ ^[0-9]+$ ]] || fail 'controlled relay port could not be resolved'
-relay_url="ws://127.0.0.1:$relay_port"
 wait_for_relay "$relay_port" || fail 'controlled relay did not become ready'
 
 ready=$(hq_command daemon readiness) || fail 'release candidate startup failed'
