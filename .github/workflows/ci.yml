@@ -73,9 +73,33 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test
+        if: matrix.os == 'macos-latest'
         run: cargo test --locked --workspace --all-targets --all-features
       - name: Build
         run: cargo build --locked --workspace --all-targets --all-features
+
+  rust-linux-tests:
+    name: Rust Linux tests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: node
+            package_arguments: -p hq-node
+          - group: tui
+            package_arguments: -p hq-tui
+          - group: remaining workspace
+            package_arguments: --workspace --exclude hq-node --exclude hq-tui
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Test owning group
+        run: >-
+          cargo test --locked ${{ matrix.package_arguments }} --all-targets --all-features
 
   rust-core-targets:
     name: Rust portable crates (${{ matrix.target }})
