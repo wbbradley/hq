@@ -27,21 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Complete the TUI vocabulary and progressive-disclosure audit
-
-Audit every ordinary screen, dialog, footer, hint, and exceptional outcome from the perspective of
-a person seeing HQ for the first time.
-
-- Replace unexplained reducer, transport, authority, reconciliation, provider-session, assignment,
-  and thread terminology where it is not essential to the user's decision.
-- Ensure every screen explains what it represents, why input is needed, what the user can do next,
-  and what will happen afterward.
-- Keep stable identities, causal evidence, raw state codes, and recovery diagnostics available in
-  technical details rather than deleting them.
-- Add or update render snapshots and pure-model tests for every revised state at narrow and wide
-  terminal sizes. Update `docs/rust/tui.md` with the final vocabulary and progressive-disclosure
-  contract.
-
 ### Make dialogs behave like familiar forms
 
 Introduce reusable form-editing and rendering behavior rather than continuing per-dialog key and

@@ -9025,3 +9025,41 @@ and applicable recovery actions derived by the node mapper.
   recovery codes in contextual technical details.
 - Add mapper, pure-model, and narrow/wide render coverage for every unavailable and conflicted
   condition. Update `docs/rust/tui.md` with the typed recovery vocabulary.
+
+## 2026-08-29 — TUI vocabulary and progressive disclosure
+
+Ordinary TUI surfaces now describe user intentions and visible outcomes instead of HQ internals.
+Headers report the device connection in plain language; activity is an information-only update;
+projects lead with status, folders and resources, and the assigned agent; agent workflows use saved
+conversations and agent services; mailbox dialogs explain who receives a message; and project
+forms, confirmations, completions, and failures say what HQ needs, will change, or kept on disk.
+
+Stable IDs, revisions, raw connection and runtime states, request identities, provider/session and
+thread evidence, causal details, failure codes, and recovery actions remain available behind
+explicit technical labels. Ordinary failure footers now explain the recovery action without making
+the user interpret a stable code. Compact layouts retain required fields, warnings, actions, and
+recovery guidance before secondary evidence.
+
+Responsive render contracts cover the revised ordinary and technical states at narrow and wide
+sizes, and the installed pseudo-terminal workflows synchronize on stable structural cues rather
+than presentation phrases. The final vocabulary and progressive-disclosure contract is recorded in
+`docs/rust/tui.md`. Formatting, architecture verification, qualification-evidence validation,
+strict workspace Clippy, the locked full-workspace test suite, the workspace build, and installed
+terminal scenarios pass.
+
+### Original plan entry
+
+### Complete the TUI vocabulary and progressive-disclosure audit
+
+Audit every ordinary screen, dialog, footer, hint, and exceptional outcome from the perspective of
+a person seeing HQ for the first time.
+
+- Replace unexplained reducer, transport, authority, reconciliation, provider-session, assignment,
+  and thread terminology where it is not essential to the user's decision.
+- Ensure every screen explains what it represents, why input is needed, what the user can do next,
+  and what will happen afterward.
+- Keep stable identities, causal evidence, raw state codes, and recovery diagnostics available in
+  technical details rather than deleting them.
+- Add or update render snapshots and pure-model tests for every revised state at narrow and wide
+  terminal sizes. Update `docs/rust/tui.md` with the final vocabulary and progressive-disclosure
+  contract.
