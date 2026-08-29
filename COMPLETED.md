@@ -1,5 +1,41 @@
 # Completed
 
+## 2026-08-28 — Project lifecycle CLI
+
+Added `project open PROJECT_ID`, `project close PROJECT_ID --yes [--force]`, `project archive
+PROJECT_ID`, and `project unarchive PROJECT_ID`. Every lifecycle command resolves the selected
+active account, immutable project home, and exact canonical head from one authoritative snapshot,
+then submits through one stable project-command builder. Close always requires explicit `--yes`;
+`--force` is separate authorization for dirty/unknown release or failed/uncertain runtime cessation
+and cannot substitute for confirmation.
+
+Added the application-to-local-API project request conversion boundary and reused it for creation
+and lifecycle commands, removing the CLI's hand-built creation DTO. The conversion is exhaustive
+over the closed project action catalog and round-trips lifecycle values. Existing outcome rendering
+now serves every lifecycle command and preserves accepted/running stages, terminal rejection,
+reconcilable checkpoints, and exact runtime failure or uncertainty details. Passive records retain
+public fields; no accessor facade or duplicate stored/runtime state was introduced.
+
+Parser, confirmation, exact authority/head digest, conversion round-trip, stale-head precondition,
+byte-identical response-loss replay, close/archive recovery, runtime failure/uncertainty rendering,
+and real foreground CLI lifecycle tests pass. The foreground test closes and archives one project,
+restarts its owning daemon, unarchives and opens it, proves desired resource identity survives while
+advisory claims release and reacquire, and explicitly stops the owner. Full locked workspace tests
+with all targets/features, format/check, strict Clippy, architecture, behavior-ledger, causal,
+protocol, and dependency gates pass. The dependency audit retains only the existing yanked
+`chacha20 0.10.1` warning. Repeated post-suite process-table audits found no HQ daemon. Local API
+remains v1 and storage remains v13; no migration or compatibility path was added because HQ has not
+shipped.
+
+### Original plan entry
+
+- **[cli/high] Add project lifecycle commands** — Expose open, close, archive, and unarchive through
+  one stable project-command builder shared with subsequent assignment commands. Resolve the active
+  human, immutable home, and exact expected head from authoritative state; require explicit close
+  confirmation and force authorization; render every workflow stage, rejection, runtime
+  failure/uncertainty, and reconcilable operation. Test stale heads, response loss, restart repair,
+  close confirmation, and real foreground execution.
+
 ## 2026-08-28 — Project-addressed messaging CLI
 
 Added `project send PROJECT_ID [MESSAGE]` through the ordinary asynchronous-message planner. The

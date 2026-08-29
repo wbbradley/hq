@@ -54,12 +54,12 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Add project lifecycle and assignment commands** — Expose open, activate,
-  exact-session/thread resume, pending dispatch, handoff, close, archive, and unarchive through one
-  stable project-command builder. Resolve active human, expected head, named agent, provider,
-  launch directory, and force confirmations from authoritative state; render every workflow stage,
-  rejection, runtime failure/uncertainty, and reconcilable operation. Test stale heads, response
-  loss, restart repair, takeover/close confirmation, and real foreground execution.
+- **[cli/high] Add project assignment and dispatch commands** — Extend the stable project-command
+  builder with activate, exact-session/thread resume, pending dispatch, and handoff. Resolve the
+  named agent, provider, launch directory, active assignment, and takeover authorization from
+  authoritative state; render every workflow stage, rejection, runtime failure/uncertainty, and
+  reconcilable operation. Test invalid session/thread combinations, stale heads, response loss,
+  restart repair, takeover confirmation, and real foreground execution.
 
 - **[cli/high] Add desired-resource inspection and mutation commands** — Expose resource add,
   remove, replace, primary selection, and check through the project and read-only inspection ports.

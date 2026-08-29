@@ -306,11 +306,13 @@ hq project create widget --path /work/widget
 hq project worktree --repo /work/widget --base main --destination /work/widget-fix --branch fix/widget widget-fix
 hq project send PROJECT_ID "Investigate the failing integration test"
 hq project activate PROJECT_ID --agent alice --harness codex --new-session
-hq project close PROJECT_ID
+hq project close PROJECT_ID --yes
 hq project archive PROJECT_ID
+hq project unarchive PROJECT_ID
+hq project open PROJECT_ID
 ```
 
-Use `hq project list`, `show`, `reopen`, `handoff`, `check`, and `resource` for inspection and lifecycle management. `project worktree` reserves its destination on the selected home before the daemon invokes Git. `--home INSTALLATION_ID` creates or provisions on another active human-account device. Remote mutations remain visibly queued until the home returns a signed received/committed/rejected result; expected-head comparison rejects delayed stale commands. Closing and archival release HQ's advisory claims but never delete files, worktrees, branches, or containers.
+Use `hq project list`, `show`, `open`, `handoff`, `check`, and `resource` for inspection and lifecycle management. Close requires `--yes`; `--force` separately authorizes dirty/unknown release or failed/uncertain runtime cessation. `project worktree` reserves its destination on the selected home before the daemon invokes Git. `--home INSTALLATION_ID` creates or provisions on another active human-account device. Remote mutations remain visibly queued until the home returns a signed received/committed/rejected result; expected-head comparison rejects delayed stale commands. Closing and archival release HQ's advisory claims but never delete files, worktrees, branches, or containers.
 
 `project send` accepts the body as its final argument or from stdin. It writes an ordinary durable
 account message to the immutable project mailbox; the authoritative home sequences it even while

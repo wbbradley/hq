@@ -2,12 +2,12 @@
 
 #![allow(clippy::expect_used)]
 
+use hq_application::{ProjectCommandAction, ProjectCommandRequest};
 use hq_domain::{
-    BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactScope, InstallationId,
-    MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, SemanticPayload, ShortText, SigningPublicKey,
-    Timestamp,
+    AccountId, BoundedSet, CausalReferences, CommandDigest, CommandId, EncryptionPublicKey, FactId,
+    FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, OperationId, ProjectId,
+    SemanticPayload, ShortText, SigningPublicKey, Timestamp,
 };
-use hq_local_api::project_command_from_v1;
 use hq_local_api::protocol::v1::{
     AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
     AgentSelectionCandidateDto, AgentSessionBindingDto, AgentSessionNameCandidateDto,
@@ -29,6 +29,7 @@ use hq_local_api::protocol::v1::{
     SynchronizationRequestDto, V1, ValueError, VersionRange, VersionRejected, WireMessage,
     WorktreeProvisioningRequestDto, agent_session_request_digest, negotiate,
 };
+use hq_local_api::{project_command_from_v1, project_command_request_to_v1};
 
 fn build() -> BuildMetadata {
     BuildMetadata::new("hq", "0.1.0", Some("0123456789ab")).expect("bounded build metadata")
@@ -265,6 +266,34 @@ fn project_head_presence_matches_creation_semantics() {
         project_command_from_v1(*request),
         Err(ValueError::InvalidValueCombination)
     );
+}
+
+#[test]
+fn lifecycle_project_commands_round_trip_through_the_application_boundary() {
+    for action in [
+        ProjectCommandAction::Open,
+        ProjectCommandAction::Close { force: false },
+        ProjectCommandAction::Close { force: true },
+        ProjectCommandAction::SetArchived { archived: true },
+        ProjectCommandAction::SetArchived { archived: false },
+    ] {
+        let request = ProjectCommandRequest {
+            command_id: CommandId::from_bytes([1; 32]),
+            operation_id: OperationId::from_bytes([2; 32]),
+            request_digest: CommandDigest::from_bytes([3; 32]),
+            account_id: AccountId::from_bytes([4; 32]),
+            project_id: ProjectId::from_bytes([5; 32]),
+            home: InstallationId::from_bytes([6; 32]),
+            expected_head: Some(FactId::from_bytes([7; 32])),
+            issued_at: Timestamp::from_unix_millis(1_700_000_000_000),
+            action,
+        };
+        let wire = project_command_request_to_v1(&request);
+        assert_eq!(
+            project_command_from_v1(wire).expect("valid project request"),
+            request
+        );
+    }
 }
 
 fn effect<T>(body: T) -> EffectRequestDto<T> {

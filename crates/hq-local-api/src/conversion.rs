@@ -934,6 +934,127 @@ pub fn project_command_from_v1(
     })
 }
 
+/// Converts one exact transport-independent project command into local API v1.
+pub fn project_command_request_to_v1(request: &ProjectCommandRequest) -> ProjectCommandRequestDto {
+    ProjectCommandRequestDto {
+        command_id: id32(request.command_id.as_bytes()),
+        operation_id: id32(request.operation_id.as_bytes()),
+        request_digest: id32(request.request_digest.as_bytes()),
+        account_id: id32(request.account_id.as_bytes()),
+        project_id: id32(request.project_id.as_bytes()),
+        home: id32(request.home.as_bytes()),
+        expected_head: request.expected_head.map(|head| id32(head.as_bytes())),
+        issued_at_unix_millis: request.issued_at.as_unix_millis(),
+        action: project_action_to_v1(&request.action),
+    }
+}
+
+fn project_action_to_v1(action: &ProjectCommandAction) -> ProjectCommandActionDto {
+    match action {
+        ProjectCommandAction::Create(request) => {
+            ProjectCommandActionDto::Create(crate::protocol::v1::ProjectCreationRequestDto {
+                mailbox_id: id32(request.mailbox_id.as_bytes()),
+                project_name: request.project_name.as_str().to_owned(),
+                brief: request
+                    .brief
+                    .as_ref()
+                    .map(|brief| brief.as_str().to_owned()),
+                resource_id: id32(request.resource_id.as_bytes()),
+                resource: locator_to_v1(&request.resource),
+            })
+        }
+        ProjectCommandAction::Open => ProjectCommandActionDto::Open,
+        ProjectCommandAction::Activate {
+            agent_id,
+            provider,
+            resume_session,
+            resume_thread,
+            launch_directory,
+        } => ProjectCommandActionDto::Activate {
+            agent_id: id32(agent_id.as_bytes()),
+            provider: provider.as_str().to_owned(),
+            resume_session: resume_session
+                .as_ref()
+                .map(|session| session.as_str().to_owned()),
+            resume_thread: resume_thread.map(|thread| id32(thread.as_bytes())),
+            launch_directory: locator_to_v1(launch_directory),
+        },
+        ProjectCommandAction::DispatchPending => ProjectCommandActionDto::DispatchPending,
+        ProjectCommandAction::Close { force } => ProjectCommandActionDto::Close { force: *force },
+        ProjectCommandAction::SetArchived { archived } => ProjectCommandActionDto::SetArchived {
+            archived: *archived,
+        },
+        ProjectCommandAction::Handoff {
+            agent_id,
+            provider,
+            resume_session,
+            thread_id,
+            launch_directory,
+            force_takeover,
+        } => ProjectCommandActionDto::Handoff {
+            agent_id: id32(agent_id.as_bytes()),
+            provider: provider.as_str().to_owned(),
+            resume_session: resume_session
+                .as_ref()
+                .map(|session| session.as_str().to_owned()),
+            thread_id: id32(thread_id.as_bytes()),
+            launch_directory: locator_to_v1(launch_directory),
+            force_takeover: *force_takeover,
+        },
+        ProjectCommandAction::RetireAgent { agent_id, force } => {
+            ProjectCommandActionDto::RetireAgent {
+                agent_id: id32(agent_id.as_bytes()),
+                force: *force,
+            }
+        }
+        ProjectCommandAction::AddResource {
+            resource,
+            make_primary,
+        } => ProjectCommandActionDto::AddResource {
+            resource: project_resource_to_v1(resource),
+            make_primary: *make_primary,
+        },
+        ProjectCommandAction::RemoveResource { resource_id, force } => {
+            ProjectCommandActionDto::RemoveResource {
+                resource_id: id32(resource_id.as_bytes()),
+                force: *force,
+            }
+        }
+        ProjectCommandAction::ReplaceResource {
+            old_resource_id,
+            new_resource,
+        } => ProjectCommandActionDto::ReplaceResource {
+            old_resource_id: id32(old_resource_id.as_bytes()),
+            new_resource: project_resource_to_v1(new_resource),
+        },
+        ProjectCommandAction::ProvisionWorktree(request) => {
+            ProjectCommandActionDto::ProvisionWorktree(
+                crate::protocol::v1::WorktreeProvisioningRequestDto {
+                    mailbox_id: id32(request.mailbox_id.as_bytes()),
+                    project_name: request.project_name.as_str().to_owned(),
+                    brief: request
+                        .brief
+                        .as_ref()
+                        .map(|brief| brief.as_str().to_owned()),
+                    source: locator_to_v1(&request.source),
+                    destination: locator_to_v1(&request.destination),
+                    branch: request.branch.as_str().to_owned(),
+                    create_branch: request.create_branch,
+                },
+            )
+        }
+    }
+}
+
+fn project_resource_to_v1(resource: &ProjectResource) -> ProjectResourceDto {
+    ProjectResourceDto {
+        resource_id: id32(resource.resource_id.as_bytes()),
+        display_locator: locator_to_v1(&resource.display_locator),
+        canonical_locator: locator_to_v1(&resource.canonical_locator),
+        health: resource_health_to_v1(resource.health),
+    }
+}
+
 /// Converts one typed project result into its local API representation.
 pub fn project_command_to_v1(outcome: &ProjectCommandOutcome) -> ProjectCommandOutcomeDto {
     match outcome {

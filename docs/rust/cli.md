@@ -180,6 +180,19 @@ to a closed, archived, or unassigned project remains pending rather than reopeni
 it. Message and acceptance mutations retain deterministic identities across response loss. Human
 output is exactly `project=ID message=ID`; JSON adds the same IDs to `hq-cli-output-v1`.
 
+`project open PROJECT_ID`, `project close PROJECT_ID --yes [--force]`, `project archive
+PROJECT_ID`, and `project unarchive PROJECT_ID` submit through the same stable project-command
+builder. Each command resolves the selected active account, immutable project home, and exact
+canonical head from one fresh authoritative snapshot; a delayed command therefore rejects as stale
+instead of applying to a newer project state. Close always requires `--yes`. `--force` is a
+separate authorization for dirty/unknown release or failed/uncertain runtime cessation and never
+acts as confirmation. Archive gracefully closes an open project before hiding it; unarchive
+restores presentation while leaving the project closed, and `open` reacquires its advisory claims.
+All four commands preserve accepted inputs and desired resources and render accepted, running,
+completed, rejected, or reconcilable workflow truth with runtime failure/uncertainty details.
+Exact requests replay after local response loss, and durable workflow checkpoints repair after
+restart. This extends local API v1 in place because no HQ installation has shipped.
+
 `agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
 for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert
 dependency-incomplete history, and the boundary that humans own identity, authority, durable

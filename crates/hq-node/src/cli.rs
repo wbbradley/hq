@@ -34,7 +34,7 @@ use hq_domain::{
     SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_local_api::{
-    ClientEvent, InitialView,
+    ClientEvent, InitialView, project_command_request_to_v1,
     protocol::v1::{
         AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
         AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
@@ -42,12 +42,11 @@ use hq_local_api::{
         ConversationMessageDto, ConversationPageRequest, DeviceGrantDto, EffectOutcomeDto,
         EffectRequestDto, HealthDomainDto, Id32, LaunchEnvironmentDto, LifecycleRequest,
         LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
-        PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto,
-        ProjectCommandOutcomeDto, ProjectCommandRequestDto, ProjectCommandStageDto,
-        ProjectCreationRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
-        RelayStatusDto, Request, ResourceHealthDto, ResourceLocatorDto, ResourceSchemeDto,
-        ResponseResult, RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto,
-        SynchronizationRequestDto, agent_session_request_digest,
+        PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, ProjectCommandOutcomeDto,
+        ProjectCommandRequestDto, ProjectCommandStageDto, RelayAccessDto, RelayAuthenticationDto,
+        RelayConfigurationDto, RelayStatusDto, Request, ResourceHealthDto, ResourceLocatorDto,
+        ResourceSchemeDto, ResponseResult, RuntimeObservationDto, SessionControlDto, SnapshotItem,
+        StateHealthDto, SynchronizationRequestDto, agent_session_request_digest,
     },
 };
 use hq_projects::{agent_retirement_request_digest, project_command_request_digest};
@@ -445,6 +444,19 @@ pub enum ProjectCliCommand {
         /// Selected immutable home, or the local installation by default.
         home: Option<InstallationId>,
     },
+    /// Open one exact closed project.
+    Open(ProjectId),
+    /// Close one exact project after explicit confirmation.
+    Close {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Whether dirty or uncertain effects may revoke HQ authority.
+        force: bool,
+    },
+    /// Close and hide one exact project from ordinary active views.
+    Archive(ProjectId),
+    /// Restore one exact archived project to ordinary closed presentation.
+    Unarchive(ProjectId),
 }
 
 /// Passive desired-resource and advisory-claim presentation.
@@ -1700,12 +1712,40 @@ fn parse_project_catalog(
             ),
         },
         [action, rest @ ..] if action == "create" => parse_project_create(rest)?,
+        [action, project_id] if action == "open" => {
+            ProjectCliCommand::Open(ProjectId::from_bytes(parse_hex32(project_id)?))
+        }
+        [action, rest @ ..] if action == "close" => parse_project_close(rest)?,
+        [action, project_id] if action == "archive" => {
+            ProjectCliCommand::Archive(ProjectId::from_bytes(parse_hex32(project_id)?))
+        }
+        [action, project_id] if action == "unarchive" => {
+            ProjectCliCommand::Unarchive(ProjectId::from_bytes(parse_hex32(project_id)?))
+        }
         _ => return Err(CliError::Arguments),
     };
     Ok(CliCommand::Project {
         action,
         state: parsed_state(state_root)?,
     })
+}
+
+fn parse_project_close(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
+    let project_id =
+        ProjectId::from_bytes(parse_hex32(arguments.first().ok_or(CliError::Arguments)?)?);
+    let mut confirmed = false;
+    let mut force = false;
+    for argument in &arguments[1..] {
+        match argument.to_str() {
+            Some("--yes") if !confirmed => confirmed = true,
+            Some("--force") if !force => force = true,
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    if !confirmed {
+        return Err(CliError::Arguments);
+    }
+    Ok(ProjectCliCommand::Close { project_id, force })
 }
 
 fn parse_project_create(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
@@ -2726,7 +2766,85 @@ fn run_project(
         ProjectCliCommand::Send { project_id, body } => {
             send_project_message(&mut client, &snapshot, *project_id, body.as_ref(), input)
         }
+        ProjectCliCommand::Open(project_id) => control_project(
+            &mut client,
+            &snapshot,
+            "open",
+            *project_id,
+            ProjectCommandAction::Open,
+        ),
+        ProjectCliCommand::Close { project_id, force } => control_project(
+            &mut client,
+            &snapshot,
+            "close",
+            *project_id,
+            ProjectCommandAction::Close { force: *force },
+        ),
+        ProjectCliCommand::Archive(project_id) => control_project(
+            &mut client,
+            &snapshot,
+            "archive",
+            *project_id,
+            ProjectCommandAction::SetArchived { archived: true },
+        ),
+        ProjectCliCommand::Unarchive(project_id) => control_project(
+            &mut client,
+            &snapshot,
+            "unarchive",
+            *project_id,
+            ProjectCommandAction::SetArchived { archived: false },
+        ),
     }
+}
+
+fn control_project(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    operation: &'static str,
+    project_id: ProjectId,
+    action: ProjectCommandAction,
+) -> Result<CliResult, CliError> {
+    let project = project_rows(snapshot)?
+        .remove(&project_id)
+        .ok_or(CliError::ProjectState)?;
+    let local = client.installation_id();
+    let account_id = local_selection(snapshot, local)
+        .map_err(|_| CliError::ProjectState)?
+        .active
+        .filter(|account_id| *account_id == project.account_id)
+        .ok_or(CliError::ProjectState)?;
+    require_active_project_home(snapshot, account_id, project.home)?;
+    let command_id = random_command_id()?;
+    let operation_id = project_operation_id(command_id);
+    let wire = project_command_request(
+        command_id,
+        operation_id,
+        account_id,
+        project_id,
+        project.home,
+        Some(project.head),
+        current_unix_millis()?,
+        action,
+    )?;
+    let ClientEvent::ProjectCommand {
+        command_id: completed,
+        outcome,
+    } = client.project(wire)?
+    else {
+        return Err(CliError::ProjectState);
+    };
+    if completed != command_id {
+        return Err(CliError::ProjectState);
+    }
+    project_operation_view(
+        operation,
+        command_id,
+        project_id,
+        project.home,
+        operation_id,
+        outcome,
+    )
+    .map(CliResult::ProjectOperation)
 }
 
 fn send_project_message(
@@ -2826,6 +2944,36 @@ fn project_creation_request(
     let resource_id =
         hq_domain::ResourceId::from_bytes(project_creation_identity(operation_id, b"resource"));
     let issued_at = Timestamp::from_unix_millis(issued_at_unix_millis);
+    let wire = project_command_request(
+        command_id,
+        operation_id,
+        account_id,
+        project_id,
+        home,
+        None,
+        issued_at.as_unix_millis(),
+        ProjectCommandAction::Create(ProjectCreationRequest {
+            mailbox_id,
+            project_name: name.clone(),
+            brief: brief.cloned(),
+            resource_id,
+            resource: resource.clone(),
+        }),
+    )?;
+    Ok((wire, project_id, operation_id))
+}
+
+#[allow(clippy::too_many_arguments, reason = "exact project-command envelope")]
+fn project_command_request(
+    command_id: CommandId,
+    operation_id: OperationId,
+    account_id: AccountId,
+    project_id: ProjectId,
+    home: InstallationId,
+    expected_head: Option<FactId>,
+    issued_at_unix_millis: i64,
+    action: ProjectCommandAction,
+) -> Result<ProjectCommandRequestDto, CliError> {
     let mut request = ProjectCommandRequest {
         command_id,
         operation_id,
@@ -2833,40 +2981,13 @@ fn project_creation_request(
         account_id,
         project_id,
         home,
-        expected_head: None,
-        issued_at,
-        action: ProjectCommandAction::Create(ProjectCreationRequest {
-            mailbox_id,
-            project_name: name.clone(),
-            brief: brief.cloned(),
-            resource_id,
-            resource: resource.clone(),
-        }),
+        expected_head,
+        issued_at: Timestamp::from_unix_millis(issued_at_unix_millis),
+        action,
     };
     request.request_digest =
         project_command_request_digest(&request).map_err(|_| CliError::ProjectState)?;
-    let wire = ProjectCommandRequestDto {
-        command_id: Id32::new(*command_id.as_bytes()),
-        operation_id: Id32::new(*operation_id.as_bytes()),
-        request_digest: Id32::new(*request.request_digest.as_bytes()),
-        account_id: Id32::new(*account_id.as_bytes()),
-        project_id: Id32::new(*project_id.as_bytes()),
-        home: Id32::new(*home.as_bytes()),
-        expected_head: None,
-        issued_at_unix_millis: issued_at.as_unix_millis(),
-        action: ProjectCommandActionDto::Create(ProjectCreationRequestDto {
-            mailbox_id: Id32::new(*mailbox_id.as_bytes()),
-            project_name: name.as_str().to_owned(),
-            brief: brief.map(|value| value.as_str().to_owned()),
-            resource_id: Id32::new(*resource_id.as_bytes()),
-            resource: ResourceLocatorDto::new(
-                ResourceSchemeDto::WorkingTree,
-                resource.value().to_owned(),
-            )
-            .map_err(|_| CliError::ProjectState)?,
-        }),
-    };
-    Ok((wire, project_id, operation_id))
+    Ok(project_command_request_to_v1(&request))
 }
 
 fn require_active_project_home(
@@ -2927,6 +3048,13 @@ fn project_creation_operation_id(command_id: CommandId) -> OperationId {
         OperationId::from_bytes(*command_id.as_bytes()),
         b"operation",
     ))
+}
+
+fn project_operation_id(command_id: CommandId) -> OperationId {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-project-operation-v1\0");
+    digest.update(command_id.as_bytes());
+    OperationId::from_bytes(digest.finalize().into())
 }
 
 fn project_creation_identity(operation_id: OperationId, label: &[u8]) -> [u8; 32] {
@@ -3051,7 +3179,12 @@ fn project_catalog_view(
         ProjectCliCommand::Show(project_id) => {
             vec![projects.remove(project_id).ok_or(CliError::ProjectState)?]
         }
-        ProjectCliCommand::Create { .. } | ProjectCliCommand::Send { .. } => {
+        ProjectCliCommand::Create { .. }
+        | ProjectCliCommand::Send { .. }
+        | ProjectCliCommand::Open(_)
+        | ProjectCliCommand::Close { .. }
+        | ProjectCliCommand::Archive(_)
+        | ProjectCliCommand::Unarchive(_) => {
             return Err(CliError::ProjectState);
         }
     };
@@ -3059,7 +3192,12 @@ fn project_catalog_view(
         operation: match action {
             ProjectCliCommand::List => "list",
             ProjectCliCommand::Show(_) => "show",
-            ProjectCliCommand::Create { .. } | ProjectCliCommand::Send { .. } => {
+            ProjectCliCommand::Create { .. }
+            | ProjectCliCommand::Send { .. }
+            | ProjectCliCommand::Open(_)
+            | ProjectCliCommand::Close { .. }
+            | ProjectCliCommand::Archive(_)
+            | ProjectCliCommand::Unarchive(_) => {
                 return Err(CliError::ProjectState);
             }
         },
@@ -8518,7 +8656,10 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                 || (command == "harness"
                     && matches!(action.as_str(), "start" | "resume" | "stop"))
                 || (command == "project"
-                    && matches!(action.as_str(), "list" | "show" | "send")) =>
+                    && matches!(
+                        action.as_str(),
+                        "list" | "show" | "send" | "open" | "close" | "archive" | "unarchive"
+                    )) =>
         {
             match command.as_str() {
                 "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
@@ -8558,7 +8699,8 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
         [command] if command == "project" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
              Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
-             Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Project inspection starts or connects to the local node and reads one complete authoritative snapshot. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
+  open PROJECT_ID                           Open one closed project\n  close PROJECT_ID --yes [--force]          Close and release advisory claims\n  archive PROJECT_ID                        Gracefully close and hide one project\n  unarchive PROJECT_ID                      Restore one archived project as closed\n\n\
+             Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Project inspection and lifecycle commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
@@ -8659,11 +8801,12 @@ mod tests {
         ProjectCliCommand, RelayCommand, completion_for, copy_launch_environment, effect_outcome,
         execute_cli, harness_request, human_devices_view, human_view, mailbox_discovery_view,
         message_body, named_agent_catalog_view, normalized_existing_resource, pairing_grant_id,
-        parse_cli, project_catalog_view, project_creation_request, project_operation_view,
-        read_password, render_project_catalog, render_result, resolve_environment_session,
-        resolve_named_agent_id, run_cli, session_binding_fact, session_context,
-        stable_relay_effect, stable_repair_operation, successful_result_exit_code,
+        parse_cli, project_catalog_view, project_command_request, project_creation_request,
+        project_operation_view, read_password, render_project_catalog, render_result,
+        resolve_environment_session, resolve_named_agent_id, run_cli, session_binding_fact,
+        session_context, stable_relay_effect, stable_repair_operation, successful_result_exit_code,
     };
+    use hq_application::ProjectCommandAction;
     use hq_domain::{
         AccountId, AgentId, FactId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
         MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, RelayHints,
@@ -8823,6 +8966,110 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_project_lifecycle_commands_and_requires_close_confirmation() {
+        let project = "22".repeat(32);
+        for (arguments, expected) in [
+            (
+                vec!["project", "open", &project],
+                ProjectCliCommand::Open(ProjectId::from_bytes([0x22; 32])),
+            ),
+            (
+                vec!["project", "archive", &project],
+                ProjectCliCommand::Archive(ProjectId::from_bytes([0x22; 32])),
+            ),
+            (
+                vec!["project", "unarchive", &project],
+                ProjectCliCommand::Unarchive(ProjectId::from_bytes([0x22; 32])),
+            ),
+            (
+                vec!["project", "close", &project, "--yes"],
+                ProjectCliCommand::Close {
+                    project_id: ProjectId::from_bytes([0x22; 32]),
+                    force: false,
+                },
+            ),
+            (
+                vec!["project", "close", &project, "--force", "--yes"],
+                ProjectCliCommand::Close {
+                    project_id: ProjectId::from_bytes([0x22; 32]),
+                    force: true,
+                },
+            ),
+        ] {
+            let parsed = parse_cli(arguments.into_iter().map(OsString::from))
+                .expect("lifecycle command parses");
+            assert!(
+                matches!(parsed.command, CliCommand::Project { action, .. } if action == expected)
+            );
+        }
+        for arguments in [
+            vec!["project", "close", &project],
+            vec!["project", "close", &project, "--force"],
+            vec!["project", "open", &project, "--yes"],
+            vec!["project", "archive", &project, "--force"],
+        ] {
+            assert_eq!(
+                parse_cli(arguments.into_iter().map(OsString::from)),
+                Err(CliError::Arguments)
+            );
+        }
+    }
+
+    #[test]
+    fn project_command_request_binds_exact_snapshot_authority_and_head() {
+        let command_id = hq_domain::CommandId::from_bytes([1; 32]);
+        let operation_id = OperationId::from_bytes([2; 32]);
+        let account_id = AccountId::from_bytes([3; 32]);
+        let project_id = ProjectId::from_bytes([4; 32]);
+        let home = InstallationId::from_bytes([5; 32]);
+        let head = FactId::from_bytes([6; 32]);
+        let first = project_command_request(
+            command_id,
+            operation_id,
+            account_id,
+            project_id,
+            home,
+            Some(head),
+            1_700_000_000_000,
+            ProjectCommandAction::Close { force: true },
+        )
+        .expect("project command request");
+        let repeated = project_command_request(
+            command_id,
+            operation_id,
+            account_id,
+            project_id,
+            home,
+            Some(head),
+            1_700_000_000_000,
+            ProjectCommandAction::Close { force: true },
+        )
+        .expect("repeated request");
+        assert_eq!(first, repeated);
+        assert_eq!(first.account_id.bytes(), *account_id.as_bytes());
+        assert_eq!(first.project_id.bytes(), *project_id.as_bytes());
+        assert_eq!(first.home.bytes(), *home.as_bytes());
+        assert_eq!(first.expected_head.map(Id32::bytes), Some(*head.as_bytes()));
+        assert!(matches!(
+            first.action,
+            ProjectCommandActionDto::Close { force: true }
+        ));
+
+        let changed = project_command_request(
+            command_id,
+            operation_id,
+            account_id,
+            project_id,
+            home,
+            Some(FactId::from_bytes([7; 32])),
+            1_700_000_000_000,
+            ProjectCommandAction::Close { force: true },
+        )
+        .expect("changed-head request");
+        assert_ne!(first.request_digest, changed.request_digest);
+    }
+
+    #[test]
     fn project_creation_request_has_stable_identity_and_exact_content_digest() {
         let command_id = hq_domain::CommandId::from_bytes([1; 32]);
         let account_id = AccountId::from_bytes([2; 32]);
@@ -8884,7 +9131,7 @@ mod tests {
         let project_id = ProjectId::from_bytes([3; 32]);
         let home = InstallationId::from_bytes([4; 32]);
         let rejected = project_operation_view(
-            "create",
+            "close",
             command_id,
             project_id,
             home,
@@ -8893,7 +9140,7 @@ mod tests {
                 operation_id: Id32::new(*operation_id.as_bytes()),
                 error: DomainErrorDto::new("project".to_owned(), "resource_conflict".to_owned())
                     .expect("domain error"),
-                runtime: None,
+                runtime: Some(RuntimeObservationDto::Failed("stop_failed".to_owned())),
             },
         )
         .expect("rejected view");
@@ -8905,6 +9152,25 @@ mod tests {
         assert_eq!(value["data"]["status"], "rejected");
         assert_eq!(value["data"]["error_category"], "project");
         assert_eq!(value["data"]["error_code"], "resource_conflict");
+        assert_eq!(value["data"]["runtime_state"], "failed");
+        assert_eq!(value["data"]["runtime_code"], "stop_failed");
+
+        let uncertain = project_operation_view(
+            "close",
+            command_id,
+            project_id,
+            home,
+            operation_id,
+            ProjectCommandOutcomeDto::Completed {
+                operation_id: Id32::new(*operation_id.as_bytes()),
+                project_head: Id32::new([5; 32]),
+                runtime: Some(RuntimeObservationDto::Uncertain("stop_unknown".to_owned())),
+            },
+        )
+        .expect("uncertain runtime view");
+        assert_eq!(uncertain.status, "completed");
+        assert_eq!(uncertain.runtime_state, Some("uncertain"));
+        assert_eq!(uncertain.runtime_code.as_deref(), Some("stop_unknown"));
 
         let reconcilable = project_operation_view(
             "create",
@@ -10267,7 +10533,7 @@ mod tests {
     }
 
     #[test]
-    fn project_help_covers_catalog_and_creation() {
+    fn project_help_covers_catalog_creation_and_lifecycle() {
         let project = run_cli(
             &parse_cli([OsString::from("help"), OsString::from("project")])
                 .expect("project help parses"),
@@ -10276,6 +10542,9 @@ mod tests {
         assert!(project.contains("show PROJECT_ID"));
         assert!(project.contains("send PROJECT_ID [MESSAGE]"));
         assert!(project.contains("create NAME --path ABSOLUTE_PATH"));
+        assert!(project.contains("open PROJECT_ID"));
+        assert!(project.contains("close PROJECT_ID --yes [--force]"));
+        assert!(project.contains("unarchive PROJECT_ID"));
         assert!(project.contains("never chooses a historical winner"));
     }
 

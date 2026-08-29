@@ -856,6 +856,121 @@ fn project_create_claims_one_existing_path_and_survives_restart() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "complete foreground project lifecycle"
+)]
+fn project_lifecycle_runs_in_foreground_and_survives_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("lifecycle-worktree");
+    fs::create_dir(&worktree).expect("existing working tree");
+    initialize_identity(&state_root);
+    let foreground = command("run", &state_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("foreground project node starts");
+    let mut foreground = ChildGuard(foreground);
+    let runtime = RuntimePaths::new(state_root.join("runtime")).expect("runtime paths");
+    wait_ready(&mut client(runtime));
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+    let created = project_json(
+        &state_root,
+        &[
+            "create",
+            "Lifecycle target",
+            "--path",
+            worktree.to_str().expect("UTF-8 worktree"),
+        ],
+    );
+    let project_id = created["data"]["project_id"]
+        .as_str()
+        .expect("project identity")
+        .to_owned();
+    let initial = project_json(&state_root, &["show", &project_id]);
+    let resources = initial["data"]["projects"][0]["resources"].clone();
+
+    for arguments in [
+        vec!["close", project_id.as_str()],
+        vec!["close", project_id.as_str(), "--force"],
+    ] {
+        let unconfirmed = admin_output(&state_root, "project", &arguments);
+        assert_eq!(unconfirmed.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&unconfirmed.stderr).contains("cli.arguments"));
+    }
+
+    let closed = project_json(&state_root, &["close", &project_id, "--yes"]);
+    assert_eq!(closed["data"]["operation"], "close");
+    assert_eq!(closed["data"]["status"], "completed");
+    let closed_catalog = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(closed_catalog["data"]["projects"][0]["lifecycle"], "closed");
+    assert_eq!(
+        closed_catalog["data"]["projects"][0]["resources"][0]["resource_id"],
+        resources[0]["resource_id"]
+    );
+    assert_eq!(
+        closed_catalog["data"]["projects"][0]["resources"][0]["active_claim"],
+        false
+    );
+
+    let archived = project_json(&state_root, &["archive", &project_id]);
+    assert_eq!(archived["data"]["operation"], "archive");
+    assert_eq!(archived["data"]["status"], "completed");
+    let archived_catalog = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(
+        archived_catalog["data"]["projects"][0]["lifecycle"],
+        "closed"
+    );
+    assert_eq!(archived_catalog["data"]["projects"][0]["archived"], true);
+    assert_eq!(
+        archived_catalog["data"]["projects"][0]["resources"],
+        closed_catalog["data"]["projects"][0]["resources"]
+    );
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+
+    let unarchived = project_json(&state_root, &["unarchive", &project_id]);
+    assert_eq!(unarchived["data"]["operation"], "unarchive");
+    assert_eq!(unarchived["data"]["status"], "completed");
+    let unarchived_catalog = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(
+        unarchived_catalog["data"]["projects"][0]["lifecycle"],
+        "closed"
+    );
+    assert_eq!(unarchived_catalog["data"]["projects"][0]["archived"], false);
+
+    let opened = project_json(&state_root, &["open", &project_id]);
+    assert_eq!(opened["data"]["operation"], "open");
+    assert_eq!(opened["data"]["status"], "completed");
+    let opened_catalog = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(opened_catalog["data"]["projects"][0]["lifecycle"], "open");
+    assert_eq!(
+        opened_catalog["data"]["projects"][0]["resources"][0]["resource_id"],
+        resources[0]["resource_id"]
+    );
+    assert_eq!(
+        opened_catalog["data"]["projects"][0]["resources"][0]["active_claim"],
+        true
+    );
+
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "final stop stderr: {:?}",
+        stopped.stderr
+    );
+    wait_child(&mut foreground.0);
+}
+
+#[test]
 fn project_send_sequences_argument_and_stdin_work_and_survives_restart() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
