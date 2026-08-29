@@ -318,6 +318,11 @@ project/agent/provider/session/thread binding from authoritative history. Handof
 separate confirmation; force takeover only revokes HQ authority after blocked or uncertain
 quiescence and does not claim the external runtime stopped. Tab moves between agent, mode, thread,
 provider, directory, confirmation, and force fields; arrows change the selected choice.
+Press `c` on an open project to run a fresh all-resource release assessment before a separately
+confirmed close; dirty, rejected, or unknown evidence additionally requires the `f` force toggle.
+Press `o` to reopen a closed project and `z` to confirm archive or unarchive. These lifecycle
+controls use the same ordinary local API as the CLI and retain external paths, files, worktrees,
+branches, and uncertain runtime evidence for explicit recovery.
 Forms, exact logical selection, and typed operation,
 health, release, rejection, and reconciliation outcomes survive authoritative reloads and
 reconnects; canceling a form performs no mutation. A reconcilable worktree outcome names any

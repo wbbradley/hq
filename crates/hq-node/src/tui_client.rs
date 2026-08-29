@@ -1326,6 +1326,23 @@ fn local_project_command(action: &UiProjectAction) -> LocalProjectCommand {
             launch_directory: launch_directory.clone(),
             force_takeover: *force_takeover,
         },
+        UiProjectAction::Open { project_id } => LocalProjectCommand::Open {
+            project_id: *project_id,
+        },
+        UiProjectAction::PreviewClose { project_id } => LocalProjectCommand::PreviewClose {
+            project_id: *project_id,
+        },
+        UiProjectAction::Close { project_id, force } => LocalProjectCommand::Close {
+            project_id: *project_id,
+            force: *force,
+        },
+        UiProjectAction::SetArchived {
+            project_id,
+            archived,
+        } => LocalProjectCommand::SetArchived {
+            project_id: *project_id,
+            archived: *archived,
+        },
     }
 }
 
@@ -2003,6 +2020,44 @@ mod tests {
                     thread_id: [6; 32],
                     launch_directory: "/handoff".to_owned(),
                     force_takeover: true,
+                },
+            ),
+            (
+                UiProjectAction::Open { project_id },
+                LocalProjectCommand::Open { project_id },
+            ),
+            (
+                UiProjectAction::PreviewClose { project_id },
+                LocalProjectCommand::PreviewClose { project_id },
+            ),
+            (
+                UiProjectAction::Close {
+                    project_id,
+                    force: true,
+                },
+                LocalProjectCommand::Close {
+                    project_id,
+                    force: true,
+                },
+            ),
+            (
+                UiProjectAction::SetArchived {
+                    project_id,
+                    archived: true,
+                },
+                LocalProjectCommand::SetArchived {
+                    project_id,
+                    archived: true,
+                },
+            ),
+            (
+                UiProjectAction::SetArchived {
+                    project_id,
+                    archived: false,
+                },
+                LocalProjectCommand::SetArchived {
+                    project_id,
+                    archived: false,
                 },
             ),
         ];

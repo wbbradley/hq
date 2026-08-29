@@ -7,8 +7,8 @@ use hq_tui::{
     UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiInput,
     UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject, UiProjectAction,
     UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
-    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState,
-    UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
+    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -400,6 +400,166 @@ fn project_handoff_form_separates_confirmation_force_and_runtime_truth() {
     }
 }
 
+#[test]
+#[allow(clippy::too_many_lines)]
+fn project_lifecycle_controls_are_responsive_confirmed_and_force_gated() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+    ] {
+        let details = update(project_model(size), UiEvent::Input(UiInput::Activate))
+            .expect("project details")
+            .model;
+        let previewing = update(details.clone(), UiEvent::Input(UiInput::Character('c')))
+            .expect("close preview");
+        let (effect_id, action) = previewing
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::SubmitProjectCommand { id, action } => Some((*id, action.clone())),
+                _ => None,
+            })
+            .expect("preview effect");
+        assert_eq!(
+            action,
+            UiProjectAction::PreviewClose {
+                project_id: [1; 32]
+            }
+        );
+        let assessed = update(
+            previewing.model,
+            UiEvent::ProjectCommandCompleted {
+                effect_id,
+                result: UiProjectResult {
+                    action,
+                    command_id: [11; 32],
+                    operation_id: [12; 32],
+                    project_id: [1; 32],
+                    runtime_state: None,
+                    runtime_code: None,
+                    outcome: UiProjectOutcome::ResourceChecks {
+                        checks: vec![UiProjectResourceCheck {
+                            resource_id: [4; 32],
+                            status: "accepted".to_owned(),
+                            health: Some("healthy".to_owned()),
+                            release: Some("dirty".to_owned()),
+                            observed_canonical_path: Some("/workspace/release".to_owned()),
+                            details: Some("working tree has changes".to_owned()),
+                            error_category: None,
+                            error_code: None,
+                            reconciliation_id: None,
+                        }],
+                    },
+                },
+            },
+        )
+        .expect("typed release assessment")
+        .model;
+        let confirmation = update(assessed, UiEvent::Input(UiInput::Activate))
+            .expect("close confirmation")
+            .model;
+        let rendered = render_text(&confirmation);
+        assert!(rendered.contains("Confirm project close"));
+        assert!(rendered.contains("release=dirty"));
+        if size.width >= 120 {
+            assert!(rendered.contains("Confirmed: false"));
+            assert!(rendered.contains("retains external paths"));
+        }
+        let cancelled = update(confirmation.clone(), UiEvent::Input(UiInput::Escape))
+            .expect("close cancellation");
+        assert!(cancelled.model.project_modal().is_none());
+        assert!(
+            !cancelled
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+        );
+
+        let confirmed = update(confirmation, UiEvent::Input(UiInput::Character('c')))
+            .expect("separate confirmation")
+            .model;
+        let blocked = update(confirmed, UiEvent::Input(UiInput::Activate))
+            .expect("dirty close remains blocked");
+        assert!(
+            !blocked
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+        );
+        let forced = update(blocked.model, UiEvent::Input(UiInput::Character('f')))
+            .expect("force recovery")
+            .model;
+        let closing = update(forced, UiEvent::Input(UiInput::Activate)).expect("forced close");
+        assert!(closing.effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::SubmitProjectCommand {
+                action: UiProjectAction::Close {
+                    project_id,
+                    force: true
+                },
+                ..
+            } if *project_id == [1; 32]
+        )));
+
+        let archive = update(details, UiEvent::Input(UiInput::Character('z')))
+            .expect("archive confirmation")
+            .model;
+        assert!(render_text(&archive).contains("Confirm project archive"));
+        let archiving = update(archive, UiEvent::Input(UiInput::Activate)).expect("archive");
+        assert!(archiving.effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::SubmitProjectCommand {
+                action: UiProjectAction::SetArchived { archived: true, .. },
+                ..
+            }
+        )));
+    }
+
+    let closed = update(
+        project_model_with_state(
+            UiSize {
+                width: 100,
+                height: 20,
+            },
+            false,
+            "closed",
+            true,
+        ),
+        UiEvent::Input(UiInput::Activate),
+    )
+    .expect("closed project details")
+    .model;
+    let opening =
+        update(closed.clone(), UiEvent::Input(UiInput::Character('o'))).expect("reopen project");
+    assert!(opening.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::SubmitProjectCommand {
+            action: UiProjectAction::Open { .. },
+            ..
+        }
+    )));
+    let unarchive = update(closed, UiEvent::Input(UiInput::Character('z')))
+        .expect("unarchive confirmation")
+        .model;
+    let unarchiving = update(unarchive, UiEvent::Input(UiInput::Activate)).expect("unarchive");
+    assert!(unarchiving.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::SubmitProjectCommand {
+            action: UiProjectAction::SetArchived {
+                archived: false,
+                ..
+            },
+            ..
+        }
+    )));
+}
+
 fn assert_snapshot(model: &UiModel, expected: &str) {
     let before = model.clone();
     let viewport = model.viewport();
@@ -566,11 +726,21 @@ fn agent_details_model(size: UiSize) -> UiModel {
 }
 
 fn project_model(size: UiSize) -> UiModel {
-    project_model_with_assignment(size, false)
+    project_model_with_state(size, false, "open", false)
 }
 
 #[allow(clippy::too_many_lines)]
 fn project_model_with_assignment(size: UiSize, assigned: bool) -> UiModel {
+    project_model_with_state(size, assigned, "open", false)
+}
+
+#[allow(clippy::too_many_lines)]
+fn project_model_with_state(
+    size: UiSize,
+    assigned: bool,
+    lifecycle: &str,
+    archived: bool,
+) -> UiModel {
     let mut model = ready_model(size);
     for section in [
         UiSection::Sent,
@@ -592,8 +762,8 @@ fn project_model_with_assignment(size: UiSize, assigned: bool) -> UiModel {
                 project_id: [1; 32],
                 home: [2; 32],
                 name: "release".to_owned(),
-                lifecycle: "open".to_owned(),
-                archived: false,
+                lifecycle: lifecycle.to_owned(),
+                archived,
                 claimable: true,
                 assignment: assigned.then(|| UiProjectAssignment {
                     assignment_id: [8; 32],

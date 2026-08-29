@@ -1,5 +1,43 @@
 # Completed
 
+## 2026-08-29 — Retained project lifecycle controls
+
+Added reopen, fresh close assessment, confirmed close, archive, and unarchive to project details.
+Close first performs a read-only all-resource check through the ordinary local API, then retains
+the exact accepted, rejected, or uncertain health and release evidence in a confirmation modal.
+Confirmation and force recovery are separate choices. Only dirty, unknown, rejected, or uncertain
+evidence requires force; clean and non-Git resources do not. Closing and archival explicitly retain
+external paths, files, worktrees, branches, and uncertain runtime truth.
+
+Every lifecycle action maps directly to the existing project CLI command through the local-client
+boundary. The TUI adds no project authority and no alternate mutation route. Stable project
+identity, fresh checks, confirmation, force choice, and submission state survive authoritative
+reloads and reconnects. Existing typed operation identity, saga progress, runtime state and code,
+rejection, reconciliation, compensation, and external-state warnings remain the sole outcome and
+recovery evidence.
+
+Pure-model coverage proves clean close, dirty force gating, separate confirmation, cancellation,
+stable reload retention, reopen, archive, and unarchive. Wide and compact renderer tests cover
+release evidence and lifecycle confirmations. Exact action-mapping tests cover every new local
+command. Installed pseudoterminal coverage drives one project through close, reopen, archive, and
+unarchive, checks each authoritative state through the CLI, and proves terminal restoration.
+
+The locked full workspace passes formatting, check, strict Clippy, all-target/all-feature tests and
+build, architecture, behavior-ledger, causal, protocol, dependency, and bounded protocol-fuzz
+gates. No storage shape or version, migration, compatibility reader, protocol version, accessor
+facade, duplicate stored/runtime state, dependency, or lockfile changed. The final exact
+executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[tui/high] Implement retained project lifecycle controls** — Add confirmed close, force-gated
+  takeover/close recovery, reopen, archive, and unarchive through ordinary local-API commands.
+  Preserve project selection and modal state across authoritative reload/reconnect, reconcile
+  in-flight operations by stable identity, and expose release assessment, quiescence, compensation,
+  external-state warnings, rejected outcomes, and recovery actions as typed state. Complete this
+  work when pure model, responsive renderer, executor, and installed-client parity tests cover every
+  lifecycle transition, confirmation, cancellation, progress, response-loss, and failure path.
+
 ## 2026-08-29 — Retained project assignment, activation, dispatch, and handoff
 
 Added passive public-field current-assignment and exact historical project-thread records to the

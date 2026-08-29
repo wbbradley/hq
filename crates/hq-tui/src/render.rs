@@ -142,6 +142,11 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 "p primary · k check selected · K check all · n send input",
             ));
             lines.push(Line::from("v activate · d dispatch pending · h handoff"));
+            lines.push(Line::from(if project.lifecycle == "closed" {
+                "o reopen · z archive/unarchive"
+            } else {
+                "c assess and close · z archive/unarchive"
+            }));
             (" Project details ", lines)
         }
         UiProjectModal::CreateExisting {
@@ -340,6 +345,84 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 Some((*confirmed, *force_takeover)),
                 *submitting,
             ),
+        ),
+        UiProjectModal::ConfirmClose {
+            project,
+            checks,
+            confirmed,
+            force,
+            submitting,
+        } => {
+            let mut lines = vec![
+                Line::from(format!("Project: {}", project.name)),
+                Line::from(format!(
+                    "Lifecycle: {} · assigned: {}",
+                    project.lifecycle,
+                    project.assignment.is_some()
+                )),
+                Line::default(),
+                Line::styled("Fresh release assessment", Style::new().fg(Color::Cyan)),
+            ];
+            if checks.is_empty() {
+                lines.push(Line::from("No desired resources"));
+            }
+            for check in checks {
+                lines.push(Line::from(format!(
+                    "{} · {} · health={} · release={}",
+                    short_identity(check.resource_id),
+                    check.status,
+                    check.health.as_deref().unwrap_or("unknown"),
+                    check.release.as_deref().unwrap_or("unknown")
+                )));
+                if let Some(details) = &check.details {
+                    lines.push(Line::from(format!("  {details}")));
+                }
+                if let (Some(category), Some(code)) = (&check.error_category, &check.error_code) {
+                    lines.push(Line::styled(
+                        format!("  rejected: {category}/{code}"),
+                        Style::new().fg(Color::Red),
+                    ));
+                }
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(format!(
+                "Confirmed: {confirmed} · force recovery: {force}"
+            )));
+            lines.push(Line::from(
+                "Closing retains external paths, files, worktrees, and branches.",
+            ));
+            lines.push(Line::from(if *submitting {
+                "Reconciling one stable close operation…"
+            } else {
+                "c confirm · f authorize force · Enter close · Esc cancel"
+            }));
+            (" Confirm project close ", lines)
+        }
+        UiProjectModal::ConfirmArchive {
+            project,
+            archived,
+            submitting,
+        } => (
+            if *archived {
+                " Confirm project archive "
+            } else {
+                " Confirm project unarchive "
+            },
+            vec![
+                Line::from(format!("Project: {}", project.name)),
+                Line::from(format!("Lifecycle: {}", project.lifecycle)),
+                Line::from(if *archived {
+                    "Archiving closes the project while retaining external state."
+                } else {
+                    "Unarchiving retains the project in its authoritative lifecycle state."
+                }),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Reconciling one stable archive operation…"
+                } else {
+                    "Enter confirm · Esc cancel"
+                }),
+            ],
         ),
         UiProjectModal::Outcome { result } => {
             let mut lines = vec![Line::from(project_action_label(&result.action))];
@@ -569,6 +652,16 @@ fn project_action_label(action: &UiProjectAction) -> String {
         UiProjectAction::Activate { .. } => "Activate project assignment".to_owned(),
         UiProjectAction::DispatchPending { .. } => "Dispatch pending project input".to_owned(),
         UiProjectAction::Handoff { .. } => "Hand off project assignment".to_owned(),
+        UiProjectAction::Open { .. } => "Reopen project".to_owned(),
+        UiProjectAction::PreviewClose { .. } => "Assess project close".to_owned(),
+        UiProjectAction::Close { force, .. } => format!("Close project · force={force}"),
+        UiProjectAction::SetArchived { archived, .. } => {
+            if *archived {
+                "Archive project".to_owned()
+            } else {
+                "Unarchive project".to_owned()
+            }
+        }
     }
 }
 

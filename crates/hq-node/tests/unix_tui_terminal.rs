@@ -281,6 +281,69 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn installed_tui_project_lifecycle_matches_the_cli() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("lifecycle-worktree");
+    std::fs::create_dir(&worktree).expect("existing working tree");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+    let name = "tui-lifecycle";
+    let created = hq_output(
+        &state_root,
+        &[
+            "project",
+            "create",
+            name,
+            "--path",
+            worktree.to_str().expect("UTF-8 path"),
+        ],
+    );
+    assert!(
+        created.status.success(),
+        "project create failed: {created:?}"
+    );
+
+    for (interaction, lifecycle, archived) in [
+        (PtyInteraction::CloseProject { name }, "closed", false),
+        (PtyInteraction::OpenProject { name }, "open", false),
+        (
+            PtyInteraction::SetProjectArchived {
+                name,
+                archived: true,
+            },
+            "closed",
+            true,
+        ),
+        (
+            PtyInteraction::SetProjectArchived {
+                name,
+                archived: false,
+            },
+            "closed",
+            false,
+        ),
+    ] {
+        let run = run_in_pty(&state_root, true, interaction);
+        assert!(
+            run.status.success(),
+            "TUI lifecycle failed: {:?}",
+            run.bytes
+        );
+        assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+        let project = project_json(&state_root, name);
+        assert_eq!(project["lifecycle"], lifecycle);
+        assert_eq!(project["archived"], archived);
+    }
+}
+
+#[test]
 fn installed_tui_provisions_a_recoverable_git_worktree_project() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -389,6 +452,16 @@ enum PtyInteraction<'content> {
         name: &'content str,
         path: &'content str,
     },
+    CloseProject {
+        name: &'content str,
+    },
+    OpenProject {
+        name: &'content str,
+    },
+    SetProjectArchived {
+        name: &'content str,
+        archived: bool,
+    },
     CreateWorktreeProject {
         name: &'content str,
         source: &'content str,
@@ -456,7 +529,10 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::CreateExistingProject { .. } => b"llllc".as_slice(),
                 PtyInteraction::SendProjectInput { .. }
                 | PtyInteraction::DispatchProjectInput { .. }
-                | PtyInteraction::AddProjectResource { .. } => b"llll".as_slice(),
+                | PtyInteraction::AddProjectResource { .. }
+                | PtyInteraction::CloseProject { .. }
+                | PtyInteraction::OpenProject { .. }
+                | PtyInteraction::SetProjectArchived { .. } => b"llll".as_slice(),
                 PtyInteraction::CreateWorktreeProject { .. } => b"llllw".as_slice(),
             };
             master.write_all(key).expect("initial TUI key writes");
@@ -577,6 +653,118 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.flush().expect("project details key flushes");
             content_sent = true;
             completion_offset = Some(bytes.len());
+        }
+        let lifecycle_name = match interaction {
+            PtyInteraction::CloseProject { name }
+            | PtyInteraction::OpenProject { name }
+            | PtyInteraction::SetProjectArchived { name, .. } => Some(name),
+            _ => None,
+        };
+        if let Some(name) = lifecycle_name
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(name.len())
+                .any(|window| window == name.as_bytes())
+        {
+            master.write_all(b"\r").expect("project details key writes");
+            master.flush().expect("project details key flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CloseProject { .. })
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Unassigned".len())
+                    .any(|window| window == b"Unassigned")
+            })
+        {
+            master.write_all(b"c").expect("close assessment key writes");
+            master.flush().expect("close assessment key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CloseProject { .. })
+            && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"operation outcome".len())
+                    .any(|window| window == b"operation outcome")
+            })
+        {
+            master.write_all(b"\r").expect("close assessment accepts");
+            master.flush().expect("close assessment flushes");
+            managed_provider_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CloseProject { .. })
+            && managed_provider_sent
+            && !resource_commit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Fresh release assessment".len())
+                    .any(|window| window == b"Fresh release assessment")
+            })
+        {
+            master
+                .write_all(b"cf\r")
+                .expect("confirmed forced close writes");
+            master.flush().expect("confirmed forced close flushes");
+            resource_commit_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::OpenProject { .. })
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Unassigned".len())
+                    .any(|window| window == b"Unassigned")
+            })
+        {
+            master.write_all(b"o").expect("reopen key writes");
+            master.flush().expect("reopen key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::SetProjectArchived { .. })
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Unassigned".len())
+                    .any(|window| window == b"Unassigned")
+            })
+        {
+            master.write_all(b"z").expect("archive choice key writes");
+            master.flush().expect("archive choice key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::SetProjectArchived { archived, .. } = interaction
+            && managed_action_sent
+            && !managed_provider_sent
+        {
+            let title = if archived {
+                b"Archiving closes the project".as_slice()
+            } else {
+                b"unarchive ".as_slice()
+            };
+            if completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(title.len())
+                    .any(|window| window == title)
+            }) {
+                master
+                    .write_all(b"\r")
+                    .expect("archive confirmation writes");
+                master.flush().expect("archive confirmation flushes");
+                managed_provider_sent = true;
+                completion_offset = Some(bytes.len());
+            }
         }
         if matches!(interaction, PtyInteraction::DispatchProjectInput { .. })
             && content_sent
@@ -705,6 +893,26 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .any(|window| window == b"open messages")
         {
             let _ = content;
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+        }
+        if matches!(
+            interaction,
+            PtyInteraction::CloseProject { .. }
+                | PtyInteraction::OpenProject { .. }
+                | PtyInteraction::SetProjectArchived { .. }
+        ) && (resource_commit_sent
+            || managed_action_sent && matches!(interaction, PtyInteraction::OpenProject { .. })
+            || managed_provider_sent
+                && matches!(interaction, PtyInteraction::SetProjectArchived { .. }))
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Completed".len())
+                    .any(|window| window == b"Completed")
+            })
+        {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
@@ -855,6 +1063,15 @@ fn project_id(state_root: &Path, name: &str) -> String {
         .and_then(|project| project["project_id"].as_str())
         .expect("project identity")
         .to_owned()
+}
+
+fn project_json(state_root: &Path, name: &str) -> serde_json::Value {
+    let id = project_id(state_root, name);
+    let output = hq_output(state_root, &["--output", "json", "project", "show", &id]);
+    assert!(output.status.success(), "project show failed: {output:?}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("project show is JSON")["data"]
+        ["projects"][0]
+        .clone()
 }
 
 fn hq_output(state_root: &Path, arguments: &[&str]) -> std::process::Output {

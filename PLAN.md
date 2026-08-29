@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained project lifecycle controls** — Add confirmed close, force-gated
-  takeover/close recovery, reopen, archive, and unarchive through ordinary local-API commands.
-  Preserve project selection and modal state across authoritative reload/reconnect, reconcile
-  in-flight operations by stable identity, and expose release assessment, quiescence, compensation,
-  external-state warnings, rejected outcomes, and recovery actions as typed state. Complete this
-  work when pure model, responsive renderer, executor, and installed-client parity tests cover every
-  lifecycle transition, confirmation, cancellation, progress, response-loss, and failure path.
-
 - **[verification/high] Qualify the integrated Rust system against the acceptance matrix** — Run and
   strengthen the complete fixture, property, model, fuzz, crash/reopen, lifecycle, architecture,
   security/redaction, and end-to-end suites across the assembled node, clients, relay, harness, and

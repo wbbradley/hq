@@ -350,6 +350,20 @@ pub(crate) enum LocalProjectCommand {
         launch_directory: String,
         force_takeover: bool,
     },
+    Open {
+        project_id: [u8; 32],
+    },
+    PreviewClose {
+        project_id: [u8; 32],
+    },
+    Close {
+        project_id: [u8; 32],
+        force: bool,
+    },
+    SetArchived {
+        project_id: [u8; 32],
+        archived: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -557,6 +571,28 @@ pub(crate) fn execute_project_command(
             directory: Some(PathBuf::from(launch_directory)),
             force: *force_takeover,
         },
+        LocalProjectCommand::Open { project_id } => {
+            ProjectCliCommand::Open(ProjectId::from_bytes(*project_id))
+        }
+        LocalProjectCommand::PreviewClose { project_id } => ProjectCliCommand::Check {
+            project_id: ProjectId::from_bytes(*project_id),
+            resource_id: None,
+        },
+        LocalProjectCommand::Close { project_id, force } => ProjectCliCommand::Close {
+            project_id: ProjectId::from_bytes(*project_id),
+            force: *force,
+        },
+        LocalProjectCommand::SetArchived {
+            project_id,
+            archived,
+        } => {
+            let project_id = ProjectId::from_bytes(*project_id);
+            if *archived {
+                ProjectCliCommand::Archive(project_id)
+            } else {
+                ProjectCliCommand::Unarchive(project_id)
+            }
+        }
         LocalProjectCommand::PreviewAddResource { .. }
         | LocalProjectCommand::PreviewReplaceResource { .. } => {
             unreachable!("preview commands return before command conversion")

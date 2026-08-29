@@ -514,6 +514,20 @@ pub enum UiProjectAction {
         launch_directory: String,
         force_takeover: bool,
     },
+    Open {
+        project_id: [u8; 32],
+    },
+    PreviewClose {
+        project_id: [u8; 32],
+    },
+    Close {
+        project_id: [u8; 32],
+        force: bool,
+    },
+    SetArchived {
+        project_id: [u8; 32],
+        archived: bool,
+    },
 }
 
 /// Passive domain-selected overlap for one proposed desired resource.
@@ -730,6 +744,18 @@ pub enum UiProjectModal {
         field: UiProjectFormField,
         confirmed: bool,
         force_takeover: bool,
+        submitting: bool,
+    },
+    ConfirmClose {
+        project: UiProject,
+        checks: Vec<UiProjectResourceCheck>,
+        confirmed: bool,
+        force: bool,
+        submitting: bool,
+    },
+    ConfirmArchive {
+        project: UiProject,
+        archived: bool,
         submitting: bool,
     },
     Outcome {
@@ -2307,6 +2333,32 @@ fn apply_project_modal_input(
                 open_project_activation(model, project, true);
                 Ok(true)
             }
+            UiInput::Character('o') if project.lifecycle == "closed" => {
+                model.submit_project(
+                    UiProjectAction::Open {
+                        project_id: project.project_id,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
+            UiInput::Character('c') if project.lifecycle == "open" => {
+                model.submit_project(
+                    UiProjectAction::PreviewClose {
+                        project_id: project.project_id,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
+            UiInput::Character('z') => {
+                model.project_modal = Some(UiProjectModal::ConfirmArchive {
+                    archived: !project.archived,
+                    project,
+                    submitting: false,
+                });
+                Ok(true)
+            }
             _ => Ok(false),
         },
         Some(
@@ -2405,6 +2457,93 @@ fn apply_project_modal_input(
             )?;
             Ok(true)
         }
+        Some(UiProjectModal::ConfirmClose {
+            project,
+            checks,
+            mut confirmed,
+            mut force,
+            submitting,
+        }) => match input {
+            UiInput::Character('c') if !submitting => {
+                confirmed = !confirmed;
+                model.project_modal = Some(UiProjectModal::ConfirmClose {
+                    project,
+                    checks,
+                    confirmed,
+                    force,
+                    submitting: false,
+                });
+                model.last_failure = None;
+                Ok(true)
+            }
+            UiInput::Character('f') if !submitting => {
+                force = !force;
+                model.project_modal = Some(UiProjectModal::ConfirmClose {
+                    project,
+                    checks,
+                    confirmed,
+                    force,
+                    submitting: false,
+                });
+                model.last_failure = None;
+                Ok(true)
+            }
+            UiInput::Activate if !submitting => {
+                if !confirmed {
+                    model.last_failure = Some(UiFailure {
+                        code: "project_close_confirmation_required".to_owned(),
+                        action: "toggle confirmation before closing the project".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                let force_required = checks.iter().any(|check| {
+                    check.status != "accepted"
+                        || !matches!(check.release.as_deref(), Some("clean" | "not_applicable"))
+                });
+                if force_required && !force {
+                    model.last_failure = Some(UiFailure {
+                        code: "project_close_force_required".to_owned(),
+                        action: "review dirty or unknown release evidence and explicitly authorize force".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                model.project_modal = Some(UiProjectModal::ConfirmClose {
+                    project: project.clone(),
+                    checks,
+                    confirmed,
+                    force,
+                    submitting: true,
+                });
+                model.submit_project(
+                    UiProjectAction::Close {
+                        project_id: project.project_id,
+                        force,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiProjectModal::ConfirmArchive {
+            project,
+            archived,
+            submitting,
+        }) if matches!(input, UiInput::Activate) && !submitting => {
+            model.project_modal = Some(UiProjectModal::ConfirmArchive {
+                project: project.clone(),
+                archived,
+                submitting: true,
+            });
+            model.submit_project(
+                UiProjectAction::SetArchived {
+                    project_id: project.project_id,
+                    archived,
+                },
+                effects,
+            )?;
+            Ok(true)
+        }
         Some(
             UiProjectModal::Activate { submitting, .. }
             | UiProjectModal::Handoff { submitting, .. },
@@ -2436,9 +2575,12 @@ fn apply_project_modal_input(
             }
         }
         Some(UiProjectModal::Outcome { result }) => {
-            submit_resource_preview(model, &result, &input, effects)
+            submit_project_preview(model, &result, &input, effects)
         }
-        Some(UiProjectModal::ConfirmPrimaryResource { .. }) | None => Ok(false),
+        Some(
+            UiProjectModal::ConfirmPrimaryResource { .. } | UiProjectModal::ConfirmArchive { .. },
+        )
+        | None => Ok(false),
     }
 }
 
@@ -3005,7 +3147,7 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
     Ok(true)
 }
 
-fn submit_resource_preview(
+fn submit_project_preview(
     model: &mut UiModel,
     result: &UiProjectResult,
     input: &UiInput,
@@ -3013,6 +3155,36 @@ fn submit_resource_preview(
 ) -> Result<bool, UiError> {
     if !matches!(input, UiInput::Activate) {
         return Ok(false);
+    }
+    if matches!(result.action, UiProjectAction::PreviewClose { .. }) {
+        let UiProjectOutcome::ResourceChecks { checks } = &result.outcome else {
+            return Ok(false);
+        };
+        let Some(project) = model
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .projects
+                    .iter()
+                    .find(|project| project.project_id == result.project_id)
+            })
+            .cloned()
+        else {
+            model.last_failure = Some(UiFailure {
+                code: "project_target_stale".to_owned(),
+                action: "reload and reselect the project before closing".to_owned(),
+            });
+            return Ok(true);
+        };
+        model.project_modal = Some(UiProjectModal::ConfirmClose {
+            project,
+            checks: checks.clone(),
+            confirmed: false,
+            force: false,
+            submitting: false,
+        });
+        return Ok(true);
     }
     let UiProjectOutcome::ResourcePreview { conflicts, .. } = &result.outcome else {
         return Ok(false);
@@ -3723,7 +3895,9 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
             | UiProjectModal::ConfirmRemoveResource { project, .. }
             | UiProjectModal::ConfirmPrimaryResource { project, .. }
             | UiProjectModal::Activate { project, .. }
-            | UiProjectModal::Handoff { project, .. },
+            | UiProjectModal::Handoff { project, .. }
+            | UiProjectModal::ConfirmClose { project, .. }
+            | UiProjectModal::ConfirmArchive { project, .. },
         ) => Some(project.project_id),
         _ => None,
     };
@@ -3809,7 +3983,9 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
                 | UiProjectModal::AddResource { project, .. }
                 | UiProjectModal::ReplaceResource { project, .. }
                 | UiProjectModal::ConfirmRemoveResource { project, .. }
-                | UiProjectModal::ConfirmPrimaryResource { project, .. },
+                | UiProjectModal::ConfirmPrimaryResource { project, .. }
+                | UiProjectModal::ConfirmClose { project, .. }
+                | UiProjectModal::ConfirmArchive { project, .. },
             ),
             Some(current),
         ) => *project = current,
@@ -4547,7 +4723,9 @@ fn project_command_failed(
         | UiProjectModal::ConfirmRemoveResource { submitting, .. }
         | UiProjectModal::ConfirmPrimaryResource { submitting, .. }
         | UiProjectModal::Activate { submitting, .. }
-        | UiProjectModal::Handoff { submitting, .. },
+        | UiProjectModal::Handoff { submitting, .. }
+        | UiProjectModal::ConfirmClose { submitting, .. }
+        | UiProjectModal::ConfirmArchive { submitting, .. },
     ) = &mut model.project_modal
     {
         *submitting = false;
@@ -4643,7 +4821,11 @@ mod tests {
 
     use std::num::NonZeroU64;
 
-    use super::{UiEffect, UiError, UiEvent, UiModel, UiSize, update};
+    use super::{
+        UiEffect, UiError, UiEvent, UiInput, UiModel, UiProject, UiProjectAction, UiProjectModal,
+        UiProjectResourceCheck, UiSection, UiSize, UiSnapshot, apply_project_modal_input,
+        refresh_project_modal, update,
+    };
 
     #[test]
     fn effect_identity_exhaustion_is_explicit() {
@@ -4671,5 +4853,111 @@ mod tests {
             update(started.model, UiEvent::Started),
             Err(UiError::AlreadyStarted)
         );
+    }
+
+    #[test]
+    fn clean_close_requires_confirmation_but_not_force() {
+        let project = project("release");
+        let mut model = UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        });
+        model.project_modal = Some(UiProjectModal::ConfirmClose {
+            project,
+            checks: vec![release_check("accepted", Some("clean"))],
+            confirmed: false,
+            force: false,
+            submitting: false,
+        });
+        let mut effects = Vec::new();
+        assert!(
+            apply_project_modal_input(&mut model, UiInput::Character('c'), &mut effects)
+                .expect("confirmation toggles")
+        );
+        assert!(
+            apply_project_modal_input(&mut model, UiInput::Activate, &mut effects)
+                .expect("clean close submits")
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::SubmitProjectCommand {
+                action: UiProjectAction::Close {
+                    project_id,
+                    force: false
+                },
+                ..
+            } if *project_id == [1; 32]
+        )));
+    }
+
+    #[test]
+    fn authoritative_refresh_retains_close_evidence_and_user_authorization() {
+        let mut model = UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        });
+        model.project_modal = Some(UiProjectModal::ConfirmClose {
+            project: project("old name"),
+            checks: vec![release_check("uncertain", None)],
+            confirmed: true,
+            force: true,
+            submitting: false,
+        });
+        refresh_project_modal(
+            &mut model,
+            &UiSnapshot {
+                section: UiSection::Projects,
+                revision: 2,
+                rows: Vec::new(),
+                direct_targets: Vec::new(),
+                agents: Vec::new(),
+                projects: vec![project("new name")],
+            },
+        );
+        let retained = model.project_modal.expect("close modal retained");
+        assert!(matches!(retained, UiProjectModal::ConfirmClose { .. }));
+        if let UiProjectModal::ConfirmClose {
+            project,
+            checks,
+            confirmed,
+            force,
+            ..
+        } = retained
+        {
+            assert_eq!(project.name, "new name");
+            assert_eq!(checks, vec![release_check("uncertain", None)]);
+            assert!(confirmed);
+            assert!(force);
+        }
+    }
+
+    fn project(name: &str) -> UiProject {
+        UiProject {
+            project_id: [1; 32],
+            home: [2; 32],
+            name: name.to_owned(),
+            lifecycle: "open".to_owned(),
+            archived: false,
+            claimable: true,
+            assignment: None,
+            threads: Vec::new(),
+            head: [3; 32],
+            input_sequence: 0,
+            resources: Vec::new(),
+        }
+    }
+
+    fn release_check(status: &str, release: Option<&str>) -> UiProjectResourceCheck {
+        UiProjectResourceCheck {
+            resource_id: [4; 32],
+            status: status.to_owned(),
+            health: Some("healthy".to_owned()),
+            release: release.map(str::to_owned),
+            observed_canonical_path: Some("/workspace/release".to_owned()),
+            details: None,
+            error_category: None,
+            error_code: None,
+            reconciliation_id: None,
+        }
     }
 }
