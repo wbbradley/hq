@@ -4,7 +4,7 @@ set -euo pipefail
 
 repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 budget_file="$repository_root/qualification/budgets.env"
-evidence_file="$repository_root/qualification/acceptance-evidence.tsv"
+evidence_file=${HQ_QUALIFICATION_EVIDENCE_FILE:-"$repository_root/qualification/acceptance-evidence.tsv"}
 qualification_directory=$(mktemp -d "${TMPDIR:-/tmp}/hq-rust-qualification.XXXXXX")
 
 cleanup() {
@@ -19,6 +19,9 @@ fail() {
 
 [[ -f "$budget_file" ]] || fail "missing qualification budget file"
 [[ -f "$evidence_file" ]] || fail "missing acceptance evidence inventory"
+if (($# > 1)) || [[ ${1:-} != '' && ${1:-} != '--validate-only' ]]; then
+  fail "usage: scripts/verify-rust-qualification.sh [--validate-only]"
+fi
 
 if grep -Ev '^(#.*|[A-Z][A-Z0-9_]*=[0-9]+|[[:space:]]*)$' "$budget_file" >/dev/null; then
   fail "budget file contains a non-numeric or non-variable entry"
@@ -63,24 +66,54 @@ TUI/CLI
 EOF
 
 header=$(head -n 1 "$evidence_file")
-[[ "$header" == 'area|evidence|purpose' ]] || fail "acceptance inventory has an unknown header"
+[[ "$header" == 'area|evidence|proof|purpose' ]] || fail "acceptance inventory has an unknown header"
 : >"$actual_areas"
-while IFS='|' read -r area evidence purpose remainder; do
+evidence_keys="$qualification_directory/evidence-keys"
+: >"$evidence_keys"
+while IFS='|' read -r area evidence proof purpose remainder; do
   [[ "$area" == 'area' ]] && continue
-  [[ -n "$area" && -n "$evidence" && -n "$purpose" && -z "${remainder:-}" ]] ||
+  [[ -n "$area" && -n "$evidence" && -n "$proof" && -n "$purpose" && -z "${remainder:-}" ]] ||
     fail "acceptance inventory contains an incomplete row"
   [[ -f "$repository_root/$evidence" ]] || fail "evidence path does not resolve: $evidence"
+  git -C "$repository_root" ls-files --error-unmatch -- "$evidence" >/dev/null 2>&1 ||
+    fail "evidence path is not tracked: $evidence"
+  case "$proof" in
+    test:*)
+      test_name=${proof#test:}
+      [[ "$test_name" =~ ^[a-z][a-z0-9_]*$ ]] || fail "invalid test selector: $proof"
+      grep -Eq "^[[:space:]]*(pub[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+${test_name}[[:space:]]*\\(" \
+        "$repository_root/$evidence" || fail "test selector does not resolve: $evidence#$test_name"
+      ;;
+    command)
+      [[ -x "$repository_root/$evidence" ]] || fail "command evidence is not executable: $evidence"
+      ;;
+    configuration)
+      [[ "$evidence" == 'qualification/budgets.env' ]] ||
+        fail "unknown configuration evidence: $evidence"
+      ;;
+    *)
+      fail "unknown evidence proof: $proof"
+      ;;
+  esac
   printf '%s\n' "$area" >>"$actual_areas"
+  printf '%s|%s\n' "$evidence" "$proof" >>"$evidence_keys"
 done <"$evidence_file"
 sort -u "$actual_areas" -o "$actual_areas"
 diff -u "$expected_areas" "$actual_areas" || fail "acceptance inventory areas differ"
+duplicate_evidence=$(sort "$evidence_keys" | uniq -d)
+[[ -z "$duplicate_evidence" ]] || fail "duplicate evidence proof: $duplicate_evidence"
+
+if [[ ${1:-} == '--validate-only' ]]; then
+  printf 'Rust qualification evidence verified.\n'
+  exit 0
+fi
 
 cd "$repository_root"
-cargo test --locked -p hq-store --test qualification_budgets
-cargo test --locked -p hq-tui --test qualification_budgets
-cargo test --locked -p hq-node --test unix_qualification_budgets
+cargo test --locked -p hq-store --test qualification_budgets -- --test-threads=1
+cargo test --locked -p hq-tui --test qualification_budgets -- --test-threads=1
+cargo test --locked -p hq-node --test unix_qualification_budgets -- --test-threads=1
 cargo test --locked -p hq-node --test unix_session_registry \
-  drain_completes_while_the_shared_event_queue_is_saturated -- --exact
+  drain_completes_while_the_shared_event_queue_is_saturated -- --exact --test-threads=1
 
 release_build_seconds=skipped
 if [[ "${HQ_QUALIFICATION_SKIP_RELEASE_BUILD:-0}" != 1 ]]; then

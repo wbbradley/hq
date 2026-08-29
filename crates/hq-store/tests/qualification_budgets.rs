@@ -2,7 +2,10 @@
 
 #![allow(clippy::expect_used)]
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Mutex, MutexGuard},
+    time::{Duration, Instant},
+};
 
 use hq_domain::{MailboxAddress, ProviderId, ProviderSessionId};
 use hq_store::ConversationKey;
@@ -18,6 +21,11 @@ const FULL_REBUILD_FACTS: u16 = 1_000;
 const LATE_PARENT_DEPENDANTS: u16 = 500;
 const PAGE_SIZE: usize = 10;
 const LATER_PAGE_COUNT: usize = 10;
+
+fn qualification_lease() -> MutexGuard<'static, ()> {
+    static LEASE: Mutex<()> = Mutex::new(());
+    LEASE.lock().expect("qualification lease locks")
+}
 
 fn budget(name: &str, fallback_milliseconds: u64) -> Duration {
     let milliseconds = std::env::var(name)
@@ -40,6 +48,7 @@ fn paged_conversation() -> ConversationKey {
 
 #[test]
 fn complete_rebuild_stays_within_the_declared_budget() {
+    let _lease = qualification_lease();
     let directory = support::TestDirectory::new();
     let database = directory.database_path();
     open_store(&database).close().expect("schema initializes");
@@ -72,6 +81,7 @@ fn complete_rebuild_stays_within_the_declared_budget() {
 
 #[test]
 fn one_late_parent_wakes_high_fanout_within_the_declared_budget() {
+    let _lease = qualification_lease();
     let directory = support::TestDirectory::new();
     let database = directory.database_path();
     open_store(&database).close().expect("schema initializes");
@@ -107,6 +117,7 @@ fn one_late_parent_wakes_high_fanout_within_the_declared_budget() {
 
 #[test]
 fn indexed_later_pages_stay_within_the_declared_budget() {
+    let _lease = qualification_lease();
     let directory = support::TestDirectory::new();
     let database = directory.database_path();
     open_store(&database).close().expect("schema initializes");

@@ -9,8 +9,10 @@ check is never substituted for a missing behavioral test.
 
 ## Acceptance evidence
 
-`scripts/verify-rust-qualification.sh` rejects an unknown, missing, or empty acceptance area and
-rejects evidence paths that no longer resolve. The inventory covers exactly these rows:
+`scripts/verify-rust-qualification.sh` rejects an unknown, missing, or empty acceptance area,
+untracked or unresolved evidence, a renamed or malformed Rust test selector, a non-executable
+command, an unknown proof kind, and duplicate evidence. `--validate-only` performs those checks
+without compiling or running the workloads. The inventory covers exactly these rows:
 
 | Acceptance area | Direct evidence focus |
 | --- | --- |
@@ -26,9 +28,28 @@ rejects evidence paths that no longer resolve. The inventory covers exactly thes
 | TUI/CLI | Retained workflows, pure transitions, rendering, and terminal restoration |
 | Security/operations | Redaction, bounded resources, architecture, recovery, and budgets |
 
-The inventory names the owning files and commands. The complete workspace suite remains the proof
-that the named files pass together; the inventory is traceability, not a second hand-maintained
-test list.
+Every behavioral inventory row names one exact `test:function_name`; command and configuration
+rows use closed proof kinds. The complete workspace suite remains the proof that the named tests
+pass together; the inventory is checked traceability, not a second hand-maintained test list.
+
+## Integrated gap audit
+
+The native Apple-Silicon audit on 2026-08-29 resolved every acceptance-matrix requirement to a
+current exact test, command, or configuration proof. It found no unexplained behavioral failure,
+untested in-process invariant, or exceeded budget. In particular, direct evidence exists for:
+
+- generated algebra and authorization schedules, strict protocol vectors, and fuzz boundaries;
+- atomic failpoints, corrupt-projection recovery, indexed cursors, and incremental/batch equality;
+- local replay/reconnect/restart, relay outage and response loss, and harness partial persistence;
+- project expected-head races, compensation, and bounded recovery scans;
+- pure TUI workflows, responsive rendering, installed terminal restoration, and CLI repair; and
+- secret/environment redaction, bounded queues and tasks, and every quantitative resource gate.
+
+Evidence that inherently depends on another native target or an operator-controlled external
+system remains explicit work, not a waived gap. Native Linux/macOS target records belong to the
+next qualification queue item. Controlled relay/provider smoke, backup/restore, catch-up, node
+replacement, and read-only Go archival rehearsals belong to the queued release-candidate item and
+retain their separate authority boundaries.
 
 ## Performance workloads and budgets
 
@@ -52,6 +73,9 @@ Semantic and boundedness assertions must pass even when timing is below the ceil
 The environment file uses fully descriptive variable names and decimal milliseconds, seconds, or
 kibibytes. The runner exports those values to the owning Rust tests. Running a test directly uses
 the same checked-in fallback and is useful for development; release evidence comes from the runner.
+Qualification timing workloads serialize through a test-local lease, and the runner also fixes the
+test-thread count to one so unrelated scheduler contention is not mistaken for an algorithmic
+regression.
 
 ## Platform evidence
 

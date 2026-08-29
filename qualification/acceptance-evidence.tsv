@@ -1,22 +1,31 @@
-area|evidence|purpose
-Domain/algebra|crates/hq-testkit/tests/deterministic.rs|Generated DAG schedules and algebra laws
-Domain/algebra|crates/hq-testkit/tests/authority_reduction.rs|Reviewed authority conflict and frontier scenarios
-Canonical protocol|crates/hq-protocol/tests/dto_vectors.rs|Exact canonical v1 vectors and strict decoding
-Canonical protocol|scripts/verify-rust-protocol-fuzz.sh|Pinned adversarial signed-event fuzz boundary
-Authorization|crates/hq-testkit/tests/authority_reduction.rs|Grant revoke regrant and observation race matrix
-Persistence|crates/hq-store/tests/repair_contract.rs|Complete repair equality corruption and reopen contracts
-Persistence|crates/hq-store/tests/atomic_ingest_contract.rs|Atomic mutation failpoints
-Queries|crates/hq-store/tests/incremental_query_contract.rs|Stable cursors canonical ordering and indexed later pages
-Local API/node|crates/hq-local-api/tests/reconnecting_client.rs|Replay reconnect and revision-race closure
-Local API/node|crates/hq-node/tests/unix_graceful_runtime.rs|Native readiness restart and ordered shutdown
-Relay|crates/hq-relay/tests/relay_session_contract.rs|Retry duplicate auth disconnect catch-up and wake behavior
-Relay|crates/hq-node/tests/relay_convergence.rs|Integrated relay-to-store convergence
-Harness|crates/hq-testkit/tests/harness_conformance.rs|Provider-neutral capability and delivery conformance
-Harness|crates/hq-testkit/tests/supervisor_recovery.rs|Backpressure uncertain delivery drain and recovery
-Projects|crates/hq-testkit/tests/project_reduction.rs|Transition expected-head and resource-conflict model
-Projects|crates/hq-projects/tests/saga_acceptance.rs|Provisioning and compensation acceptance sagas
-TUI/CLI|crates/hq-tui/tests/model.rs|Pure retained-workflow transition coverage
-TUI/CLI|crates/hq-node/tests/unix_tui_terminal.rs|Native rendering and terminal restoration
-Security/operations|crates/hq-node/tests/identity_adversarial.rs|Secret redaction and identity boundary attacks
-Security/operations|scripts/verify-rust-architecture.sh|Dependency capability and secret ownership boundaries
-Security/operations|qualification/budgets.env|Explicit bounded resource and performance limits
+area|evidence|proof|purpose
+Domain/algebra|crates/hq-reducer/tests/causal_laws.rs|test:generated_dags_have_exact_frontiers_and_parent_first_order|Generated DAG schedules maximal frontiers and parent-first order
+Domain/algebra|crates/hq-testkit/tests/authority_reduction.rs|test:every_named_authority_scenario_is_mapped_to_an_executable_case|Reviewed authority conflict and frontier scenario inventory
+Canonical protocol|crates/hq-protocol/tests/dto_vectors.rs|test:every_normative_family_body_has_one_executable_exact_dto|Exact canonical v1 DTO vectors
+Canonical protocol|crates/hq-protocol/tests/event_adversarial.rs|test:raw_and_decoded_limits_are_inclusive_and_checked_before_unbounded_work|Strict signature syntax and size boundaries
+Canonical protocol|scripts/verify-rust-protocol-fuzz.sh|command|Pinned adversarial signed-event and DTO fuzz boundaries
+Authorization|crates/hq-testkit/tests/authority_reduction.rs|test:observed_pre_revoke_action_survives_while_concurrent_action_retracts|Capability observation and revoke race matrix
+Authorization|crates/hq-testkit/tests/authority_reduction.rs|test:old_grant_fails_after_revoke_and_only_full_frontier_regrant_restores_access|Full-frontier revoke and regrant authority
+Persistence|crates/hq-store/src/database.rs|test:atomic_ingest_failpoints_reopen_to_the_complete_old_or_new_state|Atomic ingest failpoints and reopen
+Persistence|crates/hq-store/tests/repair_contract.rs|test:changed_rebuildable_rows_fail_closed_until_repair|Corruption fail-closed and complete repair equality
+Queries|crates/hq-store/tests/incremental_query_contract.rs|test:thousand_entry_later_pages_use_the_covering_conversation_index|Stable cursors canonical order and indexed later pages
+Local API/node|crates/hq-local-api/tests/reconnecting_client.rs|test:subscription_acknowledgement_is_the_fresh_base_and_gaps_force_full_refresh|Replay reconnect and revision-gap closure
+Local API/node|crates/hq-node/tests/unix_graceful_runtime.rs|test:protocol_stop_returns_the_draining_ack_before_ordered_cleanup_and_immediate_rebind|Ordered graceful stop and immediate ownership recovery
+Local API/node|crates/hq-node/tests/unix_graceful_runtime.rs|test:protocol_restart_retains_restart_intent_even_when_the_client_drops_its_ack|Restart response loss and intent retention
+Relay|crates/hq-relay/tests/relay_session_contract.rs|test:uncertain_publish_restarts_with_byte_identical_wrapper_and_acceptance_is_absorbing|Exact wrapper retry and uncertain delivery recovery
+Relay|crates/hq-relay/tests/relay_session_contract.rs|test:required_auth_precedes_live_then_retained_and_live_edge_drains_after_eose|Authentication catch-up and live-edge ordering
+Relay|crates/hq-node/tests/relay_convergence.rs|test:concrete_two_replica_composition_converges_despite_order_outage_restart_and_response_loss|Integrated duplicate outage restart and response-loss convergence
+Harness|crates/hq-testkit/tests/harness_conformance.rs|test:scripted_provider_passes_every_neutral_harness_scenario|Provider-neutral capability delivery ordering and kill conformance
+Harness|crates/hq-testkit/tests/supervisor_recovery.rs|test:restart_reconciles_response_loss_and_partial_event_persistence_before_forced_teardown|Backpressure partial persistence restart and forced teardown
+Projects|crates/hq-testkit/tests/project_reduction.rs|test:every_project_and_control_scenario_is_mapped|Transition expected-head assignment and resource-conflict model
+Projects|crates/hq-projects/tests/activation_dispatch.rs|test:compensation_response_loss_repairs_with_the_original_failure_and_finishes_closed|Saga compensation and response-loss recovery
+Projects|crates/hq-projects/tests/saga_acceptance.rs|test:recovery_scan_is_bounded_and_excludes_terminal_records|Bounded recovery scan
+TUI/CLI|crates/hq-tui/tests/model.rs|test:resource_edits_force_gate_selection_and_fresh_checks_use_exact_identities|Pure retained-workflow transition coverage
+TUI/CLI|crates/hq-tui/tests/render_snapshots.rs|test:project_lifecycle_controls_are_responsive_confirmed_and_force_gated|Responsive rendering and confirmation snapshots
+TUI/CLI|crates/hq-node/tests/unix_tui_terminal.rs|test:explicit_and_bare_tui_render_and_restore_the_pseudoterminal|Installed client rendering and terminal restoration
+Security/operations|crates/hq-node/tests/identity_adversarial.rs|test:password_and_error_surfaces_are_redacted_and_bounded|Secret and diagnostic redaction
+Security/operations|crates/hq-application/tests/launch_environment.rs|test:launch_environment_copies_sorts_and_redacts_secret_values|Environment copying bounds and redaction
+Security/operations|crates/hq-node/tests/node_components.rs|test:cancellation_mailboxes_and_tasks_are_hierarchical_bounded_and_joined|Bounded queues tasks and hierarchical cancellation
+Security/operations|crates/hq-node/tests/unix_node_cli.rs|test:relay_administration_is_idempotent_redacted_and_restart_durable|Integrated repair restart durability and redacted administration
+Security/operations|scripts/verify-rust-architecture.sh|command|Dependency capability and secret ownership boundaries
+Security/operations|qualification/budgets.env|configuration|Explicit bounded resource and performance limits

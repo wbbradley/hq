@@ -1,5 +1,43 @@
 # Completed
 
+## 2026-08-29 — Integrated acceptance and performance gap closure
+
+Audited every integrated acceptance row against the complete passing workspace and replaced
+file-level evidence with exact checked proof selectors. Behavioral rows now name a concrete Rust
+test function; scripts and the numeric budget source use closed command/configuration proof kinds.
+The validator rejects malformed or renamed selectors, missing or untracked files, non-executable
+commands, duplicate evidence, unknown proof kinds, incomplete rows, and unknown invocation modes.
+A deliberate missing-selector check failed with the exact evidence path and function as intended.
+
+The audit found direct current tests for generated algebra, authority races, protocol strictness,
+durable failpoints and repair, indexed queries, local replay/restart, relay response loss, harness
+partial persistence, project compensation, TUI/CLI parity and restoration, repair/restart recovery,
+redaction, and bounded ownership. It found no unexplained behavioral failure, untested in-process
+invariant, missing deterministic recovery scenario, or algorithmic regression. Native records on
+the other ADR-0001 targets remain the next queued qualification work; controlled external relay,
+provider, archival, dogfood, and operator recovery rehearsals remain explicitly queued for the
+release candidate rather than being waived.
+
+Serialized the three store performance workloads through a test-local lease and fixed the canonical
+runner to one test thread. This removes workload-to-workload scheduler contention without changing
+any measured region or production API. All explicit budgets pass, including the 40-second clean
+release build. The locked full workspace passes formatting, check, strict Clippy,
+all-target/all-feature tests and build, architecture, behavior-ledger, causal, protocol, dependency,
+and both 512-run protocol-fuzz gates. No production record accessor facade, storage shape or
+version, migration, compatibility reader, duplicate stored/runtime state, dependency, or lockfile
+changed. The final exact executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[verification/high] Close integrated acceptance and performance gaps** — Implement every
+  missing test, recovery scenario, or algorithmic correction found by the checked evidence
+  inventory. Strengthen and run the complete fixture, property, model, fuzz, crash/reopen,
+  lifecycle, architecture, security/redaction, and end-to-end suites across the assembled node,
+  clients, relay, harness, and project workflows. Meet the explicit cold-readiness, rebuild,
+  late-parent/high-fanout, paging, invalidation-to-redraw, bounded-queue, memory, release-build, and
+  graceful-shutdown budgets without unexplained failures, untested invariants, or hidden
+  algorithmic regressions.
+
 ## 2026-08-29 — Reproducible qualification budgets and evidence mapping
 
 Added a machine-checked inventory mapping all eleven integrated acceptance areas to direct fixture,

@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[verification/high] Close integrated acceptance and performance gaps** — Implement every
-  missing test, recovery scenario, or algorithmic correction found by the checked evidence
-  inventory. Strengthen and run the complete fixture, property, model, fuzz, crash/reopen,
-  lifecycle, architecture, security/redaction, and end-to-end suites across the assembled node,
-  clients, relay, harness, and project workflows. Meet the explicit cold-readiness, rebuild,
-  late-parent/high-fanout, paging, invalidation-to-redraw, bounded-queue, memory, release-build, and
-  graceful-shutdown budgets without unexplained failures, untested invariants, or hidden
-  algorithmic regressions.
-
 - **[verification/high] Record cross-platform qualification and complete the acceptance audit** —
   Run and record the deterministic qualification commands and applicable installed lifecycle and
   provider evidence on the ADR-0001 Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon matrix.
