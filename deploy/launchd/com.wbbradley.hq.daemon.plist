@@ -20,6 +20,11 @@
   </dict>
   <key>ProcessType</key>
   <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/REPLACE_WITH_USER/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>REPLACE_WITH_ABSOLUTE_LOG_DIRECTORY/hq-daemon.log</string>
   <key>StandardErrorPath</key>

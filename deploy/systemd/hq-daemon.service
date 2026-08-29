@@ -5,10 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment="PATH=%h/go/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/usr/bin/env hq daemon run
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=REPLACE_WITH_ABSOLUTE_HQ_PATH daemon run
 Restart=on-failure
 RestartSec=5
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 

@@ -110,9 +110,47 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  cutover-rollback:
+    name: Synthetic archived-Go rollback
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Download Linux x86_64 release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-release-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/hq-rust-cutover-rollback
+      - name: Extract verified release candidate
+        run: |
+          artifact_directory="$RUNNER_TEMP/hq-rust-cutover-rollback"
+          archives=("$artifact_directory"/hq-v*-x86_64-unknown-linux-gnu.tar.gz)
+          test "${#archives[@]}" = 1
+          cd "$artifact_directory"
+          sha256sum --check "$(basename "${archives[0]}").sha256"
+          mkdir installed
+          tar -xzf "${archives[0]}" -C installed
+      - name: Rehearse offline rollback selection
+        run: |
+          scripts/rehearse-rust-cutover-rollback.sh \
+            "$RUNNER_TEMP/hq-rust-cutover-rollback/installed/hq" \
+            "$RUNNER_TEMP/hq-rust-cutover-rollback/cutover-rollback.json" \
+            "${{ github.sha }}"
+      - name: Upload cutover rollback evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-cutover-rollback-${{ github.sha }}
+          path: ${{ runner.temp }}/hq-rust-cutover-rollback/cutover-rollback.json
+          if-no-files-found: error
+          retention-days: 30
+
   aggregate:
     name: Verify native release matrix
-    needs: [package, controlled-failure]
+    needs: [package, controlled-failure, cutover-rollback]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -123,6 +161,8 @@ jobs:
           scripts/test-rust-release-artifacts.sh
           scripts/test-rust-recovery-rehearsal.sh
           scripts/test-rust-controlled-failure.sh
+          scripts/test-rust-cutover-rollback.sh
+          scripts/test-rust-cutover-evidence.sh
       - name: Download native release artifacts
         uses: actions/download-artifact@v8
         with:
@@ -133,6 +173,11 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: rust-controlled-failure-${{ github.sha }}
+          path: ${{ runner.temp }}/hq-rust-release-matrix
+      - name: Download cutover rollback evidence
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-cutover-rollback-${{ github.sha }}
           path: ${{ runner.temp }}/hq-rust-release-matrix
       - name: Verify complete release matrix
         run: |
@@ -145,11 +190,21 @@ jobs:
           scripts/verify-rust-controlled-failure.sh \
             "$RUNNER_TEMP/hq-rust-release-matrix/controlled-failure.json" \
             "${{ github.sha }}"
+          scripts/verify-rust-cutover-rollback.sh \
+            "$RUNNER_TEMP/hq-rust-release-matrix/cutover-rollback.json" \
+            "${{ github.sha }}"
+          scripts/generate-rust-cutover-evidence.sh \
+            "$RUNNER_TEMP/hq-rust-release-matrix" "${{ github.sha }}" \
+            "$RUNNER_TEMP/hq-rust-release-matrix/cutover-evidence.json"
           jq . "$RUNNER_TEMP/hq-rust-release-matrix/release-manifest.json" \
             >>"$GITHUB_STEP_SUMMARY"
           jq . "$RUNNER_TEMP/hq-rust-release-matrix/recovery-manifest.json" \
             >>"$GITHUB_STEP_SUMMARY"
           jq . "$RUNNER_TEMP/hq-rust-release-matrix/controlled-failure.json" \
+            >>"$GITHUB_STEP_SUMMARY"
+          jq . "$RUNNER_TEMP/hq-rust-release-matrix/cutover-rollback.json" \
+            >>"$GITHUB_STEP_SUMMARY"
+          jq . "$RUNNER_TEMP/hq-rust-release-matrix/cutover-evidence.json" \
             >>"$GITHUB_STEP_SUMMARY"
       - name: Upload combined release-candidate evidence
         uses: actions/upload-artifact@v7

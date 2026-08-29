@@ -28,11 +28,18 @@ manifest with `single_executable: true` and `installed_lifecycle: "passed"`.
 target, one shared version and revision, matching archives and checksums, and successful installed
 lifecycle evidence. It emits `release-manifest.json` with schema
 `hq-rust-release-manifest-v1`. CI uploads the complete matrix as
-`rust-release-candidate-<REVISION>` for 30 days.
+`rust-release-candidate-<REVISION>` for 30 days. That combined artifact also contains the four-host
+recovery manifest, controlled relay/provider failure record, synthetic archived-Go rollback record,
+and `hq-rust-cutover-evidence-v1` bundle. The cutover bundle binds those inputs by SHA-256 and audits
+all acceptance-matrix and definition-of-done clauses.
 
 The scripts refuse existing output files. They never inspect a default state root, a Go key, or a
 Go database. The release workflow does not install into a user path, use an existing identity, or
 leave the temporary verification daemon running.
+
+The supported candidate-install procedure is the checksum, extraction, absolute-path installation,
+and embedded revision check in the repository README. A successful workflow makes artifacts
+available for review; it does not install, tag, publish, soak, activate, or change a service.
 
 ## Local rehearsal
 

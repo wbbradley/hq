@@ -45,11 +45,11 @@ in-process invariant, or exceeded budget. In particular, direct evidence exists 
 - pure TUI workflows, responsive rendering, installed terminal restoration, and CLI repair; and
 - secret/environment redaction, bounded queues and tasks, and every quantitative resource gate.
 
-Native Linux and macOS evidence is recorded below. Evidence that inherently depends on an
-operator-controlled external system remains explicit work, not a waived gap. Controlled
-relay/provider smoke, backup/restore, catch-up, node replacement, and read-only Go archival
-rehearsals belong to the queued release-candidate item and retain their separate authority
-boundaries.
+Native Linux and macOS evidence is recorded below. The release workflow additionally rehearses a
+pinned controlled relay, relay loss and catch-up, provider crash and drain, identity-only recovery,
+database repair, node replacement, and offline selection of an untouched synthetic Go archive.
+These controlled proofs retain their separate authority boundaries and never imply a production
+soak or cutover.
 
 ## Performance workloads and budgets
 
@@ -132,10 +132,13 @@ protocol and ownership boundaries remain architecture-checked, durable and exter
 boundaries retain deterministic recovery evidence, and normal Rust operation has no Go code path,
 protocol, or state dependency.
 
-The audit does not claim operator-controlled dogfood or cutover evidence. Those remaining
-definition-of-done proofs are already the next release-candidate task: controlled relay and
-provider operation, backup/restore, offline catch-up, failure and repair drills, node replacement,
-read-only Go archival, and rollback rehearsal. No additional integrated acceptance gap was found.
+`qualification/cutover-evidence.tsv` is the closed audit of the same eleven acceptance rows plus
+every definition-of-done clause: reviewed requirements and algebra, Rust-era protocol
+specifications, durable/external recovery, Go-independent normal operation, causal authority,
+convergence, atomicity, lifecycle ownership, and domain state transitions. The release aggregate
+validates that inventory and emits `hq-rust-cutover-evidence-v1`, binding the native release,
+recovery, controlled-failure, and rollback records by SHA-256. The record explicitly preserves two
+unperformed operator decisions: soak authorization and separate cutover authorization.
 
 Any missing row, unexplained failure, untested invariant, or exceeded budget is new work for
 `PLAN.md`. It is not waived by raising a limit during the same qualification run.

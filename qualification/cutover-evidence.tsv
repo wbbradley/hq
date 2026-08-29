@@ -1,0 +1,21 @@
+clause|evidence|proof|purpose
+acceptance:Domain/algebra|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix domain and algebra row
+acceptance:Canonical protocol|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix canonical protocol row
+acceptance:Authorization|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix authorization row
+acceptance:Persistence|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix persistence row
+acceptance:Queries|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix queries row
+acceptance:Local API/node|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix local API and node row
+acceptance:Relay|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix relay row
+acceptance:Harness|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix harness row
+acceptance:Projects|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix projects row
+acceptance:TUI/CLI|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix TUI and CLI row
+acceptance:Security/operations|qualification/acceptance-evidence.tsv|acceptance-area|Acceptance matrix security and operations row
+definition:reviewed-requirements-and-algebra|crates/hq-reducer/tests/causal_laws.rs|test:generated_dags_have_exact_frontiers_and_parent_first_order|Reviewed product requirements and algebraic contract are executable
+definition:rust-era-protocol-specifications|docs/rust/protocol-boundary.md|specification|Required external and durable protocols have Rust-era specifications
+definition:durable-and-external-recovery|scripts/rehearse-rust-recovery.sh|command|Durable state and external-effect boundaries have recovery evidence
+definition:go-independent-normal-operation|scripts/verify-rust-architecture.sh|command|Rust normal operation has no Go code or data dependency
+definition:causal-authority|crates/hq-testkit/tests/authority_reduction.rs|test:every_named_authority_scenario_is_mapped_to_an_executable_case|Causal authority is explicit and testable
+definition:convergence|crates/hq-node/tests/relay_convergence.rs|test:concrete_two_replica_composition_converges_despite_order_outage_restart_and_response_loss|Replica convergence is explicit and testable
+definition:atomicity|crates/hq-store/src/database.rs|test:atomic_ingest_failpoints_reopen_to_the_complete_old_or_new_state|Persistence atomicity is explicit and testable
+definition:lifecycle-ownership|crates/hq-node/tests/node_components.rs|test:cancellation_mailboxes_and_tasks_are_hierarchical_bounded_and_joined|Lifecycle ownership is explicit and testable
+definition:domain-state-transitions|crates/hq-testkit/tests/project_reduction.rs|test:every_project_and_control_scenario_is_mapped|Domain state transitions are explicit and testable

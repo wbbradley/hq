@@ -26,6 +26,10 @@ ownership prevents two owners of one directory, but cannot prevent duplicate ide
 hosts. Keep the original node stopped and archived until the replacement has caught up and a
 separate operator decision retires the old installation.
 
+There is no storage-version upgrade or legacy migration path. HQ has never shipped, so the v0.1.0
+candidate always initializes new Rust state. A Go key, database, log, or service definition is not
+a recovery input and must not be opened by Rust.
+
 ## Automated isolated rehearsal
 
 `scripts/rehearse-rust-recovery.sh` accepts an absolute revision-stamped `hq` executable, evidence
@@ -51,6 +55,9 @@ cutover.
 
 Each successful host emits `hq-rust-recovery-rehearsal-v1` JSON. The aggregate validator requires
 complete success evidence for all four release hosts and emits `hq-rust-recovery-manifest-v1`.
+The separate cutover rehearsal proves an offline selector can return to an untouched synthetic Go
+archive only after Rust has stopped, without executing that binary, opening its state, or disturbing
+unrelated HQ processes. See [cutover.md](cutover.md).
 
 ## Recorded recovery evidence
 
