@@ -533,11 +533,24 @@ async fn drain_completes_while_the_shared_event_queue_is_saturated() {
     first_client.write_all(&frame).await.expect("first hello");
     second_client.write_all(&frame).await.expect("second hello");
 
+    let shutdown_started = std::time::Instant::now();
     let report = registry.shutdown().await;
+    let shutdown_elapsed = shutdown_started.elapsed();
     assert_eq!(report.closed_sessions, 2);
     assert_eq!(report.joined_tasks, 2);
     assert!(report.task_failures.is_empty());
     assert_eq!(report.retained_sessions, 0);
     assert_eq!(report.retained_tasks, 0);
+    let shutdown_maximum = std::env::var("HQ_QUALIFICATION_QUEUE_SHUTDOWN_MAX_MILLISECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis,
+        );
+    assert!(
+        shutdown_elapsed <= shutdown_maximum,
+        "saturated queue shutdown took {shutdown_elapsed:?}, exceeding {shutdown_maximum:?}"
+    );
     foundation.shutdown().expect("foundation cleanup");
 }

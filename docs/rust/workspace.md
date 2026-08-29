@@ -201,6 +201,7 @@ cargo test --locked --workspace --all-targets --all-features
 cargo build --locked --workspace --all-targets --all-features
 scripts/verify-rust-dependencies.sh
 scripts/verify-rust-protocol-fuzz.sh
+scripts/verify-rust-qualification.sh
 ```
 
 The root and isolated fuzz policies reject advisories, wildcard dependency versions, unknown

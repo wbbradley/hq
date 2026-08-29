@@ -54,15 +54,21 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[verification/high] Qualify the integrated Rust system against the acceptance matrix** — Run and
-  strengthen the complete fixture, property, model, fuzz, crash/reopen, lifecycle, architecture,
-  security/redaction, and end-to-end suites across the assembled node, clients, relay, harness, and
-  project workflows. Establish and meet explicit budgets for cold readiness, full rebuild,
-  late-parent/high-fanout ingestion, long-conversation paging, invalidation-to-redraw, bounded queue
-  behavior, memory, release build time, and graceful shutdown. Run platform evidence on the
-  ADR-0001 Linux/macOS matrix. Audit every acceptance-matrix row against direct evidence and add
-  missing work to the queue rather than waiving it. Complete this work only when unexplained
-  failures, invariants without tests, and algorithmic regressions are absent.
+- **[verification/high] Close integrated acceptance and performance gaps** — Implement every
+  missing test, recovery scenario, or algorithmic correction found by the checked evidence
+  inventory. Strengthen and run the complete fixture, property, model, fuzz, crash/reopen,
+  lifecycle, architecture, security/redaction, and end-to-end suites across the assembled node,
+  clients, relay, harness, and project workflows. Meet the explicit cold-readiness, rebuild,
+  late-parent/high-fanout, paging, invalidation-to-redraw, bounded-queue, memory, release-build, and
+  graceful-shutdown budgets without unexplained failures, untested invariants, or hidden
+  algorithmic regressions.
+
+- **[verification/high] Record cross-platform qualification and complete the acceptance audit** —
+  Run and record the deterministic qualification commands and applicable installed lifecycle and
+  provider evidence on the ADR-0001 Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon matrix.
+  Cross-check every acceptance-matrix row against direct current evidence, add any remaining gap
+  back to the front of the queue rather than waiving it, and complete integrated qualification only
+  when all required evidence is current and all quantitative budgets pass.
 
 - **[release/high] Produce and rehearse the cutover-ready Rust release candidate** — Build the
   single-executable Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon release artifacts, complete

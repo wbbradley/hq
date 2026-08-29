@@ -3,8 +3,7 @@
 #![allow(clippy::expect_used)]
 
 use hq_application::ClientProjection;
-use hq_domain::{AuthorityRole, MailboxAddress, PageCursor, ProviderId, ProviderSessionId};
-use hq_protocol::VerifiedSemanticFact;
+use hq_domain::{MailboxAddress, PageCursor, ProviderId, ProviderSessionId};
 use hq_store::{ConversationEntry, ConversationKey, IngestOutcome, StoreErrorClass};
 use rusqlite::{Connection, params};
 
@@ -12,8 +11,8 @@ mod support;
 
 use support::{
     TestDirectory, TestStoreExt, authored_conversation_entry, authored_durable_conversation_entry,
-    authority_policy, open_store, verified_account, verified_child, verified_fact,
-    verified_incomplete_peer_question, verified_question,
+    authority_policy, open_store, seed_canonical_corpus, verified_account, verified_child,
+    verified_fact, verified_incomplete_peer_question, verified_question,
 };
 
 #[test]
@@ -365,68 +364,4 @@ fn thousand_entry_later_pages_use_the_covering_conversation_index() {
         assert!(hydration.contains(&format!("USING COVERING INDEX {index_name}")));
         assert!(!hydration.contains(&format!("SCAN {table}")));
     }
-}
-
-fn seed_canonical_corpus(path: &std::path::Path, facts: &[VerifiedSemanticFact]) {
-    let mut connection = Connection::open(path).expect("seed connection opens");
-    connection
-        .pragma_update(None, "foreign_keys", true)
-        .expect("foreign keys enable");
-    let transaction = connection.transaction().expect("seed transaction begins");
-    for verified in facts {
-        let fact = verified.fact();
-        let family = fact
-            .kind()
-            .catalog_id()
-            .strip_prefix("FCT-")
-            .expect("catalog prefix exists")
-            .parse::<i64>()
-            .expect("catalog suffix is numeric");
-        transaction
-            .execute(
-                "INSERT INTO canonical_facts(fact_id, event_bytes, namespace, family) \
-                 VALUES (?1, ?2, 1, ?3)",
-                params![
-                    fact.id().as_bytes().as_slice(),
-                    verified.verified_event().exact_event_bytes(),
-                    family
-                ],
-            )
-            .expect("canonical fact seeds");
-        for parent in fact.causal().parents().iter() {
-            transaction
-                .execute(
-                    "INSERT INTO fact_parents(fact_id, parent_id) VALUES (?1, ?2)",
-                    params![
-                        fact.id().as_bytes().as_slice(),
-                        parent.as_bytes().as_slice()
-                    ],
-                )
-                .expect("parent seeds");
-        }
-        for role in AuthorityRole::ALL {
-            if let Some(authority) = fact.causal().authority(role) {
-                transaction
-                    .execute(
-                        "INSERT INTO fact_authorities(fact_id, authority_role, authority_fact_id) \
-                         VALUES (?1, ?2, ?3)",
-                        params![
-                            fact.id().as_bytes().as_slice(),
-                            authority_role_code(role),
-                            authority.as_bytes().as_slice()
-                        ],
-                    )
-                    .expect("authority seeds");
-            }
-        }
-    }
-    transaction.commit().expect("seed transaction commits");
-}
-
-fn authority_role_code(role: AuthorityRole) -> i64 {
-    AuthorityRole::ALL
-        .iter()
-        .position(|candidate| *candidate == role)
-        .and_then(|index| i64::try_from(index + 1).ok())
-        .expect("closed role has a code")
 }

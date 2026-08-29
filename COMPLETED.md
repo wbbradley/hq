@@ -1,5 +1,44 @@
 # Completed
 
+## 2026-08-29 — Reproducible qualification budgets and evidence mapping
+
+Added a machine-checked inventory mapping all eleven integrated acceptance areas to direct fixture,
+property, model, crash/reopen, lifecycle, architecture, security/redaction, fuzz, and end-to-end
+evidence. Added one normative qualification contract and one canonical numeric budget file for cold
+readiness, full rebuild, late-parent fanout, indexed later-page loading, invalidation-to-redraw,
+saturated-queue shutdown, idle and active resident memory, clean release build time, and graceful
+shutdown. The portable runner rejects missing inventory areas, unresolved evidence paths, and
+unknown or malformed budget variables before running any workload.
+
+New owning-boundary tests exercise a 1,002-fact rebuild, one late parent waking 500 dependants, ten
+indexed later pages in a 1,000-entry conversation, invalidation of a ready 10,000-row pure UI model,
+a saturated fixed-capacity local-session drain, and a real foreground node's readiness, RSS, status
+work, stop, process join, and runtime-artifact cleanup. The runner executes these tests, builds the
+single `hq` release executable in an isolated temporary target directory, enforces the checked-in
+limits, and emits platform, Rust-host, revision, duration, and budget evidence. Native Linux and
+macOS qualification is now a dedicated CI matrix; four-target portable checks remain explicitly
+compilation evidence only.
+
+Native Apple-Silicon qualification passed every budget, including a 40-second clean release build
+against the 900-second limit. The locked full workspace passes formatting, check, strict Clippy,
+all-target/all-feature tests and build, architecture, behavior-ledger, causal, protocol, dependency,
+and both 512-run protocol-fuzz gates. No production record accessor facade, storage shape or version,
+migration, compatibility reader, duplicate stored/runtime state, dependency, or lockfile changed.
+The final exact executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[verification/high] Establish reproducible qualification budgets and evidence mapping** — Turn
+  every acceptance-matrix row into a checked evidence inventory covering the fixture, property,
+  model, fuzz, crash/reopen, lifecycle, architecture, security/redaction, and end-to-end suites
+  across the assembled node, clients, relay, harness, and project workflows. Define explicit,
+  executable budgets and representative workloads for cold readiness, full rebuild,
+  late-parent/high-fanout ingestion, long-conversation paging, invalidation-to-redraw, bounded queue
+  behavior, idle/active memory, release build time, and graceful shutdown. Add deterministic
+  qualification commands whose results can be recorded on every ADR-0001 target, and put every
+  uncovered invariant or missing direct proof into the queue rather than treating documentation or
+  compilation as evidence.
+
 ## 2026-08-29 — Retained project lifecycle controls
 
 Added reopen, fresh close assessment, confirmed close, archive, and unarchive to project details.
