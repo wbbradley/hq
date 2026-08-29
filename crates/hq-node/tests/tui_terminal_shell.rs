@@ -181,10 +181,11 @@ fn panic_unwinding_restores_the_terminal_exactly_once() {
 #[test]
 fn client_worker_failure_restores_the_terminal_exactly_once() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let terminal = ScriptedTerminal::new(
+    let mut terminal = ScriptedTerminal::new(
         Arc::clone(&log),
         [Ok(Some(TuiTerminalEvent::Input(UiInput::Quit)))],
     );
+    terminal.draw_delay = Duration::from_millis(50);
 
     assert!(run_tui_shell(terminal, PanickingClient, FixedClock).is_err());
     assert_eq!(
@@ -202,6 +203,7 @@ struct ScriptedTerminal {
     events: VecDeque<Result<Option<TuiTerminalEvent>, TuiTerminalError>>,
     activation_fails: bool,
     draw_panics: bool,
+    draw_delay: Duration,
 }
 
 impl ScriptedTerminal {
@@ -214,6 +216,7 @@ impl ScriptedTerminal {
             events: events.into_iter().collect(),
             activation_fails: false,
             draw_panics: false,
+            draw_delay: Duration::ZERO,
         }
     }
 
@@ -250,6 +253,7 @@ impl TuiTerminalPort for ScriptedTerminal {
     fn draw(&mut self, _model: &UiModel) -> Result<(), TuiTerminalError> {
         self.record("draw");
         assert!(!self.draw_panics, "scripted draw panic");
+        thread::sleep(self.draw_delay);
         Ok(())
     }
 
