@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[node/high] Prevent autostarted daemons from inheriting caller descriptors** — Close every
-  unrelated inherited descriptor in the spawned daemon before `exec` while preserving only the
-  explicit null standard streams. Add Linux/macOS process tests proving an autostart caller whose
-  output is captured reaches EOF, aborted callers leave no descriptor references that obstruct
-  cleanup, and exact executable-path audits find no orphaned test daemons. Complete this work when
-  the Unix CLI suite finishes without manual daemon intervention and every spawned owner is
-  independently stoppable and reapable.
-
 - **[tui/high] Implement retained mailbox, agent, and project workflows** — Add authoritative
   snapshot reload, conversation/activity presentation in reducer order, inbox filtering, typed
   technical disclosure, reply/new-message composition, durable drafts, focus, logical selection and

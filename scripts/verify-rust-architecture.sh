@@ -279,6 +279,8 @@ grep -Fq 'struct TerminalGuard' "$repository_root/crates/hq-node/src/tui_shell.r
   fail "the TUI terminal shell must own restoration through an RAII guard"
 grep -Fq 'run_installed_tui(state)' "$repository_root/crates/hq-node/src/bin/hq.rs" ||
   fail "the installed hq executable must compose the TUI terminal role"
+grep -Fq 'close_inherited_descriptors()' "$repository_root/crates/hq-node/src/bin/hq.rs" ||
+  fail "the installed daemon role must isolate inherited caller descriptors"
 if grep -Eq '(StoreGateway|Bip340Signer|FactMutation|SemanticPayload::(AgentNameClaimed|ProviderSessionSelected|ProviderSessionRenamed))' \
   "$repository_root/crates/hq-node/src/cli.rs" \
   "$repository_root/crates/hq-node/src/local_client.rs"; then

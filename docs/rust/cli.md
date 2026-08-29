@@ -17,6 +17,8 @@ The installed commands currently include `help`, `version`, `agents`, `identity`
 internal foreground ownership role used by
 autostart and service managers. `daemon status` never starts a process; `readiness` may start one
 candidate and waits for all concurrent candidates to converge on the sole state-directory owner.
+The foreground role closes every non-standard inherited descriptor before runtime startup, so an
+autostart caller never remains coupled to the long-lived daemon by an unrelated pipe or socket.
 These commands never inspect terminal state or prompt.
 
 `identity init|show|export|import` and `config get|set` are deliberately offline operations. They

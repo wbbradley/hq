@@ -3148,7 +3148,7 @@ fn process_owning_test_directories_serialize_across_test_threads() {
     );
     drop(first);
     acquired_rx
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(Duration::from_secs(120))
         .expect("contender acquires after release");
     contender.join().expect("contender exits");
 }

@@ -8118,3 +8118,33 @@ cleanup and all TUI test guards.
   restoration. Add normal, error, cancellation, and panic restoration tests plus installed-binary
   pseudo-terminal coverage. Complete this work when the shell is usable, restores every terminal
   mode on every exit path, and reaches state only through the TUI effect executor.
+
+## 2026-08-28 — Autostarted daemon descriptor isolation
+
+The installed foreground `daemon run` role now enumerates its process descriptor directory before
+runtime or worker startup and closes every inherited descriptor above the three standard streams.
+Linux uses `/proc/self/fd`; macOS uses `/dev/fd`. The implementation uses safe `nix`
+closure only, preserving the workspace-wide `unsafe_code = forbid` policy, and changes no caller
+descriptor flags or ownership.
+
+A subprocess regression opens a deliberately inheritable pipe, starts a live foreground node,
+drops the caller's writer, and proves the read side reaches EOF while the daemon remains ready.
+The formerly hanging concurrent-readiness test now completes normally because its autostarted owner
+cannot retain the test harness capture channel. The complete Unix CLI integration file runs without
+manual intervention, and an executable-path process audit finds no debug or release `hq` owner
+afterward. The parallel serialization self-test also uses a suite-scale eventual-acquisition bound
+instead of assuming unfair mutex wake order.
+
+Formatting, locked full-workspace check, strict Clippy, all-target/all-feature tests and build, and
+the architecture gate pass. No storage or protocol shape/version, migration, compatibility reader,
+or accessor facade changed.
+
+### Original plan entry
+
+- **[node/high] Prevent autostarted daemons from inheriting caller descriptors** — Close every
+  unrelated inherited descriptor in the spawned daemon before `exec` while preserving only the
+  explicit null standard streams. Add Linux/macOS process tests proving an autostart caller whose
+  output is captured reaches EOF, aborted callers leave no descriptor references that obstruct
+  cleanup, and exact executable-path audits find no orphaned test daemons. Complete this work when
+  the Unix CLI suite finishes without manual daemon intervention and every spawned owner is
+  independently stoppable and reapable.

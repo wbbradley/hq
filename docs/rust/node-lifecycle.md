@@ -171,6 +171,12 @@ remain inaccessible and no second signer is constructed.
 
 ## Unix listener and readiness artifact ownership
 
+Before the installed `daemon run` role enters foreground composition, the single-threaded binary
+enumerates its own `/proc/self/fd` on Linux or `/dev/fd` on macOS and closes every descriptor above
+the three standard streams. This uses only safe descriptor operations. Autostarted
+owners therefore cannot retain a caller's capture pipe, terminal, socket, lock, or test-harness
+channel, and a caller can reach EOF or abort independently while the sole node owner continues.
+
 The live `NodeFoundation` is the only public socket bind boundary. Binding rejects symbolic links,
 non-sockets, modes other than `0600`, and a path that accepts or is conservatively completing a
 connection. A connection-refused socket is stale; it is removed and rebound only while its original

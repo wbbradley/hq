@@ -11,9 +11,24 @@ fn main() {
     if !has_top_level_command(&arguments) {
         arguments.push(if interactive { "tui" } else { "list" }.into());
     }
+    let invocation = hq_node::parse_cli(arguments.clone()).ok();
+    if matches!(
+        invocation.as_ref().map(|invocation| &invocation.command),
+        Some(hq_node::CliCommand::Daemon {
+            action: hq_node::DaemonCommand::Run,
+            ..
+        })
+    ) && close_inherited_descriptors().is_err()
+    {
+        let _ = std::io::stderr()
+            .write_all(b"hq: daemon.isolation_failed: inherited descriptors could not be closed\n");
+        std::process::exit(1);
+    }
     if interactive
-        && let Ok(invocation) = hq_node::parse_cli(arguments.clone())
-        && let hq_node::CliCommand::Tui { state } = invocation.command
+        && let Some(hq_node::CliInvocation {
+            command: hq_node::CliCommand::Tui { state },
+            ..
+        }) = invocation
     {
         let result = hq_node::run_installed_tui(state);
         if result.is_err() {
@@ -54,6 +69,26 @@ fn main() {
     if execution.exit_code != 0 {
         std::process::exit(i32::from(execution.exit_code));
     }
+}
+
+#[cfg(target_os = "linux")]
+const PROCESS_DESCRIPTOR_DIRECTORY: &str = "/proc/self/fd";
+
+#[cfg(target_os = "macos")]
+const PROCESS_DESCRIPTOR_DIRECTORY: &str = "/dev/fd";
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn close_inherited_descriptors() -> Result<(), ()> {
+    let descriptors = std::fs::read_dir(PROCESS_DESCRIPTOR_DIRECTORY)
+        .map_err(|_| ())?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor > 2)
+        .collect::<Vec<_>>();
+    for descriptor in descriptors {
+        let _ = nix::unistd::close(descriptor);
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
