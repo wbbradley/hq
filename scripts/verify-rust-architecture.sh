@@ -172,11 +172,18 @@ done
 grep -Eq '^ratatui(\.workspace)?[[:space:]]*=' \
   "$repository_root/crates/hq-tui/Cargo.toml" ||
   fail "hq-tui must own the borrowed Ratatui renderer"
+grep -Eq '^crossterm(\.workspace)?[[:space:]]*=' \
+  "$repository_root/crates/hq-node/Cargo.toml" ||
+  fail "hq-node must own the Crossterm terminal adapter"
 for crate in "${expected_crates[@]}"; do
   if [[ "$crate" != hq-tui && "$crate" != hq-node ]] &&
     grep -Eq '^ratatui(\.workspace)?[[:space:]]*=' \
       "$repository_root/crates/$crate/Cargo.toml"; then
     fail "$crate may not depend directly on ratatui; UI rendering belongs to hq-tui"
+  fi
+  if [[ "$crate" != hq-node ]] && grep -Eq '^crossterm(\.workspace)?[[:space:]]*=' \
+    "$repository_root/crates/$crate/Cargo.toml"; then
+    fail "$crate may not depend directly on crossterm; terminal ownership belongs to hq-node"
   fi
 done
 if grep -ERq --include='*.rs' \
@@ -264,6 +271,14 @@ grep -Fq 'impl TuiClientPort for LocalTuiClient' \
   fail "hq-node must map the subscribed ordinary local client into the TUI client port"
 grep -Fq 'LocalNodeEventClient' "$repository_root/crates/hq-node/src/tui_client.rs" ||
   fail "the TUI client port must use the subscribed ordinary local API client"
+if grep -Eq '(hq_(domain|application|store|relay|harness|codex|resources|projects)|rusqlite|std::fs|std::process)' \
+  "$repository_root/crates/hq-node/src/tui_shell.rs"; then
+  fail "the TUI terminal shell may cross only hq-tui and ordinary local API boundaries"
+fi
+grep -Fq 'struct TerminalGuard' "$repository_root/crates/hq-node/src/tui_shell.rs" ||
+  fail "the TUI terminal shell must own restoration through an RAII guard"
+grep -Fq 'run_installed_tui(state)' "$repository_root/crates/hq-node/src/bin/hq.rs" ||
+  fail "the installed hq executable must compose the TUI terminal role"
 if grep -Eq '(StoreGateway|Bip340Signer|FactMutation|SemanticPayload::(AgentNameClaimed|ProviderSessionSelected|ProviderSessionRenamed))' \
   "$repository_root/crates/hq-node/src/cli.rs" \
   "$repository_root/crates/hq-node/src/local_client.rs"; then

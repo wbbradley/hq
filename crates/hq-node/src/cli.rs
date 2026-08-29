@@ -60,14 +60,15 @@ use hq_reducer::{
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::local_client::installed_local_client_config;
 use crate::pairing_file::{read_pairing_file, write_new_pairing_file};
 use crate::{
     BackupPassword, ForegroundNodeConfig, ForegroundNodeError, IdentityError, LifecycleClient,
     LifecycleClientConfig, LifecycleClientError, LifecycleObservation, LocalConfiguration,
-    LocalNodeClient, LocalNodeClientConfig, LocalNodeClientError, NodeClientCoordinator,
-    NodeCoordinatorConfig, NodeCoordinatorError, ProcessNodeLauncher, PublicIdentity,
-    RelayEndpoint, RuntimePathError, RuntimePaths, StateDirectoryOwner, StatePaths,
-    agent_guidance::AgentGuidanceTopic, run_foreground,
+    LocalNodeClient, LocalNodeClientError, NodeClientCoordinator, NodeCoordinatorConfig,
+    NodeCoordinatorError, ProcessNodeLauncher, PublicIdentity, RelayEndpoint, RuntimePathError,
+    RuntimePaths, StateDirectoryOwner, StatePaths, agent_guidance::AgentGuidanceTopic,
+    run_foreground,
 };
 
 /// Stable output representation selected for one invocation.
@@ -1373,6 +1374,11 @@ pub enum CliCommand {
     },
     /// Print executable and protocol build metadata.
     Version,
+    /// Run the installed interactive terminal user interface.
+    Tui {
+        /// Validated installation state layout.
+        state: StatePaths,
+    },
     /// Render concise installed guidance for agents.
     AgentGuidance {
         /// Requested guidance topic.
@@ -1545,6 +1551,8 @@ impl CliExitClass {
 pub enum CliError {
     /// Arguments did not match one explicit supported role.
     Arguments,
+    /// The interactive terminal command was invoked without terminal input and output.
+    TerminalRequired,
     /// State paths could not be derived or validated.
     StatePath,
     /// Runtime paths could not be derived or validated.
@@ -1592,8 +1600,11 @@ impl fmt::Display for CliError {
         match self {
             Self::Arguments => formatter.write_str(
                 "usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] \
-                 <help|version|agents|agent|harness|project|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
+                 <help|version|tui|agents|agent|harness|project|ask|send|wait|poll|get|list|answer|cancel|archive|restore|mailboxes|identity|config|human|peer|mailbox|relay|daemon>",
             ),
+            Self::TerminalRequired => {
+                formatter.write_str("the TUI requires terminal input and output")
+            }
             Self::StatePath => formatter.write_str("node state path is unavailable or invalid"),
             Self::RuntimePath => formatter.write_str("node runtime path is unavailable or invalid"),
             Self::Build => formatter.write_str("node build metadata is invalid"),
@@ -1643,6 +1654,11 @@ impl CliError {
             Self::Arguments => (
                 "cli.arguments",
                 "the command arguments are invalid; run `hq help`",
+                CliExitClass::Usage,
+            ),
+            Self::TerminalRequired => (
+                "tui.terminal_required",
+                "run `hq tui` with both stdin and stdout attached to a terminal",
                 CliExitClass::Usage,
             ),
             Self::StatePath => (
@@ -1837,6 +1853,9 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
     let command = arguments.next();
     let rest = arguments.collect::<Vec<_>>();
     let command = parse_top_level_command(command.as_ref(), &rest, state_root.as_ref())?;
+    if matches!(command, CliCommand::Tui { .. }) && output != CliOutputFormat::Human {
+        return Err(CliError::Arguments);
+    }
     if state_root.is_some()
         && !matches!(
             command,
@@ -1854,6 +1873,7 @@ pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInv
                 | CliCommand::GetMessage { .. }
                 | CliCommand::DiscoverMailboxes { .. }
                 | CliCommand::HumanMessage { .. }
+                | CliCommand::Tui { .. }
         )
     {
         return Err(CliError::Arguments);
@@ -1874,6 +1894,9 @@ fn parse_top_level_command(
                 .collect::<Result<Vec<_>, _>>()?,
         },
         Some("version" | "--version") if rest.is_empty() => CliCommand::Version,
+        Some("tui") if rest.is_empty() => CliCommand::Tui {
+            state: parsed_state(state_root)?,
+        },
         Some("agents") if rest.len() <= 1 => CliCommand::AgentGuidance {
             topic: AgentGuidanceTopic::parse(rest.first().and_then(|value| value.to_str()))
                 .ok_or(CliError::Arguments)?,
@@ -3236,6 +3259,7 @@ pub fn run_cli_with_input(
     render_result(invocation.output, &result)
 }
 
+#[allow(clippy::too_many_lines, reason = "closed installed command dispatch")]
 fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<CliResult, CliError> {
     match &invocation.command {
         CliCommand::Identity { action, state } => return run_identity(action, state, input),
@@ -3261,6 +3285,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
         }
         CliCommand::Help { .. }
         | CliCommand::Version
+        | CliCommand::Tui { .. }
         | CliCommand::AgentGuidance { .. }
         | CliCommand::Daemon { .. } => {}
     }
@@ -3270,6 +3295,7 @@ fn run_cli_result(invocation: &CliInvocation, input: &mut dyn Read) -> Result<Cl
                 render_help(invocation.output, topic).map(CliResult::Rendered)
             }
             CliCommand::Version => render_version(invocation.output).map(CliResult::Rendered),
+            CliCommand::Tui { .. } => Err(CliError::TerminalRequired),
             CliCommand::AgentGuidance { topic } => Ok(CliResult::AgentGuidance(*topic)),
             CliCommand::Daemon { .. }
             | CliCommand::Identity { .. }
@@ -8580,19 +8606,11 @@ fn random_command_id() -> Result<CommandId, CliError> {
 }
 
 fn command_client(state: &StatePaths) -> Result<LocalNodeClient, CliError> {
-    LocalNodeClient::connect(LocalNodeClientConfig {
-        state: state.clone(),
-        build: build()?,
-        initial_view: InitialView::OnDemand,
-        io_timeout: Duration::from_secs(2),
-        command_deadline: Duration::from_secs(10),
-        max_connection_attempts: nonzero(8),
-        readiness_timeout: Duration::from_secs(10),
-        readiness_retry_interval: Duration::from_millis(25),
-        reconnect_initial: Duration::from_millis(25),
-        reconnect_maximum: Duration::from_millis(250),
-        completed_identity_capacity: nonzero(64),
-    })
+    LocalNodeClient::connect(installed_local_client_config(
+        state.clone(),
+        build()?,
+        InitialView::OnDemand,
+    ))
     .map_err(Into::into)
 }
 
@@ -10089,7 +10107,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
         [] => Some(
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  project          Inspect authoritative projects and remote progress\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  tui             Open the interactive terminal interface\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  project          Inspect authoritative projects and remote progress\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
         ),
         [command] if matches!(command.as_str(), "ask" | "send" | "wait" | "poll") => Some(
@@ -10202,6 +10220,9 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
     match topic {
         [command] if command == "version" => Some(
             "Usage: hq [--output human|json] version\n\nShow executable version, local protocol version, and build commit metadata.\n",
+        ),
+        [command] if command == "tui" => Some(
+            "Usage: hq [--state-root ABSOLUTE_PATH] tui\n\nOpen the interactive terminal interface. Both stdin and stdout must be attached to a terminal. Press q or Ctrl-C to exit.\n",
         ),
         [command] if command == "agents" => Some(
             "Usage: hq [--output human|json] agents [messaging|retry|synchronization|delivery|causality|administration]\n\nShow concise installed guidance for agents without exposing installation or authority internals.\n",
@@ -11927,6 +11948,21 @@ mod tests {
     #[test]
     fn parser_accepts_global_output_and_explicit_daemon_roles() {
         let root = std::env::temp_dir().join("hq-cli-parser");
+        let tui = parse_cli([
+            OsString::from("--state-root"),
+            root.clone().into_os_string(),
+            OsString::from("tui"),
+        ])
+        .expect("TUI parses");
+        assert!(matches!(tui.command, CliCommand::Tui { state } if state.root() == root));
+        assert_eq!(
+            parse_cli([
+                OsString::from("--output"),
+                OsString::from("json"),
+                OsString::from("tui"),
+            ]),
+            Err(CliError::Arguments)
+        );
         let parsed = parse_cli([
             OsString::from("--output"),
             OsString::from("json"),
@@ -12859,9 +12895,14 @@ mod tests {
             root,
             "HQ local client\n\n\
              Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  project          Inspect authoritative projects and remote progress\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
+             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  tui             Open the interactive terminal interface\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  project          Inspect authoritative projects and remote progress\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
              Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
         );
+        let tui = run_cli(
+            &parse_cli([OsString::from("help"), OsString::from("tui")]).expect("TUI help parses"),
+        )
+        .expect("TUI help");
+        assert!(tui.contains("stdin and stdout"));
         let ask = run_cli(
             &parse_cli([OsString::from("help"), OsString::from("ask")]).expect("ask help parses"),
         )

@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 bech32.workspace = true
 chacha20poly1305.workspace = true
+crossterm.workspace = true
 getrandom.workspace = true
 hq-application.workspace = true
 hq-codex.workspace = true
@@ -24,6 +25,7 @@ hq-reducer.workspace = true
 hq-resources.workspace = true
 hq-store.workspace = true
 hq-tui.workspace = true
+ratatui = { workspace = true, features = ["crossterm_0_29"] }
 scrypt.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -34,6 +36,9 @@ zeroize.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 nix.workspace = true
 tokio.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+nix = { workspace = true, features = ["term"] }
 
 [[bin]]
 name = "hq"

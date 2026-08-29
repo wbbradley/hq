@@ -198,6 +198,8 @@ Run `hq` in a terminal to open the mailbox UI:
 
 ```sh
 hq
+# Equivalent explicit role:
+hq tui
 ```
 
 The default view shows open messages in the reserved `human` mailbox. Use these keys:

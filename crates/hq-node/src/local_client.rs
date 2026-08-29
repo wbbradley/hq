@@ -84,6 +84,33 @@ pub struct LocalNodeClientConfig {
     pub completed_identity_capacity: NonZeroUsize,
 }
 
+pub(crate) const fn installed_local_client_config(
+    state: StatePaths,
+    build: BuildMetadata,
+    initial_view: InitialView,
+) -> LocalNodeClientConfig {
+    LocalNodeClientConfig {
+        state,
+        build,
+        initial_view,
+        io_timeout: Duration::from_secs(2),
+        command_deadline: Duration::from_secs(10),
+        max_connection_attempts: positive_usize(8),
+        readiness_timeout: Duration::from_secs(10),
+        readiness_retry_interval: Duration::from_millis(25),
+        reconnect_initial: Duration::from_millis(25),
+        reconnect_maximum: Duration::from_millis(250),
+        completed_identity_capacity: positive_usize(64),
+    }
+}
+
+const fn positive_usize(value: usize) -> NonZeroUsize {
+    match NonZeroUsize::new(value) {
+        Some(value) => value,
+        None => unreachable!(),
+    }
+}
+
 /// Closed command-client setup or execution failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalNodeClientError {

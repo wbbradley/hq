@@ -8080,3 +8080,41 @@ running `hq` daemon after the tests.
   invalidation tests, bounded timer/redraw coalescing, and joined worker shutdown. Complete this
   work when the executor remains responsive during reconnect and performs no direct domain/storage
   access.
+
+## 2026-08-28 — Crossterm terminal shell and installed TUI routes
+
+Added a node-owned Crossterm/Ratatui terminal capability and shell around the pure UI reducer and
+bounded effect executor. Backend events normalize into the closed UI vocabulary, redraws always
+borrow the latest complete model, and the shell reaches authoritative state only through the
+subscribed ordinary local client. An ordered activation state and an armed RAII guard restore the
+cursor, mouse capture, alternate screen, and raw mode exactly once after normal quit, Ctrl-C,
+terminal failure, partial activation, client-worker panic, or outer panic unwinding.
+
+The single installed executable now accepts `hq tui`; bare `hq` selects the TUI only when both
+stdin and stdout are terminals and retains noninteractive `list` behavior otherwise. Machine output
+is rejected for the interactive role, and nonterminal explicit invocation returns a stable usage
+diagnostic without emitting terminal escapes. Linux/macOS pseudoterminal coverage proves explicit
+and bare routing, visible rendering, alternate-screen exit, and exact termios restoration. The PTY
+test also caught and removed a redundant Crossterm cursor-position query during activation.
+
+Passive terminal observations expose their data directly; only the live terminal capability,
+ordered activation invariant, model, and executor retain private state. No storage shape, storage
+version, protocol version, migration, compatibility reader, or accessor facade was added. The full
+locked workspace check, strict Clippy, all-target/all-feature tests and build, architecture,
+behavior-ledger, causal-spec, protocol-spec, dependency-policy, and protocol-fuzz gates pass.
+Dependency policy reports only Ratatui's allowed duplicate `hashbrown`/`syn` versions and the
+existing allowed yanked `chacha20 0.10.1` warning.
+
+The full parallel Unix CLI suite exposed one autostarted daemon retaining a caller-owned descriptor
+on macOS; stopping that exact temporary-state owner let the existing suite complete. The distinct
+descriptor-inheritance defect is now the first remaining PLAN package rather than being hidden or
+folded into terminal behavior. An executable-path process audit is clean after that explicit
+cleanup and all TUI test guards.
+
+### Original plan entry
+
+- **[tui/high] Compose the Crossterm terminal shell and installed TUI routes** — Add terminal input
+  mapping, the redraw/event loop, installed `hq tui` and bare-terminal roles, and RAII terminal
+  restoration. Add normal, error, cancellation, and panic restoration tests plus installed-binary
+  pseudo-terminal coverage. Complete this work when the shell is usable, restores every terminal
+  mode on every exit path, and reaches state only through the TUI effect executor.

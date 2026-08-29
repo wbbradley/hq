@@ -7,8 +7,21 @@ fn main() {
     let mut arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    if !has_top_level_command(&arguments) && (!stdin.is_terminal() || !stdout.is_terminal()) {
-        arguments.push("list".into());
+    let interactive = stdin.is_terminal() && stdout.is_terminal();
+    if !has_top_level_command(&arguments) {
+        arguments.push(if interactive { "tui" } else { "list" }.into());
+    }
+    if interactive
+        && let Ok(invocation) = hq_node::parse_cli(arguments.clone())
+        && let hq_node::CliCommand::Tui { state } = invocation.command
+    {
+        let result = hq_node::run_installed_tui(state);
+        if result.is_err() {
+            let _ = std::io::stderr()
+                .write_all(b"hq: tui.failed: the interactive terminal session failed\n");
+            std::process::exit(1);
+        }
+        return;
     }
     let execution = if stdin.is_terminal()
         && arguments
@@ -53,6 +66,30 @@ fn has_top_level_command(arguments: &[std::ffi::OsString]) -> bool {
         }
     }
     false
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::has_top_level_command;
+    use std::ffi::OsString;
+
+    #[test]
+    fn global_options_do_not_count_as_a_top_level_command() {
+        assert!(!has_top_level_command(&[
+            OsString::from("--state-root"),
+            OsString::from("/tmp/hq"),
+        ]));
+        assert!(!has_top_level_command(&[
+            OsString::from("--output"),
+            OsString::from("human"),
+        ]));
+        assert!(has_top_level_command(&[OsString::from("tui")]));
+        assert!(has_top_level_command(&[
+            OsString::from("--state-root"),
+            OsString::from("/tmp/hq"),
+            OsString::from("list"),
+        ]));
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

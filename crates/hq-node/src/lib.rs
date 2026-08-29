@@ -43,6 +43,8 @@ mod session_registry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tui_client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod tui_shell;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix_frame;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -141,6 +143,11 @@ pub use session_registry::{
 pub use tui_client::{
     LocalTuiClient, MonotonicTuiClock, TuiClientObservation, TuiClientPort, TuiClock,
     TuiEffectExecutor, TuiExecutorError, tui_snapshot,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use tui_shell::{
+    CrosstermTerminal, TuiShellError, TuiTerminalError, TuiTerminalEvent, TuiTerminalPort,
+    normalize_crossterm_event, run_installed_tui, run_tui_shell,
 };
 
 use hq_application::InMemoryApplication;

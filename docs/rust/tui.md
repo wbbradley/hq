@@ -5,8 +5,8 @@ Status: Active pure-client contract
 `hq-tui` owns deterministic presentation state and borrowed Ratatui rendering. It does not own a
 terminal, clock, task runtime, local connection, storage handle, signer, filesystem, process, or
 domain mutation capability. The outer `hq-node` composition normalizes ordinary local API
-observations into the closed event vocabulary and executes returned effects; the terminal shell
-only needs to add terminal input, resize, and rendering ownership.
+observations into the closed event vocabulary and executes returned effects. Its Crossterm shell
+adds terminal input and resize normalization plus exclusive Ratatui rendering ownership.
 
 ## Transition boundary
 
@@ -98,5 +98,13 @@ The terminal/client shell must:
 7. restore terminal state through shell-owned RAII on every exit path.
 
 Terminal ownership, key-event decoding, event-loop composition, and restoration remain outside the
-pure crate and belong to the terminal-shell package. The terminal shell must reach state only
-through `TuiEffectExecutor`; reconnect execution and snapshot mapping are already composed there.
+pure crate in `hq-node`. `TerminalGuard` is armed before activation so partial activation, normal
+quit, Ctrl-C, terminal errors, client-worker failure, and panic unwinding all attempt restoration
+exactly once. Restoration reverses cursor hiding, mouse capture, alternate-screen ownership, and
+raw mode and is idempotent. The shell reaches state only through `TuiEffectExecutor`; reconnect
+execution and snapshot mapping are composed there.
+
+The installed `hq tui` role accepts only human output with both stdin and stdout attached to a
+terminal. A bare `hq` selects the same role when both streams are terminals and retains the
+noninteractive `list` role otherwise. The binary returns from the guarded shell before translating
+failure into a process exit, so it never exits while terminal modes are still owned.
