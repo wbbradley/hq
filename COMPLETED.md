@@ -1,5 +1,46 @@
 # Completed
 
+## 2026-08-29 — Isolated identity and database recovery rehearsal
+
+Added a release-binary recovery drill that owns a short, bounded `/tmp` rehearsal namespace and
+supplies an explicit new state root to every HQ invocation. It creates canonical human and agent
+state, runs explicit database repair, proves the authoritative projections remain equal, restarts
+and stops the original node, waits for state ownership release, and round-trips a password-
+encrypted identity into a new replacement root. The replacement proves exact public identity
+equality while configuration and SQLite history remain absent, then starts with empty account and
+agent history and shuts down cleanly.
+
+The drill runs with a controlled temporary home containing inaccessible synthetic Go-layout key
+and database sentinels. Those paths are never passed to HQ, every Rust state path lies outside the
+layout, and their inode, mode, size, and modification/change metadata remains unchanged across all
+product invocations. Recovery documentation now states plainly that the first release supports
+identity backup and rebuildable-projection repair, not database-history backup/restore; an
+identity-only replacement requires authorized relay/peer catch-up and must never overlap the
+original identity on another live host.
+
+Actions run 33252489386 passed the complete artifact and recovery sequence on Linux x86-64, Linux
+ARM64, macOS x86-64, and Apple Silicon for exact revision
+`6abdcf43f4820f1b55c19d3db55db1b78e647099`, then passed both aggregate validators. The combined
+artifact `rust-release-candidate-6abdcf43f4820f1b55c19d3db55db1b78e647099` was downloaded
+independently. Fresh release and recovery validation passed, and the regenerated recovery manifest
+was byte-for-byte equal to CI's manifest. The validator's complete-matrix fixture passed and its
+incomplete-repair fixture was rejected.
+
+The locked full workspace passed formatting, architecture and qualification-inventory validation,
+strict Clippy, and every all-target/all-feature test. Recovery scripts passed Bash syntax and
+ShellCheck. Final exact executable-name inspection found no HQ daemon. No production record
+accessor facade, storage shape or version, migration, compatibility reader, duplicate
+stored/runtime state, dependency, or lockfile changed; no real Go or standing Rust state was
+opened, and no tag, release, identity activation, or cutover occurred.
+
+### Original plan entry
+
+- **[operations/high] Rehearse isolated identity and database recovery** — Add a repeatable drill
+  that uses only newly generated Rust identities and temporary state roots to prove encrypted
+  identity export/import, backup boundaries, database repair, node replacement, restart, and clean
+  shutdown. Prove that unsupported database-history restoration is described truthfully and that
+  neither a Go key nor a Go database is opened or mutated.
+
 ## 2026-08-29 — Native Rust release artifacts
 
 Replaced the write-enabled GoReleaser tag workflow with a manually dispatched, read-only Rust

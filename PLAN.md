@@ -54,11 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[operations/high] Rehearse isolated identity and database recovery** — Add a repeatable drill
-  that uses only newly generated Rust identities and temporary state roots to prove encrypted
-  identity export/import, backup boundaries, database repair, node replacement, restart, and clean
-  shutdown. Prove that unsupported database-history restoration is described truthfully and that
-  neither a Go key nor a Go database is opened or mutated.
 - **[operations/high] Rehearse controlled relay and provider failure** — Dogfood the release
   candidate only with new identities and new state directories on controlled relays. Exercise
   startup, offline catch-up, relay loss and recovery, provider crash and drain behavior, and final
