@@ -1,0 +1,16 @@
+ HQ   Inbox
+ local workspace ready · revision 42
+────────────────────────────────────────────────────────────────────────
+Inbox · Sent · Archived · Agents · Projects
+────────────────────────────────────────────────────────────────────────
+ Inbox · 3 items
+
+   Build release
+     open · agent-1
+ › Deploy production
+     waiting · waiting for approval
+   Investigate timeout
+     attention · relay needs attention
+
+────────────────────────────────────────────────────────────────────────
+ tab focus · ↑/↓ select · ←/→ section · q quit

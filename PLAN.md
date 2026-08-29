@@ -54,13 +54,12 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Build the pure Ratatui application architecture and terminal shell** — Implement
-  `UiModel`, the closed `UiEvent` enum, pure update transitions, explicit `UiEffect` values, stale
-  effect-response suppression, one effect executor, borrowed rendering, responsive layout,
-  terminal input, redraw scheduling, reconnect state, and RAII terminal restoration. Add model and
-  effect tests, deterministic buffer snapshots across representative terminal sizes, and normal,
-  error, cancellation, and panic restoration tests. Complete this work when the UI shell has no
-  domain/storage side channel and can render/reconnect against a scripted local client.
+- **[tui/high] Compose the Ratatui terminal and reconnecting local-client shell** — Add terminal
+  input mapping, one effect executor, bounded redraw/tick scheduling, reconnect and invalidation
+  integration, the installed `hq tui` and bare-terminal roles, and RAII terminal restoration. Add
+  scripted local-client tests plus normal, error, cancellation, and panic restoration tests.
+  Complete this work when the shell renders and reconnects through the ordinary local API with no
+  domain/storage side channel.
 
 - **[tui/high] Implement retained mailbox, agent, and project workflows** — Add authoritative
   snapshot reload, conversation/activity presentation in reducer order, inbox filtering, typed

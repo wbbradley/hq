@@ -71,7 +71,6 @@ allowed_internal_dependency() {
       hq-projects:hq-domain | hq-projects:hq-reducer | \
       hq-projects:hq-application | hq-projects:hq-harness | hq-projects:hq-resources | \
       hq-codex:hq-domain | hq-codex:hq-harness | hq-codex:hq-testkit | \
-      hq-tui:hq-domain | hq-tui:hq-application | \
       hq-node:hq-domain | hq-node:hq-reducer | hq-node:hq-protocol | \
       hq-node:hq-application | hq-node:hq-store | hq-node:hq-local-api | \
       hq-node:hq-relay | hq-node:hq-harness | hq-node:hq-codex | \
@@ -169,6 +168,22 @@ for core_crate in hq-domain hq-reducer hq-application; do
     fail "$core_crate contains a forbidden runtime, adapter, filesystem, process, or provider-specific reference"
   fi
 done
+
+grep -Eq '^ratatui(\.workspace)?[[:space:]]*=' \
+  "$repository_root/crates/hq-tui/Cargo.toml" ||
+  fail "hq-tui must own the borrowed Ratatui renderer"
+for crate in "${expected_crates[@]}"; do
+  if [[ "$crate" != hq-tui && "$crate" != hq-node ]] &&
+    grep -Eq '^ratatui(\.workspace)?[[:space:]]*=' \
+      "$repository_root/crates/$crate/Cargo.toml"; then
+    fail "$crate may not depend directly on ratatui; UI rendering belongs to hq-tui"
+  fi
+done
+if grep -ERq --include='*.rs' \
+  '(tokio::|rusqlite|tungstenite|nostr|std::fs|std::process|hq_(domain|application|store|local_api|relay|harness|projects|resources|codex))' \
+  "$repository_root/crates/hq-tui/src"; then
+  fail "hq-tui contains runtime, transport, storage, filesystem, process, domain, or adapter API use"
+fi
 
 if grep -ERq --include='*.rs' '(hq_store|StoredRelay|rusqlite)' \
   "$repository_root/crates/hq-relay/src"; then

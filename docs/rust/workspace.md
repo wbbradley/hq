@@ -25,7 +25,7 @@ making the skeleton a supported replacement for the Go executable.
 | `hq-harness` | Provider-neutral runtime contract, registry, buffer, and supervisor | Domain |
 | `hq-projects` | Explicit durable project command workflows and strict remote command codec | Application, domain, reducer, harness, resources |
 | `hq-codex` | Private Codex adapter | Domain, `hq-harness` |
-| `hq-tui` | Pure UI state plus terminal adapter | Domain, application |
+| `hq-tui` | Pure UI state and borrowed Ratatui renderer | Standard library, Ratatui |
 | `hq-node` | Composition, runtime ownership, single binary | Any inward crate |
 | `hq-testkit` | Deterministic builders, reusable conformance, and scripted adapters | Domain, harness; reducer in tests |
 
@@ -36,6 +36,14 @@ serialization/runtime/process/filesystem dependencies in `hq-harness`; and requi
 provider dependency to point from `hq-codex` to the neutral harness contract. Provider-neutral
 identities remain valid domain vocabulary. This source scan complements
 Cargo's cycle checks: dependency acyclicity alone does not prove that a core crate is pure.
+
+`hq-tui` implements the pure model/effect and borrowed-rendering contract in `docs/rust/tui.md`.
+It has no internal workspace dependency and no runtime, transport, storage, filesystem, process, or
+domain capability. Passive shell-normalized records expose public fields. `UiModel` and `EffectId`
+remain opaque because they maintain relational invariants between outstanding effect identities,
+timers, snapshot revisions, reconnect generations, and logical selection. The `hq-node`
+composition layer owns terminal and local-client capabilities and will map ordinary local API
+snapshots into those passive presentation records.
 
 `hq-harness` implements the synchronous object-safe boundary in
 `docs/harness-contract-v1.md`: passive capability and event records have public fields, while the

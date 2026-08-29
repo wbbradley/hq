@@ -1,5 +1,44 @@
 # Completed
 
+## 2026-08-28 — Pure Ratatui model/effect architecture and renderer
+
+Added a pure `hq-tui` transition algebra in which the complete `UiModel` and one closed `UiEvent`
+produce a new model plus ordered, identity-bearing `UiEffect` values. Startup, normalized input,
+resize, timers, authoritative snapshots, revision-only invalidations, and generation-scoped
+connection observations perform no I/O or domain mutation. Nonzero effect identities suppress late
+snapshot successes, failures, and timer completions; invalidations coalesce to the greatest required
+revision and force a follow-up snapshot when an in-flight response cannot satisfy it. Logical row
+identity preserves selection across reload and resize.
+
+Added borrowed Ratatui rendering for wide navigation/content, compact tab/content, and bounded
+undersized-terminal layouts. The header exposes section, connection, and revision; rows expose
+selection and typed state in text as well as style; the footer exposes controls or an actionable
+failure. Exact terminal-buffer snapshots cover all three layouts and assert that rendering leaves
+the entire model unchanged.
+
+The crate has no internal HQ dependency and owns no terminal, clock, runtime, local transport,
+storage, filesystem, process, provider, or domain capability. Passive sizes, rows, snapshots,
+failures, and transition results use public fields without constructors or accessor facades.
+Only `UiModel` and `EffectId` stay opaque because they enforce outstanding-effect, revision,
+generation, selection, startup, and nonzero-identity invariants. The architecture verifier now
+enforces this boundary, while `docs/rust/tui.md`, the workspace contract, and behavior-ledger
+`CLI-013` record the stable shell interface. Terminal ownership, reconnect execution, input
+decoding, local-API mapping, and RAII restoration remain in the next composition package.
+
+Full workspace all-target/all-feature tests, strict Clippy, format/check, architecture,
+behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. Ratatui introduces two
+reported but allowed transitive duplicate-version trees; the existing yanked `chacha20 0.10.1`
+warning also remains. The final exact executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[tui/high] Build the pure Ratatui model/effect architecture and renderer** — Implement
+  `UiModel`, the closed `UiEvent` enum, pure update transitions, explicit identity-bearing
+  `UiEffect` values, stale effect-response suppression, borrowed rendering, and responsive layout.
+  Add exhaustive model/effect tests and deterministic buffer snapshots across representative
+  terminal sizes. Complete this work when state transitions and rendering perform no I/O or domain
+  mutation and expose a stable shell boundary.
+
 ## 2026-08-28 — Recoverable worktree provisioning and non-TUI parity
 
 Added `project worktree NAME --source ABSOLUTE_PATH --destination ABSOLUTE_PATH --branch BRANCH
