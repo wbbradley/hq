@@ -8957,3 +8957,36 @@ focused on immediate actions.
   failure. Explain the prerequisite and dismiss the hint on the next meaningful input.
 - Add pure-model tests and render snapshots for help opened from every section, with and without a
   selected item, at narrow and wide terminal sizes. Document the help contract in `docs/rust/tui.md`.
+
+## 2026-08-29 — Empty states with exact next actions
+
+Inbox, Sent, Archived, Agents, and Projects now replace the generic `No items` presentation with a
+plain-language explanation of what belongs there and one or two actions that work from the current
+screen. Project guidance leads with durable work and folder/resource ownership, while isolated Git
+worktrees remain a disclosed secondary option instead of the empty screen's product definition.
+
+An empty direct-message recipient chooser now explains that nobody is reachable, points to agent
+creation as the available path, and leaves room for people in the user's future HQ network. It
+hides selection and compose controls until a typed recipient exists, while pure-model coverage
+proves navigation and submission remain inert and Escape is safe. Narrow/wide render coverage spans
+all five empty sections and the chooser. Formatting, architecture checks, strict Clippy, the locked
+full-workspace test suite, and the all-target/all-feature workspace build pass.
+
+### Original plan entry
+
+### Explain empty states with exact next actions
+
+Give every empty section and empty recipient chooser a plain-language purpose and one or two
+actions that are possible from the current screen.
+
+- Distinguish an empty Inbox, Sent, and Archived section; explain what each normally contains and
+  point to the applicable direct-message, personal-note, or `New...` action without implying that
+  project work is the only collaboration path.
+- Explain that an empty Agents section contains no named workers yet and offer agent creation. For
+  an empty Projects section, explain project/resource ownership and offer project creation without
+  positioning HQ as a worktree manager.
+- When no direct-message target is available, explain that no reachable recipient exists, offer the
+  applicable agent-creation path now, and leave the copy compatible with future human recipients.
+  Do not render selection or submission controls that cannot work.
+- Keep the contextual-help and focused-footer actions consistent with each empty state. Add pure
+  model tests and narrow/wide render snapshots for every section and the empty recipient chooser.

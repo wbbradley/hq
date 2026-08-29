@@ -27,23 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Explain empty states with exact next actions
-
-Give every empty section and empty recipient chooser a plain-language purpose and one or two
-actions that are possible from the current screen.
-
-- Distinguish an empty Inbox, Sent, and Archived section; explain what each normally contains and
-  point to the applicable direct-message, personal-note, or `New...` action without implying that
-  project work is the only collaboration path.
-- Explain that an empty Agents section contains no named workers yet and offer agent creation. For
-  an empty Projects section, explain project/resource ownership and offer project creation without
-  positioning HQ as a worktree manager.
-- When no direct-message target is available, explain that no reachable recipient exists, offer the
-  applicable agent-creation path now, and leave the copy compatible with future human recipients.
-  Do not render selection or submission controls that cannot work.
-- Keep the contextual-help and focused-footer actions consistent with each empty state. Add pure
-  model tests and narrow/wide render snapshots for every section and the empty recipient chooser.
-
 ### Explain unavailable and conflicted human accounts from typed evidence
 
 Replace the aggregate unavailable/ambiguous human-account presentation with exact typed conditions
