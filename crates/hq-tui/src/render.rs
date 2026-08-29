@@ -9,9 +9,9 @@ use ratatui::{
 };
 
 use crate::{
-    UiActivityStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind, UiFocus,
-    UiMailboxAction, UiMailboxDraftTarget, UiMailboxModal, UiMessageState, UiModel, UiRow,
-    UiRowState, UiSection, UiTechnicalSection,
+    UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentModal, UiConnectionState,
+    UiConversationEntry, UiConversationEntryKind, UiFocus, UiMailboxAction, UiMailboxDraftTarget,
+    UiMailboxModal, UiMessageState, UiModel, UiRow, UiRowState, UiSection, UiTechnicalSection,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -42,6 +42,162 @@ pub fn render(frame: &mut Frame<'_>, model: &UiModel) {
     }
     render_footer(frame, model, footer);
     render_mailbox_modal(frame, model, content);
+    render_agent_modal(frame, model, content);
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+    let Some(interaction) = model.agent_modal() else {
+        return;
+    };
+    let width = available.width.saturating_sub(4).clamp(1, 82);
+    let height = available.height.clamp(1, 20);
+    let area = Rect {
+        x: available.x + available.width.saturating_sub(width) / 2,
+        y: available.y + available.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let (title, lines) = match interaction {
+        UiAgentModal::Search { query } => (
+            " Search agents ",
+            vec![
+                Line::from(format!("Query: {query}")),
+                Line::default(),
+                Line::from("Type to select matching names, sessions, or IDs"),
+                Line::from("↑/↓ cycle matches · Enter inspect · Esc keep query"),
+            ],
+        ),
+        UiAgentModal::Details {
+            agent,
+            selected_session,
+        } => {
+            let mut lines = agent_summary(agent);
+            lines.push(Line::default());
+            lines.push(Line::styled(
+                "Durable sessions",
+                Style::new().fg(Color::Cyan),
+            ));
+            for session in &agent.sessions {
+                let selected = selected_session.as_ref().is_some_and(|(provider, value)| {
+                    *provider == session.provider && *value == session.session
+                });
+                let name = session.display_name.as_deref().unwrap_or("unnamed");
+                lines.push(Line::styled(
+                    format!(
+                        " {} {}/{} · {}{}{}",
+                        if selected { '›' } else { ' ' },
+                        session.provider,
+                        session.session,
+                        name,
+                        if session.selected { " · selected" } else { "" },
+                        if session.conflicted {
+                            " · conflicted"
+                        } else {
+                            ""
+                        }
+                    ),
+                    if selected {
+                        selected_style(true)
+                    } else {
+                        Style::new()
+                    },
+                ));
+            }
+            if agent.sessions.is_empty() {
+                lines.push(Line::from(" No durable provider sessions"));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(
+                "↑/↓ session · r rename/clear · x retire · Esc close",
+            ));
+            (" Agent details ", lines)
+        }
+        UiAgentModal::Create { name, submitting } => (
+            " Create named agent ",
+            vec![
+                Line::from(format!("Permanent lowercase name: {name}")),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Reconciling create command…"
+                } else {
+                    "Enter create · Esc cancel"
+                }),
+            ],
+        ),
+        UiAgentModal::RenameSession {
+            provider,
+            session,
+            display_name,
+            submitting,
+            ..
+        } => (
+            " Rename durable session ",
+            vec![
+                Line::from(format!("Target: {provider}/{session}")),
+                Line::from(format!("Display name: {display_name}")),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Reconciling rename command…"
+                } else {
+                    "Enter rename (empty clears) · Esc cancel"
+                }),
+            ],
+        ),
+        UiAgentModal::ConfirmRetire {
+            agent,
+            force,
+            submitting,
+        } => {
+            let name = agent.names.first().map_or("unnamed", String::as_str);
+            (
+                " Confirm permanent retirement ",
+                vec![
+                    Line::styled(
+                        format!("Retire {name}? This cannot be undone."),
+                        Style::new().fg(Color::Yellow),
+                    ),
+                    Line::from(format!("Force assigned/runtime takeover: {force}")),
+                    Line::default(),
+                    Line::from(if *submitting {
+                        "Reconciling retirement…"
+                    } else {
+                        "f toggle force · Enter confirm · Esc cancel"
+                    }),
+                ],
+            )
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(title))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn agent_summary(agent: &UiAgent) -> Vec<Line<'_>> {
+    let lifecycle = match agent.lifecycle {
+        UiAgentLifecycle::Active => "active",
+        UiAgentLifecycle::Conflicted => "conflicted",
+        UiAgentLifecycle::Retired => "retired",
+    };
+    vec![
+        Line::styled(
+            agent.names.first().map_or("Unnamed agent", String::as_str),
+            Style::new().fg(Color::Cyan).bold(),
+        ),
+        Line::from(format!(
+            "Identity: {:02x}{:02x}{:02x}{:02x}…",
+            agent.agent_id[0], agent.agent_id[1], agent.agent_id[2], agent.agent_id[3]
+        )),
+        Line::from(format!(
+            "Lifecycle: {lifecycle} · runnable: {} · mailboxes: {}",
+            agent.runnable,
+            agent.mailboxes.len()
+        )),
+    ]
 }
 
 #[allow(clippy::too_many_lines)]
@@ -507,7 +663,16 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
 fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     let content = model.last_failure().map_or_else(
         || {
-            if model.viewport().width >= WIDE_WIDTH {
+            if model.section() == UiSection::Agents {
+                format!(
+                    " / search ({}) · Enter inspect · c create · q quit",
+                    if model.agent_search().is_empty() {
+                        "all"
+                    } else {
+                        model.agent_search()
+                    }
+                )
+            } else if model.viewport().width >= WIDE_WIDTH {
                 " tab focus · ↑/↓ select · r reply · d direct · n note · a/u state · q quit"
                     .to_owned()
             } else {

@@ -54,13 +54,14 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained agent and session workflows** — Add named-agent search and
-  inspection plus create, retire, start, exact resume, rename, live switch confirmation, and stop
-  through ordinary local-API commands. Keep durable provider/session selection separate from
-  runtime presence, retain mailbox editing/navigation state while managing sessions, reconcile
-  in-flight commands after reconnect, and expose stale or uncertain outcomes as typed actionable
-  state. Complete this work when pure model, executor, and installed-client tests cover the retained
-  agent/session use cases without importing provider or domain authority into the TUI.
+- **[tui/high] Implement retained managed-session lifecycle** — Add start, exact resume, live switch
+  confirmation, and stop for one stable named-agent/provider/session target through the ordinary
+  local API. Keep durable provider/session selection separate from runtime presence, retain
+  mailbox editing/navigation state while managing sessions, reconcile stable in-flight operations
+  after reconnect, and expose stale, rejected, or uncertain outcomes as typed actionable state.
+  Complete this work when pure model, responsive renderer, executor, and installed-client tests
+  cover every retained session lifecycle use case without importing provider or domain authority
+  into the TUI.
 
 - **[tui/high] Implement retained project-first workflows** — Add project selection/creation before
   new project work, desired-resource editing and conflict previews, assignment and handoff,

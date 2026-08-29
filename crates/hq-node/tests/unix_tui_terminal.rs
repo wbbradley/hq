@@ -91,6 +91,34 @@ fn installed_tui_self_note_matches_cli_and_survives_restart() {
 }
 
 #[test]
+fn installed_tui_agent_create_matches_cli_and_survives_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    let human = hq_output(&state_root, &["human", "create"]);
+    assert!(
+        human.status.success(),
+        "human create failed: {:?}",
+        human.stderr
+    );
+
+    let name = "tui-builder";
+    let run = run_in_pty(&state_root, true, PtyInteraction::CreateAgent(name));
+    assert!(run.status.success(), "TUI process failed: {:?}", run.bytes);
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+    assert!(agent_exists(&state_root, name));
+
+    let restarted = hq_output(&state_root, &["daemon", "restart"]);
+    assert!(
+        restarted.status.success(),
+        "daemon restart failed: {:?}",
+        restarted.stderr
+    );
+    assert!(agent_exists(&state_root, name));
+}
+
+#[test]
 fn explicit_tui_without_terminal_fails_without_escape_sequences() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -119,6 +147,7 @@ struct PtyRun {
 enum PtyInteraction<'content> {
     QuitOnStart,
     SubmitSelfNote(&'content str),
+    CreateAgent(&'content str),
 }
 
 #[allow(clippy::too_many_lines)]
@@ -153,6 +182,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut bytes = Vec::new();
     let mut initial_key_sent = false;
     let mut content_sent = false;
+    let mut completion_offset = None;
     let mut exit_sent = false;
     let status = loop {
         let mut buffer = [0_u8; 8192];
@@ -170,6 +200,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             let key = match interaction {
                 PtyInteraction::QuitOnStart => b"q".as_slice(),
                 PtyInteraction::SubmitSelfNote(_) => b"n".as_slice(),
+                PtyInteraction::CreateAgent(_) => b"lllc".as_slice(),
             };
             master.write_all(key).expect("initial TUI key writes");
             master.flush().expect("initial TUI key flushes");
@@ -189,6 +220,20 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.flush().expect("self-note text flushes");
             content_sent = true;
         }
+        if let PtyInteraction::CreateAgent(name) = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(b"Permanent".len())
+                .any(|window| window == b"Permanent")
+        {
+            master
+                .write_all(format!("{name}\r").as_bytes())
+                .expect("agent name writes");
+            master.flush().expect("agent name flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
         if let PtyInteraction::SubmitSelfNote(content) = interaction
             && content_sent
             && !exit_sent
@@ -197,6 +242,19 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .any(|window| window == b"open messages")
         {
             let _ = content;
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+        }
+        if let PtyInteraction::CreateAgent(_) = interaction
+            && content_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"revision ".len())
+                    .any(|window| window == b"revision ")
+            })
+        {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
@@ -236,6 +294,11 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
 fn mailbox_contains(state_root: &Path, content: &str) -> bool {
     let output = hq_output(state_root, &["--output", "json", "list", "--all"]);
     output.status.success() && String::from_utf8_lossy(&output.stdout).contains(content)
+}
+
+fn agent_exists(state_root: &Path, name: &str) -> bool {
+    let output = hq_output(state_root, &["--output", "json", "agent", "show", name]);
+    output.status.success() && String::from_utf8_lossy(&output.stdout).contains(name)
 }
 
 fn hq_output(state_root: &Path, arguments: &[&str]) -> std::process::Output {

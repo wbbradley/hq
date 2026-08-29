@@ -18,13 +18,17 @@ use hq_local_api::{
     },
 };
 use hq_tui::{
-    EffectId, UiActivityStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
+    EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox,
+    UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiMailboxAction,
     UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiMessageTarget, UiRow, UiRowKind,
     UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
-use crate::{LocalNodeClientError, LocalNodeEventClient};
+use crate::{
+    LocalNodeClientError, LocalNodeEventClient, StatePaths,
+    local_client::{LocalNamedAgentCommand, execute_named_agent_command, tui_named_agent_catalog},
+};
 
 const CLIENT_COMMAND_CAPACITY: usize = 8;
 const CLIENT_EVENT_CAPACITY: usize = 16;
@@ -107,6 +111,14 @@ pub trait TuiClientPort: Send {
         action: UiMailboxAction,
     ) -> Result<u64, UiFailure>;
 
+    /// Executes or reconciles one stable named-agent administration command.
+    fn submit_agent_command(&mut self, _action: UiAgentAction) -> Result<u64, UiFailure> {
+        Err(UiFailure {
+            code: "agent_command_unavailable".to_owned(),
+            action: "use a client that supports named-agent administration".to_owned(),
+        })
+    }
+
     /// Polls subscribed invalidation and reconnect observations for a bounded interval.
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation>;
 }
@@ -123,15 +135,17 @@ pub struct TuiDraftError {
 /// Ordinary local-API implementation of the TUI client capability.
 pub struct LocalTuiClient {
     client: LocalNodeEventClient,
+    state: StatePaths,
     observed_connection: Option<ClientConnectionState>,
     conversation_keys: BTreeMap<String, ConversationKeyDto>,
 }
 
 impl LocalTuiClient {
     /// Wraps one already-ready subscribed ordinary local API client.
-    pub const fn new(client: LocalNodeEventClient) -> Self {
+    pub const fn new(client: LocalNodeEventClient, state: StatePaths) -> Self {
         Self {
             client,
+            state,
             observed_connection: None,
             conversation_keys: BTreeMap::new(),
         }
@@ -352,6 +366,43 @@ impl TuiClientPort for LocalTuiClient {
         }
     }
 
+    fn submit_agent_command(&mut self, action: UiAgentAction) -> Result<u64, UiFailure> {
+        let command = match action {
+            UiAgentAction::Create { name } => LocalNamedAgentCommand::Create { name },
+            UiAgentAction::RenameSession {
+                agent_id,
+                provider,
+                session,
+                display_name,
+            } => LocalNamedAgentCommand::RenameSession {
+                agent_id,
+                provider,
+                session,
+                display_name,
+            },
+            UiAgentAction::Retire { agent_id, force } => {
+                LocalNamedAgentCommand::Retire { agent_id, force }
+            }
+        };
+        execute_named_agent_command(&self.state, command).map_err(|error| UiFailure {
+            code: match error {
+                crate::cli::CliError::AgentState => "agent_state_stale_or_uncertain",
+                crate::cli::CliError::Arguments => "agent_action_invalid",
+                _ => "agent_command_failed",
+            }
+            .to_owned(),
+            action: match error {
+                crate::cli::CliError::AgentState => {
+                    "reload and reselect an active unconflicted agent or session".to_owned()
+                }
+                crate::cli::CliError::Arguments => {
+                    "correct the agent name or session display name and retry".to_owned()
+                }
+                _ => "wait for the local node to recover, then retry".to_owned(),
+            },
+        })
+    }
+
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
         let result = self.client.poll_event(wait);
         let state = self.client.connection_state();
@@ -511,6 +562,10 @@ enum WorkerCommand {
         draft: Option<UiMailboxDraft>,
         action: UiMailboxAction,
     },
+    SubmitAgentCommand {
+        id: EffectId,
+        action: UiAgentAction,
+    },
     Shutdown,
 }
 
@@ -593,6 +648,12 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                     self.enqueue_client_effect(
                         id,
                         WorkerCommand::SubmitMailboxCommand { id, draft, action },
+                    )?;
+                }
+                UiEffect::SubmitAgentCommand { id, action } => {
+                    self.enqueue_client_effect(
+                        id,
+                        WorkerCommand::SubmitAgentCommand { id, action },
                     )?;
                 }
                 UiEffect::ScheduleTimer { id, kind, after } => {
@@ -720,7 +781,9 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             | UiEvent::DraftSaved { effect_id, .. }
             | UiEvent::DraftFailed { effect_id, .. }
             | UiEvent::MailboxCommandCommitted { effect_id, .. }
-            | UiEvent::MailboxCommandFailed { effect_id, .. } => Some(*effect_id),
+            | UiEvent::MailboxCommandFailed { effect_id, .. }
+            | UiEvent::AgentCommandCommitted { effect_id, .. }
+            | UiEvent::AgentCommandFailed { effect_id, .. } => Some(*effect_id),
             UiEvent::Started
             | UiEvent::Input(_)
             | UiEvent::Resized(_)
@@ -827,6 +890,21 @@ fn client_worker<P: TuiClientPort>(
                     break;
                 }
             }
+            Ok(WorkerCommand::SubmitAgentCommand { id, action }) => {
+                let event = match client.submit_agent_command(action) {
+                    Ok(revision) => UiEvent::AgentCommandCommitted {
+                        effect_id: id,
+                        revision,
+                    },
+                    Err(failure) => UiEvent::AgentCommandFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
             Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 for observation in client.poll(CLIENT_POLL_WAIT) {
@@ -856,6 +934,47 @@ fn client_worker<P: TuiClientPort>(
 
 /// Maps one authoritative local API snapshot into passive section-specific presentation rows.
 pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> UiSnapshot {
+    let agents = tui_named_agent_catalog(&snapshot)
+        .into_iter()
+        .map(|agent| UiAgent {
+            agent_id: *agent.agent_id.as_bytes(),
+            names: agent
+                .names
+                .into_iter()
+                .map(|name| terminal_text(&name))
+                .collect(),
+            mailboxes: agent
+                .mailboxes
+                .into_iter()
+                .map(|mailbox| UiAgentMailbox {
+                    installation_id: *mailbox.installation_id().as_bytes(),
+                    mailbox_id: *mailbox.mailbox_id().as_bytes(),
+                })
+                .collect(),
+            lifecycle: match agent.lifecycle.as_str() {
+                "active" => UiAgentLifecycle::Active,
+                "retired" => UiAgentLifecycle::Retired,
+                _ => UiAgentLifecycle::Conflicted,
+            },
+            runnable: agent.runnable,
+            sessions: agent
+                .sessions
+                .into_iter()
+                .map(|session| UiAgentSession {
+                    provider: session.provider,
+                    session: session.session,
+                    mailbox: session.mailbox.map(|mailbox| UiAgentMailbox {
+                        installation_id: *mailbox.installation_id().as_bytes(),
+                        mailbox_id: *mailbox.mailbox_id().as_bytes(),
+                    }),
+                    conflicted: session.conflicted,
+                    selected: session.selected,
+                    name_resolved: session.name_resolved,
+                    display_name: session.display_name.map(|name| terminal_text(&name)),
+                })
+                .collect(),
+        })
+        .collect();
     let mut direct_targets = snapshot
         .items
         .iter()
@@ -893,6 +1012,7 @@ pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> U
         revision: snapshot.revision,
         rows,
         direct_targets,
+        agents,
     }
 }
 

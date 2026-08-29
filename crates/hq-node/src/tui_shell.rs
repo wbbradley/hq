@@ -290,7 +290,7 @@ pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
     )
     .map_err(|_| TuiShellError::Build)?;
     let event_client = LocalNodeEventClient::connect(installed_local_client_config(
-        state,
+        state.clone(),
         build,
         InitialView::OnDemand,
     ))
@@ -298,7 +298,7 @@ pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
     let terminal = CrosstermTerminal::new()?;
     run_tui_shell(
         terminal,
-        LocalTuiClient::new(event_client),
+        LocalTuiClient::new(event_client, state),
         MonotonicTuiClock::default(),
     )
 }

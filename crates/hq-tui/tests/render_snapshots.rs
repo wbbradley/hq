@@ -3,9 +3,10 @@
 #![allow(clippy::expect_used)]
 
 use hq_tui::{
-    UiActivityStatus, UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect,
-    UiEvent, UiInput, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiRow,
-    UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection, render, update,
+    UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentMailbox, UiAgentSession,
+    UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiInput,
+    UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiRow, UiRowKind, UiRowState,
+    UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -115,6 +116,34 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
     }
 }
 
+#[test]
+fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+    ] {
+        let model = agent_details_model(size);
+        let before = model.clone();
+        let backend = TestBackend::new(size.width, size.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &model))
+            .expect("render agent details");
+        assert_eq!(model, before);
+        let rendered = snapshot_text(terminal.backend().buffer());
+        assert!(rendered.contains("Agent details"));
+        assert!(rendered.contains("builder"));
+        assert!(rendered.contains("codex/session-1"));
+        assert!(rendered.contains("r rename/clear"));
+    }
+}
+
 fn assert_snapshot(model: &UiModel, expected: &str) {
     let before = model.clone();
     let viewport = model.viewport();
@@ -179,6 +208,7 @@ fn ready_model(size: UiSize) -> UiModel {
                     ),
                 ],
                 direct_targets: Vec::new(),
+                agents: Vec::new(),
             },
         },
     )
@@ -196,6 +226,73 @@ fn row(id: &str, title: &str, detail: &str, state: UiRowState) -> UiRow {
         state,
         kind: UiRowKind::Conversation,
     }
+}
+
+fn agent_details_model(size: UiSize) -> UiModel {
+    let mut model = ready_model(size);
+    for section in [UiSection::Sent, UiSection::Archived, UiSection::Agents] {
+        let moving = update(model, UiEvent::Input(UiInput::Character('l'))).expect("next section");
+        let request = moving
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::LoadSnapshot { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("section snapshot");
+        let agent = UiAgent {
+            agent_id: [1; 32],
+            names: vec!["builder".to_owned()],
+            mailboxes: vec![UiAgentMailbox {
+                installation_id: [2; 32],
+                mailbox_id: [3; 32],
+            }],
+            lifecycle: UiAgentLifecycle::Active,
+            runnable: true,
+            sessions: vec![UiAgentSession {
+                provider: "codex".to_owned(),
+                session: "session-1".to_owned(),
+                mailbox: None,
+                conflicted: false,
+                selected: true,
+                name_resolved: true,
+                display_name: Some("live".to_owned()),
+            }],
+        };
+        let snapshot = UiSnapshot {
+            section,
+            revision: 43,
+            rows: if section == UiSection::Agents {
+                vec![UiRow {
+                    id: "01".repeat(32),
+                    title: "builder".to_owned(),
+                    detail: "active".to_owned(),
+                    state: UiRowState::Open,
+                    kind: UiRowKind::Agent,
+                }]
+            } else {
+                Vec::new()
+            },
+            direct_targets: Vec::new(),
+            agents: if section == UiSection::Agents {
+                vec![agent]
+            } else {
+                Vec::new()
+            },
+        };
+        model = update(
+            moving.model,
+            UiEvent::SnapshotLoaded {
+                effect_id: request,
+                snapshot,
+            },
+        )
+        .expect("section loaded")
+        .model;
+    }
+    update(model, UiEvent::Input(UiInput::Activate))
+        .expect("inspect agent")
+        .model
 }
 
 fn conversation_model(size: UiSize) -> UiModel {

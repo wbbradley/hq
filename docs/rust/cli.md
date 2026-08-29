@@ -282,6 +282,12 @@ and the live client capability remain closed behavioral types. The clean unshipp
 contract carries exact agent claims, mailboxes, immutable binding facts, and selection/rename
 candidates and frontiers in place; there is no compatibility accessor, migration, or version bump.
 
+The installed TUI Agents section uses the same catalog and command workflows. `/` searches stable
+agent, name, provider, session, and display-name identities; Enter inspects durable history; `c`
+creates; `r` renames or clears one exact selected session; and `x` opens permanent retirement
+confirmation, with `f` as an explicit force toggle. These actions add no TUI-specific authority,
+storage record, local-API version, migration, or compatibility facade.
+
 Human output is concise newline-terminated text. JSON output is exactly one newline-terminated
 object with schema `hq-cli-output-v1`, an `ok` boolean, a stable `kind`, and typed `data`. Errors use
 the same envelope on stderr and contain only stable class, code, and redacted message fields.

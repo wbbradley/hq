@@ -6,6 +6,7 @@ const PERIODIC_REFRESH: Duration = Duration::from_secs(300);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 const DRAFT_AUTOSAVE_DELAY: Duration = Duration::from_millis(250);
 const MAX_DRAFT_BYTES: usize = 16 * 1024;
+const MAX_AGENT_TEXT_BYTES: usize = 256;
 
 /// Stable identity attached to an asynchronous UI effect and its completion.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -291,6 +292,110 @@ pub struct UiDirectTarget {
     pub label: String,
 }
 
+/// Closed named-agent lifecycle supplied by the authoritative mapper.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiAgentLifecycle {
+    /// One active, unconflicted permanent identity exists.
+    Active,
+    /// Candidate identity state is ambiguous or incomplete.
+    Conflicted,
+    /// Retirement is absorbing and the agent is historical only.
+    Retired,
+}
+
+/// Passive installation-qualified agent mailbox.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiAgentMailbox {
+    /// Owning installation identity.
+    pub installation_id: [u8; 32],
+    /// Mailbox identity.
+    pub mailbox_id: [u8; 32],
+}
+
+/// Passive durable provider-session presentation for one named agent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiAgentSession {
+    /// Neutral provider namespace.
+    pub provider: String,
+    /// Exact provider-scoped durable session.
+    pub session: String,
+    /// Unique immutable mailbox binding when resolved.
+    pub mailbox: Option<UiAgentMailbox>,
+    /// Whether immutable bindings conflict.
+    pub conflicted: bool,
+    /// Whether this is the resolved durable selection.
+    pub selected: bool,
+    /// Whether the display-name register is resolved.
+    pub name_resolved: bool,
+    /// Resolved display name, or `None` for an explicit clear.
+    pub display_name: Option<String>,
+}
+
+/// Complete passive named-agent presentation used by search and inspection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiAgent {
+    /// Stable durable agent identity.
+    pub agent_id: [u8; 32],
+    /// Candidate permanent names in stable order.
+    pub names: Vec<String>,
+    /// Candidate installation-qualified mailboxes in stable order.
+    pub mailboxes: Vec<UiAgentMailbox>,
+    /// Typed lifecycle.
+    pub lifecycle: UiAgentLifecycle,
+    /// Whether one durable provider session is selected without conflict.
+    pub runnable: bool,
+    /// Compatible durable provider sessions in stable order.
+    pub sessions: Vec<UiAgentSession>,
+}
+
+/// Exact named-agent administration command chosen by the pure model.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiAgentAction {
+    Create {
+        name: String,
+    },
+    RenameSession {
+        agent_id: [u8; 32],
+        provider: String,
+        session: String,
+        display_name: Option<String>,
+    },
+    Retire {
+        agent_id: [u8; 32],
+        force: bool,
+    },
+}
+
+/// Current named-agent search, inspection, or administration interaction.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiAgentModal {
+    Search {
+        query: String,
+    },
+    Details {
+        agent: UiAgent,
+        selected_session: Option<(String, String)>,
+    },
+    Create {
+        name: String,
+        submitting: bool,
+    },
+    RenameSession {
+        agent_id: [u8; 32],
+        provider: String,
+        session: String,
+        display_name: String,
+        submitting: bool,
+    },
+    ConfirmRetire {
+        agent: UiAgent,
+        force: bool,
+        submitting: bool,
+    },
+}
+
 /// Explicit semantic target retained with one installation-local draft.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -399,6 +504,8 @@ pub struct UiSnapshot {
     pub rows: Vec<UiRow>,
     /// Resolved named-agent mailboxes available for direct composition.
     pub direct_targets: Vec<UiDirectTarget>,
+    /// Complete named-agent records when the selected section is Agents.
+    pub agents: Vec<UiAgent>,
 }
 
 /// Passive stable actionable failure shown without behavioral prose parsing.
@@ -500,6 +607,20 @@ pub enum UiEvent {
         /// Stable actionable failure.
         failure: UiFailure,
     },
+    /// One stable named-agent administration command completed.
+    AgentCommandCommitted {
+        /// Identity of the completed command effect.
+        effect_id: EffectId,
+        /// Authoritative revision observed after completion.
+        revision: u64,
+    },
+    /// One named-agent administration command was rejected or remained uncertain.
+    AgentCommandFailed {
+        /// Identity of the failed command effect.
+        effect_id: EffectId,
+        /// Stable actionable failure.
+        failure: UiFailure,
+    },
     /// A revision-only wake marked the current snapshot stale.
     Invalidated {
         /// Greatest revision known to the shell.
@@ -562,6 +683,13 @@ pub enum UiEffect {
         draft: Option<UiMailboxDraft>,
         /// Exact typed action selected by the model.
         action: UiMailboxAction,
+    },
+    /// Execute or reconcile one stable named-agent administration command.
+    SubmitAgentCommand {
+        /// Identity required on the completion event.
+        id: EffectId,
+        /// Exact typed command selected by the model.
+        action: UiAgentAction,
     },
     /// Schedule one bounded timer through the shell clock.
     ScheduleTimer {
@@ -649,10 +777,13 @@ pub struct UiModel {
     conversation_anchor: Option<String>,
     technical_visible: bool,
     mailbox_modal: Option<UiMailboxModal>,
+    agent_modal: Option<UiAgentModal>,
+    agent_search: String,
     required_revision: Option<u64>,
     pending_snapshot: Option<PendingSnapshot>,
     pending_conversation: Option<PendingConversation>,
     pending_mailbox: Option<PendingMailbox>,
+    pending_agent: Option<EffectId>,
     periodic_timer: Option<EffectId>,
     retry_timer: Option<EffectId>,
     autosave_timer: Option<EffectId>,
@@ -677,10 +808,13 @@ impl UiModel {
             conversation_anchor: None,
             technical_visible: false,
             mailbox_modal: None,
+            agent_modal: None,
+            agent_search: String::new(),
             required_revision: None,
             pending_snapshot: None,
             pending_conversation: None,
             pending_mailbox: None,
+            pending_agent: None,
             periodic_timer: None,
             retry_timer: None,
             autosave_timer: None,
@@ -741,6 +875,16 @@ impl UiModel {
         self.mailbox_modal.as_ref()
     }
 
+    /// Borrows the current named-agent interaction.
+    pub const fn agent_modal(&self) -> Option<&UiAgentModal> {
+        self.agent_modal.as_ref()
+    }
+
+    /// Returns the retained named-agent search query.
+    pub fn agent_search(&self) -> &str {
+        &self.agent_search
+    }
+
     /// Returns the greatest revision required by coalesced invalidations.
     pub const fn required_revision(&self) -> Option<u64> {
         self.required_revision
@@ -768,6 +912,11 @@ impl UiModel {
             Some(pending) => Some(pending.id),
             None => None,
         }
+    }
+
+    /// Returns the current named-agent administration effect identity.
+    pub const fn pending_agent(&self) -> Option<EffectId> {
+        self.pending_agent
     }
 
     /// Borrows the latest matching failure.
@@ -884,6 +1033,20 @@ impl UiModel {
             kind: PendingMailboxKind::SubmitCommand,
         });
         effects.push(UiEffect::SubmitMailboxCommand { id, draft, action });
+        Ok(())
+    }
+
+    fn submit_agent(
+        &mut self,
+        action: UiAgentAction,
+        effects: &mut Vec<UiEffect>,
+    ) -> Result<(), UiError> {
+        if self.pending_agent.is_some() {
+            return Ok(());
+        }
+        let id = self.allocate_effect()?;
+        self.pending_agent = Some(id);
+        effects.push(UiEffect::SubmitAgentCommand { id, action });
         Ok(())
     }
 
@@ -1011,7 +1174,9 @@ impl UiModel {
             });
             targets.clone_from(&snapshot.direct_targets);
         }
+        refresh_agent_modal(self, &snapshot);
         self.snapshot = Some(snapshot);
+        select_agent_search_match(self, false);
     }
 }
 
@@ -1061,6 +1226,13 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::MailboxCommandFailed { effect_id, failure } => {
             mailbox_command_failed(&mut model, effect_id, failure, &mut effects);
         }
+        UiEvent::AgentCommandCommitted {
+            effect_id,
+            revision,
+        } => agent_command_committed(&mut model, effect_id, revision, &mut effects)?,
+        UiEvent::AgentCommandFailed { effect_id, failure } => {
+            agent_command_failed(&mut model, effect_id, failure, &mut effects);
+        }
         UiEvent::Invalidated { revision } => invalidated(&mut model, revision, &mut effects)?,
         UiEvent::ConnectionObserved { generation, state } => {
             connection_observed(&mut model, generation, state, &mut effects)?;
@@ -1090,6 +1262,13 @@ fn apply_input(
     input: UiInput,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
+    if model.agent_modal.is_some() {
+        let changed = apply_agent_modal_input(model, input, effects)?;
+        if changed {
+            effects.push(UiEffect::RequestRedraw);
+        }
+        return Ok(());
+    }
     if model.mailbox_modal.is_some() {
         let changed = apply_modal_input(model, input, effects)?;
         if changed {
@@ -1333,6 +1512,440 @@ fn update_composer(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
+fn apply_agent_modal_input(
+    model: &mut UiModel,
+    input: UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    if matches!(input, UiInput::Quit) {
+        model.should_exit = true;
+        effects.push(UiEffect::Exit);
+        return Ok(false);
+    }
+    if matches!(input, UiInput::Escape) {
+        if model.pending_agent.is_none() {
+            if let Some(UiAgentModal::Search { query }) = &model.agent_modal {
+                model.agent_search.clone_from(query);
+            }
+            model.agent_modal = None;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+    match model.agent_modal.clone() {
+        Some(UiAgentModal::Search { mut query }) => match input {
+            UiInput::Character(value) => {
+                push_bounded(&mut query, &value.to_string());
+                update_agent_search(model, query);
+                Ok(true)
+            }
+            UiInput::Paste(value) => {
+                push_bounded(&mut query, &value);
+                update_agent_search(model, query);
+                Ok(true)
+            }
+            UiInput::Backspace => {
+                if query.pop().is_none() {
+                    return Ok(false);
+                }
+                update_agent_search(model, query);
+                Ok(true)
+            }
+            UiInput::NextItem | UiInput::PreviousItem => {
+                model.agent_search.clone_from(&query);
+                select_agent_search_match(model, matches!(input, UiInput::NextItem));
+                Ok(true)
+            }
+            UiInput::Activate => {
+                model.agent_search = query;
+                let Some(agent) = selected_agent(model).cloned() else {
+                    return Ok(false);
+                };
+                let selected_session = default_agent_session(&agent);
+                model.agent_modal = Some(UiAgentModal::Details {
+                    agent,
+                    selected_session,
+                });
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiAgentModal::Details {
+            agent,
+            selected_session,
+        }) => match input {
+            UiInput::NextItem | UiInput::PreviousItem => {
+                let next = move_agent_session(
+                    &agent,
+                    selected_session.as_ref(),
+                    matches!(input, UiInput::NextItem),
+                );
+                model.agent_modal = Some(UiAgentModal::Details {
+                    agent,
+                    selected_session: next,
+                });
+                Ok(true)
+            }
+            UiInput::Character(value) if value.eq_ignore_ascii_case(&'r') => {
+                let Some((provider, session)) = selected_session else {
+                    return Ok(false);
+                };
+                let display_name = agent
+                    .sessions
+                    .iter()
+                    .find(|candidate| {
+                        candidate.provider == provider && candidate.session == session
+                    })
+                    .and_then(|candidate| candidate.display_name.clone())
+                    .unwrap_or_default();
+                model.agent_modal = Some(UiAgentModal::RenameSession {
+                    agent_id: agent.agent_id,
+                    provider,
+                    session,
+                    display_name,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Character(value) if value.eq_ignore_ascii_case(&'x') => {
+                if agent.lifecycle != UiAgentLifecycle::Active {
+                    model.last_failure = Some(UiFailure {
+                        code: "agent_not_active".to_owned(),
+                        action: "select one active unconflicted agent".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                model.agent_modal = Some(UiAgentModal::ConfirmRetire {
+                    agent,
+                    force: false,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiAgentModal::Create {
+            mut name,
+            submitting,
+        }) => match input {
+            UiInput::Character(value) if !submitting => {
+                push_bounded(&mut name, &value.to_string());
+                model.agent_modal = Some(UiAgentModal::Create {
+                    name,
+                    submitting: false,
+                });
+                model.last_failure = None;
+                Ok(true)
+            }
+            UiInput::Paste(value) if !submitting => {
+                push_bounded(&mut name, &value);
+                model.agent_modal = Some(UiAgentModal::Create {
+                    name,
+                    submitting: false,
+                });
+                model.last_failure = None;
+                Ok(true)
+            }
+            UiInput::Backspace if !submitting => {
+                if name.pop().is_none() {
+                    return Ok(false);
+                }
+                model.agent_modal = Some(UiAgentModal::Create {
+                    name,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Activate if !submitting => {
+                if name.is_empty() {
+                    model.last_failure = Some(UiFailure {
+                        code: "agent_name_empty".to_owned(),
+                        action: "enter a permanent lowercase agent name".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                model.agent_modal = Some(UiAgentModal::Create {
+                    name: name.clone(),
+                    submitting: true,
+                });
+                model.submit_agent(UiAgentAction::Create { name }, effects)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiAgentModal::RenameSession {
+            agent_id,
+            provider,
+            session,
+            mut display_name,
+            submitting,
+        }) => match input {
+            UiInput::Character(value) if !submitting => {
+                push_bounded(&mut display_name, &value.to_string());
+                model.agent_modal = Some(UiAgentModal::RenameSession {
+                    agent_id,
+                    provider,
+                    session,
+                    display_name,
+                    submitting: false,
+                });
+                model.last_failure = None;
+                Ok(true)
+            }
+            UiInput::Paste(value) if !submitting => {
+                push_bounded(&mut display_name, &value);
+                model.agent_modal = Some(UiAgentModal::RenameSession {
+                    agent_id,
+                    provider,
+                    session,
+                    display_name,
+                    submitting: false,
+                });
+                model.last_failure = None;
+                Ok(true)
+            }
+            UiInput::Backspace if !submitting => {
+                if display_name.pop().is_none() {
+                    return Ok(false);
+                }
+                model.agent_modal = Some(UiAgentModal::RenameSession {
+                    agent_id,
+                    provider,
+                    session,
+                    display_name,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Activate if !submitting => {
+                let value = (!display_name.is_empty()).then_some(display_name.clone());
+                model.agent_modal = Some(UiAgentModal::RenameSession {
+                    agent_id,
+                    provider: provider.clone(),
+                    session: session.clone(),
+                    display_name,
+                    submitting: true,
+                });
+                model.submit_agent(
+                    UiAgentAction::RenameSession {
+                        agent_id,
+                        provider,
+                        session,
+                        display_name: value,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiAgentModal::ConfirmRetire {
+            agent,
+            mut force,
+            submitting,
+        }) => match input {
+            UiInput::Character(value) if value.eq_ignore_ascii_case(&'f') && !submitting => {
+                force = !force;
+                model.agent_modal = Some(UiAgentModal::ConfirmRetire {
+                    agent,
+                    force,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Activate if !submitting => {
+                model.agent_modal = Some(UiAgentModal::ConfirmRetire {
+                    agent: agent.clone(),
+                    force,
+                    submitting: true,
+                });
+                model.submit_agent(
+                    UiAgentAction::Retire {
+                        agent_id: agent.agent_id,
+                        force,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        None => Ok(false),
+    }
+}
+
+fn push_bounded(target: &mut String, value: &str) {
+    if target.len().saturating_add(value.len()) <= MAX_AGENT_TEXT_BYTES {
+        target.push_str(value);
+    }
+}
+
+fn update_agent_search(model: &mut UiModel, query: String) {
+    model.agent_search.clone_from(&query);
+    model.agent_modal = Some(UiAgentModal::Search { query });
+    model.last_failure = None;
+    select_agent_search_match(model, false);
+}
+
+fn selected_agent(model: &UiModel) -> Option<&UiAgent> {
+    let selected = model.selected_row.as_deref()?;
+    model
+        .snapshot
+        .as_ref()?
+        .agents
+        .iter()
+        .find(|agent| agent_hex(agent.agent_id) == selected)
+}
+
+fn agent_hex(bytes: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(64);
+    for byte in bytes {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    value
+}
+
+fn agent_matches(agent: &UiAgent, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let query = query.to_lowercase();
+    agent_hex(agent.agent_id).contains(&query)
+        || agent
+            .names
+            .iter()
+            .any(|name| name.to_lowercase().contains(&query))
+        || agent.sessions.iter().any(|session| {
+            session.provider.to_lowercase().contains(&query)
+                || session.session.to_lowercase().contains(&query)
+                || session
+                    .display_name
+                    .as_ref()
+                    .is_some_and(|name| name.to_lowercase().contains(&query))
+        })
+}
+
+fn select_agent_search_match(model: &mut UiModel, forward: bool) {
+    if model.section != UiSection::Agents || model.agent_search.is_empty() {
+        return;
+    }
+    let Some(snapshot) = &model.snapshot else {
+        return;
+    };
+    let matches = snapshot
+        .agents
+        .iter()
+        .filter(|agent| agent_matches(agent, &model.agent_search))
+        .map(|agent| agent_hex(agent.agent_id))
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return;
+    }
+    let current = model
+        .selected_row
+        .as_ref()
+        .and_then(|selected| matches.iter().position(|candidate| candidate == selected));
+    let next = match (current, forward) {
+        (Some(index), true) => (index + 1) % matches.len(),
+        (Some(index), false) => index.checked_sub(1).unwrap_or(matches.len() - 1),
+        (None, _) => 0,
+    };
+    model.selected_row = Some(matches[next].clone());
+}
+
+fn default_agent_session(agent: &UiAgent) -> Option<(String, String)> {
+    agent
+        .sessions
+        .iter()
+        .find(|session| session.selected)
+        .or_else(|| agent.sessions.first())
+        .map(|session| (session.provider.clone(), session.session.clone()))
+}
+
+fn move_agent_session(
+    agent: &UiAgent,
+    selected: Option<&(String, String)>,
+    forward: bool,
+) -> Option<(String, String)> {
+    if agent.sessions.is_empty() {
+        return None;
+    }
+    let current = selected.and_then(|(provider, session)| {
+        agent
+            .sessions
+            .iter()
+            .position(|candidate| candidate.provider == *provider && candidate.session == *session)
+    });
+    let next = match (current, forward) {
+        (Some(index), true) => (index + 1).min(agent.sessions.len() - 1),
+        (Some(index), false) => index.saturating_sub(1),
+        (None, _) => 0,
+    };
+    let session = &agent.sessions[next];
+    Some((session.provider.clone(), session.session.clone()))
+}
+
+fn refresh_agent_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
+    let identity = match &model.agent_modal {
+        Some(UiAgentModal::Details { agent, .. } | UiAgentModal::ConfirmRetire { agent, .. }) => {
+            Some(agent.agent_id)
+        }
+        Some(UiAgentModal::RenameSession { agent_id, .. }) => Some(*agent_id),
+        _ => None,
+    };
+    let Some(identity) = identity else { return };
+    let current = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.agent_id == identity)
+        .cloned();
+    match (&mut model.agent_modal, current) {
+        (
+            Some(UiAgentModal::Details {
+                agent,
+                selected_session,
+            }),
+            Some(current),
+        ) => {
+            *selected_session = selected_session
+                .clone()
+                .filter(|(provider, session)| {
+                    current.sessions.iter().any(|candidate| {
+                        candidate.provider == *provider && candidate.session == *session
+                    })
+                })
+                .or_else(|| default_agent_session(&current));
+            *agent = current;
+        }
+        (Some(UiAgentModal::ConfirmRetire { agent, .. }), Some(current)) => *agent = current,
+        (
+            Some(UiAgentModal::RenameSession {
+                provider, session, ..
+            }),
+            Some(current),
+        ) if !current
+            .sessions
+            .iter()
+            .any(|candidate| candidate.provider == *provider && candidate.session == *session) =>
+        {
+            model.last_failure = Some(UiFailure {
+                code: "agent_session_stale".to_owned(),
+                action: "cancel and reselect a current provider session".to_owned(),
+            });
+        }
+        (_, None) => {
+            model.last_failure = Some(UiFailure {
+                code: "agent_target_stale".to_owned(),
+                action: "cancel and reselect the agent from the authoritative catalog".to_owned(),
+            });
+        }
+        _ => {}
+    }
+}
+
 fn mailbox_shortcut(
     model: &mut UiModel,
     character: char,
@@ -1345,6 +1958,9 @@ fn mailbox_shortcut(
             Ok(false)
         }
         'r' => {
+            if model.section == UiSection::Agents {
+                return Ok(false);
+            }
             let Some(target) = selected_message_target(model).filter(|target| target.reply_allowed)
             else {
                 return Ok(false);
@@ -1358,6 +1974,9 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'd' => {
+            if model.section == UiSection::Agents {
+                return Ok(false);
+            }
             let targets = model
                 .snapshot
                 .as_ref()
@@ -1369,11 +1988,27 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'n' => {
+            if model.section == UiSection::Agents {
+                return Ok(false);
+            }
             model.open_draft(UiMailboxDraftTarget::SelfNote, effects)?;
             Ok(true)
         }
-        'a' => Ok(confirm_message_state(model, false)),
-        'u' => Ok(confirm_message_state(model, true)),
+        'a' if model.section != UiSection::Agents => Ok(confirm_message_state(model, false)),
+        'u' if model.section != UiSection::Agents => Ok(confirm_message_state(model, true)),
+        '/' if model.section == UiSection::Agents => {
+            model.agent_modal = Some(UiAgentModal::Search {
+                query: model.agent_search.clone(),
+            });
+            Ok(true)
+        }
+        'c' if model.section == UiSection::Agents => {
+            model.agent_modal = Some(UiAgentModal::Create {
+                name: String::new(),
+                submitting: false,
+            });
+            Ok(true)
+        }
         'h' => {
             model.section = model.section.previous();
             model.snapshot = None;
@@ -1465,6 +2100,17 @@ fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
 fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
     if model.focus == UiFocus::Conversation && model.conversation_anchor.is_some() {
         model.technical_visible = !model.technical_visible;
+        return Ok(true);
+    }
+    if model.section == UiSection::Agents {
+        let Some(agent) = selected_agent(model).cloned() else {
+            return Ok(false);
+        };
+        let selected_session = default_agent_session(&agent);
+        model.agent_modal = Some(UiAgentModal::Details {
+            agent,
+            selected_session,
+        });
         return Ok(true);
     }
     if !model.selected_row_is_conversation() {
@@ -1828,6 +2474,45 @@ fn mailbox_command_failed(
     {
         *submitting = false;
         *closing = false;
+    }
+    model.last_failure = Some(failure);
+    effects.push(UiEffect::RequestRedraw);
+}
+
+fn agent_command_committed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    revision: u64,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    if model.pending_agent != Some(effect_id) {
+        return Ok(());
+    }
+    model.pending_agent = None;
+    model.agent_modal = None;
+    model.last_failure = None;
+    invalidated(model, revision, effects)?;
+    effects.push(UiEffect::RequestRedraw);
+    Ok(())
+}
+
+fn agent_command_failed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    failure: UiFailure,
+    effects: &mut Vec<UiEffect>,
+) {
+    if model.pending_agent != Some(effect_id) {
+        return;
+    }
+    model.pending_agent = None;
+    if let Some(
+        UiAgentModal::Create { submitting, .. }
+        | UiAgentModal::RenameSession { submitting, .. }
+        | UiAgentModal::ConfirmRetire { submitting, .. },
+    ) = &mut model.agent_modal
+    {
+        *submitting = false;
     }
     model.last_failure = Some(failure);
     effects.push(UiEffect::RequestRedraw);

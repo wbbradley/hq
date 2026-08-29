@@ -5372,6 +5372,14 @@ fn run_named_agent(action: &NamedAgentCommand, state: &StatePaths) -> Result<Cli
     )))
 }
 
+pub(crate) fn run_named_agent_for_tui(
+    action: &NamedAgentCommand,
+    state: &StatePaths,
+) -> Result<u64, CliError> {
+    let _ = run_named_agent(action, state)?;
+    Ok(command_client(state)?.snapshot()?.revision)
+}
+
 fn retire_named_agent(
     client: &mut LocalNodeClient,
     snapshot: &AuthoritativeSnapshotDto,
@@ -5997,7 +6005,7 @@ fn resolve_current_session(
     Ok((provider, session, candidate.mailbox, candidate.named_agent))
 }
 
-fn named_agent_catalog_view(
+pub(crate) fn named_agent_catalog_view(
     snapshot: &AuthoritativeSnapshotDto,
     operation: &'static str,
     selected_agent: Option<AgentId>,

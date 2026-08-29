@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hq_domain::InstallationId;
+use hq_domain::{AgentId, InstallationId, ProviderId, ProviderSessionId, ShortText};
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientConnectionState,
     ClientEvent, ClientTransport, InitialView, ReconnectPolicy, ReconnectingClient,
@@ -24,8 +24,65 @@ use hq_local_api::{
 use crate::{
     LifecycleClient, LifecycleClientConfig, NodeClientCoordinator, NodeCoordinatorConfig,
     NodeCoordinatorError, NodeLaunchError, NodeLauncher, ProcessNodeLauncher, RuntimePathError,
-    RuntimePaths, StatePaths, unix_frame,
+    RuntimePaths, StatePaths,
+    cli::{
+        CliError, NamedAgentCommand, NamedAgentSelector, NamedAgentView, named_agent_catalog_view,
+        run_named_agent_for_tui,
+    },
+    unix_frame,
 };
+
+/// Passive named-agent command accepted by the ordinary local client composition.
+pub(crate) enum LocalNamedAgentCommand {
+    Create {
+        name: String,
+    },
+    RenameSession {
+        agent_id: [u8; 32],
+        provider: String,
+        session: String,
+        display_name: Option<String>,
+    },
+    Retire {
+        agent_id: [u8; 32],
+        force: bool,
+    },
+}
+
+pub(crate) fn execute_named_agent_command(
+    state: &StatePaths,
+    command: LocalNamedAgentCommand,
+) -> Result<u64, CliError> {
+    let command = match command {
+        LocalNamedAgentCommand::Create { name } => NamedAgentCommand::Create {
+            name: ShortText::new(name).map_err(|_| CliError::Arguments)?,
+            mailbox_id: None,
+        },
+        LocalNamedAgentCommand::RenameSession {
+            agent_id,
+            provider,
+            session,
+            display_name,
+        } => NamedAgentCommand::Rename {
+            agent: NamedAgentSelector::Id(AgentId::from_bytes(agent_id)),
+            provider: Some(ProviderId::new(provider).map_err(|_| CliError::Arguments)?),
+            session: Some(ProviderSessionId::new(session).map_err(|_| CliError::Arguments)?),
+            display_name: display_name
+                .map(ShortText::new)
+                .transpose()
+                .map_err(|_| CliError::Arguments)?,
+        },
+        LocalNamedAgentCommand::Retire { agent_id, force } => NamedAgentCommand::Retire {
+            agent: NamedAgentSelector::Id(AgentId::from_bytes(agent_id)),
+            force,
+        },
+    };
+    run_named_agent_for_tui(&command, state)
+}
+
+pub(crate) fn tui_named_agent_catalog(snapshot: &AuthoritativeSnapshotDto) -> Vec<NamedAgentView> {
+    named_agent_catalog_view(snapshot, "tui_snapshot", None, None).agents
+}
 
 /// Passive local Unix transport configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]

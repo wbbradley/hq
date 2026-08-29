@@ -1,5 +1,43 @@
 # Completed
 
+## 2026-08-29 — Retained named-agent TUI catalog and administration
+
+Added stable-identity named-agent search and inspection to the pure Ratatui model. Search covers
+agent identities, permanent names, providers, durable sessions, and display names; its query,
+logical agent selection, open details, and exact provider/session selection survive authoritative
+reorder, reload, reconnect, and resize. Responsive wide and compact overlays expose lifecycle,
+runnable selection, mailbox count, durable sessions, conflicts, and resolved names without parsing
+display prose.
+
+Added typed create, session rename/clear, and permanent retirement actions. Retirement requires an
+explicit confirmation, exposes force as a separate visible toggle, and Escape cancels without
+mutation. Failed, stale, conflicted, retired, rejected, or potentially uncertain commands preserve
+the exact modal inputs for correction. Passive agent, mailbox, session, action, and modal records
+use public fields; only the invariant-bearing UI model and effect identity retain accessors.
+
+The snapshot mapper reuses the existing named-agent catalog reduction, preserving exact validated
+provider/session identities as action targets while sanitizing presentation names. The bounded
+executor carries exact typed effects through the ordinary local-client composition and existing
+CLI/local-API workflows, which retain their stable request and response-loss behavior. The TUI
+executor imports no domain, planner, project, provider, signer, storage, or process capability.
+
+Pure model, responsive render, exact executor mapping, full workspace all-target/all-feature,
+installed TUI/CLI create and daemon-restart parity, strict Clippy, format/check, architecture,
+behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. This package added no
+storage or local-API version, migration, compatibility facade, duplicate stored/runtime record, or
+passive-record accessor layer. The final exact executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[tui/high] Implement retained named-agent catalog and administration** — Add stable-identity
+  named-agent search and inspection plus create, rename, and confirmed retirement through ordinary
+  local-API commands. Preserve logical agent selection, search, and open details across
+  authoritative reload, reconnect, and resize; cancel administration modals without mutation;
+  reconcile in-flight commands after reconnect; and expose stale, conflicted, assigned, retired,
+  rejected, or uncertain outcomes as typed actionable state. Complete this work when pure model,
+  responsive renderer, executor, and installed-client tests cover every retained catalog and
+  administration use case without importing agent or project authority into the TUI.
+
 ## 2026-08-29 — Retained TUI mailbox composition and actions
 
 Added pure typed reply, direct-message, self-note, archive, and restore interactions to the

@@ -8,7 +8,8 @@ mod model;
 mod render;
 
 pub use model::{
-    EffectId, UiActivityStatus, UiConnectionState, UiConversation, UiConversationEntry,
+    EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox,
+    UiAgentModal, UiAgentSession, UiConnectionState, UiConversation, UiConversationEntry,
     UiConversationEntryKind, UiConversationPage, UiDirectTarget, UiEffect, UiError, UiEvent,
     UiFailure, UiFocus, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
     UiMailboxModal, UiMessageState, UiMessageTarget, UiModel, UiRow, UiRowKind, UiRowState,

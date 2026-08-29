@@ -19,9 +19,10 @@ use hq_node::{
     TuiExecutorError, tui_conversation_page, tui_snapshot,
 };
 use hq_tui::{
-    UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiFailure,
-    UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiRow,
-    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiAgentAction, UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect,
+    UiEvent, UiFailure, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
+    UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -38,6 +39,7 @@ fn executor_loads_the_effects_exact_section_and_preserves_identity() {
             revision: 7,
             rows: Vec::new(),
             direct_targets: Vec::new(),
+            agents: Vec::new(),
         })]),
         observations: VecDeque::new(),
         stopped: Arc::clone(&stopped),
@@ -165,6 +167,7 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
                     kind: UiRowKind::Conversation,
                 }],
                 direct_targets: Vec::new(),
+                agents: Vec::new(),
             },
         },
     )
@@ -198,6 +201,51 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
         requests.lock().expect("requests lock").as_slice(),
         &[("thread-a".to_owned(), None)]
     );
+    executor.shutdown().expect("shutdown");
+}
+
+#[test]
+fn executor_submits_the_exact_typed_agent_command_and_preserves_effect_identity() {
+    let started = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start");
+    let id = started
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadSnapshot { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("effect identity");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let client = AgentTuiClient {
+        calls: Arc::clone(&calls),
+    };
+    let mut executor =
+        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("executor starts");
+    let action = UiAgentAction::Retire {
+        agent_id: [44; 32],
+        force: true,
+    };
+    executor
+        .execute([UiEffect::SubmitAgentCommand {
+            id,
+            action: action.clone(),
+        }])
+        .expect("execute command");
+    assert_eq!(
+        receive_event(&mut executor),
+        UiEvent::AgentCommandCommitted {
+            effect_id: id,
+            revision: 23,
+        }
+    );
+    assert_eq!(calls.lock().expect("calls lock").as_slice(), &[action]);
     executor.shutdown().expect("shutdown");
 }
 
@@ -338,7 +386,7 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
                     mailbox_id: Id32::new([16; 32]),
                 }],
                 retirements: Vec::new(),
-                lifecycle: "ready".to_owned(),
+                lifecycle: "active".to_owned(),
                 runnable: true,
             },
             SnapshotItem::Project {
@@ -374,6 +422,11 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
     assert_eq!(agents.rows.len(), 1);
     assert_eq!(agents.rows[0].title, "builder");
     assert_eq!(agents.rows[0].state, hq_tui::UiRowState::Open);
+    assert_eq!(agents.agents.len(), 1);
+    assert_eq!(agents.agents[0].agent_id, [5; 32]);
+    assert_eq!(agents.agents[0].names, ["builder"]);
+    assert_eq!(agents.agents[0].mailboxes[0].installation_id, [15; 32]);
+    assert_eq!(agents.agents[0].lifecycle, hq_tui::UiAgentLifecycle::Active);
 
     let projects = tui_snapshot(UiSection::Projects, source.clone());
     assert_eq!(projects.rows.len(), 1);
@@ -624,6 +677,63 @@ impl Drop for ScriptedTuiClient {
 
 struct PanickingClient;
 
+struct AgentTuiClient {
+    calls: Arc<Mutex<Vec<UiAgentAction>>>,
+}
+
+impl TuiClientPort for AgentTuiClient {
+    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+        Ok(UiSnapshot {
+            section,
+            revision: 1,
+            rows: Vec::new(),
+            direct_targets: Vec::new(),
+            agents: Vec::new(),
+        })
+    }
+
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        Ok(UiConversationPage {
+            row_id: row_id.to_owned(),
+            entries: Vec::new(),
+            next_cursor: None,
+        })
+    }
+
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        Err(unsupported_failure())
+    }
+
+    fn submit_agent_command(&mut self, action: UiAgentAction) -> Result<u64, UiFailure> {
+        self.calls.lock().expect("calls lock").push(action);
+        Ok(23)
+    }
+
+    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
+        thread::sleep(wait);
+        Vec::new()
+    }
+}
+
 impl TuiClientPort for PanickingClient {
     fn load_snapshot(&mut self, _section: UiSection) -> Result<UiSnapshot, UiFailure> {
         panic!("scripted worker failure");
@@ -670,6 +780,7 @@ impl TuiClientPort for ImmediateSnapshotClient {
             revision: 1,
             rows: Vec::new(),
             direct_targets: Vec::new(),
+            agents: Vec::new(),
         })
     }
 
@@ -725,6 +836,7 @@ impl TuiClientPort for MailboxTuiClient {
             revision: 1,
             rows: Vec::new(),
             direct_targets: Vec::new(),
+            agents: Vec::new(),
         })
     }
 
@@ -821,6 +933,7 @@ fn snapshot_load_effects(count: usize) -> Vec<UiEffect> {
                     revision: revision as u64,
                     rows: Vec::new(),
                     direct_targets: Vec::new(),
+                    agents: Vec::new(),
                 },
             },
         )

@@ -5,7 +5,8 @@
 use std::time::Duration;
 
 use hq_tui::{
-    UiActivityStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
+    UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox, UiAgentModal,
+    UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiInput,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiMessageState,
     UiMessageTarget, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
@@ -1010,6 +1011,133 @@ fn optimistic_draft_conflict_preserves_local_text_and_adopts_current_version() {
     );
 }
 
+#[test]
+fn agent_search_and_details_keep_stable_identity_across_reload_reconnect_and_resize() {
+    let model = loaded_agents_model(1, &[agent(1, "alpha"), agent(2, "beta")]);
+    let searching = update(model, UiEvent::Input(UiInput::Character('/'))).expect("search");
+    let matched = update(
+        searching.model,
+        UiEvent::Input(UiInput::Paste("beta".to_owned())),
+    )
+    .expect("search query");
+    assert_eq!(matched.model.selected_row(), Some(agent_row_id(2).as_str()));
+    let invalidated = update(matched.model, UiEvent::Invalidated { revision: 2 }).expect("reload");
+    let request = snapshot_effect(&invalidated.effects);
+    let reloaded = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: request,
+            snapshot: agents_snapshot(2, vec![agent(2, "beta"), agent(1, "alpha")]),
+        },
+    )
+    .expect("authoritative reorder");
+    assert_eq!(
+        reloaded.model.selected_row(),
+        Some(agent_row_id(2).as_str())
+    );
+    assert!(matches!(
+        reloaded.model.agent_modal(),
+        Some(UiAgentModal::Search { query }) if query == "beta"
+    ));
+    let details = update(reloaded.model, UiEvent::Input(UiInput::Activate)).expect("inspect");
+    let resized = update(
+        details.model,
+        UiEvent::Resized(UiSize {
+            width: 62,
+            height: 17,
+        }),
+    )
+    .expect("resize");
+    let reconnecting = update(
+        resized.model,
+        UiEvent::ConnectionObserved {
+            generation: 4,
+            state: UiConnectionState::Reconnecting,
+        },
+    )
+    .expect("reconnect");
+    assert!(matches!(
+        reconnecting.model.agent_modal(),
+        Some(UiAgentModal::Details { agent, .. }) if agent.agent_id == [2; 32]
+    ));
+}
+
+#[test]
+fn agent_create_and_session_rename_emit_exact_typed_commands_and_preserve_failures() {
+    let model = loaded_agents_model(1, &[agent(3, "builder")]);
+    let create = update(model, UiEvent::Input(UiInput::Character('c'))).expect("create");
+    let named = update(
+        create.model,
+        UiEvent::Input(UiInput::Paste("reviewer".to_owned())),
+    )
+    .expect("name");
+    let submitted = update(named.model, UiEvent::Input(UiInput::Activate)).expect("submit");
+    let (create_id, create_action) = agent_action_effect(&submitted.effects);
+    assert_eq!(
+        create_action,
+        &UiAgentAction::Create {
+            name: "reviewer".to_owned()
+        }
+    );
+    let failed = update(
+        submitted.model,
+        UiEvent::AgentCommandFailed {
+            effect_id: create_id,
+            failure: UiFailure {
+                code: "agent_command_failed".to_owned(),
+                action: "correct the name and retry".to_owned(),
+            },
+        },
+    )
+    .expect("failure");
+    assert!(matches!(
+        failed.model.agent_modal(),
+        Some(UiAgentModal::Create { name, submitting: false }) if name == "reviewer"
+    ));
+
+    let details_model = loaded_agents_model(1, &[agent(3, "builder")]);
+    let details = update(details_model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let rename = update(details.model, UiEvent::Input(UiInput::Character('r'))).expect("rename");
+    let cleared = update(rename.model, UiEvent::Input(UiInput::Backspace)).expect("clear old name");
+    let renamed = update(
+        cleared.model,
+        UiEvent::Input(UiInput::Paste("live".to_owned())),
+    )
+    .expect("new name");
+    let submitted =
+        update(renamed.model, UiEvent::Input(UiInput::Activate)).expect("rename submit");
+    assert!(matches!(
+        agent_action_effect(&submitted.effects).1,
+        UiAgentAction::RenameSession { agent_id, provider, session, display_name: Some(name) }
+            if *agent_id == [3; 32] && provider == "codex" && session == "session-3" && name == "live"
+    ));
+}
+
+#[test]
+fn retirement_is_explicit_cancelable_and_force_is_part_of_the_typed_command() {
+    let model = loaded_agents_model(1, &[agent(4, "worker")]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let confirm = update(details.model, UiEvent::Input(UiInput::Character('x'))).expect("confirm");
+    let cancelled = update(confirm.model, UiEvent::Input(UiInput::Escape)).expect("cancel");
+    assert!(cancelled.model.agent_modal().is_none());
+    assert!(
+        !cancelled
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, UiEffect::SubmitAgentCommand { .. }))
+    );
+
+    let details =
+        update(cancelled.model, UiEvent::Input(UiInput::Activate)).expect("details again");
+    let confirm = update(details.model, UiEvent::Input(UiInput::Character('x'))).expect("confirm");
+    let forced = update(confirm.model, UiEvent::Input(UiInput::Character('f'))).expect("force");
+    let submitted = update(forced.model, UiEvent::Input(UiInput::Activate)).expect("retire");
+    assert!(matches!(
+        agent_action_effect(&submitted.effects).1,
+        UiAgentAction::Retire { agent_id, force: true } if *agent_id == [4; 32]
+    ));
+}
+
 fn snapshot(revision: u64, ids: &[&str]) -> UiSnapshot {
     snapshot_for(UiSection::Inbox, revision, ids)
 }
@@ -1019,6 +1147,7 @@ fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
         section,
         revision,
         direct_targets: Vec::new(),
+        agents: Vec::new(),
         rows: ids
             .iter()
             .map(|id| UiRow {
@@ -1030,6 +1159,74 @@ fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
             })
             .collect(),
     }
+}
+
+fn loaded_agents_model(revision: u64, agents: &[UiAgent]) -> UiModel {
+    let mut model = loaded_model(snapshot(0, &[]));
+    for section in [UiSection::Sent, UiSection::Archived, UiSection::Agents] {
+        let moved = update(model, UiEvent::Input(UiInput::Character('l'))).expect("next section");
+        let id = snapshot_effect(&moved.effects);
+        let source = if section == UiSection::Agents {
+            agents_snapshot(revision, agents.to_owned())
+        } else {
+            snapshot_for(section, revision, &[])
+        };
+        model = update(
+            moved.model,
+            UiEvent::SnapshotLoaded {
+                effect_id: id,
+                snapshot: source,
+            },
+        )
+        .expect("section loaded")
+        .model;
+    }
+    model
+}
+
+fn agents_snapshot(revision: u64, agents: Vec<UiAgent>) -> UiSnapshot {
+    UiSnapshot {
+        section: UiSection::Agents,
+        revision,
+        rows: agents
+            .iter()
+            .map(|agent| UiRow {
+                id: agent_row_id(agent.agent_id[0]),
+                title: agent.names.first().cloned().unwrap_or_default(),
+                detail: "active".to_owned(),
+                state: UiRowState::Open,
+                kind: UiRowKind::Agent,
+            })
+            .collect(),
+        direct_targets: Vec::new(),
+        agents,
+    }
+}
+
+fn agent(byte: u8, name: &str) -> UiAgent {
+    UiAgent {
+        agent_id: [byte; 32],
+        names: vec![name.to_owned()],
+        mailboxes: vec![UiAgentMailbox {
+            installation_id: [9; 32],
+            mailbox_id: [byte; 32],
+        }],
+        lifecycle: UiAgentLifecycle::Active,
+        runnable: true,
+        sessions: vec![UiAgentSession {
+            provider: "codex".to_owned(),
+            session: format!("session-{byte}"),
+            mailbox: None,
+            conflicted: false,
+            selected: true,
+            name_resolved: true,
+            display_name: Some("x".to_owned()),
+        }],
+    }
+}
+
+fn agent_row_id(byte: u8) -> String {
+    format!("{byte:02x}").repeat(32)
 }
 
 fn started_model() -> hq_tui::UiTransition {
@@ -1137,6 +1334,16 @@ fn save_draft_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &UiMailboxDraft
             _ => None,
         })
         .expect("save draft effect")
+}
+
+fn agent_action_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &UiAgentAction) {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitAgentCommand { id, action } => Some((*id, action)),
+            _ => None,
+        })
+        .expect("agent command effect")
 }
 
 fn entry(id: &str, activity: bool) -> UiConversationEntry {
