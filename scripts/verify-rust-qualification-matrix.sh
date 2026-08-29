@@ -49,7 +49,7 @@ release_build_seconds
 rust_host
 EOF
 sed -n 's/=.*//p' "$budget_file" >>"$expected_keys"
-sort -u "$expected_keys" -o "$expected_keys"
+LC_ALL=C sort -u "$expected_keys" -o "$expected_keys"
 
 field() {
   local key=$1
@@ -72,7 +72,7 @@ while IFS='|' read -r evidence runner operating_system architecture rust_host re
   [[ -f "$record" && ! -L "$record" ]] || fail "missing regular evidence file: $evidence"
   grep -Eq '^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9._-]+$' "$record" ||
     fail "malformed evidence record: $evidence"
-  sed 's/=.*//' "$record" | sort >"$actual_keys"
+  sed 's/=.*//' "$record" | LC_ALL=C sort >"$actual_keys"
   diff -u "$expected_keys" "$actual_keys" >/dev/null || fail "unknown or missing keys in $evidence"
   [[ $(field qualification_schema "$record") == 'hq-rust-qualification-v1' ]] ||
     fail "unknown qualification schema in $evidence"
@@ -97,13 +97,13 @@ while IFS='|' read -r evidence runner operating_system architecture rust_host re
 done <"$matrix_file"
 
 ((row_count == 4)) || fail "platform matrix must contain exactly four native targets"
-[[ $(sort "$expected_files" | uniq -d | wc -l | tr -d ' ') == 0 ]] ||
+[[ $(LC_ALL=C sort "$expected_files" | uniq -d | wc -l | tr -d ' ') == 0 ]] ||
   fail "platform matrix contains duplicate evidence filenames"
-[[ $(sort "$seen_runners" | uniq -d | wc -l | tr -d ' ') == 0 ]] ||
+[[ $(LC_ALL=C sort "$seen_runners" | uniq -d | wc -l | tr -d ' ') == 0 ]] ||
   fail "platform matrix contains duplicate runners"
-[[ $(sort "$seen_hosts" | uniq -d | wc -l | tr -d ' ') == 0 ]] ||
+[[ $(LC_ALL=C sort "$seen_hosts" | uniq -d | wc -l | tr -d ' ') == 0 ]] ||
   fail "platform matrix contains duplicate Rust hosts"
-find "$evidence_directory" -maxdepth 1 -name '*.env' -exec basename {} \; | sort >"$actual_files"
-sort "$expected_files" -o "$expected_files"
+find "$evidence_directory" -maxdepth 1 -name '*.env' -exec basename {} \; | LC_ALL=C sort >"$actual_files"
+LC_ALL=C sort "$expected_files" -o "$expected_files"
 diff -u "$expected_files" "$actual_files" >/dev/null ||
   fail "evidence directory does not contain the exact native record set"

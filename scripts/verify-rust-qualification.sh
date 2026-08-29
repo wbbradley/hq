@@ -53,7 +53,8 @@ HQ_QUALIFICATION_LATER_PAGE_BATCH_MAX_MILLISECONDS
 HQ_QUALIFICATION_QUEUE_SHUTDOWN_MAX_MILLISECONDS
 HQ_QUALIFICATION_RELEASE_BUILD_MAX_SECONDS
 EOF
-sed -n 's/=.*//p' "$budget_file" | sort -u >"$actual_budgets"
+LC_ALL=C sort -u "$expected_budgets" -o "$expected_budgets"
+sed -n 's/=.*//p' "$budget_file" | LC_ALL=C sort -u >"$actual_budgets"
 diff -u "$expected_budgets" "$actual_budgets" || fail "qualification budget variables differ"
 
 set -a
@@ -76,6 +77,7 @@ Relay
 Security/operations
 TUI/CLI
 EOF
+LC_ALL=C sort -u "$expected_areas" -o "$expected_areas"
 
 header=$(head -n 1 "$evidence_file")
 [[ "$header" == 'area|evidence|proof|purpose' ]] || fail "acceptance inventory has an unknown header"
@@ -112,9 +114,9 @@ while IFS='|' read -r area evidence proof purpose remainder; do
   printf '%s\n' "$area" >>"$actual_areas"
   printf '%s|%s\n' "$evidence" "$proof" >>"$evidence_keys"
 done <"$evidence_file"
-sort -u "$actual_areas" -o "$actual_areas"
+LC_ALL=C sort -u "$actual_areas" -o "$actual_areas"
 diff -u "$expected_areas" "$actual_areas" || fail "acceptance inventory areas differ"
-duplicate_evidence=$(sort "$evidence_keys" | uniq -d)
+duplicate_evidence=$(LC_ALL=C sort "$evidence_keys" | uniq -d)
 [[ -z "$duplicate_evidence" ]] || fail "duplicate evidence proof: $duplicate_evidence"
 
 if [[ ${1:-} == '--validate-only' ]]; then
