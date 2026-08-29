@@ -1260,7 +1260,18 @@ fn tui_human_state(
         [] => UiHumanState::Unavailable,
         [(candidates, None)] if candidates.is_empty() => UiHumanState::Unavailable,
         [(_, Some(account))] => {
-            let active_membership = snapshot.items.iter().any(|item| {
+            let creator_authority = snapshot.items.iter().any(|item| {
+                matches!(
+                    item,
+                    SnapshotItem::Account {
+                        account_id,
+                        creator_installation,
+                        ..
+                    } if *account_id == *account
+                        && creator_installation.bytes() == local_installation
+                )
+            });
+            let device_authority = snapshot.items.iter().any(|item| {
                 matches!(
                     item,
                     SnapshotItem::Membership {
@@ -1275,7 +1286,7 @@ fn tui_human_state(
                         && !active_acceptances.is_empty()
                 )
             });
-            if active_membership {
+            if creator_authority || device_authority {
                 UiHumanState::Ready
             } else {
                 UiHumanState::Ambiguous

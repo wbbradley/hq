@@ -699,6 +699,36 @@ fn authoritative_snapshot_human_state_requires_local_selection_and_active_member
 }
 
 #[test]
+fn authoritative_snapshot_human_state_accepts_local_account_creator_authority() {
+    let local = [42; 32];
+    let account = Id32::new([41; 32]);
+    let source = AuthoritativeSnapshotDto::new(
+        1,
+        vec![
+            SnapshotItem::Account {
+                account_id: account,
+                root_fact: Id32::new([43; 32]),
+                creator_installation: Id32::new(local),
+                label: Some("personal".to_owned()),
+                selected: true,
+            },
+            SnapshotItem::AccountSelection {
+                installation_id: Id32::new(local),
+                candidates: vec![account],
+                active: Some(account),
+                frontier: vec![Id32::new([40; 32])],
+            },
+        ],
+    )
+    .expect("authoritative snapshot");
+
+    assert_eq!(
+        tui_snapshot(local, &source).human_state,
+        UiHumanState::Ready
+    );
+}
+
+#[test]
 fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
     let page = ConversationPageDto::new(
         vec![
