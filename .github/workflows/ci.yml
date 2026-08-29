@@ -86,12 +86,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - group: application
+            package_arguments: -p hq-application
+          - group: codex
+            package_arguments: -p hq-codex
+          - group: domain
+            package_arguments: -p hq-domain
+          - group: harness
+            package_arguments: -p hq-harness
+          - group: local API
+            package_arguments: -p hq-local-api
           - group: node
             package_arguments: -p hq-node
+          - group: projects
+            package_arguments: -p hq-projects
+          - group: protocol
+            package_arguments: -p hq-protocol
+          - group: reducer
+            package_arguments: -p hq-reducer
+          - group: relay
+            package_arguments: -p hq-relay
+          - group: resources
+            package_arguments: -p hq-resources
+          - group: store
+            package_arguments: -p hq-store
+          - group: testkit
+            package_arguments: -p hq-testkit
           - group: tui
             package_arguments: -p hq-tui
-          - group: remaining workspace
-            package_arguments: --workspace --exclude hq-node --exclude hq-tui
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
