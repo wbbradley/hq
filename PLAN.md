@@ -54,16 +54,39 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained mailbox, agent, and project workflows** — Add authoritative
-  snapshot reload, conversation/activity presentation in reducer order, inbox filtering, typed
-  technical disclosure, reply/new-message composition, durable drafts, focus, logical selection and
-  scroll anchors, archive/restore, agent/session management, project-first composition, resource
-  conflict previews, activation/close/takeover flows, progress, and actionable errors. Preserve
-  semantic user workflows rather than Bubble Tea cells or key bindings. Test invalidation and
-  resize during editing, reconnect with in-flight commands, stale targets/heads, activity
-  coalescing, modal cancellation, and complete CLI/TUI use-case parity where intended. Complete
-  this work when every retained interactive workflow survives reload and never reimplements domain
-  ordering or authority.
+- **[tui/high] Present authoritative mailbox conversations and activity** — Extend the ordinary
+  local-API TUI client and pure model with open, sent, and archived filters; reducer-ordered mixed
+  conversation/activity pages; typed technical disclosure; stable conversation selection; and
+  logical scroll anchors. Preserve those presentation choices across authoritative reload,
+  invalidation, reconnect, and resize, consume reducer activity coalescing without reimplementing
+  it, and show stale or conflicted data as typed actionable state. Complete this work when mailbox
+  browsing is fully snapshot-driven and pure model/render tests prove canonical presentation and
+  state preservation.
+
+- **[tui/high] Implement durable mailbox composition and actions** — Add reply, direct-message,
+  self-note, archive, and restore workflows through ordinary local-API mutations. Persist
+  installation-local drafts, focus, target reselection, and modal state across reload/reconnect and
+  resize where appropriate; submit and consume drafts atomically; preserve stale targets for
+  recovery; cancel modals without mutation; and reconcile in-flight commands by stable request
+  identity. Complete this work when actionable errors and model, restart, stale-target, and
+  CLI/TUI parity tests cover every retained mailbox mutation without selected-row leakage.
+
+- **[tui/high] Implement retained agent and session workflows** — Add named-agent search and
+  inspection plus create, retire, start, exact resume, rename, live switch confirmation, and stop
+  through ordinary local-API commands. Keep durable provider/session selection separate from
+  runtime presence, retain mailbox editing/navigation state while managing sessions, reconcile
+  in-flight commands after reconnect, and expose stale or uncertain outcomes as typed actionable
+  state. Complete this work when pure model, executor, and installed-client tests cover the retained
+  agent/session use cases without importing provider or domain authority into the TUI.
+
+- **[tui/high] Implement retained project-first workflows** — Add project selection/creation before
+  new project work, desired-resource editing and conflict previews, assignment and handoff,
+  activate/takeover/close/reopen/archive flows, worktree progress, and saga outcomes through
+  ordinary local-API commands. Preserve modal and logical selection state across authoritative
+  reloads, reject stale heads explicitly, reconcile in-flight operations after reconnect, and show
+  domain-selected conflicts and recovery actions without recomputing project authority. Complete
+  this work when pure model, executor, and installed-client parity tests cover every retained
+  project workflow and its cancellation, conflict, progress, and failure paths.
 
 - **[verification/high] Qualify the integrated Rust system against the acceptance matrix** — Run and
   strengthen the complete fixture, property, model, fuzz, crash/reopen, lifecycle, architecture,
