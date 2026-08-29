@@ -8990,3 +8990,38 @@ actions that are possible from the current screen.
   Do not render selection or submission controls that cannot work.
 - Keep the contextual-help and focused-footer actions consistent with each empty state. Add pure
   model tests and narrow/wide render snapshots for every section and the empty recipient chooser.
+
+## 2026-08-29 — Typed human-account recovery
+
+The node mapper now distinguishes every local condition that can prevent safe human-account use:
+no selection, unresolved candidates, duplicate selection records, a selected account without
+local authority, pending or revoked membership, and conflicting membership or acceptance evidence.
+The pure TUI receives closed typed evidence rather than parsing diagnostic prose.
+
+Ordinary screens explain the exact condition and show only applicable create, join, select, sync,
+repair, or retry actions. Contextual technical help preserves stable recovery codes, candidate and
+selected account IDs, selection and membership frontiers, membership status, and active acceptance
+evidence; wide layouts show full IDs while narrow layouts remain bounded. The former aggregate
+ambiguity message and its instruction to inspect unrelated IDs are gone.
+
+Mapper, model, responsive render, and installed pseudoterminal tests cover every condition. The
+typed recovery vocabulary is documented in `docs/rust/tui.md`. Formatting, architecture checks,
+strict Clippy, the locked full-workspace test suite, and the all-target/all-feature workspace build
+pass.
+
+### Original plan entry
+
+### Explain unavailable and conflicted human accounts from typed evidence
+
+Replace the aggregate unavailable/ambiguous human-account presentation with exact typed conditions
+and applicable recovery actions derived by the node mapper.
+
+- Distinguish no local account selection, several local selection candidates, several local
+  selection records, a selected account with no local creator/device authority, and conflicting or
+  inactive local membership evidence without parsing diagnostic prose.
+- Explain each condition in ordinary language and offer only the applicable create, join, select,
+  sync, repair, or retry action. Do not make the user inspect unrelated IDs to discover the problem.
+- Preserve candidate account IDs, selection frontier, membership/authority evidence, and stable
+  recovery codes in contextual technical details.
+- Add mapper, pure-model, and narrow/wide render coverage for every unavailable and conflicted
+  condition. Update `docs/rust/tui.md` with the typed recovery vocabulary.

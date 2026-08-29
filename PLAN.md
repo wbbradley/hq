@@ -27,21 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Explain unavailable and conflicted human accounts from typed evidence
-
-Replace the aggregate unavailable/ambiguous human-account presentation with exact typed conditions
-and applicable recovery actions derived by the node mapper.
-
-- Distinguish no local account selection, several local selection candidates, several local
-  selection records, a selected account with no local creator/device authority, and conflicting or
-  inactive local membership evidence without parsing diagnostic prose.
-- Explain each condition in ordinary language and offer only the applicable create, join, select,
-  sync, repair, or retry action. Do not make the user inspect unrelated IDs to discover the problem.
-- Preserve candidate account IDs, selection frontier, membership/authority evidence, and stable
-  recovery codes in contextual technical details.
-- Add mapper, pure-model, and narrow/wide render coverage for every unavailable and conflicted
-  condition. Update `docs/rust/tui.md` with the typed recovery vocabulary.
-
 ### Complete the TUI vocabulary and progressive-disclosure audit
 
 Audit every ordinary screen, dialog, footer, hint, and exceptional outcome from the perspective of
