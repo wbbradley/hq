@@ -56,6 +56,14 @@ jobs:
             "$PWD/target/release/hq" "$artifact_directory" "${{ github.sha }}" "$RUST_HOST"
           scripts/verify-rust-release-artifact.sh \
             "$artifact_directory" "${{ github.sha }}" "$RUST_HOST"
+      - name: Rehearse isolated identity and database recovery
+        env:
+          RUST_HOST: ${{ matrix.rust_host }}
+        run: |
+          scripts/rehearse-rust-recovery.sh \
+            "$PWD/target/release/hq" \
+            "$RUNNER_TEMP/hq-rust-release/hq-recovery-$RUST_HOST.json" \
+            "${{ github.sha }}" "$RUST_HOST"
       - name: Upload native release artifact
         uses: actions/upload-artifact@v7
         with:
@@ -73,7 +81,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
       - name: Test release artifact validator
-        run: scripts/test-rust-release-artifacts.sh
+        run: |
+          scripts/test-rust-release-artifacts.sh
+          scripts/test-rust-recovery-rehearsal.sh
       - name: Download native release artifacts
         uses: actions/download-artifact@v8
         with:
@@ -85,7 +95,12 @@ jobs:
           scripts/verify-rust-release-matrix.sh \
             "$RUNNER_TEMP/hq-rust-release-matrix" "${{ github.sha }}" \
             "$RUNNER_TEMP/hq-rust-release-matrix/release-manifest.json"
+          scripts/verify-rust-recovery-matrix.sh \
+            "$RUNNER_TEMP/hq-rust-release-matrix" "${{ github.sha }}" \
+            "$RUNNER_TEMP/hq-rust-release-matrix/recovery-manifest.json"
           jq . "$RUNNER_TEMP/hq-rust-release-matrix/release-manifest.json" \
+            >>"$GITHUB_STEP_SUMMARY"
+          jq . "$RUNNER_TEMP/hq-rust-release-matrix/recovery-manifest.json" \
             >>"$GITHUB_STEP_SUMMARY"
       - name: Upload combined release-candidate evidence
         uses: actions/upload-artifact@v7
