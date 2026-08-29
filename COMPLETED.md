@@ -1,5 +1,47 @@
 # Completed
 
+## 2026-08-29 — Retained managed-session TUI lifecycle
+
+Added provider-neutral start, exact resume, and stop commands to named-agent details. Start accepts
+an explicit provider, exact resume binds the highlighted durable provider/session identity, and
+stop retains durable session history. Starting while a durable session is selected or resuming a
+different session requires a conservative confirmation that explicitly avoids treating durable
+selection or the runnable catalog flag as live-process evidence.
+
+The pure model now retains each section's logical selection, focus, open conversation, technical
+disclosure, and conversation anchor while visiting Agents. Stable managed-session operations stay
+pending across reconnect and resize; stale completions are ignored. Ready, stopped, rejected, and
+uncertain outcomes retain exact operation evidence, rejection category/code, or reconciliation
+identity with corrective actions. Passive action and result records expose public fields directly;
+no accessor facade or duplicate stored/runtime state was introduced.
+
+The bounded executor maps exact typed effects through the ordinary local-client composition into
+the existing harness CLI workflow. That workflow continues to capture launch directory and copied
+environment outside the TUI, allocate one retry-safe operation identity, and use the existing
+ordinary AgentSession local-API frame and response-loss reconciliation. The TUI imports no domain,
+provider, harness, storage, filesystem, or process authority and never stores or renders launch
+environment.
+
+Pure model and responsive rendering cover start, exact resume, stop, switch cancellation,
+reconnect/resize persistence, stale completion, rejected and uncertain outcomes, and mailbox
+workspace restoration. Executor tests preserve exact targets and operation evidence. The installed
+pseudoterminal exercises explicit-provider start and typed rejection, while installed CLI restart
+coverage exercises stop and stale exact resume. Full workspace tests, strict Clippy, formatting,
+architecture, behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. No
+storage or local-API version, migration, or compatibility shape changed. The final exact
+executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[tui/high] Implement retained managed-session lifecycle** — Add start, exact resume, live switch
+  confirmation, and stop for one stable named-agent/provider/session target through the ordinary
+  local API. Keep durable provider/session selection separate from runtime presence, retain
+  mailbox editing/navigation state while managing sessions, reconcile stable in-flight operations
+  after reconnect, and expose stale, rejected, or uncertain outcomes as typed actionable state.
+  Complete this work when pure model, responsive renderer, executor, and installed-client tests
+  cover every retained session lifecycle use case without importing provider or domain authority
+  into the TUI.
+
 ## 2026-08-29 — Retained named-agent TUI catalog and administration
 
 Added stable-identity named-agent search and inspection to the pure Ratatui model. Search covers

@@ -66,6 +66,13 @@ impl UiSection {
             .unwrap_or(0);
         Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
     }
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(0)
+    }
 }
 
 /// Logical focus independent of terminal coordinates.
@@ -367,6 +374,46 @@ pub enum UiAgentAction {
     },
 }
 
+/// Exact provider-neutral managed-session command chosen by the pure model.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiManagedSessionAction {
+    Start {
+        agent_id: [u8; 32],
+        provider: String,
+    },
+    Resume {
+        agent_id: [u8; 32],
+        provider: String,
+        session: String,
+    },
+    Stop {
+        agent_id: [u8; 32],
+        provider: String,
+    },
+}
+
+/// Typed actionable outcome of one stable managed-session operation.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiManagedSessionOutcome {
+    Ready { session: String },
+    Stopped,
+    Rejected { category: String, code: String },
+    Uncertain { reconciliation_id: [u8; 32] },
+}
+
+/// Passive completion evidence returned by the ordinary local client.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiManagedSessionResult {
+    /// Exact command whose stable operation completed.
+    pub action: UiManagedSessionAction,
+    /// Retry-safe operation identity allocated by the shared command workflow.
+    pub operation_id: [u8; 32],
+    /// Typed operation outcome; this is not inferred runtime presence.
+    pub outcome: UiManagedSessionOutcome,
+}
+
 /// Current named-agent search, inspection, or administration interaction.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -393,6 +440,22 @@ pub enum UiAgentModal {
         agent: UiAgent,
         force: bool,
         submitting: bool,
+    },
+    ManagedProvider {
+        agent: UiAgent,
+        provider: String,
+    },
+    ConfirmManagedSession {
+        agent: UiAgent,
+        action: UiManagedSessionAction,
+    },
+    ManagingSession {
+        agent: UiAgent,
+        action: UiManagedSessionAction,
+    },
+    ManagedSessionOutcome {
+        agent: UiAgent,
+        result: UiManagedSessionResult,
     },
 }
 
@@ -621,6 +684,20 @@ pub enum UiEvent {
         /// Stable actionable failure.
         failure: UiFailure,
     },
+    /// One stable managed-session command reached a typed outcome.
+    ManagedSessionCompleted {
+        /// Identity of the completed model effect.
+        effect_id: EffectId,
+        /// Passive operation evidence returned by the ordinary client.
+        result: UiManagedSessionResult,
+    },
+    /// One managed-session command could not reach the local API.
+    ManagedSessionFailed {
+        /// Identity of the failed model effect.
+        effect_id: EffectId,
+        /// Stable actionable client failure.
+        failure: UiFailure,
+    },
     /// A revision-only wake marked the current snapshot stale.
     Invalidated {
         /// Greatest revision known to the shell.
@@ -690,6 +767,13 @@ pub enum UiEffect {
         id: EffectId,
         /// Exact typed command selected by the model.
         action: UiAgentAction,
+    },
+    /// Execute or reconcile one stable provider-neutral managed-session command.
+    SubmitManagedSession {
+        /// Identity required on the completion event.
+        id: EffectId,
+        /// Exact typed command selected by the model.
+        action: UiManagedSessionAction,
     },
     /// Schedule one bounded timer through the shell clock.
     ScheduleTimer {
@@ -763,6 +847,15 @@ struct PendingMailbox {
     kind: PendingMailboxKind,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UiSectionWorkspace {
+    selected_row: Option<String>,
+    conversation: Option<UiConversation>,
+    conversation_anchor: Option<String>,
+    technical_visible: bool,
+    focus: UiFocus,
+}
+
 /// Complete invariant-bearing TUI application state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiModel {
@@ -784,6 +877,8 @@ pub struct UiModel {
     pending_conversation: Option<PendingConversation>,
     pending_mailbox: Option<PendingMailbox>,
     pending_agent: Option<EffectId>,
+    pending_managed_session: Option<EffectId>,
+    section_workspaces: [Option<UiSectionWorkspace>; 5],
     periodic_timer: Option<EffectId>,
     retry_timer: Option<EffectId>,
     autosave_timer: Option<EffectId>,
@@ -815,6 +910,8 @@ impl UiModel {
             pending_conversation: None,
             pending_mailbox: None,
             pending_agent: None,
+            pending_managed_session: None,
+            section_workspaces: [None, None, None, None, None],
             periodic_timer: None,
             retry_timer: None,
             autosave_timer: None,
@@ -917,6 +1014,11 @@ impl UiModel {
     /// Returns the current named-agent administration effect identity.
     pub const fn pending_agent(&self) -> Option<EffectId> {
         self.pending_agent
+    }
+
+    /// Returns the current stable managed-session effect identity.
+    pub const fn pending_managed_session(&self) -> Option<EffectId> {
+        self.pending_managed_session
     }
 
     /// Borrows the latest matching failure.
@@ -1048,6 +1150,48 @@ impl UiModel {
         self.pending_agent = Some(id);
         effects.push(UiEffect::SubmitAgentCommand { id, action });
         Ok(())
+    }
+
+    fn submit_managed_session(
+        &mut self,
+        action: UiManagedSessionAction,
+        effects: &mut Vec<UiEffect>,
+    ) -> Result<(), UiError> {
+        if self.pending_managed_session.is_some() {
+            return Ok(());
+        }
+        let id = self.allocate_effect()?;
+        self.pending_managed_session = Some(id);
+        effects.push(UiEffect::SubmitManagedSession { id, action });
+        Ok(())
+    }
+
+    fn save_section_workspace(&mut self) {
+        self.section_workspaces[self.section.index()] = Some(UiSectionWorkspace {
+            selected_row: self.selected_row.clone(),
+            conversation: self.conversation.clone(),
+            conversation_anchor: self.conversation_anchor.clone(),
+            technical_visible: self.technical_visible,
+            focus: self.focus,
+        });
+    }
+
+    fn restore_section_workspace(&mut self) {
+        let workspace = self.section_workspaces[self.section.index()].clone();
+        if let Some(workspace) = workspace {
+            self.selected_row = workspace.selected_row;
+            self.conversation = workspace.conversation;
+            self.conversation_anchor = workspace.conversation_anchor;
+            self.technical_visible = workspace.technical_visible;
+            self.focus = workspace.focus;
+        } else {
+            self.selected_row = None;
+            self.conversation = None;
+            self.conversation_anchor = None;
+            self.technical_visible = false;
+            self.focus = UiFocus::Navigation;
+        }
+        self.pending_conversation = None;
     }
 
     fn schedule_timer(
@@ -1233,6 +1377,12 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::AgentCommandFailed { effect_id, failure } => {
             agent_command_failed(&mut model, effect_id, failure, &mut effects);
         }
+        UiEvent::ManagedSessionCompleted { effect_id, result } => {
+            managed_session_completed(&mut model, effect_id, result, &mut effects)?;
+        }
+        UiEvent::ManagedSessionFailed { effect_id, failure } => {
+            managed_session_failed(&mut model, effect_id, failure, &mut effects);
+        }
         UiEvent::Invalidated { revision } => invalidated(&mut model, revision, &mut effects)?,
         UiEvent::ConnectionObserved { generation, state } => {
             connection_observed(&mut model, generation, state, &mut effects)?;
@@ -1303,18 +1453,18 @@ fn apply_input(
             true
         }
         UiInput::NextSection => {
+            model.save_section_workspace();
             model.section = model.section.next();
             model.snapshot = None;
-            model.selected_row = None;
-            model.close_conversation();
+            model.restore_section_workspace();
             model.request_snapshot(effects)?;
             true
         }
         UiInput::PreviousSection => {
+            model.save_section_workspace();
             model.section = model.section.previous();
             model.snapshot = None;
-            model.selected_row = None;
-            model.close_conversation();
+            model.restore_section_workspace();
             model.request_snapshot(effects)?;
             true
         }
@@ -1524,7 +1674,7 @@ fn apply_agent_modal_input(
         return Ok(false);
     }
     if matches!(input, UiInput::Escape) {
-        if model.pending_agent.is_none() {
+        if model.pending_agent.is_none() && model.pending_managed_session.is_none() {
             if let Some(UiAgentModal::Search { query }) = &model.agent_modal {
                 model.agent_search.clone_from(query);
             }
@@ -1585,6 +1735,50 @@ fn apply_agent_modal_input(
                     agent,
                     selected_session: next,
                 });
+                Ok(true)
+            }
+            UiInput::Character(value) if value.eq_ignore_ascii_case(&'s') => {
+                let provider = selected_session
+                    .as_ref()
+                    .map(|(provider, _)| provider.clone())
+                    .unwrap_or_default();
+                model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
+                Ok(true)
+            }
+            UiInput::Character(value) if value.eq_ignore_ascii_case(&'e') => {
+                let Some((provider, session)) = selected_session else {
+                    model.last_failure = Some(UiFailure {
+                        code: "managed_session_target_missing".to_owned(),
+                        action: "select one exact durable provider session to resume".to_owned(),
+                    });
+                    return Ok(true);
+                };
+                let switching = !agent.sessions.iter().any(|candidate| {
+                    candidate.provider == provider
+                        && candidate.session == session
+                        && candidate.selected
+                });
+                let action = UiManagedSessionAction::Resume {
+                    agent_id: agent.agent_id,
+                    provider,
+                    session,
+                };
+                begin_managed_session(model, agent, action, switching, effects)?;
+                Ok(true)
+            }
+            UiInput::Character(value) if value.eq_ignore_ascii_case(&'t') => {
+                let Some((provider, _)) = selected_session else {
+                    model.last_failure = Some(UiFailure {
+                        code: "managed_session_provider_missing".to_owned(),
+                        action: "select a durable provider session before stopping".to_owned(),
+                    });
+                    return Ok(true);
+                };
+                let action = UiManagedSessionAction::Stop {
+                    agent_id: agent.agent_id,
+                    provider,
+                };
+                begin_managed_session(model, agent, action, false, effects)?;
                 Ok(true)
             }
             UiInput::Character(value) if value.eq_ignore_ascii_case(&'r') => {
@@ -1771,8 +1965,88 @@ fn apply_agent_modal_input(
             }
             _ => Ok(false),
         },
-        None => Ok(false),
+        Some(UiAgentModal::ManagedProvider {
+            agent,
+            mut provider,
+        }) => match input {
+            UiInput::Character(value) => {
+                push_bounded(&mut provider, &value.to_string());
+                model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
+                model.last_failure = None;
+                Ok(true)
+            }
+            UiInput::Paste(value) => {
+                push_bounded(&mut provider, &value);
+                model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
+                model.last_failure = None;
+                Ok(true)
+            }
+            UiInput::Backspace => {
+                if provider.pop().is_none() {
+                    return Ok(false);
+                }
+                model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
+                Ok(true)
+            }
+            UiInput::Activate => {
+                if provider.is_empty() {
+                    model.last_failure = Some(UiFailure {
+                        code: "managed_session_provider_empty".to_owned(),
+                        action: "enter an exact provider namespace".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                let switching = agent.sessions.iter().any(|session| session.selected);
+                let action = UiManagedSessionAction::Start {
+                    agent_id: agent.agent_id,
+                    provider,
+                };
+                begin_managed_session(model, agent, action, switching, effects)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiAgentModal::ConfirmManagedSession { agent, action }) => match input {
+            UiInput::Activate => {
+                model.agent_modal = Some(UiAgentModal::ManagingSession {
+                    agent,
+                    action: action.clone(),
+                });
+                model.submit_managed_session(action, effects)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiAgentModal::ManagingSession { .. } | UiAgentModal::ManagedSessionOutcome { .. })
+        | None => Ok(false),
     }
+}
+
+fn begin_managed_session(
+    model: &mut UiModel,
+    agent: UiAgent,
+    action: UiManagedSessionAction,
+    switching: bool,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    if agent.lifecycle != UiAgentLifecycle::Active {
+        model.last_failure = Some(UiFailure {
+            code: "managed_session_agent_not_active".to_owned(),
+            action: "select one active unconflicted named agent".to_owned(),
+        });
+        return Ok(());
+    }
+    model.last_failure = None;
+    if switching {
+        model.agent_modal = Some(UiAgentModal::ConfirmManagedSession { agent, action });
+    } else {
+        model.agent_modal = Some(UiAgentModal::ManagingSession {
+            agent,
+            action: action.clone(),
+        });
+        model.submit_managed_session(action, effects)?;
+    }
+    Ok(())
 }
 
 fn push_bounded(target: &mut String, value: &str) {
@@ -1890,9 +2164,14 @@ fn move_agent_session(
 
 fn refresh_agent_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
     let identity = match &model.agent_modal {
-        Some(UiAgentModal::Details { agent, .. } | UiAgentModal::ConfirmRetire { agent, .. }) => {
-            Some(agent.agent_id)
-        }
+        Some(
+            UiAgentModal::Details { agent, .. }
+            | UiAgentModal::ConfirmRetire { agent, .. }
+            | UiAgentModal::ManagedProvider { agent, .. }
+            | UiAgentModal::ConfirmManagedSession { agent, .. }
+            | UiAgentModal::ManagingSession { agent, .. }
+            | UiAgentModal::ManagedSessionOutcome { agent, .. },
+        ) => Some(agent.agent_id),
         Some(UiAgentModal::RenameSession { agent_id, .. }) => Some(*agent_id),
         _ => None,
     };
@@ -1921,6 +2200,17 @@ fn refresh_agent_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
             *agent = current;
         }
         (Some(UiAgentModal::ConfirmRetire { agent, .. }), Some(current)) => *agent = current,
+        (
+            Some(
+                UiAgentModal::ManagedProvider { agent, .. }
+                | UiAgentModal::ConfirmManagedSession { agent, .. }
+                | UiAgentModal::ManagingSession { agent, .. }
+                | UiAgentModal::ManagedSessionOutcome { agent, .. },
+            ),
+            Some(current),
+        ) => {
+            *agent = current;
+        }
         (
             Some(UiAgentModal::RenameSession {
                 provider, session, ..
@@ -2513,6 +2803,62 @@ fn agent_command_failed(
     ) = &mut model.agent_modal
     {
         *submitting = false;
+    }
+    model.last_failure = Some(failure);
+    effects.push(UiEffect::RequestRedraw);
+}
+
+fn managed_session_completed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    result: UiManagedSessionResult,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    if model.pending_managed_session != Some(effect_id) {
+        return Ok(());
+    }
+    let Some(UiAgentModal::ManagingSession { agent, action }) = model.agent_modal.clone() else {
+        return Ok(());
+    };
+    if result.action != action {
+        model.pending_managed_session = None;
+        model.last_failure = Some(UiFailure {
+            code: "managed_session_response_mismatch".to_owned(),
+            action: "reload and reselect the exact managed-session target".to_owned(),
+        });
+        effects.push(UiEffect::RequestRedraw);
+        return Ok(());
+    }
+    model.pending_managed_session = None;
+    model.last_failure = match &result.outcome {
+        UiManagedSessionOutcome::Rejected { code, .. } => Some(UiFailure {
+            code: code.clone(),
+            action: "reload durable sessions, then select an exact current target".to_owned(),
+        }),
+        UiManagedSessionOutcome::Uncertain { .. } => Some(UiFailure {
+            code: "managed_session_uncertain".to_owned(),
+            action: "keep this operation identity while HQ reconciles the same request".to_owned(),
+        }),
+        UiManagedSessionOutcome::Ready { .. } | UiManagedSessionOutcome::Stopped => None,
+    };
+    model.agent_modal = Some(UiAgentModal::ManagedSessionOutcome { agent, result });
+    model.request_snapshot(effects)?;
+    effects.push(UiEffect::RequestRedraw);
+    Ok(())
+}
+
+fn managed_session_failed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    failure: UiFailure,
+    effects: &mut Vec<UiEffect>,
+) {
+    if model.pending_managed_session != Some(effect_id) {
+        return;
+    }
+    model.pending_managed_session = None;
+    if let Some(UiAgentModal::ManagingSession { agent, action }) = model.agent_modal.clone() {
+        model.agent_modal = Some(UiAgentModal::ConfirmManagedSession { agent, action });
     }
     model.last_failure = Some(failure);
     effects.push(UiEffect::RequestRedraw);

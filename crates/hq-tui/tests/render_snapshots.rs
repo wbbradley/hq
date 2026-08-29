@@ -144,6 +144,39 @@ fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
     }
 }
 
+#[test]
+fn managed_session_switch_confirmation_is_responsive_and_explicit_about_runtime_evidence() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+    ] {
+        let details = agent_details_model(size);
+        let provider =
+            update(details, UiEvent::Input(UiInput::Character('s'))).expect("choose provider");
+        let model = update(provider.model, UiEvent::Input(UiInput::Activate))
+            .expect("switch confirmation")
+            .model;
+        let before = model.clone();
+        let backend = TestBackend::new(size.width, size.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &model))
+            .expect("render managed-session confirmation");
+        assert_eq!(model, before);
+        let rendered = snapshot_text(terminal.backend().buffer());
+        assert!(rendered.contains("Confirm managed-session switch"));
+        assert!(rendered.contains("Start fresh on codex"));
+        assert!(rendered.contains("Runtime presence"));
+        assert!(rendered.contains("inferred"));
+    }
+}
+
 fn assert_snapshot(model: &UiModel, expected: &str) {
     let before = model.clone();
     let viewport = model.viewport();

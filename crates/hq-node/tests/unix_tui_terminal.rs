@@ -119,6 +119,49 @@ fn installed_tui_agent_create_matches_cli_and_survives_restart() {
 }
 
 #[test]
+fn installed_tui_starts_explicit_provider_and_renders_typed_rejection() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    let human = hq_output(&state_root, &["human", "create"]);
+    assert!(
+        human.status.success(),
+        "human create failed: {:?}",
+        human.stderr
+    );
+    let created = hq_output(
+        &state_root,
+        &["--output", "json", "agent", "create", "runtime-agent"],
+    );
+    assert!(
+        created.status.success(),
+        "agent create failed: {:?}",
+        created.stderr
+    );
+
+    let run = run_in_pty(&state_root, true, PtyInteraction::StartRejectedSession);
+    assert!(run.status.success(), "TUI process failed: {:?}", run.bytes);
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+    assert!(
+        run.bytes
+            .windows(b"Rejected:".len())
+            .any(|window| window == b"Rejected:"),
+        "TUI did not render the typed rejected outcome: {:?}",
+        run.bytes
+    );
+    assert!(agent_exists(&state_root, "runtime-agent"));
+
+    let restarted = hq_output(&state_root, &["daemon", "restart"]);
+    assert!(
+        restarted.status.success(),
+        "restart failed: {:?}",
+        restarted.stderr
+    );
+    assert!(agent_exists(&state_root, "runtime-agent"));
+}
+
+#[test]
 fn explicit_tui_without_terminal_fails_without_escape_sequences() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -148,6 +191,7 @@ enum PtyInteraction<'content> {
     QuitOnStart,
     SubmitSelfNote(&'content str),
     CreateAgent(&'content str),
+    StartRejectedSession,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -183,6 +227,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut initial_key_sent = false;
     let mut content_sent = false;
     let mut completion_offset = None;
+    let mut managed_action_sent = false;
+    let mut managed_provider_sent = false;
     let mut exit_sent = false;
     let status = loop {
         let mut buffer = [0_u8; 8192];
@@ -201,6 +247,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::QuitOnStart => b"q".as_slice(),
                 PtyInteraction::SubmitSelfNote(_) => b"n".as_slice(),
                 PtyInteraction::CreateAgent(_) => b"lllc".as_slice(),
+                PtyInteraction::StartRejectedSession => b"lll".as_slice(),
             };
             master.write_all(key).expect("initial TUI key writes");
             master.flush().expect("initial TUI key flushes");
@@ -234,6 +281,48 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             content_sent = true;
             completion_offset = Some(bytes.len());
         }
+        if matches!(interaction, PtyInteraction::StartRejectedSession)
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(b"runtime-agent".len())
+                .any(|window| window == b"runtime-agent")
+        {
+            master.write_all(b"\r").expect("agent details key writes");
+            master.flush().expect("agent details key flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::StartRejectedSession)
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Durable sessions".len())
+                    .any(|window| window == b"Durable sessions")
+            })
+        {
+            master.write_all(b"s").expect("managed start key writes");
+            master.flush().expect("managed start key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::StartRejectedSession)
+            && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Provider namespace".len())
+                    .any(|window| window == b"Provider namespace")
+            })
+        {
+            master
+                .write_all(b"unregistered\r")
+                .expect("managed provider writes");
+            master.flush().expect("managed provider flushes");
+            managed_provider_sent = true;
+            completion_offset = Some(bytes.len());
+        }
         if let PtyInteraction::SubmitSelfNote(content) = interaction
             && content_sent
             && !exit_sent
@@ -253,6 +342,19 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 bytes[offset..]
                     .windows(b"revision ".len())
                     .any(|window| window == b"revision ")
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+        }
+        if matches!(interaction, PtyInteraction::StartRejectedSession)
+            && managed_provider_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Rejected:".len())
+                    .any(|window| window == b"Rejected:")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");

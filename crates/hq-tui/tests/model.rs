@@ -8,9 +8,10 @@ use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox, UiAgentModal,
     UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiInput,
-    UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiMessageState,
-    UiMessageTarget, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
+    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    update,
 };
 
 #[test]
@@ -1138,6 +1139,228 @@ fn retirement_is_explicit_cancelable_and_force_is_part_of_the_typed_command() {
     ));
 }
 
+#[test]
+fn managed_session_start_confirms_switch_and_exact_resume_and_stop_emit_typed_commands() {
+    let model = loaded_agents_model(1, &[agent(5, "runtime")]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let provider =
+        update(details.model, UiEvent::Input(UiInput::Character('s'))).expect("start provider");
+    assert!(matches!(
+        provider.model.agent_modal(),
+        Some(UiAgentModal::ManagedProvider { provider, .. }) if provider == "codex"
+    ));
+    let confirm = update(provider.model, UiEvent::Input(UiInput::Activate)).expect("switch gate");
+    assert!(matches!(
+        confirm.model.agent_modal(),
+        Some(UiAgentModal::ConfirmManagedSession {
+            action: UiManagedSessionAction::Start { agent_id, provider }, ..
+        }) if *agent_id == [5; 32] && provider == "codex"
+    ));
+    let started = update(confirm.model, UiEvent::Input(UiInput::Activate)).expect("start");
+    assert!(matches!(
+        managed_session_effect(&started.effects).1,
+        UiManagedSessionAction::Start { agent_id, provider }
+            if *agent_id == [5; 32] && provider == "codex"
+    ));
+
+    let model = loaded_agents_model(1, &[agent(5, "runtime")]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let resumed =
+        update(details.model, UiEvent::Input(UiInput::Character('e'))).expect("exact resume");
+    assert!(matches!(
+        managed_session_effect(&resumed.effects).1,
+        UiManagedSessionAction::Resume { agent_id, provider, session }
+            if *agent_id == [5; 32] && provider == "codex" && session == "session-5"
+    ));
+
+    let model = loaded_agents_model(1, &[agent(5, "runtime")]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let stopped = update(details.model, UiEvent::Input(UiInput::Character('t'))).expect("stop");
+    assert!(matches!(
+        managed_session_effect(&stopped.effects).1,
+        UiManagedSessionAction::Stop { agent_id, provider }
+            if *agent_id == [5; 32] && provider == "codex"
+    ));
+}
+
+#[test]
+fn managed_session_switch_cancel_stale_completion_and_actionable_outcomes_are_explicit() {
+    let mut target = agent(6, "switcher");
+    target.sessions.push(UiAgentSession {
+        provider: "codex".to_owned(),
+        session: "older-session".to_owned(),
+        mailbox: None,
+        conflicted: false,
+        selected: false,
+        name_resolved: true,
+        display_name: Some("older".to_owned()),
+    });
+    let model = loaded_agents_model(1, &[target]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let older = update(details.model, UiEvent::Input(UiInput::NextItem)).expect("older");
+    let confirm = update(older.model, UiEvent::Input(UiInput::Character('e'))).expect("confirm");
+    assert!(matches!(
+        confirm.model.agent_modal(),
+        Some(UiAgentModal::ConfirmManagedSession { .. })
+    ));
+    let cancelled = update(confirm.model, UiEvent::Input(UiInput::Escape)).expect("cancel");
+    assert!(cancelled.model.agent_modal().is_none());
+
+    let model = loaded_agents_model(1, &[agent(6, "switcher")]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let pending = update(details.model, UiEvent::Input(UiInput::Character('e'))).expect("resume");
+    let (effect_id, action) = managed_session_effect(&pending.effects);
+    let reconnecting = update(
+        pending.model,
+        UiEvent::ConnectionObserved {
+            generation: 7,
+            state: UiConnectionState::Reconnecting,
+        },
+    )
+    .expect("reconnect while managed operation is pending");
+    let pending = update(
+        reconnecting.model,
+        UiEvent::Resized(UiSize {
+            width: 61,
+            height: 17,
+        }),
+    )
+    .expect("resize while managed operation is pending");
+    assert_eq!(pending.model.pending_managed_session(), Some(effect_id));
+    assert!(matches!(
+        pending.model.agent_modal(),
+        Some(UiAgentModal::ManagingSession { .. })
+    ));
+    let stale_id = snapshot_effect(&started_model().effects);
+    assert_ne!(stale_id, effect_id);
+    let stale = update(
+        pending.model.clone(),
+        UiEvent::ManagedSessionCompleted {
+            effect_id: stale_id,
+            result: UiManagedSessionResult {
+                action: action.clone(),
+                operation_id: [7; 32],
+                outcome: UiManagedSessionOutcome::Stopped,
+            },
+        },
+    )
+    .expect("stale completion");
+    assert_eq!(stale.model, pending.model);
+
+    let rejected = update(
+        pending.model,
+        UiEvent::ManagedSessionCompleted {
+            effect_id,
+            result: UiManagedSessionResult {
+                action: action.clone(),
+                operation_id: [8; 32],
+                outcome: UiManagedSessionOutcome::Rejected {
+                    category: "domain".to_owned(),
+                    code: "managed_session_precondition".to_owned(),
+                },
+            },
+        },
+    )
+    .expect("rejected");
+    assert!(matches!(
+        rejected.model.agent_modal(),
+        Some(UiAgentModal::ManagedSessionOutcome {
+            result: UiManagedSessionResult {
+                outcome: UiManagedSessionOutcome::Rejected { code, .. }, ..
+            }, ..
+        }) if code == "managed_session_precondition"
+    ));
+    assert_eq!(
+        rejected
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("managed_session_precondition")
+    );
+}
+
+#[test]
+fn managed_session_uncertainty_retains_operation_and_reconciliation_identity() {
+    let model = loaded_agents_model(1, &[agent(6, "switcher")]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let pending = update(details.model, UiEvent::Input(UiInput::Character('t'))).expect("stop");
+    let (effect_id, action) = managed_session_effect(&pending.effects);
+    let uncertain = update(
+        pending.model,
+        UiEvent::ManagedSessionCompleted {
+            effect_id,
+            result: UiManagedSessionResult {
+                action: action.clone(),
+                operation_id: [10; 32],
+                outcome: UiManagedSessionOutcome::Uncertain {
+                    reconciliation_id: [11; 32],
+                },
+            },
+        },
+    )
+    .expect("uncertain");
+    assert!(matches!(
+        uncertain.model.agent_modal(),
+        Some(UiAgentModal::ManagedSessionOutcome {
+            result: UiManagedSessionResult {
+                operation_id,
+                outcome: UiManagedSessionOutcome::Uncertain {
+                    reconciliation_id
+                },
+                ..
+            },
+            ..
+        }) if *operation_id == [10; 32] && *reconciliation_id == [11; 32]
+    ));
+}
+
+#[test]
+fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
+    let mut model = opened_conversation(vec![entry("message-a", false)]);
+    assert_eq!(model.conversation_anchor(), Some("message-a"));
+    for section in [UiSection::Sent, UiSection::Archived, UiSection::Agents] {
+        let moved = update(model, UiEvent::Input(UiInput::NextSection)).expect("next section");
+        let id = snapshot_effect(&moved.effects);
+        model = update(
+            moved.model,
+            UiEvent::SnapshotLoaded {
+                effect_id: id,
+                snapshot: if section == UiSection::Agents {
+                    agents_snapshot(1, vec![agent(9, "runtime")])
+                } else {
+                    snapshot_for(section, 1, &[])
+                },
+            },
+        )
+        .expect("section snapshot")
+        .model;
+    }
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("agent details");
+    model = update(details.model, UiEvent::Input(UiInput::Escape))
+        .expect("close details")
+        .model;
+    for section in [UiSection::Archived, UiSection::Sent, UiSection::Inbox] {
+        let moved = update(model, UiEvent::Input(UiInput::PreviousSection)).expect("previous");
+        let id = snapshot_effect(&moved.effects);
+        model = update(
+            moved.model,
+            UiEvent::SnapshotLoaded {
+                effect_id: id,
+                snapshot: if section == UiSection::Inbox {
+                    snapshot(1, &["thread-a"])
+                } else {
+                    snapshot_for(section, 1, &[])
+                },
+            },
+        )
+        .expect("restored snapshot")
+        .model;
+    }
+    assert_eq!(model.selected_row(), Some("thread-a"));
+    assert_eq!(model.conversation_anchor(), Some("message-a"));
+    assert!(model.conversation().is_some());
+}
+
 fn snapshot(revision: u64, ids: &[&str]) -> UiSnapshot {
     snapshot_for(UiSection::Inbox, revision, ids)
 }
@@ -1344,6 +1567,16 @@ fn agent_action_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &UiAgentActio
             _ => None,
         })
         .expect("agent command effect")
+}
+
+fn managed_session_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, &UiManagedSessionAction) {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitManagedSession { id, action } => Some((*id, action)),
+            _ => None,
+        })
+        .expect("managed-session effect")
 }
 
 fn entry(id: &str, activity: bool) -> UiConversationEntry {

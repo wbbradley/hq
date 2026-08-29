@@ -17,11 +17,12 @@ UiModel + UiEvent -> Result<(UiModel, [UiEffect]), UiError>
 ```
 
 `UiEvent` covers one-time startup, normalized input, complete resizes, identity-bearing timer,
-snapshot, conversation, draft, mailbox-command, and named-agent administration completions,
+snapshot, conversation, draft, mailbox-command, named-agent administration, and managed-session
+completions,
 revision-only invalidations, and
 generation-scoped connection states and failures. `UiEffect` covers section-bound complete-snapshot
 requests, bounded reducer-ordered conversation-page requests, draft open/autosave, stable mailbox
-commands, typed named-agent commands, timers, redraw requests, and exit. The transition function
+commands, typed named-agent and managed-session commands, timers, redraw requests, and exit. The transition function
 performs no I/O and has no domain mutation port.
 
 Every asynchronous request receives a nonzero process-local `EffectId`. A completion changes state
@@ -32,7 +33,8 @@ snapshot is older than that requirement, its matching completion schedules one f
 it is never treated as current merely because the request succeeded. Connection observations obey
 the shell's monotonic generation.
 
-The model preserves summary selection and conversation scroll anchors by stable row/fact identity,
+The model preserves each section's summary selection, focus, open conversation, typed-detail state,
+and conversation scroll anchor by stable row/fact identity,
 not by screen coordinate or vector index. Reload keeps each identity while it remains present and
 falls back to the first logical item when it disappears. An invalidation cancels the model's claim
 on an in-flight old conversation page; after the required snapshot arrives, the selected
@@ -74,6 +76,20 @@ takeover, and Escape cancels without mutation. In-flight create, rename, and ret
 not discarded during reconnect. Rejected, stale, conflicted, retired, or uncertain outcomes retain
 the exact modal inputs and expose a stable failure code plus a corrective action.
 
+Agent details also use `s` to start on an explicit provider, `e` to resume exactly the highlighted
+provider/session, and `t` to stop that provider's local runtime without erasing durable history.
+Starting while a durable selection exists, or resuming a different durable session, requires an
+explicit switch confirmation. This is deliberately conservative: the presentation never treats a
+durable selection or `runnable` catalog flag as evidence that a process is currently live.
+
+One stable managed-session effect remains pending across connection observations. The ordinary
+client returns a retry-safe operation identity and one typed `Ready`, `Stopped`, `Rejected`, or
+`Uncertain` outcome. Rejections retain category/code and a reload/reselect action; uncertainty
+retains the reconciliation identity and directs the operator to keep the same request. A stale
+process-local completion identity cannot replace a newer interaction. Visiting Agents and managing
+a session does not discard the saved mailbox section's selection, focus, open conversation, or
+logical anchor.
+
 ## Reconnecting client and effect executor
 
 `hq-node::LocalNodeEventClient` is the long-lived subscribed form of the ordinary local API client.
@@ -100,6 +116,10 @@ remain semantic command targets; only presentation names are terminal-sanitized.
 typed create, rename/clear, and retirement effects to the same existing CLI/client workflows and
 ordinary local-API frames. Those workflows own stable request identity and response-loss
 reconciliation; `hq-tui` never receives a planner, signer, project coordinator, or provider handle.
+Managed-session effects follow the same rule: `local_client` translates passive start/exact-resume/
+stop targets to the existing harness CLI workflow, which captures launch directory and environment
+outside the TUI and submits the ordinary `AgentSession` frame. The TUI never stores or renders the
+captured environment and does not own provider authority.
 
 `TuiEffectExecutor` owns one named worker and bounded command/result channels. The worker alone owns
 the subscribed client; the shell cannot reach storage, domain planners, signers, relays, providers,
@@ -118,7 +138,7 @@ message-state frontiers. Those remain transaction-local node decisions.
 ## Data and encapsulation
 
 Shell-normalized snapshots, rows, conversation pages/entries, message/direct targets, drafts,
-mailbox commands, agents, agent mailboxes/sessions/actions, typed technical sections, sizes, and
+mailbox commands, agents, agent mailboxes/sessions/actions, managed-session actions/results, typed technical sections, sizes, and
 failures are passive records and expose public fields. Display text is bounded and sanitized before
 entering this crate; user-authored draft content and validated provider/session identities retain
 their exact bounded UTF-8. There is no accessor facade around those DTOs.
@@ -148,7 +168,7 @@ opens a conversation or toggles its selected entry's details; PageDown requests 
 page; Escape collapses details and then the conversation. The footer exposes discoverable controls
 for reply, direct, self-note, archive/restore, navigation, and quit, or the latest stable failure
 code and operator action. The Agents footer exposes search, inspect, and create controls; responsive
-modal tests cover wide and compact draft and agent-detail rendering. Styling
+modal tests cover wide and compact draft, agent-detail, and managed-switch rendering. Styling
 supplements these text markers and is not the sole carrier of state.
 
 ## Shell obligations

@@ -12,7 +12,8 @@ pub use model::{
     UiAgentModal, UiAgentSession, UiConnectionState, UiConversation, UiConversationEntry,
     UiConversationEntryKind, UiConversationPage, UiDirectTarget, UiEffect, UiError, UiEvent,
     UiFailure, UiFocus, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
-    UiMailboxModal, UiMessageState, UiMessageTarget, UiModel, UiRow, UiRowKind, UiRowState,
-    UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
+    UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
+    UiMessageState, UiMessageTarget, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
+    UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
 };
 pub use render::render;

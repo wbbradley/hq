@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained managed-session lifecycle** — Add start, exact resume, live switch
-  confirmation, and stop for one stable named-agent/provider/session target through the ordinary
-  local API. Keep durable provider/session selection separate from runtime presence, retain
-  mailbox editing/navigation state while managing sessions, reconcile stable in-flight operations
-  after reconnect, and expose stale, rejected, or uncertain outcomes as typed actionable state.
-  Complete this work when pure model, responsive renderer, executor, and installed-client tests
-  cover every retained session lifecycle use case without importing provider or domain authority
-  into the TUI.
-
 - **[tui/high] Implement retained project-first workflows** — Add project selection/creation before
   new project work, desired-resource editing and conflict previews, assignment and handoff,
   activate/takeover/close/reopen/archive flows, worktree progress, and saga outcomes through

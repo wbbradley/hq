@@ -5000,6 +5000,16 @@ fn run_harness(action: &HarnessCommand, state: &StatePaths) -> Result<CliResult,
     Ok(CliResult::HarnessSession(view))
 }
 
+pub(crate) fn run_harness_for_tui(
+    action: &HarnessCommand,
+    state: &StatePaths,
+) -> Result<HarnessSessionView, CliError> {
+    match run_harness(action, state)? {
+        CliResult::HarnessSession(view) => Ok(view),
+        _ => Err(CliError::HarnessState),
+    }
+}
+
 fn harness_request(
     action: &HarnessCommand,
     agent_id: AgentId,

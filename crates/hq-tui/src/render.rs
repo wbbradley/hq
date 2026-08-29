@@ -1,5 +1,7 @@
 //! Borrowed responsive Ratatui renderer.
 
+use std::fmt::Write as _;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -11,7 +13,8 @@ use ratatui::{
 use crate::{
     UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentModal, UiConnectionState,
     UiConversationEntry, UiConversationEntryKind, UiFocus, UiMailboxAction, UiMailboxDraftTarget,
-    UiMailboxModal, UiMessageState, UiModel, UiRow, UiRowState, UiSection, UiTechnicalSection,
+    UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel,
+    UiRow, UiRowState, UiSection, UiTechnicalSection,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -110,8 +113,9 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             }
             lines.push(Line::default());
             lines.push(Line::from(
-                "↑/↓ session · r rename/clear · x retire · Esc close",
+                "↑/↓ session · s start · e exact resume · t stop",
             ));
+            lines.push(Line::from("r rename/clear · x retire · Esc close"));
             (" Agent details ", lines)
         }
         UiAgentModal::Create { name, submitting } => (
@@ -168,6 +172,70 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 ],
             )
         }
+        UiAgentModal::ManagedProvider { provider, .. } => (
+            " Start managed session ",
+            vec![
+                Line::from(format!("Provider namespace: {provider}")),
+                Line::default(),
+                Line::from("Enter continue · Esc cancel"),
+            ],
+        ),
+        UiAgentModal::ConfirmManagedSession { action, .. } => (
+            " Confirm managed-session switch ",
+            vec![
+                Line::styled(
+                    "This target differs from the durable selected session.",
+                    Style::new().fg(Color::Yellow),
+                ),
+                Line::from(managed_session_target(action)),
+                Line::default(),
+                Line::from("Runtime presence is checked by the node, not inferred here."),
+                Line::from("Enter confirm · Esc cancel"),
+            ],
+        ),
+        UiAgentModal::ManagingSession { action, .. } => (
+            " Managing session ",
+            vec![
+                Line::from(managed_session_target(action)),
+                Line::default(),
+                Line::from("Reconciling one stable operation across reconnects…"),
+            ],
+        ),
+        UiAgentModal::ManagedSessionOutcome { result, .. } => {
+            let mut lines = vec![Line::from(managed_session_target(&result.action))];
+            lines.push(Line::from(format!(
+                "Operation: {}",
+                short_identity(result.operation_id)
+            )));
+            lines.push(Line::default());
+            match &result.outcome {
+                UiManagedSessionOutcome::Ready { session } => {
+                    lines.push(Line::from(format!("Ready session: {session}")));
+                }
+                UiManagedSessionOutcome::Stopped => {
+                    lines.push(Line::from(
+                        "Local runtime stopped; durable history retained.",
+                    ));
+                }
+                UiManagedSessionOutcome::Rejected { category, code } => {
+                    lines.push(Line::styled(
+                        format!("Rejected: {category}/{code}"),
+                        Style::new().fg(Color::Red),
+                    ));
+                    lines.push(Line::from("Reload and reselect an exact current target."));
+                }
+                UiManagedSessionOutcome::Uncertain { reconciliation_id } => {
+                    lines.push(Line::styled(
+                        format!("Uncertain: {}", short_identity(*reconciliation_id)),
+                        Style::new().fg(Color::Yellow),
+                    ));
+                    lines.push(Line::from("HQ will reconcile the same stable request."));
+                }
+            }
+            lines.push(Line::default());
+            lines.push(Line::from("Esc close"));
+            (" Managed-session outcome ", lines)
+        }
     };
     frame.render_widget(
         Paragraph::new(lines)
@@ -175,6 +243,25 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn managed_session_target(action: &UiManagedSessionAction) -> String {
+    match action {
+        UiManagedSessionAction::Start { provider, .. } => format!("Start fresh on {provider}"),
+        UiManagedSessionAction::Resume {
+            provider, session, ..
+        } => format!("Resume exactly {provider}/{session}"),
+        UiManagedSessionAction::Stop { provider, .. } => format!("Stop runtime on {provider}"),
+    }
+}
+
+fn short_identity(identity: [u8; 32]) -> String {
+    identity[..6]
+        .iter()
+        .fold(String::with_capacity(12), |mut rendered, byte| {
+            let _ = write!(rendered, "{byte:02x}");
+            rendered
+        })
 }
 
 fn agent_summary(agent: &UiAgent) -> Vec<Line<'_>> {

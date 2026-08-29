@@ -26,8 +26,8 @@ use crate::{
     NodeCoordinatorError, NodeLaunchError, NodeLauncher, ProcessNodeLauncher, RuntimePathError,
     RuntimePaths, StatePaths,
     cli::{
-        CliError, NamedAgentCommand, NamedAgentSelector, NamedAgentView, named_agent_catalog_view,
-        run_named_agent_for_tui,
+        CliError, HarnessCommand, NamedAgentCommand, NamedAgentSelector, NamedAgentView,
+        named_agent_catalog_view, run_harness_for_tui, run_named_agent_for_tui,
     },
     unix_frame,
 };
@@ -82,6 +82,88 @@ pub(crate) fn execute_named_agent_command(
 
 pub(crate) fn tui_named_agent_catalog(snapshot: &AuthoritativeSnapshotDto) -> Vec<NamedAgentView> {
     named_agent_catalog_view(snapshot, "tui_snapshot", None, None).agents
+}
+
+/// Passive managed-session command accepted by the ordinary local client composition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LocalManagedSessionCommand {
+    Start {
+        agent_id: [u8; 32],
+        provider: String,
+    },
+    Resume {
+        agent_id: [u8; 32],
+        provider: String,
+        session: String,
+    },
+    Stop {
+        agent_id: [u8; 32],
+        provider: String,
+    },
+}
+
+/// Typed managed-session outcome returned across the passive local-client seam.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LocalManagedSessionOutcome {
+    Ready { session: String },
+    Stopped,
+    Rejected { category: String, code: String },
+    Uncertain { reconciliation_id: [u8; 32] },
+}
+
+/// Passive completion evidence for one stable managed-session operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalManagedSessionResult {
+    pub command: LocalManagedSessionCommand,
+    pub operation_id: [u8; 32],
+    pub outcome: LocalManagedSessionOutcome,
+}
+
+pub(crate) fn execute_managed_session_command(
+    state: &StatePaths,
+    command: LocalManagedSessionCommand,
+) -> Result<LocalManagedSessionResult, CliError> {
+    let action = match &command {
+        LocalManagedSessionCommand::Start { agent_id, provider } => HarnessCommand::Start {
+            agent: NamedAgentSelector::Id(AgentId::from_bytes(*agent_id)),
+            provider: ProviderId::new(provider.clone()).map_err(|_| CliError::Arguments)?,
+            directory: None,
+        },
+        LocalManagedSessionCommand::Resume {
+            agent_id,
+            provider,
+            session,
+        } => HarnessCommand::Resume {
+            agent: NamedAgentSelector::Id(AgentId::from_bytes(*agent_id)),
+            provider: ProviderId::new(provider.clone()).map_err(|_| CliError::Arguments)?,
+            session: ProviderSessionId::new(session.clone()).map_err(|_| CliError::Arguments)?,
+            directory: None,
+        },
+        LocalManagedSessionCommand::Stop { agent_id, provider } => HarnessCommand::Stop {
+            agent: NamedAgentSelector::Id(AgentId::from_bytes(*agent_id)),
+            provider: ProviderId::new(provider.clone()).map_err(|_| CliError::Arguments)?,
+        },
+    };
+    let view = run_harness_for_tui(&action, state)?;
+    let outcome = match view.status {
+        "ready" => LocalManagedSessionOutcome::Ready {
+            session: view.ready_session.ok_or(CliError::HarnessState)?,
+        },
+        "stopped" => LocalManagedSessionOutcome::Stopped,
+        "rejected" => LocalManagedSessionOutcome::Rejected {
+            category: view.error_category.ok_or(CliError::HarnessState)?,
+            code: view.error_code.ok_or(CliError::HarnessState)?,
+        },
+        "uncertain" => LocalManagedSessionOutcome::Uncertain {
+            reconciliation_id: view.reconciliation_id.ok_or(CliError::HarnessState)?,
+        },
+        _ => return Err(CliError::HarnessState),
+    };
+    Ok(LocalManagedSessionResult {
+        command,
+        operation_id: *view.operation_id.as_bytes(),
+        outcome,
+    })
 }
 
 /// Passive local Unix transport configuration.

@@ -21,13 +21,17 @@ use hq_tui::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox,
     UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiMailboxAction,
-    UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiMessageTarget, UiRow, UiRowKind,
-    UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiManagedSessionResult, UiMessageState, UiMessageTarget, UiRow, UiRowKind, UiRowState,
+    UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
     LocalNodeClientError, LocalNodeEventClient, StatePaths,
-    local_client::{LocalNamedAgentCommand, execute_named_agent_command, tui_named_agent_catalog},
+    local_client::{
+        LocalManagedSessionCommand, LocalManagedSessionOutcome, LocalNamedAgentCommand,
+        execute_managed_session_command, execute_named_agent_command, tui_named_agent_catalog,
+    },
 };
 
 const CLIENT_COMMAND_CAPACITY: usize = 8;
@@ -116,6 +120,17 @@ pub trait TuiClientPort: Send {
         Err(UiFailure {
             code: "agent_command_unavailable".to_owned(),
             action: "use a client that supports named-agent administration".to_owned(),
+        })
+    }
+
+    /// Executes or reconciles one stable provider-neutral managed-session command.
+    fn submit_managed_session(
+        &mut self,
+        _action: UiManagedSessionAction,
+    ) -> Result<UiManagedSessionResult, UiFailure> {
+        Err(UiFailure {
+            code: "managed_session_unavailable".to_owned(),
+            action: "use a client that supports managed-session control".to_owned(),
         })
     }
 
@@ -403,6 +418,75 @@ impl TuiClientPort for LocalTuiClient {
         })
     }
 
+    fn submit_managed_session(
+        &mut self,
+        action: UiManagedSessionAction,
+    ) -> Result<UiManagedSessionResult, UiFailure> {
+        let command = match &action {
+            UiManagedSessionAction::Start { agent_id, provider } => {
+                LocalManagedSessionCommand::Start {
+                    agent_id: *agent_id,
+                    provider: provider.clone(),
+                }
+            }
+            UiManagedSessionAction::Resume {
+                agent_id,
+                provider,
+                session,
+            } => LocalManagedSessionCommand::Resume {
+                agent_id: *agent_id,
+                provider: provider.clone(),
+                session: session.clone(),
+            },
+            UiManagedSessionAction::Stop { agent_id, provider } => {
+                LocalManagedSessionCommand::Stop {
+                    agent_id: *agent_id,
+                    provider: provider.clone(),
+                }
+            }
+        };
+        let result =
+            execute_managed_session_command(&self.state, command).map_err(|error| UiFailure {
+                code: match error {
+                    crate::cli::CliError::Arguments => "managed_session_invalid",
+                    crate::cli::CliError::AgentState => "managed_session_target_stale",
+                    crate::cli::CliError::HarnessState => "managed_session_response_invalid",
+                    _ => "managed_session_unavailable",
+                }
+                .to_owned(),
+                action: match error {
+                    crate::cli::CliError::Arguments => {
+                        "correct the exact provider or session target and retry"
+                    }
+                    crate::cli::CliError::AgentState => {
+                        "reload and reselect an active unconflicted named agent"
+                    }
+                    crate::cli::CliError::HarnessState => {
+                        "reload durable sessions before retrying this operation"
+                    }
+                    _ => "wait for the local node to recover, then retry the same target",
+                }
+                .to_owned(),
+            })?;
+        let outcome = match result.outcome {
+            LocalManagedSessionOutcome::Ready { session } => {
+                UiManagedSessionOutcome::Ready { session }
+            }
+            LocalManagedSessionOutcome::Stopped => UiManagedSessionOutcome::Stopped,
+            LocalManagedSessionOutcome::Rejected { category, code } => {
+                UiManagedSessionOutcome::Rejected { category, code }
+            }
+            LocalManagedSessionOutcome::Uncertain { reconciliation_id } => {
+                UiManagedSessionOutcome::Uncertain { reconciliation_id }
+            }
+        };
+        Ok(UiManagedSessionResult {
+            action,
+            operation_id: result.operation_id,
+            outcome,
+        })
+    }
+
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
         let result = self.client.poll_event(wait);
         let state = self.client.connection_state();
@@ -566,6 +650,10 @@ enum WorkerCommand {
         id: EffectId,
         action: UiAgentAction,
     },
+    SubmitManagedSession {
+        id: EffectId,
+        action: UiManagedSessionAction,
+    },
     Shutdown,
 }
 
@@ -654,6 +742,12 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                     self.enqueue_client_effect(
                         id,
                         WorkerCommand::SubmitAgentCommand { id, action },
+                    )?;
+                }
+                UiEffect::SubmitManagedSession { id, action } => {
+                    self.enqueue_client_effect(
+                        id,
+                        WorkerCommand::SubmitManagedSession { id, action },
                     )?;
                 }
                 UiEffect::ScheduleTimer { id, kind, after } => {
@@ -783,7 +877,9 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             | UiEvent::MailboxCommandCommitted { effect_id, .. }
             | UiEvent::MailboxCommandFailed { effect_id, .. }
             | UiEvent::AgentCommandCommitted { effect_id, .. }
-            | UiEvent::AgentCommandFailed { effect_id, .. } => Some(*effect_id),
+            | UiEvent::AgentCommandFailed { effect_id, .. }
+            | UiEvent::ManagedSessionCompleted { effect_id, .. }
+            | UiEvent::ManagedSessionFailed { effect_id, .. } => Some(*effect_id),
             UiEvent::Started
             | UiEvent::Input(_)
             | UiEvent::Resized(_)
@@ -897,6 +993,21 @@ fn client_worker<P: TuiClientPort>(
                         revision,
                     },
                     Err(failure) => UiEvent::AgentCommandFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::SubmitManagedSession { id, action }) => {
+                let event = match client.submit_managed_session(action) {
+                    Ok(result) => UiEvent::ManagedSessionCompleted {
+                        effect_id: id,
+                        result,
+                    },
+                    Err(failure) => UiEvent::ManagedSessionFailed {
                         effect_id: id,
                         failure,
                     },

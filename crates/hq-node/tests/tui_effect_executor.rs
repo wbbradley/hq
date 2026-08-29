@@ -21,8 +21,9 @@ use hq_node::{
 use hq_tui::{
     UiAgentAction, UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect,
     UiEvent, UiFailure, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
-    UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
+    UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection,
+    UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -243,6 +244,58 @@ fn executor_submits_the_exact_typed_agent_command_and_preserves_effect_identity(
         UiEvent::AgentCommandCommitted {
             effect_id: id,
             revision: 23,
+        }
+    );
+    assert_eq!(calls.lock().expect("calls lock").as_slice(), &[action]);
+    executor.shutdown().expect("shutdown");
+}
+
+#[test]
+fn executor_submits_exact_managed_session_target_and_preserves_operation_evidence() {
+    let started = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start");
+    let id = started
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadSnapshot { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("effect identity");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let client = ManagedSessionTuiClient {
+        calls: Arc::clone(&calls),
+    };
+    let mut executor =
+        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("executor starts");
+    let action = UiManagedSessionAction::Resume {
+        agent_id: [45; 32],
+        provider: "codex".to_owned(),
+        session: "exact-session".to_owned(),
+    };
+    executor
+        .execute([UiEffect::SubmitManagedSession {
+            id,
+            action: action.clone(),
+        }])
+        .expect("execute managed-session command");
+    assert_eq!(
+        receive_event(&mut executor),
+        UiEvent::ManagedSessionCompleted {
+            effect_id: id,
+            result: UiManagedSessionResult {
+                action: action.clone(),
+                operation_id: [91; 32],
+                outcome: UiManagedSessionOutcome::Uncertain {
+                    reconciliation_id: [92; 32],
+                },
+            },
         }
     );
     assert_eq!(calls.lock().expect("calls lock").as_slice(), &[action]);
@@ -679,6 +732,72 @@ struct PanickingClient;
 
 struct AgentTuiClient {
     calls: Arc<Mutex<Vec<UiAgentAction>>>,
+}
+
+struct ManagedSessionTuiClient {
+    calls: Arc<Mutex<Vec<UiManagedSessionAction>>>,
+}
+
+impl TuiClientPort for ManagedSessionTuiClient {
+    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+        Ok(UiSnapshot {
+            section,
+            revision: 1,
+            rows: Vec::new(),
+            direct_targets: Vec::new(),
+            agents: Vec::new(),
+        })
+    }
+
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        Ok(UiConversationPage {
+            row_id: row_id.to_owned(),
+            entries: Vec::new(),
+            next_cursor: None,
+        })
+    }
+
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        Err(unsupported_failure())
+    }
+
+    fn submit_managed_session(
+        &mut self,
+        action: UiManagedSessionAction,
+    ) -> Result<UiManagedSessionResult, UiFailure> {
+        self.calls.lock().expect("calls lock").push(action.clone());
+        Ok(UiManagedSessionResult {
+            action,
+            operation_id: [91; 32],
+            outcome: UiManagedSessionOutcome::Uncertain {
+                reconciliation_id: [92; 32],
+            },
+        })
+    }
+
+    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
+        thread::sleep(wait);
+        Vec::new()
+    }
 }
 
 impl TuiClientPort for AgentTuiClient {

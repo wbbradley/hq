@@ -36,6 +36,14 @@ modal/focus/selection state across authoritative reload, reconnect, and resize. 
 recomputes CLI or node authority. Installed pseudoterminal coverage submits a self-note, verifies it
 through `hq list --all`, restarts the daemon, and verifies the same canonical message again.
 
+Agent details in the installed TUI use the ordinary managed-session endpoint for `s` explicit-
+provider start, `e` exact resume, and `t` local-runtime stop. A fresh or switching target is never
+derived from terminal text: the model emits an exact stable agent/provider/session command, and the
+shared harness CLI workflow captures launch context and owns retry/reconciliation. The TUI renders
+ready, stopped, rejected, and uncertain as distinct outcomes and does not equate durable selection
+with runtime presence. Installed pseudoterminal coverage exercises explicit-provider start and a
+typed rejection; installed CLI restart coverage exercises stop and stale exact resume.
+
 `identity init|show|export|import` and `config get|set` are deliberately offline operations. They
 acquire the same exclusive state owner as the node and refuse a live owner instead of reading or
 writing behind it. Initialization and import never overwrite an identity. Export and import require
