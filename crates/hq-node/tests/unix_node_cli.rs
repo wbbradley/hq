@@ -5,6 +5,7 @@
 
 mod support;
 
+use std::os::unix::fs::symlink;
 use std::{
     ffi::OsString,
     fs,
@@ -854,6 +855,124 @@ fn project_create_claims_one_existing_path_and_survives_restart() {
     let shown = project_json(&state_root, &["show", &project_id]);
     assert_eq!(shown["data"]["projects"][0]["project_id"], project_id);
     assert_eq!(shown["data"]["projects"][0]["lifecycle"], "open");
+
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "complete real Git, symlink, and restart resource check"
+)]
+fn project_resource_checks_observe_git_and_symlink_changes_across_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let first_target = directory.path().join("first-target");
+    let second_target = directory.path().join("second-target");
+    let selected_path = directory.path().join("selected-worktree");
+    fs::create_dir(&first_target).expect("first target");
+    fs::create_dir(&second_target).expect("second target");
+    symlink(&first_target, &selected_path).expect("selected symlink");
+    let git = |arguments: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&first_target)
+            .args(arguments)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git stderr: {:?}", output.stderr);
+    };
+    git(&["init"]);
+    git(&["config", "user.name", "HQ Test"]);
+    git(&["config", "user.email", "hq@example.invalid"]);
+    fs::write(first_target.join("tracked.txt"), "clean\n").expect("tracked file");
+    git(&["add", "tracked.txt"]);
+    git(&["commit", "-m", "initial"]);
+
+    initialize_identity(&state_root);
+    let _stop = DaemonStopGuard(state_root.clone());
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+    let created = project_json(
+        &state_root,
+        &[
+            "create",
+            "Observed resource",
+            "--path",
+            selected_path.to_str().expect("UTF-8 selected path"),
+        ],
+    );
+    let project_id = created["data"]["project_id"]
+        .as_str()
+        .expect("project id")
+        .to_owned();
+
+    let listed = project_json(&state_root, &["resource", "list", &project_id]);
+    assert_eq!(listed["kind"], "project_resources");
+    assert_eq!(listed["data"]["operation"], "resource_list");
+    assert_eq!(
+        listed["data"]["resources"][0]["display_locator"]["value"],
+        selected_path.to_str().expect("UTF-8 selected path")
+    );
+    assert_eq!(
+        listed["data"]["resources"][0]["canonical_locator"]["value"],
+        fs::canonicalize(&first_target)
+            .expect("canonical first target")
+            .to_str()
+            .expect("UTF-8 first target")
+    );
+    let resource_id = listed["data"]["resources"][0]["resource_id"]
+        .as_str()
+        .expect("resource id")
+        .to_owned();
+    let shown = project_json(
+        &state_root,
+        &["resource", "show", &project_id, &resource_id],
+    );
+    assert_eq!(shown["data"]["resources"][0]["resource_id"], resource_id);
+
+    let clean = project_json(&state_root, &["check", &project_id, &resource_id]);
+    assert_eq!(clean["kind"], "project_check");
+    assert_eq!(clean["data"]["checks"][0]["status"], "accepted");
+    assert_eq!(clean["data"]["checks"][0]["health"], "healthy");
+    assert_eq!(clean["data"]["checks"][0]["release"], "clean");
+    assert_eq!(clean["data"]["checks"][0]["resource_id"], resource_id);
+
+    fs::write(first_target.join("tracked.txt"), "dirty\n").expect("dirty tracked file");
+    let dirty = project_json(&state_root, &["check", &project_id]);
+    assert_eq!(dirty["data"]["checks"][0]["health"], "healthy");
+    assert_eq!(dirty["data"]["checks"][0]["release"], "dirty");
+
+    fs::remove_file(&selected_path).expect("remove old symlink");
+    symlink(&second_target, &selected_path).expect("retarget selected symlink");
+    let moved = project_json(&state_root, &["check", &project_id]);
+    assert_eq!(moved["data"]["checks"][0]["health"], "degraded");
+    assert_eq!(
+        moved["data"]["checks"][0]["observed_canonical"]["value"],
+        fs::canonicalize(&second_target)
+            .expect("canonical second target")
+            .to_str()
+            .expect("UTF-8 second target")
+    );
+    assert_eq!(moved["data"]["checks"][0]["release"], "unknown");
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let after_restart = project_json(&state_root, &["check", &project_id, &resource_id]);
+    assert_eq!(
+        after_restart["data"]["checks"][0]["resource_id"],
+        resource_id
+    );
+    assert_eq!(after_restart["data"]["checks"][0]["health"], "degraded");
 
     let stopped = output("stop", &state_root);
     assert!(

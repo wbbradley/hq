@@ -28,7 +28,7 @@ use hq_local_api::protocol::v1::{
     SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement,
     SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
     VersionRejected, WireMessage, WorktreeProvisioningRequestDto, agent_session_request_digest,
-    negotiate,
+    negotiate, resource_inspection_request_digest,
 };
 use hq_local_api::{project_command_from_v1, project_command_request_to_v1};
 
@@ -368,6 +368,39 @@ fn launch_environment_is_binary_safe_redacted_and_bound_into_session_identity() 
     );
     assert_ne!(
         agent_session_request_digest(&changed).expect("changed digest"),
+        digest
+    );
+}
+
+#[test]
+fn resource_inspection_digest_binds_stable_identity_and_both_locators() {
+    let body = ResourceInspectionRequestDto {
+        project_id: Id32::new([5; 32]),
+        resource_id: Id32::new([6; 32]),
+        display_locator: locator(),
+        canonical_locator: locator(),
+    };
+    let request = EffectRequestDto::new(
+        Id32::new([7; 32]),
+        Id32::new([0; 32]),
+        1_700_000_000_000,
+        body,
+    );
+    let digest = resource_inspection_request_digest(&request).expect("inspection digest");
+    let decoded: EffectRequestDto<ResourceInspectionRequestDto> =
+        serde_json::from_slice(&serde_json::to_vec(&request).expect("inspection JSON"))
+            .expect("inspection round trip");
+    assert_eq!(
+        resource_inspection_request_digest(&decoded).expect("decoded digest"),
+        digest
+    );
+
+    let mut changed = request;
+    changed.body.canonical_locator =
+        ResourceLocatorDto::new(ResourceSchemeDto::WorkingTree, "/work/other".to_owned())
+            .expect("changed locator");
+    assert_ne!(
+        resource_inspection_request_digest(&changed).expect("changed digest"),
         digest
     );
 }

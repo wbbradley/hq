@@ -26,7 +26,7 @@ use hq_local_api::protocol::v1::{
     RelayAuthenticationDto, RelayConfigurationDto, Request, RequestEnvelope, RequestId,
     ResourceInspectionRequestDto, ResourceLocatorDto, ResourceSchemeDto, Response, ResponseResult,
     SessionControlDto, SubscriptionRequestDto, SynchronizationRequestDto, V1, VersionRange,
-    WireMessage, agent_session_request_digest,
+    WireMessage, agent_session_request_digest, resource_inspection_request_digest,
 };
 use hq_local_api::{
     LifecycleControl, RevisionHub, ServerSession, ServerSessionError, ServerWriteDisposition,
@@ -325,6 +325,23 @@ fn agent_effect(body: AgentSessionRequestDto) -> EffectRequestDto<AgentSessionRe
     request
 }
 
+fn resource_effect(
+    body: ResourceInspectionRequestDto,
+) -> EffectRequestDto<ResourceInspectionRequestDto> {
+    let mut request = EffectRequestDto::new(
+        Id32::new([31; 32]),
+        Id32::new([0; 32]),
+        1_700_000_000_000,
+        body,
+    );
+    request.request_digest = Id32::new(
+        *resource_inspection_request_digest(&request)
+            .expect("valid resource inspection request")
+            .as_bytes(),
+    );
+    request
+}
+
 fn locator() -> ResourceLocatorDto {
     ResourceLocatorDto::new(ResourceSchemeDto::WorkingTree, "/work/hq".to_owned())
         .expect("bounded locator")
@@ -531,7 +548,7 @@ fn every_typed_request_family_routes_without_storage_types() {
             )
             .expect("agent request"),
         ))),
-        Request::InspectResource(effect(ResourceInspectionRequestDto {
+        Request::InspectResource(resource_effect(ResourceInspectionRequestDto {
             project_id: Id32::new([14; 32]),
             resource_id: Id32::new([15; 32]),
             display_locator: locator(),
@@ -563,6 +580,30 @@ fn every_typed_request_family_routes_without_storage_types() {
             .confirm_written(outbound.ticket())
             .expect("response written");
     }
+}
+
+#[test]
+fn resource_inspection_rejects_a_digest_that_does_not_bind_its_body() {
+    let hub = RevisionHub::new(4).expect("capacity");
+    let (mut server, application) = session(hub);
+    negotiate(&mut server, &application);
+    let invalid = effect(ResourceInspectionRequestDto {
+        project_id: Id32::new([14; 32]),
+        resource_id: Id32::new([15; 32]),
+        display_locator: locator(),
+        canonical_locator: locator(),
+    });
+    let outbound = server
+        .receive(
+            request(1, Request::InspectResource(invalid)),
+            &application,
+            &Lifecycle,
+        )
+        .expect("invalid request receives a response");
+    assert!(matches!(
+        outbound.message(),
+        WireMessage::Response(response) if matches!(response.response, Response::Error(_))
+    ));
 }
 
 #[test]

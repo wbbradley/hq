@@ -1,5 +1,39 @@
 # Completed
 
+## 2026-08-28 — Desired-resource inspection and fresh checks
+
+Added snapshot-only `project resource list PROJECT_ID` and `project resource show PROJECT_ID
+RESOURCE_ID` plus fresh `project check PROJECT_ID [RESOURCE_ID]` commands. Passive public-field
+views expose stable resource identity, normalized display and immutable canonical locators, primary
+selection, projected and freshly observed health, advisory claims, every overlap conflict, Git
+release state, observation time, rejection, response loss, and reconciliation identity. Duplicate
+resource identities fail closed.
+
+Fresh checks issue stable, digest-bound requests through the existing read-only application port in
+resource-ID order. The digest binds operation/time, project/resource identity, and both locators;
+the server rejects a mismatched body. Checks never modify filesystem, Git, desired membership, or
+claims. Because v1 resources are home-machine scoped, a non-home check fails closed instead of
+observing an unrelated local path namespace. The unshipped local API v1 was evolved in place with
+no version bump, migration, compatibility shape, accessor facade, or duplicate stored/runtime
+record.
+
+Parser, deterministic human/JSON presentation, duplicate/conflict, digest, server rejection, and
+home-selection tests pass. A real foreground test creates a project through a symlink into a clean
+Git worktree, observes clean then dirty release state, retargets the symlink and observes degraded
+identity plus an unknown release gate, restarts the daemon, and proves the stable resource identity
+survives. Full workspace all-target/all-feature tests, strict Clippy, format/check, architecture,
+behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. The dependency audit
+retains only the existing yanked `chacha20 0.10.1` warning, and the final process-table audit found
+no HQ daemon.
+
+### Original plan entry
+
+- **[cli/high] Add desired-resource inspection and check commands** — Expose complete desired-resource
+  inspection and fresh health/release checks through the project and read-only inspection ports.
+  Identify display/canonical locators at the boundary, preserve stable resource identities, and
+  show primary selection, health, conflicting projects, and dirty/unknown release gates. Test
+  symlink/path changes, overlap conflicts, restart, and real foreground execution.
+
 ## 2026-08-28 — Project handoff and takeover CLI
 
 Added `project handoff` through the stable project-command path. The command resolves exactly one

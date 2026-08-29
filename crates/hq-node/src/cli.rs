@@ -44,9 +44,11 @@ use hq_local_api::{
         LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
         PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, ProjectCommandOutcomeDto,
         ProjectCommandRequestDto, ProjectCommandStageDto, RelayAccessDto, RelayAuthenticationDto,
-        RelayConfigurationDto, RelayStatusDto, Request, ResourceHealthDto, ResourceLocatorDto,
-        ResourceSchemeDto, ResponseResult, RuntimeObservationDto, SessionControlDto, SnapshotItem,
-        StateHealthDto, SynchronizationRequestDto, agent_session_request_digest,
+        RelayConfigurationDto, RelayStatusDto, Request, ResourceHealthDto,
+        ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
+        ResourceReleaseStateDto, ResourceSchemeDto, ResponseResult, RuntimeObservationDto,
+        SessionControlDto, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
+        agent_session_request_digest, resource_inspection_request_digest,
     },
 };
 use hq_projects::{agent_retirement_request_digest, project_command_request_digest};
@@ -426,6 +428,15 @@ pub enum ProjectCliCommand {
     List,
     /// Show one exact project identity.
     Show(ProjectId),
+    /// Inspect desired resource definitions without observing external state.
+    Resource(ProjectResourceCliCommand),
+    /// Freshly inspect all or one exact desired resource on its home installation.
+    Check {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Optional exact stable resource identity.
+        resource_id: Option<hq_domain::ResourceId>,
+    },
     /// Send durable human-authored work to one project's immutable mailbox.
     Send {
         /// Stable project identity.
@@ -491,6 +502,23 @@ pub enum ProjectCliCommand {
     Archive(ProjectId),
     /// Restore one exact archived project to ordinary closed presentation.
     Unarchive(ProjectId),
+}
+
+/// Closed snapshot-only desired-resource inspection behavior.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectResourceCliCommand {
+    /// List every desired resource for one exact project.
+    List {
+        /// Stable project identity.
+        project_id: ProjectId,
+    },
+    /// Show one exact desired resource identity.
+    Show {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Stable resource identity.
+        resource_id: hq_domain::ResourceId,
+    },
 }
 
 /// Passive desired-resource and advisory-claim presentation.
@@ -684,6 +712,67 @@ pub struct ProjectCatalogView {
     pub unattributed_dispatches: usize,
     /// Output projections whose dispatch is unavailable.
     pub unattributed_outputs: usize,
+}
+
+/// Passive snapshot-only desired-resource inspection result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectResourceCatalogView {
+    /// Stable `resource_list` or `resource_show` operation label.
+    pub operation: &'static str,
+    /// Stable owning project identity.
+    pub project_id: ProjectId,
+    /// Immutable resource namespace authority.
+    pub home: InstallationId,
+    /// Complete or selected desired resources in stable identity order.
+    pub resources: Vec<ProjectResourceView>,
+}
+
+/// Passive result for one fresh resource observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectResourceCheckItemView {
+    /// Exact read-only operation identity.
+    pub operation_id: OperationId,
+    /// Stable desired resource identity.
+    pub resource_id: hq_domain::ResourceId,
+    /// Normalized human-selected spelling.
+    pub display_locator: ResourceLocatorDto,
+    /// Immutable expected canonical identity.
+    pub canonical_locator: ResourceLocatorDto,
+    /// Whether this resource is the explicit launch primary.
+    pub primary: bool,
+    /// Whether its advisory claim is active and conflict-free.
+    pub active_claim: bool,
+    /// Every overlapping project in stable identity order.
+    pub conflicting_projects: Vec<ProjectId>,
+    /// Stable accepted, rejected, uncertain, or `response_lost` outcome.
+    pub status: &'static str,
+    /// Fresh health classification, when accepted.
+    pub health: Option<&'static str>,
+    /// Fresh release classification, when accepted.
+    pub release: Option<&'static str>,
+    /// Freshly observed canonical identity, when available.
+    pub observed_canonical: Option<ResourceLocatorDto>,
+    /// Bounded inert adapter detail, when present.
+    pub details: Option<String>,
+    /// Explicit observation time, when accepted.
+    pub checked_at_unix_millis: Option<i64>,
+    /// Stable rejection category, when rejected.
+    pub error_category: Option<String>,
+    /// Stable rejection code, when rejected.
+    pub error_code: Option<String>,
+    /// Reconciliation identity returned by an uncertain adapter.
+    pub reconciliation_id: Option<OperationId>,
+}
+
+/// Passive complete fresh resource-check result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectResourceCheckView {
+    /// Stable owning project identity.
+    pub project_id: ProjectId,
+    /// Immutable local resource namespace authority.
+    pub home: InstallationId,
+    /// Selected fresh observations in stable resource identity order.
+    pub checks: Vec<ProjectResourceCheckItemView>,
 }
 
 /// Passive project workflow submission or checkpoint result.
@@ -1419,6 +1508,8 @@ pub enum CliError {
     HarnessState,
     /// Project state was absent, duplicated, or internally inconsistent.
     ProjectState,
+    /// Resource inspection was non-local, unavailable, or internally inconsistent.
+    ResourceState,
     /// Pairing evidence or its filesystem location failed strict validation.
     PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
@@ -1462,6 +1553,9 @@ impl fmt::Display for CliError {
             }
             Self::ProjectState => {
                 formatter.write_str("project state is unavailable or inconsistent")
+            }
+            Self::ResourceState => {
+                formatter.write_str("resource inspection is unavailable or inconsistent")
             }
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
@@ -1572,6 +1666,11 @@ impl CliError {
             Self::ProjectState => (
                 "project.state_unavailable",
                 "project state is absent, duplicated, conflicted, or inconsistent",
+                CliExitClass::Failure,
+            ),
+            Self::ResourceState => (
+                "resource.inspection_unavailable",
+                "resource inspection is unavailable, non-local, or inconsistent",
                 CliExitClass::Failure,
             ),
             Self::PairingArtifact | Self::SecretInput => input_diagnostic(self),
@@ -1778,6 +1877,15 @@ fn parse_project_catalog(
         [action, project_id] if action == "show" => {
             ProjectCliCommand::Show(ProjectId::from_bytes(parse_hex32(project_id)?))
         }
+        [action, rest @ ..] if action == "resource" => parse_project_resource(rest)?,
+        [action, project_id] if action == "check" => ProjectCliCommand::Check {
+            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+            resource_id: None,
+        },
+        [action, project_id, resource_id] if action == "check" => ProjectCliCommand::Check {
+            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+            resource_id: Some(hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?)),
+        },
         [action, project_id] if action == "send" => ProjectCliCommand::Send {
             project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
             body: None,
@@ -1811,6 +1919,23 @@ fn parse_project_catalog(
         action,
         state: parsed_state(state_root)?,
     })
+}
+
+fn parse_project_resource(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
+    match arguments {
+        [action, project_id] if action == "list" => Ok(ProjectCliCommand::Resource(
+            ProjectResourceCliCommand::List {
+                project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+            },
+        )),
+        [action, project_id, resource_id] if action == "show" => Ok(ProjectCliCommand::Resource(
+            ProjectResourceCliCommand::Show {
+                project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+                resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
+            },
+        )),
+        _ => Err(CliError::Arguments),
+    }
 }
 
 fn parse_project_handoff(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
@@ -2847,6 +2972,11 @@ fn successful_result_exit_code(result: &CliResult, empty_poll: bool) -> u8 {
         | CliResult::ProjectOperation(ProjectOperationView {
             status: "rejected", ..
         }) => 1,
+        CliResult::ProjectResourceCheck(view)
+            if view.checks.iter().any(|check| check.status == "rejected") =>
+        {
+            1
+        }
         CliResult::HarnessSession(HarnessSessionView {
             status: "uncertain",
             ..
@@ -2855,6 +2985,14 @@ fn successful_result_exit_code(result: &CliResult, empty_poll: bool) -> u8 {
             status: "reconcilable",
             ..
         }) => 3,
+        CliResult::ProjectResourceCheck(view)
+            if view
+                .checks
+                .iter()
+                .any(|check| matches!(check.status, "uncertain" | "response_lost")) =>
+        {
+            3
+        }
         _ if empty_poll => 3,
         _ => 0,
     }
@@ -2989,6 +3127,13 @@ fn run_project(
             project_catalog_view(&snapshot, action)
                 .map(|view| CliResult::ProjectCatalog(Box::new(view)))
         }
+        ProjectCliCommand::Resource(resource) => project_resource_catalog_view(&snapshot, resource)
+            .map(|view| CliResult::ProjectResourceCatalog(Box::new(view))),
+        ProjectCliCommand::Check {
+            project_id,
+            resource_id,
+        } => check_project_resources(&mut client, &snapshot, *project_id, *resource_id)
+            .map(|view| CliResult::ProjectResourceCheck(Box::new(view))),
         ProjectCliCommand::Create {
             name,
             brief,
@@ -3071,6 +3216,159 @@ fn run_project(
             *project_id,
             ProjectCommandAction::SetArchived { archived: false },
         ),
+    }
+}
+
+fn project_resource_catalog_view(
+    snapshot: &AuthoritativeSnapshotDto,
+    action: &ProjectResourceCliCommand,
+) -> Result<ProjectResourceCatalogView, CliError> {
+    let (operation, project_id, resource_id) = match action {
+        ProjectResourceCliCommand::List { project_id } => ("resource_list", *project_id, None),
+        ProjectResourceCliCommand::Show {
+            project_id,
+            resource_id,
+        } => ("resource_show", *project_id, Some(*resource_id)),
+    };
+    let mut catalog = project_catalog_view(snapshot, &ProjectCliCommand::Show(project_id))?;
+    let project = catalog.projects.pop().ok_or(CliError::ProjectState)?;
+    let resources = match resource_id {
+        None => project.resources,
+        Some(resource_id) => vec![
+            project
+                .resources
+                .into_iter()
+                .find(|resource| resource.resource_id == resource_id)
+                .ok_or(CliError::ProjectState)?,
+        ],
+    };
+    Ok(ProjectResourceCatalogView {
+        operation,
+        project_id,
+        home: project.home,
+        resources,
+    })
+}
+
+fn check_project_resources(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    project_id: ProjectId,
+    resource_id: Option<hq_domain::ResourceId>,
+) -> Result<ProjectResourceCheckView, CliError> {
+    let action = resource_id.map_or(
+        ProjectResourceCliCommand::List { project_id },
+        |resource_id| ProjectResourceCliCommand::Show {
+            project_id,
+            resource_id,
+        },
+    );
+    let catalog = project_resource_catalog_view(snapshot, &action)?;
+    ensure_resource_check_home(client.installation_id(), catalog.home)?;
+    let mut checks = Vec::with_capacity(catalog.resources.len());
+    for resource in catalog.resources {
+        let operation_id = OperationId::from_bytes(*random_command_id()?.as_bytes());
+        let issued_at_unix_millis = current_unix_millis()?;
+        let request = resource_inspection_request(
+            project_id,
+            &resource,
+            operation_id,
+            issued_at_unix_millis,
+        )?;
+        let mut view = ProjectResourceCheckItemView {
+            operation_id,
+            resource_id: resource.resource_id,
+            display_locator: resource.display_locator,
+            canonical_locator: resource.canonical_locator,
+            primary: resource.primary,
+            active_claim: resource.active_claim,
+            conflicting_projects: resource.conflicting_projects,
+            status: "response_lost",
+            health: None,
+            release: None,
+            observed_canonical: None,
+            details: None,
+            checked_at_unix_millis: None,
+            error_category: None,
+            error_code: None,
+            reconciliation_id: None,
+        };
+        match client.request(Request::InspectResource(request))? {
+            ClientEvent::Response {
+                result: ResponseResult::ResourceInspection(outcome),
+                ..
+            } => apply_resource_inspection_outcome(&mut view, outcome),
+            ClientEvent::RequestLost(_) => {}
+            _ => return Err(CliError::ResourceState),
+        }
+        checks.push(view);
+    }
+    Ok(ProjectResourceCheckView {
+        project_id,
+        home: catalog.home,
+        checks,
+    })
+}
+
+fn ensure_resource_check_home(
+    connected_installation: InstallationId,
+    project_home: InstallationId,
+) -> Result<(), CliError> {
+    if connected_installation == project_home {
+        Ok(())
+    } else {
+        Err(CliError::ResourceState)
+    }
+}
+
+fn resource_inspection_request(
+    project_id: ProjectId,
+    resource: &ProjectResourceView,
+    operation_id: OperationId,
+    issued_at_unix_millis: i64,
+) -> Result<EffectRequestDto<ResourceInspectionRequestDto>, CliError> {
+    let body = ResourceInspectionRequestDto {
+        project_id: Id32::new(*project_id.as_bytes()),
+        resource_id: Id32::new(*resource.resource_id.as_bytes()),
+        display_locator: resource.display_locator.clone(),
+        canonical_locator: resource.canonical_locator.clone(),
+    };
+    let mut request = EffectRequestDto::new(
+        Id32::new(*operation_id.as_bytes()),
+        Id32::new([0; 32]),
+        issued_at_unix_millis,
+        body,
+    );
+    request.request_digest = Id32::new(
+        *resource_inspection_request_digest(&request)
+            .map_err(|_| CliError::ResourceState)?
+            .as_bytes(),
+    );
+    Ok(request)
+}
+
+fn apply_resource_inspection_outcome(
+    view: &mut ProjectResourceCheckItemView,
+    outcome: EffectOutcomeDto<ResourceInspectionResultDto>,
+) {
+    match outcome {
+        EffectOutcomeDto::Accepted(result) => {
+            view.status = "accepted";
+            view.health = Some(resource_health_label(result.health));
+            view.release = Some(resource_release_label(result.release));
+            view.observed_canonical = result.observed_canonical;
+            view.details = result.details;
+            view.checked_at_unix_millis = Some(result.checked_at_unix_millis);
+        }
+        EffectOutcomeDto::Rejected(error) => {
+            view.status = "rejected";
+            view.error_category = Some(error.category);
+            view.error_code = Some(error.code);
+        }
+        EffectOutcomeDto::Uncertain(reconciliation_id) => {
+            view.status = "uncertain";
+            view.reconciliation_id = Some(OperationId::from_bytes(reconciliation_id.bytes()));
+        }
     }
 }
 
@@ -3634,6 +3932,8 @@ fn project_catalog_view(
             vec![projects.remove(project_id).ok_or(CliError::ProjectState)?]
         }
         ProjectCliCommand::Create { .. }
+        | ProjectCliCommand::Resource(_)
+        | ProjectCliCommand::Check { .. }
         | ProjectCliCommand::Send { .. }
         | ProjectCliCommand::Open(_)
         | ProjectCliCommand::Activate { .. }
@@ -3650,6 +3950,8 @@ fn project_catalog_view(
             ProjectCliCommand::List => "list",
             ProjectCliCommand::Show(_) => "show",
             ProjectCliCommand::Create { .. }
+            | ProjectCliCommand::Resource(_)
+            | ProjectCliCommand::Check { .. }
             | ProjectCliCommand::Send { .. }
             | ProjectCliCommand::Open(_)
             | ProjectCliCommand::Activate { .. }
@@ -3817,13 +4119,21 @@ fn add_project_resources(
         let project = projects
             .get_mut(&ProjectId::from_bytes(project_id.bytes()))
             .ok_or(CliError::ProjectState)?;
+        let resource_id = hq_domain::ResourceId::from_bytes(resource_id.bytes());
+        if project
+            .resources
+            .iter()
+            .any(|resource| resource.resource_id == resource_id)
+        {
+            return Err(CliError::ProjectState);
+        }
         let mut conflicts = conflicting_projects
             .iter()
             .map(|id| ProjectId::from_bytes(id.bytes()))
             .collect::<Vec<_>>();
         conflicts.sort_unstable();
         project.resources.push(ProjectResourceView {
-            resource_id: hq_domain::ResourceId::from_bytes(resource_id.bytes()),
+            resource_id,
             display_locator: display_locator.clone(),
             canonical_locator: canonical_locator.clone(),
             health: resource_health_label(*health),
@@ -4020,6 +4330,15 @@ const fn resource_health_label(health: ResourceHealthDto) -> &'static str {
         ResourceHealthDto::Healthy => "healthy",
         ResourceHealthDto::Degraded => "degraded",
         ResourceHealthDto::Unavailable => "unavailable",
+    }
+}
+
+const fn resource_release_label(release: ResourceReleaseStateDto) -> &'static str {
+    match release {
+        ResourceReleaseStateDto::Clean => "clean",
+        ResourceReleaseStateDto::Dirty => "dirty",
+        ResourceReleaseStateDto::Unknown => "unknown",
+        ResourceReleaseStateDto::NotApplicable => "not_applicable",
     }
 }
 
@@ -7962,6 +8281,8 @@ enum CliResult {
     NamedAgentRetirement(NamedAgentRetirementView),
     HarnessSession(HarnessSessionView),
     ProjectCatalog(Box<ProjectCatalogView>),
+    ProjectResourceCatalog(Box<ProjectResourceCatalogView>),
+    ProjectResourceCheck(Box<ProjectResourceCheckView>),
     ProjectOperation(ProjectOperationView),
     Completed {
         operation: &'static str,
@@ -8064,6 +8385,12 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
         (format, CliResult::RelayAdmin(view)) => render_relay_admin_result(format, view),
         (format, CliResult::HarnessSession(view)) => render_harness_session(format, view),
         (format, CliResult::ProjectCatalog(view)) => render_project_catalog(format, view),
+        (format, CliResult::ProjectResourceCatalog(view)) => {
+            render_project_resource_catalog(format, view)
+        }
+        (format, CliResult::ProjectResourceCheck(view)) => {
+            render_project_resource_check(format, view)
+        }
         (format, CliResult::ProjectOperation(view)) => render_project_operation(format, view),
         (
             _,
@@ -8074,6 +8401,145 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             | CliResult::Stopped { .. },
         ) => unreachable!(),
     }
+}
+
+fn render_project_resource_catalog(
+    format: CliOutputFormat,
+    view: &ProjectResourceCatalogView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => {
+            let mut output = format!(
+                "project_resources operation={} project={} home={} resources={}\n",
+                view.operation,
+                encode_id(view.project_id.as_bytes()),
+                encode_id(view.home.as_bytes()),
+                view.resources.len(),
+            );
+            for resource in &view.resources {
+                write_project_resource_line(&mut output, view.project_id, resource)?;
+            }
+            Ok(output)
+        }
+        CliOutputFormat::Json => machine_record(
+            "project_resources",
+            &serde_json::json!({
+                "home": encode_id(view.home.as_bytes()),
+                "operation": view.operation,
+                "project_id": encode_id(view.project_id.as_bytes()),
+                "resources": view.resources.iter().map(project_resource_json).collect::<Vec<_>>(),
+            }),
+        ),
+    }
+}
+
+fn render_project_resource_check(
+    format: CliOutputFormat,
+    view: &ProjectResourceCheckView,
+) -> Result<String, CliError> {
+    match format {
+        CliOutputFormat::Human => {
+            let mut output = format!(
+                "project_check project={} home={} resources={}\n",
+                encode_id(view.project_id.as_bytes()),
+                encode_id(view.home.as_bytes()),
+                view.checks.len(),
+            );
+            for check in &view.checks {
+                writeln!(
+                    output,
+                    "resource_check project={} id={} operation_id={} display={}:{} canonical={}:{} observed={} health={} release={} primary={} active_claim={} conflicts={} status={} checked_at_unix_millis={} details={:?} error={}:{} reconciliation_id={}",
+                    encode_id(view.project_id.as_bytes()),
+                    encode_id(check.resource_id.as_bytes()),
+                    encode_id(check.operation_id.as_bytes()),
+                    resource_scheme_label(check.display_locator.scheme),
+                    check.display_locator.value,
+                    resource_scheme_label(check.canonical_locator.scheme),
+                    check.canonical_locator.value,
+                    check.observed_canonical.as_ref().map_or_else(
+                        || "none".to_owned(),
+                        |locator| format!("{}:{}", resource_scheme_label(locator.scheme), locator.value),
+                    ),
+                    check.health.unwrap_or("none"),
+                    check.release.unwrap_or("none"),
+                    check.primary,
+                    check.active_claim,
+                    check.conflicting_projects.iter().map(|id| encode_id(id.as_bytes())).collect::<Vec<_>>().join(","),
+                    check.status,
+                    check.checked_at_unix_millis.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+                    check.details,
+                    check.error_category.as_deref().unwrap_or("none"),
+                    check.error_code.as_deref().unwrap_or("none"),
+                    check.reconciliation_id.as_ref().map_or_else(|| "none".to_owned(), |id| encode_id(id.as_bytes())),
+                )
+                .map_err(|_| CliError::Runtime)?;
+            }
+            Ok(output)
+        }
+        CliOutputFormat::Json => machine_record(
+            "project_check",
+            &serde_json::json!({
+                "checks": view.checks.iter().map(project_resource_check_json).collect::<Vec<_>>(),
+                "home": encode_id(view.home.as_bytes()),
+                "project_id": encode_id(view.project_id.as_bytes()),
+            }),
+        ),
+    }
+}
+
+fn write_project_resource_line(
+    output: &mut String,
+    project_id: ProjectId,
+    resource: &ProjectResourceView,
+) -> Result<(), CliError> {
+    writeln!(
+        output,
+        "resource project={} id={} display={}:{} canonical={}:{} health={} primary={} active_claim={} conflicts={}",
+        encode_id(project_id.as_bytes()),
+        encode_id(resource.resource_id.as_bytes()),
+        resource_scheme_label(resource.display_locator.scheme),
+        resource.display_locator.value,
+        resource_scheme_label(resource.canonical_locator.scheme),
+        resource.canonical_locator.value,
+        resource.health,
+        resource.primary,
+        resource.active_claim,
+        resource.conflicting_projects.iter().map(|id| encode_id(id.as_bytes())).collect::<Vec<_>>().join(","),
+    )
+    .map_err(|_| CliError::Runtime)
+}
+
+fn project_resource_json(resource: &ProjectResourceView) -> serde_json::Value {
+    serde_json::json!({
+        "active_claim": resource.active_claim,
+        "canonical_locator": resource.canonical_locator,
+        "conflicting_projects": resource.conflicting_projects.iter().map(|id| encode_id(id.as_bytes())).collect::<Vec<_>>(),
+        "display_locator": resource.display_locator,
+        "health": resource.health,
+        "primary": resource.primary,
+        "resource_id": encode_id(resource.resource_id.as_bytes()),
+    })
+}
+
+fn project_resource_check_json(check: &ProjectResourceCheckItemView) -> serde_json::Value {
+    serde_json::json!({
+        "active_claim": check.active_claim,
+        "canonical_locator": check.canonical_locator,
+        "checked_at_unix_millis": check.checked_at_unix_millis,
+        "conflicting_projects": check.conflicting_projects.iter().map(|id| encode_id(id.as_bytes())).collect::<Vec<_>>(),
+        "details": check.details,
+        "display_locator": check.display_locator,
+        "error_category": check.error_category,
+        "error_code": check.error_code,
+        "health": check.health,
+        "observed_canonical": check.observed_canonical,
+        "operation_id": encode_id(check.operation_id.as_bytes()),
+        "primary": check.primary,
+        "reconciliation_id": check.reconciliation_id.as_ref().map(|id| encode_id(id.as_bytes())),
+        "release": check.release,
+        "resource_id": encode_id(check.resource_id.as_bytes()),
+        "status": check.status,
+    })
 }
 
 fn render_project_catalog(
@@ -9247,7 +9713,15 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                 || (command == "project"
                     && matches!(
                         action.as_str(),
-                        "list" | "show" | "send" | "open" | "close" | "archive" | "unarchive"
+                        "list"
+                            | "show"
+                            | "send"
+                            | "open"
+                            | "close"
+                            | "archive"
+                            | "unarchive"
+                            | "check"
+                            | "resource"
                     )) =>
         {
             match command.as_str() {
@@ -9287,9 +9761,9 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
         ),
         [command] if command == "project" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
-             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
+             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  resource list PROJECT_ID                  List exact desired resources\n  resource show PROJECT_ID RESOURCE_ID      Show one exact desired resource\n  check PROJECT_ID [RESOURCE_ID]            Freshly inspect health and release state\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
   open PROJECT_ID                           Open one closed project\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --new-session [--thread THREAD_ID] [--dir ABSOLUTE_PATH]\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --session SESSION --thread THREAD_ID [--dir ABSOLUTE_PATH]\n                                            Activate one exact agent assignment\n  dispatch PROJECT_ID                       Dispatch all pending accepted inputs\n  handoff PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER (--new-session | --session SESSION) --thread THREAD_ID [--dir ABSOLUTE_PATH] --yes [--force]\n                                            Hand off to one exact historical target\n  close PROJECT_ID --yes [--force]          Close and release advisory claims\n  archive PROJECT_ID                        Gracefully close and hide one project\n  unarchive PROJECT_ID                      Restore one archived project as closed\n\n\
-             Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Handoff always requires one historical target thread and explicit --yes; --force separately authorizes takeover after blocked or uncertain quiescence. Without --dir, assignment commands use the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
+             Resource list/show read only the authoritative snapshot. Check re-observes path identity and Git release state through the read-only home adapter; it fails closed when the project's immutable home is not this installation and never mutates the filesystem or Git. Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Handoff always requires one historical target thread and explicit --yes; --force separately authorizes takeover after blocked or uncertain quiescence. Without --dir, assignment commands use the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
@@ -9387,19 +9861,22 @@ mod tests {
         CliOutputFormat, ConfigurationCommand, DaemonCommand, HarnessCommand, HarnessSessionView,
         HumanCommand, HumanDeviceState, HumanMessageCommand, HumanMessageFilters, IdentityCommand,
         MailboxCommand, MessageCommandView, NamedAgentCommand, NamedAgentSelector, PeerCommand,
-        ProjectCliCommand, RelayCommand, completion_for, copy_launch_environment, effect_outcome,
-        execute_cli, harness_request, human_devices_view, human_view, mailbox_discovery_view,
-        message_body, named_agent_catalog_view, normalized_existing_resource, pairing_grant_id,
-        parse_cli, project_activation_action, project_catalog_view, project_command_request,
-        project_creation_request, project_handoff_action, project_operation_view, read_password,
-        render_project_catalog, render_result, resolve_environment_session, resolve_named_agent_id,
-        run_cli, session_binding_fact, session_context, stable_relay_effect,
-        stable_repair_operation, successful_result_exit_code,
+        ProjectCliCommand, ProjectResourceCliCommand, RelayCommand, completion_for,
+        copy_launch_environment, effect_outcome, ensure_resource_check_home, execute_cli,
+        harness_request, human_devices_view, human_view, mailbox_discovery_view, message_body,
+        named_agent_catalog_view, normalized_existing_resource, pairing_grant_id, parse_cli,
+        project_activation_action, project_catalog_view, project_command_request,
+        project_creation_request, project_handoff_action, project_operation_view,
+        project_resource_catalog_view, read_password, render_project_catalog,
+        render_project_resource_catalog, render_project_resource_check, render_result,
+        resolve_environment_session, resolve_named_agent_id, resource_inspection_request, run_cli,
+        session_binding_fact, session_context, stable_relay_effect, stable_repair_operation,
+        successful_result_exit_code,
     };
     use hq_application::ProjectCommandAction;
     use hq_domain::{
         AccountId, AgentId, FactId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
-        MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, RelayHints,
+        MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, RelayHints, ResourceId,
         SigningPublicKey, ThreadId,
     };
     use hq_local_api::protocol::v1::{
@@ -9553,6 +10030,215 @@ mod tests {
                 Err(CliError::Arguments)
             );
         }
+    }
+
+    #[test]
+    fn parser_accepts_desired_resource_inspection_and_fresh_checks() {
+        let project_id = ProjectId::from_bytes([0x22; 32]);
+        let resource_id = hq_domain::ResourceId::from_bytes([0x33; 32]);
+
+        for (arguments, expected) in [
+            (
+                vec!["project", "resource", "list", &"22".repeat(32)],
+                ProjectCliCommand::Resource(ProjectResourceCliCommand::List { project_id }),
+            ),
+            (
+                vec![
+                    "project",
+                    "resource",
+                    "show",
+                    &"22".repeat(32),
+                    &"33".repeat(32),
+                ],
+                ProjectCliCommand::Resource(ProjectResourceCliCommand::Show {
+                    project_id,
+                    resource_id,
+                }),
+            ),
+            (
+                vec!["project", "check", &"22".repeat(32)],
+                ProjectCliCommand::Check {
+                    project_id,
+                    resource_id: None,
+                },
+            ),
+            (
+                vec!["project", "check", &"22".repeat(32), &"33".repeat(32)],
+                ProjectCliCommand::Check {
+                    project_id,
+                    resource_id: Some(resource_id),
+                },
+            ),
+        ] {
+            let parsed = parse_cli(arguments.into_iter().map(OsString::from))
+                .expect("resource inspection parses");
+            assert!(matches!(
+                parsed.command,
+                CliCommand::Project { action, .. } if action == expected
+            ));
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "complete desired and observed resource fixture"
+    )]
+    fn desired_resource_views_preserve_identity_and_fresh_release_truth() {
+        let project_id = ProjectId::from_bytes([0x22; 32]);
+        let home = InstallationId::from_bytes([0x44; 32]);
+        let first_id = ResourceId::from_bytes([0x31; 32]);
+        let second_id = ResourceId::from_bytes([0x32; 32]);
+        let locator = |value: &str| {
+            ResourceLocatorDto::new(ResourceSchemeDto::WorkingTree, value.to_owned())
+                .expect("locator")
+        };
+        let snapshot = AuthoritativeSnapshotDto {
+            revision: 7,
+            items: vec![
+                SnapshotItem::Project {
+                    project_id: Id32::new(*project_id.as_bytes()),
+                    home: Id32::new(*home.as_bytes()),
+                    account_id: Id32::new([0x10; 32]),
+                    mailbox_id: Id32::new([0x11; 32]),
+                    name: "resources".to_owned(),
+                    lifecycle: "open".to_owned(),
+                    archived: false,
+                    claimable: false,
+                    head: Id32::new([0x12; 32]),
+                    input_sequence: 0,
+                },
+                SnapshotItem::ProjectResource {
+                    project_id: Id32::new(*project_id.as_bytes()),
+                    resource_id: Id32::new(*second_id.as_bytes()),
+                    display_locator: locator("/display/second"),
+                    canonical_locator: locator("/canonical/second"),
+                    health: ResourceHealthDto::Unknown,
+                    primary: false,
+                    active_claim: true,
+                    conflicting_projects: Vec::new(),
+                },
+                SnapshotItem::ProjectResource {
+                    project_id: Id32::new(*project_id.as_bytes()),
+                    resource_id: Id32::new(*first_id.as_bytes()),
+                    display_locator: locator("/display/first"),
+                    canonical_locator: locator("/canonical/first"),
+                    health: ResourceHealthDto::Degraded,
+                    primary: true,
+                    active_claim: false,
+                    conflicting_projects: vec![Id32::new([0x55; 32])],
+                },
+            ],
+        };
+
+        let listed = project_resource_catalog_view(
+            &snapshot,
+            &ProjectResourceCliCommand::List { project_id },
+        )
+        .expect("resource list");
+        assert_eq!(listed.home, home);
+        assert_eq!(
+            listed
+                .resources
+                .iter()
+                .map(|resource| resource.resource_id)
+                .collect::<Vec<_>>(),
+            [first_id, second_id]
+        );
+        assert!(listed.resources[0].primary);
+        assert_eq!(
+            listed.resources[0].conflicting_projects,
+            [ProjectId::from_bytes([0x55; 32])]
+        );
+        let shown = project_resource_catalog_view(
+            &snapshot,
+            &ProjectResourceCliCommand::Show {
+                project_id,
+                resource_id: second_id,
+            },
+        )
+        .expect("resource show");
+        assert_eq!(shown.resources.len(), 1);
+        assert_eq!(shown.resources[0].resource_id, second_id);
+
+        let operation_id = OperationId::from_bytes([0x66; 32]);
+        let request = resource_inspection_request(
+            project_id,
+            &listed.resources[0],
+            operation_id,
+            1_700_000_000_000,
+        )
+        .expect("inspection request");
+        assert_eq!(request.body.resource_id.bytes(), *first_id.as_bytes());
+        assert_ne!(request.request_digest.bytes(), [0; 32]);
+        let repeated = resource_inspection_request(
+            project_id,
+            &listed.resources[0],
+            operation_id,
+            1_700_000_000_000,
+        )
+        .expect("repeat request");
+        assert_eq!(request, repeated);
+
+        let check = super::ProjectResourceCheckItemView {
+            operation_id,
+            resource_id: first_id,
+            display_locator: locator("/display/first"),
+            canonical_locator: locator("/canonical/first"),
+            primary: true,
+            active_claim: false,
+            conflicting_projects: vec![ProjectId::from_bytes([0x55; 32])],
+            status: "accepted",
+            health: Some("degraded"),
+            release: Some("dirty"),
+            observed_canonical: Some(locator("/canonical/moved")),
+            details: Some("canonical identity changed".to_owned()),
+            checked_at_unix_millis: Some(1_700_000_000_001),
+            error_category: None,
+            error_code: None,
+            reconciliation_id: None,
+        };
+        let checked = super::ProjectResourceCheckView {
+            project_id,
+            home,
+            checks: vec![check],
+        };
+        let human =
+            render_project_resource_check(CliOutputFormat::Human, &checked).expect("human check");
+        assert!(human.contains("health=degraded release=dirty"));
+        assert!(human.contains("observed=working_tree:/canonical/moved"));
+        let json =
+            render_project_resource_check(CliOutputFormat::Json, &checked).expect("JSON check");
+        let record: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(record["kind"], "project_check");
+        assert_eq!(record["data"]["checks"][0]["release"], "dirty");
+
+        let static_human = render_project_resource_catalog(CliOutputFormat::Human, &listed)
+            .expect("human resources");
+        assert!(static_human.contains("primary=true"));
+        assert!(static_human.contains(&"55".repeat(32)));
+        assert_eq!(ensure_resource_check_home(home, home), Ok(()));
+        assert_eq!(
+            ensure_resource_check_home(InstallationId::from_bytes([0x45; 32]), home),
+            Err(CliError::ResourceState)
+        );
+
+        let mut duplicated = snapshot.clone();
+        duplicated.items.push(
+            snapshot
+                .items
+                .iter()
+                .find(|item| matches!(item, SnapshotItem::ProjectResource { .. }))
+                .expect("resource item")
+                .clone(),
+        );
+        assert_eq!(
+            project_resource_catalog_view(
+                &duplicated,
+                &ProjectResourceCliCommand::List { project_id },
+            ),
+            Err(CliError::ProjectState)
+        );
     }
 
     #[test]

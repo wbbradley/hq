@@ -54,12 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Add desired-resource inspection and check commands** — Expose complete desired-resource
-  inspection and fresh health/release checks through the project and read-only inspection ports.
-  Identify display/canonical locators at the boundary, preserve stable resource identities, and
-  show primary selection, health, conflicting projects, and dirty/unknown release gates. Test
-  symlink/path changes, overlap conflicts, restart, and real foreground execution.
-
 - **[cli/high] Add desired-resource mutation commands** — Expose resource add, remove, replace, and
   primary selection through the stable project-command path. Preserve stable resource identities,
   exact expected heads, and explicit force semantics. Test overlap conflicts, stale heads, response

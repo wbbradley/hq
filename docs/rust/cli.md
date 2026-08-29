@@ -158,6 +158,18 @@ received, terminal, or conflicted progress, including receipt/head/outcome facts
 rejected result, and exact runtime success/failure/uncertainty. Both human and JSON output are
 deterministic, and the same catalog survives a node restart without a separate CLI cache.
 
+`project resource list PROJECT_ID` and `project resource show PROJECT_ID RESOURCE_ID` select desired
+resources from that same fresh snapshot. They preserve the stable resource identity and expose both
+the normalized display locator and immutable canonical locator, primary selection, projected
+health, active advisory claim, and every conflicting project. `project check PROJECT_ID
+[RESOURCE_ID]` then crosses the existing read-only resource-inspection port once per selected
+resource in stable identity order. It reports the freshly observed canonical locator, health,
+clean/dirty/unknown/not-applicable release state, checked time, rejection, response loss, and
+reconciliation identity without changing the filesystem, Git, desired membership, or claims.
+Because resource namespaces and adapters are co-located with the immutable home in v1, a check for
+a project homed on another installation fails closed instead of inspecting the caller's local path.
+The unshipped local API v1 is evolved in place with no compatibility shape or storage migration.
+
 `project create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]` creates an
 initially open project over one existing directory. The caller sends only its normalized absolute
 spelling; the selected authoritative home resolves the canonical filesystem identity and requires a

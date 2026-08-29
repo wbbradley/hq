@@ -916,6 +916,11 @@ pub(crate) fn agent_effect_from_v1(
 pub(crate) fn resource_effect_from_v1(
     request: &EffectRequestDto<ResourceInspectionRequestDto>,
 ) -> Result<EffectRequest<ResourceInspectionRequest>, ValueError> {
+    if crate::protocol::v1::resource_inspection_request_digest(request)?.as_bytes()
+        != &request.request_digest.bytes()
+    {
+        return Err(ValueError::InvalidValueCombination);
+    }
     let body = ResourceInspectionRequest {
         project_id: ProjectId::from_bytes(request.body.project_id.bytes()),
         resource_id: ResourceId::from_bytes(request.body.resource_id.bytes()),

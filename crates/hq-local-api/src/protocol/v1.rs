@@ -37,6 +37,7 @@ pub const MAX_RELAY_STATUS_POLICIES: usize = hq_application::MAX_RELAY_STATUS_PO
 
 const MUTATION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mutation\0";
 const AGENT_SESSION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-agent-session\0";
+const RESOURCE_INSPECTION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-resource-inspection\0";
 
 /// Fixed-width identifier representation owned by local API v1.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -911,6 +912,36 @@ pub struct ResourceInspectionRequestDto {
     pub display_locator: ResourceLocatorDto,
     /// Immutable canonical identity expected after re-resolution.
     pub canonical_locator: ResourceLocatorDto,
+}
+
+/// Derives the exact digest for one read-only resource inspection request.
+pub fn resource_inspection_request_digest(
+    request: &EffectRequestDto<ResourceInspectionRequestDto>,
+) -> Result<CommandDigest, ValueError> {
+    validate_locator(&request.body.display_locator)?;
+    validate_locator(&request.body.canonical_locator)?;
+    if request.body.display_locator.scheme != request.body.canonical_locator.scheme {
+        return Err(ValueError::InvalidValueCombination);
+    }
+    let mut digest = Sha256::new();
+    digest.update(RESOURCE_INSPECTION_DIGEST_DOMAIN);
+    digest.update(request.operation_id.bytes());
+    digest.update(request.issued_at_unix_millis.to_be_bytes());
+    digest.update(request.body.project_id.bytes());
+    digest.update(request.body.resource_id.bytes());
+    for locator in [
+        &request.body.display_locator,
+        &request.body.canonical_locator,
+    ] {
+        digest.update([match locator.scheme {
+            ResourceSchemeDto::GitRepository => 0,
+            ResourceSchemeDto::WorkingTree => 1,
+            ResourceSchemeDto::Container => 2,
+            ResourceSchemeDto::Opaque => 3,
+        }]);
+        update_sized(&mut digest, locator.value.as_bytes())?;
+    }
+    Ok(CommandDigest::from_bytes(digest.finalize().into()))
 }
 
 /// Desired project resource carried by a control request.
