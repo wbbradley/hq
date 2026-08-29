@@ -660,7 +660,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .any(|window| window == b"Name:")
         {
             master
-                .write_all(format!("{name}\x1b[B\x1b[B{path}\r").as_bytes())
+                .write_all(format!("{name}\t\t{path}\r").as_bytes())
                 .expect("project form writes");
             master.flush().expect("project form flushes");
             content_sent = true;
@@ -681,10 +681,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         {
             master
                 .write_all(
-                    format!(
-                        "{name}\x1b[B\x1b[B{source}\x1b[B{destination}\x1b[B{branch}\x1b[B{base}\r"
-                    )
-                    .as_bytes(),
+                    format!("{name}\t\t{source}\t{destination}\t{branch}\t{base}\r").as_bytes(),
                 )
                 .expect("worktree project form writes");
             master.flush().expect("worktree project form flushes");
@@ -778,8 +775,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !resource_commit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"authorize".len())
-                    .any(|window| window == b"authorize")
+                    .windows(b"Tab/Shift-Tab".len())
+                    .any(|window| window == b"Tab/Shift-Tab")
             })
         {
             master

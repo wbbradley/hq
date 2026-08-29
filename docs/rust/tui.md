@@ -57,13 +57,36 @@ failure. Activity
 entries carry no `UiMessageTarget`, so no key sequence can turn activity into a reply or reversible
 state target. Escape cancels selectors and confirmations without a canonical mutation.
 
-Draft editing accepts Unicode characters, paste, and character-aware backspace up to the ordinary
-content bound. A coalesced 250 ms timer autosaves optimistic complete replacements. Submit waits for
+Draft editing accepts Unicode characters, bounded paste, and Unicode-safe Left, Right, Home, End,
+Backspace, and Delete operations up to the ordinary content bound. A coalesced 250 ms timer
+autosaves optimistic complete replacements. Submit waits for
 the latest save acknowledgement, then emits one draft-backed command effect. Escape also waits for
 the latest text to be durably saved before closing; an edit made while an earlier save is in flight
 therefore cannot disappear. Save conflicts preserve the local editor text, adopt the current server
 version, and require an explicit edit/retry. A rejected stale target leaves the draft and modal open
 with a reselection action. Only a committed canonical receipt closes and consumes the draft.
+
+## Form interaction
+
+All editable dialogs use one pure form editor rather than dialog-specific cursor policy. Tab and
+Shift-Tab move forward and backward through fields; Up and Down change a focused choice or list;
+Left and Right move the insertion caret while a text field is open. Text fields also support Home,
+End, Unicode-safe Backspace and Delete, and atomic bounded paste. Modal handling precedes global
+navigation, so these keys cannot accidentally change sections while a dialog is open. Text,
+focus, caret positions, field errors, and pending submissions survive resize and authoritative
+refresh; async rejection keeps the user's input available for correction.
+
+Focused fields have a visible selection treatment and insertion caret. Labels say whether input is
+required or optional, concise guidance and examples appear with the focused field, and known
+validation failures render next to that field before an effect is emitted. Stable failures from an
+actual operation remain in the global recovery presentation because they are not form validation.
+
+Project path fields share one lexical input boundary. Exact `~` and `~/...` forms expand using the
+current operating-system user's home directory, then `.` and `..` components normalize into the
+absolute path shown in the form and submitted to the ordinary domain workflow. Other tilde forms,
+relative paths, environment variables, command substitutions, and arbitrary shell syntax are not
+expanded. This convenience does not replace filesystem canonicalization or resource-ownership
+validation at the project boundary.
 
 ## Named-agent catalog and administration
 

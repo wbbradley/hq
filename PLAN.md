@@ -27,27 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Make dialogs behave like familiar forms
-
-Introduce reusable form-editing and rendering behavior rather than continuing per-dialog key and
-cursor logic.
-
-- Make `Tab` and `Shift-Tab` move forward and backward through fields in every multi-field form.
-  Keep arrow keys for list/choice navigation and text-cursor movement according to ordinary terminal
-  conventions; modal input must take precedence over global section navigation.
-- Render both a clear focus treatment and a visible insertion caret. Support Unicode-safe left,
-  right, Home, End, Backspace, and Delete behavior, bounded paste, and predictable submission and
-  cancellation. Preserve in-flight and reconnect-safe inputs.
-- Mark required and optional fields, show examples or concise field guidance, and attach validation
-  messages to the relevant field before submission. Do not make users infer requirements from a
-  rejected operation code in the global footer.
-- Add one path-input boundary that expands `~` and `~/...` for the current user, produces the
-  absolute path required by the domain, and shows the normalized path before mutation. Do not
-  expand arbitrary shell syntax or weaken canonical resource-identity validation.
-- Exercise the reusable form behavior with model tests and terminal render snapshots, then migrate
-  project creation, agent creation/rename, resource paths, project input, activation/handoff, and
-  mailbox composition without duplicating editing policy.
-
 ### Clarify project creation and resource ownership
 
 Make project creation explain the durable HQ concept—resource ownership—without positioning HQ as

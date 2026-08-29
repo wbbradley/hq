@@ -13,6 +13,7 @@ use crossterm::{
 };
 use hq_local_api::{InitialView, protocol::v1::BuildMetadata};
 use hq_tui::{UiEvent, UiInput, UiModel, UiSize, update};
+use nix::unistd::{Uid, User};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
@@ -259,13 +260,16 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
     let input = match key.code {
         KeyCode::Tab if plain => UiInput::NextFocus,
         KeyCode::BackTab if plain => UiInput::PreviousFocus,
-        KeyCode::Right if plain => UiInput::NextSection,
-        KeyCode::Left if plain => UiInput::PreviousSection,
+        KeyCode::Right if plain => UiInput::MoveCursorRight,
+        KeyCode::Left if plain => UiInput::MoveCursorLeft,
         KeyCode::Down if plain => UiInput::NextItem,
         KeyCode::Up if plain => UiInput::PreviousItem,
         KeyCode::Enter if plain => UiInput::Activate,
         KeyCode::PageDown if plain => UiInput::LoadMore,
         KeyCode::Backspace if plain => UiInput::Backspace,
+        KeyCode::Delete if plain => UiInput::Delete,
+        KeyCode::Home if plain => UiInput::MoveCursorHome,
+        KeyCode::End if plain => UiInput::MoveCursorEnd,
         KeyCode::Char(character) if plain => UiInput::Character(character),
         KeyCode::Esc => UiInput::Escape,
         _ => return None,
@@ -280,11 +284,12 @@ where
     P: TuiClientPort + 'static,
     C: TuiClock,
 {
+    let home_directory = current_user_home_directory();
     let mut terminal = TerminalGuard::activate(terminal)?;
     let mut executor =
         TuiEffectExecutor::spawn(client, clock).map_err(|_| TuiShellError::Executor)?;
-    let started = update(UiModel::new(terminal.size()?), UiEvent::Started)
-        .map_err(|_| TuiShellError::Model)?;
+    let model = UiModel::new(terminal.size()?).with_home_directory(home_directory);
+    let started = update(model, UiEvent::Started).map_err(|_| TuiShellError::Model)?;
     let mut model = started.model;
     executor
         .execute(started.effects)
@@ -322,6 +327,13 @@ where
     executor.shutdown().map_err(|_| TuiShellError::Executor)?;
     terminal.finish()?;
     Ok(())
+}
+
+fn current_user_home_directory() -> Option<String> {
+    User::from_uid(Uid::effective())
+        .ok()
+        .flatten()
+        .and_then(|user| user.dir.into_os_string().into_string().ok())
 }
 
 /// Composes the installed subscribed client and real terminal shell for one state root.

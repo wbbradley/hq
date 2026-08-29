@@ -1,5 +1,53 @@
 # Completed
 
+## 2026-08-29 — Familiar TUI forms
+
+Introduced one pure, reusable form editor for project creation and input, resource paths,
+activation and handoff, agent creation and conversation naming, searches, managed-session setup,
+and mailbox composition. Text fields now share Unicode-safe Left, Right, Home, End, Backspace, and
+Delete behavior, atomic bounded paste, visible insertion carets, and cursor state that survives
+resize, reconnect, authoritative refresh, and in-flight command recovery. Tab and Shift-Tab move
+through multi-field dialogs; Up and Down remain choice/list controls, and modal editing continues to
+take precedence over global section navigation.
+
+Forms identify required and optional fields, show focused examples or concise guidance, and render
+known validation next to the relevant field before emitting an effect. Agent slug validation now
+matches the installed CLI grammar. Project paths use one lexical boundary that expands only exact
+`~` and `~/...` through the operating-system user's account record, rejects relative and shell-like
+expressions, displays the normalized absolute path, and still delegates canonical filesystem and
+resource-ownership checks to the existing domain workflow.
+
+Pure editor/model tests cover Unicode insertion and deletion, atomic paste bounds, path expansion
+and shell non-expansion, reverse field traversal, and caret preservation through authoritative
+reload. Responsive render coverage checks project, agent, and mailbox form guidance and carets.
+Crossterm and installed pseudoterminal tests exercise the expanded key vocabulary and Tab-based
+project workflows. Formatting, architecture verification, qualification-evidence validation,
+strict workspace Clippy, the locked all-target/all-feature workspace suite and build, and all nine
+installed TUI pseudoterminal workflows pass.
+
+### Original plan entry
+
+### Make dialogs behave like familiar forms
+
+Introduce reusable form-editing and rendering behavior rather than continuing per-dialog key and
+cursor logic.
+
+- Make `Tab` and `Shift-Tab` move forward and backward through fields in every multi-field form.
+  Keep arrow keys for list/choice navigation and text-cursor movement according to ordinary terminal
+  conventions; modal input must take precedence over global section navigation.
+- Render both a clear focus treatment and a visible insertion caret. Support Unicode-safe left,
+  right, Home, End, Backspace, and Delete behavior, bounded paste, and predictable submission and
+  cancellation. Preserve in-flight and reconnect-safe inputs.
+- Mark required and optional fields, show examples or concise field guidance, and attach validation
+  messages to the relevant field before submission. Do not make users infer requirements from a
+  rejected operation code in the global footer.
+- Add one path-input boundary that expands `~` and `~/...` for the current user, produces the
+  absolute path required by the domain, and shows the normalized path before mutation. Do not
+  expand arbitrary shell syntax or weaken canonical resource-identity validation.
+- Exercise the reusable form behavior with model tests and terminal render snapshots, then migrate
+  project creation, agent creation/rename, resource paths, project input, activation/handoff, and
+  mailbox composition without duplicating editing policy.
+
 ## 2026-08-29 — Final completion-evidence hardening
 
 Expanded the acceptance inventory from representative area-level examples to 70 direct current

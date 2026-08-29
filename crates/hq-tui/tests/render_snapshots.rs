@@ -446,7 +446,8 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
         assert_eq!(model, before);
         let rendered = snapshot_text(terminal.backend().buffer());
         assert!(rendered.contains("Self-note · saved"));
-        assert!(rendered.contains("bounded draft text"));
+        assert!(rendered.contains("Message required"));
+        assert!(rendered.contains("bounded draft text│"));
         assert!(rendered.contains("Enter submit · Esc save and close"));
     }
 }
@@ -486,6 +487,23 @@ fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
         }
         assert!(!rendered.contains("runnable:"));
     }
+}
+
+#[test]
+fn agent_form_marks_requirements_and_renders_the_insertion_caret() {
+    let details = agent_details_model(UiSize {
+        width: 90,
+        height: 18,
+    });
+    let agents = update(details, UiEvent::Input(UiInput::Escape))
+        .expect("close details")
+        .model;
+    let form = update(agents, UiEvent::Input(UiInput::Character('c')))
+        .expect("create agent")
+        .model;
+    let rendered = render_text(&form);
+    assert!(rendered.contains("Name: │ (required)"), "{rendered}");
+    assert!(rendered.contains("such as reviewer"), "{rendered}");
 }
 
 #[test]
@@ -619,7 +637,7 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
                     .model;
             }
             if index < 5 {
-                model = update(model, UiEvent::Input(UiInput::NextItem))
+                model = update(model, UiEvent::Input(UiInput::NextFocus))
                     .expect("next field")
                     .model;
             }
@@ -670,6 +688,44 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
             "worktree outcome at {size:?}:\n{rendered}"
         );
     }
+}
+
+#[test]
+fn project_form_explains_fields_caret_validation_and_normalized_paths() {
+    let mut model = project_model(UiSize {
+        width: 120,
+        height: 24,
+    })
+    .with_home_directory(Some("/Users/example".to_owned()));
+    model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("existing form")
+        .model;
+    let empty = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("validate form")
+        .model;
+    let rendered = render_text(&empty);
+    assert!(rendered.contains("Name: │ (required)"), "{rendered}");
+    assert!(rendered.contains("Enter a project name"), "{rendered}");
+
+    let mut model = update(empty, UiEvent::Input(UiInput::Paste("project".to_owned())))
+        .expect("name")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("brief")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("path")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("~/repo".to_owned())))
+        .expect("path")
+        .model;
+    let rendered = render_text(&model);
+    assert!(rendered.contains("Path: ~/repo│ (required)"), "{rendered}");
+    assert!(
+        rendered.contains("Will use: /Users/example/repo"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Tab/Shift-Tab field"), "{rendered}");
 }
 
 #[test]

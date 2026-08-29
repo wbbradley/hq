@@ -1,6 +1,11 @@
 //! Pure identity-aware TUI transition algebra.
 
-use std::{num::NonZeroU64, time::Duration};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroU64,
+    path::{Component, Path, PathBuf},
+    time::Duration,
+};
 
 const PERIODIC_REFRESH: Duration = Duration::from_secs(300);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
@@ -207,6 +212,16 @@ pub enum UiInput {
     Paste(String),
     /// Delete the preceding Unicode scalar while composing.
     Backspace,
+    /// Move the insertion caret one Unicode scalar left.
+    MoveCursorLeft,
+    /// Move the insertion caret one Unicode scalar right.
+    MoveCursorRight,
+    /// Move the insertion caret to the beginning of the field.
+    MoveCursorHome,
+    /// Move the insertion caret to the end of the field.
+    MoveCursorEnd,
+    /// Delete the Unicode scalar under the insertion caret.
+    Delete,
 }
 
 /// Passive terminal dimensions supplied by the shell.
@@ -786,7 +801,7 @@ pub struct UiProjectResult {
 }
 
 /// Editable field selected in a pure project form.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum UiProjectFormField {
     /// Project name.
     Name,
@@ -808,6 +823,8 @@ pub enum UiProjectFormField {
     Provider,
     /// Runtime launch directory.
     Directory,
+    /// Whether a new resource becomes the project's primary resource.
+    Primary,
     /// Stable named-agent selection.
     Agent,
     /// New-session or exact-resume mode.
@@ -818,6 +835,54 @@ pub enum UiProjectFormField {
     Confirmation,
     /// Separate force-takeover authorization.
     Force,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum UiFormField {
+    Project(UiProjectFormField),
+    AgentSearch,
+    ProjectSearch,
+    AgentName,
+    SessionName,
+    Provider,
+    Message,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiFormKind {
+    AgentSearch,
+    ProjectSearch,
+    AgentCreate,
+    AgentRename,
+    ManagedProvider,
+    ProjectCreateExisting,
+    ProjectCreateWorktree,
+    ProjectInput,
+    ProjectAddResource,
+    ProjectReplaceResource,
+    ProjectActivate,
+    ProjectHandoff,
+    ProjectConfirmClose,
+    MailboxCompose,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct UiFormState {
+    active: Option<UiFormKind>,
+    focused: Option<UiFormField>,
+    cursors: BTreeMap<UiFormField, usize>,
+    errors: BTreeMap<UiFormField, String>,
+}
+
+#[derive(Clone, Copy)]
+enum TextEdit<'a> {
+    Insert(&'a str),
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
 }
 
 /// Current project catalog, creation, input, or outcome interaction.
@@ -1501,6 +1566,8 @@ pub struct UiModel {
     project_modal: Option<UiProjectModal>,
     agent_search: String,
     project_search: String,
+    home_directory: Option<String>,
+    form: UiFormState,
     help_page: Option<UiHelpPage>,
     required_revision: Option<u64>,
     pending_snapshot: Option<PendingSnapshot>,
@@ -1539,6 +1606,13 @@ impl UiModel {
             project_modal: None,
             agent_search: String::new(),
             project_search: String::new(),
+            home_directory: None,
+            form: UiFormState {
+                active: None,
+                focused: None,
+                cursors: BTreeMap::new(),
+                errors: BTreeMap::new(),
+            },
             help_page: None,
             required_revision: None,
             pending_snapshot: None,
@@ -1556,6 +1630,149 @@ impl UiModel {
             transient_help: None,
             started: false,
             should_exit: false,
+        }
+    }
+
+    /// Supplies the current user's absolute home directory for explicit `~` path expansion.
+    #[must_use]
+    pub fn with_home_directory(mut self, home_directory: Option<String>) -> Self {
+        self.home_directory = home_directory;
+        self
+    }
+
+    pub(crate) fn project_field_cursor(&self, field: UiProjectFormField, value: &str) -> usize {
+        self.form_cursor(UiFormField::Project(field), value)
+    }
+
+    pub(crate) fn project_field_error(&self, field: UiProjectFormField) -> Option<&str> {
+        self.form_error(UiFormField::Project(field))
+    }
+
+    pub(crate) fn project_field_is_focused(&self, field: UiProjectFormField) -> bool {
+        if self.form.active != self.active_form_kind() {
+            return (matches!(self.project_modal, Some(UiProjectModal::AddResource { .. }))
+                && field == UiProjectFormField::Path)
+                || (matches!(
+                    self.project_modal,
+                    Some(UiProjectModal::ConfirmClose { .. })
+                ) && field == UiProjectFormField::Confirmation);
+        }
+        self.form.focused == Some(UiFormField::Project(field))
+    }
+
+    pub(crate) fn normalized_path_preview(&self, value: &str) -> Result<String, &'static str> {
+        normalize_path_input(value, self.home_directory.as_deref())
+    }
+
+    pub(crate) fn agent_field_cursor(&self, value: &str) -> usize {
+        self.form_cursor(UiFormField::AgentName, value)
+    }
+
+    pub(crate) fn session_field_cursor(&self, value: &str) -> usize {
+        self.form_cursor(UiFormField::SessionName, value)
+    }
+
+    pub(crate) fn provider_field_cursor(&self, value: &str) -> usize {
+        self.form_cursor(UiFormField::Provider, value)
+    }
+
+    pub(crate) fn message_field_cursor(&self, value: &str) -> usize {
+        self.form_cursor(UiFormField::Message, value)
+    }
+
+    pub(crate) fn search_field_cursor(&self, value: &str, projects: bool) -> usize {
+        self.form_cursor(
+            if projects {
+                UiFormField::ProjectSearch
+            } else {
+                UiFormField::AgentSearch
+            },
+            value,
+        )
+    }
+
+    pub(crate) fn agent_field_error(&self) -> Option<&str> {
+        self.form_error(UiFormField::AgentName)
+    }
+
+    pub(crate) fn provider_field_error(&self) -> Option<&str> {
+        self.form_error(UiFormField::Provider)
+    }
+
+    pub(crate) fn message_field_error(&self) -> Option<&str> {
+        self.form_error(UiFormField::Message)
+    }
+
+    fn form_cursor(&self, field: UiFormField, value: &str) -> usize {
+        if self.form.active != self.active_form_kind() {
+            return value.len();
+        }
+        let mut cursor = self
+            .form
+            .cursors
+            .get(&field)
+            .copied()
+            .unwrap_or(value.len())
+            .min(value.len());
+        while !value.is_char_boundary(cursor) {
+            cursor = cursor.saturating_sub(1);
+        }
+        cursor
+    }
+
+    fn form_error(&self, field: UiFormField) -> Option<&str> {
+        (self.form.active == self.active_form_kind())
+            .then(|| self.form.errors.get(&field).map(String::as_str))
+            .flatten()
+    }
+
+    fn active_form_kind(&self) -> Option<UiFormKind> {
+        match (&self.project_modal, &self.agent_modal, &self.mailbox_modal) {
+            (Some(UiProjectModal::Search { .. }), _, _) => Some(UiFormKind::ProjectSearch),
+            (Some(UiProjectModal::CreateExisting { .. }), _, _) => {
+                Some(UiFormKind::ProjectCreateExisting)
+            }
+            (Some(UiProjectModal::CreateWorktree { .. }), _, _) => {
+                Some(UiFormKind::ProjectCreateWorktree)
+            }
+            (Some(UiProjectModal::SendInput { .. }), _, _) => Some(UiFormKind::ProjectInput),
+            (Some(UiProjectModal::AddResource { .. }), _, _) => {
+                Some(UiFormKind::ProjectAddResource)
+            }
+            (Some(UiProjectModal::ReplaceResource { .. }), _, _) => {
+                Some(UiFormKind::ProjectReplaceResource)
+            }
+            (Some(UiProjectModal::Activate { .. }), _, _) => Some(UiFormKind::ProjectActivate),
+            (Some(UiProjectModal::Handoff { .. }), _, _) => Some(UiFormKind::ProjectHandoff),
+            (Some(UiProjectModal::ConfirmClose { .. }), _, _) => {
+                Some(UiFormKind::ProjectConfirmClose)
+            }
+            (_, Some(UiAgentModal::Search { .. }), _) => Some(UiFormKind::AgentSearch),
+            (_, Some(UiAgentModal::Create { .. }), _) => Some(UiFormKind::AgentCreate),
+            (_, Some(UiAgentModal::RenameSession { .. }), _) => Some(UiFormKind::AgentRename),
+            (_, Some(UiAgentModal::ManagedProvider { .. }), _) => Some(UiFormKind::ManagedProvider),
+            (_, _, Some(UiMailboxModal::Compose { .. })) => Some(UiFormKind::MailboxCompose),
+            _ => None,
+        }
+    }
+
+    fn sync_form(&mut self) {
+        let active = self.active_form_kind();
+        if self.form.active != active {
+            let focused = match active {
+                Some(UiFormKind::ProjectAddResource) => {
+                    Some(UiFormField::Project(UiProjectFormField::Path))
+                }
+                Some(UiFormKind::ProjectConfirmClose) => {
+                    Some(UiFormField::Project(UiProjectFormField::Confirmation))
+                }
+                _ => None,
+            };
+            self.form = UiFormState {
+                active,
+                focused,
+                ..UiFormState::default()
+            };
         }
     }
 
@@ -2137,11 +2354,13 @@ fn start(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<(), UiError
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_input(
     model: &mut UiModel,
     input: &UiInput,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
+    model.sync_form();
     if let Some(changed) = apply_open_modal_input(model, input, effects)? {
         if changed {
             effects.push(UiEffect::RequestRedraw);
@@ -2182,28 +2401,32 @@ fn apply_input(
             };
             true
         }
-        UiInput::NextSection => match (model.viewport.width >= WIDE_WIDTH, model.focus) {
-            (true, UiFocus::Navigation) => {
-                model.focus = UiFocus::Content;
-                true
+        UiInput::NextSection | UiInput::MoveCursorRight => {
+            match (model.viewport.width >= WIDE_WIDTH, model.focus) {
+                (true, UiFocus::Navigation) => {
+                    model.focus = UiFocus::Content;
+                    true
+                }
+                (false, _) => {
+                    model.change_section(model.section.next());
+                    true
+                }
+                _ => false,
             }
-            (false, _) => {
-                model.change_section(model.section.next());
-                true
+        }
+        UiInput::PreviousSection | UiInput::MoveCursorLeft => {
+            match (model.viewport.width >= WIDE_WIDTH, model.focus) {
+                (true, UiFocus::Content | UiFocus::Conversation) => {
+                    model.focus = UiFocus::Navigation;
+                    true
+                }
+                (false, _) => {
+                    model.change_section(model.section.previous());
+                    true
+                }
+                _ => false,
             }
-            _ => false,
-        },
-        UiInput::PreviousSection => match (model.viewport.width >= WIDE_WIDTH, model.focus) {
-            (true, UiFocus::Content | UiFocus::Conversation) => {
-                model.focus = UiFocus::Navigation;
-                true
-            }
-            (false, _) => {
-                model.change_section(model.section.previous());
-                true
-            }
-            _ => false,
-        },
+        }
         UiInput::NextItem => match model.focus {
             UiFocus::Conversation => model.move_conversation_anchor(true),
             UiFocus::Navigation if model.viewport.width >= WIDE_WIDTH => {
@@ -2228,7 +2451,11 @@ fn apply_input(
             true
         }
         UiInput::Character(character) => mailbox_shortcut(model, *character, effects)?,
-        UiInput::Paste(_) | UiInput::Backspace => false,
+        UiInput::Paste(_)
+        | UiInput::Backspace
+        | UiInput::MoveCursorHome
+        | UiInput::MoveCursorEnd
+        | UiInput::Delete => false,
     };
     if changed || dismissed_transient_help {
         effects.push(UiEffect::RequestRedraw);
@@ -2277,7 +2504,7 @@ fn apply_help_input(model: &mut UiModel, input: &UiInput, effects: &mut Vec<UiEf
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn apply_modal_input(
     model: &mut UiModel,
     input: UiInput,
@@ -2355,35 +2582,23 @@ fn apply_modal_input(
             submitting,
             closing,
         }) => match input {
-            UiInput::Character(character) if !submitting && !closing => {
-                let mut encoded = [0_u8; 4];
-                let value = character.encode_utf8(&mut encoded);
-                if draft.content.len().saturating_add(value.len()) > MAX_DRAFT_BYTES {
-                    model.last_failure = Some(UiFailure {
-                        code: "draft_content_too_large".to_owned(),
-                        action: "shorten the draft before submitting".to_owned(),
-                    });
-                    return Ok(true);
-                }
-                draft.content.push(character);
-                update_composer(model, draft, true, false, effects)?;
-                Ok(true)
-            }
-            UiInput::Paste(value) if !submitting && !closing => {
-                let available = MAX_DRAFT_BYTES.saturating_sub(draft.content.len());
-                if value.len() > available {
-                    model.last_failure = Some(UiFailure {
-                        code: "draft_content_too_large".to_owned(),
-                        action: "shorten the pasted text before submitting".to_owned(),
-                    });
-                    return Ok(true);
-                }
-                draft.content.push_str(&value);
-                update_composer(model, draft, true, false, effects)?;
-                Ok(true)
-            }
-            UiInput::Backspace if !submitting && !closing => {
-                if draft.content.pop().is_none() {
+            UiInput::Character(_)
+            | UiInput::Paste(_)
+            | UiInput::Backspace
+            | UiInput::Delete
+            | UiInput::MoveCursorLeft
+            | UiInput::MoveCursorRight
+            | UiInput::MoveCursorHome
+            | UiInput::MoveCursorEnd
+                if !submitting && !closing =>
+            {
+                if !edit_text_input(
+                    &mut model.form,
+                    UiFormField::Message,
+                    &mut draft.content,
+                    &input,
+                    MAX_DRAFT_BYTES,
+                ) {
                     return Ok(false);
                 }
                 update_composer(model, draft, true, false, effects)?;
@@ -2391,10 +2606,11 @@ fn apply_modal_input(
             }
             UiInput::Activate if !submitting && !closing => {
                 if draft.content.is_empty() {
-                    model.last_failure = Some(UiFailure {
-                        code: "draft_content_empty".to_owned(),
-                        action: "enter message text before submitting".to_owned(),
-                    });
+                    model.form.errors.insert(
+                        UiFormField::Message,
+                        "Enter a message before sending".to_owned(),
+                    );
+                    model.last_failure = None;
                     return Ok(true);
                 }
                 if dirty {
@@ -2451,7 +2667,7 @@ fn update_composer(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn apply_project_modal_input(
     model: &mut UiModel,
     input: UiInput,
@@ -2475,18 +2691,22 @@ fn apply_project_modal_input(
 
     match model.project_modal.clone() {
         Some(UiProjectModal::Search { mut query }) => match input {
-            UiInput::Character(value) => {
-                push_project_text(&mut query, &value.to_string());
-                update_project_search(model, query);
-                Ok(true)
-            }
-            UiInput::Paste(value) => {
-                push_project_text(&mut query, &value);
-                update_project_search(model, query);
-                Ok(true)
-            }
-            UiInput::Backspace => {
-                if query.pop().is_none() {
+            UiInput::Character(_)
+            | UiInput::Paste(_)
+            | UiInput::Backspace
+            | UiInput::Delete
+            | UiInput::MoveCursorLeft
+            | UiInput::MoveCursorRight
+            | UiInput::MoveCursorHome
+            | UiInput::MoveCursorEnd => {
+                let changed = edit_text_input(
+                    &mut model.form,
+                    UiFormField::ProjectSearch,
+                    &mut query,
+                    &input,
+                    MAX_PROJECT_TEXT_BYTES,
+                );
+                if !changed {
                     return Ok(false);
                 }
                 update_project_search(model, query);
@@ -2663,28 +2883,39 @@ fn apply_project_modal_input(
                 return Ok(false);
             }
             match input {
-                UiInput::NextItem | UiInput::PreviousItem => {
+                UiInput::NextFocus | UiInput::PreviousFocus => {
+                    if matches!(
+                        model.project_modal,
+                        Some(UiProjectModal::AddResource { .. })
+                    ) {
+                        let path = UiFormField::Project(UiProjectFormField::Path);
+                        let primary = UiFormField::Project(UiProjectFormField::Primary);
+                        model.form.focused = Some(if model.form.focused == Some(path) {
+                            primary
+                        } else {
+                            path
+                        });
+                    } else {
+                        cycle_project_field(model, matches!(input, UiInput::NextFocus));
+                    }
+                    Ok(true)
+                }
+                UiInput::NextItem | UiInput::PreviousItem
+                    if matches!(
+                        model.project_modal,
+                        Some(UiProjectModal::AddResource { .. })
+                    ) && model.form.focused
+                        == Some(UiFormField::Project(UiProjectFormField::Primary)) =>
+                {
                     if let Some(UiProjectModal::AddResource { make_primary, .. }) =
                         &mut model.project_modal
                     {
                         *make_primary = !*make_primary;
-                    } else {
-                        cycle_project_field(model, matches!(input, UiInput::NextItem));
                     }
                     Ok(true)
                 }
-                UiInput::Character(value) => {
-                    let mut encoded = [0_u8; 4];
-                    Ok(edit_project_field(
-                        model,
-                        Some(value.encode_utf8(&mut encoded)),
-                        false,
-                    ))
-                }
-                UiInput::Paste(value) => Ok(edit_project_field(model, Some(&value), false)),
-                UiInput::Backspace => Ok(edit_project_field(model, None, true)),
                 UiInput::Activate => submit_project_modal(model, effects),
-                _ => Ok(false),
+                _ => Ok(edit_project_field(model, &input)),
             }
         }
         Some(UiProjectModal::ConfirmRemoveResource {
@@ -2755,6 +2986,36 @@ fn apply_project_modal_input(
             mut force,
             submitting,
         }) => match input {
+            UiInput::NextFocus | UiInput::PreviousFocus if !submitting => {
+                let confirmation = UiFormField::Project(UiProjectFormField::Confirmation);
+                let force = UiFormField::Project(UiProjectFormField::Force);
+                model.form.focused = Some(if model.form.focused == Some(confirmation) {
+                    force
+                } else {
+                    confirmation
+                });
+                Ok(true)
+            }
+            UiInput::NextItem | UiInput::PreviousItem if !submitting => {
+                if model.form.focused == Some(UiFormField::Project(UiProjectFormField::Force)) {
+                    force = !force;
+                } else {
+                    confirmed = !confirmed;
+                }
+                model.project_modal = Some(UiProjectModal::ConfirmClose {
+                    project,
+                    checks,
+                    confirmed,
+                    force,
+                    submitting: false,
+                });
+                let field = model.form.focused;
+                if let Some(field) = field {
+                    model.form.errors.remove(&field);
+                }
+                model.last_failure = None;
+                Ok(true)
+            }
             UiInput::Character('c') if !submitting => {
                 confirmed = !confirmed;
                 model.project_modal = Some(UiProjectModal::ConfirmClose {
@@ -2764,6 +3025,10 @@ fn apply_project_modal_input(
                     force,
                     submitting: false,
                 });
+                model
+                    .form
+                    .errors
+                    .remove(&UiFormField::Project(UiProjectFormField::Confirmation));
                 model.last_failure = None;
                 Ok(true)
             }
@@ -2776,15 +3041,22 @@ fn apply_project_modal_input(
                     force,
                     submitting: false,
                 });
+                model
+                    .form
+                    .errors
+                    .remove(&UiFormField::Project(UiProjectFormField::Force));
                 model.last_failure = None;
                 Ok(true)
             }
             UiInput::Activate if !submitting => {
                 if !confirmed {
-                    model.last_failure = Some(UiFailure {
-                        code: "project_close_confirmation_required".to_owned(),
-                        action: "toggle confirmation before closing the project".to_owned(),
-                    });
+                    let field = UiFormField::Project(UiProjectFormField::Confirmation);
+                    model.form.focused = Some(field);
+                    model
+                        .form
+                        .errors
+                        .insert(field, "Confirm that the project should close".to_owned());
+                    model.last_failure = None;
                     return Ok(true);
                 }
                 let force_required = checks.iter().any(|check| {
@@ -2792,10 +3064,13 @@ fn apply_project_modal_input(
                         || !matches!(check.release.as_deref(), Some("clean" | "not_applicable"))
                 });
                 if force_required && !force {
-                    model.last_failure = Some(UiFailure {
-                        code: "project_close_force_required".to_owned(),
-                        action: "review dirty or unknown release evidence and explicitly authorize force".to_owned(),
-                    });
+                    let field = UiFormField::Project(UiProjectFormField::Force);
+                    model.form.focused = Some(field);
+                    model.form.errors.insert(
+                        field,
+                        "Review the release evidence and authorize the override".to_owned(),
+                    );
+                    model.last_failure = None;
                     return Ok(true);
                 }
                 model.project_modal = Some(UiProjectModal::ConfirmClose {
@@ -2851,18 +3126,8 @@ fn apply_project_modal_input(
                     adjust_activation_selection(model);
                     Ok(true)
                 }
-                UiInput::Character(value) => {
-                    let mut encoded = [0_u8; 4];
-                    Ok(edit_project_field(
-                        model,
-                        Some(value.encode_utf8(&mut encoded)),
-                        false,
-                    ))
-                }
-                UiInput::Paste(value) => Ok(edit_project_field(model, Some(&value), false)),
-                UiInput::Backspace => Ok(edit_project_field(model, None, true)),
                 UiInput::Activate => submit_project_modal(model, effects),
-                _ => Ok(false),
+                _ => Ok(edit_project_field(model, &input)),
             }
         }
         Some(UiProjectModal::Outcome { result }) => {
@@ -2959,8 +3224,14 @@ fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: boo
 
 fn cycle_activation_field(model: &mut UiModel, forward: bool) {
     let is_handoff = matches!(&model.project_modal, Some(UiProjectModal::Handoff { .. }));
-    let Some(UiProjectModal::Activate { field, .. } | UiProjectModal::Handoff { field, .. }) =
-        &mut model.project_modal
+    let Some(
+        UiProjectModal::Activate {
+            field, new_session, ..
+        }
+        | UiProjectModal::Handoff {
+            field, new_session, ..
+        },
+    ) = &mut model.project_modal
     else {
         return;
     };
@@ -2980,8 +3251,24 @@ fn cycle_activation_field(model: &mut UiModel, forward: bool) {
         UiProjectFormField::Confirmation,
         UiProjectFormField::Force,
     ];
-    let fields = if is_handoff {
+    let fields = if is_handoff && *new_session {
+        &[
+            UiProjectFormField::Agent,
+            UiProjectFormField::SessionMode,
+            UiProjectFormField::Provider,
+            UiProjectFormField::Directory,
+            UiProjectFormField::Confirmation,
+            UiProjectFormField::Force,
+        ][..]
+    } else if is_handoff {
         handoff.as_slice()
+    } else if *new_session {
+        &[
+            UiProjectFormField::Agent,
+            UiProjectFormField::SessionMode,
+            UiProjectFormField::Provider,
+            UiProjectFormField::Directory,
+        ][..]
     } else {
         activation.as_slice()
     };
@@ -3020,6 +3307,7 @@ fn adjust_activation_selection(model: &mut UiModel) {
         }
         _ => {}
     }
+    model.form.errors.remove(&UiFormField::Project(field));
     model.last_failure = None;
 }
 
@@ -3145,13 +3433,171 @@ fn toggle_activation_mode(model: &mut UiModel) {
     }
 }
 
-fn push_project_text(target: &mut String, value: &str) {
-    if target.len().saturating_add(value.len()) <= MAX_PROJECT_TEXT_BYTES {
-        target.push_str(value);
-    }
+fn previous_char_boundary(value: &str, cursor: usize) -> usize {
+    value[..cursor]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(index, _)| index)
 }
 
-fn edit_project_field(model: &mut UiModel, value: Option<&str>, backspace: bool) -> bool {
+fn next_char_boundary(value: &str, cursor: usize) -> usize {
+    value[cursor..]
+        .chars()
+        .next()
+        .map_or(value.len(), |character| cursor + character.len_utf8())
+}
+
+fn edit_text(
+    form: &mut UiFormState,
+    field: UiFormField,
+    target: &mut String,
+    edit: TextEdit<'_>,
+    max_bytes: usize,
+) -> bool {
+    let mut cursor = form
+        .cursors
+        .get(&field)
+        .copied()
+        .unwrap_or(target.len())
+        .min(target.len());
+    while !target.is_char_boundary(cursor) {
+        cursor = cursor.saturating_sub(1);
+    }
+    let handled = match edit {
+        TextEdit::Insert(value) => {
+            if target.len().saturating_add(value.len()) > max_bytes {
+                form.errors
+                    .insert(field, format!("Keep this field under {max_bytes} bytes"));
+                true
+            } else {
+                target.insert_str(cursor, value);
+                cursor += value.len();
+                form.errors.remove(&field);
+                true
+            }
+        }
+        TextEdit::Backspace if cursor > 0 => {
+            let previous = previous_char_boundary(target, cursor);
+            target.replace_range(previous..cursor, "");
+            cursor = previous;
+            form.errors.remove(&field);
+            true
+        }
+        TextEdit::Delete if cursor < target.len() => {
+            let next = next_char_boundary(target, cursor);
+            target.replace_range(cursor..next, "");
+            form.errors.remove(&field);
+            true
+        }
+        TextEdit::Left if cursor > 0 => {
+            cursor = previous_char_boundary(target, cursor);
+            true
+        }
+        TextEdit::Right if cursor < target.len() => {
+            cursor = next_char_boundary(target, cursor);
+            true
+        }
+        TextEdit::Home if cursor != 0 => {
+            cursor = 0;
+            true
+        }
+        TextEdit::End if cursor != target.len() => {
+            cursor = target.len();
+            true
+        }
+        TextEdit::Backspace
+        | TextEdit::Delete
+        | TextEdit::Left
+        | TextEdit::Right
+        | TextEdit::Home
+        | TextEdit::End => false,
+    };
+    form.cursors.insert(field, cursor);
+    handled
+}
+
+fn edit_text_input(
+    form: &mut UiFormState,
+    field: UiFormField,
+    target: &mut String,
+    input: &UiInput,
+    max_bytes: usize,
+) -> bool {
+    let mut encoded = [0_u8; 4];
+    let edit = match input {
+        UiInput::Character(value) => TextEdit::Insert(value.encode_utf8(&mut encoded)),
+        UiInput::Paste(value) => TextEdit::Insert(value),
+        UiInput::Backspace => TextEdit::Backspace,
+        UiInput::Delete => TextEdit::Delete,
+        UiInput::MoveCursorLeft => TextEdit::Left,
+        UiInput::MoveCursorRight => TextEdit::Right,
+        UiInput::MoveCursorHome => TextEdit::Home,
+        UiInput::MoveCursorEnd => TextEdit::End,
+        _ => return false,
+    };
+    edit_text(form, field, target, edit, max_bytes)
+}
+
+fn normalize_path_input(value: &str, home: Option<&str>) -> Result<String, &'static str> {
+    if value.is_empty() {
+        return Err("Enter a path");
+    }
+    let expanded = if value == "~" {
+        home.ok_or("Your home directory is unavailable; enter an absolute path")?
+            .to_owned()
+    } else if let Some(relative) = value.strip_prefix("~/") {
+        let home = home.ok_or("Your home directory is unavailable; enter an absolute path")?;
+        Path::new(home)
+            .join(relative)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        value.to_owned()
+    };
+    let path = Path::new(&expanded);
+    if !path.is_absolute() {
+        return Err("Use an absolute path, ~, or ~/…");
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+        .to_str()
+        .map(ToOwned::to_owned)
+        .ok_or("This path cannot be displayed as terminal text")
+}
+
+fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
+    if matches!(
+        model.project_modal,
+        Some(UiProjectModal::AddResource { .. })
+    ) && model.form.focused != Some(UiFormField::Project(UiProjectFormField::Path))
+    {
+        return false;
+    }
+    let field = match &model.project_modal {
+        Some(
+            UiProjectModal::CreateExisting { field, .. }
+            | UiProjectModal::CreateWorktree { field, .. }
+            | UiProjectModal::Activate { field, .. }
+            | UiProjectModal::Handoff { field, .. },
+        ) => UiFormField::Project(*field),
+        Some(UiProjectModal::SendInput { .. }) => UiFormField::Project(UiProjectFormField::Content),
+        Some(UiProjectModal::AddResource { .. } | UiProjectModal::ReplaceResource { .. }) => {
+            UiFormField::Project(UiProjectFormField::Path)
+        }
+        _ => return false,
+    };
+    let form = &mut model.form;
     let target = match &mut model.project_modal {
         Some(UiProjectModal::CreateExisting {
             name,
@@ -3207,15 +3653,7 @@ fn edit_project_field(model: &mut UiModel, value: Option<&str>, backspace: bool)
         },
         _ => return false,
     };
-    let changed = if backspace {
-        target.pop().is_some()
-    } else if let Some(value) = value {
-        let before = target.len();
-        push_project_text(target, value);
-        target.len() != before
-    } else {
-        false
-    };
+    let changed = edit_text_input(form, field, target, input, MAX_PROJECT_TEXT_BYTES);
     if changed {
         model.last_failure = None;
     }
@@ -3264,14 +3702,63 @@ fn cycle_project_field(model: &mut UiModel, forward: bool) {
 
 #[allow(clippy::too_many_lines)]
 fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
+    fn reject(model: &mut UiModel, field: UiProjectFormField, message: &str) -> bool {
+        if let Some(
+            UiProjectModal::CreateExisting {
+                field: selected, ..
+            }
+            | UiProjectModal::CreateWorktree {
+                field: selected, ..
+            }
+            | UiProjectModal::Activate {
+                field: selected, ..
+            }
+            | UiProjectModal::Handoff {
+                field: selected, ..
+            },
+        ) = &mut model.project_modal
+        {
+            *selected = field;
+        }
+        model
+            .form
+            .errors
+            .insert(UiFormField::Project(field), message.to_owned());
+        model.last_failure = None;
+        true
+    }
+
+    fn normalized_path(
+        model: &mut UiModel,
+        field: UiProjectFormField,
+        value: &str,
+    ) -> Option<String> {
+        match normalize_path_input(value, model.home_directory.as_deref()) {
+            Ok(path) => Some(path),
+            Err(message) => {
+                reject(model, field, message);
+                None
+            }
+        }
+    }
+
     let action = match model.project_modal.clone() {
         Some(UiProjectModal::CreateExisting {
             name, brief, path, ..
-        }) if !name.is_empty() && !path.is_empty() => UiProjectAction::CreateExisting {
-            name,
-            brief: (!brief.is_empty()).then_some(brief),
-            path,
-        },
+        }) => {
+            if name.is_empty() {
+                reject(model, UiProjectFormField::Name, "Enter a project name");
+                return Ok(true);
+            }
+            let Some(path) = normalized_path(model, UiProjectFormField::Path, &path) else {
+                return Ok(true);
+            };
+            UiProjectAction::CreateExisting {
+                name,
+                brief: (!brief.is_empty()).then_some(brief),
+                path,
+            }
+        }
         Some(UiProjectModal::CreateWorktree {
             name,
             brief,
@@ -3280,11 +3767,27 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
             branch,
             base,
             ..
-        }) if !name.is_empty()
-            && !source.is_empty()
-            && !destination.is_empty()
-            && !branch.is_empty() =>
-        {
+        }) => {
+            if name.is_empty() {
+                reject(model, UiProjectFormField::Name, "Enter a project name");
+                return Ok(true);
+            }
+            let Some(source) = normalized_path(model, UiProjectFormField::Source, &source) else {
+                return Ok(true);
+            };
+            let Some(destination) =
+                normalized_path(model, UiProjectFormField::Destination, &destination)
+            else {
+                return Ok(true);
+            };
+            if branch.is_empty() {
+                reject(
+                    model,
+                    UiProjectFormField::Branch,
+                    "Enter the new Git branch name",
+                );
+                return Ok(true);
+            }
             UiProjectAction::CreateWorktree {
                 name,
                 brief: (!brief.is_empty()).then_some(brief),
@@ -3296,45 +3799,87 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
         }
         Some(UiProjectModal::SendInput {
             project, content, ..
-        }) if !content.is_empty() => UiProjectAction::SendInput {
-            project_id: project.project_id,
-            content,
-        },
+        }) => {
+            if content.is_empty() {
+                reject(
+                    model,
+                    UiProjectFormField::Content,
+                    "Enter instructions for the agent",
+                );
+                return Ok(true);
+            }
+            UiProjectAction::SendInput {
+                project_id: project.project_id,
+                content,
+            }
+        }
         Some(UiProjectModal::AddResource {
             project,
             path,
             make_primary,
             ..
-        }) if !path.is_empty() => UiProjectAction::PreviewAddResource {
-            project_id: project.project_id,
-            path,
-            make_primary,
-        },
+        }) => {
+            let Some(path) = normalized_path(model, UiProjectFormField::Path, &path) else {
+                return Ok(true);
+            };
+            UiProjectAction::PreviewAddResource {
+                project_id: project.project_id,
+                path,
+                make_primary,
+            }
+        }
         Some(UiProjectModal::ReplaceResource {
             project,
             resource_id,
             path,
             ..
-        }) if !path.is_empty() => UiProjectAction::PreviewReplaceResource {
-            project_id: project.project_id,
-            resource_id,
-            path,
-        },
+        }) => {
+            let Some(path) = normalized_path(model, UiProjectFormField::Path, &path) else {
+                return Ok(true);
+            };
+            UiProjectAction::PreviewReplaceResource {
+                project_id: project.project_id,
+                resource_id,
+                path,
+            }
+        }
         Some(UiProjectModal::Activate {
             project,
-            agent_id: Some(agent_id),
+            agent_id,
             thread,
             new_session,
             provider,
             directory,
             ..
-        }) if !provider.is_empty()
-            && !directory.is_empty()
-            && (new_session
-                || thread
+        }) => {
+            let Some(agent_id) = agent_id else {
+                reject(
+                    model,
+                    UiProjectFormField::Agent,
+                    "Choose an available agent",
+                );
+                return Ok(true);
+            };
+            if provider.is_empty() {
+                reject(model, UiProjectFormField::Provider, "Choose a provider");
+                return Ok(true);
+            }
+            if !new_session
+                && thread
                     .as_ref()
-                    .is_some_and(|selected| selected.provider == provider)) =>
-        {
+                    .is_none_or(|selected| selected.provider != provider)
+            {
+                reject(
+                    model,
+                    UiProjectFormField::Thread,
+                    "Choose an exact conversation to resume",
+                );
+                return Ok(true);
+            }
+            let Some(directory) = normalized_path(model, UiProjectFormField::Directory, &directory)
+            else {
+                return Ok(true);
+            };
             UiProjectAction::Activate {
                 project_id: project.project_id,
                 agent_id,
@@ -3348,18 +3893,55 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
         }
         Some(UiProjectModal::Handoff {
             project,
-            agent_id: Some(agent_id),
-            thread: Some(thread),
+            agent_id,
+            thread,
             new_session,
             provider,
             directory,
-            confirmed: true,
+            confirmed,
             force_takeover,
             ..
-        }) if !provider.is_empty()
-            && !directory.is_empty()
-            && (new_session || thread.provider == provider) =>
-        {
+        }) => {
+            let Some(agent_id) = agent_id else {
+                reject(
+                    model,
+                    UiProjectFormField::Agent,
+                    "Choose the receiving agent",
+                );
+                return Ok(true);
+            };
+            let Some(thread) = thread else {
+                reject(
+                    model,
+                    UiProjectFormField::Thread,
+                    "Choose the project conversation to transfer",
+                );
+                return Ok(true);
+            };
+            if provider.is_empty() {
+                reject(model, UiProjectFormField::Provider, "Choose a provider");
+                return Ok(true);
+            }
+            if !new_session && thread.provider != provider {
+                reject(
+                    model,
+                    UiProjectFormField::Thread,
+                    "Choose a conversation from this provider",
+                );
+                return Ok(true);
+            }
+            let Some(directory) = normalized_path(model, UiProjectFormField::Directory, &directory)
+            else {
+                return Ok(true);
+            };
+            if !confirmed {
+                reject(
+                    model,
+                    UiProjectFormField::Confirmation,
+                    "Confirm that the project should move",
+                );
+                return Ok(true);
+            }
             UiProjectAction::Handoff {
                 project_id: project.project_id,
                 agent_id,
@@ -3369,55 +3951,6 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
                 launch_directory: directory,
                 force_takeover,
             }
-        }
-        Some(UiProjectModal::CreateExisting { .. }) => {
-            model.last_failure = Some(UiFailure {
-                code: "project_create_fields_empty".to_owned(),
-                action: "enter a project name and existing working-tree path".to_owned(),
-            });
-            return Ok(true);
-        }
-        Some(UiProjectModal::CreateWorktree { .. }) => {
-            model.last_failure = Some(UiFailure {
-                code: "project_worktree_fields_empty".to_owned(),
-                action: "enter name, source, destination, and branch".to_owned(),
-            });
-            return Ok(true);
-        }
-        Some(UiProjectModal::SendInput { .. }) => {
-            model.last_failure = Some(UiFailure {
-                code: "project_input_empty".to_owned(),
-                action: "enter project input before submitting".to_owned(),
-            });
-            return Ok(true);
-        }
-        Some(UiProjectModal::AddResource { .. } | UiProjectModal::ReplaceResource { .. }) => {
-            model.last_failure = Some(UiFailure {
-                code: "project_resource_path_empty".to_owned(),
-                action: "enter an absolute existing resource path".to_owned(),
-            });
-            return Ok(true);
-        }
-        Some(UiProjectModal::Activate { .. }) => {
-            model.last_failure = Some(UiFailure {
-                code: "project_activation_target_incomplete".to_owned(),
-                action:
-                    "select an agent and exact thread for resume, then enter provider and directory"
-                        .to_owned(),
-            });
-            return Ok(true);
-        }
-        Some(UiProjectModal::Handoff { confirmed, .. }) => {
-            model.last_failure = Some(UiFailure {
-                code: if confirmed {
-                    "project_handoff_target_incomplete"
-                } else {
-                    "project_handoff_confirmation_required"
-                }
-                .to_owned(),
-                action: "select an exact target and separately confirm the handoff".to_owned(),
-            });
-            return Ok(true);
         }
         _ => return Ok(false),
     };
@@ -3512,7 +4045,7 @@ fn submit_project_preview(
     Ok(true)
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn apply_agent_modal_input(
     model: &mut UiModel,
     input: UiInput,
@@ -3535,18 +4068,21 @@ fn apply_agent_modal_input(
     }
     match model.agent_modal.clone() {
         Some(UiAgentModal::Search { mut query }) => match input {
-            UiInput::Character(value) => {
-                push_bounded(&mut query, &value.to_string());
-                update_agent_search(model, query);
-                Ok(true)
-            }
-            UiInput::Paste(value) => {
-                push_bounded(&mut query, &value);
-                update_agent_search(model, query);
-                Ok(true)
-            }
-            UiInput::Backspace => {
-                if query.pop().is_none() {
+            UiInput::Character(_)
+            | UiInput::Paste(_)
+            | UiInput::Backspace
+            | UiInput::Delete
+            | UiInput::MoveCursorLeft
+            | UiInput::MoveCursorRight
+            | UiInput::MoveCursorHome
+            | UiInput::MoveCursorEnd => {
+                if !edit_text_input(
+                    &mut model.form,
+                    UiFormField::AgentSearch,
+                    &mut query,
+                    &input,
+                    MAX_AGENT_TEXT_BYTES,
+                ) {
                     return Ok(false);
                 }
                 update_agent_search(model, query);
@@ -3673,26 +4209,23 @@ fn apply_agent_modal_input(
             mut name,
             submitting,
         }) => match input {
-            UiInput::Character(value) if !submitting => {
-                push_bounded(&mut name, &value.to_string());
-                model.agent_modal = Some(UiAgentModal::Create {
-                    name,
-                    submitting: false,
-                });
-                model.last_failure = None;
-                Ok(true)
-            }
-            UiInput::Paste(value) if !submitting => {
-                push_bounded(&mut name, &value);
-                model.agent_modal = Some(UiAgentModal::Create {
-                    name,
-                    submitting: false,
-                });
-                model.last_failure = None;
-                Ok(true)
-            }
-            UiInput::Backspace if !submitting => {
-                if name.pop().is_none() {
+            UiInput::Character(_)
+            | UiInput::Paste(_)
+            | UiInput::Backspace
+            | UiInput::Delete
+            | UiInput::MoveCursorLeft
+            | UiInput::MoveCursorRight
+            | UiInput::MoveCursorHome
+            | UiInput::MoveCursorEnd
+                if !submitting =>
+            {
+                if !edit_text_input(
+                    &mut model.form,
+                    UiFormField::AgentName,
+                    &mut name,
+                    &input,
+                    MAX_AGENT_TEXT_BYTES,
+                ) {
                     return Ok(false);
                 }
                 model.agent_modal = Some(UiAgentModal::Create {
@@ -3703,10 +4236,25 @@ fn apply_agent_modal_input(
             }
             UiInput::Activate if !submitting => {
                 if name.is_empty() {
-                    model.last_failure = Some(UiFailure {
-                        code: "agent_name_empty".to_owned(),
-                        action: "enter a permanent lowercase agent name".to_owned(),
-                    });
+                    model.form.errors.insert(
+                        UiFormField::AgentName,
+                        "Enter a permanent lowercase agent name".to_owned(),
+                    );
+                    model.last_failure = None;
+                    return Ok(true);
+                }
+                let bytes = name.as_bytes();
+                if !bytes[0].is_ascii_lowercase()
+                    || !bytes.iter().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-'
+                    })
+                {
+                    model.form.errors.insert(
+                        UiFormField::AgentName,
+                        "Use lowercase letters, numbers, and hyphens; start with a letter"
+                            .to_owned(),
+                    );
+                    model.last_failure = None;
                     return Ok(true);
                 }
                 model.agent_modal = Some(UiAgentModal::Create {
@@ -3725,32 +4273,23 @@ fn apply_agent_modal_input(
             mut display_name,
             submitting,
         }) => match input {
-            UiInput::Character(value) if !submitting => {
-                push_bounded(&mut display_name, &value.to_string());
-                model.agent_modal = Some(UiAgentModal::RenameSession {
-                    agent_id,
-                    provider,
-                    session,
-                    display_name,
-                    submitting: false,
-                });
-                model.last_failure = None;
-                Ok(true)
-            }
-            UiInput::Paste(value) if !submitting => {
-                push_bounded(&mut display_name, &value);
-                model.agent_modal = Some(UiAgentModal::RenameSession {
-                    agent_id,
-                    provider,
-                    session,
-                    display_name,
-                    submitting: false,
-                });
-                model.last_failure = None;
-                Ok(true)
-            }
-            UiInput::Backspace if !submitting => {
-                if display_name.pop().is_none() {
+            UiInput::Character(_)
+            | UiInput::Paste(_)
+            | UiInput::Backspace
+            | UiInput::Delete
+            | UiInput::MoveCursorLeft
+            | UiInput::MoveCursorRight
+            | UiInput::MoveCursorHome
+            | UiInput::MoveCursorEnd
+                if !submitting =>
+            {
+                if !edit_text_input(
+                    &mut model.form,
+                    UiFormField::SessionName,
+                    &mut display_name,
+                    &input,
+                    MAX_AGENT_TEXT_BYTES,
+                ) {
                     return Ok(false);
                 }
                 model.agent_modal = Some(UiAgentModal::RenameSession {
@@ -3819,20 +4358,21 @@ fn apply_agent_modal_input(
             agent,
             mut provider,
         }) => match input {
-            UiInput::Character(value) => {
-                push_bounded(&mut provider, &value.to_string());
-                model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
-                model.last_failure = None;
-                Ok(true)
-            }
-            UiInput::Paste(value) => {
-                push_bounded(&mut provider, &value);
-                model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
-                model.last_failure = None;
-                Ok(true)
-            }
-            UiInput::Backspace => {
-                if provider.pop().is_none() {
+            UiInput::Character(_)
+            | UiInput::Paste(_)
+            | UiInput::Backspace
+            | UiInput::Delete
+            | UiInput::MoveCursorLeft
+            | UiInput::MoveCursorRight
+            | UiInput::MoveCursorHome
+            | UiInput::MoveCursorEnd => {
+                if !edit_text_input(
+                    &mut model.form,
+                    UiFormField::Provider,
+                    &mut provider,
+                    &input,
+                    MAX_AGENT_TEXT_BYTES,
+                ) {
                     return Ok(false);
                 }
                 model.agent_modal = Some(UiAgentModal::ManagedProvider { agent, provider });
@@ -3840,10 +4380,11 @@ fn apply_agent_modal_input(
             }
             UiInput::Activate => {
                 if provider.is_empty() {
-                    model.last_failure = Some(UiFailure {
-                        code: "managed_session_provider_empty".to_owned(),
-                        action: "enter an exact provider namespace".to_owned(),
-                    });
+                    model.form.errors.insert(
+                        UiFormField::Provider,
+                        "Choose an available provider".to_owned(),
+                    );
+                    model.last_failure = None;
                     return Ok(true);
                 }
                 let switching = agent.sessions.iter().any(|session| session.selected);
@@ -3897,12 +4438,6 @@ fn begin_managed_session(
         model.submit_managed_session(action, effects)?;
     }
     Ok(())
-}
-
-fn push_bounded(target: &mut String, value: &str) {
-    if target.len().saturating_add(value.len()) <= MAX_AGENT_TEXT_BYTES {
-        target.push_str(value);
-    }
 }
 
 fn update_agent_search(model: &mut UiModel, query: String) {
@@ -5144,8 +5679,9 @@ mod tests {
     use std::num::NonZeroU64;
 
     use super::{
-        UiEffect, UiError, UiEvent, UiHumanState, UiInput, UiModel, UiProject, UiProjectAction,
-        UiProjectModal, UiProjectResourceCheck, UiSize, UiSnapshot, apply_project_modal_input,
+        TextEdit, UiEffect, UiError, UiEvent, UiFormField, UiFormKind, UiFormState, UiHumanState,
+        UiInput, UiModel, UiProject, UiProjectAction, UiProjectModal, UiProjectResourceCheck,
+        UiSize, UiSnapshot, apply_project_modal_input, edit_text, normalize_path_input,
         refresh_project_modal, update,
     };
 
@@ -5255,6 +5791,40 @@ mod tests {
             assert!(confirmed);
             assert!(force);
         }
+    }
+
+    #[test]
+    fn path_input_expands_only_the_current_user_shorthand_and_normalizes_lexically() {
+        assert_eq!(
+            normalize_path_input("~/src/./hq/../project", Some("/Users/example")),
+            Ok("/Users/example/src/project".to_owned())
+        );
+        assert_eq!(
+            normalize_path_input("~someone/project", Some("/Users/example")),
+            Err("Use an absolute path, ~, or ~/…")
+        );
+        assert_eq!(
+            normalize_path_input("$HOME/project", Some("/Users/example")),
+            Err("Use an absolute path, ~, or ~/…")
+        );
+    }
+
+    #[test]
+    fn reusable_editor_rejects_an_oversized_paste_atomically() {
+        let mut form = UiFormState {
+            active: Some(UiFormKind::AgentCreate),
+            ..UiFormState::default()
+        };
+        let mut value = "é".to_owned();
+        assert!(edit_text(
+            &mut form,
+            UiFormField::AgentName,
+            &mut value,
+            TextEdit::Insert("abc"),
+            4,
+        ));
+        assert_eq!(value, "é");
+        assert!(form.errors.contains_key(&UiFormField::AgentName));
     }
 
     fn project(name: &str) -> UiProject {

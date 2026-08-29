@@ -11,10 +11,10 @@ use hq_tui::{
     UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectModal,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectFormField,
+    UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
+    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState,
+    UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1655,13 +1655,13 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
     model = update(model, UiEvent::Input(UiInput::Paste("existing".to_owned())))
         .expect("name")
         .model;
-    model = update(model, UiEvent::Input(UiInput::NextItem))
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
         .expect("brief")
         .model;
     model = update(model, UiEvent::Input(UiInput::Paste("brief".to_owned())))
         .expect("brief text")
         .model;
-    model = update(model, UiEvent::Input(UiInput::NextItem))
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
         .expect("path")
         .model;
     model = update(model, UiEvent::Input(UiInput::Paste("/repo".to_owned())))
@@ -1714,7 +1714,7 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
                 .model;
         }
         if index < 5 {
-            model = update(model, UiEvent::Input(UiInput::NextItem))
+            model = update(model, UiEvent::Input(UiInput::NextFocus))
                 .expect("next worktree field")
                 .model;
         }
@@ -1730,6 +1730,94 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
             destination: "/destination".to_owned(),
             branch: "feature".to_owned(),
             base: Some("main".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
+    let mut model =
+        loaded_projects_model(1, Vec::new()).with_home_directory(Some("/Users/example".to_owned()));
+    model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("existing form")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("ac".to_owned())))
+        .expect("name")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::MoveCursorLeft))
+        .expect("cursor left")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('é')))
+        .expect("unicode insertion")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("cursor home")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Delete))
+        .expect("delete at cursor")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::MoveCursorEnd))
+        .expect("cursor end")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Backspace))
+        .expect("unicode-safe backspace")
+        .model;
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::CreateExisting { name, .. }) if name == "é"
+    ));
+    model = update(model, UiEvent::Input(UiInput::MoveCursorHome))
+        .expect("cursor home before reconnect")
+        .model;
+    let invalidated = update(model, UiEvent::Invalidated { revision: 2 }).expect("reload");
+    let request = snapshot_effect(&invalidated.effects);
+    model = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: request,
+            snapshot: projects_snapshot(2, Vec::new()),
+        },
+    )
+    .expect("reconnected form")
+    .model;
+    model = update(model, UiEvent::Input(UiInput::Character('x')))
+        .expect("insert at retained cursor")
+        .model;
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::CreateExisting { name, .. }) if name == "xé"
+    ));
+
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("brief field")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::PreviousFocus))
+        .expect("name field")
+        .model;
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::CreateExisting {
+            field: UiProjectFormField::Name,
+            ..
+        })
+    ));
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("brief field")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("path field")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("~/repo".to_owned())))
+        .expect("home-relative path")
+        .model;
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit");
+    let (_, action) = project_effect(&submitted.effects);
+    assert_eq!(
+        action,
+        UiProjectAction::CreateExisting {
+            name: "xé".to_owned(),
+            brief: None,
+            path: "/Users/example/repo".to_owned(),
         }
     );
 }
@@ -1915,6 +2003,9 @@ fn resource_add_previews_authoritative_conflicts_before_mutation() {
         .model;
     model = update(model, UiEvent::Input(UiInput::Paste("/shared".to_owned())))
         .expect("path")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("primary field")
         .model;
     model = update(model, UiEvent::Input(UiInput::NextItem))
         .expect("primary toggle")
@@ -2140,7 +2231,7 @@ fn activation_target_and_edited_fields_survive_authoritative_reload() {
     model = update(model, UiEvent::Input(UiInput::Character('v')))
         .expect("activation")
         .model;
-    for _ in 0..3 {
+    for _ in 0..2 {
         model = update(model, UiEvent::Input(UiInput::NextFocus))
             .expect("provider field")
             .model;
@@ -2225,13 +2316,7 @@ fn handoff_requires_confirmation_and_keeps_force_separate() {
             .iter()
             .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
     );
-    let mut confirmed = blocked.model;
-    for _ in 0..5 {
-        confirmed = update(confirmed, UiEvent::Input(UiInput::NextFocus))
-            .expect("confirmation field")
-            .model;
-    }
-    confirmed = update(confirmed, UiEvent::Input(UiInput::NextItem))
+    let confirmed = update(blocked.model, UiEvent::Input(UiInput::NextItem))
         .expect("confirm")
         .model;
     let force_field = update(confirmed, UiEvent::Input(UiInput::NextFocus))

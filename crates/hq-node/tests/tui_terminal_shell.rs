@@ -35,13 +35,13 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
             KeyModifiers::SHIFT,
             UiInput::PreviousFocus,
         ),
-        (KeyCode::Right, KeyModifiers::NONE, UiInput::NextSection),
+        (KeyCode::Right, KeyModifiers::NONE, UiInput::MoveCursorRight),
         (
             KeyCode::Char('l'),
             KeyModifiers::NONE,
             UiInput::Character('l'),
         ),
-        (KeyCode::Left, KeyModifiers::NONE, UiInput::PreviousSection),
+        (KeyCode::Left, KeyModifiers::NONE, UiInput::MoveCursorLeft),
         (
             KeyCode::Char('h'),
             KeyModifiers::NONE,
@@ -63,6 +63,9 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
         (KeyCode::PageDown, KeyModifiers::NONE, UiInput::LoadMore),
         (KeyCode::Esc, KeyModifiers::NONE, UiInput::Escape),
         (KeyCode::Backspace, KeyModifiers::NONE, UiInput::Backspace),
+        (KeyCode::Delete, KeyModifiers::NONE, UiInput::Delete),
+        (KeyCode::Home, KeyModifiers::NONE, UiInput::MoveCursorHome),
+        (KeyCode::End, KeyModifiers::NONE, UiInput::MoveCursorEnd),
     ];
     for (code, modifiers, expected) in cases {
         assert_eq!(

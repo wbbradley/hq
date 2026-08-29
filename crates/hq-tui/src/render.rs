@@ -368,7 +368,13 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         UiProjectModal::Search { query } => (
             " Search projects ",
             vec![
-                Line::from(format!("Query: {query}")),
+                text_field_line(
+                    "Query",
+                    query,
+                    model.search_field_cursor(query, true),
+                    true,
+                    "",
+                ),
                 Line::default(),
                 Line::from("Type to match names or resource paths; technical IDs also work"),
                 Line::from("↑/↓ cycle matches · Enter inspect · Esc keep query"),
@@ -497,25 +503,52 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             path,
             field,
             submitting,
-        } => (
-            " Create project from folder ",
-            vec![
-                project_field_line("Name", name, *field == UiProjectFormField::Name),
-                project_field_line(
-                    "Brief (optional)",
-                    brief,
-                    *field == UiProjectFormField::Brief,
-                ),
-                project_field_line("Folder", path, *field == UiProjectFormField::Path),
-                Line::from("HQ will record this folder as a resource owned by the project."),
-                Line::default(),
-                Line::from(if *submitting {
-                    "Creating the project safely…"
-                } else {
-                    "↑/↓ field · Enter create · Esc cancel"
-                }),
-            ],
-        ),
+        } => {
+            let mut lines = Vec::new();
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Name",
+                name,
+                UiProjectFormField::Name,
+                *field == UiProjectFormField::Name,
+                true,
+                "Example: api-redesign",
+                false,
+            );
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Brief",
+                brief,
+                UiProjectFormField::Brief,
+                *field == UiProjectFormField::Brief,
+                false,
+                "A short description helps agents understand the project",
+                false,
+            );
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Path",
+                path,
+                UiProjectFormField::Path,
+                *field == UiProjectFormField::Path,
+                true,
+                "Use an absolute path, ~, or ~/…",
+                true,
+            );
+            lines.push(Line::from(
+                "HQ will record this folder as a resource owned by the project.",
+            ));
+            lines.push(Line::default());
+            lines.push(Line::from(if *submitting {
+                "Creating the project safely…"
+            } else {
+                "Tab/Shift-Tab field · Enter create · Esc cancel"
+            }));
+            (" Create project from folder ", lines)
+        }
         UiProjectModal::CreateWorktree {
             name,
             brief,
@@ -525,90 +558,178 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             base,
             field,
             submitting,
-        } => (
-            " Create an isolated Git worktree ",
-            vec![
-                project_field_line("Name", name, *field == UiProjectFormField::Name),
-                project_field_line(
-                    "Brief (optional)",
-                    brief,
-                    *field == UiProjectFormField::Brief,
-                ),
-                project_field_line("Source", source, *field == UiProjectFormField::Source),
-                project_field_line(
-                    "Destination",
-                    destination,
-                    *field == UiProjectFormField::Destination,
-                ),
-                project_field_line("Branch", branch, *field == UiProjectFormField::Branch),
-                project_field_line("Base", base, *field == UiProjectFormField::Base),
-                Line::from("HQ creates a separate branch and folder; you keep normal Git control."),
-                Line::default(),
-                Line::from(if *submitting {
-                    "Creating the worktree; external files will be kept if setup is interrupted…"
-                } else {
-                    "↑/↓ field · Enter create · Esc cancel"
-                }),
-            ],
-        ),
+        } => {
+            let mut lines = Vec::new();
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Name",
+                name,
+                UiProjectFormField::Name,
+                *field == UiProjectFormField::Name,
+                true,
+                "Example: api-redesign",
+                false,
+            );
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Brief",
+                brief,
+                UiProjectFormField::Brief,
+                *field == UiProjectFormField::Brief,
+                false,
+                "Optional project context",
+                false,
+            );
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Source",
+                source,
+                UiProjectFormField::Source,
+                *field == UiProjectFormField::Source,
+                true,
+                "Existing Git working tree",
+                true,
+            );
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Destination",
+                destination,
+                UiProjectFormField::Destination,
+                *field == UiProjectFormField::Destination,
+                true,
+                "New worktree folder",
+                true,
+            );
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Branch",
+                branch,
+                UiProjectFormField::Branch,
+                *field == UiProjectFormField::Branch,
+                true,
+                "Example: feature/api-redesign",
+                false,
+            );
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Base",
+                base,
+                UiProjectFormField::Base,
+                *field == UiProjectFormField::Base,
+                false,
+                "Optional starting revision, such as main",
+                false,
+            );
+            lines.push(Line::from(
+                "HQ creates a separate branch and folder; you keep normal Git control.",
+            ));
+            lines.push(Line::from(if *submitting {
+                "Creating the worktree; external files will be kept if setup is interrupted…"
+            } else {
+                "Tab/Shift-Tab field · Enter create · Esc cancel"
+            }));
+            (" Create an isolated Git worktree ", lines)
+        }
         UiProjectModal::SendInput {
             project,
             content,
             submitting,
-        } => (
-            " Send instructions to this project ",
-            vec![
-                Line::from(format!("Project: {}", project.name)),
-                project_field_line("Instructions", content, true),
-                Line::from("The assigned agent will receive these instructions once."),
-                Line::default(),
-                Line::from(if *submitting {
-                    "Sending instructions…"
-                } else {
-                    "Enter send · Esc cancel"
-                }),
-            ],
-        ),
+        } => {
+            let mut lines = vec![Line::from(format!("Project: {}", project.name))];
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Instructions",
+                content,
+                UiProjectFormField::Content,
+                true,
+                true,
+                "Describe the outcome you want the assigned agent to achieve",
+                false,
+            );
+            lines.push(Line::from(
+                "The assigned agent will receive these instructions once.",
+            ));
+            lines.push(Line::default());
+            lines.push(Line::from(if *submitting {
+                "Sending instructions…"
+            } else {
+                "Enter send · Esc cancel"
+            }));
+            (" Send instructions to this project ", lines)
+        }
         UiProjectModal::AddResource {
             project,
             path,
             make_primary,
             submitting,
-        } => (
-            " Add a folder or resource ",
-            vec![
-                Line::from(format!("Project: {}", project.name)),
-                project_field_line("Path", path, true),
-                Line::from(format!("Use as primary: {}", yes_no(*make_primary))),
-                Line::from("HQ checks project ownership before saving this path."),
-                Line::default(),
-                Line::from(if *submitting {
-                    "Checking whether another project owns this path…"
-                } else {
-                    "↑/↓ toggle primary · Enter preview · Esc cancel"
-                }),
-            ],
-        ),
+        } => {
+            let mut lines = vec![Line::from(format!("Project: {}", project.name))];
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Path",
+                path,
+                UiProjectFormField::Path,
+                model.project_field_is_focused(UiProjectFormField::Path),
+                true,
+                "Use an absolute path, ~, or ~/…",
+                true,
+            );
+            lines.push(project_choice_line(
+                "Use as primary",
+                yes_no(*make_primary),
+                model.project_field_is_focused(UiProjectFormField::Primary),
+            ));
+            lines.push(Line::from(
+                "HQ checks project ownership before saving this path.",
+            ));
+            lines.push(Line::default());
+            lines.push(Line::from(if *submitting {
+                "Checking whether another project owns this path…"
+            } else {
+                "Tab/Shift-Tab field · ↑/↓ change choice · Enter preview · Esc cancel"
+            }));
+            (" Add a folder or resource ", lines)
+        }
         UiProjectModal::ReplaceResource {
             project,
             resource_id,
             path,
             submitting,
-        } => (
-            " Change a folder or resource ",
-            vec![
+        } => {
+            let mut lines = vec![
                 Line::from(format!("Project: {}", project.name)),
                 Line::from(format!("Replace: {}", short_identity(*resource_id))),
-                project_field_line("Path", path, true),
-                Line::from("HQ checks project ownership before replacing the recorded path."),
-                Line::default(),
-                Line::from(if *submitting {
-                    "Checking whether another project owns this path…"
-                } else {
-                    "Enter preview · Esc cancel"
-                }),
-            ],
-        ),
+            ];
+            push_project_text_field(
+                &mut lines,
+                model,
+                "Path",
+                path,
+                UiProjectFormField::Path,
+                true,
+                true,
+                "Use an absolute path, ~, or ~/…",
+                true,
+            );
+            lines.push(Line::from(
+                "HQ checks project ownership before replacing the recorded path.",
+            ));
+            lines.push(Line::default());
+            lines.push(Line::from(if *submitting {
+                "Checking whether another project owns this path…"
+            } else {
+                "Enter preview · Esc cancel"
+            }));
+            (" Change a folder or resource ", lines)
+        }
         UiProjectModal::ConfirmRemoveResource {
             project,
             resource_id,
@@ -676,6 +797,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 None,
                 model.viewport().width >= WIDE_WIDTH,
                 *submitting,
+                model,
             ),
         ),
         UiProjectModal::Handoff {
@@ -704,6 +826,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 Some((*confirmed, *force_takeover)),
                 model.viewport().width >= WIDE_WIDTH,
                 *submitting,
+                model,
             ),
         ),
         UiProjectModal::ConfirmClose {
@@ -749,18 +872,35 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 }
             }
             lines.push(Line::default());
-            lines.push(Line::from(format!(
-                "I understand: {} · override safety check: {}",
+            lines.push(project_choice_line(
+                "I understand",
                 yes_no(*confirmed),
-                yes_no(*force)
-            )));
+                model.project_field_is_focused(UiProjectFormField::Confirmation),
+            ));
+            if let Some(error) = model.project_field_error(UiProjectFormField::Confirmation) {
+                lines.push(Line::styled(
+                    format!("  {error}"),
+                    Style::new().fg(Color::Red),
+                ));
+            }
+            lines.push(project_choice_line(
+                "Override safety check",
+                yes_no(*force),
+                model.project_field_is_focused(UiProjectFormField::Force),
+            ));
+            if let Some(error) = model.project_field_error(UiProjectFormField::Force) {
+                lines.push(Line::styled(
+                    format!("  {error}"),
+                    Style::new().fg(Color::Red),
+                ));
+            }
             lines.push(Line::from(
                 "Closing keeps folders, files, worktrees, and branches on disk.",
             ));
             lines.push(Line::from(if *submitting {
                 "Closing the project safely…"
             } else {
-                "c confirm · f authorize override · Enter close · Esc cancel"
+                "Tab/Shift-Tab field · ↑/↓ change choice · Enter close · Esc cancel"
             }));
             (" Confirm project close ", lines)
         }
@@ -938,18 +1078,87 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
     );
 }
 
-fn project_field_line<'value>(label: &str, value: &'value str, selected: bool) -> Line<'value> {
-    Line::styled(
-        format!("{} {label}: {value}", if selected { '›' } else { ' ' }),
-        if selected {
-            selected_style(true)
-        } else {
-            Style::new()
-        },
+fn text_field_line(
+    label: &str,
+    value: &str,
+    cursor: usize,
+    selected: bool,
+    requirement: &str,
+) -> Line<'static> {
+    let cursor = cursor.min(value.len());
+    let (left, right) = value.split_at(cursor);
+    let style = if selected {
+        selected_style(true)
+    } else {
+        Style::new()
+    };
+    let mut spans = vec![Span::styled(
+        format!("{} {label}: {left}", if selected { '›' } else { ' ' }),
+        style,
+    )];
+    if selected {
+        spans.push(Span::styled(
+            "│",
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::styled(format!("{right} {requirement}"), style));
+    Line::from(spans)
+}
+
+fn project_text_field_line(
+    model: &UiModel,
+    label: &str,
+    value: &str,
+    field: UiProjectFormField,
+    selected: bool,
+    required: bool,
+) -> Line<'static> {
+    text_field_line(
+        label,
+        value,
+        model.project_field_cursor(field, value),
+        selected,
+        if required { "(required)" } else { "(optional)" },
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+fn push_project_text_field(
+    lines: &mut Vec<Line<'static>>,
+    model: &UiModel,
+    label: &str,
+    value: &str,
+    field: UiProjectFormField,
+    selected: bool,
+    required: bool,
+    guidance: &str,
+    path: bool,
+) {
+    lines.push(project_text_field_line(
+        model, label, value, field, selected, required,
+    ));
+    if let Some(error) = model.project_field_error(field) {
+        lines.push(Line::styled(
+            format!("  {error}"),
+            Style::new().fg(Color::Red),
+        ));
+    } else if selected {
+        lines.push(Line::styled(
+            format!("  {guidance}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    if path && selected && !value.is_empty() {
+        let preview = match model.normalized_path_preview(value) {
+            Ok(path) => format!("  Will use: {path}"),
+            Err(error) => format!("  {error}"),
+        };
+        lines.push(Line::styled(preview, Style::new().fg(Color::DarkGray)));
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn project_activation_lines<'value>(
     project: &'value crate::UiProject,
     agents: &'value [UiAgent],
@@ -962,6 +1171,7 @@ fn project_activation_lines<'value>(
     handoff: Option<(bool, bool)>,
     wide: bool,
     submitting: bool,
+    model: &UiModel,
 ) -> Vec<Line<'value>> {
     let agent = agent_id
         .and_then(|id| agents.iter().find(|agent| agent.agent_id == id))
@@ -991,6 +1201,12 @@ fn project_activation_lines<'value>(
         agent,
         field == UiProjectFormField::Agent,
     ));
+    if let Some(error) = model.project_field_error(UiProjectFormField::Agent) {
+        lines.push(Line::styled(
+            format!("  {error}"),
+            Style::new().fg(Color::Red),
+        ));
+    }
     lines.push(project_choice_line(
         "Conversation",
         if new_session {
@@ -1012,23 +1228,59 @@ fn project_activation_lines<'value>(
             &thread_label,
             field == UiProjectFormField::Thread,
         ));
+        if let Some(error) = model.project_field_error(UiProjectFormField::Thread) {
+            lines.push(Line::styled(
+                format!("  {error}"),
+                Style::new().fg(Color::Red),
+            ));
+        }
     }
-    lines.push(project_field_line(
+    lines.push(project_text_field_line(
+        model,
         "Agent service",
         provider,
+        UiProjectFormField::Provider,
         field == UiProjectFormField::Provider,
+        true,
     ));
-    lines.push(project_field_line(
+    if let Some(error) = model.project_field_error(UiProjectFormField::Provider) {
+        lines.push(Line::styled(
+            format!("  {error}"),
+            Style::new().fg(Color::Red),
+        ));
+    }
+    lines.push(project_text_field_line(
+        model,
         "Working folder",
         directory,
+        UiProjectFormField::Directory,
         field == UiProjectFormField::Directory,
+        true,
     ));
+    if let Some(error) = model.project_field_error(UiProjectFormField::Directory) {
+        lines.push(Line::styled(
+            format!("  {error}"),
+            Style::new().fg(Color::Red),
+        ));
+    } else if field == UiProjectFormField::Directory && !directory.is_empty() {
+        let preview = match model.normalized_path_preview(directory) {
+            Ok(path) => format!("  Will use: {path}"),
+            Err(error) => format!("  {error}"),
+        };
+        lines.push(Line::styled(preview, Style::new().fg(Color::DarkGray)));
+    }
     if let Some((confirmed, force)) = handoff {
         lines.push(project_choice_line(
             "I understand",
             yes_no(confirmed),
             field == UiProjectFormField::Confirmation,
         ));
+        if let Some(error) = model.project_field_error(UiProjectFormField::Confirmation) {
+            lines.push(Line::styled(
+                format!("  {error}"),
+                Style::new().fg(Color::Red),
+            ));
+        }
         lines.push(project_choice_line(
             "Override safety check",
             yes_no(force),
@@ -1180,7 +1432,13 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
         UiAgentModal::Search { query } => (
             " Search agents ",
             vec![
-                Line::from(format!("Query: {query}")),
+                text_field_line(
+                    "Query",
+                    query,
+                    model.search_field_cursor(query, false),
+                    true,
+                    "",
+                ),
                 Line::default(),
                 Line::from("Type to match agent or conversation names; technical IDs also work"),
                 Line::from("↑/↓ cycle matches · Enter inspect · Esc keep query"),
@@ -1245,20 +1503,35 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             }));
             (" Agent details ", lines)
         }
-        UiAgentModal::Create { name, submitting } => (
-            " Create agent ",
-            vec![
-                Line::from(format!("Name: {name}")),
-                Line::from("Use a permanent lowercase name without spaces."),
-                Line::from("You can assign this agent to projects and message it directly."),
-                Line::default(),
-                Line::from(if *submitting {
-                    "Creating the agent…"
-                } else {
-                    "Enter create · Esc cancel"
-                }),
-            ],
-        ),
+        UiAgentModal::Create { name, submitting } => {
+            let mut lines = vec![text_field_line(
+                "Name",
+                name,
+                model.agent_field_cursor(name),
+                true,
+                "(required)",
+            )];
+            if let Some(error) = model.agent_field_error() {
+                lines.push(Line::styled(
+                    format!("  {error}"),
+                    Style::new().fg(Color::Red),
+                ));
+            } else {
+                lines.push(Line::from(
+                    "Use a permanent lowercase name without spaces, such as reviewer.",
+                ));
+            }
+            lines.push(Line::from(
+                "You can assign this agent to projects and message it directly.",
+            ));
+            lines.push(Line::default());
+            lines.push(Line::from(if *submitting {
+                "Creating the agent…"
+            } else {
+                "Enter create · Esc cancel"
+            }));
+            (" Create agent ", lines)
+        }
         UiAgentModal::RenameSession {
             provider,
             session,
@@ -1269,13 +1542,19 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             " Name saved conversation ",
             vec![
                 Line::from(format!("Technical conversation: {provider}/{session}")),
-                Line::from(format!("Name: {display_name}")),
-                Line::from("This optional name helps you recognize the conversation later."),
+                text_field_line(
+                    "Name",
+                    display_name,
+                    model.session_field_cursor(display_name),
+                    true,
+                    "(optional)",
+                ),
+                Line::from("A recognizable name, such as release-review; leave empty to clear."),
                 Line::default(),
                 Line::from(if *submitting {
                     "Saving the conversation name…"
                 } else {
-                    "Enter save (empty clears) · Esc cancel"
+                    "Enter save · Esc cancel"
                 }),
             ],
         ),
@@ -1309,8 +1588,19 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
         UiAgentModal::ManagedProvider { provider, .. } => (
             " Start an agent conversation ",
             vec![
-                Line::from(format!("Agent service: {provider}")),
+                text_field_line(
+                    "Agent service",
+                    provider,
+                    model.provider_field_cursor(provider),
+                    true,
+                    "(required)",
+                ),
                 Line::from("This service will run the agent's conversation."),
+                Line::from(
+                    model
+                        .provider_field_error()
+                        .unwrap_or("Choose one of the services available on this device."),
+                ),
                 Line::default(),
                 Line::from("Enter continue · Esc cancel"),
             ],
@@ -1588,16 +1878,21 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 vertical: 2,
             });
             frame.render_widget(
-                Block::bordered().title(format!(
-                    " {} · {status} · {}/{} bytes ",
-                    draft_target_label(&draft.target),
-                    draft.content.len(),
-                    MAX_DRAFT_BYTES
-                )),
+                Block::bordered()
+                    .border_style(Style::new().fg(Color::Cyan))
+                    .title(format!(
+                        " {} · {status} · Message required · {}/{} bytes ",
+                        draft_target_label(&draft.target),
+                        draft.content.len(),
+                        MAX_DRAFT_BYTES
+                    )),
                 area,
             );
+            let cursor = model.message_field_cursor(&draft.content);
+            let mut content = draft.content.clone();
+            content.insert(cursor, '│');
             frame.render_widget(
-                Paragraph::new(draft.content.as_str()).wrap(Wrap { trim: false }),
+                Paragraph::new(content).wrap(Wrap { trim: false }),
                 text_area,
             );
             let hint = Rect {
@@ -1606,7 +1901,17 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 x: area.x + 2,
                 width: area.width.saturating_sub(4),
             };
-            frame.render_widget(Paragraph::new("Enter submit · Esc save and close"), hint);
+            let hint_text = model
+                .message_field_error()
+                .unwrap_or("Enter submit · Esc save and close");
+            frame.render_widget(
+                Paragraph::new(hint_text).style(if model.message_field_error().is_some() {
+                    Style::new().fg(Color::Red)
+                } else {
+                    Style::new()
+                }),
+                hint,
+            );
         }
         UiMailboxModal::Confirm { action } => {
             let (label, explanation) = match action {
