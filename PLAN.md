@@ -54,12 +54,16 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Add desired-resource inspection and mutation commands** — Expose resource add,
-  remove, replace, primary selection, and check through the project and read-only inspection ports.
+- **[cli/high] Add desired-resource inspection and check commands** — Expose complete desired-resource
+  inspection and fresh health/release checks through the project and read-only inspection ports.
   Identify display/canonical locators at the boundary, preserve stable resource identities, and
-  show health, conflicting projects, dirty/unknown release gates, and explicit force semantics.
-  Test symlink/path changes, overlap conflicts, stale heads, response loss, restart, and no external
-  deletion or mutation on close/archive/remove.
+  show primary selection, health, conflicting projects, and dirty/unknown release gates. Test
+  symlink/path changes, overlap conflicts, restart, and real foreground execution.
+
+- **[cli/high] Add desired-resource mutation commands** — Expose resource add, remove, replace, and
+  primary selection through the stable project-command path. Preserve stable resource identities,
+  exact expected heads, and explicit force semantics. Test overlap conflicts, stale heads, response
+  loss, restart, and no external deletion or mutation on close, archive, or remove.
 
 - **[cli/high] Add recoverable worktree provisioning and audit non-TUI parity** — Expose exact Git
   worktree provisioning with destination reservation, source/base/branch validation, optional

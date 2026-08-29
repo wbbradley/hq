@@ -23,11 +23,12 @@ use hq_local_api::protocol::v1::{
     ProjectCommandRequestDto, ProjectCreationRequestDto, RelayAccessDto, RelayAuthenticationDto,
     RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request,
     RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceSchemeDto, ResponseEnvelope,
-    ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto, SnapshotItem,
-    StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement, SubscriptionRequestDto,
-    SynchronizationRequestDto, V1, ValueError, VersionRange, VersionRejected, WireMessage,
-    WorktreeProvisioningRequestDto, agent_session_request_digest, negotiate,
+    ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
+    ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto,
+    SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement,
+    SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
+    VersionRejected, WireMessage, WorktreeProvisioningRequestDto, agent_session_request_digest,
+    negotiate,
 };
 use hq_local_api::{project_command_from_v1, project_command_request_to_v1};
 
@@ -591,6 +592,7 @@ fn every_success_and_error_response_family_interoperates() {
             ResourceInspectionResultDto::new(
                 ResourceHealthDto::Healthy,
                 Some(locator()),
+                ResourceReleaseStateDto::Clean,
                 Some("clean".to_owned()),
                 1_700_000_000_000,
             )

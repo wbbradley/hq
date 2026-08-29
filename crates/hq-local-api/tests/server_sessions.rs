@@ -10,8 +10,8 @@ use hq_application::{
     DomainSnapshot, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation,
     InspectResource, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
     ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
-    WakeDisposition,
+    ResourceInspectionResult, ResourceReleaseState, SubscriptionRequest, SubscriptionTopic,
+    SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{
     BoundedSet, CausalReferences, CommandId, EncryptionPublicKey, FactId, FactScope,
@@ -207,6 +207,7 @@ impl InspectResource for Ports {
         Ok(EffectOutcome::Accepted(ResourceInspectionResult {
             health: ResourceHealth::Healthy,
             observed_canonical: None,
+            release: ResourceReleaseState::Clean,
             details: None,
             checked_at: Timestamp::from_unix_millis(8),
         }))

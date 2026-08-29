@@ -508,10 +508,25 @@ pub struct ResourceInspectionResult {
     pub health: ResourceHealth,
     /// Current canonical identity when it could be observed.
     pub observed_canonical: Option<ResourceLocator>,
+    /// Fresh read-only release classification.
+    pub release: ResourceReleaseState,
     /// Bounded inert details.
     pub details: Option<ContentText>,
     /// Explicit observation time.
     pub checked_at: Timestamp,
+}
+
+/// Closed resource-release classification independent of adapter details.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceReleaseState {
+    /// The resource may be released without force.
+    Clean,
+    /// The resource contains changes and requires force.
+    Dirty,
+    /// Safety could not be established and force is required.
+    Unknown,
+    /// The resource kind has no applicable release check.
+    NotApplicable,
 }
 
 /// External resource observation capability.

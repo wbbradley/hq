@@ -14,8 +14,9 @@ use crate::protocol::v1::{
     RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto,
     RemoteCommandProgressDto, RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto,
     ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
-    ResourceSchemeDto, RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto,
-    StateRepairReportDto, SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
+    ResourceReleaseStateDto, ResourceSchemeDto, RuntimeObservationDto, SessionControlDto,
+    SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionRequestDto,
+    SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentLaunchContext, AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest,
@@ -945,6 +946,14 @@ pub(crate) fn resource_effect_to_v1(
     effect_to_v1(outcome, |result| ResourceInspectionResultDto {
         health: resource_health_to_v1(result.health),
         observed_canonical: result.observed_canonical.as_ref().map(locator_to_v1),
+        release: match result.release {
+            hq_application::ResourceReleaseState::Clean => ResourceReleaseStateDto::Clean,
+            hq_application::ResourceReleaseState::Dirty => ResourceReleaseStateDto::Dirty,
+            hq_application::ResourceReleaseState::Unknown => ResourceReleaseStateDto::Unknown,
+            hq_application::ResourceReleaseState::NotApplicable => {
+                ResourceReleaseStateDto::NotApplicable
+            }
+        },
         details: result
             .details
             .as_ref()

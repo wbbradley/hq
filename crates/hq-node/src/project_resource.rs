@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use hq_application::{
     ApplicationError, EffectOutcome, EffectRequest, InspectResource, ResourceInspectionRequest,
-    ResourceInspectionResult,
+    ResourceInspectionResult, ResourceReleaseState,
 };
 use hq_domain::{
     DomainError, ErrorCategory, ErrorCode, InstallationId, ProjectResource, RepositoryContext,
@@ -149,9 +149,26 @@ impl InspectResource for ProjectResourceAdapter {
                 health: ResourceHealth::Unknown,
             },
         );
+        let release = self.paths.assess_release(
+            self.home,
+            &ProjectResource {
+                resource_id: request.body.resource_id,
+                display_locator: request.body.display_locator.clone(),
+                canonical_locator: request.body.canonical_locator.clone(),
+                health: inspection.health,
+            },
+        );
         Ok(EffectOutcome::Accepted(ResourceInspectionResult {
             health: inspection.health,
             observed_canonical: inspection.observed_canonical,
+            release: match release.state {
+                hq_resources::PathReleaseState::Clean => ResourceReleaseState::Clean,
+                hq_resources::PathReleaseState::Dirty => ResourceReleaseState::Dirty,
+                hq_resources::PathReleaseState::Unknown => ResourceReleaseState::Unknown,
+                hq_resources::PathReleaseState::NotApplicable => {
+                    ResourceReleaseState::NotApplicable
+                }
+            },
             details: None,
             checked_at: request.issued_at,
         }))

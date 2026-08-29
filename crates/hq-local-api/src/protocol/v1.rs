@@ -2044,10 +2044,26 @@ pub struct ResourceInspectionResultDto {
     pub health: ResourceHealthDto,
     /// Current canonical identity when it could be observed.
     pub observed_canonical: Option<ResourceLocatorDto>,
+    /// Fresh clean, dirty, unknown, or not-applicable release classification.
+    pub release: ResourceReleaseStateDto,
     /// Optional bounded inert observation detail.
     pub details: Option<String>,
     /// Explicit observation time.
     pub checked_at_unix_millis: i64,
+}
+
+/// Closed resource-release classification.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceReleaseStateDto {
+    /// Safe to release without force.
+    Clean,
+    /// Contains changes and requires force.
+    Dirty,
+    /// Safety could not be established.
+    Unknown,
+    /// No release assessment applies.
+    NotApplicable,
 }
 
 impl ResourceInspectionResultDto {
@@ -2055,6 +2071,7 @@ impl ResourceInspectionResultDto {
     pub fn new(
         health: ResourceHealthDto,
         observed_canonical: Option<ResourceLocatorDto>,
+        release: ResourceReleaseStateDto,
         details: Option<String>,
         checked_at_unix_millis: i64,
     ) -> Result<Self, ValueError> {
@@ -2064,6 +2081,7 @@ impl ResourceInspectionResultDto {
         Ok(Self {
             health,
             observed_canonical,
+            release,
             details,
             checked_at_unix_millis,
         })

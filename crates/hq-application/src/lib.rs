@@ -58,8 +58,8 @@ pub use ports::{
     MAX_LAUNCH_ENVIRONMENT_NAME_BYTES, MAX_LAUNCH_ENVIRONMENT_VALUE_BYTES,
     MAX_RELAY_STATUS_POLICIES, MAX_SUBSCRIPTION_TOPICS, ObserveRevisions, PublishWake, QueryDomain,
     RelayAccess, RelayAuthentication, RelayConfiguration, RelayPolicyStatus, RelayStatus,
-    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
-    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    ResourceInspectionRequest, ResourceInspectionResult, ResourceReleaseState, SessionControl,
+    StateHealth, StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
     WakeDisposition,
 };
 pub use project::{

@@ -10,7 +10,7 @@ use std::{
 use hq_application::{
     ApplicationError, ControlProjects, EffectOutcome, EffectRequest, InspectResource,
     ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage,
-    ResourceInspectionRequest, ResourceInspectionResult,
+    ResourceInspectionRequest, ResourceInspectionResult, ResourceReleaseState,
 };
 use hq_domain::{
     AccountId, CommandDigest, CommandId, FactId, InstallationId, OperationId, ProjectId, Timestamp,
@@ -78,6 +78,7 @@ impl InspectResource for FakeResources {
         Ok(EffectOutcome::Accepted(ResourceInspectionResult {
             health: hq_domain::ResourceHealth::Healthy,
             observed_canonical: Some(request.body.canonical_locator.clone()),
+            release: ResourceReleaseState::Clean,
             details: None,
             checked_at: request.issued_at,
         }))
