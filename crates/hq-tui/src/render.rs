@@ -5,12 +5,13 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::{
     UiActivityStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind, UiFocus,
-    UiMessageState, UiModel, UiRow, UiRowState, UiSection, UiTechnicalSection,
+    UiMailboxAction, UiMailboxDraftTarget, UiMailboxModal, UiMessageState, UiModel, UiRow,
+    UiRowState, UiSection, UiTechnicalSection,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -40,6 +41,133 @@ pub fn render(frame: &mut Frame<'_>, model: &UiModel) {
         render_compact_content(frame, model, content);
     }
     render_footer(frame, model, footer);
+    render_mailbox_modal(frame, model, content);
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+    let Some(interaction) = model.mailbox_modal() else {
+        return;
+    };
+    let width = available.width.saturating_sub(4).clamp(1, 76);
+    let height = available.height.saturating_sub(2).clamp(1, 18);
+    let area = Rect {
+        x: available.x + available.width.saturating_sub(width) / 2,
+        y: available.y + available.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    match interaction {
+        UiMailboxModal::SelectDirect { targets, selected } => {
+            let mut lines = vec![Line::styled(
+                "Choose a resolved named agent",
+                Style::new().fg(Color::Cyan),
+            )];
+            lines.push(Line::default());
+            for target in targets {
+                let is_selected = *selected == Some((target.installation_id, target.mailbox_id));
+                lines.push(Line::styled(
+                    format!(" {} {}", if is_selected { '›' } else { ' ' }, target.label),
+                    if is_selected {
+                        selected_style(true)
+                    } else {
+                        Style::new()
+                    },
+                ));
+            }
+            if targets.is_empty() {
+                lines.push(Line::styled(
+                    "No unconflicted local agent mailbox is available",
+                    Style::new().fg(Color::Yellow),
+                ));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from("↑/↓ select · Enter compose · Esc cancel"));
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(Block::bordered().title(" Direct message "))
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        UiMailboxModal::LoadingDraft { target } => {
+            frame.render_widget(
+                Paragraph::new(format!("Loading {} draft…", draft_target_label(target)))
+                    .block(Block::bordered().title(" Mailbox draft ")),
+                area,
+            );
+        }
+        UiMailboxModal::Compose {
+            draft,
+            dirty,
+            submitting,
+            closing,
+        } => {
+            let status = if *closing {
+                "saving and closing"
+            } else if *submitting {
+                "submitting"
+            } else if *dirty {
+                "autosave pending"
+            } else {
+                "saved"
+            };
+            let text_area = area.inner(ratatui::layout::Margin {
+                horizontal: 2,
+                vertical: 2,
+            });
+            frame.render_widget(
+                Block::bordered().title(format!(
+                    " {} · {status} · {}/{} bytes ",
+                    draft_target_label(&draft.target),
+                    draft.content.len(),
+                    MAX_DRAFT_BYTES
+                )),
+                area,
+            );
+            frame.render_widget(
+                Paragraph::new(draft.content.as_str()).wrap(Wrap { trim: false }),
+                text_area,
+            );
+            let hint = Rect {
+                y: area.y + area.height.saturating_sub(2),
+                height: 1,
+                x: area.x + 2,
+                width: area.width.saturating_sub(4),
+            };
+            frame.render_widget(Paragraph::new("Enter submit · Esc save and close"), hint);
+        }
+        UiMailboxModal::Confirm { action } => {
+            let label = match action {
+                UiMailboxAction::Archive { .. } => "Archive this exact message?",
+                UiMailboxAction::Restore { .. } => "Restore this exact message?",
+                UiMailboxAction::Reply { .. }
+                | UiMailboxAction::Direct { .. }
+                | UiMailboxAction::SelfNote => "Submit this mailbox command?",
+            };
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(label),
+                    Line::default(),
+                    Line::from("Enter confirm · Esc cancel"),
+                ])
+                .block(Block::bordered().title(" Confirm mailbox action "))
+                .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+    }
+}
+
+const MAX_DRAFT_BYTES: usize = 16 * 1024;
+
+const fn draft_target_label(target: &UiMailboxDraftTarget) -> &'static str {
+    match target {
+        UiMailboxDraftTarget::Reply { .. } => "Reply",
+        UiMailboxDraftTarget::Direct { .. } => "Direct message",
+        UiMailboxDraftTarget::SelfNote => "Self-note",
+    }
 }
 
 fn render_too_small(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
@@ -378,7 +506,14 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
 
 fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     let content = model.last_failure().map_or_else(
-        || " tab focus · ↑/↓ select · ←/→ section · q quit".to_owned(),
+        || {
+            if model.viewport().width >= WIDE_WIDTH {
+                " tab focus · ↑/↓ select · r reply · d direct · n note · a/u state · q quit"
+                    .to_owned()
+            } else {
+                " ↑/↓ select · r reply · d direct · n note · a/u state · q quit".to_owned()
+            }
+        },
         |failure| format!(" {} · {}", failure.code, failure.action),
     );
     let style = if model.last_failure().is_some() {

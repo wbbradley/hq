@@ -29,6 +29,13 @@ retains its separate question-owner cancellation planner. The same endpoint also
 agent messages and self-notes for the interactive client, while durable draft autosave/load/delete
 remain local operational state rather than canonical facts.
 
+The installed `hq tui` uses that same endpoint for `r` reply, `d` direct message, `n` self-note,
+and confirmed `a` archive / `u` restore actions. Its local draft editor autosaves after bounded
+input, saves the latest text before close or submit, retains stale targets for recovery, and keeps
+modal/focus/selection state across authoritative reload, reconnect, and resize. The TUI never
+recomputes CLI or node authority. Installed pseudoterminal coverage submits a self-note, verifies it
+through `hq list --all`, restarts the daemon, and verifies the same canonical message again.
+
 `identity init|show|export|import` and `config get|set` are deliberately offline operations. They
 acquire the same exclusive state owner as the node and refuse a live owner instead of reading or
 writing behind it. Initialization and import never overwrite an identity. Export and import require

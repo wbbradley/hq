@@ -16,11 +16,12 @@ The only behavioral entry point is:
 UiModel + UiEvent -> Result<(UiModel, [UiEffect]), UiError>
 ```
 
-`UiEvent` covers one-time startup, normalized input, complete resizes, identity-bearing timer and
-snapshot completions, revision-only invalidations, and generation-scoped connection states and
-failures. `UiEffect` covers section-bound complete-snapshot requests, bounded reducer-ordered
-conversation-page requests, timers, redraw requests, and exit. The transition function performs no
-I/O and has no domain mutation port.
+`UiEvent` covers one-time startup, normalized input, complete resizes, identity-bearing timer,
+snapshot, conversation, draft, and mailbox-command completions, revision-only invalidations, and
+generation-scoped connection states and failures. `UiEffect` covers section-bound complete-snapshot
+requests, bounded reducer-ordered conversation-page requests, draft open/autosave, stable mailbox
+commands, timers, redraw requests, and exit. The transition function performs no I/O and has no
+domain mutation port.
 
 Every asynchronous request receives a nonzero process-local `EffectId`. A completion changes state
 only while that exact identity is outstanding for its effect kind. Older snapshot or conversation
@@ -36,7 +37,25 @@ falls back to the first logical item when it disappears. An invalidation cancels
 on an in-flight old conversation page; after the required snapshot arrives, the selected
 conversation reloads from its first page and retains the fact anchor when still present. Reconnect
 uses the same repair path. Resize changes dimensions only; it does not rewrite logical focus,
-selection, the open conversation, or typed-detail disclosure.
+selection, the open conversation, typed-detail disclosure, applicable draft identity, modal state,
+edited text, direct target identity, or pending submission.
+
+## Mailbox composition and actions
+
+The pure model owns reply, direct-message, self-note, archive, and restore interaction state. `r`
+opens an applicable reply draft only for a typed message target whose purpose permits replies; `d`
+selects one unconflicted named-agent mailbox by stable installation/mailbox identity; `n` opens a
+self-note; and `a`/`u` open explicit archive/restore confirmations for an exact message. Activity
+entries carry no `UiMessageTarget`, so no key sequence can turn activity into a reply or reversible
+state target. Escape cancels selectors and confirmations without a canonical mutation.
+
+Draft editing accepts Unicode characters, paste, and character-aware backspace up to the ordinary
+content bound. A coalesced 250 ms timer autosaves optimistic complete replacements. Submit waits for
+the latest save acknowledgement, then emits one draft-backed command effect. Escape also waits for
+the latest text to be durably saved before closing; an edit made while an earlier save is in flight
+therefore cannot disappear. Save conflicts preserve the local editor text, adopt the current server
+version, and require an explicit edit/retry. A rejected stale target leaves the draft and modal open
+with a reselection action. Only a committed canonical receipt closes and consumes the draft.
 
 ## Reconnecting client and effect executor
 
@@ -51,7 +70,8 @@ the broad invalidation subscription before its acknowledged authoritative snapsh
 counts, so Inbox, Archived, and Sent filters do not scan or reorder message bodies. Activating a
 summary issues the ordinary `ConversationPage` request with an opaque cursor. Returned
 message/activity unions remain in reducer order; selected/coalesced activity is presented as
-non-actionable and is never converted into a message target. The protocol
+non-actionable and is never converted into a message target. The mapper also exposes only uniquely
+named, uniquely bound, non-retired agent mailboxes as passive direct-target candidates. The protocol
 `AuthoritativeSnapshotDto` and presentation `UiSnapshot` are deliberately different records: one
 is canonical local-API data, while the other is a small section-specific view containing only safe
 rendering fields. Neither is a storage compatibility shape, and both passive records expose their
@@ -65,11 +85,18 @@ drains bounded results while enqueueing the stop command, so saturated queues ca
 join. Client failures and connection observations retain their generation so older results cannot
 overwrite newer UI state.
 
+The same worker executes draft list/save requests and stable mailbox commands through the ordinary
+subscribed client. It allocates command/message identities, semantic time, and auxiliary randomness
+once, then the reconnecting runner retains and replays that exact command frame until a durable
+receipt is known. No TUI component resolves human authority, thread roots, recipient validity, or
+message-state frontiers. Those remain transaction-local node decisions.
+
 ## Data and encapsulation
 
-Shell-normalized snapshots, rows, conversation pages/entries, typed technical sections, sizes, and
-failures are passive records and expose public fields. Their text is bounded and sanitized before
-entering this crate. There is no accessor facade around those DTOs.
+Shell-normalized snapshots, rows, conversation pages/entries, message/direct targets, drafts,
+mailbox commands, typed technical sections, sizes, and failures are passive records and expose
+public fields. Display text is bounded and sanitized before entering this crate; user-authored draft
+content retains its exact bounded UTF-8. There is no accessor facade around those DTOs.
 
 `UiModel` is not a passive record. It keeps the outstanding snapshot and timer identities aligned
 with minimum revisions, reconnect generations, retry state, selection, and one-time startup/exit
@@ -94,8 +121,9 @@ responsive second pane, centers rendering around the stable fact anchor, labels 
 non-actionable, and expands only typed routing, semantics, evidence, or activity sections. Enter
 opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
 page; Escape collapses details and then the conversation. The footer exposes discoverable controls
-or the latest stable failure code and operator action. Styling supplements these text markers and
-is not the sole carrier of state.
+for reply, direct, self-note, archive/restore, navigation, and quit, or the latest stable failure
+code and operator action. Responsive modal tests cover wide and compact draft rendering. Styling
+supplements these text markers and is not the sole carrier of state.
 
 ## Shell obligations
 

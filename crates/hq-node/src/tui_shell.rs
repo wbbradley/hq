@@ -23,7 +23,7 @@ use crate::{
 const MAX_TERMINAL_WAIT: Duration = Duration::from_millis(50);
 
 /// Passive terminal observation after backend-specific normalization.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TuiTerminalEvent {
     /// One input action understood by the pure UI model.
     Input(UiInput),
@@ -196,11 +196,8 @@ pub fn normalize_crossterm_event(observation: &Event) -> Option<TuiTerminalEvent
             width: *width,
             height: *height,
         })),
-        Event::FocusGained
-        | Event::FocusLost
-        | Event::Key(_)
-        | Event::Mouse(_)
-        | Event::Paste(_) => None,
+        Event::Paste(value) => Some(TuiTerminalEvent::Input(UiInput::Paste(value.clone()))),
+        Event::FocusGained | Event::FocusLost | Event::Key(_) | Event::Mouse(_) => None,
     }
 }
 
@@ -217,15 +214,16 @@ fn normalize_key(key: KeyEvent) -> Option<TuiTerminalEvent> {
             | KeyModifiers::META,
     );
     let input = match key.code {
-        KeyCode::Char('q' | 'Q') if plain => UiInput::Quit,
         KeyCode::Tab if plain => UiInput::NextFocus,
         KeyCode::BackTab if plain => UiInput::PreviousFocus,
-        KeyCode::Right | KeyCode::Char('l' | 'L') if plain => UiInput::NextSection,
-        KeyCode::Left | KeyCode::Char('h' | 'H') if plain => UiInput::PreviousSection,
-        KeyCode::Down | KeyCode::Char('j' | 'J') if plain => UiInput::NextItem,
-        KeyCode::Up | KeyCode::Char('k' | 'K') if plain => UiInput::PreviousItem,
+        KeyCode::Right if plain => UiInput::NextSection,
+        KeyCode::Left if plain => UiInput::PreviousSection,
+        KeyCode::Down if plain => UiInput::NextItem,
+        KeyCode::Up if plain => UiInput::PreviousItem,
         KeyCode::Enter if plain => UiInput::Activate,
         KeyCode::PageDown if plain => UiInput::LoadMore,
+        KeyCode::Backspace if plain => UiInput::Backspace,
+        KeyCode::Char(character) if plain => UiInput::Character(character),
         KeyCode::Esc => UiInput::Escape,
         _ => return None,
     };

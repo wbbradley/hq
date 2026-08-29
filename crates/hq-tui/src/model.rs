@@ -4,6 +4,8 @@ use std::{num::NonZeroU64, time::Duration};
 
 const PERIODIC_REFRESH: Duration = Duration::from_secs(300);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
+const DRAFT_AUTOSAVE_DELAY: Duration = Duration::from_millis(250);
+const MAX_DRAFT_BYTES: usize = 16 * 1024;
 
 /// Stable identity attached to an asynchronous UI effect and its completion.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -77,7 +79,7 @@ pub enum UiFocus {
 }
 
 /// Shell-normalized terminal input understood by the pure model.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiInput {
     /// Exit the UI.
     Quit,
@@ -99,6 +101,12 @@ pub enum UiInput {
     LoadMore,
     /// Dismiss the current transient interaction.
     Escape,
+    /// One printable Unicode scalar from the terminal.
+    Character(char),
+    /// One bounded pasted text fragment.
+    Paste(String),
+    /// Delete the preceding Unicode scalar while composing.
+    Backspace,
 }
 
 /// Passive terminal dimensions supplied by the shell.
@@ -257,8 +265,105 @@ pub struct UiConversationEntry {
     pub summary: String,
     /// Typed message state; absent for non-actionable activity.
     pub message_state: Option<UiMessageState>,
+    /// Typed canonical action target; absent for activity and diagnostic entries.
+    pub message_target: Option<UiMessageTarget>,
     /// Namespaced technical sections, already bounded by the local protocol.
     pub technical: Vec<UiTechnicalSection>,
+}
+
+/// Canonical message identity and typed action capability selected by the node mapper.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiMessageTarget {
+    /// Stable public message identity.
+    pub message_id: [u8; 32],
+    /// Whether this message's typed purpose permits a reply interaction.
+    pub reply_allowed: bool,
+}
+
+/// Resolved direct-message target offered by the authoritative snapshot mapper.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiDirectTarget {
+    /// Target installation identity.
+    pub installation_id: [u8; 32],
+    /// Target mailbox identity.
+    pub mailbox_id: [u8; 32],
+    /// Bounded resolved display label.
+    pub label: String,
+}
+
+/// Explicit semantic target retained with one installation-local draft.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiMailboxDraftTarget {
+    /// Reply to one exact message.
+    Reply { message_id: [u8; 32] },
+    /// Send to one exact installation-qualified mailbox.
+    Direct {
+        installation_id: [u8; 32],
+        mailbox_id: [u8; 32],
+    },
+    /// Send a note to the local human mailbox.
+    SelfNote,
+}
+
+/// Complete passive local draft returned by the ordinary client boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiMailboxDraft {
+    /// Stable draft identity.
+    pub draft_id: [u8; 32],
+    /// Exact semantic target.
+    pub target: UiMailboxDraftTarget,
+    /// Possibly-empty bounded composition text.
+    pub content: String,
+    /// Optimistic local draft version.
+    pub version: u64,
+}
+
+/// Canonical mailbox command selected by the pure model.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiMailboxAction {
+    /// Reply using the currently loaded draft.
+    Reply { target_message: [u8; 32] },
+    /// Send the currently loaded draft to an exact mailbox.
+    Direct {
+        recipient_installation: [u8; 32],
+        recipient_mailbox: [u8; 32],
+    },
+    /// Submit the currently loaded self-note draft.
+    SelfNote,
+    /// Archive one exact message.
+    Archive { target_message: [u8; 32] },
+    /// Restore one exact message.
+    Restore { target_message: [u8; 32] },
+}
+
+/// Current mailbox modal presentation borrowed by the renderer.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiMailboxModal {
+    /// Select one resolved direct-message target by stable mailbox identity.
+    SelectDirect {
+        /// Current authoritative resolved candidates.
+        targets: Vec<UiDirectTarget>,
+        /// Stable selected mailbox identity.
+        selected: Option<([u8; 32], [u8; 32])>,
+    },
+    /// An applicable draft is being loaded or created.
+    LoadingDraft { target: UiMailboxDraftTarget },
+    /// Edit one durable draft.
+    Compose {
+        /// Latest local draft state, including unsaved content.
+        draft: UiMailboxDraft,
+        /// Whether text differs from the last acknowledged version.
+        dirty: bool,
+        /// Whether submit is waiting for the latest autosave.
+        submitting: bool,
+        /// Whether cancellation is waiting for the latest autosave.
+        closing: bool,
+    },
+    /// Confirm a reversible canonical state command.
+    Confirm { action: UiMailboxAction },
 }
 
 /// Passive bounded page returned by the ordinary local API client.
@@ -292,6 +397,8 @@ pub struct UiSnapshot {
     pub revision: u64,
     /// Reducer-ordered shell-normalized rows for the selected foundation view.
     pub rows: Vec<UiRow>,
+    /// Resolved named-agent mailboxes available for direct composition.
+    pub direct_targets: Vec<UiDirectTarget>,
 }
 
 /// Passive stable actionable failure shown without behavioral prose parsing.
@@ -310,6 +417,8 @@ pub enum UiTimerKind {
     PeriodicRefresh,
     /// Bounded retry after a failed snapshot request.
     RetrySnapshot,
+    /// Debounced local draft autosave.
+    AutosaveDraft,
 }
 
 /// Closed event vocabulary accepted by the pure UI model.
@@ -354,6 +463,43 @@ pub enum UiEvent {
         /// Stable actionable failure.
         failure: UiFailure,
     },
+    /// One applicable local draft was loaded or created.
+    DraftLoaded {
+        /// Identity of the completed open-draft effect.
+        effect_id: EffectId,
+        /// Complete current draft.
+        draft: UiMailboxDraft,
+    },
+    /// One local draft autosave completed.
+    DraftSaved {
+        /// Identity of the completed save effect.
+        effect_id: EffectId,
+        /// Complete acknowledged draft.
+        draft: UiMailboxDraft,
+    },
+    /// One local draft operation failed without losing editor text.
+    DraftFailed {
+        /// Identity of the failed draft effect.
+        effect_id: EffectId,
+        /// Stable actionable failure.
+        failure: UiFailure,
+        /// Current server draft on an optimistic conflict, when available.
+        current: Option<UiMailboxDraft>,
+    },
+    /// One stable mailbox command committed canonically.
+    MailboxCommandCommitted {
+        /// Identity of the completed command effect.
+        effect_id: EffectId,
+        /// Durable transaction revision.
+        revision: u64,
+    },
+    /// One stable mailbox command was rejected or could not be completed.
+    MailboxCommandFailed {
+        /// Identity of the failed command effect.
+        effect_id: EffectId,
+        /// Stable actionable failure.
+        failure: UiFailure,
+    },
     /// A revision-only wake marked the current snapshot stale.
     Invalidated {
         /// Greatest revision known to the shell.
@@ -393,6 +539,29 @@ pub enum UiEffect {
         row_id: String,
         /// Opaque continuation cursor; absent for the first page.
         cursor: Option<String>,
+    },
+    /// Load one applicable draft by semantic target, creating it when absent.
+    OpenDraft {
+        /// Identity required on the completion event.
+        id: EffectId,
+        /// Exact semantic draft target.
+        target: UiMailboxDraftTarget,
+    },
+    /// Persist one complete optimistic local draft replacement.
+    SaveDraft {
+        /// Identity required on the completion event.
+        id: EffectId,
+        /// Complete locally edited draft.
+        draft: UiMailboxDraft,
+    },
+    /// Execute or reconcile one stable authoritative mailbox command.
+    SubmitMailboxCommand {
+        /// Identity required on the completion event.
+        id: EffectId,
+        /// Draft consumed only if the command commits.
+        draft: Option<UiMailboxDraft>,
+        /// Exact typed action selected by the model.
+        action: UiMailboxAction,
     },
     /// Schedule one bounded timer through the shell clock.
     ScheduleTimer {
@@ -453,6 +622,19 @@ struct PendingConversation {
     cursor: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingMailboxKind {
+    OpenDraft,
+    SaveDraft,
+    SubmitCommand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingMailbox {
+    id: EffectId,
+    kind: PendingMailboxKind,
+}
+
 /// Complete invariant-bearing TUI application state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiModel {
@@ -466,11 +648,14 @@ pub struct UiModel {
     conversation: Option<UiConversation>,
     conversation_anchor: Option<String>,
     technical_visible: bool,
+    mailbox_modal: Option<UiMailboxModal>,
     required_revision: Option<u64>,
     pending_snapshot: Option<PendingSnapshot>,
     pending_conversation: Option<PendingConversation>,
+    pending_mailbox: Option<PendingMailbox>,
     periodic_timer: Option<EffectId>,
     retry_timer: Option<EffectId>,
+    autosave_timer: Option<EffectId>,
     next_effect_id: Option<NonZeroU64>,
     last_failure: Option<UiFailure>,
     started: bool,
@@ -491,11 +676,14 @@ impl UiModel {
             conversation: None,
             conversation_anchor: None,
             technical_visible: false,
+            mailbox_modal: None,
             required_revision: None,
             pending_snapshot: None,
             pending_conversation: None,
+            pending_mailbox: None,
             periodic_timer: None,
             retry_timer: None,
+            autosave_timer: None,
             next_effect_id: NonZeroU64::new(1),
             last_failure: None,
             started: false,
@@ -548,6 +736,11 @@ impl UiModel {
         self.technical_visible
     }
 
+    /// Borrows the current mailbox interaction, when a modal is open.
+    pub const fn mailbox_modal(&self) -> Option<&UiMailboxModal> {
+        self.mailbox_modal.as_ref()
+    }
+
     /// Returns the greatest revision required by coalesced invalidations.
     pub const fn required_revision(&self) -> Option<u64> {
         self.required_revision
@@ -564,6 +757,14 @@ impl UiModel {
     /// Returns the current conversation-page effect identity.
     pub const fn pending_conversation(&self) -> Option<EffectId> {
         match &self.pending_conversation {
+            Some(pending) => Some(pending.id),
+            None => None,
+        }
+    }
+
+    /// Returns the current draft or mailbox-command effect identity.
+    pub const fn pending_mailbox(&self) -> Option<EffectId> {
+        match self.pending_mailbox {
             Some(pending) => Some(pending.id),
             None => None,
         }
@@ -628,6 +829,64 @@ impl UiModel {
         Ok(())
     }
 
+    fn open_draft(
+        &mut self,
+        target: UiMailboxDraftTarget,
+        effects: &mut Vec<UiEffect>,
+    ) -> Result<(), UiError> {
+        if self.pending_mailbox.is_some() {
+            return Ok(());
+        }
+        let id = self.allocate_effect()?;
+        self.pending_mailbox = Some(PendingMailbox {
+            id,
+            kind: PendingMailboxKind::OpenDraft,
+        });
+        self.mailbox_modal = Some(UiMailboxModal::LoadingDraft {
+            target: target.clone(),
+        });
+        effects.push(UiEffect::OpenDraft { id, target });
+        Ok(())
+    }
+
+    fn save_draft(&mut self, effects: &mut Vec<UiEffect>) -> Result<(), UiError> {
+        if self.pending_mailbox.is_some() {
+            return Ok(());
+        }
+        let Some(UiMailboxModal::Compose {
+            draft, dirty: true, ..
+        }) = &self.mailbox_modal
+        else {
+            return Ok(());
+        };
+        let draft = draft.clone();
+        let id = self.allocate_effect()?;
+        self.pending_mailbox = Some(PendingMailbox {
+            id,
+            kind: PendingMailboxKind::SaveDraft,
+        });
+        effects.push(UiEffect::SaveDraft { id, draft });
+        Ok(())
+    }
+
+    fn submit_mailbox(
+        &mut self,
+        draft: Option<UiMailboxDraft>,
+        action: UiMailboxAction,
+        effects: &mut Vec<UiEffect>,
+    ) -> Result<(), UiError> {
+        if self.pending_mailbox.is_some() {
+            return Ok(());
+        }
+        let id = self.allocate_effect()?;
+        self.pending_mailbox = Some(PendingMailbox {
+            id,
+            kind: PendingMailboxKind::SubmitCommand,
+        });
+        effects.push(UiEffect::SubmitMailboxCommand { id, draft, action });
+        Ok(())
+    }
+
     fn schedule_timer(
         &mut self,
         kind: UiTimerKind,
@@ -638,6 +897,7 @@ impl UiModel {
         match kind {
             UiTimerKind::PeriodicRefresh => self.periodic_timer = Some(id),
             UiTimerKind::RetrySnapshot => self.retry_timer = Some(id),
+            UiTimerKind::AutosaveDraft => self.autosave_timer = Some(id),
         }
         effects.push(UiEffect::ScheduleTimer { id, kind, after });
         Ok(())
@@ -737,6 +997,20 @@ impl UiModel {
         if !conversation_survives {
             self.close_conversation();
         }
+        if let Some(UiMailboxModal::SelectDirect { selected, targets }) = &mut self.mailbox_modal {
+            let keep = selected.filter(|(installation, mailbox)| {
+                snapshot.direct_targets.iter().any(|target| {
+                    target.installation_id == *installation && target.mailbox_id == *mailbox
+                })
+            });
+            *selected = keep.or_else(|| {
+                snapshot
+                    .direct_targets
+                    .first()
+                    .map(|target| (target.installation_id, target.mailbox_id))
+            });
+            targets.clone_from(&snapshot.direct_targets);
+        }
         self.snapshot = Some(snapshot);
     }
 }
@@ -769,6 +1043,24 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
         UiEvent::ConversationFailed { effect_id, failure } => {
             conversation_failed(&mut model, effect_id, failure, &mut effects);
         }
+        UiEvent::DraftLoaded { effect_id, draft } => {
+            draft_loaded(&mut model, effect_id, draft, &mut effects);
+        }
+        UiEvent::DraftSaved { effect_id, draft } => {
+            draft_saved(&mut model, effect_id, &draft, &mut effects)?;
+        }
+        UiEvent::DraftFailed {
+            effect_id,
+            failure,
+            current,
+        } => draft_failed(&mut model, effect_id, failure, current, &mut effects),
+        UiEvent::MailboxCommandCommitted {
+            effect_id,
+            revision,
+        } => mailbox_command_committed(&mut model, effect_id, revision, &mut effects)?,
+        UiEvent::MailboxCommandFailed { effect_id, failure } => {
+            mailbox_command_failed(&mut model, effect_id, failure, &mut effects);
+        }
         UiEvent::Invalidated { revision } => invalidated(&mut model, revision, &mut effects)?,
         UiEvent::ConnectionObserved { generation, state } => {
             connection_observed(&mut model, generation, state, &mut effects)?;
@@ -798,6 +1090,13 @@ fn apply_input(
     input: UiInput,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
+    if model.mailbox_modal.is_some() {
+        let changed = apply_modal_input(model, input, effects)?;
+        if changed {
+            effects.push(UiEffect::RequestRedraw);
+        }
+        return Ok(());
+    }
     let changed = match input {
         UiInput::Quit => {
             if model.should_exit {
@@ -851,11 +1150,316 @@ fn apply_input(
         UiInput::Activate => activate(model, effects)?,
         UiInput::LoadMore => load_more(model, effects)?,
         UiInput::Escape => escape(model),
+        UiInput::Character(character) => mailbox_shortcut(model, character, effects)?,
+        UiInput::Paste(_) | UiInput::Backspace => false,
     };
     if changed {
         effects.push(UiEffect::RequestRedraw);
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn apply_modal_input(
+    model: &mut UiModel,
+    input: UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    if matches!(input, UiInput::Quit) {
+        model.should_exit = true;
+        effects.push(UiEffect::Exit);
+        return Ok(false);
+    }
+    if matches!(input, UiInput::Escape) {
+        if let Some(UiMailboxModal::Compose { draft, dirty, .. }) = model.mailbox_modal.clone() {
+            if dirty {
+                model.mailbox_modal = Some(UiMailboxModal::Compose {
+                    draft: draft.clone(),
+                    dirty: true,
+                    submitting: false,
+                    closing: true,
+                });
+                model.autosave_timer = None;
+                if model.pending_mailbox.is_none() {
+                    model.save_draft(effects)?;
+                }
+            } else {
+                model.mailbox_modal = None;
+            }
+        } else {
+            model.mailbox_modal = None;
+        }
+        return Ok(true);
+    }
+
+    match model.mailbox_modal.clone() {
+        Some(UiMailboxModal::SelectDirect { targets, selected }) => match input {
+            UiInput::NextItem | UiInput::PreviousItem => {
+                if targets.is_empty() {
+                    return Ok(false);
+                }
+                let current = selected.and_then(|identity| {
+                    targets
+                        .iter()
+                        .position(|target| (target.installation_id, target.mailbox_id) == identity)
+                });
+                let next = match (current, matches!(input, UiInput::NextItem)) {
+                    (Some(index), true) => (index + 1).min(targets.len() - 1),
+                    (Some(index), false) => index.saturating_sub(1),
+                    (None, _) => 0,
+                };
+                if let Some(UiMailboxModal::SelectDirect { selected, .. }) =
+                    &mut model.mailbox_modal
+                {
+                    *selected = Some((targets[next].installation_id, targets[next].mailbox_id));
+                }
+                Ok(true)
+            }
+            UiInput::Activate => {
+                let Some((installation_id, mailbox_id)) = selected else {
+                    return Ok(false);
+                };
+                model.open_draft(
+                    UiMailboxDraftTarget::Direct {
+                        installation_id,
+                        mailbox_id,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiMailboxModal::LoadingDraft { .. }) | None => Ok(false),
+        Some(UiMailboxModal::Compose {
+            mut draft,
+            dirty,
+            submitting,
+            closing,
+        }) => match input {
+            UiInput::Character(character) if !submitting && !closing => {
+                let mut encoded = [0_u8; 4];
+                let value = character.encode_utf8(&mut encoded);
+                if draft.content.len().saturating_add(value.len()) > MAX_DRAFT_BYTES {
+                    model.last_failure = Some(UiFailure {
+                        code: "draft_content_too_large".to_owned(),
+                        action: "shorten the draft before submitting".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                draft.content.push(character);
+                update_composer(model, draft, true, false, effects)?;
+                Ok(true)
+            }
+            UiInput::Paste(value) if !submitting && !closing => {
+                let available = MAX_DRAFT_BYTES.saturating_sub(draft.content.len());
+                if value.len() > available {
+                    model.last_failure = Some(UiFailure {
+                        code: "draft_content_too_large".to_owned(),
+                        action: "shorten the pasted text before submitting".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                draft.content.push_str(&value);
+                update_composer(model, draft, true, false, effects)?;
+                Ok(true)
+            }
+            UiInput::Backspace if !submitting && !closing => {
+                if draft.content.pop().is_none() {
+                    return Ok(false);
+                }
+                update_composer(model, draft, true, false, effects)?;
+                Ok(true)
+            }
+            UiInput::Activate if !submitting && !closing => {
+                if draft.content.is_empty() {
+                    model.last_failure = Some(UiFailure {
+                        code: "draft_content_empty".to_owned(),
+                        action: "enter message text before submitting".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                if dirty {
+                    model.mailbox_modal = Some(UiMailboxModal::Compose {
+                        draft,
+                        dirty: true,
+                        submitting: true,
+                        closing: false,
+                    });
+                    model.autosave_timer = None;
+                    model.save_draft(effects)?;
+                } else {
+                    let action = draft_action(&draft.target);
+                    model.mailbox_modal = Some(UiMailboxModal::Compose {
+                        draft: draft.clone(),
+                        dirty: false,
+                        submitting: true,
+                        closing: false,
+                    });
+                    model.submit_mailbox(Some(draft), action, effects)?;
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiMailboxModal::Confirm { action }) => {
+            if matches!(input, UiInput::Activate) {
+                model.submit_mailbox(None, action, effects)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+}
+
+fn update_composer(
+    model: &mut UiModel,
+    draft: UiMailboxDraft,
+    dirty: bool,
+    submitting: bool,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    model.mailbox_modal = Some(UiMailboxModal::Compose {
+        draft,
+        dirty,
+        submitting,
+        closing: false,
+    });
+    model.last_failure = None;
+    if model.pending_mailbox.is_none() {
+        model.schedule_timer(UiTimerKind::AutosaveDraft, DRAFT_AUTOSAVE_DELAY, effects)?;
+    }
+    Ok(())
+}
+
+fn mailbox_shortcut(
+    model: &mut UiModel,
+    character: char,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    match character.to_ascii_lowercase() {
+        'q' => {
+            model.should_exit = true;
+            effects.push(UiEffect::Exit);
+            Ok(false)
+        }
+        'r' => {
+            let Some(target) = selected_message_target(model).filter(|target| target.reply_allowed)
+            else {
+                return Ok(false);
+            };
+            model.open_draft(
+                UiMailboxDraftTarget::Reply {
+                    message_id: target.message_id,
+                },
+                effects,
+            )?;
+            Ok(true)
+        }
+        'd' => {
+            let targets = model
+                .snapshot
+                .as_ref()
+                .map_or_else(Vec::new, |snapshot| snapshot.direct_targets.clone());
+            let selected = targets
+                .first()
+                .map(|target| (target.installation_id, target.mailbox_id));
+            model.mailbox_modal = Some(UiMailboxModal::SelectDirect { targets, selected });
+            Ok(true)
+        }
+        'n' => {
+            model.open_draft(UiMailboxDraftTarget::SelfNote, effects)?;
+            Ok(true)
+        }
+        'a' => Ok(confirm_message_state(model, false)),
+        'u' => Ok(confirm_message_state(model, true)),
+        'h' => {
+            model.section = model.section.previous();
+            model.snapshot = None;
+            model.selected_row = None;
+            model.close_conversation();
+            model.request_snapshot(effects)?;
+            Ok(true)
+        }
+        'l' => {
+            model.section = model.section.next();
+            model.snapshot = None;
+            model.selected_row = None;
+            model.close_conversation();
+            model.request_snapshot(effects)?;
+            Ok(true)
+        }
+        'j' => Ok(match model.focus {
+            UiFocus::Conversation => model.move_conversation_anchor(true),
+            UiFocus::Navigation | UiFocus::Content => model.move_row_selection(true),
+        }),
+        'k' => Ok(match model.focus {
+            UiFocus::Conversation => model.move_conversation_anchor(false),
+            UiFocus::Navigation | UiFocus::Content => model.move_row_selection(false),
+        }),
+        _ => Ok(false),
+    }
+}
+
+fn selected_message_target(model: &UiModel) -> Option<UiMessageTarget> {
+    let anchor = model.conversation_anchor.as_deref()?;
+    model
+        .conversation
+        .as_ref()?
+        .entries
+        .iter()
+        .find(|entry| entry.id == anchor)?
+        .message_target
+}
+
+fn confirm_message_state(model: &mut UiModel, restore: bool) -> bool {
+    let Some(target) = selected_message_target(model) else {
+        return false;
+    };
+    let state = model
+        .conversation
+        .as_ref()
+        .and_then(|conversation| {
+            conversation
+                .entries
+                .iter()
+                .find(|entry| entry.message_target == Some(target))
+        })
+        .and_then(|entry| entry.message_state);
+    if (restore && state != Some(UiMessageState::Archived))
+        || (!restore && state != Some(UiMessageState::Open))
+    {
+        return false;
+    }
+    model.mailbox_modal = Some(UiMailboxModal::Confirm {
+        action: if restore {
+            UiMailboxAction::Restore {
+                target_message: target.message_id,
+            }
+        } else {
+            UiMailboxAction::Archive {
+                target_message: target.message_id,
+            }
+        },
+    });
+    true
+}
+
+fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {
+    match target {
+        UiMailboxDraftTarget::Reply { message_id } => UiMailboxAction::Reply {
+            target_message: *message_id,
+        },
+        UiMailboxDraftTarget::Direct {
+            installation_id,
+            mailbox_id,
+        } => UiMailboxAction::Direct {
+            recipient_installation: *installation_id,
+            recipient_mailbox: *mailbox_id,
+        },
+        UiMailboxDraftTarget::SelfNote => UiMailboxAction::SelfNote,
+    }
 }
 
 fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
@@ -920,6 +1524,9 @@ fn timer_elapsed(
         model.connection = UiConnectionState::Connecting;
         model.request_snapshot(effects)?;
         effects.push(UiEffect::RequestRedraw);
+    } else if model.autosave_timer == Some(effect_id) {
+        model.autosave_timer = None;
+        model.save_draft(effects)?;
     }
     Ok(())
 }
@@ -1039,6 +1646,189 @@ fn conversation_failed(
         return;
     }
     model.pending_conversation = None;
+    model.last_failure = Some(failure);
+    effects.push(UiEffect::RequestRedraw);
+}
+
+fn draft_loaded(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    draft: UiMailboxDraft,
+    effects: &mut Vec<UiEffect>,
+) {
+    if model.pending_mailbox
+        != Some(PendingMailbox {
+            id: effect_id,
+            kind: PendingMailboxKind::OpenDraft,
+        })
+    {
+        return;
+    }
+    let target_matches = matches!(
+        &model.mailbox_modal,
+        Some(UiMailboxModal::LoadingDraft { target }) if *target == draft.target
+    );
+    model.pending_mailbox = None;
+    if !target_matches {
+        return;
+    }
+    model.mailbox_modal = Some(UiMailboxModal::Compose {
+        draft,
+        dirty: false,
+        submitting: false,
+        closing: false,
+    });
+    model.last_failure = None;
+    effects.push(UiEffect::RequestRedraw);
+}
+
+fn draft_saved(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    saved: &UiMailboxDraft,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    if model.pending_mailbox
+        != Some(PendingMailbox {
+            id: effect_id,
+            kind: PendingMailboxKind::SaveDraft,
+        })
+    {
+        return Ok(());
+    }
+    model.pending_mailbox = None;
+    let Some(UiMailboxModal::Compose {
+        draft,
+        dirty: _,
+        submitting,
+        closing,
+    }) = model.mailbox_modal.clone()
+    else {
+        return Ok(());
+    };
+    if draft.draft_id != saved.draft_id || draft.target != saved.target {
+        return Ok(());
+    }
+    let content_is_saved = draft.content == saved.content;
+    let current = UiMailboxDraft {
+        version: saved.version,
+        ..draft
+    };
+    model.mailbox_modal = Some(UiMailboxModal::Compose {
+        draft: current.clone(),
+        dirty: !content_is_saved,
+        submitting,
+        closing,
+    });
+    model.last_failure = None;
+    if closing && content_is_saved {
+        model.mailbox_modal = None;
+        model.autosave_timer = None;
+    } else if submitting && content_is_saved {
+        model.submit_mailbox(
+            Some(current.clone()),
+            draft_action(&current.target),
+            effects,
+        )?;
+    } else if !content_is_saved {
+        if closing {
+            model.save_draft(effects)?;
+        } else {
+            model.schedule_timer(UiTimerKind::AutosaveDraft, DRAFT_AUTOSAVE_DELAY, effects)?;
+        }
+    }
+    effects.push(UiEffect::RequestRedraw);
+    Ok(())
+}
+
+fn draft_failed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    failure: UiFailure,
+    current: Option<UiMailboxDraft>,
+    effects: &mut Vec<UiEffect>,
+) {
+    let Some(pending) = model
+        .pending_mailbox
+        .filter(|pending| pending.id == effect_id)
+    else {
+        return;
+    };
+    if !matches!(
+        pending.kind,
+        PendingMailboxKind::OpenDraft | PendingMailboxKind::SaveDraft
+    ) {
+        return;
+    }
+    model.pending_mailbox = None;
+    if let (
+        PendingMailboxKind::SaveDraft,
+        Some(UiMailboxModal::Compose {
+            draft,
+            dirty,
+            submitting: _,
+            closing,
+        }),
+        Some(server),
+    ) = (pending.kind, &mut model.mailbox_modal, current)
+        && draft.draft_id == server.draft_id
+        && draft.target == server.target
+    {
+        draft.version = server.version;
+        *dirty = true;
+        *closing = false;
+    }
+    model.last_failure = Some(failure);
+    effects.push(UiEffect::RequestRedraw);
+}
+
+fn mailbox_command_committed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    revision: u64,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    if model.pending_mailbox
+        != Some(PendingMailbox {
+            id: effect_id,
+            kind: PendingMailboxKind::SubmitCommand,
+        })
+    {
+        return Ok(());
+    }
+    model.pending_mailbox = None;
+    model.mailbox_modal = None;
+    model.autosave_timer = None;
+    model.last_failure = None;
+    invalidated(model, revision, effects)?;
+    effects.push(UiEffect::RequestRedraw);
+    Ok(())
+}
+
+fn mailbox_command_failed(
+    model: &mut UiModel,
+    effect_id: EffectId,
+    failure: UiFailure,
+    effects: &mut Vec<UiEffect>,
+) {
+    if model.pending_mailbox
+        != Some(PendingMailbox {
+            id: effect_id,
+            kind: PendingMailboxKind::SubmitCommand,
+        })
+    {
+        return;
+    }
+    model.pending_mailbox = None;
+    if let Some(UiMailboxModal::Compose {
+        submitting,
+        closing,
+        ..
+    }) = &mut model.mailbox_modal
+    {
+        *submitting = false;
+        *closing = false;
+    }
     model.last_failure = Some(failure);
     effects.push(UiEffect::RequestRedraw);
 }

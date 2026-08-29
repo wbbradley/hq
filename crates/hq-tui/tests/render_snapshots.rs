@@ -4,8 +4,8 @@
 
 use hq_tui::{
     UiActivityStatus, UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect,
-    UiEvent, UiInput, UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot,
-    UiTechnicalSection, render, update,
+    UiEvent, UiInput, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiRow,
+    UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -63,6 +63,56 @@ fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
     assert!(message < activity, "reducer page order is retained");
     assert!(rendered.contains("non-actionable · compiling"));
     assert!(rendered.contains("Conversation · complete"));
+}
+
+#[test]
+fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+    ] {
+        let ready = ready_model(size);
+        let opening = update(ready, UiEvent::Input(UiInput::Character('n'))).expect("self note");
+        let effect_id = opening
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::OpenDraft { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("draft request");
+        let model = update(
+            opening.model,
+            UiEvent::DraftLoaded {
+                effect_id,
+                draft: UiMailboxDraft {
+                    draft_id: [1; 32],
+                    target: UiMailboxDraftTarget::SelfNote,
+                    content: "bounded draft text".to_owned(),
+                    version: 2,
+                },
+            },
+        )
+        .expect("draft loaded")
+        .model;
+        let before = model.clone();
+        let backend = TestBackend::new(size.width, size.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &model))
+            .expect("render composer");
+        assert_eq!(model, before);
+        let rendered = snapshot_text(terminal.backend().buffer());
+        assert!(rendered.contains("Self-note · saved"));
+        assert!(rendered.contains("bounded draft text"));
+        assert!(rendered.contains("Enter submit · Esc save and close"));
+    }
 }
 
 fn assert_snapshot(model: &UiModel, expected: &str) {
@@ -128,6 +178,7 @@ fn ready_model(size: UiSize) -> UiModel {
                         UiRowState::Attention,
                     ),
                 ],
+                direct_targets: Vec::new(),
             },
         },
     )
@@ -171,6 +222,7 @@ fn conversation_model(size: UiSize) -> UiModel {
                         content: "Can we ship?".to_owned(),
                         summary: "question · peer".to_owned(),
                         message_state: Some(UiMessageState::Open),
+                        message_target: None,
                         technical: Vec::new(),
                     },
                     UiConversationEntry {
@@ -179,6 +231,7 @@ fn conversation_model(size: UiSize) -> UiModel {
                         content: "compiling".to_owned(),
                         summary: "activity · running".to_owned(),
                         message_state: None,
+                        message_target: None,
                         technical: vec![UiTechnicalSection::Activity {
                             sequence: 2,
                             status: UiActivityStatus::Running,

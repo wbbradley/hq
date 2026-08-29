@@ -1,5 +1,46 @@
 # Completed
 
+## 2026-08-29 — Retained TUI mailbox composition and actions
+
+Added pure typed reply, direct-message, self-note, archive, and restore interactions to the
+Ratatui model. Responsive direct-target selection, draft loading and composition, and archive or
+restore confirmation overlays preserve focus, logical selection, scroll anchors, stable targets,
+and modal state across authoritative reload, reconnect, and resize. Activity entries cannot become
+message-action targets, and cancelling a confirmation performs no canonical mutation.
+
+Draft composition supports exact UTF-8 typing, paste, backspace, a 16 KiB bound, coalesced
+autosave, save-before-close, and save-before-submit. Editing while a save is in flight triggers a
+second save for the latest text before close. Optimistic conflicts preserve local text while
+adopting the authoritative version, stale targets retain recoverable draft content, and only a
+committed mailbox receipt closes and consumes a submitted draft.
+
+The terminal shell and bounded effect executor now run draft and mailbox effects through the
+ordinary local API. Stable effect and request identities reconcile response loss without giving
+the TUI storage, planner, provider, or domain authority. Direct-message candidates are derived
+authoritatively from active named agents with one mailbox, and the real installed TUI self-note
+flow produces the same canonical message as the CLI and survives daemon restart.
+
+Passive mailbox targets, drafts, actions, and modal data expose public fields directly. Only the
+invariant-bearing model and effect identity retain accessors. The unshipped storage schema and
+local API were used as-is: this package added no version bump, migration, compatibility shape, or
+duplicate stored/runtime state type.
+
+Pure transition, renderer snapshot, executor, terminal normalization, installed pseudoterminal,
+restart, full workspace all-target/all-feature, strict Clippy, format/check, architecture,
+behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. The final exact
+executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[tui/high] Implement retained mailbox composition and actions** — Add pure reply,
+  direct-message, self-note, archive, and restore interactions over the ordinary mailbox-command
+  service. Preserve applicable draft identity, focus, target reselection, modal state, logical
+  selection, and scroll anchors across authoritative reload, reconnect, and resize; cancel modals
+  without mutation; and reconcile in-flight effects by stable request identity. Complete this work
+  when responsive render, model, executor, actionable-error, stale-target, modal-cancellation, and
+  installed TUI/CLI parity tests cover every retained mailbox interaction without selected-row or
+  activity-target leakage.
+
 ## 2026-08-28 — Durable local drafts and mailbox commands
 
 Added typed installation-local reply, direct-message, and self-note drafts with stable identities,

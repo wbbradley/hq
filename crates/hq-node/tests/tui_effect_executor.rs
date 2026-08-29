@@ -11,17 +11,17 @@ use std::{
 
 use hq_local_api::protocol::v1::{
     ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
-    ConversationMessageDto, ConversationPageDto, Id32, MessagePurposeDto, PresentationKindDto,
-    SnapshotItem,
+    ConversationMessageDto, ConversationPageDto, Id32, MailboxAddressDto, MessagePurposeDto,
+    PresentationKindDto, SnapshotItem,
 };
 use hq_node::{
-    TuiClientObservation, TuiClientPort, TuiClock, TuiEffectExecutor, TuiExecutorError,
-    tui_conversation_page, tui_snapshot,
+    TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiEffectExecutor,
+    TuiExecutorError, tui_conversation_page, tui_snapshot,
 };
 use hq_tui::{
     UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiFailure,
-    UiInput, UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiRow,
+    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -37,6 +37,7 @@ fn executor_loads_the_effects_exact_section_and_preserves_identity() {
             section: UiSection::Inbox,
             revision: 7,
             rows: Vec::new(),
+            direct_targets: Vec::new(),
         })]),
         observations: VecDeque::new(),
         stopped: Arc::clone(&stopped),
@@ -163,6 +164,7 @@ fn executor_loads_the_exact_conversation_row_and_preserves_effect_identity() {
                     state: UiRowState::Open,
                     kind: UiRowKind::Conversation,
                 }],
+                direct_targets: Vec::new(),
             },
         },
     )
@@ -244,6 +246,74 @@ fn executor_forwards_subscription_and_connection_observations() {
 }
 
 #[test]
+fn executor_runs_draft_autosave_and_stable_mailbox_command_in_order() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let client = MailboxTuiClient {
+        calls: Arc::clone(&calls),
+    };
+    let clock = ManualClock::default();
+    let mut executor =
+        TuiEffectExecutor::spawn(client, clock.clone()).expect("spawn mailbox executor");
+    let started = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start");
+    let mut model = started.model;
+    executor.execute(started.effects).expect("load snapshot");
+    model = update(model, receive_event(&mut executor))
+        .expect("snapshot event")
+        .model;
+
+    let opening = update(model, UiEvent::Input(UiInput::Character('n'))).expect("self note");
+    model = opening.model;
+    executor.execute(opening.effects).expect("open draft");
+    model = update(model, receive_event(&mut executor))
+        .expect("draft loaded")
+        .model;
+
+    let typing = update(
+        model,
+        UiEvent::Input(UiInput::Paste("durable note".to_owned())),
+    )
+    .expect("type draft");
+    model = typing.model;
+    executor.execute(typing.effects).expect("schedule autosave");
+    clock.advance(Duration::from_millis(250));
+    let elapsed = executor.poll_event().expect("autosave timer");
+    let saving = update(model, elapsed).expect("emit save");
+    model = saving.model;
+    executor.execute(saving.effects).expect("save draft");
+    model = update(model, receive_event(&mut executor))
+        .expect("draft saved")
+        .model;
+
+    let submit = update(model, UiEvent::Input(UiInput::Activate)).expect("submit note");
+    model = submit.model;
+    executor.execute(submit.effects).expect("submit command");
+    let completed = receive_event(&mut executor);
+    assert!(matches!(
+        completed,
+        UiEvent::MailboxCommandCommitted { revision: 9, .. }
+    ));
+    let final_state = update(model, completed).expect("apply command receipt");
+    assert!(final_state.model.mailbox_modal().is_none());
+    assert_eq!(
+        calls.lock().expect("calls lock").as_slice(),
+        &[
+            "snapshot",
+            "open:self_note",
+            "save:durable note",
+            "submit:self_note"
+        ]
+    );
+    executor.shutdown().expect("shutdown");
+}
+
+#[test]
 fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
     let source = AuthoritativeSnapshotDto::new(
         21,
@@ -263,7 +333,10 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
                 agent_id: Id32::new([5; 32]),
                 claims: vec![Id32::new([6; 32])],
                 names: vec!["builder".to_owned()],
-                mailboxes: Vec::new(),
+                mailboxes: vec![MailboxAddressDto {
+                    installation_id: Id32::new([15; 32]),
+                    mailbox_id: Id32::new([16; 32]),
+                }],
                 retirements: Vec::new(),
                 lifecycle: "ready".to_owned(),
                 runnable: true,
@@ -292,6 +365,10 @@ fn authoritative_snapshot_mapping_is_section_bound_and_deterministic() {
     assert_eq!(inbox.rows[0].title, "Thread 030303030303");
     assert_eq!(inbox.rows[0].detail, "2 open messages");
     assert_eq!(inbox.rows[1].state, hq_tui::UiRowState::Attention);
+    assert_eq!(inbox.direct_targets.len(), 1);
+    assert_eq!(inbox.direct_targets[0].label, "builder");
+    assert_eq!(inbox.direct_targets[0].installation_id, [15; 32]);
+    assert_eq!(inbox.direct_targets[0].mailbox_id, [16; 32]);
 
     let agents = tui_snapshot(UiSection::Agents, source.clone());
     assert_eq!(agents.rows.len(), 1);
@@ -388,6 +465,11 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
     );
     assert_eq!(mapped.entries[0].content, "hello world");
     assert!(matches!(
+        mapped.entries[0].message_target,
+        Some(hq_tui::UiMessageTarget { message_id, reply_allowed: true })
+            if message_id == [2; 32]
+    ));
+    assert!(matches!(
         mapped.entries[0].technical.as_slice(),
         [
             UiTechnicalSection::Routing { .. },
@@ -397,6 +479,7 @@ fn conversation_page_mapping_preserves_reducer_order_and_typed_disclosure() {
     ));
     assert_eq!(mapped.entries[1].kind, UiConversationEntryKind::Activity);
     assert_eq!(mapped.entries[1].message_state, None);
+    assert_eq!(mapped.entries[1].message_target, None);
     assert!(matches!(
         mapped.entries[1].technical.as_slice(),
         [UiTechnicalSection::Activity { sequence: 4, .. }]
@@ -504,6 +587,25 @@ impl TuiClientPort for ScriptedTuiClient {
         })
     }
 
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        Err(unsupported_failure())
+    }
+
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
         if let Some(observation) = self.observations.pop_front() {
             vec![observation]
@@ -535,6 +637,25 @@ impl TuiClientPort for PanickingClient {
         panic!("scripted worker failure");
     }
 
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        panic!("scripted worker failure");
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        panic!("scripted worker failure");
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        panic!("scripted worker failure");
+    }
+
     fn poll(&mut self, _wait: Duration) -> Vec<TuiClientObservation> {
         panic!("scripted worker failure");
     }
@@ -548,6 +669,7 @@ impl TuiClientPort for ImmediateSnapshotClient {
             section,
             revision: 1,
             rows: Vec::new(),
+            direct_targets: Vec::new(),
         })
     }
 
@@ -561,6 +683,106 @@ impl TuiClientPort for ImmediateSnapshotClient {
             entries: Vec::new(),
             next_cursor: None,
         })
+    }
+
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        Err(unsupported_failure())
+    }
+
+    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
+        thread::sleep(wait);
+        Vec::new()
+    }
+}
+
+struct MailboxTuiClient {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl TuiClientPort for MailboxTuiClient {
+    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push("snapshot".to_owned());
+        Ok(UiSnapshot {
+            section,
+            revision: 1,
+            rows: Vec::new(),
+            direct_targets: Vec::new(),
+        })
+    }
+
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        Ok(UiConversationPage {
+            row_id: row_id.to_owned(),
+            entries: Vec::new(),
+            next_cursor: None,
+        })
+    }
+
+    fn open_draft(
+        &mut self,
+        target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        assert_eq!(target, UiMailboxDraftTarget::SelfNote);
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push("open:self_note".to_owned());
+        Ok(UiMailboxDraft {
+            draft_id: [7; 32],
+            target,
+            content: String::new(),
+            version: 1,
+        })
+    }
+
+    fn save_draft(&mut self, draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push(format!("save:{}", draft.content));
+        Ok(UiMailboxDraft {
+            version: draft.version + 1,
+            ..draft
+        })
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        draft: Option<UiMailboxDraft>,
+        action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        assert!(matches!(action, UiMailboxAction::SelfNote));
+        assert_eq!(
+            draft.as_ref().map(|draft| draft.content.as_str()),
+            Some("durable note")
+        );
+        self.calls
+            .lock()
+            .expect("calls lock")
+            .push("submit:self_note".to_owned());
+        Ok(9)
     }
 
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
@@ -598,6 +820,7 @@ fn snapshot_load_effects(count: usize) -> Vec<UiEffect> {
                     section,
                     revision: revision as u64,
                     rows: Vec::new(),
+                    direct_targets: Vec::new(),
                 },
             },
         )
@@ -611,6 +834,20 @@ fn snapshot_load_effects(count: usize) -> Vec<UiEffect> {
         .expect("generate next snapshot effect");
     }
     effects
+}
+
+fn unsupported_failure() -> UiFailure {
+    UiFailure {
+        code: "unsupported_test_effect".to_owned(),
+        action: "add a scripted mailbox result".to_owned(),
+    }
+}
+
+fn unsupported_draft() -> TuiDraftError {
+    TuiDraftError {
+        failure: unsupported_failure(),
+        current: None,
+    }
 }
 
 fn receive_event<C: TuiClock>(executor: &mut TuiEffectExecutor<C>) -> UiEvent {

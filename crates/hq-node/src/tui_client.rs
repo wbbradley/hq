@@ -4,21 +4,24 @@ use std::{
     collections::BTreeMap,
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use hq_local_api::{
     BlockingClientError, ClientConnectionState, ClientEvent,
     protocol::v1::{
         ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
-        ConversationMessageDto, ConversationPageRequest, Id32, MessagePurposeDto,
-        PresentationKindDto, Request, ResponseResult, SnapshotItem,
+        ConversationMessageDto, ConversationPageRequest, Id32, MailboxCommandActionDto,
+        MailboxCommandRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
+        MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
+        MutationOutcomeDto, PresentationKindDto, Request, ResponseResult, SnapshotItem,
     },
 };
 use hq_tui::{
     EffectId, UiActivityStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
-    UiConversationPage, UiEffect, UiEvent, UiFailure, UiMessageState, UiRow, UiRowKind, UiRowState,
-    UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiMailboxAction,
+    UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiMessageTarget, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{LocalNodeClientError, LocalNodeEventClient};
@@ -90,8 +93,31 @@ pub trait TuiClientPort: Send {
         cursor: Option<String>,
     ) -> Result<UiConversationPage, UiFailure>;
 
+    /// Loads one applicable durable draft, creating an empty draft when absent.
+    fn open_draft(&mut self, target: UiMailboxDraftTarget)
+    -> Result<UiMailboxDraft, TuiDraftError>;
+
+    /// Autosaves one complete optimistic durable draft replacement.
+    fn save_draft(&mut self, draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError>;
+
+    /// Executes or reconciles one stable authoritative mailbox command.
+    fn submit_mailbox_command(
+        &mut self,
+        draft: Option<UiMailboxDraft>,
+        action: UiMailboxAction,
+    ) -> Result<u64, UiFailure>;
+
     /// Polls subscribed invalidation and reconnect observations for a bounded interval.
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation>;
+}
+
+/// Actionable draft failure with the current server value on optimistic conflict.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TuiDraftError {
+    /// Stable actionable failure.
+    pub failure: UiFailure,
+    /// Current server draft when a concurrent save won.
+    pub current: Option<Box<UiMailboxDraft>>,
 }
 
 /// Ordinary local-API implementation of the TUI client capability.
@@ -165,6 +191,167 @@ impl TuiClientPort for LocalTuiClient {
         }
     }
 
+    fn open_draft(
+        &mut self,
+        target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        let ClientEvent::Response {
+            result: ResponseResult::MailboxDrafts(drafts),
+            ..
+        } = self
+            .client
+            .request(Request::MailboxDrafts)
+            .map_err(|error| draft_client_error(&error))?
+        else {
+            return Err(draft_protocol_error());
+        };
+        if let Some(draft) = drafts
+            .into_iter()
+            .find(|draft| tui_draft_target(&draft.target) == target)
+        {
+            return Ok(tui_draft(draft));
+        }
+        let request = MailboxDraftSaveRequestDto {
+            draft_id: Id32::new(random_identity().map_err(|failure| TuiDraftError {
+                failure,
+                current: None,
+            })?),
+            target: mailbox_draft_target(&target),
+            content: String::new(),
+            expected_version: None,
+        };
+        match self
+            .client
+            .request(Request::SaveMailboxDraft(request))
+            .map_err(|error| draft_client_error(&error))?
+        {
+            ClientEvent::Response {
+                result: ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Saved(draft)),
+                ..
+            } => Ok(tui_draft(draft)),
+            ClientEvent::Response {
+                result:
+                    ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Conflict(draft)),
+                ..
+            } => Err(TuiDraftError {
+                failure: UiFailure {
+                    code: "draft_conflict".to_owned(),
+                    action: "reopen the current draft before editing".to_owned(),
+                },
+                current: Some(Box::new(tui_draft(draft))),
+            }),
+            _ => Err(draft_protocol_error()),
+        }
+    }
+
+    fn save_draft(&mut self, draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        let request = MailboxDraftSaveRequestDto {
+            draft_id: Id32::new(draft.draft_id),
+            target: mailbox_draft_target(&draft.target),
+            content: draft.content,
+            expected_version: Some(draft.version),
+        };
+        match self
+            .client
+            .request(Request::SaveMailboxDraft(request))
+            .map_err(|error| draft_client_error(&error))?
+        {
+            ClientEvent::Response {
+                result: ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Saved(draft)),
+                ..
+            } => Ok(tui_draft(draft)),
+            ClientEvent::Response {
+                result:
+                    ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Conflict(draft)),
+                ..
+            } => Err(TuiDraftError {
+                failure: UiFailure {
+                    code: "draft_conflict".to_owned(),
+                    action: "edit the preserved text and retry against the current draft"
+                        .to_owned(),
+                },
+                current: Some(Box::new(tui_draft(draft))),
+            }),
+            _ => Err(draft_protocol_error()),
+        }
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        draft: Option<UiMailboxDraft>,
+        action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        let command_id = Id32::new(random_identity()?);
+        let message_id = Id32::new(random_identity()?);
+        let action = match action {
+            UiMailboxAction::Reply { target_message } => MailboxCommandActionDto::Reply {
+                target_message: Id32::new(target_message),
+                message_id,
+            },
+            UiMailboxAction::Direct {
+                recipient_installation,
+                recipient_mailbox,
+            } => MailboxCommandActionDto::Direct {
+                recipient_installation: Id32::new(recipient_installation),
+                recipient_mailbox: Id32::new(recipient_mailbox),
+                message_id,
+            },
+            UiMailboxAction::SelfNote => MailboxCommandActionDto::SelfNote { message_id },
+            UiMailboxAction::Archive { target_message } => MailboxCommandActionDto::Archive {
+                target_message: Id32::new(target_message),
+            },
+            UiMailboxAction::Restore { target_message } => MailboxCommandActionDto::Restore {
+                target_message: Id32::new(target_message),
+            },
+        };
+        let authored_at_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| UiFailure {
+                code: "system_time_invalid".to_owned(),
+                action: "correct the system clock and retry".to_owned(),
+            })?
+            .as_millis()
+            .try_into()
+            .map_err(|_| UiFailure {
+                code: "system_time_invalid".to_owned(),
+                action: "correct the system clock and retry".to_owned(),
+            })?;
+        let request = MailboxCommandRequestDto::new(
+            command_id,
+            draft.as_ref().map(|draft| Id32::new(draft.draft_id)),
+            action,
+            None,
+            authored_at_millis,
+            random_identity()?,
+        );
+        match self
+            .client
+            .mailbox_command(request)
+            .map_err(|error| client_failure(&error))?
+        {
+            ClientEvent::Mutation(MutationAttemptDto::Completed {
+                revision,
+                outcome: MutationOutcomeDto::Committed,
+                ..
+            }) => Ok(revision),
+            ClientEvent::Mutation(MutationAttemptDto::Completed {
+                outcome: MutationOutcomeDto::Rejected { code, .. },
+                ..
+            }) => Err(UiFailure {
+                action: if code == "mailbox_target_stale" {
+                    "reselect the target; the draft text is preserved".to_owned()
+                } else {
+                    "correct the mailbox command and retry".to_owned()
+                },
+                code,
+            }),
+            _ => Err(UiFailure {
+                code: "mailbox_command_uncertain".to_owned(),
+                action: "keep the draft open while HQ reconciles the same command".to_owned(),
+            }),
+        }
+    }
+
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
         let result = self.client.poll_event(wait);
         let state = self.client.connection_state();
@@ -202,6 +389,73 @@ impl TuiClientPort for LocalTuiClient {
             }),
         }
         observations
+    }
+}
+
+fn random_identity() -> Result<[u8; 32], UiFailure> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| UiFailure {
+        code: "entropy_unavailable".to_owned(),
+        action: "restore operating-system randomness and retry".to_owned(),
+    })?;
+    Ok(bytes)
+}
+
+fn draft_client_error(error: &LocalNodeClientError) -> TuiDraftError {
+    TuiDraftError {
+        failure: client_failure(error),
+        current: None,
+    }
+}
+
+fn draft_protocol_error() -> TuiDraftError {
+    TuiDraftError {
+        failure: UiFailure {
+            code: "draft_response_invalid".to_owned(),
+            action: "reopen the draft from a fresh authoritative client".to_owned(),
+        },
+        current: None,
+    }
+}
+
+fn mailbox_draft_target(target: &UiMailboxDraftTarget) -> MailboxDraftTargetDto {
+    match target {
+        UiMailboxDraftTarget::Reply { message_id } => MailboxDraftTargetDto::Reply {
+            message_id: Id32::new(*message_id),
+        },
+        UiMailboxDraftTarget::Direct {
+            installation_id,
+            mailbox_id,
+        } => MailboxDraftTargetDto::Direct {
+            installation_id: Id32::new(*installation_id),
+            mailbox_id: Id32::new(*mailbox_id),
+        },
+        UiMailboxDraftTarget::SelfNote => MailboxDraftTargetDto::SelfNote,
+    }
+}
+
+fn tui_draft_target(target: &MailboxDraftTargetDto) -> UiMailboxDraftTarget {
+    match target {
+        MailboxDraftTargetDto::Reply { message_id } => UiMailboxDraftTarget::Reply {
+            message_id: message_id.bytes(),
+        },
+        MailboxDraftTargetDto::Direct {
+            installation_id,
+            mailbox_id,
+        } => UiMailboxDraftTarget::Direct {
+            installation_id: installation_id.bytes(),
+            mailbox_id: mailbox_id.bytes(),
+        },
+        MailboxDraftTargetDto::SelfNote => UiMailboxDraftTarget::SelfNote,
+    }
+}
+
+fn tui_draft(draft: MailboxDraftDto) -> UiMailboxDraft {
+    UiMailboxDraft {
+        draft_id: draft.draft_id.bytes(),
+        target: tui_draft_target(&draft.target),
+        content: draft.content,
+        version: draft.version,
     }
 }
 
@@ -243,6 +497,19 @@ enum WorkerCommand {
         id: EffectId,
         row_id: String,
         cursor: Option<String>,
+    },
+    OpenDraft {
+        id: EffectId,
+        target: UiMailboxDraftTarget,
+    },
+    SaveDraft {
+        id: EffectId,
+        draft: UiMailboxDraft,
+    },
+    SubmitMailboxCommand {
+        id: EffectId,
+        draft: Option<UiMailboxDraft>,
+        action: UiMailboxAction,
     },
     Shutdown,
 }
@@ -316,6 +583,18 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                         })?;
                     self.outstanding_snapshots.push(id);
                 }
+                UiEffect::OpenDraft { id, target } => {
+                    self.enqueue_client_effect(id, WorkerCommand::OpenDraft { id, target })?;
+                }
+                UiEffect::SaveDraft { id, draft } => {
+                    self.enqueue_client_effect(id, WorkerCommand::SaveDraft { id, draft })?;
+                }
+                UiEffect::SubmitMailboxCommand { id, draft, action } => {
+                    self.enqueue_client_effect(
+                        id,
+                        WorkerCommand::SubmitMailboxCommand { id, draft, action },
+                    )?;
+                }
                 UiEffect::ScheduleTimer { id, kind, after } => {
                     if self.effect_is_outstanding(id) {
                         return Err(TuiExecutorError::DuplicateEffectIdentity);
@@ -325,6 +604,10 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                         .now()
                         .checked_add(after)
                         .ok_or(TuiExecutorError::TimerDeadlineOverflow)?;
+                    if kind == UiTimerKind::AutosaveDraft {
+                        self.timers
+                            .retain(|timer| timer.kind != UiTimerKind::AutosaveDraft);
+                    }
                     self.timers.push(ScheduledTimer { id, kind, deadline });
                     self.timers.sort_by_key(|timer| {
                         (timer.deadline, timer.id, timer_kind_order(timer.kind))
@@ -408,12 +691,36 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
         self.outstanding_snapshots.contains(&id) || self.timers.iter().any(|timer| timer.id == id)
     }
 
+    fn enqueue_client_effect(
+        &mut self,
+        id: EffectId,
+        command: WorkerCommand,
+    ) -> Result<(), TuiExecutorError> {
+        if self.effect_is_outstanding(id) {
+            return Err(TuiExecutorError::DuplicateEffectIdentity);
+        }
+        self.commands
+            .try_send(command)
+            .map_err(|error| match error {
+                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
+                    TuiExecutorError::WorkerUnavailable
+                }
+            })?;
+        self.outstanding_snapshots.push(id);
+        Ok(())
+    }
+
     fn complete_snapshot_identity(&mut self, event: &UiEvent) {
         let completed = match event {
             UiEvent::SnapshotLoaded { effect_id, .. }
             | UiEvent::SnapshotFailed { effect_id, .. }
             | UiEvent::ConversationLoaded { effect_id, .. }
-            | UiEvent::ConversationFailed { effect_id, .. } => Some(*effect_id),
+            | UiEvent::ConversationFailed { effect_id, .. }
+            | UiEvent::DraftLoaded { effect_id, .. }
+            | UiEvent::DraftSaved { effect_id, .. }
+            | UiEvent::DraftFailed { effect_id, .. }
+            | UiEvent::MailboxCommandCommitted { effect_id, .. }
+            | UiEvent::MailboxCommandFailed { effect_id, .. } => Some(*effect_id),
             UiEvent::Started
             | UiEvent::Input(_)
             | UiEvent::Resized(_)
@@ -435,6 +742,7 @@ impl<C: TuiClock> Drop for TuiEffectExecutor<C> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn client_worker<P: TuiClientPort>(
     mut client: P,
     commands: &Receiver<WorkerCommand>,
@@ -472,6 +780,53 @@ fn client_worker<P: TuiClientPort>(
                     break;
                 }
             }
+            Ok(WorkerCommand::OpenDraft { id, target }) => {
+                let event = match client.open_draft(target) {
+                    Ok(draft) => UiEvent::DraftLoaded {
+                        effect_id: id,
+                        draft,
+                    },
+                    Err(error) => UiEvent::DraftFailed {
+                        effect_id: id,
+                        failure: error.failure,
+                        current: error.current.map(|draft| *draft),
+                    },
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::SaveDraft { id, draft }) => {
+                let event = match client.save_draft(draft) {
+                    Ok(draft) => UiEvent::DraftSaved {
+                        effect_id: id,
+                        draft,
+                    },
+                    Err(error) => UiEvent::DraftFailed {
+                        effect_id: id,
+                        failure: error.failure,
+                        current: error.current.map(|draft| *draft),
+                    },
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
+            Ok(WorkerCommand::SubmitMailboxCommand { id, draft, action }) => {
+                let event = match client.submit_mailbox_command(draft, action) {
+                    Ok(revision) => UiEvent::MailboxCommandCommitted {
+                        effect_id: id,
+                        revision,
+                    },
+                    Err(failure) => UiEvent::MailboxCommandFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
             Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 for observation in client.poll(CLIENT_POLL_WAIT) {
@@ -501,6 +856,33 @@ fn client_worker<P: TuiClientPort>(
 
 /// Maps one authoritative local API snapshot into passive section-specific presentation rows.
 pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> UiSnapshot {
+    let mut direct_targets = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            SnapshotItem::Agent {
+                names,
+                mailboxes,
+                retirements,
+                ..
+            } if retirements.is_empty() => match (names.as_slice(), mailboxes.as_slice()) {
+                ([name], [mailbox]) => Some(UiDirectTarget {
+                    installation_id: mailbox.installation_id.bytes(),
+                    mailbox_id: mailbox.mailbox_id.bytes(),
+                    label: terminal_text(name),
+                }),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    direct_targets.sort_by(|left, right| {
+        (&left.label, left.installation_id, left.mailbox_id).cmp(&(
+            &right.label,
+            right.installation_id,
+            right.mailbox_id,
+        ))
+    });
     let rows = snapshot
         .items
         .into_iter()
@@ -510,6 +892,7 @@ pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> U
         section,
         revision: snapshot.revision,
         rows,
+        direct_targets,
     }
 }
 
@@ -692,6 +1075,7 @@ fn tui_conversation_entry(entry: ConversationEntryDto) -> UiConversationEntry {
                 content: terminal_text(&content),
                 summary: format!("activity · {}", activity_status_label(&status)),
                 message_state: None,
+                message_target: None,
                 technical: vec![UiTechnicalSection::Activity {
                     sequence,
                     status,
@@ -745,6 +1129,10 @@ fn tui_message_entry(message: ConversationMessageDto) -> UiConversationEntry {
         content: terminal_text(&message.content),
         summary: format!("{purpose} · {}", short_id(message.sender_mailbox)),
         message_state: Some(state),
+        message_target: Some(UiMessageTarget {
+            message_id: message.message_id.bytes(),
+            reply_allowed: message.purpose == MessagePurposeDto::Question,
+        }),
         technical: vec![
             UiTechnicalSection::Routing { sender, recipient },
             UiTechnicalSection::Semantics {
@@ -893,5 +1281,6 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
     match kind {
         UiTimerKind::PeriodicRefresh => 0,
         UiTimerKind::RetrySnapshot => 1,
+        UiTimerKind::AutosaveDraft => 2,
     }
 }

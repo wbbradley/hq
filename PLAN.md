@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained mailbox composition and actions** — Add pure reply,
-  direct-message, self-note, archive, and restore interactions over the ordinary mailbox-command
-  service. Preserve applicable draft identity, focus, target reselection, modal state, logical
-  selection, and scroll anchors across authoritative reload, reconnect, and resize; cancel modals
-  without mutation; and reconcile in-flight effects by stable request identity. Complete this work
-  when responsive render, model, executor, actionable-error, stale-target, modal-cancellation, and
-  installed TUI/CLI parity tests cover every retained mailbox interaction without selected-row or
-  activity-target leakage.
-
 - **[tui/high] Implement retained agent and session workflows** — Add named-agent search and
   inspection plus create, retire, start, exact resume, rename, live switch confirmation, and stop
   through ordinary local-API commands. Keep durable provider/session selection separate from

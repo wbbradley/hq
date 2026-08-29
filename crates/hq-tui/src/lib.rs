@@ -9,8 +9,9 @@ mod render;
 
 pub use model::{
     EffectId, UiActivityStatus, UiConnectionState, UiConversation, UiConversationEntry,
-    UiConversationEntryKind, UiConversationPage, UiEffect, UiError, UiEvent, UiFailure, UiFocus,
-    UiInput, UiMessageState, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, UiTransition, update,
+    UiConversationEntryKind, UiConversationPage, UiDirectTarget, UiEffect, UiError, UiEvent,
+    UiFailure, UiFocus, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
+    UiMailboxModal, UiMessageState, UiMessageTarget, UiModel, UiRow, UiRowKind, UiRowState,
+    UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
 };
 pub use render::render;

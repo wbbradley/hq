@@ -13,15 +13,22 @@ use std::{
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use hq_node::{
-    TuiClientObservation, TuiClientPort, TuiClock, TuiTerminalError, TuiTerminalEvent,
-    TuiTerminalPort, normalize_crossterm_event, run_tui_shell,
+    TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiTerminalError,
+    TuiTerminalEvent, TuiTerminalPort, normalize_crossterm_event, run_tui_shell,
 };
-use hq_tui::{UiInput, UiModel, UiSection, UiSize, UiSnapshot};
+use hq_tui::{
+    UiFailure, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiModel, UiSection,
+    UiSize, UiSnapshot,
+};
 
 #[test]
 fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
     let cases = [
-        (KeyCode::Char('q'), KeyModifiers::NONE, UiInput::Quit),
+        (
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+            UiInput::Character('q'),
+        ),
         (KeyCode::Tab, KeyModifiers::NONE, UiInput::NextFocus),
         (
             KeyCode::BackTab,
@@ -29,24 +36,33 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
             UiInput::PreviousFocus,
         ),
         (KeyCode::Right, KeyModifiers::NONE, UiInput::NextSection),
-        (KeyCode::Char('l'), KeyModifiers::NONE, UiInput::NextSection),
+        (
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+            UiInput::Character('l'),
+        ),
         (KeyCode::Left, KeyModifiers::NONE, UiInput::PreviousSection),
         (
             KeyCode::Char('h'),
             KeyModifiers::NONE,
-            UiInput::PreviousSection,
+            UiInput::Character('h'),
         ),
         (KeyCode::Down, KeyModifiers::NONE, UiInput::NextItem),
-        (KeyCode::Char('j'), KeyModifiers::NONE, UiInput::NextItem),
+        (
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            UiInput::Character('j'),
+        ),
         (KeyCode::Up, KeyModifiers::NONE, UiInput::PreviousItem),
         (
             KeyCode::Char('k'),
             KeyModifiers::NONE,
-            UiInput::PreviousItem,
+            UiInput::Character('k'),
         ),
         (KeyCode::Enter, KeyModifiers::NONE, UiInput::Activate),
         (KeyCode::PageDown, KeyModifiers::NONE, UiInput::LoadMore),
         (KeyCode::Esc, KeyModifiers::NONE, UiInput::Escape),
+        (KeyCode::Backspace, KeyModifiers::NONE, UiInput::Backspace),
     ];
     for (code, modifiers, expected) in cases {
         assert_eq!(
@@ -81,7 +97,13 @@ fn crossterm_events_normalize_to_the_closed_ui_vocabulary() {
             KeyCode::Char('x'),
             KeyModifiers::NONE,
         ))),
-        None
+        Some(TuiTerminalEvent::Input(UiInput::Character('x')))
+    );
+    assert_eq!(
+        normalize_crossterm_event(&Event::Paste("pasted text".to_owned())),
+        Some(TuiTerminalEvent::Input(UiInput::Paste(
+            "pasted text".to_owned()
+        )))
     );
 }
 
@@ -245,6 +267,7 @@ impl TuiClientPort for EmptyClient {
             section,
             revision: 1,
             rows: Vec::new(),
+            direct_targets: Vec::new(),
         })
     }
 
@@ -258,6 +281,25 @@ impl TuiClientPort for EmptyClient {
             entries: Vec::new(),
             next_cursor: None,
         })
+    }
+
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(test_draft_error())
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(test_draft_error())
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        Err(test_failure())
     }
 
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
@@ -281,8 +323,41 @@ impl TuiClientPort for PanickingClient {
         panic!("scripted client failure")
     }
 
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        panic!("scripted client failure")
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        panic!("scripted client failure")
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        panic!("scripted client failure")
+    }
+
     fn poll(&mut self, _wait: Duration) -> Vec<TuiClientObservation> {
         Vec::new()
+    }
+}
+
+fn test_failure() -> UiFailure {
+    UiFailure {
+        code: "unsupported_test_effect".to_owned(),
+        action: "script the mailbox effect".to_owned(),
+    }
+}
+
+fn test_draft_error() -> TuiDraftError {
+    TuiDraftError {
+        failure: test_failure(),
+        current: None,
     }
 }
 
