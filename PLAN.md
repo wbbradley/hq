@@ -54,14 +54,40 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained project-first workflows** — Add project selection/creation before
-  new project work, desired-resource editing and conflict previews, assignment and handoff,
-  activate/takeover/close/reopen/archive flows, worktree progress, and saga outcomes through
-  ordinary local-API commands. Preserve modal and logical selection state across authoritative
-  reloads, reject stale heads explicitly, reconcile in-flight operations after reconnect, and show
-  domain-selected conflicts and recovery actions without recomputing project authority. Complete
-  this work when pure model, executor, and installed-client parity tests cover every retained
-  project workflow and its cancellation, conflict, progress, and failure paths.
+- **[tui/high] Implement retained project catalog, creation, and input workflows** — Add stable
+  project search, selection, and details before accepting new project work; create projects over an
+  existing working tree; provision recoverable Git worktrees; and send project input through
+  ordinary local-API commands. Preserve modal text and logical project selection across
+  authoritative reload, reconnect, and resize; cancel without mutation; reject stale heads; and
+  expose worktree progress, rejected outcomes, reconcilable external-state warnings, and recovery
+  actions without recomputing project authority. Complete this work when pure model, responsive
+  renderer, executor, and installed-client parity tests cover catalog, both creation modes, input,
+  cancellation, progress, response loss, and failure paths.
+
+- **[tui/high] Implement retained desired-resource editing and conflict previews** — Add desired
+  resource add, remove, replace, and primary selection plus fresh health/release checks through
+  ordinary local-API commands. Present domain-selected claim conflicts and force gates before
+  mutation, retain exact project/resource selection and modal inputs across reload/reconnect, and
+  expose stale heads, dirty/unknown release state, rejected outcomes, and recovery actions as typed
+  state. Complete this work when pure model, responsive renderer, executor, and installed-client
+  parity tests cover every resource edit, preview, cancellation, conflict, and failure path.
+
+- **[tui/high] Implement retained project assignment, activation, dispatch, and handoff** — Add
+  stable named-agent selection, new-session or exact-session activation, pending-input dispatch,
+  and confirmed handoff/takeover through ordinary local-API commands. Preserve exact project,
+  agent, provider/session, thread, and directory targets across reload/reconnect; require separate
+  confirmation and force choices; and render saga progress, stale heads, runtime rejection,
+  uncertainty, and recovery actions without importing project or provider authority into the TUI.
+  Complete this work when pure model, responsive renderer, executor, and installed-client parity
+  tests cover every assignment, activation, dispatch, handoff, cancellation, and failure path.
+
+- **[tui/high] Implement retained project lifecycle controls** — Add confirmed close, force-gated
+  takeover/close recovery, reopen, archive, and unarchive through ordinary local-API commands.
+  Preserve project selection and modal state across authoritative reload/reconnect, reconcile
+  in-flight operations by stable identity, and expose release assessment, quiescence, compensation,
+  external-state warnings, rejected outcomes, and recovery actions as typed state. Complete this
+  work when pure model, responsive renderer, executor, and installed-client parity tests cover every
+  lifecycle transition, confirmation, cancellation, progress, response-loss, and failure path.
 
 - **[verification/high] Qualify the integrated Rust system against the acceptance matrix** — Run and
   strengthen the complete fixture, property, model, fuzz, crash/reopen, lifecycle, architecture,
