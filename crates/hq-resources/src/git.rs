@@ -190,6 +190,7 @@ fn terminate_process_group(process_group: u32) {
     let group = format!("-{process_group}");
     let _ = Command::new("/bin/kill")
         .arg("-KILL")
+        .arg("--")
         .arg(group)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
