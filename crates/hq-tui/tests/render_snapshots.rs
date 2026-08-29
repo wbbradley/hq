@@ -62,6 +62,20 @@ fn mailbox_footer_explains_thread_and_exact_message_actions() {
     assert!(archived.contains("u restore"));
     assert!(!archived.contains("a archive"));
     assert!(archived.contains("Enter info · Esc back · q quit"));
+
+    let confirmation = update(
+        conversation_model(UiSize {
+            width: 104,
+            height: 18,
+        }),
+        UiEvent::Input(UiInput::Character('a')),
+    )
+    .expect("archive confirmation")
+    .model;
+    let confirmation = render_text(&confirmation);
+    assert!(confirmation.contains("Archive the selected message?"));
+    assert!(confirmation.contains("Only this message changes state"));
+    assert!(confirmation.contains("the thread and its history are kept"));
 }
 
 #[test]

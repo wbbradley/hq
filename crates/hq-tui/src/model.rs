@@ -1023,6 +1023,21 @@ pub struct UiFailure {
     pub action: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiMailboxHint {
+    SelectMessage,
+}
+
+impl UiMailboxHint {
+    const fn text(self) -> &'static str {
+        match self {
+            Self::SelectMessage => {
+                "open the thread with Enter, then select the message to archive or restore"
+            }
+        }
+    }
+}
+
 /// Closed timer purpose owned by the shell effect executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiTimerKind {
@@ -1353,6 +1368,7 @@ pub struct UiModel {
     autosave_timer: Option<EffectId>,
     next_effect_id: Option<NonZeroU64>,
     last_failure: Option<UiFailure>,
+    mailbox_hint: Option<UiMailboxHint>,
     started: bool,
     should_exit: bool,
 }
@@ -1389,6 +1405,7 @@ impl UiModel {
             autosave_timer: None,
             next_effect_id: NonZeroU64::new(1),
             last_failure: None,
+            mailbox_hint: None,
             started: false,
             should_exit: false,
         }
@@ -1531,6 +1548,11 @@ impl UiModel {
     /// Borrows the latest matching failure.
     pub const fn last_failure(&self) -> Option<&UiFailure> {
         self.last_failure.as_ref()
+    }
+
+    /// Returns transient mailbox guidance produced by the latest input.
+    pub fn mailbox_hint(&self) -> Option<&'static str> {
+        self.mailbox_hint.map(UiMailboxHint::text)
     }
 
     /// Reports whether the model requested loop exit.
@@ -1982,6 +2004,7 @@ fn apply_input(
         }
         return Ok(());
     }
+    let dismissed_mailbox_hint = model.mailbox_hint.take().is_some();
     let changed = match input {
         UiInput::Quit => {
             if model.should_exit {
@@ -2052,7 +2075,7 @@ fn apply_input(
         UiInput::Character(character) => mailbox_shortcut(model, character, effects)?,
         UiInput::Paste(_) | UiInput::Backspace => false,
     };
-    if changed {
+    if changed || dismissed_mailbox_hint {
         effects.push(UiEffect::RequestRedraw);
     }
     Ok(())
@@ -4222,10 +4245,7 @@ fn selected_message_target(model: &UiModel) -> Option<UiMessageTarget> {
 fn confirm_message_state(model: &mut UiModel, restore: bool) -> bool {
     let Some(target) = selected_message_target(model) else {
         if model.conversation.is_none() && model.selected_row_is_conversation() {
-            model.last_failure = Some(UiFailure {
-                code: "message_not_selected".to_owned(),
-                action: "press Enter to open the thread, then select an exact message".to_owned(),
-            });
+            model.mailbox_hint = Some(UiMailboxHint::SelectMessage);
             return true;
         }
         return false;

@@ -998,21 +998,31 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             frame.render_widget(Paragraph::new("Enter submit · Esc save and close"), hint);
         }
         UiMailboxModal::Confirm { action } => {
-            let label = match action {
-                UiMailboxAction::Archive { .. } => "Archive this exact message?",
-                UiMailboxAction::Restore { .. } => "Restore this exact message?",
+            let (label, explanation) = match action {
+                UiMailboxAction::Archive { .. } => (
+                    "Archive the selected message?",
+                    Some("Only this message changes state; the thread and its history are kept."),
+                ),
+                UiMailboxAction::Restore { .. } => (
+                    "Restore the selected message?",
+                    Some(
+                        "Only this message returns to open views; the rest of the thread is unchanged.",
+                    ),
+                ),
                 UiMailboxAction::Reply { .. }
                 | UiMailboxAction::Direct { .. }
-                | UiMailboxAction::SelfNote => "Submit this mailbox command?",
+                | UiMailboxAction::SelfNote => ("Submit this mailbox command?", None),
             };
+            let mut lines = vec![Line::from(label), Line::default()];
+            if let Some(explanation) = explanation {
+                lines.push(Line::from(explanation));
+                lines.push(Line::default());
+            }
+            lines.push(Line::from("Enter confirm · Esc cancel"));
             frame.render_widget(
-                Paragraph::new(vec![
-                    Line::from(label),
-                    Line::default(),
-                    Line::from("Enter confirm · Esc cancel"),
-                ])
-                .block(Block::bordered().title(" Confirm mailbox action "))
-                .wrap(Wrap { trim: false }),
+                Paragraph::new(lines)
+                    .block(Block::bordered().title(" Confirm mailbox action "))
+                    .wrap(Wrap { trim: false }),
                 area,
             );
         }
@@ -1389,6 +1399,9 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
 fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     let content = model.last_failure().map_or_else(
         || {
+            if let Some(hint) = model.mailbox_hint() {
+                return format!(" Hint · {hint}");
+            }
             if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
                 " ↑/↓ or j/k section · Enter/→/l content · q quit".to_owned()
             } else if model.focus() == UiFocus::Navigation {

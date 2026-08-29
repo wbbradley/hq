@@ -790,15 +790,18 @@ fn summary_state_shortcuts_explain_that_an_exact_message_must_be_selected() {
     for shortcut in ['a', 'u'] {
         let attempted = update(loaded.clone(), UiEvent::Input(UiInput::Character(shortcut)))
             .expect("summary state shortcut provides guidance");
+        assert!(attempted.model.last_failure().is_none());
         assert_eq!(
-            attempted.model.last_failure(),
-            Some(&UiFailure {
-                code: "message_not_selected".to_owned(),
-                action: "press Enter to open the thread, then select an exact message".to_owned(),
-            })
+            attempted.model.mailbox_hint(),
+            Some("open the thread with Enter, then select the message to archive or restore")
         );
         assert_eq!(redraw_count(&attempted.effects), 1);
         assert!(attempted.model.mailbox_modal().is_none());
+
+        let dismissed = update(attempted.model, UiEvent::Input(UiInput::NextItem))
+            .expect("the next input dismisses transient guidance");
+        assert!(dismissed.model.mailbox_hint().is_none());
+        assert_eq!(redraw_count(&dismissed.effects), 1);
     }
 }
 

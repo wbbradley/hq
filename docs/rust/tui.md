@@ -50,8 +50,10 @@ opens a selected conversation summary so the operator can select an exact messag
 applicable reply draft only for a typed message target whose purpose permits replies; `d` selects
 one unconflicted named-agent mailbox by stable installation/mailbox identity; `n` opens a self-note;
 `a` opens archive confirmation for an open message; and `u` opens restore confirmation for an
-archived message. Using either state shortcut on a conversation summary explains that the thread
-must be opened first instead of silently ignoring the input. Activity
+archived message. Archive changes only that message's reversible state; it does not delete the
+thread or any message history. Using either state shortcut on a conversation summary shows a
+transient help hint that is dismissed by the next input, rather than recording a persistent
+failure. Activity
 entries carry no `UiMessageTarget`, so no key sequence can turn activity into a reply or reversible
 state target. Escape cancels selectors and confirmations without a canonical mutation.
 
