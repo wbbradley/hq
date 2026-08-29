@@ -157,12 +157,18 @@ fn assert_retained(
             }
             RelayFrame::EndOfStoredEvents(candidate) if candidate == subscription => {
                 if observed {
+                    connection
+                        .send(RelayFrame::Close(subscription.to_owned()))
+                        .expect("completed retained subscription closes");
                     return;
                 }
                 assert!(
                     Instant::now() < deadline,
                     "controlled relay never made the acknowledged wrapper query-visible"
                 );
+                connection
+                    .send(RelayFrame::Close(subscription.to_owned()))
+                    .expect("empty retained subscription closes before retry");
                 std::thread::sleep(Duration::from_millis(25));
                 request_retained(connection, subscription, receiver.public_key());
             }
