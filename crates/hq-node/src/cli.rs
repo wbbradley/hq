@@ -28,9 +28,9 @@ use hq_domain::{
     AccountId, AgentId, AuthorityReference, AuthorityRole, BoundedText, CommandId, ContentText,
     EncryptionPublicKey, ErrorCode, FactId, FactScope, GrantId, InstallationAddress,
     InstallationId, MailboxAddress, MailboxId, MessageId, MessagePurpose, OperationCorrelation,
-    OperationId, PresentationKind, ProjectId, ProviderId, ProviderSessionId,
-    RESOURCE_LOCATOR_MAX_BYTES, RelayHints, ResourceLocator, ResourceScheme, ShortText,
-    SigningPublicKey, ThreadId, Timestamp,
+    OperationId, PresentationKind, ProjectId, ProjectResource, ProviderId, ProviderSessionId,
+    RESOURCE_LOCATOR_MAX_BYTES, RelayHints, ResourceHealth, ResourceLocator, ResourceScheme,
+    ShortText, SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_local_api::{
     ClientEvent, InitialView, project_command_request_to_v1,
@@ -52,7 +52,10 @@ use hq_local_api::{
         resource_inspection_request_digest,
     },
 };
-use hq_projects::{agent_retirement_request_digest, project_command_request_digest};
+use hq_projects::{
+    ProjectResourceRelationship, agent_retirement_request_digest, desired_resource_conflict,
+    project_command_request_digest,
+};
 use hq_protocol::VerifiedPairingInvitation;
 use hq_reducer::{
     AuthorityPolicy, AuthorityProjectionKey, AuthorityReducer, DecisionStatus, reduce_complete,
@@ -3474,10 +3477,27 @@ fn run_project(
 /// Passive result subset needed by the ordinary local TUI client.
 pub(crate) enum ProjectTuiResult {
     Operation(Box<ProjectOperationView>),
+    ResourceChecks(Box<ProjectResourceCheckView>),
     InputSent {
         project_id: ProjectId,
         message_id: MessageId,
     },
+}
+
+pub(crate) struct ProjectResourceConflictPreviewView {
+    pub project_id: ProjectId,
+    pub resource_id: hq_domain::ResourceId,
+    pub display_path: String,
+    pub canonical_path: String,
+    pub relationship: &'static str,
+}
+
+pub(crate) struct ProjectResourcePreviewView {
+    pub project_id: ProjectId,
+    pub operation_id: OperationId,
+    pub display_path: String,
+    pub canonical_path: String,
+    pub conflicts: Vec<ProjectResourceConflictPreviewView>,
 }
 
 pub(crate) fn project_catalog_for_tui(
@@ -3492,6 +3512,7 @@ pub(crate) fn run_project_for_tui(
 ) -> Result<ProjectTuiResult, CliError> {
     match run_project(action, state, &mut std::io::empty())? {
         CliResult::ProjectOperation(view) => Ok(ProjectTuiResult::Operation(Box::new(view))),
+        CliResult::ProjectResourceCheck(view) => Ok(ProjectTuiResult::ResourceChecks(view)),
         CliResult::Messages(view) if view.operation == "project_send" => {
             Ok(ProjectTuiResult::InputSent {
                 project_id: view.project_id.ok_or(CliError::ProjectState)?,
@@ -3500,6 +3521,100 @@ pub(crate) fn run_project_for_tui(
         }
         _ => Err(CliError::ProjectState),
     }
+}
+
+pub(crate) fn preview_project_resource_for_tui(
+    state: &StatePaths,
+    project_id: ProjectId,
+    path: &Path,
+) -> Result<ProjectResourcePreviewView, CliError> {
+    let mut client = command_client(state)?;
+    let snapshot = client.snapshot()?;
+    let catalog = project_catalog_view(&snapshot, &ProjectCliCommand::List)?;
+    let project = catalog
+        .projects
+        .iter()
+        .find(|project| project.project_id == project_id)
+        .ok_or(CliError::ProjectState)?;
+    ensure_resource_check_home(client.installation_id(), project.home)?;
+    let display = normalized_existing_resource(path)?;
+    let operation_id = OperationId::from_bytes(*random_command_id()?.as_bytes());
+    let resource_id = project_resource_operation_identity(operation_id);
+    let display_dto =
+        ResourceLocatorDto::new(ResourceSchemeDto::WorkingTree, display.value().to_owned())
+            .map_err(|_| CliError::Arguments)?;
+    let request_resource = ProjectResourceView {
+        resource_id,
+        display_locator: display_dto.clone(),
+        canonical_locator: display_dto,
+        health: "unknown",
+        primary: false,
+        active_claim: false,
+        conflicting_projects: Vec::new(),
+    };
+    let request = resource_inspection_request(
+        project_id,
+        &request_resource,
+        operation_id,
+        current_unix_millis()?,
+    )?;
+    let ClientEvent::Response {
+        result: ResponseResult::ResourceInspection(EffectOutcomeDto::Accepted(observed)),
+        ..
+    } = client.request(Request::InspectResource(request))?
+    else {
+        return Err(CliError::ResourceState);
+    };
+    let canonical_dto = observed.observed_canonical.ok_or(CliError::ResourceState)?;
+    let canonical = locator_from_v1(&canonical_dto)?;
+    let requested_resource = ProjectResource {
+        resource_id,
+        display_locator: display,
+        canonical_locator: canonical,
+        health: ResourceHealth::Unknown,
+    };
+    let mut conflicts = Vec::new();
+    for candidate in &catalog.projects {
+        for resource in &candidate.resources {
+            if !resource.active_claim {
+                continue;
+            }
+            let candidate_resource = ProjectResource {
+                resource_id: resource.resource_id,
+                display_locator: locator_from_v1(&resource.display_locator)?,
+                canonical_locator: locator_from_v1(&resource.canonical_locator)?,
+                health: ResourceHealth::Unknown,
+            };
+            if let Some(conflict) = desired_resource_conflict(
+                project_id,
+                project.home,
+                &requested_resource,
+                candidate.project_id,
+                candidate.home,
+                &candidate_resource,
+            ) {
+                conflicts.push(ProjectResourceConflictPreviewView {
+                    project_id: conflict.project_id,
+                    resource_id: conflict.resource_id,
+                    display_path: conflict.display_locator.value().to_owned(),
+                    canonical_path: conflict.canonical_locator.value().to_owned(),
+                    relationship: match conflict.relationship {
+                        ProjectResourceRelationship::Equal => "equal",
+                        ProjectResourceRelationship::Ancestor => "ancestor",
+                        ProjectResourceRelationship::Descendant => "descendant",
+                    },
+                });
+            }
+        }
+    }
+    conflicts.sort_by_key(|conflict| (conflict.project_id, conflict.resource_id));
+    Ok(ProjectResourcePreviewView {
+        project_id,
+        operation_id,
+        display_path: requested_resource.display_locator.value().to_owned(),
+        canonical_path: requested_resource.canonical_locator.value().to_owned(),
+        conflicts,
+    })
 }
 
 fn run_project_resource(

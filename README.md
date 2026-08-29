@@ -307,10 +307,15 @@ Projects keep resource claims, conversation history, assignment epochs, and exec
 In the Rust TUI, move to `Projects` with `h`/`l`, use `/` to search stable project names, resource
 paths, or IDs, and press Enter to inspect the selected project. Press `c` to create a project over
 an existing working tree, `w` to provision a recoverable Git worktree project, or `n` from project
-details to send durable project input. Arrow keys move between form fields. Forms, logical
-selection, and typed operation outcomes survive authoritative reloads and reconnects; canceling a
-form performs no mutation. A reconcilable worktree outcome names any external destination and
-branch that HQ deliberately retained for operator recovery.
+details to send durable project input. In project details, arrows select an exact desired resource;
+`a`, `e`, `x`, and `p` add, replace, remove, or select it as primary, while `k` freshly checks the
+selected resource and `K` checks all desired resources. Add and replace first show the freshly
+canonicalized path and every domain-selected claim conflict; conflicts block mutation. Removing a
+resource from an assigned project requires an explicit `f` force toggle and never deletes external
+files. Arrow keys move between form fields. Forms, exact logical selection, and typed operation,
+health, release, rejection, and reconciliation outcomes survive authoritative reloads and
+reconnects; canceling a form performs no mutation. A reconcilable worktree outcome names any
+external destination and branch that HQ deliberately retained for operator recovery.
 
 ```sh
 hq project create widget --path /work/widget

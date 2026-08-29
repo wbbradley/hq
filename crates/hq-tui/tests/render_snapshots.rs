@@ -6,8 +6,9 @@ use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentMailbox, UiAgentSession,
     UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiInput,
     UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject, UiProjectAction,
-    UiProjectExternalWarning, UiProjectOutcome, UiProjectResult, UiRow, UiRowKind, UiRowState,
-    UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
+    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResourceConflict,
+    UiProjectResult, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -256,6 +257,86 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
     }
 }
 
+#[test]
+fn project_resource_forms_and_conflict_preview_are_responsive() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+    ] {
+        let details = update(project_model(size), UiEvent::Input(UiInput::Activate))
+            .expect("project details")
+            .model;
+        let rendered = render_text(&details);
+        assert!(rendered.contains("Desired resources"));
+        if size.height >= 24 {
+            assert!(rendered.contains("check selected"));
+        }
+
+        for (key, expected) in [
+            ('a', "Add desired resource"),
+            ('e', "Replace desired resource"),
+            ('x', "Confirm desired-resource removal"),
+            ('p', "Confirm primary resource"),
+        ] {
+            let modal = update(details.clone(), UiEvent::Input(UiInput::Character(key)))
+                .expect("resource modal")
+                .model;
+            assert!(render_text(&modal).contains(expected));
+        }
+
+        let add = update(details, UiEvent::Input(UiInput::Character('a')))
+            .expect("add form")
+            .model;
+        let add = update(add, UiEvent::Input(UiInput::Paste("/shared".to_owned())))
+            .expect("resource path")
+            .model;
+        let previewing = update(add, UiEvent::Input(UiInput::Activate)).expect("preview");
+        let (effect_id, action) = previewing
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::SubmitProjectCommand { id, action } => Some((*id, action.clone())),
+                _ => None,
+            })
+            .expect("preview effect");
+        let preview = update(
+            previewing.model,
+            UiEvent::ProjectCommandCompleted {
+                effect_id,
+                result: UiProjectResult {
+                    action,
+                    command_id: [5; 32],
+                    operation_id: [6; 32],
+                    project_id: [1; 32],
+                    outcome: UiProjectOutcome::ResourcePreview {
+                        display_path: "/shared".to_owned(),
+                        canonical_path: "/canonical/shared".to_owned(),
+                        conflicts: vec![UiProjectResourceConflict {
+                            project_id: [7; 32],
+                            resource_id: [8; 32],
+                            display_path: "/other".to_owned(),
+                            canonical_path: "/canonical".to_owned(),
+                            relationship: "descendant".to_owned(),
+                        }],
+                    },
+                },
+            },
+        )
+        .expect("preview outcome")
+        .model;
+        let rendered = render_text(&preview);
+        assert!(rendered.contains("Preview desired-resource addition"));
+        assert!(rendered.contains("descendant"));
+        assert!(rendered.contains("Claim conflicts block mutation"));
+    }
+}
+
 fn assert_snapshot(model: &UiModel, expected: &str) {
     let before = model.clone();
     let viewport = model.viewport();
@@ -446,9 +527,18 @@ fn project_model(size: UiSize) -> UiModel {
                 lifecycle: "open".to_owned(),
                 archived: false,
                 claimable: true,
+                assigned: false,
                 head: [3; 32],
                 input_sequence: 0,
-                resources: Vec::new(),
+                resources: vec![UiProjectResource {
+                    resource_id: [4; 32],
+                    display_path: "/workspace/release".to_owned(),
+                    canonical_path: "/workspace/release".to_owned(),
+                    health: "healthy".to_owned(),
+                    primary: true,
+                    active_claim: true,
+                    conflicting_projects: Vec::new(),
+                }],
             }]
         } else {
             Vec::new()

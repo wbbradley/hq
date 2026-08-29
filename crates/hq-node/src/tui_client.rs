@@ -23,8 +23,9 @@ use hq_tui::{
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiMailboxAction,
     UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
     UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
-    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResult, UiRow,
-    UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
+    UiProjectResourceConflict, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSection,
+    UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
@@ -506,66 +507,10 @@ impl TuiClientPort for LocalTuiClient {
         &mut self,
         action: UiProjectAction,
     ) -> Result<UiProjectResult, UiFailure> {
-        let command = match &action {
-            UiProjectAction::CreateExisting { name, brief, path } => {
-                LocalProjectCommand::CreateExisting {
-                    name: name.clone(),
-                    brief: brief.clone(),
-                    path: path.clone(),
-                }
-            }
-            UiProjectAction::CreateWorktree {
-                name,
-                brief,
-                source,
-                destination,
-                branch,
-                base,
-            } => LocalProjectCommand::CreateWorktree {
-                name: name.clone(),
-                brief: brief.clone(),
-                source: source.clone(),
-                destination: destination.clone(),
-                branch: branch.clone(),
-                base: base.clone(),
-            },
-            UiProjectAction::SendInput {
-                project_id,
-                content,
-            } => LocalProjectCommand::SendInput {
-                project_id: *project_id,
-                content: content.clone(),
-            },
-        };
+        let command = local_project_command(&action);
         let result = execute_project_command(&self.state, command)
             .map_err(|error| project_failure(&error))?;
-        let outcome = match result.outcome {
-            LocalProjectOutcome::Completed { project_head } => {
-                UiProjectOutcome::Completed { project_head }
-            }
-            LocalProjectOutcome::Running { stage } => UiProjectOutcome::Running { stage },
-            LocalProjectOutcome::Rejected { category, code } => {
-                UiProjectOutcome::Rejected { category, code }
-            }
-            LocalProjectOutcome::Reconcilable {
-                stage,
-                category,
-                code,
-                warning,
-            } => UiProjectOutcome::Reconcilable {
-                stage,
-                category,
-                code,
-                warning: warning.map(|warning| UiProjectExternalWarning {
-                    kind: warning.kind,
-                    destination: warning.destination,
-                    branch: warning.branch,
-                }),
-            },
-            LocalProjectOutcome::InputSent { message_id } => {
-                UiProjectOutcome::InputSent { message_id }
-            }
-        };
+        let outcome = ui_project_outcome(result.outcome);
         Ok(UiProjectResult {
             action,
             command_id: result.command_id,
@@ -1253,6 +1198,161 @@ fn tui_snapshot_with_projects(
     }
 }
 
+fn local_project_command(action: &UiProjectAction) -> LocalProjectCommand {
+    match action {
+        UiProjectAction::CreateExisting { name, brief, path } => {
+            LocalProjectCommand::CreateExisting {
+                name: name.clone(),
+                brief: brief.clone(),
+                path: path.clone(),
+            }
+        }
+        UiProjectAction::CreateWorktree {
+            name,
+            brief,
+            source,
+            destination,
+            branch,
+            base,
+        } => LocalProjectCommand::CreateWorktree {
+            name: name.clone(),
+            brief: brief.clone(),
+            source: source.clone(),
+            destination: destination.clone(),
+            branch: branch.clone(),
+            base: base.clone(),
+        },
+        UiProjectAction::SendInput {
+            project_id,
+            content,
+        } => LocalProjectCommand::SendInput {
+            project_id: *project_id,
+            content: content.clone(),
+        },
+        UiProjectAction::PreviewAddResource {
+            project_id,
+            path,
+            make_primary,
+        } => LocalProjectCommand::PreviewAddResource {
+            project_id: *project_id,
+            path: path.clone(),
+            make_primary: *make_primary,
+        },
+        UiProjectAction::AddResource {
+            project_id,
+            path,
+            make_primary,
+        } => LocalProjectCommand::AddResource {
+            project_id: *project_id,
+            path: path.clone(),
+            make_primary: *make_primary,
+        },
+        UiProjectAction::PreviewReplaceResource {
+            project_id,
+            resource_id,
+            path,
+        } => LocalProjectCommand::PreviewReplaceResource {
+            project_id: *project_id,
+            resource_id: *resource_id,
+            path: path.clone(),
+        },
+        UiProjectAction::ReplaceResource {
+            project_id,
+            resource_id,
+            path,
+        } => LocalProjectCommand::ReplaceResource {
+            project_id: *project_id,
+            resource_id: *resource_id,
+            path: path.clone(),
+        },
+        UiProjectAction::RemoveResource {
+            project_id,
+            resource_id,
+            force,
+        } => LocalProjectCommand::RemoveResource {
+            project_id: *project_id,
+            resource_id: *resource_id,
+            force: *force,
+        },
+        UiProjectAction::SetPrimaryResource {
+            project_id,
+            resource_id,
+        } => LocalProjectCommand::SetPrimaryResource {
+            project_id: *project_id,
+            resource_id: *resource_id,
+        },
+        UiProjectAction::CheckResources {
+            project_id,
+            resource_id,
+        } => LocalProjectCommand::CheckResources {
+            project_id: *project_id,
+            resource_id: *resource_id,
+        },
+    }
+}
+
+fn ui_project_outcome(outcome: LocalProjectOutcome) -> UiProjectOutcome {
+    match outcome {
+        LocalProjectOutcome::Completed { project_head } => {
+            UiProjectOutcome::Completed { project_head }
+        }
+        LocalProjectOutcome::Running { stage } => UiProjectOutcome::Running { stage },
+        LocalProjectOutcome::Rejected { category, code } => {
+            UiProjectOutcome::Rejected { category, code }
+        }
+        LocalProjectOutcome::Reconcilable {
+            stage,
+            category,
+            code,
+            warning,
+        } => UiProjectOutcome::Reconcilable {
+            stage,
+            category,
+            code,
+            warning: warning.map(|warning| UiProjectExternalWarning {
+                kind: warning.kind,
+                destination: warning.destination,
+                branch: warning.branch,
+            }),
+        },
+        LocalProjectOutcome::InputSent { message_id } => UiProjectOutcome::InputSent { message_id },
+        LocalProjectOutcome::ResourcePreview {
+            display_path,
+            canonical_path,
+            conflicts,
+        } => UiProjectOutcome::ResourcePreview {
+            display_path,
+            canonical_path,
+            conflicts: conflicts
+                .into_iter()
+                .map(|conflict| UiProjectResourceConflict {
+                    project_id: conflict.project_id,
+                    resource_id: conflict.resource_id,
+                    display_path: conflict.display_path,
+                    canonical_path: conflict.canonical_path,
+                    relationship: conflict.relationship,
+                })
+                .collect(),
+        },
+        LocalProjectOutcome::ResourceChecks { checks } => UiProjectOutcome::ResourceChecks {
+            checks: checks
+                .into_iter()
+                .map(|check| UiProjectResourceCheck {
+                    resource_id: check.resource_id,
+                    status: check.status,
+                    health: check.health,
+                    release: check.release,
+                    observed_canonical_path: check.observed_canonical_path,
+                    details: check.details,
+                    error_category: check.error_category,
+                    error_code: check.error_code,
+                    reconciliation_id: check.reconciliation_id,
+                })
+                .collect(),
+        },
+    }
+}
+
 fn tui_projects(projects: Vec<LocalProject>) -> Vec<UiProject> {
     projects
         .into_iter()
@@ -1263,6 +1363,7 @@ fn tui_projects(projects: Vec<LocalProject>) -> Vec<UiProject> {
             lifecycle: project.lifecycle,
             archived: project.archived,
             claimable: project.claimable,
+            assigned: project.assigned,
             head: project.head,
             input_sequence: project.input_sequence,
             resources: project
@@ -1693,5 +1794,172 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
         UiTimerKind::PeriodicRefresh => 0,
         UiTimerKind::RetrySnapshot => 1,
         UiTimerKind::AutosaveDraft => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{local_project_command, ui_project_outcome};
+    use crate::local_client::{
+        LocalProjectCommand, LocalProjectOutcome, LocalProjectResourceCheck,
+        LocalProjectResourceConflict,
+    };
+    use hq_tui::{UiProjectAction, UiProjectOutcome};
+
+    #[test]
+    fn every_resource_action_maps_to_the_exact_ordinary_client_command() {
+        let project_id = [1; 32];
+        let resource_id = [2; 32];
+        let cases = [
+            (
+                UiProjectAction::PreviewAddResource {
+                    project_id,
+                    path: "/add".to_owned(),
+                    make_primary: true,
+                },
+                LocalProjectCommand::PreviewAddResource {
+                    project_id,
+                    path: "/add".to_owned(),
+                    make_primary: true,
+                },
+            ),
+            (
+                UiProjectAction::AddResource {
+                    project_id,
+                    path: "/add".to_owned(),
+                    make_primary: true,
+                },
+                LocalProjectCommand::AddResource {
+                    project_id,
+                    path: "/add".to_owned(),
+                    make_primary: true,
+                },
+            ),
+            (
+                UiProjectAction::PreviewReplaceResource {
+                    project_id,
+                    resource_id,
+                    path: "/replace".to_owned(),
+                },
+                LocalProjectCommand::PreviewReplaceResource {
+                    project_id,
+                    resource_id,
+                    path: "/replace".to_owned(),
+                },
+            ),
+            (
+                UiProjectAction::ReplaceResource {
+                    project_id,
+                    resource_id,
+                    path: "/replace".to_owned(),
+                },
+                LocalProjectCommand::ReplaceResource {
+                    project_id,
+                    resource_id,
+                    path: "/replace".to_owned(),
+                },
+            ),
+            (
+                UiProjectAction::RemoveResource {
+                    project_id,
+                    resource_id,
+                    force: true,
+                },
+                LocalProjectCommand::RemoveResource {
+                    project_id,
+                    resource_id,
+                    force: true,
+                },
+            ),
+            (
+                UiProjectAction::SetPrimaryResource {
+                    project_id,
+                    resource_id,
+                },
+                LocalProjectCommand::SetPrimaryResource {
+                    project_id,
+                    resource_id,
+                },
+            ),
+            (
+                UiProjectAction::CheckResources {
+                    project_id,
+                    resource_id: Some(resource_id),
+                },
+                LocalProjectCommand::CheckResources {
+                    project_id,
+                    resource_id: Some(resource_id),
+                },
+            ),
+            (
+                UiProjectAction::CheckResources {
+                    project_id,
+                    resource_id: None,
+                },
+                LocalProjectCommand::CheckResources {
+                    project_id,
+                    resource_id: None,
+                },
+            ),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(local_project_command(&action), expected);
+        }
+    }
+
+    #[test]
+    fn passive_resource_preview_and_check_evidence_maps_without_parsing_text() {
+        assert_eq!(
+            ui_project_outcome(LocalProjectOutcome::ResourcePreview {
+                display_path: "/display".to_owned(),
+                canonical_path: "/canonical".to_owned(),
+                conflicts: vec![LocalProjectResourceConflict {
+                    project_id: [3; 32],
+                    resource_id: [4; 32],
+                    display_path: "/other".to_owned(),
+                    canonical_path: "/canonical/other".to_owned(),
+                    relationship: "ancestor".to_owned(),
+                }],
+            }),
+            UiProjectOutcome::ResourcePreview {
+                display_path: "/display".to_owned(),
+                canonical_path: "/canonical".to_owned(),
+                conflicts: vec![hq_tui::UiProjectResourceConflict {
+                    project_id: [3; 32],
+                    resource_id: [4; 32],
+                    display_path: "/other".to_owned(),
+                    canonical_path: "/canonical/other".to_owned(),
+                    relationship: "ancestor".to_owned(),
+                }],
+            }
+        );
+        assert_eq!(
+            ui_project_outcome(LocalProjectOutcome::ResourceChecks {
+                checks: vec![LocalProjectResourceCheck {
+                    resource_id: [5; 32],
+                    status: "uncertain".to_owned(),
+                    health: None,
+                    release: Some("dirty".to_owned()),
+                    observed_canonical_path: Some("/observed".to_owned()),
+                    details: Some("adapter detail".to_owned()),
+                    error_category: Some("resource".to_owned()),
+                    error_code: Some("uncertain".to_owned()),
+                    reconciliation_id: Some([6; 32]),
+                }],
+            }),
+            UiProjectOutcome::ResourceChecks {
+                checks: vec![hq_tui::UiProjectResourceCheck {
+                    resource_id: [5; 32],
+                    status: "uncertain".to_owned(),
+                    health: None,
+                    release: Some("dirty".to_owned()),
+                    observed_canonical_path: Some("/observed".to_owned()),
+                    details: Some("adapter detail".to_owned()),
+                    error_category: Some("resource".to_owned()),
+                    error_code: Some("uncertain".to_owned()),
+                    reconciliation_id: Some([6; 32]),
+                }],
+            }
+        );
     }
 }

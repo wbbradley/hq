@@ -4,6 +4,7 @@
 //! coordination state to decide whether an external effect is safe to start, retry, or reconcile.
 
 mod canonical;
+mod claim;
 mod command_codec;
 mod git_worktree;
 mod input;
@@ -21,6 +22,7 @@ use hq_domain::{
 };
 
 pub use canonical::ApplicationCanonicalProjectPort;
+pub use claim::{ProjectResourceConflict, ProjectResourceRelationship, desired_resource_conflict};
 pub use command_codec::{
     ProjectCommandCodecError, agent_retirement_request_digest, decode_canonical_project_mutation,
     decode_project_command_action, encode_canonical_project_mutation,

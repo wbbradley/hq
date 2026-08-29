@@ -14,8 +14,9 @@ pub use model::{
     UiFailure, UiFocus, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
     UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
     UiMessageState, UiMessageTarget, UiModel, UiProject, UiProjectAction, UiProjectExternalWarning,
-    UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResult,
-    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
-    UiTransition, update,
+    UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition,
+    update,
 };
 pub use render::render;

@@ -54,14 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained desired-resource editing and conflict previews** — Add desired
-  resource add, remove, replace, and primary selection plus fresh health/release checks through
-  ordinary local-API commands. Present domain-selected claim conflicts and force gates before
-  mutation, retain exact project/resource selection and modal inputs across reload/reconnect, and
-  expose stale heads, dirty/unknown release state, rejected outcomes, and recovery actions as typed
-  state. Complete this work when pure model, responsive renderer, executor, and installed-client
-  parity tests cover every resource edit, preview, cancellation, conflict, and failure path.
-
 - **[tui/high] Implement retained project assignment, activation, dispatch, and handoff** — Add
   stable named-agent selection, new-session or exact-session activation, pending-input dispatch,
   and confirmed handoff/takeover through ordinary local-API commands. Preserve exact project,

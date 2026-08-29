@@ -11,8 +11,8 @@ use hq_tui::{
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
     UiProject, UiProjectAction, UiProjectExternalWarning, UiProjectModal, UiProjectOutcome,
-    UiProjectResource, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
-    UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiRow,
+    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1401,7 +1401,7 @@ fn project_search_and_details_preserve_stable_identity_across_reload_and_resize(
     assert_eq!(loaded.model.selected_row(), Some(agent_row_id(2).as_str()));
     assert!(matches!(
         loaded.model.project_modal(),
-        Some(UiProjectModal::Details { project }) if project.name == "beta current"
+        Some(UiProjectModal::Details { project, .. }) if project.name == "beta current"
     ));
 }
 
@@ -1654,6 +1654,365 @@ fn project_progress_stale_rejection_and_mismatched_responses_remain_typed() {
     );
 }
 
+#[test]
+fn resource_add_previews_authoritative_conflicts_before_mutation() {
+    let target = project(9, "target", "/target");
+    let mut model = loaded_projects_model(1, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('a')))
+        .expect("add form")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("/shared".to_owned())))
+        .expect("path")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("primary toggle")
+        .model;
+    let previewing = update(model, UiEvent::Input(UiInput::Activate)).expect("preview");
+    let (preview_id, preview_action) = project_effect(&previewing.effects);
+    assert_eq!(
+        preview_action,
+        UiProjectAction::PreviewAddResource {
+            project_id: target.project_id,
+            path: "/shared".to_owned(),
+            make_primary: true,
+        }
+    );
+    let preview = update(
+        previewing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: preview_id,
+            result: UiProjectResult {
+                action: preview_action,
+                command_id: [4; 32],
+                operation_id: [5; 32],
+                project_id: target.project_id,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/shared".to_owned(),
+                    canonical_path: "/canonical/shared".to_owned(),
+                    conflicts: vec![UiProjectResourceConflict {
+                        project_id: [2; 32],
+                        resource_id: [3; 32],
+                        display_path: "/other".to_owned(),
+                        canonical_path: "/canonical".to_owned(),
+                        relationship: "descendant".to_owned(),
+                    }],
+                },
+            },
+        },
+    )
+    .expect("preview result");
+    let blocked = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("blocked");
+    assert!(
+        blocked
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+    assert_eq!(
+        blocked
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("project_resource_claim_conflict")
+    );
+}
+
+#[test]
+fn resource_edits_force_gate_selection_and_fresh_checks_use_exact_identities() {
+    let mut target = project(10, "assigned", "/first");
+    target.assigned = true;
+    target.resources.push(UiProjectResource {
+        resource_id: [22; 32],
+        display_path: "/second".to_owned(),
+        canonical_path: "/second".to_owned(),
+        health: "unknown".to_owned(),
+        primary: false,
+        active_claim: true,
+        conflicting_projects: Vec::new(),
+    });
+    let mut model = loaded_projects_model(1, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("select second resource")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('x')))
+        .expect("remove confirmation")
+        .model;
+    let gated = update(model, UiEvent::Input(UiInput::Activate)).expect("force gate");
+    assert_eq!(
+        gated
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("project_resource_remove_force_required")
+    );
+    let forced = update(gated.model, UiEvent::Input(UiInput::Character('f')))
+        .expect("force toggle")
+        .model;
+    let removing = update(forced, UiEvent::Input(UiInput::Activate)).expect("remove");
+    let (_, action) = project_effect(&removing.effects);
+    assert_eq!(
+        action,
+        UiProjectAction::RemoveResource {
+            project_id: target.project_id,
+            resource_id: [22; 32],
+            force: true,
+        }
+    );
+
+    let mut model = loaded_projects_model(2, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    let checking = update(model, UiEvent::Input(UiInput::Character('k'))).expect("exact check");
+    let (check_id, check_action) = project_effect(&checking.effects);
+    assert_eq!(
+        check_action,
+        UiProjectAction::CheckResources {
+            project_id: target.project_id,
+            resource_id: Some(target.resources[0].resource_id),
+        }
+    );
+    let checked = update(
+        checking.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: check_id,
+            result: UiProjectResult {
+                action: check_action,
+                command_id: [7; 32],
+                operation_id: [8; 32],
+                project_id: target.project_id,
+                outcome: UiProjectOutcome::ResourceChecks {
+                    checks: vec![UiProjectResourceCheck {
+                        resource_id: target.resources[0].resource_id,
+                        status: "accepted".to_owned(),
+                        health: Some("healthy".to_owned()),
+                        release: Some("clean".to_owned()),
+                        observed_canonical_path: Some("/first".to_owned()),
+                        details: None,
+                        error_category: None,
+                        error_code: None,
+                        reconciliation_id: None,
+                    }],
+                },
+            },
+        },
+    )
+    .expect("fresh check");
+    assert!(matches!(
+        checked.model.project_modal(),
+        Some(UiProjectModal::Outcome { result })
+            if matches!(result.outcome, UiProjectOutcome::ResourceChecks { .. })
+    ));
+}
+
+#[test]
+fn resource_add_retains_input_across_reload_and_preview_failure() {
+    let target = project_with_second_resource();
+    let mut model = loaded_projects_model(1, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('a')))
+        .expect("add form")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("/added".to_owned())))
+        .expect("add path")
+        .model;
+
+    let invalidated = update(model, UiEvent::Invalidated { revision: 2 }).expect("reload");
+    let snapshot_id = snapshot_effect(&invalidated.effects);
+    let mut refreshed = target.clone();
+    refreshed.name = "resources-current".to_owned();
+    model = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: projects_snapshot(2, vec![refreshed]),
+        },
+    )
+    .expect("current project")
+    .model;
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::AddResource { project, path, .. })
+            if project.name == "resources-current" && path == "/added"
+    ));
+
+    let previewing = update(model, UiEvent::Input(UiInput::Activate)).expect("preview add");
+    let (preview_id, preview_action) = project_effect(&previewing.effects);
+    model = update(
+        previewing.model,
+        UiEvent::ProjectCommandFailed {
+            effect_id: preview_id,
+            failure: UiFailure {
+                code: "resource_inspection_failed".to_owned(),
+                action: "repair the path and retry".to_owned(),
+            },
+        },
+    )
+    .expect("preview failure")
+    .model;
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::AddResource { path, submitting: false, .. }) if path == "/added"
+    ));
+    assert_eq!(
+        model.last_failure().map(|failure| failure.code.as_str()),
+        Some("resource_inspection_failed")
+    );
+
+    let previewing = update(model, UiEvent::Input(UiInput::Activate)).expect("retry preview");
+    let (preview_id, retried_action) = project_effect(&previewing.effects);
+    assert_eq!(retried_action, preview_action);
+    let previewed = update(
+        previewing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: preview_id,
+            result: UiProjectResult {
+                action: retried_action,
+                command_id: [40; 32],
+                operation_id: [41; 32],
+                project_id: target.project_id,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/added".to_owned(),
+                    canonical_path: "/canonical/added".to_owned(),
+                    conflicts: Vec::new(),
+                },
+            },
+        },
+    )
+    .expect("clean preview");
+    let adding = update(previewed.model, UiEvent::Input(UiInput::Activate)).expect("add");
+    assert_eq!(
+        project_effect(&adding.effects).1,
+        UiProjectAction::AddResource {
+            project_id: target.project_id,
+            path: "/added".to_owned(),
+            make_primary: false,
+        }
+    );
+}
+
+#[test]
+fn resource_replace_and_primary_are_exact_and_cancelable() {
+    let target = project_with_second_resource();
+    let mut model = loaded_projects_model(3, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("second resource")
+        .model;
+    let cancelled = update(
+        update(model.clone(), UiEvent::Input(UiInput::Character('e')))
+            .expect("replace form")
+            .model,
+        UiEvent::Input(UiInput::Escape),
+    )
+    .expect("cancel replace");
+    assert!(
+        cancelled
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+    assert!(cancelled.model.project_modal().is_none());
+
+    model = update(model, UiEvent::Input(UiInput::Character('e')))
+        .expect("replace form")
+        .model;
+    model = update(
+        model,
+        UiEvent::Input(UiInput::Paste("/replacement".to_owned())),
+    )
+    .expect("replacement path")
+    .model;
+    let replacing = update(model, UiEvent::Input(UiInput::Activate)).expect("replace preview");
+    assert_eq!(
+        project_effect(&replacing.effects).1,
+        UiProjectAction::PreviewReplaceResource {
+            project_id: target.project_id,
+            resource_id: [33; 32],
+            path: "/replacement".to_owned(),
+        }
+    );
+
+    let mut model = loaded_projects_model(4, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("second resource")
+        .model;
+    let primary_modal = update(model.clone(), UiEvent::Input(UiInput::Character('p')))
+        .expect("primary confirmation");
+    let cancelled =
+        update(primary_modal.model, UiEvent::Input(UiInput::Escape)).expect("cancel primary");
+    assert!(
+        cancelled
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+    let primary_modal =
+        update(model, UiEvent::Input(UiInput::Character('p'))).expect("primary confirmation");
+    let primary =
+        update(primary_modal.model, UiEvent::Input(UiInput::Activate)).expect("set primary");
+    assert_eq!(
+        project_effect(&primary.effects).1,
+        UiProjectAction::SetPrimaryResource {
+            project_id: target.project_id,
+            resource_id: [33; 32],
+        }
+    );
+}
+
+#[test]
+fn resource_check_failure_retains_exact_details_context() {
+    let target = project_with_second_resource();
+    let mut model = loaded_projects_model(5, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    let checking = update(model, UiEvent::Input(UiInput::Character('K'))).expect("check all");
+    let (check_id, action) = project_effect(&checking.effects);
+    assert_eq!(
+        action,
+        UiProjectAction::CheckResources {
+            project_id: target.project_id,
+            resource_id: None,
+        }
+    );
+    let failed = update(
+        checking.model,
+        UiEvent::ProjectCommandFailed {
+            effect_id: check_id,
+            failure: UiFailure {
+                code: "resource_check_unavailable".to_owned(),
+                action: "retry after reconnect".to_owned(),
+            },
+        },
+    )
+    .expect("check failure");
+    assert!(matches!(
+        failed.model.project_modal(),
+        Some(UiProjectModal::Details { .. })
+    ));
+    assert_eq!(
+        failed
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("resource_check_unavailable")
+    );
+}
+
 fn snapshot(revision: u64, ids: &[&str]) -> UiSnapshot {
     snapshot_for(UiSection::Inbox, revision, ids)
 }
@@ -1764,6 +2123,7 @@ fn project(byte: u8, name: &str, path: &str) -> UiProject {
         lifecycle: "open".to_owned(),
         archived: false,
         claimable: true,
+        assigned: false,
         head: [byte.saturating_add(1); 32],
         input_sequence: 1,
         resources: vec![UiProjectResource {
@@ -1776,6 +2136,20 @@ fn project(byte: u8, name: &str, path: &str) -> UiProject {
             conflicting_projects: Vec::new(),
         }],
     }
+}
+
+fn project_with_second_resource() -> UiProject {
+    let mut target = project(30, "resources", "/first");
+    target.resources.push(UiProjectResource {
+        resource_id: [33; 32],
+        display_path: "/second".to_owned(),
+        canonical_path: "/second".to_owned(),
+        health: "unknown".to_owned(),
+        primary: false,
+        active_claim: true,
+        conflicting_projects: Vec::new(),
+    });
+    target
 }
 
 fn project_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, UiProjectAction) {

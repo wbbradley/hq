@@ -74,7 +74,10 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 Line::from("↑/↓ cycle matches · Enter inspect · Esc keep query"),
             ],
         ),
-        UiProjectModal::Details { project } => {
+        UiProjectModal::Details {
+            project,
+            selected_resource,
+        } => {
             let mut lines = vec![
                 Line::styled(project.name.as_str(), Style::new().fg(Color::Cyan).bold()),
                 Line::from(format!("Identity: {}", short_identity(project.project_id))),
@@ -91,8 +94,10 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 Line::styled("Desired resources", Style::new().fg(Color::Cyan)),
             ];
             for resource in &project.resources {
+                let selected = *selected_resource == Some(resource.resource_id);
                 lines.push(Line::from(format!(
-                    " {}{} · {} · {}",
+                    " {} {}{} · {} · {}",
+                    if selected { '›' } else { ' ' },
                     if resource.primary { "primary " } else { "" },
                     resource.display_path,
                     resource.health,
@@ -107,7 +112,10 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 lines.push(Line::from(" No desired resources"));
             }
             lines.push(Line::default());
-            lines.push(Line::from("n send input · Esc close"));
+            lines.push(Line::from("↑/↓ resource · a add · e replace · x remove"));
+            lines.push(Line::from(
+                "p primary · k check selected · K check all · n send input",
+            ));
             (" Project details ", lines)
         }
         UiProjectModal::CreateExisting {
@@ -177,6 +185,81 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 }),
             ],
         ),
+        UiProjectModal::AddResource {
+            project,
+            path,
+            make_primary,
+            submitting,
+        } => (
+            " Add desired resource ",
+            vec![
+                Line::from(format!("Project: {}", project.name)),
+                project_field_line("Path", path, true),
+                Line::from(format!("Make primary: {make_primary}")),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Inspecting canonical identity and claim conflicts…"
+                } else {
+                    "↑/↓ toggle primary · Enter preview · Esc cancel"
+                }),
+            ],
+        ),
+        UiProjectModal::ReplaceResource {
+            project,
+            resource_id,
+            path,
+            submitting,
+        } => (
+            " Replace desired resource ",
+            vec![
+                Line::from(format!("Project: {}", project.name)),
+                Line::from(format!("Replace: {}", short_identity(*resource_id))),
+                project_field_line("Path", path, true),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Inspecting canonical identity and claim conflicts…"
+                } else {
+                    "Enter preview · Esc cancel"
+                }),
+            ],
+        ),
+        UiProjectModal::ConfirmRemoveResource {
+            project,
+            resource_id,
+            force,
+            submitting,
+        } => (
+            " Confirm desired-resource removal ",
+            vec![
+                Line::from(format!("Project: {}", project.name)),
+                Line::from(format!("Resource: {}", short_identity(*resource_id))),
+                Line::from(format!("Assigned: {} · force: {force}", project.assigned)),
+                Line::from("External paths, files, worktrees, and branches are retained."),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Reconciling removal…"
+                } else {
+                    "f toggle force · Enter remove · Esc cancel"
+                }),
+            ],
+        ),
+        UiProjectModal::ConfirmPrimaryResource {
+            project,
+            resource_id,
+            submitting,
+        } => (
+            " Confirm primary resource ",
+            vec![
+                Line::from(format!("Project: {}", project.name)),
+                Line::from(format!("Resource: {}", short_identity(*resource_id))),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Reconciling primary selection…"
+                } else {
+                    "Enter confirm · Esc cancel"
+                }),
+            ],
+        ),
         UiProjectModal::Outcome { result } => {
             let mut lines = vec![Line::from(project_action_label(&result.action))];
             lines.push(Line::from(format!(
@@ -221,6 +304,52 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                     "Input accepted as {}",
                     short_identity(*message_id)
                 ))),
+                UiProjectOutcome::ResourcePreview {
+                    display_path,
+                    canonical_path,
+                    conflicts,
+                } => {
+                    lines.push(Line::from(format!("Display: {display_path}")));
+                    lines.push(Line::from(format!("Canonical: {canonical_path}")));
+                    if conflicts.is_empty() {
+                        lines.push(Line::styled(
+                            "No authoritative claim conflicts · Enter commit",
+                            Style::new().fg(Color::Green),
+                        ));
+                    } else {
+                        lines.push(Line::styled(
+                            "Claim conflicts block mutation:",
+                            Style::new().fg(Color::Red),
+                        ));
+                        for conflict in conflicts {
+                            lines.push(Line::from(format!(
+                                " {} {} · {}",
+                                conflict.relationship,
+                                short_identity(conflict.project_id),
+                                conflict.canonical_path
+                            )));
+                        }
+                    }
+                }
+                UiProjectOutcome::ResourceChecks { checks } => {
+                    for check in checks {
+                        lines.push(Line::from(format!(
+                            "{} · {} · health={} · release={}",
+                            short_identity(check.resource_id),
+                            check.status,
+                            check.health.as_deref().unwrap_or("unknown"),
+                            check.release.as_deref().unwrap_or("unknown")
+                        )));
+                        if let (Some(category), Some(code)) =
+                            (&check.error_category, &check.error_code)
+                        {
+                            lines.push(Line::styled(
+                                format!("  rejected: {category}/{code}"),
+                                Style::new().fg(Color::Red),
+                            ));
+                        }
+                    }
+                }
             }
             lines.push(Line::default());
             lines.push(Line::from("Esc close"));
@@ -251,6 +380,17 @@ fn project_action_label(action: &UiProjectAction) -> String {
         UiProjectAction::CreateExisting { name, .. } => format!("Create {name} from existing tree"),
         UiProjectAction::CreateWorktree { name, .. } => format!("Provision worktree for {name}"),
         UiProjectAction::SendInput { .. } => "Send project input".to_owned(),
+        UiProjectAction::PreviewAddResource { .. } => {
+            "Preview desired-resource addition".to_owned()
+        }
+        UiProjectAction::AddResource { .. } => "Add desired resource".to_owned(),
+        UiProjectAction::PreviewReplaceResource { .. } => {
+            "Preview desired-resource replacement".to_owned()
+        }
+        UiProjectAction::ReplaceResource { .. } => "Replace desired resource".to_owned(),
+        UiProjectAction::RemoveResource { .. } => "Remove desired resource".to_owned(),
+        UiProjectAction::SetPrimaryResource { .. } => "Select primary resource".to_owned(),
+        UiProjectAction::CheckResources { .. } => "Check desired resources".to_owned(),
     }
 }
 

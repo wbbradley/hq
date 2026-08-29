@@ -390,6 +390,8 @@ pub struct UiProject {
     pub archived: bool,
     /// Whether its desired resources can currently be claimed.
     pub claimable: bool,
+    /// Whether one current assignment exists.
+    pub assigned: bool,
     /// Exact project head used for optimistic commands.
     pub head: [u8; 32],
     /// Next durable input sequence.
@@ -419,6 +421,77 @@ pub enum UiProjectAction {
         project_id: [u8; 32],
         content: String,
     },
+    PreviewAddResource {
+        project_id: [u8; 32],
+        path: String,
+        make_primary: bool,
+    },
+    AddResource {
+        project_id: [u8; 32],
+        path: String,
+        make_primary: bool,
+    },
+    PreviewReplaceResource {
+        project_id: [u8; 32],
+        resource_id: [u8; 32],
+        path: String,
+    },
+    ReplaceResource {
+        project_id: [u8; 32],
+        resource_id: [u8; 32],
+        path: String,
+    },
+    RemoveResource {
+        project_id: [u8; 32],
+        resource_id: [u8; 32],
+        force: bool,
+    },
+    SetPrimaryResource {
+        project_id: [u8; 32],
+        resource_id: [u8; 32],
+    },
+    CheckResources {
+        project_id: [u8; 32],
+        resource_id: Option<[u8; 32]>,
+    },
+}
+
+/// Passive domain-selected overlap for one proposed desired resource.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectResourceConflict {
+    /// Stable conflicting project identity.
+    pub project_id: [u8; 32],
+    /// Stable conflicting desired-resource identity.
+    pub resource_id: [u8; 32],
+    /// Conflicting display locator.
+    pub display_path: String,
+    /// Conflicting canonical locator.
+    pub canonical_path: String,
+    /// Exact equal, ancestor, or descendant relationship.
+    pub relationship: String,
+}
+
+/// Passive fresh resource-inspection result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectResourceCheck {
+    /// Stable desired-resource identity.
+    pub resource_id: [u8; 32],
+    /// Stable accepted, rejected, uncertain, or response-lost status.
+    pub status: String,
+    /// Fresh health classification when accepted.
+    pub health: Option<String>,
+    /// Fresh release classification when accepted.
+    pub release: Option<String>,
+    /// Fresh canonical locator when observed.
+    pub observed_canonical_path: Option<String>,
+    /// Bounded inert adapter detail.
+    pub details: Option<String>,
+    /// Stable rejection category.
+    pub error_category: Option<String>,
+    /// Stable rejection code.
+    pub error_code: Option<String>,
+    /// Stable reconciliation identity when uncertain.
+    pub reconciliation_id: Option<[u8; 32]>,
 }
 
 /// Typed project workflow outcome retained without parsing display text.
@@ -443,6 +516,14 @@ pub enum UiProjectOutcome {
     },
     InputSent {
         message_id: [u8; 32],
+    },
+    ResourcePreview {
+        display_path: String,
+        canonical_path: String,
+        conflicts: Vec<UiProjectResourceConflict>,
+    },
+    ResourceChecks {
+        checks: Vec<UiProjectResourceCheck>,
     },
 }
 
@@ -502,6 +583,7 @@ pub enum UiProjectModal {
     },
     Details {
         project: UiProject,
+        selected_resource: Option<[u8; 32]>,
     },
     CreateExisting {
         name: String,
@@ -523,6 +605,29 @@ pub enum UiProjectModal {
     SendInput {
         project: UiProject,
         content: String,
+        submitting: bool,
+    },
+    AddResource {
+        project: UiProject,
+        path: String,
+        make_primary: bool,
+        submitting: bool,
+    },
+    ReplaceResource {
+        project: UiProject,
+        resource_id: [u8; 32],
+        path: String,
+        submitting: bool,
+    },
+    ConfirmRemoveResource {
+        project: UiProject,
+        resource_id: [u8; 32],
+        force: bool,
+        submitting: bool,
+    },
+    ConfirmPrimaryResource {
+        project: UiProject,
+        resource_id: [u8; 32],
         submitting: bool,
     },
     Outcome {
@@ -1977,12 +2082,31 @@ fn apply_project_modal_input(
                 let Some(project) = selected_project(model).cloned() else {
                     return Ok(false);
                 };
-                model.project_modal = Some(UiProjectModal::Details { project });
+                let selected_resource = default_project_resource(&project);
+                model.project_modal = Some(UiProjectModal::Details {
+                    project,
+                    selected_resource,
+                });
                 Ok(true)
             }
             _ => Ok(false),
         },
-        Some(UiProjectModal::Details { project }) => match input {
+        Some(UiProjectModal::Details {
+            project,
+            selected_resource,
+        }) => match input {
+            UiInput::NextItem | UiInput::PreviousItem => {
+                let selected_resource = move_project_resource(
+                    &project,
+                    selected_resource,
+                    matches!(input, UiInput::NextItem),
+                );
+                model.project_modal = Some(UiProjectModal::Details {
+                    project,
+                    selected_resource,
+                });
+                Ok(true)
+            }
             UiInput::Character(value) if value.eq_ignore_ascii_case(&'n') => {
                 model.project_modal = Some(UiProjectModal::SendInput {
                     project,
@@ -1991,19 +2115,85 @@ fn apply_project_modal_input(
                 });
                 Ok(true)
             }
+            UiInput::Character('a') => {
+                model.project_modal = Some(UiProjectModal::AddResource {
+                    project,
+                    path: String::new(),
+                    make_primary: false,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Character('e') => {
+                let Some(resource_id) = selected_resource else {
+                    return Ok(false);
+                };
+                model.project_modal = Some(UiProjectModal::ReplaceResource {
+                    project,
+                    resource_id,
+                    path: String::new(),
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Character('x') => {
+                let Some(resource_id) = selected_resource else {
+                    return Ok(false);
+                };
+                model.project_modal = Some(UiProjectModal::ConfirmRemoveResource {
+                    project,
+                    resource_id,
+                    force: false,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Character('p') => {
+                let Some(resource_id) = selected_resource else {
+                    return Ok(false);
+                };
+                model.project_modal = Some(UiProjectModal::ConfirmPrimaryResource {
+                    project,
+                    resource_id,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Character(value @ ('k' | 'K')) => {
+                let resource_id = (value == 'k').then_some(selected_resource).flatten();
+                if value == 'k' && resource_id.is_none() {
+                    return Ok(false);
+                }
+                model.submit_project(
+                    UiProjectAction::CheckResources {
+                        project_id: project.project_id,
+                        resource_id,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
             _ => Ok(false),
         },
         Some(
             UiProjectModal::CreateExisting { submitting, .. }
             | UiProjectModal::CreateWorktree { submitting, .. }
-            | UiProjectModal::SendInput { submitting, .. },
+            | UiProjectModal::SendInput { submitting, .. }
+            | UiProjectModal::AddResource { submitting, .. }
+            | UiProjectModal::ReplaceResource { submitting, .. },
         ) => {
             if submitting {
                 return Ok(false);
             }
             match input {
                 UiInput::NextItem | UiInput::PreviousItem => {
-                    cycle_project_field(model, matches!(input, UiInput::NextItem));
+                    if let Some(UiProjectModal::AddResource { make_primary, .. }) =
+                        &mut model.project_modal
+                    {
+                        *make_primary = !*make_primary;
+                    } else {
+                        cycle_project_field(model, matches!(input, UiInput::NextItem));
+                    }
                     Ok(true)
                 }
                 UiInput::Character(value) => {
@@ -2020,7 +2210,71 @@ fn apply_project_modal_input(
                 _ => Ok(false),
             }
         }
-        Some(UiProjectModal::Outcome { .. }) | None => Ok(false),
+        Some(UiProjectModal::ConfirmRemoveResource {
+            project,
+            resource_id,
+            mut force,
+            submitting,
+        }) => match input {
+            UiInput::Character(value) if value.eq_ignore_ascii_case(&'f') && !submitting => {
+                force = !force;
+                model.project_modal = Some(UiProjectModal::ConfirmRemoveResource {
+                    project,
+                    resource_id,
+                    force,
+                    submitting: false,
+                });
+                Ok(true)
+            }
+            UiInput::Activate if !submitting => {
+                if project.assigned && !force {
+                    model.last_failure = Some(UiFailure {
+                        code: "project_resource_remove_force_required".to_owned(),
+                        action: "toggle force to authorize assigned-project removal".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                model.project_modal = Some(UiProjectModal::ConfirmRemoveResource {
+                    project: project.clone(),
+                    resource_id,
+                    force,
+                    submitting: true,
+                });
+                model.submit_project(
+                    UiProjectAction::RemoveResource {
+                        project_id: project.project_id,
+                        resource_id,
+                        force,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+        Some(UiProjectModal::ConfirmPrimaryResource {
+            project,
+            resource_id,
+            submitting,
+        }) if matches!(input, UiInput::Activate) && !submitting => {
+            model.project_modal = Some(UiProjectModal::ConfirmPrimaryResource {
+                project: project.clone(),
+                resource_id,
+                submitting: true,
+            });
+            model.submit_project(
+                UiProjectAction::SetPrimaryResource {
+                    project_id: project.project_id,
+                    resource_id,
+                },
+                effects,
+            )?;
+            Ok(true)
+        }
+        Some(UiProjectModal::Outcome { result }) => {
+            submit_resource_preview(model, &result, &input, effects)
+        }
+        Some(UiProjectModal::ConfirmPrimaryResource { .. }) | None => Ok(false),
     }
 }
 
@@ -2063,6 +2317,9 @@ fn edit_project_field(model: &mut UiModel, value: Option<&str>, backspace: bool)
             _ => return false,
         },
         Some(UiProjectModal::SendInput { content, .. }) => content,
+        Some(
+            UiProjectModal::AddResource { path, .. } | UiProjectModal::ReplaceResource { path, .. },
+        ) => path,
         _ => return false,
     };
     let changed = if backspace {
@@ -2157,6 +2414,26 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
             project_id: project.project_id,
             content,
         },
+        Some(UiProjectModal::AddResource {
+            project,
+            path,
+            make_primary,
+            ..
+        }) if !path.is_empty() => UiProjectAction::PreviewAddResource {
+            project_id: project.project_id,
+            path,
+            make_primary,
+        },
+        Some(UiProjectModal::ReplaceResource {
+            project,
+            resource_id,
+            path,
+            ..
+        }) if !path.is_empty() => UiProjectAction::PreviewReplaceResource {
+            project_id: project.project_id,
+            resource_id,
+            path,
+        },
         Some(UiProjectModal::CreateExisting { .. }) => {
             model.last_failure = Some(UiFailure {
                 code: "project_create_fields_empty".to_owned(),
@@ -2178,17 +2455,70 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
             });
             return Ok(true);
         }
+        Some(UiProjectModal::AddResource { .. } | UiProjectModal::ReplaceResource { .. }) => {
+            model.last_failure = Some(UiFailure {
+                code: "project_resource_path_empty".to_owned(),
+                action: "enter an absolute existing resource path".to_owned(),
+            });
+            return Ok(true);
+        }
         _ => return Ok(false),
     };
     match &mut model.project_modal {
         Some(
             UiProjectModal::CreateExisting { submitting, .. }
             | UiProjectModal::CreateWorktree { submitting, .. }
-            | UiProjectModal::SendInput { submitting, .. },
+            | UiProjectModal::SendInput { submitting, .. }
+            | UiProjectModal::AddResource { submitting, .. }
+            | UiProjectModal::ReplaceResource { submitting, .. },
         ) => *submitting = true,
         _ => return Ok(false),
     }
     model.last_failure = None;
+    model.submit_project(action, effects)?;
+    Ok(true)
+}
+
+fn submit_resource_preview(
+    model: &mut UiModel,
+    result: &UiProjectResult,
+    input: &UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<bool, UiError> {
+    if !matches!(input, UiInput::Activate) {
+        return Ok(false);
+    }
+    let UiProjectOutcome::ResourcePreview { conflicts, .. } = &result.outcome else {
+        return Ok(false);
+    };
+    if !conflicts.is_empty() {
+        model.last_failure = Some(UiFailure {
+            code: "project_resource_claim_conflict".to_owned(),
+            action: "choose a non-overlapping resource path".to_owned(),
+        });
+        return Ok(true);
+    }
+    let action = match &result.action {
+        UiProjectAction::PreviewAddResource {
+            project_id,
+            path,
+            make_primary,
+        } => UiProjectAction::AddResource {
+            project_id: *project_id,
+            path: path.clone(),
+            make_primary: *make_primary,
+        },
+        UiProjectAction::PreviewReplaceResource {
+            project_id,
+            resource_id,
+            path,
+        } => UiProjectAction::ReplaceResource {
+            project_id: *project_id,
+            resource_id: *resource_id,
+            path: path.clone(),
+        },
+        _ => return Ok(false),
+    };
     model.submit_project(action, effects)?;
     Ok(true)
 }
@@ -2623,6 +2953,37 @@ fn project_matches(project: &UiProject, query: &str) -> bool {
         })
 }
 
+fn default_project_resource(project: &UiProject) -> Option<[u8; 32]> {
+    project
+        .resources
+        .iter()
+        .find(|resource| resource.primary)
+        .or_else(|| project.resources.first())
+        .map(|resource| resource.resource_id)
+}
+
+fn move_project_resource(
+    project: &UiProject,
+    selected: Option<[u8; 32]>,
+    forward: bool,
+) -> Option<[u8; 32]> {
+    if project.resources.is_empty() {
+        return None;
+    }
+    let current = selected.and_then(|selected| {
+        project
+            .resources
+            .iter()
+            .position(|resource| resource.resource_id == selected)
+    });
+    let next = match (current, forward) {
+        (Some(index), true) => (index + 1).min(project.resources.len() - 1),
+        (Some(index), false) => index.saturating_sub(1),
+        (None, _) => 0,
+    };
+    Some(project.resources[next].resource_id)
+}
+
 fn select_project_search_match(model: &mut UiModel, forward: bool) {
     if model.section != UiSection::Projects || model.project_search.is_empty() {
         return;
@@ -2827,9 +3188,14 @@ fn refresh_agent_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
 
 fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
     let identity = match &model.project_modal {
-        Some(UiProjectModal::Details { project } | UiProjectModal::SendInput { project, .. }) => {
-            Some(project.project_id)
-        }
+        Some(
+            UiProjectModal::Details { project, .. }
+            | UiProjectModal::SendInput { project, .. }
+            | UiProjectModal::AddResource { project, .. }
+            | UiProjectModal::ReplaceResource { project, .. }
+            | UiProjectModal::ConfirmRemoveResource { project, .. }
+            | UiProjectModal::ConfirmPrimaryResource { project, .. },
+        ) => Some(project.project_id),
         _ => None,
     };
     let Some(identity) = identity else { return };
@@ -2840,11 +3206,32 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
         .cloned();
     match (&mut model.project_modal, current) {
         (
-            Some(UiProjectModal::Details { project } | UiProjectModal::SendInput { project, .. }),
+            Some(UiProjectModal::Details {
+                project,
+                selected_resource,
+            }),
             Some(current),
         ) => {
+            *selected_resource = selected_resource
+                .filter(|selected| {
+                    current
+                        .resources
+                        .iter()
+                        .any(|resource| resource.resource_id == *selected)
+                })
+                .or_else(|| default_project_resource(&current));
             *project = current;
         }
+        (
+            Some(
+                UiProjectModal::SendInput { project, .. }
+                | UiProjectModal::AddResource { project, .. }
+                | UiProjectModal::ReplaceResource { project, .. }
+                | UiProjectModal::ConfirmRemoveResource { project, .. }
+                | UiProjectModal::ConfirmPrimaryResource { project, .. },
+            ),
+            Some(current),
+        ) => *project = current,
         (_, None) => {
             model.last_failure = Some(UiFailure {
                 code: "project_target_stale".to_owned(),
@@ -3048,7 +3435,11 @@ fn activate(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, Ui
         let Some(project) = selected_project(model).cloned() else {
             return Ok(false);
         };
-        model.project_modal = Some(UiProjectModal::Details { project });
+        let selected_resource = default_project_resource(&project);
+        model.project_modal = Some(UiProjectModal::Details {
+            project,
+            selected_resource,
+        });
         return Ok(true);
     }
     if !model.selected_row_is_conversation() {
@@ -3546,7 +3937,9 @@ fn project_command_completed(
         }),
         UiProjectOutcome::Completed { .. }
         | UiProjectOutcome::Running { .. }
-        | UiProjectOutcome::InputSent { .. } => None,
+        | UiProjectOutcome::InputSent { .. }
+        | UiProjectOutcome::ResourcePreview { .. }
+        | UiProjectOutcome::ResourceChecks { .. } => None,
     };
     model.project_modal = Some(UiProjectModal::Outcome { result });
     model.request_snapshot(effects)?;
@@ -3567,7 +3960,11 @@ fn project_command_failed(
     if let Some(
         UiProjectModal::CreateExisting { submitting, .. }
         | UiProjectModal::CreateWorktree { submitting, .. }
-        | UiProjectModal::SendInput { submitting, .. },
+        | UiProjectModal::SendInput { submitting, .. }
+        | UiProjectModal::AddResource { submitting, .. }
+        | UiProjectModal::ReplaceResource { submitting, .. }
+        | UiProjectModal::ConfirmRemoveResource { submitting, .. }
+        | UiProjectModal::ConfirmPrimaryResource { submitting, .. },
     ) = &mut model.project_modal
     {
         *submitting = false;

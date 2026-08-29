@@ -218,6 +218,46 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
         "TUI did not render typed input completion: {:?}",
         sent.bytes
     );
+
+    let added_resource = directory.path().join("added-resource");
+    std::fs::create_dir(&added_resource).expect("added resource creates");
+    let added = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::AddProjectResource {
+            name,
+            path: added_resource.to_str().expect("UTF-8 resource path"),
+        },
+    );
+    assert!(
+        added.status.success(),
+        "TUI resource add failed: {:?}",
+        added.bytes
+    );
+    assert_eq!(
+        added.before, added.after,
+        "TUI did not restore terminal modes"
+    );
+    let project_id = project_id(&state_root, name);
+    let resources = hq_output(
+        &state_root,
+        &[
+            "--output",
+            "json",
+            "project",
+            "resource",
+            "list",
+            &project_id,
+        ],
+    );
+    assert!(
+        resources.status.success()
+            && String::from_utf8_lossy(&resources.stdout)
+                .contains(added_resource.to_str().expect("UTF-8 resource path")),
+        "TUI resource was not visible through the CLI: {:?} {:?}",
+        resources.stdout,
+        resources.stderr
+    );
 }
 
 #[test]
@@ -322,6 +362,10 @@ enum PtyInteraction<'content> {
         name: &'content str,
         content: &'content str,
     },
+    AddProjectResource {
+        name: &'content str,
+        path: &'content str,
+    },
     CreateWorktreeProject {
         name: &'content str,
         source: &'content str,
@@ -366,6 +410,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut completion_offset = None;
     let mut managed_action_sent = false;
     let mut managed_provider_sent = false;
+    let mut resource_commit_sent = false;
     let mut exit_sent = false;
     let status = loop {
         let mut buffer = [0_u8; 8192];
@@ -386,7 +431,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::CreateAgent(_) => b"lllc".as_slice(),
                 PtyInteraction::StartRejectedSession => b"lll".as_slice(),
                 PtyInteraction::CreateExistingProject { .. } => b"llllc".as_slice(),
-                PtyInteraction::SendProjectInput { .. } => b"llll".as_slice(),
+                PtyInteraction::SendProjectInput { .. }
+                | PtyInteraction::AddProjectResource { .. } => b"llll".as_slice(),
                 PtyInteraction::CreateWorktreeProject { .. } => b"llllw".as_slice(),
             };
             master.write_all(key).expect("initial TUI key writes");
@@ -482,6 +528,62 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.write_all(b"\r").expect("project details key writes");
             master.flush().expect("project details key flushes");
             content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::AddProjectResource { name, .. } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(name.len())
+                .any(|window| window == name.as_bytes())
+        {
+            master.write_all(b"\r").expect("project details key writes");
+            master.flush().expect("project details key flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::AddProjectResource { .. })
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"a add".len())
+                    .any(|window| window == b"a add")
+            })
+        {
+            master.write_all(b"a").expect("resource add key writes");
+            master.flush().expect("resource add key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::AddProjectResource { path, .. } = interaction
+            && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Path:".len())
+                    .any(|window| window == b"Path:")
+            })
+        {
+            master
+                .write_all(format!("{path}\r").as_bytes())
+                .expect("resource path writes");
+            master.flush().expect("resource path flushes");
+            managed_provider_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::AddProjectResource { .. })
+            && managed_provider_sent
+            && !resource_commit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Canonical:".len())
+                    .any(|window| window == b"Canonical:")
+            })
+        {
+            master.write_all(b"\r").expect("resource commit writes");
+            master.flush().expect("resource commit flushes");
+            resource_commit_sent = true;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::SendProjectInput { content, .. } = interaction
@@ -596,6 +698,19 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
         }
+        if matches!(interaction, PtyInteraction::AddProjectResource { .. })
+            && resource_commit_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"at head".len())
+                    .any(|window| window == b"at head")
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+        }
         if let PtyInteraction::CreateAgent(_) = interaction
             && content_sent
             && !exit_sent
@@ -662,6 +777,21 @@ fn mailbox_contains(state_root: &Path, content: &str) -> bool {
 fn agent_exists(state_root: &Path, name: &str) -> bool {
     let output = hq_output(state_root, &["--output", "json", "agent", "show", name]);
     output.status.success() && String::from_utf8_lossy(&output.stdout).contains(name)
+}
+
+fn project_id(state_root: &Path, name: &str) -> String {
+    let output = hq_output(state_root, &["--output", "json", "project", "list"]);
+    assert!(output.status.success(), "project list failed: {output:?}");
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("project list is JSON");
+    value["data"]["projects"]
+        .as_array()
+        .expect("project array")
+        .iter()
+        .find(|project| project["name"] == name)
+        .and_then(|project| project["project_id"].as_str())
+        .expect("project identity")
+        .to_owned()
 }
 
 fn hq_output(state_root: &Path, arguments: &[&str]) -> std::process::Output {

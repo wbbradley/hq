@@ -22,8 +22,9 @@ use hq_tui::{
     UiAgentAction, UiConnectionState, UiConversationEntryKind, UiConversationPage, UiEffect,
     UiEvent, UiFailure, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
     UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
-    UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome, UiProjectResult, UiRow,
-    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiModel, UiProjectAction, UiProjectExternalWarning, UiProjectOutcome, UiProjectResourceCheck,
+    UiProjectResult, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, update,
 };
 
 type ConversationRequests = Arc<Mutex<Vec<(String, Option<String>)>>>;
@@ -363,6 +364,69 @@ fn executor_submits_exact_project_command_and_preserves_reconciliation_evidence(
         UiEvent::ProjectCommandCompleted {
             effect_id: id,
             result: result.clone(),
+        }
+    );
+    assert_eq!(calls.lock().expect("calls lock").as_slice(), &[action]);
+    executor.shutdown().expect("shutdown");
+}
+
+#[test]
+fn executor_preserves_exact_resource_check_target_and_typed_failure_evidence() {
+    let started = update(
+        UiModel::new(UiSize {
+            width: 80,
+            height: 24,
+        }),
+        UiEvent::Started,
+    )
+    .expect("start");
+    let id = started
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::LoadSnapshot { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("effect identity");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let client = ProjectTuiClient {
+        calls: Arc::clone(&calls),
+    };
+    let mut executor =
+        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("executor starts");
+    let action = UiProjectAction::CheckResources {
+        project_id: [83; 32],
+        resource_id: Some([84; 32]),
+    };
+    executor
+        .execute([UiEffect::SubmitProjectCommand {
+            id,
+            action: action.clone(),
+        }])
+        .expect("execute resource check");
+    assert_eq!(
+        receive_event(&mut executor),
+        UiEvent::ProjectCommandCompleted {
+            effect_id: id,
+            result: UiProjectResult {
+                action: action.clone(),
+                command_id: [81; 32],
+                operation_id: [82; 32],
+                project_id: [83; 32],
+                outcome: UiProjectOutcome::ResourceChecks {
+                    checks: vec![UiProjectResourceCheck {
+                        resource_id: [84; 32],
+                        status: "rejected".to_owned(),
+                        health: None,
+                        release: None,
+                        observed_canonical_path: None,
+                        details: Some("path is unavailable".to_owned()),
+                        error_category: Some("resource".to_owned()),
+                        error_code: Some("path_unavailable".to_owned()),
+                        reconciliation_id: None,
+                    }],
+                },
+            },
         }
     );
     assert_eq!(calls.lock().expect("calls lock").as_slice(), &[action]);
@@ -862,12 +926,26 @@ impl TuiClientPort for ProjectTuiClient {
         action: UiProjectAction,
     ) -> Result<UiProjectResult, UiFailure> {
         self.calls.lock().expect("calls lock").push(action.clone());
-        Ok(UiProjectResult {
-            action,
-            command_id: [81; 32],
-            operation_id: [82; 32],
-            project_id: [83; 32],
-            outcome: UiProjectOutcome::Reconcilable {
+        let outcome = match &action {
+            UiProjectAction::CheckResources { resource_id, .. } => {
+                UiProjectOutcome::ResourceChecks {
+                    checks: resource_id
+                        .iter()
+                        .map(|resource_id| UiProjectResourceCheck {
+                            resource_id: *resource_id,
+                            status: "rejected".to_owned(),
+                            health: None,
+                            release: None,
+                            observed_canonical_path: None,
+                            details: Some("path is unavailable".to_owned()),
+                            error_category: Some("resource".to_owned()),
+                            error_code: Some("path_unavailable".to_owned()),
+                            reconciliation_id: None,
+                        })
+                        .collect(),
+                }
+            }
+            _ => UiProjectOutcome::Reconcilable {
                 stage: "worktree_created".to_owned(),
                 category: "external_state".to_owned(),
                 code: "response_lost".to_owned(),
@@ -877,6 +955,13 @@ impl TuiClientPort for ProjectTuiClient {
                     branch: "feature".to_owned(),
                 }),
             },
+        };
+        Ok(UiProjectResult {
+            action,
+            command_id: [81; 32],
+            operation_id: [82; 32],
+            project_id: [83; 32],
+            outcome,
         })
     }
 

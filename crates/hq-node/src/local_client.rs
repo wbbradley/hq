@@ -30,8 +30,9 @@ use crate::{
     RuntimePaths, StatePaths,
     cli::{
         CliError, HarnessCommand, NamedAgentCommand, NamedAgentSelector, NamedAgentView,
-        ProjectCliCommand, ProjectTuiResult, WorktreeCliRequest, named_agent_catalog_view,
-        project_catalog_for_tui, run_harness_for_tui, run_named_agent_for_tui, run_project_for_tui,
+        ProjectCliCommand, ProjectResourceCliCommand, ProjectTuiResult, WorktreeCliRequest,
+        named_agent_catalog_view, preview_project_resource_for_tui, project_catalog_for_tui,
+        run_harness_for_tui, run_named_agent_for_tui, run_project_for_tui,
     },
     unix_frame,
 };
@@ -189,6 +190,7 @@ pub(crate) struct LocalProject {
     pub lifecycle: String,
     pub archived: bool,
     pub claimable: bool,
+    pub assigned: bool,
     pub head: [u8; 32],
     pub input_sequence: u64,
     pub resources: Vec<LocalProjectResource>,
@@ -207,6 +209,7 @@ pub(crate) fn tui_project_catalog(
             lifecycle: project.lifecycle,
             archived: project.archived,
             claimable: project.claimable,
+            assigned: project.assignment.is_some(),
             head: *project.head.as_bytes(),
             input_sequence: project.input_sequence,
             resources: project
@@ -249,6 +252,39 @@ pub(crate) enum LocalProjectCommand {
         project_id: [u8; 32],
         content: String,
     },
+    PreviewAddResource {
+        project_id: [u8; 32],
+        path: String,
+        make_primary: bool,
+    },
+    AddResource {
+        project_id: [u8; 32],
+        path: String,
+        make_primary: bool,
+    },
+    PreviewReplaceResource {
+        project_id: [u8; 32],
+        resource_id: [u8; 32],
+        path: String,
+    },
+    ReplaceResource {
+        project_id: [u8; 32],
+        resource_id: [u8; 32],
+        path: String,
+    },
+    RemoveResource {
+        project_id: [u8; 32],
+        resource_id: [u8; 32],
+        force: bool,
+    },
+    SetPrimaryResource {
+        project_id: [u8; 32],
+        resource_id: [u8; 32],
+    },
+    CheckResources {
+        project_id: [u8; 32],
+        resource_id: Option<[u8; 32]>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -256,6 +292,28 @@ pub(crate) struct LocalProjectExternalWarning {
     pub kind: String,
     pub destination: String,
     pub branch: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalProjectResourceConflict {
+    pub project_id: [u8; 32],
+    pub resource_id: [u8; 32],
+    pub display_path: String,
+    pub canonical_path: String,
+    pub relationship: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalProjectResourceCheck {
+    pub resource_id: [u8; 32],
+    pub status: String,
+    pub health: Option<String>,
+    pub release: Option<String>,
+    pub observed_canonical_path: Option<String>,
+    pub details: Option<String>,
+    pub error_category: Option<String>,
+    pub error_code: Option<String>,
+    pub reconciliation_id: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -279,6 +337,14 @@ pub(crate) enum LocalProjectOutcome {
     InputSent {
         message_id: [u8; 32],
     },
+    ResourcePreview {
+        display_path: String,
+        canonical_path: String,
+        conflicts: Vec<LocalProjectResourceConflict>,
+    },
+    ResourceChecks {
+        checks: Vec<LocalProjectResourceCheck>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -294,6 +360,9 @@ pub(crate) fn execute_project_command(
     state: &StatePaths,
     command: LocalProjectCommand,
 ) -> Result<LocalProjectResult, CliError> {
+    if let Some(preview) = execute_project_preview(state, &command)? {
+        return Ok(preview);
+    }
     let action = match &command {
         LocalProjectCommand::CreateExisting { name, brief, path } => ProjectCliCommand::Create {
             name: ShortText::new(name.clone()).map_err(|_| CliError::Arguments)?,
@@ -336,8 +405,102 @@ pub(crate) fn execute_project_command(
             project_id: ProjectId::from_bytes(*project_id),
             body: Some(ContentText::new(content.clone()).map_err(|_| CliError::Arguments)?),
         },
+        LocalProjectCommand::AddResource {
+            project_id,
+            path,
+            make_primary,
+        } => ProjectCliCommand::Resource(ProjectResourceCliCommand::Add {
+            project_id: ProjectId::from_bytes(*project_id),
+            path: PathBuf::from(path),
+            make_primary: *make_primary,
+        }),
+        LocalProjectCommand::ReplaceResource {
+            project_id,
+            resource_id,
+            path,
+        } => ProjectCliCommand::Resource(ProjectResourceCliCommand::Replace {
+            project_id: ProjectId::from_bytes(*project_id),
+            resource_id: hq_domain::ResourceId::from_bytes(*resource_id),
+            path: PathBuf::from(path),
+        }),
+        LocalProjectCommand::RemoveResource {
+            project_id,
+            resource_id,
+            force,
+        } => ProjectCliCommand::Resource(ProjectResourceCliCommand::Remove {
+            project_id: ProjectId::from_bytes(*project_id),
+            resource_id: hq_domain::ResourceId::from_bytes(*resource_id),
+            force: *force,
+        }),
+        LocalProjectCommand::SetPrimaryResource {
+            project_id,
+            resource_id,
+        } => ProjectCliCommand::Resource(ProjectResourceCliCommand::Primary {
+            project_id: ProjectId::from_bytes(*project_id),
+            resource_id: hq_domain::ResourceId::from_bytes(*resource_id),
+        }),
+        LocalProjectCommand::CheckResources {
+            project_id,
+            resource_id,
+        } => ProjectCliCommand::Check {
+            project_id: ProjectId::from_bytes(*project_id),
+            resource_id: resource_id.map(hq_domain::ResourceId::from_bytes),
+        },
+        LocalProjectCommand::PreviewAddResource { .. }
+        | LocalProjectCommand::PreviewReplaceResource { .. } => {
+            unreachable!("preview commands return before command conversion")
+        }
     };
-    match run_project_for_tui(&action, state)? {
+    project_result(command, run_project_for_tui(&action, state)?)
+}
+
+fn execute_project_preview(
+    state: &StatePaths,
+    command: &LocalProjectCommand,
+) -> Result<Option<LocalProjectResult>, CliError> {
+    let (project_id, path) = match command {
+        LocalProjectCommand::PreviewAddResource {
+            project_id, path, ..
+        }
+        | LocalProjectCommand::PreviewReplaceResource {
+            project_id, path, ..
+        } => (*project_id, path),
+        _ => return Ok(None),
+    };
+    let preview = preview_project_resource_for_tui(
+        state,
+        ProjectId::from_bytes(project_id),
+        &PathBuf::from(path),
+    )?;
+    let operation_id = *preview.operation_id.as_bytes();
+    Ok(Some(LocalProjectResult {
+        command: command.clone(),
+        command_id: operation_id,
+        operation_id,
+        project_id: *preview.project_id.as_bytes(),
+        outcome: LocalProjectOutcome::ResourcePreview {
+            display_path: preview.display_path,
+            canonical_path: preview.canonical_path,
+            conflicts: preview
+                .conflicts
+                .into_iter()
+                .map(|conflict| LocalProjectResourceConflict {
+                    project_id: *conflict.project_id.as_bytes(),
+                    resource_id: *conflict.resource_id.as_bytes(),
+                    display_path: conflict.display_path,
+                    canonical_path: conflict.canonical_path,
+                    relationship: conflict.relationship.to_owned(),
+                })
+                .collect(),
+        },
+    }))
+}
+
+fn project_result(
+    command: LocalProjectCommand,
+    result: ProjectTuiResult,
+) -> Result<LocalProjectResult, CliError> {
+    match result {
         ProjectTuiResult::Operation(view) => {
             let outcome = match view.status {
                 "accepted" | "running" => LocalProjectOutcome::Running {
@@ -384,6 +547,39 @@ pub(crate) fn execute_project_command(
                 message_id: *message_id.as_bytes(),
             },
         }),
+        ProjectTuiResult::ResourceChecks(view) => {
+            let operation_id = view
+                .checks
+                .first()
+                .map_or([0; 32], |check| *check.operation_id.as_bytes());
+            Ok(LocalProjectResult {
+                command,
+                command_id: operation_id,
+                operation_id,
+                project_id: *view.project_id.as_bytes(),
+                outcome: LocalProjectOutcome::ResourceChecks {
+                    checks: view
+                        .checks
+                        .into_iter()
+                        .map(|check| LocalProjectResourceCheck {
+                            resource_id: *check.resource_id.as_bytes(),
+                            status: check.status.to_owned(),
+                            health: check.health.map(str::to_owned),
+                            release: check.release.map(str::to_owned),
+                            observed_canonical_path: check
+                                .observed_canonical
+                                .map(|locator| locator.value),
+                            details: check.details,
+                            error_category: check.error_category,
+                            error_code: check.error_code,
+                            reconciliation_id: check
+                                .reconciliation_id
+                                .map(|operation_id| *operation_id.as_bytes()),
+                        })
+                        .collect(),
+                },
+            })
+        }
     }
 }
 

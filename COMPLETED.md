@@ -1,5 +1,45 @@
 # Completed
 
+## 2026-08-29 — Retained desired-resource editing and conflict previews
+
+Added exact desired-resource selection and retained add, replace, remove, and primary-selection
+forms to project details. Arrow navigation and dedicated action keys preserve the selected resource
+and every partially edited field across authoritative reload and reconnect. Cancellation does not
+mutate state, while assigned-project removal requires a separate explicit force confirmation and
+never deletes the external resource.
+
+Add and replace now run an authoritative fresh preview through the ordinary local client before
+mutation. The composition inspects the observed resource with the existing local-API command and
+passes canonical observations through a narrow `hq-projects` domain seam, so the TUI receives only
+the selected passive conflict and force policy. Clean previews can proceed with the retained
+expected head; conflicting previews remain blocked and explain the existing claim and requested
+relationship without importing resource authority into the TUI.
+
+Fresh exact-resource and all-resource checks retain typed desired and observed paths, canonical
+identity, health, release cleanliness or unknown state, operation identity, completed head,
+runtime rejection, uncertainty, reconciliation guidance, and recovery actions. Every edit reuses
+the established project workflow and expected-head rules. Passive records expose public fields;
+no accessor facade, duplicate stored/runtime state, storage migration, compatibility layer,
+protocol version, or lockfile change was introduced.
+
+Pure-model tests cover each edit, preview, clean commit, conflict block, force gate, cancellation,
+exact selection, retained form, exact and aggregate checks, retry, and failure path. Wide and
+compact renderer tests cover all forms and conflict evidence. Executor and installed-client tests
+preserve exact actions, perform a real add through the TUI, and verify the resulting CLI catalog.
+Full all-target/all-feature workspace tests, strict Clippy, formatting, architecture,
+behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. The final exact
+executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[tui/high] Implement retained desired-resource editing and conflict previews** — Add desired
+  resource add, remove, replace, and primary selection plus fresh health/release checks through
+  ordinary local-API commands. Present domain-selected claim conflicts and force gates before
+  mutation, retain exact project/resource selection and modal inputs across reload/reconnect, and
+  expose stale heads, dirty/unknown release state, rejected outcomes, and recovery actions as typed
+  state. Complete this work when pure model, responsive renderer, executor, and installed-client
+  parity tests cover every resource edit, preview, cancellation, conflict, and failure path.
+
 ## 2026-08-29 — Retained project catalog, creation, and input TUI workflows
 
 Added stable-identity project search, selection, and responsive details to the pure Ratatui model.
