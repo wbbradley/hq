@@ -55,6 +55,7 @@ controlled_home="$rehearsal_root/home"
 relay_data="$rehearsal_root/relay-data"
 relay_config="$rehearsal_root/rnostr.toml"
 container="hq-rust-controlled-failure-$$"
+container_user="$(id -u):$(id -g)"
 relay_port=${HQ_CONTROLLED_RELAY_PORT:-17448}
 [[ "$relay_port" =~ ^[0-9]+$ && "$relay_port" -ge 1024 && "$relay_port" -le 65535 ]] ||
   fail 'controlled relay port must be an unprivileged TCP port'
@@ -114,12 +115,15 @@ sed \
   -e "s/REPLACE_WITH_SECOND_INSTALLATION_PUBLIC_KEY/$second_key\",\n  \"$installation_key/g" \
   "$repository_root/deploy/rnostr/rnostr.toml.example" >"$relay_config"
 
-docker run -d --name "$container" \
+docker run -d --name "$container" --user "$container_user" \
   -p "127.0.0.1:$relay_port:8080" \
   -v "$relay_config:/rnostr/config/rnostr.toml:ro" \
   -v "$relay_data:/rnostr/data" \
   "$relay_image" >/dev/null || fail 'controlled relay did not start'
-wait_for_relay "$relay_port" || fail 'controlled relay did not become ready'
+if ! wait_for_relay "$relay_port"; then
+  docker logs "$container" >&2 || true
+  fail 'controlled relay did not become ready'
+fi
 
 ready=$(hq_command daemon readiness) || fail 'release candidate startup failed'
 jq -e '.ok == true and .kind == "lifecycle" and .data.state == "ready"' \
@@ -145,7 +149,10 @@ jq -e '.ok == true and .kind == "lifecycle" and .data.state == "ready"' \
   <<<"$loss_status" >/dev/null || fail 'release candidate was not ready during relay loss'
 
 docker start "$container" >/dev/null || fail 'controlled relay restart failed'
-wait_for_relay "$relay_port" || fail 'controlled relay did not recover'
+if ! wait_for_relay "$relay_port"; then
+  docker logs "$container" >&2 || true
+  fail 'controlled relay did not recover'
+fi
 HQ_RUN_CONTROLLED_RELAY_SMOKE=1 HQ_CONTROLLED_RELAY_URL="$relay_url" \
   cargo test --locked --manifest-path "$repository_root/Cargo.toml" -p hq-relay \
     --test rnostr_interop controlled_rnostr_auth_publish_retained_and_reconnect -- --exact --ignored \

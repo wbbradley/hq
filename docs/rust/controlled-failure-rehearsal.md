@@ -9,8 +9,9 @@ release.
 ## Relay boundary
 
 The runner creates a new identity under a short `/tmp/hq-rust-controlled-failure.*` state root and
-starts the pinned rnostr v0.4.9 digest with a fresh data directory and a random loopback port. Its
-temporary allow-list contains only that new installation and the two fixed interoperability keys.
+starts the pinned rnostr v0.4.9 digest with a fresh data directory and a fixed loopback-only test
+port. The container runs as the CI runner's UID and GID so only that runner owns the bind-mounted
+data. Its temporary allow-list contains only the new installation and the two fixed interoperability keys.
 The release executable reaches readiness, installs the exact relay policy, and remains ready while
 the owned relay container is stopped.
 
