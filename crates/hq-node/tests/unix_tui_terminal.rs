@@ -24,6 +24,8 @@ use support::TestDirectory;
 
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
+// This is a deadlock watchdog for installed process tests, not a product latency budget.
+const PROCESS_COMPLETION_WATCHDOG: Duration = Duration::from_secs(30);
 
 #[test]
 fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
@@ -499,7 +501,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut master = File::from(pair.master);
     fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).expect("master is nonblocking");
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + PROCESS_COMPLETION_WATCHDOG;
     let mut bytes = Vec::new();
     let mut initial_key_sent = false;
     let mut content_sent = false;

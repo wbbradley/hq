@@ -9,7 +9,7 @@ use std::{
     fs,
     num::NonZeroUsize,
     os::unix::{
-        fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        fs::{FileTypeExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     sync::Arc,
@@ -157,9 +157,6 @@ fn bind_rejects_unsafe_artifacts_live_owner_and_replaces_only_proven_stale_socke
     )
     .expect("private stale socket");
     drop(stale_listener);
-    let stale_identity = fs::symlink_metadata(stale_runtime.socket_file())
-        .expect("stale metadata")
-        .ino();
     let mut replacement = foundation(stale_state.clone(), stale_runtime.clone());
     replacement
         .bind_local_listener()
@@ -167,8 +164,13 @@ fn bind_rejects_unsafe_artifacts_live_owner_and_replaces_only_proven_stale_socke
     let replacement_metadata =
         fs::symlink_metadata(stale_runtime.socket_file()).expect("replacement metadata");
     assert!(replacement_metadata.file_type().is_socket());
-    assert_ne!(replacement_metadata.ino(), stale_identity);
     assert_private_mode(stale_runtime.socket_file(), 0o600);
+    let replacement_client =
+        UnixStream::connect(stale_runtime.socket_file()).expect("replacement accepts connections");
+    let replacement_stream = replacement
+        .accept_local()
+        .expect("replacement owns the accepted stream");
+    drop((replacement_client, replacement_stream));
     replacement.shutdown().expect("replacement cleans up");
     assert!(!stale_runtime.socket_file().exists());
     let mut rebound = foundation(stale_state, stale_runtime.clone());
