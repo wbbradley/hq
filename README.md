@@ -304,6 +304,14 @@ See [docs/lan.md](docs/lan.md) for the supported retained-relay setup, systemd a
 
 Projects keep resource claims, conversation history, assignment epochs, and execution threads attached to one durable line of work. New human messages should normally target a project; direct agent messages remain a separate control plane.
 
+In the Rust TUI, move to `Projects` with `h`/`l`, use `/` to search stable project names, resource
+paths, or IDs, and press Enter to inspect the selected project. Press `c` to create a project over
+an existing working tree, `w` to provision a recoverable Git worktree project, or `n` from project
+details to send durable project input. Arrow keys move between form fields. Forms, logical
+selection, and typed operation outcomes survive authoritative reloads and reconnects; canceling a
+form performs no mutation. A reconcilable worktree outcome names any external destination and
+branch that HQ deliberately retained for operator recovery.
+
 ```sh
 hq project create widget --path /work/widget
 hq project worktree widget-fix --source /work/widget --destination /work/widget-fix --branch fix/widget --create-branch main

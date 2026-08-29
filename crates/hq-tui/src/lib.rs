@@ -13,7 +13,9 @@ pub use model::{
     UiConversationEntryKind, UiConversationPage, UiDirectTarget, UiEffect, UiError, UiEvent,
     UiFailure, UiFocus, UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget,
     UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult,
-    UiMessageState, UiMessageTarget, UiModel, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
-    UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
+    UiMessageState, UiMessageTarget, UiModel, UiProject, UiProjectAction, UiProjectExternalWarning,
+    UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResult,
+    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiTransition, update,
 };
 pub use render::render;

@@ -14,7 +14,8 @@ use crate::{
     UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentModal, UiConnectionState,
     UiConversationEntry, UiConversationEntryKind, UiFocus, UiMailboxAction, UiMailboxDraftTarget,
     UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel,
-    UiRow, UiRowState, UiSection, UiTechnicalSection,
+    UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiRow, UiRowState,
+    UiSection, UiTechnicalSection,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -46,6 +47,211 @@ pub fn render(frame: &mut Frame<'_>, model: &UiModel) {
     render_footer(frame, model, footer);
     render_mailbox_modal(frame, model, content);
     render_agent_modal(frame, model, content);
+    render_project_modal(frame, model, content);
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+    let Some(interaction) = model.project_modal() else {
+        return;
+    };
+    let width = available.width.saturating_sub(4).clamp(1, 88);
+    let height = available.height.saturating_sub(2).clamp(1, 22);
+    let area = Rect {
+        x: available.x + available.width.saturating_sub(width) / 2,
+        y: available.y + available.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let (title, lines) = match interaction {
+        UiProjectModal::Search { query } => (
+            " Search projects ",
+            vec![
+                Line::from(format!("Query: {query}")),
+                Line::default(),
+                Line::from("Type to match names, resource paths, or stable IDs"),
+                Line::from("↑/↓ cycle matches · Enter inspect · Esc keep query"),
+            ],
+        ),
+        UiProjectModal::Details { project } => {
+            let mut lines = vec![
+                Line::styled(project.name.as_str(), Style::new().fg(Color::Cyan).bold()),
+                Line::from(format!("Identity: {}", short_identity(project.project_id))),
+                Line::from(format!(
+                    "Lifecycle: {} · archived: {} · claimable: {}",
+                    project.lifecycle, project.archived, project.claimable
+                )),
+                Line::from(format!(
+                    "Head: {} · next input: {}",
+                    short_identity(project.head),
+                    project.input_sequence
+                )),
+                Line::default(),
+                Line::styled("Desired resources", Style::new().fg(Color::Cyan)),
+            ];
+            for resource in &project.resources {
+                lines.push(Line::from(format!(
+                    " {}{} · {} · {}",
+                    if resource.primary { "primary " } else { "" },
+                    resource.display_path,
+                    resource.health,
+                    if resource.active_claim {
+                        "claimed"
+                    } else {
+                        "unclaimed"
+                    }
+                )));
+            }
+            if project.resources.is_empty() {
+                lines.push(Line::from(" No desired resources"));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from("n send input · Esc close"));
+            (" Project details ", lines)
+        }
+        UiProjectModal::CreateExisting {
+            name,
+            brief,
+            path,
+            field,
+            submitting,
+        } => (
+            " Create project from existing tree ",
+            vec![
+                project_field_line("Name", name, *field == UiProjectFormField::Name),
+                project_field_line("Brief", brief, *field == UiProjectFormField::Brief),
+                project_field_line("Path", path, *field == UiProjectFormField::Path),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Reconciling one stable create operation…"
+                } else {
+                    "↑/↓ field · Enter create · Esc cancel"
+                }),
+            ],
+        ),
+        UiProjectModal::CreateWorktree {
+            name,
+            brief,
+            source,
+            destination,
+            branch,
+            base,
+            field,
+            submitting,
+        } => (
+            " Create recoverable Git worktree project ",
+            vec![
+                project_field_line("Name", name, *field == UiProjectFormField::Name),
+                project_field_line("Brief", brief, *field == UiProjectFormField::Brief),
+                project_field_line("Source", source, *field == UiProjectFormField::Source),
+                project_field_line(
+                    "Destination",
+                    destination,
+                    *field == UiProjectFormField::Destination,
+                ),
+                project_field_line("Branch", branch, *field == UiProjectFormField::Branch),
+                project_field_line("Base", base, *field == UiProjectFormField::Base),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Reconciling worktree provisioning without removing external state…"
+                } else {
+                    "↑/↓ field · Enter provision · Esc cancel"
+                }),
+            ],
+        ),
+        UiProjectModal::SendInput {
+            project,
+            content,
+            submitting,
+        } => (
+            " Send project input ",
+            vec![
+                Line::from(format!("Project: {}", project.name)),
+                project_field_line("Input", content, true),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Submitting through the ordinary local API…"
+                } else {
+                    "Enter send · Esc cancel"
+                }),
+            ],
+        ),
+        UiProjectModal::Outcome { result } => {
+            let mut lines = vec![Line::from(project_action_label(&result.action))];
+            lines.push(Line::from(format!(
+                "Project: {} · operation: {}",
+                short_identity(result.project_id),
+                short_identity(result.operation_id)
+            )));
+            lines.push(Line::default());
+            match &result.outcome {
+                UiProjectOutcome::Completed { project_head } => lines.push(Line::from(format!(
+                    "Completed{}",
+                    project_head.map_or_else(String::new, |head| format!(
+                        " at head {}",
+                        short_identity(head)
+                    ))
+                ))),
+                UiProjectOutcome::Running { stage } => {
+                    lines.push(Line::from(format!("In progress: {stage}")));
+                }
+                UiProjectOutcome::Rejected { category, code } => lines.push(Line::styled(
+                    format!("Rejected: {category}/{code}"),
+                    Style::new().fg(Color::Red),
+                )),
+                UiProjectOutcome::Reconcilable {
+                    stage,
+                    category,
+                    code,
+                    warning,
+                } => {
+                    lines.push(Line::styled(
+                        format!("Reconcile {stage}: {category}/{code}"),
+                        Style::new().fg(Color::Yellow),
+                    ));
+                    if let Some(warning) = warning {
+                        lines.push(Line::from(format!(
+                            "Retained {}: {} ({})",
+                            warning.kind, warning.destination, warning.branch
+                        )));
+                    }
+                }
+                UiProjectOutcome::InputSent { message_id } => lines.push(Line::from(format!(
+                    "Input accepted as {}",
+                    short_identity(*message_id)
+                ))),
+            }
+            lines.push(Line::default());
+            lines.push(Line::from("Esc close"));
+            (" Project operation outcome ", lines)
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(title))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn project_field_line<'value>(label: &str, value: &'value str, selected: bool) -> Line<'value> {
+    Line::styled(
+        format!("{} {label}: {value}", if selected { '›' } else { ' ' }),
+        if selected {
+            selected_style(true)
+        } else {
+            Style::new()
+        },
+    )
+}
+
+fn project_action_label(action: &UiProjectAction) -> String {
+    match action {
+        UiProjectAction::CreateExisting { name, .. } => format!("Create {name} from existing tree"),
+        UiProjectAction::CreateWorktree { name, .. } => format!("Provision worktree for {name}"),
+        UiProjectAction::SendInput { .. } => "Send project input".to_owned(),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -757,6 +963,15 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
                         "all"
                     } else {
                         model.agent_search()
+                    }
+                )
+            } else if model.section() == UiSection::Projects {
+                format!(
+                    " / search ({}) · Enter inspect · c existing · w worktree · q quit",
+                    if model.project_search().is_empty() {
+                        "all"
+                    } else {
+                        model.project_search()
                     }
                 )
             } else if model.viewport().width >= WIDE_WIDTH {

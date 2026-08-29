@@ -22,15 +22,18 @@ use hq_tui::{
     UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiMailboxAction,
     UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiManagedSessionResult, UiMessageState, UiMessageTarget, UiRow, UiRowKind, UiRowState,
-    UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
+    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResult, UiRow,
+    UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
     LocalNodeClientError, LocalNodeEventClient, StatePaths,
     local_client::{
         LocalManagedSessionCommand, LocalManagedSessionOutcome, LocalNamedAgentCommand,
-        execute_managed_session_command, execute_named_agent_command, tui_named_agent_catalog,
+        LocalProject, LocalProjectCommand, LocalProjectOutcome, execute_managed_session_command,
+        execute_named_agent_command, execute_project_command, tui_named_agent_catalog,
+        tui_project_catalog,
     },
 };
 
@@ -134,6 +137,17 @@ pub trait TuiClientPort: Send {
         })
     }
 
+    /// Executes or reconciles one stable project command.
+    fn submit_project_command(
+        &mut self,
+        _action: UiProjectAction,
+    ) -> Result<UiProjectResult, UiFailure> {
+        Err(UiFailure {
+            code: "project_command_unavailable".to_owned(),
+            action: "use a client that supports project workflows".to_owned(),
+        })
+    }
+
     /// Polls subscribed invalidation and reconnect observations for a bounded interval.
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation>;
 }
@@ -184,7 +198,8 @@ impl TuiClientPort for LocalTuiClient {
                 _ => None,
             })
             .collect();
-        Ok(tui_snapshot(section, snapshot))
+        let projects = tui_project_catalog(&snapshot).map_err(|error| project_failure(&error))?;
+        Ok(tui_snapshot_with_projects(section, snapshot, projects))
     }
 
     fn load_conversation(
@@ -487,6 +502,79 @@ impl TuiClientPort for LocalTuiClient {
         })
     }
 
+    fn submit_project_command(
+        &mut self,
+        action: UiProjectAction,
+    ) -> Result<UiProjectResult, UiFailure> {
+        let command = match &action {
+            UiProjectAction::CreateExisting { name, brief, path } => {
+                LocalProjectCommand::CreateExisting {
+                    name: name.clone(),
+                    brief: brief.clone(),
+                    path: path.clone(),
+                }
+            }
+            UiProjectAction::CreateWorktree {
+                name,
+                brief,
+                source,
+                destination,
+                branch,
+                base,
+            } => LocalProjectCommand::CreateWorktree {
+                name: name.clone(),
+                brief: brief.clone(),
+                source: source.clone(),
+                destination: destination.clone(),
+                branch: branch.clone(),
+                base: base.clone(),
+            },
+            UiProjectAction::SendInput {
+                project_id,
+                content,
+            } => LocalProjectCommand::SendInput {
+                project_id: *project_id,
+                content: content.clone(),
+            },
+        };
+        let result = execute_project_command(&self.state, command)
+            .map_err(|error| project_failure(&error))?;
+        let outcome = match result.outcome {
+            LocalProjectOutcome::Completed { project_head } => {
+                UiProjectOutcome::Completed { project_head }
+            }
+            LocalProjectOutcome::Running { stage } => UiProjectOutcome::Running { stage },
+            LocalProjectOutcome::Rejected { category, code } => {
+                UiProjectOutcome::Rejected { category, code }
+            }
+            LocalProjectOutcome::Reconcilable {
+                stage,
+                category,
+                code,
+                warning,
+            } => UiProjectOutcome::Reconcilable {
+                stage,
+                category,
+                code,
+                warning: warning.map(|warning| UiProjectExternalWarning {
+                    kind: warning.kind,
+                    destination: warning.destination,
+                    branch: warning.branch,
+                }),
+            },
+            LocalProjectOutcome::InputSent { message_id } => {
+                UiProjectOutcome::InputSent { message_id }
+            }
+        };
+        Ok(UiProjectResult {
+            action,
+            command_id: result.command_id,
+            operation_id: result.operation_id,
+            project_id: result.project_id,
+            outcome,
+        })
+    }
+
     fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
         let result = self.client.poll_event(wait);
         let state = self.client.connection_state();
@@ -654,6 +742,10 @@ enum WorkerCommand {
         id: EffectId,
         action: UiManagedSessionAction,
     },
+    SubmitProjectCommand {
+        id: EffectId,
+        action: UiProjectAction,
+    },
     Shutdown,
 }
 
@@ -748,6 +840,12 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
                     self.enqueue_client_effect(
                         id,
                         WorkerCommand::SubmitManagedSession { id, action },
+                    )?;
+                }
+                UiEffect::SubmitProjectCommand { id, action } => {
+                    self.enqueue_client_effect(
+                        id,
+                        WorkerCommand::SubmitProjectCommand { id, action },
                     )?;
                 }
                 UiEffect::ScheduleTimer { id, kind, after } => {
@@ -879,7 +977,9 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
             | UiEvent::AgentCommandCommitted { effect_id, .. }
             | UiEvent::AgentCommandFailed { effect_id, .. }
             | UiEvent::ManagedSessionCompleted { effect_id, .. }
-            | UiEvent::ManagedSessionFailed { effect_id, .. } => Some(*effect_id),
+            | UiEvent::ManagedSessionFailed { effect_id, .. }
+            | UiEvent::ProjectCommandCompleted { effect_id, .. }
+            | UiEvent::ProjectCommandFailed { effect_id, .. } => Some(*effect_id),
             UiEvent::Started
             | UiEvent::Input(_)
             | UiEvent::Resized(_)
@@ -1016,6 +1116,21 @@ fn client_worker<P: TuiClientPort>(
                     break;
                 }
             }
+            Ok(WorkerCommand::SubmitProjectCommand { id, action }) => {
+                let event = match client.submit_project_command(action) {
+                    Ok(result) => UiEvent::ProjectCommandCompleted {
+                        effect_id: id,
+                        result,
+                    },
+                    Err(failure) => UiEvent::ProjectCommandFailed {
+                        effect_id: id,
+                        failure,
+                    },
+                };
+                if events.send(event).is_err() {
+                    break;
+                }
+            }
             Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 for observation in client.poll(CLIENT_POLL_WAIT) {
@@ -1045,6 +1160,15 @@ fn client_worker<P: TuiClientPort>(
 
 /// Maps one authoritative local API snapshot into passive section-specific presentation rows.
 pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> UiSnapshot {
+    let projects = tui_project_catalog(&snapshot).unwrap_or_default();
+    tui_snapshot_with_projects(section, snapshot, projects)
+}
+
+fn tui_snapshot_with_projects(
+    section: UiSection,
+    snapshot: AuthoritativeSnapshotDto,
+    projects: Vec<LocalProject>,
+) -> UiSnapshot {
     let agents = tui_named_agent_catalog(&snapshot)
         .into_iter()
         .map(|agent| UiAgent {
@@ -1086,6 +1210,7 @@ pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> U
                 .collect(),
         })
         .collect();
+    let projects = tui_projects(projects);
     let mut direct_targets = snapshot
         .items
         .iter()
@@ -1124,7 +1249,37 @@ pub fn tui_snapshot(section: UiSection, snapshot: AuthoritativeSnapshotDto) -> U
         rows,
         direct_targets,
         agents,
+        projects,
     }
+}
+
+fn tui_projects(projects: Vec<LocalProject>) -> Vec<UiProject> {
+    projects
+        .into_iter()
+        .map(|project| UiProject {
+            project_id: project.project_id,
+            home: project.home,
+            name: terminal_text(&project.name),
+            lifecycle: project.lifecycle,
+            archived: project.archived,
+            claimable: project.claimable,
+            head: project.head,
+            input_sequence: project.input_sequence,
+            resources: project
+                .resources
+                .into_iter()
+                .map(|resource| UiProjectResource {
+                    resource_id: resource.resource_id,
+                    display_path: terminal_text(&resource.display_path),
+                    canonical_path: terminal_text(&resource.canonical_path),
+                    health: resource.health,
+                    primary: resource.primary,
+                    active_claim: resource.active_claim,
+                    conflicting_projects: resource.conflicting_projects,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn snapshot_row(section: UiSection, item: SnapshotItem) -> Option<UiRow> {
@@ -1501,6 +1656,31 @@ fn client_failure(error: &LocalNodeClientError) -> UiFailure {
             | BlockingClientError::ConnectionAttemptsExhausted
             | BlockingClientError::ResponseLost,
         ) => ("local_client_unavailable", "waiting to reconnect"),
+    };
+    UiFailure {
+        code: code.to_owned(),
+        action: action.to_owned(),
+    }
+}
+
+fn project_failure(error: &crate::cli::CliError) -> UiFailure {
+    let (code, action) = match error {
+        crate::cli::CliError::Arguments => (
+            "project_command_invalid",
+            "correct the project name, text, path, branch, or base and retry",
+        ),
+        crate::cli::CliError::ProjectState => (
+            "project_state_stale_or_uncertain",
+            "reload and reselect the current project or working tree",
+        ),
+        crate::cli::CliError::MessagingState => (
+            "project_input_target_stale",
+            "reload and reselect the project's current mailbox",
+        ),
+        _ => (
+            "project_command_unavailable",
+            "wait for the local node to recover, then retry the same operation",
+        ),
     };
     UiFailure {
         code: code.to_owned(),

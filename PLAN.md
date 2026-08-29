@@ -54,16 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained project catalog, creation, and input workflows** — Add stable
-  project search, selection, and details before accepting new project work; create projects over an
-  existing working tree; provision recoverable Git worktrees; and send project input through
-  ordinary local-API commands. Preserve modal text and logical project selection across
-  authoritative reload, reconnect, and resize; cancel without mutation; reject stale heads; and
-  expose worktree progress, rejected outcomes, reconcilable external-state warnings, and recovery
-  actions without recomputing project authority. Complete this work when pure model, responsive
-  renderer, executor, and installed-client parity tests cover catalog, both creation modes, input,
-  cancellation, progress, response loss, and failure paths.
-
 - **[tui/high] Implement retained desired-resource editing and conflict previews** — Add desired
   resource add, remove, replace, and primary selection plus fresh health/release checks through
   ordinary local-API commands. Present domain-selected claim conflicts and force gates before

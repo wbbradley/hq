@@ -7,10 +7,13 @@ use std::{
     io::Read as _,
     num::NonZeroUsize,
     os::unix::net::UnixStream,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
-use hq_domain::{AgentId, InstallationId, ProviderId, ProviderSessionId, ShortText};
+use hq_domain::{
+    AgentId, ContentText, InstallationId, ProjectId, ProviderId, ProviderSessionId, ShortText,
+};
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientConnectionState,
     ClientEvent, ClientTransport, InitialView, ReconnectPolicy, ReconnectingClient,
@@ -27,7 +30,8 @@ use crate::{
     RuntimePaths, StatePaths,
     cli::{
         CliError, HarnessCommand, NamedAgentCommand, NamedAgentSelector, NamedAgentView,
-        named_agent_catalog_view, run_harness_for_tui, run_named_agent_for_tui,
+        ProjectCliCommand, ProjectTuiResult, WorktreeCliRequest, named_agent_catalog_view,
+        project_catalog_for_tui, run_harness_for_tui, run_named_agent_for_tui, run_project_for_tui,
     },
     unix_frame,
 };
@@ -164,6 +168,223 @@ pub(crate) fn execute_managed_session_command(
         operation_id: *view.operation_id.as_bytes(),
         outcome,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalProjectResource {
+    pub resource_id: [u8; 32],
+    pub display_path: String,
+    pub canonical_path: String,
+    pub health: String,
+    pub primary: bool,
+    pub active_claim: bool,
+    pub conflicting_projects: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalProject {
+    pub project_id: [u8; 32],
+    pub home: [u8; 32],
+    pub name: String,
+    pub lifecycle: String,
+    pub archived: bool,
+    pub claimable: bool,
+    pub head: [u8; 32],
+    pub input_sequence: u64,
+    pub resources: Vec<LocalProjectResource>,
+}
+
+pub(crate) fn tui_project_catalog(
+    snapshot: &AuthoritativeSnapshotDto,
+) -> Result<Vec<LocalProject>, CliError> {
+    Ok(project_catalog_for_tui(snapshot)?
+        .projects
+        .into_iter()
+        .map(|project| LocalProject {
+            project_id: *project.project_id.as_bytes(),
+            home: *project.home.as_bytes(),
+            name: project.name,
+            lifecycle: project.lifecycle,
+            archived: project.archived,
+            claimable: project.claimable,
+            head: *project.head.as_bytes(),
+            input_sequence: project.input_sequence,
+            resources: project
+                .resources
+                .into_iter()
+                .map(|resource| LocalProjectResource {
+                    resource_id: *resource.resource_id.as_bytes(),
+                    display_path: resource.display_locator.value,
+                    canonical_path: resource.canonical_locator.value,
+                    health: resource.health.to_owned(),
+                    primary: resource.primary,
+                    active_claim: resource.active_claim,
+                    conflicting_projects: resource
+                        .conflicting_projects
+                        .into_iter()
+                        .map(|project_id| *project_id.as_bytes())
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LocalProjectCommand {
+    CreateExisting {
+        name: String,
+        brief: Option<String>,
+        path: String,
+    },
+    CreateWorktree {
+        name: String,
+        brief: Option<String>,
+        source: String,
+        destination: String,
+        branch: String,
+        base: Option<String>,
+    },
+    SendInput {
+        project_id: [u8; 32],
+        content: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalProjectExternalWarning {
+    pub kind: String,
+    pub destination: String,
+    pub branch: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LocalProjectOutcome {
+    Completed {
+        project_head: Option<[u8; 32]>,
+    },
+    Running {
+        stage: String,
+    },
+    Rejected {
+        category: String,
+        code: String,
+    },
+    Reconcilable {
+        stage: String,
+        category: String,
+        code: String,
+        warning: Option<LocalProjectExternalWarning>,
+    },
+    InputSent {
+        message_id: [u8; 32],
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalProjectResult {
+    pub command: LocalProjectCommand,
+    pub command_id: [u8; 32],
+    pub operation_id: [u8; 32],
+    pub project_id: [u8; 32],
+    pub outcome: LocalProjectOutcome,
+}
+
+pub(crate) fn execute_project_command(
+    state: &StatePaths,
+    command: LocalProjectCommand,
+) -> Result<LocalProjectResult, CliError> {
+    let action = match &command {
+        LocalProjectCommand::CreateExisting { name, brief, path } => ProjectCliCommand::Create {
+            name: ShortText::new(name.clone()).map_err(|_| CliError::Arguments)?,
+            brief: brief
+                .clone()
+                .map(ContentText::new)
+                .transpose()
+                .map_err(|_| CliError::Arguments)?,
+            path: PathBuf::from(path),
+            home: None,
+        },
+        LocalProjectCommand::CreateWorktree {
+            name,
+            brief,
+            source,
+            destination,
+            branch,
+            base,
+        } => ProjectCliCommand::Worktree(WorktreeCliRequest {
+            name: ShortText::new(name.clone()).map_err(|_| CliError::Arguments)?,
+            brief: brief
+                .clone()
+                .map(ContentText::new)
+                .transpose()
+                .map_err(|_| CliError::Arguments)?,
+            source: PathBuf::from(source),
+            destination: PathBuf::from(destination),
+            branch: ShortText::new(branch.clone()).map_err(|_| CliError::Arguments)?,
+            base: base
+                .clone()
+                .map(ShortText::new)
+                .transpose()
+                .map_err(|_| CliError::Arguments)?,
+            home: None,
+        }),
+        LocalProjectCommand::SendInput {
+            project_id,
+            content,
+        } => ProjectCliCommand::Send {
+            project_id: ProjectId::from_bytes(*project_id),
+            body: Some(ContentText::new(content.clone()).map_err(|_| CliError::Arguments)?),
+        },
+    };
+    match run_project_for_tui(&action, state)? {
+        ProjectTuiResult::Operation(view) => {
+            let outcome = match view.status {
+                "accepted" | "running" => LocalProjectOutcome::Running {
+                    stage: view.stage.ok_or(CliError::ProjectState)?.to_owned(),
+                },
+                "completed" => LocalProjectOutcome::Completed {
+                    project_head: view.project_head.map(|head| *head.as_bytes()),
+                },
+                "rejected" => LocalProjectOutcome::Rejected {
+                    category: view.error_category.ok_or(CliError::ProjectState)?,
+                    code: view.error_code.ok_or(CliError::ProjectState)?,
+                },
+                "reconcilable" => LocalProjectOutcome::Reconcilable {
+                    stage: view.stage.ok_or(CliError::ProjectState)?.to_owned(),
+                    category: view.error_category.ok_or(CliError::ProjectState)?,
+                    code: view.error_code.ok_or(CliError::ProjectState)?,
+                    warning: view.external_state_warning.map(|warning| {
+                        LocalProjectExternalWarning {
+                            kind: warning.kind.to_owned(),
+                            destination: warning.destination,
+                            branch: warning.branch,
+                        }
+                    }),
+                },
+                _ => return Err(CliError::ProjectState),
+            };
+            Ok(LocalProjectResult {
+                command,
+                command_id: *view.command_id.as_bytes(),
+                operation_id: *view.operation_id.as_bytes(),
+                project_id: *view.project_id.as_bytes(),
+                outcome,
+            })
+        }
+        ProjectTuiResult::InputSent {
+            project_id,
+            message_id,
+        } => Ok(LocalProjectResult {
+            command,
+            command_id: *message_id.as_bytes(),
+            operation_id: *message_id.as_bytes(),
+            project_id: *project_id.as_bytes(),
+            outcome: LocalProjectOutcome::InputSent {
+                message_id: *message_id.as_bytes(),
+            },
+        }),
+    }
 }
 
 /// Passive local Unix transport configuration.

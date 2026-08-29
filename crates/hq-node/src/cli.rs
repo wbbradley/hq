@@ -3471,6 +3471,37 @@ fn run_project(
     }
 }
 
+/// Passive result subset needed by the ordinary local TUI client.
+pub(crate) enum ProjectTuiResult {
+    Operation(Box<ProjectOperationView>),
+    InputSent {
+        project_id: ProjectId,
+        message_id: MessageId,
+    },
+}
+
+pub(crate) fn project_catalog_for_tui(
+    snapshot: &AuthoritativeSnapshotDto,
+) -> Result<ProjectCatalogView, CliError> {
+    project_catalog_view(snapshot, &ProjectCliCommand::List)
+}
+
+pub(crate) fn run_project_for_tui(
+    action: &ProjectCliCommand,
+    state: &StatePaths,
+) -> Result<ProjectTuiResult, CliError> {
+    match run_project(action, state, &mut std::io::empty())? {
+        CliResult::ProjectOperation(view) => Ok(ProjectTuiResult::Operation(Box::new(view))),
+        CliResult::Messages(view) if view.operation == "project_send" => {
+            Ok(ProjectTuiResult::InputSent {
+                project_id: view.project_id.ok_or(CliError::ProjectState)?,
+                message_id: view.root_message.ok_or(CliError::ProjectState)?,
+            })
+        }
+        _ => Err(CliError::ProjectState),
+    }
+}
+
 fn run_project_resource(
     client: &mut LocalNodeClient,
     snapshot: &AuthoritativeSnapshotDto,

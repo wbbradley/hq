@@ -1,5 +1,48 @@
 # Completed
 
+## 2026-08-29 — Retained project catalog, creation, and input TUI workflows
+
+Added stable-identity project search, selection, and responsive details to the pure Ratatui model.
+Search covers names, resource paths, and full project identities. Logical selection, search text,
+open details, exact project identity, and partially edited creation or input forms survive
+authoritative reorder, reload, reconnect, and resize. Escape cancels only when no command is in
+flight and performs no mutation.
+
+Added typed existing-working-tree creation, recoverable Git worktree provisioning, and project
+input effects. Forms retain every field after client failure. Matching effect and exact action
+identity are both required before a completion can replace the modal, so stale or cross-wired
+responses fail visibly. Accepted/running progress, completed heads, rejection category/code,
+reconcilable stage, and retained external destination/branch warnings remain typed passive state
+with actionable recovery guidance.
+
+The ordinary local-client composition validates bounded names, content, project identities, paths,
+branches, and bases, then reuses the existing CLI/local-API project authority and saga workflows.
+The TUI layer receives only passive public-field project/resource records and typed outcomes; it
+does not import project, filesystem, Git, messaging, storage, or signing authority. No accessor
+facade was added to passive records, no stored/runtime state was duplicated, and no storage or
+local-API version, migration, or compatibility shape changed.
+
+Pure-model tests cover catalog reorder, reload/reconnect/resize retention, both creation modes,
+input, cancellation, client failure, progress, stale-head rejection, response mismatch, and
+reconcilable response loss. Wide and compact renderer tests cover worktree forms and external-state
+recovery. Executor tests preserve exact actions and operation evidence. Installed pseudoterminal
+tests create an existing-tree project, provision a real exact-base Git worktree and branch, send
+project input, and restore terminal modes. Full all-target/all-feature workspace tests, strict
+Clippy, formatting, architecture, behavior-ledger, causal, protocol, protocol-fuzz, and dependency
+gates pass. The final exact executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[tui/high] Implement retained project catalog, creation, and input workflows** — Add stable
+  project search, selection, and details before accepting new project work; create projects over an
+  existing working tree; provision recoverable Git worktrees; and send project input through
+  ordinary local-API commands. Preserve modal text and logical project selection across
+  authoritative reload, reconnect, and resize; cancel without mutation; reject stale heads; and
+  expose worktree progress, rejected outcomes, reconcilable external-state warnings, and recovery
+  actions without recomputing project authority. Complete this work when pure model, responsive
+  renderer, executor, and installed-client parity tests cover catalog, both creation modes, input,
+  cancellation, progress, response loss, and failure paths.
+
 ## 2026-08-29 — Retained managed-session TUI lifecycle
 
 Added provider-neutral start, exact resume, and stop commands to named-agent details. Start accepts

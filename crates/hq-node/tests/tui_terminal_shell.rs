@@ -269,6 +269,7 @@ impl TuiClientPort for EmptyClient {
             rows: Vec::new(),
             direct_targets: Vec::new(),
             agents: Vec::new(),
+            projects: Vec::new(),
         })
     }
 

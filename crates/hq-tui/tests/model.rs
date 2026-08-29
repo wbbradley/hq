@@ -10,8 +10,9 @@ use hq_tui::{
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiInput,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind,
-    update,
+    UiProject, UiProjectAction, UiProjectExternalWarning, UiProjectModal, UiProjectOutcome,
+    UiProjectResource, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
+    UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1319,7 +1320,7 @@ fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
     let mut model = opened_conversation(vec![entry("message-a", false)]);
     assert_eq!(model.conversation_anchor(), Some("message-a"));
     for section in [UiSection::Sent, UiSection::Archived, UiSection::Agents] {
-        let moved = update(model, UiEvent::Input(UiInput::NextSection)).expect("next section");
+        let moved = update(model, UiEvent::Input(UiInput::Character('l'))).expect("next section");
         let id = snapshot_effect(&moved.effects);
         model = update(
             moved.model,
@@ -1340,7 +1341,7 @@ fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
         .expect("close details")
         .model;
     for section in [UiSection::Archived, UiSection::Sent, UiSection::Inbox] {
-        let moved = update(model, UiEvent::Input(UiInput::PreviousSection)).expect("previous");
+        let moved = update(model, UiEvent::Input(UiInput::Character('h'))).expect("previous");
         let id = snapshot_effect(&moved.effects);
         model = update(
             moved.model,
@@ -1361,6 +1362,298 @@ fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
     assert!(model.conversation().is_some());
 }
 
+#[test]
+fn project_search_and_details_preserve_stable_identity_across_reload_and_resize() {
+    let alpha = project(1, "alpha", "/work/alpha");
+    let beta = project(2, "beta", "/work/beta");
+    let mut model = loaded_projects_model(4, vec![alpha, beta.clone()]);
+
+    model = update(model, UiEvent::Input(UiInput::Character('/')))
+        .expect("open search")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("beta".to_owned())))
+        .expect("search")
+        .model;
+    assert_eq!(model.selected_row(), Some(agent_row_id(2).as_str()));
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("inspect")
+        .model;
+    let resized = update(
+        model,
+        UiEvent::Resized(UiSize {
+            width: 73,
+            height: 18,
+        }),
+    )
+    .expect("resize");
+    let invalidated = update(resized.model, UiEvent::Invalidated { revision: 5 }).expect("reload");
+    let request = snapshot_effect(&invalidated.effects);
+    let mut current = beta;
+    current.name = "beta current".to_owned();
+    let loaded = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: request,
+            snapshot: projects_snapshot(5, vec![current, project(1, "alpha", "/work/alpha")]),
+        },
+    )
+    .expect("authoritative reorder");
+    assert_eq!(loaded.model.selected_row(), Some(agent_row_id(2).as_str()));
+    assert!(matches!(
+        loaded.model.project_modal(),
+        Some(UiProjectModal::Details { project }) if project.name == "beta current"
+    ));
+}
+
+#[test]
+fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effects() {
+    let mut model = loaded_projects_model(1, Vec::new());
+    model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("existing form")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("existing".to_owned())))
+        .expect("name")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("brief")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("brief".to_owned())))
+        .expect("brief text")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("path")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("/repo".to_owned())))
+        .expect("path text")
+        .model;
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit existing");
+    let (existing_id, existing_action) = project_effect(&submitted.effects);
+    assert_eq!(
+        existing_action,
+        UiProjectAction::CreateExisting {
+            name: "existing".to_owned(),
+            brief: Some("brief".to_owned()),
+            path: "/repo".to_owned(),
+        }
+    );
+    let failed = update(
+        submitted.model,
+        UiEvent::ProjectCommandFailed {
+            effect_id: existing_id,
+            failure: UiFailure {
+                code: "path_changed".to_owned(),
+                action: "inspect the current working tree".to_owned(),
+            },
+        },
+    )
+    .expect("recoverable failure");
+    assert!(matches!(
+        failed.model.project_modal(),
+        Some(UiProjectModal::CreateExisting { path, submitting: false, .. }) if path == "/repo"
+    ));
+    let cancelled = update(failed.model, UiEvent::Input(UiInput::Escape)).expect("cancel");
+    assert!(cancelled.model.project_modal().is_none());
+    assert!(
+        cancelled
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+
+    let mut model = update(cancelled.model, UiEvent::Input(UiInput::Character('w')))
+        .expect("worktree form")
+        .model;
+    for (index, value) in ["worktree", "", "/source", "/destination", "feature", "main"]
+        .into_iter()
+        .enumerate()
+    {
+        if !value.is_empty() {
+            model = update(model, UiEvent::Input(UiInput::Paste(value.to_owned())))
+                .expect("worktree field")
+                .model;
+        }
+        if index < 5 {
+            model = update(model, UiEvent::Input(UiInput::NextItem))
+                .expect("next worktree field")
+                .model;
+        }
+    }
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit worktree");
+    let (_, action) = project_effect(&submitted.effects);
+    assert_eq!(
+        action,
+        UiProjectAction::CreateWorktree {
+            name: "worktree".to_owned(),
+            brief: None,
+            source: "/source".to_owned(),
+            destination: "/destination".to_owned(),
+            branch: "feature".to_owned(),
+            base: Some("main".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn project_input_retains_text_on_failure_and_exposes_reconcilable_external_state() {
+    let target = project(7, "target", "/target");
+    let mut model = loaded_projects_model(1, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('n')))
+        .expect("input form")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("ship it".to_owned())))
+        .expect("input")
+        .model;
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit input");
+    let (first_id, action) = project_effect(&submitted.effects);
+    let failed = update(
+        submitted.model,
+        UiEvent::ProjectCommandFailed {
+            effect_id: first_id,
+            failure: UiFailure {
+                code: "disconnected".to_owned(),
+                action: "retry the same input".to_owned(),
+            },
+        },
+    )
+    .expect("failure");
+    assert!(matches!(
+        failed.model.project_modal(),
+        Some(UiProjectModal::SendInput { content, submitting: false, .. }) if content == "ship it"
+    ));
+    let retried = update(failed.model, UiEvent::Input(UiInput::Activate)).expect("retry");
+    let (second_id, second_action) = project_effect(&retried.effects);
+    assert_eq!(action, second_action);
+    let result = UiProjectResult {
+        action: second_action,
+        command_id: [3; 32],
+        operation_id: [4; 32],
+        project_id: target.project_id,
+        outcome: UiProjectOutcome::Reconcilable {
+            stage: "worktree_created".to_owned(),
+            category: "external_state".to_owned(),
+            code: "response_lost".to_owned(),
+            warning: Some(UiProjectExternalWarning {
+                kind: "retained_worktree".to_owned(),
+                destination: "/target".to_owned(),
+                branch: "feature".to_owned(),
+            }),
+        },
+    };
+    let completed = update(
+        retried.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: second_id,
+            result: result.clone(),
+        },
+    )
+    .expect("typed outcome");
+    assert!(matches!(
+        completed.model.project_modal(),
+        Some(UiProjectModal::Outcome { result: actual }) if actual == &result
+    ));
+}
+
+#[test]
+fn project_progress_stale_rejection_and_mismatched_responses_remain_typed() {
+    let target = project(8, "target", "/target");
+    let submit_input = |content: &str| {
+        let mut model = loaded_projects_model(1, vec![target.clone()]);
+        model = update(model, UiEvent::Input(UiInput::Activate))
+            .expect("details")
+            .model;
+        model = update(model, UiEvent::Input(UiInput::Character('n')))
+            .expect("input form")
+            .model;
+        model = update(model, UiEvent::Input(UiInput::Paste(content.to_owned())))
+            .expect("input")
+            .model;
+        update(model, UiEvent::Input(UiInput::Activate)).expect("submit input")
+    };
+
+    let running = submit_input("running");
+    let (effect_id, action) = project_effect(&running.effects);
+    let progress = update(
+        running.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action,
+                command_id: [1; 32],
+                operation_id: [2; 32],
+                project_id: target.project_id,
+                outcome: UiProjectOutcome::Running {
+                    stage: "git_identified".to_owned(),
+                },
+            },
+        },
+    )
+    .expect("progress");
+    assert!(matches!(
+        progress.model.project_modal(),
+        Some(UiProjectModal::Outcome { result })
+            if result.outcome == UiProjectOutcome::Running { stage: "git_identified".to_owned() }
+    ));
+
+    let rejected = submit_input("stale");
+    let (effect_id, action) = project_effect(&rejected.effects);
+    let rejected = update(
+        rejected.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action,
+                command_id: [3; 32],
+                operation_id: [4; 32],
+                project_id: target.project_id,
+                outcome: UiProjectOutcome::Rejected {
+                    category: "conflict".to_owned(),
+                    code: "stale_project_head".to_owned(),
+                },
+            },
+        },
+    )
+    .expect("rejected");
+    assert_eq!(
+        rejected
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("stale_project_head")
+    );
+
+    let mismatched = submit_input("expected");
+    let (effect_id, _) = project_effect(&mismatched.effects);
+    let mismatched = update(
+        mismatched.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action: UiProjectAction::SendInput {
+                    project_id: target.project_id,
+                    content: "different".to_owned(),
+                },
+                command_id: [5; 32],
+                operation_id: [6; 32],
+                project_id: target.project_id,
+                outcome: UiProjectOutcome::InputSent {
+                    message_id: [7; 32],
+                },
+            },
+        },
+    )
+    .expect("mismatch rejected");
+    assert_eq!(
+        mismatched
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("project_response_mismatch")
+    );
+}
+
 fn snapshot(revision: u64, ids: &[&str]) -> UiSnapshot {
     snapshot_for(UiSection::Inbox, revision, ids)
 }
@@ -1371,6 +1664,7 @@ fn snapshot_for(section: UiSection, revision: u64, ids: &[&str]) -> UiSnapshot {
         revision,
         direct_targets: Vec::new(),
         agents: Vec::new(),
+        projects: Vec::new(),
         rows: ids
             .iter()
             .map(|id| UiRow {
@@ -1423,7 +1717,75 @@ fn agents_snapshot(revision: u64, agents: Vec<UiAgent>) -> UiSnapshot {
             .collect(),
         direct_targets: Vec::new(),
         agents,
+        projects: Vec::new(),
     }
+}
+
+fn loaded_projects_model(revision: u64, projects: Vec<UiProject>) -> UiModel {
+    let model = loaded_agents_model(revision, &[]);
+    let moved = update(model, UiEvent::Input(UiInput::Character('l'))).expect("projects section");
+    let request = snapshot_effect(&moved.effects);
+    update(
+        moved.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: request,
+            snapshot: projects_snapshot(revision, projects),
+        },
+    )
+    .expect("projects loaded")
+    .model
+}
+
+fn projects_snapshot(revision: u64, projects: Vec<UiProject>) -> UiSnapshot {
+    UiSnapshot {
+        section: UiSection::Projects,
+        revision,
+        rows: projects
+            .iter()
+            .map(|project| UiRow {
+                id: agent_row_id(project.project_id[0]),
+                title: project.name.clone(),
+                detail: project.lifecycle.clone(),
+                state: UiRowState::Open,
+                kind: UiRowKind::Project,
+            })
+            .collect(),
+        direct_targets: Vec::new(),
+        agents: Vec::new(),
+        projects,
+    }
+}
+
+fn project(byte: u8, name: &str, path: &str) -> UiProject {
+    UiProject {
+        project_id: [byte; 32],
+        home: [9; 32],
+        name: name.to_owned(),
+        lifecycle: "open".to_owned(),
+        archived: false,
+        claimable: true,
+        head: [byte.saturating_add(1); 32],
+        input_sequence: 1,
+        resources: vec![UiProjectResource {
+            resource_id: [byte.saturating_add(2); 32],
+            display_path: path.to_owned(),
+            canonical_path: path.to_owned(),
+            health: "clean".to_owned(),
+            primary: true,
+            active_claim: true,
+            conflicting_projects: Vec::new(),
+        }],
+    }
+}
+
+fn project_effect(effects: &[UiEffect]) -> (hq_tui::EffectId, UiProjectAction) {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitProjectCommand { id, action } => Some((*id, action.clone())),
+            _ => None,
+        })
+        .expect("project effect")
 }
 
 fn agent(byte: u8, name: &str) -> UiAgent {

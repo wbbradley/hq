@@ -5,7 +5,8 @@
 use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentMailbox, UiAgentSession,
     UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiInput,
-    UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiRow, UiRowKind, UiRowState,
+    UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject, UiProjectAction,
+    UiProjectExternalWarning, UiProjectOutcome, UiProjectResult, UiRow, UiRowKind, UiRowState,
     UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -177,6 +178,84 @@ fn managed_session_switch_confirmation_is_responsive_and_explicit_about_runtime_
     }
 }
 
+#[test]
+fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+    ] {
+        let model = project_model(size);
+        let form = update(model, UiEvent::Input(UiInput::Character('w')))
+            .expect("worktree form")
+            .model;
+        let rendered = render_text(&form);
+        assert!(rendered.contains("recoverable Git worktree"));
+        assert!(rendered.contains("Source:"));
+        assert!(rendered.contains("Destination:"));
+
+        let mut model = form;
+        for (index, value) in ["feature", "", "/source", "/destination", "branch", "main"]
+            .into_iter()
+            .enumerate()
+        {
+            if !value.is_empty() {
+                model = update(model, UiEvent::Input(UiInput::Paste(value.to_owned())))
+                    .expect("field text")
+                    .model;
+            }
+            if index < 5 {
+                model = update(model, UiEvent::Input(UiInput::NextItem))
+                    .expect("next field")
+                    .model;
+            }
+        }
+        let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit");
+        let (effect_id, action) = submitted
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::SubmitProjectCommand { id, action } => Some((*id, action.clone())),
+                _ => None,
+            })
+            .expect("project effect");
+        assert!(matches!(action, UiProjectAction::CreateWorktree { .. }));
+        let outcome = update(
+            submitted.model,
+            UiEvent::ProjectCommandCompleted {
+                effect_id,
+                result: UiProjectResult {
+                    action,
+                    command_id: [2; 32],
+                    operation_id: [3; 32],
+                    project_id: [4; 32],
+                    outcome: UiProjectOutcome::Reconcilable {
+                        stage: "worktree_created".to_owned(),
+                        category: "external_state".to_owned(),
+                        code: "response_lost".to_owned(),
+                        warning: Some(UiProjectExternalWarning {
+                            kind: "retained_worktree".to_owned(),
+                            destination: "/destination".to_owned(),
+                            branch: "branch".to_owned(),
+                        }),
+                    },
+                },
+            },
+        )
+        .expect("typed outcome")
+        .model;
+        let rendered = render_text(&outcome);
+        assert!(rendered.contains("Project operation outcome"));
+        assert!(rendered.contains("response_lost"));
+        assert!(rendered.contains("retained_worktree"));
+    }
+}
+
 fn assert_snapshot(model: &UiModel, expected: &str) {
     let before = model.clone();
     let viewport = model.viewport();
@@ -206,6 +285,18 @@ fn snapshot_text(buffer: &Buffer) -> String {
         .join("\n");
     output.push('\n');
     output
+}
+
+fn render_text(model: &UiModel) -> String {
+    let before = model.clone();
+    let viewport = model.viewport();
+    let backend = TestBackend::new(viewport.width, viewport.height);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, model))
+        .expect("render buffer");
+    assert_eq!(model, &before);
+    snapshot_text(terminal.backend().buffer())
 }
 
 fn ready_model(size: UiSize) -> UiModel {
@@ -242,6 +333,7 @@ fn ready_model(size: UiSize) -> UiModel {
                 ],
                 direct_targets: Vec::new(),
                 agents: Vec::new(),
+                projects: Vec::new(),
             },
         },
     )
@@ -312,6 +404,7 @@ fn agent_details_model(size: UiSize) -> UiModel {
             } else {
                 Vec::new()
             },
+            projects: Vec::new(),
         };
         model = update(
             moving.model,
@@ -326,6 +419,68 @@ fn agent_details_model(size: UiSize) -> UiModel {
     update(model, UiEvent::Input(UiInput::Activate))
         .expect("inspect agent")
         .model
+}
+
+fn project_model(size: UiSize) -> UiModel {
+    let mut model = ready_model(size);
+    for section in [
+        UiSection::Sent,
+        UiSection::Archived,
+        UiSection::Agents,
+        UiSection::Projects,
+    ] {
+        let moving = update(model, UiEvent::Input(UiInput::Character('l'))).expect("next section");
+        let request = moving
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::LoadSnapshot { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("section snapshot");
+        let projects = if section == UiSection::Projects {
+            vec![UiProject {
+                project_id: [1; 32],
+                home: [2; 32],
+                name: "release".to_owned(),
+                lifecycle: "open".to_owned(),
+                archived: false,
+                claimable: true,
+                head: [3; 32],
+                input_sequence: 0,
+                resources: Vec::new(),
+            }]
+        } else {
+            Vec::new()
+        };
+        let rows = projects
+            .iter()
+            .map(|project| UiRow {
+                id: "01".repeat(32),
+                title: project.name.clone(),
+                detail: project.lifecycle.clone(),
+                state: UiRowState::Open,
+                kind: UiRowKind::Project,
+            })
+            .collect();
+        model = update(
+            moving.model,
+            UiEvent::SnapshotLoaded {
+                effect_id: request,
+                snapshot: UiSnapshot {
+                    section,
+                    revision: 44,
+                    rows,
+                    direct_targets: Vec::new(),
+                    agents: Vec::new(),
+                    projects,
+                },
+            },
+        )
+        .expect("section loaded")
+        .model;
+    }
+    model
 }
 
 fn conversation_model(size: UiSize) -> UiModel {

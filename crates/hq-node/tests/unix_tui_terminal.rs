@@ -162,6 +162,128 @@ fn installed_tui_starts_explicit_provider_and_renders_typed_rejection() {
 }
 
 #[test]
+fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("existing-worktree");
+    std::fs::create_dir(&worktree).expect("existing working tree");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    let human = hq_output(&state_root, &["human", "create"]);
+    assert!(
+        human.status.success(),
+        "human create failed: {:?}",
+        human.stderr
+    );
+
+    let name = "tui-project";
+    let path = worktree.to_str().expect("UTF-8 test path");
+    let created = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::CreateExistingProject { name, path },
+    );
+    assert!(
+        created.status.success(),
+        "TUI create failed: {:?}",
+        created.bytes
+    );
+    assert_eq!(
+        created.before, created.after,
+        "TUI did not restore terminal modes"
+    );
+    let listing = hq_output(&state_root, &["--output", "json", "project", "list"]);
+    assert!(
+        listing.status.success() && String::from_utf8_lossy(&listing.stdout).contains(name),
+        "project list did not contain TUI project: {:?} {:?}",
+        listing.stdout,
+        listing.stderr
+    );
+
+    let content = "installed project input";
+    let sent = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::SendProjectInput { name, content },
+    );
+    assert!(sent.status.success(), "TUI input failed: {:?}", sent.bytes);
+    assert_eq!(
+        sent.before, sent.after,
+        "TUI did not restore terminal modes"
+    );
+    assert!(
+        sent.bytes
+            .windows(b"Project operation outcome".len())
+            .any(|window| window == b"Project operation outcome"),
+        "TUI did not render typed input completion: {:?}",
+        sent.bytes
+    );
+}
+
+#[test]
+fn installed_tui_provisions_a_recoverable_git_worktree_project() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let repository = directory.path().join("repository");
+    let destination = directory.path().join("tui-worktree");
+    std::fs::create_dir(&repository).expect("repository creates");
+    let git = |arguments: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(arguments)
+            .output()
+            .expect("Git runs");
+        assert!(output.status.success(), "Git failed: {output:?}");
+        String::from_utf8(output.stdout)
+            .expect("Git output is UTF-8")
+            .trim()
+            .to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "hq@example.invalid"]);
+    git(&["config", "user.name", "HQ Test"]);
+    std::fs::write(repository.join("tracked.txt"), "initial\n").expect("tracked file writes");
+    git(&["add", "tracked.txt"]);
+    git(&["commit", "-qm", "initial"]);
+    let base = git(&["rev-parse", "HEAD"]);
+
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    let human = hq_output(&state_root, &["human", "create"]);
+    assert!(
+        human.status.success(),
+        "human create failed: {:?}",
+        human.stderr
+    );
+    let run = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::CreateWorktreeProject {
+            name: "tui-worktree-project",
+            source: repository.to_str().expect("UTF-8 source"),
+            destination: destination.to_str().expect("UTF-8 destination"),
+            branch: "feature/tui",
+            base: &base,
+        },
+    );
+    assert!(run.status.success(), "TUI worktree failed: {:?}", run.bytes);
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+    assert!(destination.join("tracked.txt").is_file());
+    let branch = Command::new("git")
+        .arg("-C")
+        .arg(&destination)
+        .args(["branch", "--show-current"])
+        .output()
+        .expect("Git worktree inspection runs");
+    assert!(branch.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&branch.stdout).trim(),
+        "feature/tui"
+    );
+}
+
+#[test]
 fn explicit_tui_without_terminal_fails_without_escape_sequences() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -192,6 +314,21 @@ enum PtyInteraction<'content> {
     SubmitSelfNote(&'content str),
     CreateAgent(&'content str),
     StartRejectedSession,
+    CreateExistingProject {
+        name: &'content str,
+        path: &'content str,
+    },
+    SendProjectInput {
+        name: &'content str,
+        content: &'content str,
+    },
+    CreateWorktreeProject {
+        name: &'content str,
+        source: &'content str,
+        destination: &'content str,
+        branch: &'content str,
+        base: &'content str,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -248,6 +385,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::SubmitSelfNote(_) => b"n".as_slice(),
                 PtyInteraction::CreateAgent(_) => b"lllc".as_slice(),
                 PtyInteraction::StartRejectedSession => b"lll".as_slice(),
+                PtyInteraction::CreateExistingProject { .. } => b"llllc".as_slice(),
+                PtyInteraction::SendProjectInput { .. } => b"llll".as_slice(),
+                PtyInteraction::CreateWorktreeProject { .. } => b"llllw".as_slice(),
             };
             master.write_all(key).expect("initial TUI key writes");
             master.flush().expect("initial TUI key flushes");
@@ -293,6 +433,88 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             content_sent = true;
             completion_offset = Some(bytes.len());
         }
+        if let PtyInteraction::CreateExistingProject { name, path } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(b"Name:".len())
+                .any(|window| window == b"Name:")
+        {
+            master
+                .write_all(format!("{name}\x1b[B\x1b[B{path}\r").as_bytes())
+                .expect("project form writes");
+            master.flush().expect("project form flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::CreateWorktreeProject {
+            name,
+            source,
+            destination,
+            branch,
+            base,
+        } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(b"Source:".len())
+                .any(|window| window == b"Source:")
+        {
+            master
+                .write_all(
+                    format!(
+                        "{name}\x1b[B\x1b[B{source}\x1b[B{destination}\x1b[B{branch}\x1b[B{base}\r"
+                    )
+                    .as_bytes(),
+                )
+                .expect("worktree project form writes");
+            master.flush().expect("worktree project form flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::SendProjectInput { name, .. } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(name.len())
+                .any(|window| window == name.as_bytes())
+        {
+            master.write_all(b"\r").expect("project details key writes");
+            master.flush().expect("project details key flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::SendProjectInput { content, .. } = interaction
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"send".len())
+                    .any(|window| window == b"send")
+            })
+        {
+            master.write_all(b"n").expect("project input key writes");
+            master.flush().expect("project input key flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+            let _ = content;
+        }
+        if let PtyInteraction::SendProjectInput { content, .. } = interaction
+            && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Input:".len())
+                    .any(|window| window == b"Input:")
+            })
+        {
+            master
+                .write_all(format!("{content}\r").as_bytes())
+                .expect("project input writes");
+            master.flush().expect("project input flushes");
+            managed_provider_sent = true;
+            completion_offset = Some(bytes.len());
+        }
         if matches!(interaction, PtyInteraction::StartRejectedSession)
             && content_sent
             && !managed_action_sent
@@ -331,6 +553,45 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .any(|window| window == b"open messages")
         {
             let _ = content;
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+        }
+        if matches!(interaction, PtyInteraction::CreateExistingProject { .. })
+            && content_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Completed".len())
+                    .any(|window| window == b"Completed")
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+        }
+        if matches!(interaction, PtyInteraction::CreateWorktreeProject { .. })
+            && content_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Completed".len())
+                    .any(|window| window == b"Completed")
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+        }
+        if matches!(interaction, PtyInteraction::SendProjectInput { .. })
+            && managed_provider_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Project operation outcome".len())
+                    .any(|window| window == b"Project operation outcome")
+            })
+        {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
