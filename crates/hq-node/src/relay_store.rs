@@ -500,7 +500,8 @@ pub(crate) const fn map_store_error(error: StoreError) -> RelayPortError {
         | StoreErrorClass::ReductionFailed
         | StoreErrorClass::NotRepaired
         | StoreErrorClass::HarnessStateConflict
-        | StoreErrorClass::ProjectSagaConflict => RelayPortError::Unavailable,
+        | StoreErrorClass::ProjectSagaConflict
+        | StoreErrorClass::MailboxDraftsFull => RelayPortError::Unavailable,
     }
 }
 

@@ -18,8 +18,10 @@ use hq_local_api::protocol::v1::{
     DecodeError, DeviceGrantDto, DomainErrorDto, DomainHealthDto, EffectOutcomeDto,
     EffectRequestDto, EncodeError, ErrorClass, ErrorResponse, EvidenceIngestOutcomeDto,
     FrameDecoder, HealthDomainDto, Id32, InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest,
-    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MailboxAddressDto, MessagePurposeDto,
-    MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
+    LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MailboxAddressDto, MailboxCommandActionDto,
+    MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto, MailboxDraftDeleteRequestDto,
+    MailboxDraftDto, MailboxDraftSaveOutcomeDto, MailboxDraftSaveRequestDto, MailboxDraftTargetDto,
+    MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCreationRequestDto, ProjectExternalStateWarningDto,
     RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto,
@@ -172,6 +174,53 @@ fn exact_mutation_plan_round_trips_and_changed_input_changes_digest() {
     );
     let changed = MutationRequest::from_plan(command_id, changed).expect("changed plan encodes");
     assert_ne!(request.request_digest(), changed.request_digest());
+}
+
+#[test]
+fn mailbox_command_digest_binds_content_target_and_draft_source() {
+    let request = MailboxCommandRequestDto::new(
+        Id32::new([0x21; 32]),
+        None,
+        MailboxCommandActionDto::SelfNote {
+            message_id: Id32::new([0x22; 32]),
+        },
+        Some("note".to_owned()),
+        7,
+        [0x23; 32],
+    );
+    let changed = MailboxCommandRequestDto::new(
+        Id32::new([0x21; 32]),
+        None,
+        MailboxCommandActionDto::SelfNote {
+            message_id: Id32::new([0x22; 32]),
+        },
+        Some("changed".to_owned()),
+        7,
+        [0x23; 32],
+    );
+    assert_ne!(request.request_digest, changed.request_digest);
+    let mut tampered = request.clone();
+    tampered.content = Some("changed".to_owned());
+    assert!(
+        WireMessage::Request(RequestEnvelope::new(
+            RequestId::new(1).expect("id"),
+            Request::ControlMailbox(Box::new(tampered)),
+        ))
+        .encode_frame()
+        .is_err()
+    );
+
+    let draft_backed = MailboxCommandRequestDto::new(
+        Id32::new([0x21; 32]),
+        Some(Id32::new([0x24; 32])),
+        MailboxCommandActionDto::SelfNote {
+            message_id: Id32::new([0x22; 32]),
+        },
+        None,
+        7,
+        [0x23; 32],
+    );
+    assert_ne!(request.request_digest, draft_backed.request_digest);
 }
 
 #[test]
@@ -505,6 +554,27 @@ fn every_request_notification_and_negotiation_family_interoperates() {
             )
             .expect("page request"),
         ),
+        Request::MailboxDrafts,
+        Request::SaveMailboxDraft(MailboxDraftSaveRequestDto {
+            draft_id: Id32::new([0x11; 32]),
+            target: MailboxDraftTargetDto::SelfNote,
+            content: String::new(),
+            expected_version: None,
+        }),
+        Request::DeleteMailboxDraft(MailboxDraftDeleteRequestDto {
+            draft_id: Id32::new([0x11; 32]),
+            expected_version: 1,
+        }),
+        Request::ControlMailbox(Box::new(MailboxCommandRequestDto::new(
+            Id32::new([0x12; 32]),
+            None,
+            MailboxCommandActionDto::SelfNote {
+                message_id: Id32::new([0x13; 32]),
+            },
+            Some("note".to_owned()),
+            1,
+            [0x14; 32],
+        ))),
         Request::Mutation(
             MutationRequest::from_plan(CommandId::from_bytes([3; 32]), plan()).expect("mutation"),
         ),
@@ -597,6 +667,7 @@ fn every_request_notification_and_negotiation_family_interoperates() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn every_success_and_error_response_family_interoperates() {
     let id = RequestId::new(9).expect("nonzero");
     let snapshot = AuthoritativeSnapshotDto::new(4, Vec::new()).expect("empty snapshot");
@@ -614,6 +685,19 @@ fn every_success_and_error_response_family_interoperates() {
         ResponseResult::ConversationPage(
             ConversationPageDto::new(Vec::new(), None).expect("empty page"),
         ),
+        ResponseResult::MailboxDrafts(vec![MailboxDraftDto {
+            draft_id: Id32::new([0x11; 32]),
+            target: MailboxDraftTargetDto::SelfNote,
+            content: String::new(),
+            version: 1,
+        }]),
+        ResponseResult::MailboxDraftSave(MailboxDraftSaveOutcomeDto::Saved(MailboxDraftDto {
+            draft_id: Id32::new([0x11; 32]),
+            target: MailboxDraftTargetDto::SelfNote,
+            content: "note".to_owned(),
+            version: 2,
+        })),
+        ResponseResult::MailboxDraftDelete(MailboxDraftDeleteOutcomeDto::Deleted),
         ResponseResult::Mutation(MutationAttemptDto::Completed {
             command_id: Id32::new([3; 32]),
             request_digest: Id32::new([8; 32]),

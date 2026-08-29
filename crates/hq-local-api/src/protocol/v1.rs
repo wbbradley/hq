@@ -36,6 +36,7 @@ pub const MAX_CANONICAL_EVIDENCE_BYTES: usize = 512 * 1024;
 pub const MAX_RELAY_STATUS_POLICIES: usize = hq_application::MAX_RELAY_STATUS_POLICIES;
 
 const MUTATION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mutation\0";
+const MAILBOX_COMMAND_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-mailbox-command\0";
 const AGENT_SESSION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-agent-session\0";
 const RESOURCE_INSPECTION_DIGEST_DOMAIN: &[u8] = b"hq-local-api-v1-resource-inspection\0";
 
@@ -343,6 +344,224 @@ fn mutation_digest(content: &[u8], auxiliary_randomness: &[u8; 32]) -> CommandDi
     );
     hasher.update(content);
     hasher.update(auxiliary_randomness);
+    CommandDigest::from_bytes(hasher.finalize().into())
+}
+
+/// Explicit local mailbox-draft target.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MailboxDraftTargetDto {
+    Reply {
+        message_id: Id32,
+    },
+    Direct {
+        installation_id: Id32,
+        mailbox_id: Id32,
+    },
+    SelfNote,
+}
+
+/// Complete passive local mailbox draft.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxDraftDto {
+    pub draft_id: Id32,
+    pub target: MailboxDraftTargetDto,
+    pub content: String,
+    pub version: u64,
+}
+
+/// Optimistic mailbox-draft autosave request.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxDraftSaveRequestDto {
+    pub draft_id: Id32,
+    pub target: MailboxDraftTargetDto,
+    pub content: String,
+    pub expected_version: Option<u64>,
+}
+
+/// Optimistic mailbox-draft autosave result.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", content = "draft", rename_all = "snake_case")]
+pub enum MailboxDraftSaveOutcomeDto {
+    Saved(MailboxDraftDto),
+    Conflict(MailboxDraftDto),
+}
+
+/// Optimistic mailbox-draft deletion request.
+#[allow(missing_docs)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxDraftDeleteRequestDto {
+    pub draft_id: Id32,
+    pub expected_version: u64,
+}
+
+/// Optimistic mailbox-draft deletion result.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", content = "draft", rename_all = "snake_case")]
+pub enum MailboxDraftDeleteOutcomeDto {
+    Deleted,
+    NotFound,
+    Conflict(MailboxDraftDto),
+}
+
+/// Passive node-resolved mailbox command action.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum MailboxCommandActionDto {
+    Reply {
+        target_message: Id32,
+        message_id: Id32,
+    },
+    Direct {
+        recipient_installation: Id32,
+        recipient_mailbox: Id32,
+        message_id: Id32,
+    },
+    SelfNote {
+        message_id: Id32,
+    },
+    Archive {
+        target_message: Id32,
+    },
+    Restore {
+        target_message: Id32,
+    },
+}
+
+/// Stable retry envelope for one authoritative mailbox command.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxCommandRequestDto {
+    pub command_id: Id32,
+    pub request_digest: Id32,
+    pub draft_id: Option<Id32>,
+    pub action: MailboxCommandActionDto,
+    pub content: Option<String>,
+    pub authored_at_millis: i64,
+    pub auxiliary_randomness: [u8; 32],
+}
+
+impl MailboxCommandRequestDto {
+    /// Binds a caller-selected stable identity to the exact command input.
+    pub fn new(
+        command_id: Id32,
+        draft_id: Option<Id32>,
+        action: MailboxCommandActionDto,
+        content: Option<String>,
+        authored_at_millis: i64,
+        auxiliary_randomness: [u8; 32],
+    ) -> Self {
+        let mut request = Self {
+            command_id,
+            request_digest: Id32::new([0; 32]),
+            draft_id,
+            action,
+            content,
+            authored_at_millis,
+            auxiliary_randomness,
+        };
+        request.request_digest = Id32::new(*mailbox_command_digest(&request).as_bytes());
+        request
+    }
+
+    /// Returns the stable retry identity.
+    pub const fn command_id(&self) -> CommandId {
+        CommandId::from_bytes(self.command_id.bytes())
+    }
+
+    /// Returns the digest binding every exact input field.
+    pub const fn request_digest(&self) -> CommandDigest {
+        CommandDigest::from_bytes(self.request_digest.bytes())
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ValueError> {
+        if self
+            .content
+            .as_ref()
+            .is_some_and(|value| value.len() > CONTENT_MAX_BYTES)
+            || mailbox_command_digest(self) != self.request_digest()
+        {
+            return Err(ValueError::MutationDigestMismatch);
+        }
+        let message_action = matches!(
+            self.action,
+            MailboxCommandActionDto::Reply { .. }
+                | MailboxCommandActionDto::Direct { .. }
+                | MailboxCommandActionDto::SelfNote { .. }
+        );
+        if message_action != (self.draft_id.is_some() ^ self.content.is_some()) {
+            return Err(ValueError::InvalidCanonicalPlan);
+        }
+        Ok(())
+    }
+}
+
+fn mailbox_command_digest(request: &MailboxCommandRequestDto) -> CommandDigest {
+    let mut hasher = Sha256::new();
+    hasher.update(MAILBOX_COMMAND_DIGEST_DOMAIN);
+    match &request.action {
+        MailboxCommandActionDto::Reply {
+            target_message,
+            message_id,
+        } => {
+            hasher.update([1]);
+            hasher.update(target_message.bytes());
+            hasher.update(message_id.bytes());
+        }
+        MailboxCommandActionDto::Direct {
+            recipient_installation,
+            recipient_mailbox,
+            message_id,
+        } => {
+            hasher.update([2]);
+            hasher.update(recipient_installation.bytes());
+            hasher.update(recipient_mailbox.bytes());
+            hasher.update(message_id.bytes());
+        }
+        MailboxCommandActionDto::SelfNote { message_id } => {
+            hasher.update([3]);
+            hasher.update(message_id.bytes());
+        }
+        MailboxCommandActionDto::Archive { target_message } => {
+            hasher.update([4]);
+            hasher.update(target_message.bytes());
+        }
+        MailboxCommandActionDto::Restore { target_message } => {
+            hasher.update([5]);
+            hasher.update(target_message.bytes());
+        }
+    }
+    match request.draft_id {
+        Some(draft_id) => {
+            hasher.update([1]);
+            hasher.update(draft_id.bytes());
+        }
+        None => hasher.update([0]),
+    }
+    match &request.content {
+        Some(content) => {
+            hasher.update([1]);
+            hasher.update(
+                u64::try_from(content.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            hasher.update(content.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    hasher.update(request.authored_at_millis.to_be_bytes());
+    hasher.update(request.auxiliary_randomness);
     CommandDigest::from_bytes(hasher.finalize().into())
 }
 
@@ -1239,6 +1458,14 @@ pub enum Request {
     AuthoritativeSnapshot,
     /// Load one bounded reducer-ordered conversation page.
     ConversationPage(ConversationPageRequest),
+    /// Load every bounded installation-local mailbox draft.
+    MailboxDrafts,
+    /// Create or optimistically replace one complete mailbox draft.
+    SaveMailboxDraft(MailboxDraftSaveRequestDto),
+    /// Idempotently and optimistically delete one mailbox draft.
+    DeleteMailboxDraft(MailboxDraftDeleteRequestDto),
+    /// Execute or reconcile one node-resolved mailbox command.
+    ControlMailbox(Box<MailboxCommandRequestDto>),
     /// Execute or reconcile one exact retryable mutation.
     Mutation(MutationRequest),
     /// Load bounded exact transitive canonical evidence.
@@ -2183,6 +2410,12 @@ pub enum ResponseResult {
     AuthoritativeSnapshot(AuthoritativeSnapshotDto),
     /// Bounded conversation page.
     ConversationPage(ConversationPageDto),
+    /// Every bounded installation-local mailbox draft.
+    MailboxDrafts(Vec<MailboxDraftDto>),
+    /// Optimistic mailbox-draft autosave outcome.
+    MailboxDraftSave(MailboxDraftSaveOutcomeDto),
+    /// Optimistic mailbox-draft deletion outcome.
+    MailboxDraftDelete(MailboxDraftDeleteOutcomeDto),
     /// Retry-safe mutation attempt.
     Mutation(MutationAttemptDto),
     /// Bounded exact canonical evidence closure.
@@ -2418,6 +2651,23 @@ impl WireMessage {
             }
             Self::Request(envelope) => match &envelope.request {
                 Request::ConversationPage(request) => request.validate(),
+                Request::SaveMailboxDraft(request) => {
+                    if request.content.len() > CONTENT_MAX_BYTES
+                        || request.expected_version == Some(0)
+                    {
+                        Err(ValueError::InvalidCanonicalPlan)
+                    } else {
+                        Ok(())
+                    }
+                }
+                Request::DeleteMailboxDraft(request) => {
+                    if request.expected_version == 0 {
+                        Err(ValueError::InvalidCanonicalPlan)
+                    } else {
+                        Ok(())
+                    }
+                }
+                Request::ControlMailbox(request) => request.validate(),
                 Request::Mutation(request) => request.validate(),
                 Request::CanonicalEvidence(request) => {
                     if request.roots.is_empty() {
@@ -2449,7 +2699,8 @@ impl WireMessage {
                     Ok(())
                 }
                 Request::ControlProject(request) => validate_project_request(request),
-                Request::RetireAgent(_)
+                Request::MailboxDrafts
+                | Request::RetireAgent(_)
                 | Request::Lifecycle(_)
                 | Request::AuthoritativeSnapshot
                 | Request::RelayStatus
@@ -2479,6 +2730,7 @@ fn validate_text(value: &str, maximum: usize) -> Result<(), ValueError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
     match &response.response {
         Response::Success(ResponseResult::Lifecycle(status)) => {
@@ -2492,6 +2744,39 @@ fn validate_response(response: &ResponseEnvelope) -> Result<(), ValueError> {
             validate_snapshot(snapshot)
         }
         Response::Success(ResponseResult::ConversationPage(page)) => validate_page(page),
+        Response::Success(ResponseResult::MailboxDrafts(drafts)) => {
+            if drafts.len() > hq_application::MAX_MAILBOX_DRAFTS
+                || drafts
+                    .iter()
+                    .any(|draft| draft.version == 0 || draft.content.len() > CONTENT_MAX_BYTES)
+            {
+                Err(ValueError::InvalidCanonicalPlan)
+            } else {
+                Ok(())
+            }
+        }
+        Response::Success(ResponseResult::MailboxDraftSave(outcome)) => {
+            let draft = match outcome {
+                MailboxDraftSaveOutcomeDto::Saved(draft)
+                | MailboxDraftSaveOutcomeDto::Conflict(draft) => draft,
+            };
+            if draft.version == 0 || draft.content.len() > CONTENT_MAX_BYTES {
+                Err(ValueError::InvalidCanonicalPlan)
+            } else {
+                Ok(())
+            }
+        }
+        Response::Success(ResponseResult::MailboxDraftDelete(outcome)) => match outcome {
+            MailboxDraftDeleteOutcomeDto::Deleted | MailboxDraftDeleteOutcomeDto::NotFound => {
+                Ok(())
+            }
+            MailboxDraftDeleteOutcomeDto::Conflict(draft)
+                if draft.version > 0 && draft.content.len() <= CONTENT_MAX_BYTES =>
+            {
+                Ok(())
+            }
+            MailboxDraftDeleteOutcomeDto::Conflict(_) => Err(ValueError::InvalidCanonicalPlan),
+        },
         Response::Success(ResponseResult::Mutation(attempt)) => validate_mutation_attempt(attempt),
         Response::Success(ResponseResult::CanonicalEvidence(evidence)) => {
             validate_evidence(evidence)

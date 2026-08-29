@@ -96,6 +96,46 @@ pub trait CommitFacts {
     }
 }
 
+/// Installation-local draft persistence and authoritative mailbox-command capability.
+pub trait ControlMailbox {
+    /// Loads every bounded local draft in stable identity order.
+    fn mailbox_drafts(&self) -> Result<Vec<crate::MailboxDraft>, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    /// Creates or optimistically replaces one complete local draft.
+    fn save_mailbox_draft(
+        &self,
+        _request: crate::MailboxDraftSaveRequest,
+    ) -> Result<crate::MailboxDraftSaveOutcome, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    /// Idempotently and optimistically deletes one local draft.
+    fn delete_mailbox_draft(
+        &self,
+        _request: crate::MailboxDraftDeleteRequest,
+    ) -> Result<crate::MailboxDraftDeleteOutcome, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+
+    /// Executes or reconciles one node-resolved mailbox command.
+    fn control_mailbox(
+        &self,
+        _request: crate::MailboxCommandRequest,
+    ) -> Result<MutationAttempt, ApplicationError> {
+        Err(ApplicationError::new(
+            crate::ApplicationErrorCode::AdapterUnavailable,
+        ))
+    }
+}
+
 /// Disposition of a non-blocking post-commit work notification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WakeDisposition {
@@ -614,6 +654,7 @@ pub trait ObserveRevisions {
 pub trait ApplicationPorts:
     QueryDomain
     + CommitFacts
+    + ControlMailbox
     + PublishWake
     + ConfigureRelays
     + ControlHarness

@@ -262,6 +262,27 @@ rejected identities enter the same bounded completed-identity window. Changed di
 before transport. The server delegates to `ControlProjects`; a non-home router authors only an
 inert request fact, while the home executes the ordinary durable project workflow.
 
+Mailbox composition uses an installation-local operational family in the same clean v1 protocol.
+`mailbox_drafts`, `save_mailbox_draft`, and `delete_mailbox_draft` load, optimistically replace, or
+idempotently delete passive draft records. A draft has a stable operation ID, explicit reply,
+direct-mailbox, or self-note target, possibly empty UTF-8 content bounded by the canonical content
+limit, and a positive per-draft version. Targets deliberately have no canonical foreign key: stale
+reply or mailbox targets retain their text for recovery and reselection.
+
+`control_mailbox` carries a stable command ID, an exact digest over the typed action, optional
+draft ID or inline content, authored time, and signing randomness. The closed actions are reply,
+direct message, self-note, archive, and restore. Clients never supply root facts or reversible-state
+frontiers. The node resolves the local human authority, target mailbox or message, question root,
+and current state frontier from the transaction snapshot. A draft-backed committed fact, its
+receipt, and draft deletion share one SQLite transaction. Rejection preserves the draft; exact
+response-loss replay returns the retained receipt without replanning; changed command input under
+one identity conflicts before another effect. The reconnecting client retains and replays the
+byte-identical encoded mailbox frame just like an ordinary mutation.
+
+Because HQ has not shipped and has no standing installations, these request/result families and
+the draft table were added directly to local API v1 and the current clean-sheet schema. There is no
+protocol/storage version bump, migration, compatibility reader, or parallel stored draft type.
+
 ## Revision subscriptions
 
 Topics are broad: `all`, `authority`, `conversation`, `agent`, `project`, and `operations`. A

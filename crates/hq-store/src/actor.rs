@@ -13,7 +13,10 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use hq_application::CanonicalEvidence;
+use hq_application::{
+    CanonicalEvidence, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
+    MailboxDraftSaveOutcome, MailboxDraftSaveRequest,
+};
 use hq_domain::{
     AgentId, CommandId, FactId, InstallationId, OperationId, Page, PageCursor, Revision,
 };
@@ -206,6 +209,17 @@ enum Request {
     LocalMutation {
         request: LocalMutationRequest,
         reply: SyncSender<Result<MutationReceipt, StoreError>>,
+    },
+    LoadMailboxDrafts {
+        reply: SyncSender<Result<Vec<MailboxDraft>, StoreError>>,
+    },
+    SaveMailboxDraft {
+        request: MailboxDraftSaveRequest,
+        reply: SyncSender<Result<MailboxDraftSaveOutcome, StoreError>>,
+    },
+    DeleteMailboxDraft {
+        request: MailboxDraftDeleteRequest,
+        reply: SyncSender<Result<MailboxDraftDeleteOutcome, StoreError>>,
     },
     Ingest {
         fact: Box<VerifiedSemanticFact>,
@@ -417,6 +431,45 @@ impl ReplicationHandle {
 }
 
 impl ApplicationStateHandle {
+    /// Loads every bounded installation-local mailbox draft in stable identity order.
+    pub fn load_mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::LoadMailboxDrafts { reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Creates or optimistically replaces one complete local mailbox draft.
+    pub fn save_mailbox_draft(
+        &self,
+        request: MailboxDraftSaveRequest,
+    ) -> Result<MailboxDraftSaveOutcome, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::SaveMailboxDraft { request, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Idempotently and optimistically deletes one local mailbox draft.
+    pub fn delete_mailbox_draft(
+        &self,
+        request: MailboxDraftDeleteRequest,
+    ) -> Result<MailboxDraftDeleteOutcome, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::DeleteMailboxDraft { request, reply })
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
     /// Loads revision and the normalized structural index at one serialized store point.
     pub fn state_health_snapshot(&self) -> Result<(Revision, ReductionIndexSnapshot), StoreError> {
         let (reply, response) = mpsc::sync_channel(1);
@@ -1143,6 +1196,7 @@ impl fmt::Debug for Store {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(
     path: &Path,
     receiver: &Receiver<Request>,
@@ -1161,6 +1215,15 @@ fn run(
         match request {
             Request::LocalMutation { request, reply } => {
                 execute_local_mutation(&mut database, request, &reply, invalidations);
+            }
+            Request::LoadMailboxDrafts { reply } => {
+                let _ = reply.send(database.load_mailbox_drafts());
+            }
+            Request::SaveMailboxDraft { request, reply } => {
+                let _ = reply.send(database.save_mailbox_draft(&request));
+            }
+            Request::DeleteMailboxDraft { request, reply } => {
+                let _ = reply.send(database.delete_mailbox_draft(request));
             }
             Request::Ingest {
                 fact,

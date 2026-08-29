@@ -12,10 +12,11 @@ use std::{
 
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationErrorCode,
-    ApplicationPorts, AuthoritativeSnapshot, CommitFacts, ConfigureRelays, ConversationEntry,
-    ConversationKey, EffectOutcome, EffectRequest, FactMutation, InspectResource, MutationAttempt,
-    ObserveRevisions, PublishWake, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
+    ApplicationPorts, AuthoritativeSnapshot, CommitFacts, ConfigureRelays, ControlMailbox,
+    ConversationEntry, ConversationKey, EffectOutcome, EffectRequest, FactMutation,
+    InspectResource, MutationAttempt, ObserveRevisions, PublishWake, RelayConfiguration,
+    ResourceInspectionRequest, ResourceInspectionResult, SubscriptionRequest,
+    SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{OperationId, Page, PageCursor, Revision};
 use hq_local_api::{
@@ -294,6 +295,7 @@ impl ObserveRevisions for UnavailableApplicationPorts {
 }
 
 impl ApplicationPorts for UnavailableApplicationPorts {}
+impl ControlMailbox for UnavailableApplicationPorts {}
 
 pub fn unavailable_application(hub: RevisionHub) -> Application<UnavailableApplicationPorts> {
     Application::new(UnavailableApplicationPorts::new(hub))

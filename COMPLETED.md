@@ -1,5 +1,49 @@
 # Completed
 
+## 2026-08-28 — Durable local drafts and mailbox commands
+
+Added typed installation-local reply, direct-message, and self-note drafts with stable identities,
+bounded content, explicit targets, optimistic versions, autosave/load/delete operations, and
+restart persistence. Empty drafts remain recoverable while canonical message submission still
+requires nonempty content. Stale message and agent targets deliberately remain attached to their
+draft text instead of being removed by foreign-key cleanup.
+
+Added reply, direct-message, self-note, archive, and restore commands to the ordinary local API.
+The node resolves the local human authority, exact message/thread or agent target, and current
+archive frontier from one transaction-consistent canonical snapshot. Stable request digests bind
+the command and submitted content, byte-identical requests replay their receipt after response
+loss, and changed requests fail explicitly. A successful draft-backed command deletes the draft in
+the same transaction as the canonical mutation and receipt; rejection preserves it for correction.
+
+The unshipped storage schema and local API evolved directly in place. No storage or protocol
+version was bumped, and no migration, compatibility reader, accessor facade, or duplicate stored
+draft/runtime record was introduced. Passive draft and mailbox-command records expose public
+fields; existing invariant-bearing identifiers and bounded canonical content retain their narrow
+constructors.
+
+Store contracts cover every draft target, optimistic conflicts, capacity bounds, restart,
+stale-target preservation, authoritative direct/reply resolution, exact receipt replay, and changed
+request identities. A transaction failpoint after draft consumption proves that draft deletion,
+canonical fact insertion, and receipt insertion roll back together. Reconnecting-client tests lose
+the first command response and replay the exact frame; installed CLI coverage proves mailbox
+commands and delivery state survive daemon restart.
+
+Full workspace all-target/all-feature tests, strict Clippy, format/check, architecture,
+behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. The dependency audit
+retains only its allowed duplicate-version trees and existing yanked `chacha20 0.10.1` warning.
+
+### Original plan entry
+
+- **[mailbox/high] Add the durable local draft and mailbox-command service** — Add typed
+  installation-local reply, direct-message, and self-note drafts with stable identities, bounded
+  content, explicit targets, autosave/load/delete operations, and restart persistence. Expose draft
+  operations plus reply/send/archive/restore through the ordinary local API, resolve every target
+  and causal frontier authoritatively in the node, reconcile commands by stable request identity,
+  and consume a submitted draft atomically with its canonical mutation receipt. Preserve stale
+  targets for recovery rather than deleting their text. Complete this work when store failpoint,
+  restart, replay, changed-request, stale-target, and CLI parity tests pass without a storage
+  migration or compatibility reader.
+
 ## 2026-08-28 — Pure Ratatui model/effect architecture and renderer
 
 Added a pure `hq-tui` transition algebra in which the complete `UiModel` and one closed `UiEvent`

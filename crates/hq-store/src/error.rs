@@ -33,6 +33,8 @@ pub enum StoreErrorClass {
     ProjectSagaConflict,
     /// Bounded relay staging cannot accept another exact wrapper.
     RelayStagingFull,
+    /// Bounded installation-local mailbox drafts cannot accept another identity.
+    MailboxDraftsFull,
     /// The monotonic durable revision reached its maximum representable value.
     RevisionExhausted,
     /// A durable receipt, revision, or outbox row failed strict decoding.
@@ -87,6 +89,7 @@ impl fmt::Display for StoreError {
             StoreErrorClass::HarnessStateConflict => "harness state transition conflicts",
             StoreErrorClass::ProjectSagaConflict => "project saga transition conflicts",
             StoreErrorClass::RelayStagingFull => "relay staging is full",
+            StoreErrorClass::MailboxDraftsFull => "mailbox draft capacity is full",
             StoreErrorClass::RevisionExhausted => "change revision is exhausted",
             StoreErrorClass::OperationalStateCorrupt => "durable operational state is corrupt",
             StoreErrorClass::ActorClosed => "store actor is closed",

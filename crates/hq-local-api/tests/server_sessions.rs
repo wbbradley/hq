@@ -6,9 +6,11 @@ use std::{cell::RefCell, collections::BTreeSet};
 
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationPorts,
-    AuthoritativeSnapshot, CanonicalEvidence, CommitFacts, ConfigureRelays, ConversationKey,
-    DomainSnapshot, EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation,
-    InspectResource, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
+    AuthoritativeSnapshot, CanonicalEvidence, CommitFacts, ConfigureRelays, ControlMailbox,
+    ConversationKey, DomainSnapshot, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
+    FactMutation, InspectResource, MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome,
+    MailboxDraftDeleteRequest, MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MutationAttempt,
+    MutationOutcome, MutationReceipt, ObserveRevisions, ProjectCommandOutcome,
     ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, ResourceInspectionRequest,
     ResourceInspectionResult, ResourceReleaseState, SubscriptionRequest, SubscriptionTopic,
     SynchronizationRequest, WakeDisposition,
@@ -22,11 +24,13 @@ use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata, CanonicalEvidenceDto,
     CanonicalEvidenceRequestDto, ClientHello, ConversationKeyDto, ConversationPageRequest,
     EffectRequestDto, Id32, InvalidationTopic, LifecycleRequest, LifecycleState, LifecycleStatus,
-    MutationRequest, ProjectCommandActionDto, ProjectCommandRequestDto, RelayAccessDto,
-    RelayAuthenticationDto, RelayConfigurationDto, Request, RequestEnvelope, RequestId,
-    ResourceInspectionRequestDto, ResourceLocatorDto, ResourceSchemeDto, Response, ResponseResult,
-    SessionControlDto, SubscriptionRequestDto, SynchronizationRequestDto, V1, VersionRange,
-    WireMessage, agent_session_request_digest, resource_inspection_request_digest,
+    MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDeleteRequestDto,
+    MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MutationRequest, ProjectCommandActionDto,
+    ProjectCommandRequestDto, RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto,
+    Request, RequestEnvelope, RequestId, ResourceInspectionRequestDto, ResourceLocatorDto,
+    ResourceSchemeDto, Response, ResponseResult, SessionControlDto, SubscriptionRequestDto,
+    SynchronizationRequestDto, V1, VersionRange, WireMessage, agent_session_request_digest,
+    resource_inspection_request_digest,
 };
 use hq_local_api::{
     LifecycleControl, RevisionHub, ServerSession, ServerSessionError, ServerWriteDisposition,
@@ -256,6 +260,46 @@ impl ObserveRevisions for Ports {
 }
 
 impl ApplicationPorts for Ports {}
+impl ControlMailbox for Ports {
+    fn mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, ApplicationError> {
+        self.trace.borrow_mut().push("mailbox_drafts");
+        Ok(Vec::new())
+    }
+
+    fn save_mailbox_draft(
+        &self,
+        request: MailboxDraftSaveRequest,
+    ) -> Result<MailboxDraftSaveOutcome, ApplicationError> {
+        self.trace.borrow_mut().push("save_mailbox_draft");
+        Ok(MailboxDraftSaveOutcome::Saved(MailboxDraft {
+            draft_id: request.draft_id,
+            target: request.target,
+            content: request.content,
+            version: 1,
+        }))
+    }
+
+    fn delete_mailbox_draft(
+        &self,
+        _request: MailboxDraftDeleteRequest,
+    ) -> Result<MailboxDraftDeleteOutcome, ApplicationError> {
+        self.trace.borrow_mut().push("delete_mailbox_draft");
+        Ok(MailboxDraftDeleteOutcome::Deleted)
+    }
+
+    fn control_mailbox(
+        &self,
+        request: MailboxCommandRequest,
+    ) -> Result<MutationAttempt, ApplicationError> {
+        self.trace.borrow_mut().push("control_mailbox");
+        Ok(MutationAttempt::Completed(MutationReceipt::new(
+            request.command_id,
+            request.request_digest,
+            Revision::new(8),
+            MutationOutcome::Committed,
+        )))
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Lifecycle;
@@ -517,6 +561,27 @@ fn every_typed_request_family_routes_without_storage_types() {
         Request::Lifecycle(LifecycleRequest::Status),
         Request::AuthoritativeSnapshot,
         Request::ConversationPage(page),
+        Request::MailboxDrafts,
+        Request::SaveMailboxDraft(MailboxDraftSaveRequestDto {
+            draft_id: Id32::new([8; 32]),
+            target: MailboxDraftTargetDto::SelfNote,
+            content: String::new(),
+            expected_version: None,
+        }),
+        Request::DeleteMailboxDraft(MailboxDraftDeleteRequestDto {
+            draft_id: Id32::new([8; 32]),
+            expected_version: 1,
+        }),
+        Request::ControlMailbox(Box::new(MailboxCommandRequestDto::new(
+            Id32::new([9; 32]),
+            None,
+            MailboxCommandActionDto::SelfNote {
+                message_id: Id32::new([10; 32]),
+            },
+            Some("note".to_owned()),
+            1,
+            [11; 32],
+        ))),
         Request::Mutation(
             MutationRequest::from_plan(CommandId::from_bytes([11; 32]), plan()).expect("mutation"),
         ),

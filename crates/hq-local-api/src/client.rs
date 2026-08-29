@@ -14,10 +14,10 @@ use sha2::{Digest, Sha256};
 use crate::protocol::v1::{
     AgentRetirementOutcomeDto, AgentRetirementRequestDto, AgentSessionRequestDto,
     AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata, ClientHello, DecodeError,
-    EffectOutcomeDto, EffectRequestDto, ErrorResponse, Id32, InvalidationTopic, MutationAttemptDto,
-    MutationRequest, ProjectCommandOutcomeDto, ProjectCommandRequestDto, Request, RequestEnvelope,
-    RequestId, Response, ResponseResult, SubscriptionRequestDto, V1, VersionRange, WireMessage,
-    agent_session_request_digest,
+    EffectOutcomeDto, EffectRequestDto, ErrorResponse, Id32, InvalidationTopic,
+    MailboxCommandRequestDto, MutationAttemptDto, MutationRequest, ProjectCommandOutcomeDto,
+    ProjectCommandRequestDto, Request, RequestEnvelope, RequestId, Response, ResponseResult,
+    SubscriptionRequestDto, V1, VersionRange, WireMessage, agent_session_request_digest,
 };
 
 /// Maximum simultaneous exact retryable frames retained for response-loss replay.
@@ -561,6 +561,45 @@ impl ReconnectingClient {
         })
     }
 
+    /// Queues or sends one exact mailbox command and retains it across response loss.
+    pub fn submit_mailbox_command(
+        &mut self,
+        request: MailboxCommandRequestDto,
+    ) -> Result<ClientTransition, ClientError> {
+        let command_id = request.command_id();
+        let digest = request.request_digest();
+        if self.retryable_identity_exists(command_id, digest)? {
+            return Ok(ClientTransition::default());
+        }
+        if self.retryable_command_count() >= MAX_IN_FLIGHT_RETRYABLE_COMMANDS {
+            return Err(ClientError::RetryableCommandCapacity);
+        }
+        let request_id = self.allocate_request_id()?;
+        let frame = WireMessage::Request(RequestEnvelope::new(
+            request_id,
+            Request::ControlMailbox(Box::new(request)),
+        ))
+        .encode_frame()
+        .map_err(|_| ClientError::Codec)?;
+        self.pending_mutations.insert(
+            command_id,
+            PendingMutation {
+                request_id,
+                digest,
+                frame: frame.clone(),
+            },
+        );
+        let actions = self
+            .active_generation()
+            .map_or_else(Vec::new, |generation| {
+                vec![ClientAction::Write { generation, frame }]
+            });
+        Ok(ClientTransition {
+            actions,
+            events: Vec::new(),
+        })
+    }
+
     /// Queues or sends one exact project command and retains its frame across response loss.
     pub fn submit_project_command(
         &mut self,
@@ -716,6 +755,7 @@ impl ReconnectingClient {
         if matches!(
             request,
             Request::Mutation(_)
+                | Request::ControlMailbox(_)
                 | Request::ControlProject(_)
                 | Request::RetireAgent(_)
                 | Request::ControlAgentSession(_)
@@ -1074,6 +1114,9 @@ impl ReconnectingClient {
                 }
                 ResponseResult::Lifecycle(_)
                 | ResponseResult::ConversationPage(_)
+                | ResponseResult::MailboxDrafts(_)
+                | ResponseResult::MailboxDraftSave(_)
+                | ResponseResult::MailboxDraftDelete(_)
                 | ResponseResult::CanonicalEvidence(_)
                 | ResponseResult::EvidenceIngest(_)
                 | ResponseResult::EmptyEffect(_)
@@ -1387,6 +1430,56 @@ impl<T: ClientTransport> BlockingClientRunner<T> {
         let transition = self
             .client
             .submit_mutation(request)
+            .map_err(BlockingClientError::Client)?;
+        self.enqueue(transition)?;
+        self.ensure_started()?;
+        loop {
+            match self.step(deadline)? {
+                Some(
+                    event @ ClientEvent::Mutation(MutationAttemptDto::Completed {
+                        command_id: completed,
+                        ..
+                    }),
+                ) if CommandId::from_bytes(completed.bytes()) == command_id => {
+                    return Ok(event);
+                }
+                Some(
+                    event @ ClientEvent::Error {
+                        operation: ClientOperation::Mutation(failed),
+                        ..
+                    },
+                ) if failed == command_id => return Ok(event),
+                Some(ClientEvent::IncompatibleVersion) => {
+                    return Err(BlockingClientError::Incompatible);
+                }
+                Some(
+                    ClientEvent::Mutation(
+                        MutationAttemptDto::Completed { .. } | MutationAttemptDto::Uncertain { .. },
+                    )
+                    | ClientEvent::Snapshot(_)
+                    | ClientEvent::ProjectCommand { .. }
+                    | ClientEvent::AgentRetirement { .. }
+                    | ClientEvent::AgentSession { .. }
+                    | ClientEvent::Response { .. }
+                    | ClientEvent::RequestLost(_)
+                    | ClientEvent::Error { .. },
+                )
+                | None => {}
+            }
+        }
+    }
+
+    /// Executes or reconciles one retry-safe authoritative mailbox command.
+    pub fn mailbox_command(
+        &mut self,
+        request: MailboxCommandRequestDto,
+    ) -> Result<ClientEvent, BlockingClientError> {
+        let deadline = self.execution_deadline();
+        let command_id = request.command_id();
+        self.begin_execution();
+        let transition = self
+            .client
+            .submit_mailbox_command(request)
             .map_err(BlockingClientError::Client)?;
         self.enqueue(transition)?;
         self.ensure_started()?;

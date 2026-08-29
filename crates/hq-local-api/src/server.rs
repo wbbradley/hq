@@ -7,7 +7,9 @@ use hq_domain::OperationId;
 
 use crate::conversion::{
     agent_effect_from_v1, agent_effect_to_v1, agent_retirement_from_v1, agent_retirement_to_v1,
-    empty_effect_to_v1, project_command_from_v1, project_command_to_v1, relay_effect_from_v1,
+    empty_effect_to_v1, mailbox_command_from_v1, mailbox_draft_delete_from_v1,
+    mailbox_draft_delete_to_v1, mailbox_draft_save_from_v1, mailbox_draft_save_to_v1,
+    mailbox_drafts_to_v1, project_command_from_v1, project_command_to_v1, relay_effect_from_v1,
     relay_status_to_v1, resource_effect_from_v1, resource_effect_to_v1, state_health_to_v1,
     state_repair_to_v1, synchronization_effect_from_v1,
 };
@@ -304,6 +306,23 @@ impl ServerSession {
                 })
                 .and_then(|page| page_to_v1(&page).map_err(|_| internal_conversion_error()))
                 .map(ResponseResult::ConversationPage),
+            Request::MailboxDrafts => application
+                .mailbox_drafts()
+                .map(|drafts| ResponseResult::MailboxDrafts(mailbox_drafts_to_v1(&drafts))),
+            Request::SaveMailboxDraft(request) => application
+                .save_mailbox_draft(mailbox_draft_save_from_v1(request))
+                .map(|outcome| {
+                    ResponseResult::MailboxDraftSave(mailbox_draft_save_to_v1(&outcome))
+                }),
+            Request::DeleteMailboxDraft(request) => application
+                .delete_mailbox_draft(mailbox_draft_delete_from_v1(request))
+                .map(|outcome| {
+                    ResponseResult::MailboxDraftDelete(mailbox_draft_delete_to_v1(&outcome))
+                }),
+            Request::ControlMailbox(request) => mailbox_command_from_v1(*request)
+                .map_err(|_| invalid_request_error())
+                .and_then(|request| application.control_mailbox(request))
+                .map(|completion| ResponseResult::Mutation(mutation_to_v1(completion.attempt()))),
             Request::Mutation(request) => mutation_from_v1(request)
                 .map_err(|_| invalid_request_error())
                 .and_then(|request| application.execute_mutation(request))

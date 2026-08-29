@@ -2,7 +2,8 @@
 
 use std::{error::Error, fmt, sync::Arc};
 
-use hq_domain::{CommandDigest, CommandId, FactId, InstallationId, Revision};
+use hq_application::MailboxDraft;
+use hq_domain::{CommandDigest, CommandId, FactId, InstallationId, OperationId, Revision};
 use hq_protocol::{Bip340Signer, CanonicalEventPlan, MAX_EVENT_BYTES};
 use hq_reducer::AuthorityPolicy;
 
@@ -13,8 +14,9 @@ pub const MAX_MUTATION_RESULT_BYTES: usize = 65_536;
 /// Maximum outbox intents returned by one store query.
 pub const MAX_OUTBOX_QUERY_ITEMS: usize = 1_024;
 
-pub(crate) type LocalDecisionCallback =
-    Box<dyn FnOnce(&CompleteSnapshot) -> LocalMutationDecision + Send + 'static>;
+pub(crate) type LocalDecisionCallback = Box<
+    dyn FnOnce(&CompleteSnapshot, Option<&MailboxDraft>) -> LocalMutationDecision + Send + 'static,
+>;
 
 /// Bounded typed request for one retryable local fact-backed mutation.
 pub struct LocalMutationRequest {
@@ -22,6 +24,7 @@ pub struct LocalMutationRequest {
     request_digest: CommandDigest,
     policy: AuthorityPolicy,
     signer: Arc<Bip340Signer>,
+    draft_id: Option<OperationId>,
     decide: LocalDecisionCallback,
 }
 
@@ -42,6 +45,31 @@ impl LocalMutationRequest {
             request_digest,
             policy,
             signer,
+            draft_id: None,
+            decide: Box::new(move |snapshot, _| decide(snapshot)),
+        }
+    }
+
+    /// Creates a request whose successful commit atomically consumes the named draft.
+    pub fn new_with_draft<D>(
+        command_id: CommandId,
+        request_digest: CommandDigest,
+        policy: AuthorityPolicy,
+        signer: Arc<Bip340Signer>,
+        draft_id: OperationId,
+        decide: D,
+    ) -> Self
+    where
+        D: FnOnce(&CompleteSnapshot, Option<&MailboxDraft>) -> LocalMutationDecision
+            + Send
+            + 'static,
+    {
+        Self {
+            command_id,
+            request_digest,
+            policy,
+            signer,
+            draft_id: Some(draft_id),
             decide: Box::new(decide),
         }
     }
@@ -63,6 +91,7 @@ impl LocalMutationRequest {
         CommandDigest,
         AuthorityPolicy,
         Arc<Bip340Signer>,
+        Option<OperationId>,
         LocalDecisionCallback,
     ) {
         (
@@ -70,6 +99,7 @@ impl LocalMutationRequest {
             self.request_digest,
             self.policy,
             self.signer,
+            self.draft_id,
             self.decide,
         )
     }
@@ -82,6 +112,7 @@ impl fmt::Debug for LocalMutationRequest {
             .field("command_id", &self.command_id)
             .field("request_digest", &self.request_digest)
             .field("policy", &self.policy)
+            .field("draft_id", &self.draft_id)
             .finish_non_exhaustive()
     }
 }

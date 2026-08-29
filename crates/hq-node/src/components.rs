@@ -5,8 +5,10 @@ use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroUsize};
 use hq_application::{
     AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest, AgentSessionResult,
     ApplicationError, ApplicationPorts, CanonicalEvidence, CommitFacts, ConfigureRelays,
-    ControlHarness, ControlProjects, EffectOutcome, EffectRequest, EvidenceIngestOutcome,
-    FactMutation, InspectResource, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
+    ControlHarness, ControlMailbox, ControlProjects, EffectOutcome, EffectRequest,
+    EvidenceIngestOutcome, FactMutation, InspectResource, MailboxCommandRequest, MailboxDraft,
+    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest, MutationAttempt, ObserveRevisions, ProjectCommandOutcome,
     ProjectCommandRequest, PublishWake, QueryDomain, RelayConfiguration, RelayStatus,
     ResourceInspectionRequest, ResourceInspectionResult, RetireAgents, StateHealth,
     StateRepairReport, SubscriptionRequest, SynchronizationRequest, WakeDisposition,
@@ -225,6 +227,33 @@ impl<R, H, P: ReconcileProjectInputs> CommitFacts for NodeApplicationPorts<'_, R
         evidence: &[CanonicalEvidence],
     ) -> Result<Vec<EvidenceIngestOutcome>, ApplicationError> {
         self.store.ingest_canonical_evidence(evidence)
+    }
+}
+
+impl<R, H, P> ControlMailbox for NodeApplicationPorts<'_, R, H, P> {
+    fn mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, ApplicationError> {
+        self.store.mailbox_drafts()
+    }
+
+    fn save_mailbox_draft(
+        &self,
+        request: MailboxDraftSaveRequest,
+    ) -> Result<MailboxDraftSaveOutcome, ApplicationError> {
+        self.store.save_mailbox_draft(request)
+    }
+
+    fn delete_mailbox_draft(
+        &self,
+        request: MailboxDraftDeleteRequest,
+    ) -> Result<MailboxDraftDeleteOutcome, ApplicationError> {
+        self.store.delete_mailbox_draft(request)
+    }
+
+    fn control_mailbox(
+        &self,
+        request: MailboxCommandRequest,
+    ) -> Result<MutationAttempt, ApplicationError> {
+        self.store.control_mailbox(request)
     }
 }
 

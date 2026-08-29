@@ -152,6 +152,44 @@ where
         Ok(MutationCompletion { attempt, wake })
     }
 
+    /// Loads every bounded installation-local mailbox draft.
+    pub fn mailbox_drafts(&self) -> Result<Vec<crate::MailboxDraft>, ApplicationError> {
+        self.ports.mailbox_drafts()
+    }
+
+    /// Creates or optimistically replaces one complete mailbox draft.
+    pub fn save_mailbox_draft(
+        &self,
+        request: crate::MailboxDraftSaveRequest,
+    ) -> Result<crate::MailboxDraftSaveOutcome, ApplicationError> {
+        self.ports.save_mailbox_draft(request)
+    }
+
+    /// Idempotently and optimistically deletes one mailbox draft.
+    pub fn delete_mailbox_draft(
+        &self,
+        request: crate::MailboxDraftDeleteRequest,
+    ) -> Result<crate::MailboxDraftDeleteOutcome, ApplicationError> {
+        self.ports.delete_mailbox_draft(request)
+    }
+
+    /// Executes or reconciles one authoritative mailbox command and prompts relay work.
+    pub fn control_mailbox(
+        &self,
+        request: crate::MailboxCommandRequest,
+    ) -> Result<MutationCompletion, ApplicationError> {
+        let attempt = self.ports.control_mailbox(request)?;
+        let wake = match &attempt {
+            MutationAttempt::Completed(receipt)
+                if matches!(receipt.outcome(), MutationOutcome::Committed) =>
+            {
+                Some(self.ports.publish_wake(receipt.revision()))
+            }
+            MutationAttempt::Completed(_) | MutationAttempt::Uncertain { .. } => None,
+        };
+        Ok(MutationCompletion { attempt, wake })
+    }
+
     /// Applies or reconciles one stable relay configuration operation.
     pub fn configure_relay(
         &self,

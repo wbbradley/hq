@@ -495,6 +495,7 @@ const fn store_cause(class: StoreErrorClass) -> StartupCause {
         | StoreErrorClass::RebuildableStateCorrupt => StartupCause::Malformed,
         StoreErrorClass::FileSystem
         | StoreErrorClass::RelayStagingFull
+        | StoreErrorClass::MailboxDraftsFull
         | StoreErrorClass::ActorClosed
         | StoreErrorClass::WorkerStopped
         | StoreErrorClass::DatabaseUnavailable => StartupCause::Unavailable,

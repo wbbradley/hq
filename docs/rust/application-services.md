@@ -276,6 +276,18 @@ that window repeats a stable message identity instead of losing content. Direct 
 list operations do not create a completion. The clean unshipped local API v1 and storage v13
 contracts were completed in place; no migration, compatibility accessor, or version bump exists.
 
+Local human composition is a node-resolved service rather than a client-authored `FactPlan`.
+Passive draft records use public fields and retain stable identity, explicit reply/direct/self
+target, possibly empty bounded text, and optimistic version. They are installation-local
+operational state, never canonical facts or rebuildable projections, and stale targets remain
+loadable. On submit, reply/direct/self-note/archive/restore resolve the human mailbox authority,
+target existence, exact question root, and reversible-state frontier from the store transaction's
+complete snapshot. Only nonempty submitted text becomes `ContentText`. A successful draft-backed
+canonical mutation, stable receipt, and draft deletion commit atomically; a stable rejection leaves
+the draft untouched. Exact retry bypasses the decision callback, while changed digest reuse
+conflicts. The ordinary CLI answer/archive/restore paths use this service, giving installed CLI and
+the queued TUI actions one authority boundary.
+
 ## Subscription revision race
 
 Subscription preparation has three ordered phases:

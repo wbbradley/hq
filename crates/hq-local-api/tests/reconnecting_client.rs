@@ -14,10 +14,11 @@ use hq_local_api::protocol::v1::{
     AgentSessionRequestDto, AgentSessionResultDto, AuthoritativeSnapshotDto, BuildMetadata,
     ClientHello, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse, Id32,
     InvalidationTopic, LaunchEnvironmentDto, LifecycleRequest, LifecycleState, LifecycleStatus,
-    MutationAttemptDto, MutationRequest, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, ProjectCreationRequestDto, Request, RequestId, ResourceLocatorDto,
-    ResourceSchemeDto, ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello,
-    SessionControlDto, SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
+    MailboxCommandActionDto, MailboxCommandRequestDto, MutationAttemptDto, MutationRequest,
+    ProjectCommandActionDto, ProjectCommandOutcomeDto, ProjectCommandRequestDto,
+    ProjectCreationRequestDto, Request, RequestId, ResourceLocatorDto, ResourceSchemeDto,
+    ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto,
+    SubscriptionAcknowledgement, V1, VersionRange, VersionRejected, WireMessage,
     agent_session_request_digest,
 };
 use hq_local_api::{
@@ -124,6 +125,19 @@ fn plan(at: i64) -> hq_application::FactPlan {
 fn mutation(command: u8, at: i64) -> MutationRequest {
     MutationRequest::from_plan(CommandId::from_bytes([command; 32]), plan(at))
         .expect("mutation request")
+}
+
+fn mailbox_command(command: u8, content: &str) -> MailboxCommandRequestDto {
+    MailboxCommandRequestDto::new(
+        Id32::new([command; 32]),
+        None,
+        MailboxCommandActionDto::SelfNote {
+            message_id: Id32::new([command.wrapping_add(1); 32]),
+        },
+        Some(content.to_owned()),
+        1_700_000_000_000,
+        [command.wrapping_add(2); 32],
+    )
 }
 
 fn project_command(command: u8, digest: u8) -> ProjectCommandRequestDto {
@@ -300,6 +314,66 @@ fn lost_mutation_response_replays_the_byte_identical_original_frame() {
         Err(ClientError::ChangedCommandIdentity)
     );
     assert_eq!(request.command_id(), CommandId::from_bytes([1; 32]));
+}
+
+#[test]
+fn lost_mailbox_response_replays_exact_frame_and_changed_identity_is_rejected() {
+    let mut client = client();
+    let request = mailbox_command(31, "remember this");
+    assert!(
+        client
+            .submit_mailbox_command(request)
+            .expect("queue")
+            .actions
+            .is_empty()
+    );
+    let (first, _) = only_connect(&client.start().expect("start").actions);
+    let _ = client.connected(first).expect("connect");
+    let negotiated = client
+        .receive_frame(
+            first,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([32; 32])))
+                .encode_frame()
+                .expect("hello frame"),
+        )
+        .expect("negotiates");
+    let original = negotiated
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientAction::Write { frame, .. }
+                if matches!(
+                    WireMessage::decode_frame(frame),
+                    Ok(WireMessage::Request(envelope))
+                        if matches!(envelope.request, Request::ControlMailbox(_))
+                ) =>
+            {
+                Some(frame.clone())
+            }
+            _ => None,
+        })
+        .expect("queued mailbox command writes");
+
+    let reconnect = client.disconnected(first).expect("response lost");
+    let (second, _) = only_connect(&reconnect.actions);
+    let _ = client.connected(second).expect("reconnect starts");
+    let replay = client
+        .receive_frame(
+            second,
+            &WireMessage::ServerHello(ServerHello::new(V1, build(), Id32::new([33; 32])))
+                .encode_frame()
+                .expect("hello frame"),
+        )
+        .expect("renegotiates");
+    assert!(
+        replay.actions.iter().any(
+            |action| matches!(action, ClientAction::Write { frame, .. } if frame == &original)
+        )
+    );
+    assert_eq!(
+        client.submit_mailbox_command(mailbox_command(31, "changed")),
+        Err(ClientError::ChangedCommandIdentity)
+    );
 }
 
 #[test]

@@ -3,12 +3,14 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use hq_application::{
-    ApplicationError, ApplicationErrorCode, CanonicalEvidence, CommitFacts, DomainHealth,
-    DomainSnapshot, EvidenceIngestOutcome, FactMutation, HealthDomain, MutationAttempt,
-    MutationDecision, MutationOutcome, MutationReceipt as ApplicationMutationReceipt, QueryDomain,
-    StateHealth, StateRepairReport, decode_mutation_outcome, encode_mutation_outcome,
+    ApplicationError, ApplicationErrorCode, CanonicalEvidence, CommitFacts, ControlMailbox,
+    DomainHealth, DomainSnapshot, EvidenceIngestOutcome, FactMutation, HealthDomain,
+    MailboxCommandRequest, MailboxDraft, MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest,
+    MailboxDraftSaveOutcome, MailboxDraftSaveRequest, MutationAttempt, MutationDecision,
+    MutationOutcome, MutationReceipt as ApplicationMutationReceipt, QueryDomain, StateHealth,
+    StateRepairReport, decode_mutation_outcome, encode_mutation_outcome, plan_mailbox_command,
 };
-use hq_domain::{FactId, OperationId, Page, PageCursor};
+use hq_domain::{FactId, MailboxAddress, OperationId, Page, PageCursor};
 use hq_protocol::{Bip340Signer, CanonicalEventPlan, decode_semantic_event};
 use hq_reducer::{AuthorityPolicy, ConversationKey, DecisionStatus};
 
@@ -159,28 +161,7 @@ impl CommitFacts for StoreGateway {
                     snapshot.agent(),
                     snapshot.project(),
                 );
-                match decide(&domain) {
-                    MutationDecision::Commit(plan) => {
-                        let (author, authored_at, scope, causal, payload, randomness) =
-                            plan.into_parts();
-                        let result = MutationResultBytes::from_application_encoding(
-                            encode_mutation_outcome(&MutationOutcome::Committed),
-                        );
-                        LocalMutationDecision::commit(
-                            CanonicalEventPlan::new(author, authored_at, scope, causal, payload),
-                            randomness,
-                            result,
-                        )
-                    }
-                    MutationDecision::Reject(error) => {
-                        let outcome = MutationOutcome::Rejected(error);
-                        LocalMutationDecision::reject(
-                            MutationResultBytes::from_application_encoding(
-                                encode_mutation_outcome(&outcome),
-                            ),
-                        )
-                    }
-                }
+                to_local_decision(decide(&domain))
             },
         );
 
@@ -229,6 +210,108 @@ impl CommitFacts for StoreGateway {
     }
 }
 
+impl ControlMailbox for StoreGateway {
+    fn mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, ApplicationError> {
+        self.store.load_mailbox_drafts().map_err(map_store_error)
+    }
+
+    fn save_mailbox_draft(
+        &self,
+        request: MailboxDraftSaveRequest,
+    ) -> Result<MailboxDraftSaveOutcome, ApplicationError> {
+        self.store
+            .save_mailbox_draft(request)
+            .map_err(map_store_error)
+    }
+
+    fn delete_mailbox_draft(
+        &self,
+        request: MailboxDraftDeleteRequest,
+    ) -> Result<MailboxDraftDeleteOutcome, ApplicationError> {
+        self.store
+            .delete_mailbox_draft(request)
+            .map_err(map_store_error)
+    }
+
+    fn control_mailbox(
+        &self,
+        request: MailboxCommandRequest,
+    ) -> Result<MutationAttempt, ApplicationError> {
+        let command_id = request.command_id;
+        let request_digest = request.request_digest;
+        let policy = self.policy;
+        let signer = Arc::clone(&self.signer);
+        let local = policy.local_installation();
+        let human = MailboxAddress::new(local, policy.local_human_mailbox());
+        let store_request = if let Some(draft_id) = request.draft_id {
+            LocalMutationRequest::new_with_draft(
+                command_id,
+                request_digest,
+                policy,
+                signer,
+                draft_id,
+                move |snapshot, draft| {
+                    let domain = DomainSnapshot::from_reports(
+                        snapshot.authority(),
+                        snapshot.conversation(),
+                        snapshot.agent(),
+                        snapshot.project(),
+                    );
+                    to_local_decision(plan_mailbox_command(&domain, local, human, &request, draft))
+                },
+            )
+        } else {
+            LocalMutationRequest::new(
+                command_id,
+                request_digest,
+                policy,
+                signer,
+                move |snapshot| {
+                    let domain = DomainSnapshot::from_reports(
+                        snapshot.authority(),
+                        snapshot.conversation(),
+                        snapshot.agent(),
+                        snapshot.project(),
+                    );
+                    to_local_decision(plan_mailbox_command(&domain, local, human, &request, None))
+                },
+            )
+        };
+        match self.store.execute_local_mutation(store_request) {
+            Ok(receipt) => decode_receipt(&receipt).map(MutationAttempt::Completed),
+            Err(error) if error.class() == StoreErrorClass::WorkerStopped => {
+                Ok(MutationAttempt::Uncertain {
+                    command_id,
+                    request_digest,
+                })
+            }
+            Err(error) => Err(map_store_error(error)),
+        }
+    }
+}
+
+fn to_local_decision(decision: MutationDecision) -> LocalMutationDecision {
+    match decision {
+        MutationDecision::Commit(plan) => {
+            let (author, authored_at, scope, causal, payload, randomness) = plan.into_parts();
+            let result = MutationResultBytes::from_application_encoding(encode_mutation_outcome(
+                &MutationOutcome::Committed,
+            ));
+            LocalMutationDecision::commit(
+                CanonicalEventPlan::new(author, authored_at, scope, causal, payload),
+                randomness,
+                result,
+            )
+        }
+        MutationDecision::Reject(error) => {
+            let outcome = MutationOutcome::Rejected(error);
+            LocalMutationDecision::reject(MutationResultBytes::from_application_encoding(
+                encode_mutation_outcome(&outcome),
+            ))
+        }
+    }
+}
+
 fn decode_receipt(
     receipt: &crate::MutationReceipt,
 ) -> Result<ApplicationMutationReceipt, ApplicationError> {
@@ -258,7 +341,9 @@ fn map_store_error(error: StoreError) -> ApplicationError {
         | StoreErrorClass::HarnessStateConflict
         | StoreErrorClass::ProjectSagaConflict => ApplicationErrorCode::StateIdentityConflict,
         StoreErrorClass::InvalidOperationalRequest => ApplicationErrorCode::InvalidRequest,
-        StoreErrorClass::RelayStagingFull => ApplicationErrorCode::IntakeFull,
+        StoreErrorClass::RelayStagingFull | StoreErrorClass::MailboxDraftsFull => {
+            ApplicationErrorCode::IntakeFull
+        }
         StoreErrorClass::ActorClosed
         | StoreErrorClass::WorkerStopped
         | StoreErrorClass::DatabaseUnavailable

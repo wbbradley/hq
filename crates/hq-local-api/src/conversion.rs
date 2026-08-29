@@ -8,8 +8,11 @@ use crate::protocol::v1::{
     DomainErrorDto, DomainHealthDto, EffectOutcomeDto, EffectRequestDto, ErrorClass, ErrorResponse,
     EvidenceIngestOutcomeDto, HealthDomainDto, Id32, InvalidationTopic,
     MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto,
-    MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
-    PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
+    MailboxCommandActionDto, MailboxCommandRequestDto, MailboxDraftDeleteOutcomeDto,
+    MailboxDraftDeleteRequestDto, MailboxDraftDto, MailboxDraftSaveOutcomeDto,
+    MailboxDraftSaveRequestDto, MailboxDraftTargetDto, MessagePurposeDto, MutationAttemptDto,
+    MutationOutcomeDto, MutationRequest, PeerRouteBlockDto, PeerRouteCandidateDto,
+    PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
     ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
     RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto,
     RelayStatusDto, RemoteCommandProgressDto, RemoteCommandResultDto, RepositoryContextDto,
@@ -25,17 +28,19 @@ use hq_application::{
     ClientProjectAssignmentPhase, ClientProjectLifecycle, ClientProjectOutputStatus,
     ClientProjection, ClientRemoteCommandStage, ConversationEntry, ConversationKey, DomainHealth,
     EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation, HealthDomain,
-    LaunchEnvironment, MutationAttempt, MutationDecision, MutationOutcome, MutationReceipt,
-    ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage,
-    ProjectCreationRequest, RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus,
-    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
-    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
-    WorktreeProvisioningRequest,
+    LaunchEnvironment, MailboxCommandAction, MailboxCommandRequest, MailboxDraft,
+    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest, MailboxDraftTarget, MutationAttempt, MutationDecision,
+    MutationOutcome, MutationReceipt, ProjectCommandAction, ProjectCommandOutcome,
+    ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest, RelayAccess,
+    RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
+    ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
+    SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
 };
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
-    MailboxAddress, MailboxId, MessagePurpose, OperationId, Page, PageCursor, PresentationKind,
-    ProjectExternalStateWarning, ProjectId, ProviderId, ProviderSessionId,
+    InstallationId, MailboxAddress, MailboxId, MessagePurpose, OperationId, Page, PageCursor,
+    PresentationKind, ProjectExternalStateWarning, ProjectId, ProviderId, ProviderSessionId,
     RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator,
     ResourceScheme, Revision, RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
@@ -712,6 +717,179 @@ pub fn mutation_to_v1(attempt: &MutationAttempt) -> MutationAttemptDto {
             command_id: id32(command_id.as_bytes()),
             request_digest: id32(request_digest.as_bytes()),
         },
+    }
+}
+
+/// Converts one wire mailbox command into the application vocabulary.
+pub fn mailbox_command_from_v1(
+    request: MailboxCommandRequestDto,
+) -> Result<MailboxCommandRequest, ValueError> {
+    request.validate()?;
+    Ok(MailboxCommandRequest {
+        command_id: request.command_id(),
+        request_digest: request.request_digest(),
+        draft_id: request
+            .draft_id
+            .map(|draft_id| OperationId::from_bytes(draft_id.bytes())),
+        action: match request.action {
+            MailboxCommandActionDto::Reply {
+                target_message,
+                message_id,
+            } => MailboxCommandAction::Reply {
+                target_message: hq_domain::MessageId::from_bytes(target_message.bytes()),
+                message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
+            },
+            MailboxCommandActionDto::Direct {
+                recipient_installation,
+                recipient_mailbox,
+                message_id,
+            } => MailboxCommandAction::Direct {
+                recipient: MailboxAddress::new(
+                    InstallationId::from_bytes(recipient_installation.bytes()),
+                    MailboxId::from_bytes(recipient_mailbox.bytes()),
+                ),
+                message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
+            },
+            MailboxCommandActionDto::SelfNote { message_id } => MailboxCommandAction::SelfNote {
+                message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
+            },
+            MailboxCommandActionDto::Archive { target_message } => MailboxCommandAction::Archive {
+                target_message: hq_domain::MessageId::from_bytes(target_message.bytes()),
+            },
+            MailboxCommandActionDto::Restore { target_message } => MailboxCommandAction::Restore {
+                target_message: hq_domain::MessageId::from_bytes(target_message.bytes()),
+            },
+        },
+        content: request.content,
+        authored_at: Timestamp::from_unix_millis(request.authored_at_millis),
+        auxiliary_randomness: request.auxiliary_randomness,
+    })
+}
+
+/// Converts one application mailbox command into its digest-bound wire request.
+pub fn mailbox_command_request_to_v1(request: &MailboxCommandRequest) -> MailboxCommandRequestDto {
+    let mut wire = MailboxCommandRequestDto::new(
+        Id32::new(*request.command_id.as_bytes()),
+        request
+            .draft_id
+            .map(|draft_id| Id32::new(*draft_id.as_bytes())),
+        match request.action {
+            MailboxCommandAction::Reply {
+                target_message,
+                message_id,
+            } => MailboxCommandActionDto::Reply {
+                target_message: Id32::new(*target_message.as_bytes()),
+                message_id: Id32::new(*message_id.as_bytes()),
+            },
+            MailboxCommandAction::Direct {
+                recipient,
+                message_id,
+            } => MailboxCommandActionDto::Direct {
+                recipient_installation: Id32::new(*recipient.installation_id().as_bytes()),
+                recipient_mailbox: Id32::new(*recipient.mailbox_id().as_bytes()),
+                message_id: Id32::new(*message_id.as_bytes()),
+            },
+            MailboxCommandAction::SelfNote { message_id } => MailboxCommandActionDto::SelfNote {
+                message_id: Id32::new(*message_id.as_bytes()),
+            },
+            MailboxCommandAction::Archive { target_message } => MailboxCommandActionDto::Archive {
+                target_message: Id32::new(*target_message.as_bytes()),
+            },
+            MailboxCommandAction::Restore { target_message } => MailboxCommandActionDto::Restore {
+                target_message: Id32::new(*target_message.as_bytes()),
+            },
+        },
+        request.content.clone(),
+        request.authored_at.as_unix_millis(),
+        request.auxiliary_randomness,
+    );
+    wire.request_digest = Id32::new(*request.request_digest.as_bytes());
+    wire
+}
+
+/// Converts one wire draft autosave request into the application vocabulary.
+pub fn mailbox_draft_save_from_v1(request: MailboxDraftSaveRequestDto) -> MailboxDraftSaveRequest {
+    MailboxDraftSaveRequest {
+        draft_id: OperationId::from_bytes(request.draft_id.bytes()),
+        target: mailbox_draft_target_from_v1(&request.target),
+        content: request.content,
+        expected_version: request.expected_version,
+    }
+}
+
+/// Converts one wire draft deletion request into the application vocabulary.
+pub fn mailbox_draft_delete_from_v1(
+    request: MailboxDraftDeleteRequestDto,
+) -> MailboxDraftDeleteRequest {
+    MailboxDraftDeleteRequest {
+        draft_id: OperationId::from_bytes(request.draft_id.bytes()),
+        expected_version: request.expected_version,
+    }
+}
+
+/// Converts bounded application drafts into wire records.
+pub fn mailbox_drafts_to_v1(drafts: &[MailboxDraft]) -> Vec<MailboxDraftDto> {
+    drafts.iter().map(mailbox_draft_to_v1).collect()
+}
+
+/// Converts one application draft autosave outcome into its wire form.
+pub fn mailbox_draft_save_to_v1(outcome: &MailboxDraftSaveOutcome) -> MailboxDraftSaveOutcomeDto {
+    match outcome {
+        MailboxDraftSaveOutcome::Saved(draft) => {
+            MailboxDraftSaveOutcomeDto::Saved(mailbox_draft_to_v1(draft))
+        }
+        MailboxDraftSaveOutcome::Conflict(draft) => {
+            MailboxDraftSaveOutcomeDto::Conflict(mailbox_draft_to_v1(draft))
+        }
+    }
+}
+
+/// Converts one application draft deletion outcome into its wire form.
+pub fn mailbox_draft_delete_to_v1(
+    outcome: &MailboxDraftDeleteOutcome,
+) -> MailboxDraftDeleteOutcomeDto {
+    match outcome {
+        MailboxDraftDeleteOutcome::Deleted => MailboxDraftDeleteOutcomeDto::Deleted,
+        MailboxDraftDeleteOutcome::NotFound => MailboxDraftDeleteOutcomeDto::NotFound,
+        MailboxDraftDeleteOutcome::Conflict(draft) => {
+            MailboxDraftDeleteOutcomeDto::Conflict(mailbox_draft_to_v1(draft))
+        }
+    }
+}
+
+fn mailbox_draft_to_v1(draft: &MailboxDraft) -> MailboxDraftDto {
+    MailboxDraftDto {
+        draft_id: Id32::new(*draft.draft_id.as_bytes()),
+        target: match draft.target {
+            MailboxDraftTarget::Reply { message_id } => MailboxDraftTargetDto::Reply {
+                message_id: Id32::new(*message_id.as_bytes()),
+            },
+            MailboxDraftTarget::Direct { recipient } => MailboxDraftTargetDto::Direct {
+                installation_id: Id32::new(*recipient.installation_id().as_bytes()),
+                mailbox_id: Id32::new(*recipient.mailbox_id().as_bytes()),
+            },
+            MailboxDraftTarget::SelfNote => MailboxDraftTargetDto::SelfNote,
+        },
+        content: draft.content.clone(),
+        version: draft.version,
+    }
+}
+
+fn mailbox_draft_target_from_v1(target: &MailboxDraftTargetDto) -> MailboxDraftTarget {
+    match target {
+        MailboxDraftTargetDto::Reply { message_id } => MailboxDraftTarget::Reply {
+            message_id: hq_domain::MessageId::from_bytes(message_id.bytes()),
+        },
+        MailboxDraftTargetDto::Direct {
+            installation_id,
+            mailbox_id,
+        } => MailboxDraftTarget::Direct {
+            recipient: MailboxAddress::new(
+                InstallationId::from_bytes(installation_id.bytes()),
+                MailboxId::from_bytes(mailbox_id.bytes()),
+            ),
+        },
+        MailboxDraftTargetDto::SelfNote => MailboxDraftTarget::SelfNote,
     }
 }
 

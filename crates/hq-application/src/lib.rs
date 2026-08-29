@@ -5,6 +5,7 @@ mod authority_admin;
 mod error;
 mod harness;
 mod human;
+mod mailbox;
 mod messaging;
 mod mutation;
 mod ports;
@@ -40,6 +41,11 @@ pub use human::{
     plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
     plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
 };
+pub use mailbox::{
+    MAX_MAILBOX_DRAFTS, MailboxCommandAction, MailboxCommandRequest, MailboxDraft,
+    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest, MailboxDraftTarget, plan_mailbox_command,
+};
 pub use messaging::{
     MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest, ReplyRequest,
     ThreadCancellationRequest, plan_asynchronous_message, plan_message_archive,
@@ -52,9 +58,9 @@ pub use mutation::{
 };
 pub use ports::{
     AgentLaunchContext, AgentSessionRequest, AgentSessionResult, ApplicationPorts,
-    CanonicalEvidence, CommitFacts, ConfigureRelays, ControlHarness, DomainHealth, EffectOutcome,
-    EffectRequest, EvidenceIngestOutcome, HealthDomain, InspectResource, LaunchEnvironment,
-    MAX_LAUNCH_ENVIRONMENT_BYTES, MAX_LAUNCH_ENVIRONMENT_ENTRIES,
+    CanonicalEvidence, CommitFacts, ConfigureRelays, ControlHarness, ControlMailbox, DomainHealth,
+    EffectOutcome, EffectRequest, EvidenceIngestOutcome, HealthDomain, InspectResource,
+    LaunchEnvironment, MAX_LAUNCH_ENVIRONMENT_BYTES, MAX_LAUNCH_ENVIRONMENT_ENTRIES,
     MAX_LAUNCH_ENVIRONMENT_NAME_BYTES, MAX_LAUNCH_ENVIRONMENT_VALUE_BYTES,
     MAX_RELAY_STATUS_POLICIES, MAX_SUBSCRIPTION_TOPICS, ObserveRevisions, PublishWake, QueryDomain,
     RelayAccess, RelayAuthentication, RelayConfiguration, RelayPolicyStatus, RelayStatus,

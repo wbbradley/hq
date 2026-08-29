@@ -11,12 +11,12 @@ use std::{
 use hq_application::{
     AgentSessionRequest, AgentSessionResult, Application, ApplicationError, ApplicationErrorClass,
     ApplicationErrorCode, ApplicationPorts, AuthoritativeSnapshot, CommitFacts, ConfigureRelays,
-    DomainSnapshot, EffectOutcome, EffectRequest, FactMutation, FactPlan, InspectResource,
-    MutationAttempt, MutationDecision, MutationOutcome, MutationReceipt, ObserveRevisions,
-    PreparedSubscription, ProjectCommandOutcome, ProjectCommandRequest, PublishWake, QueryDomain,
-    RelayAccess, RelayAuthentication, RelayConfiguration, ResourceInspectionRequest,
-    ResourceInspectionResult, SessionControl, SubscriptionRequest, SubscriptionTopic,
-    SynchronizationRequest, WakeDisposition,
+    ControlMailbox, DomainSnapshot, EffectOutcome, EffectRequest, FactMutation, FactPlan,
+    InspectResource, MutationAttempt, MutationDecision, MutationOutcome, MutationReceipt,
+    ObserveRevisions, PreparedSubscription, ProjectCommandOutcome, ProjectCommandRequest,
+    PublishWake, QueryDomain, RelayAccess, RelayAuthentication, RelayConfiguration,
+    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, SubscriptionRequest,
+    SubscriptionTopic, SynchronizationRequest, WakeDisposition,
 };
 use hq_domain::{
     BoundedSet, BoundedText, CausalReferences, CommandDigest, CommandId, DomainError,
@@ -236,6 +236,7 @@ impl ObserveRevisions for ScriptedPorts {
 }
 
 impl ApplicationPorts for ScriptedPorts {}
+impl ControlMailbox for ScriptedPorts {}
 
 #[test]
 fn mutation_replay_is_exact_and_changed_digest_conflicts() -> Result<(), Box<dyn Error>> {

@@ -16,8 +16,8 @@ use hq_local_api::{
     ClientEvent, ClientTransport, InitialView, ReconnectPolicy, ReconnectingClient,
     protocol::v1::{
         AgentRetirementRequestDto, AgentSessionRequestDto, AuthoritativeSnapshotDto, BuildMetadata,
-        EffectRequestDto, FrameDecoder, Id32, InvalidationTopic, MutationRequest,
-        ProjectCommandRequestDto, Request,
+        EffectRequestDto, FrameDecoder, Id32, InvalidationTopic, MailboxCommandRequestDto,
+        MutationRequest, ProjectCommandRequestDto, Request,
     },
 };
 
@@ -203,6 +203,16 @@ impl LocalNodeClient {
             .map_err(LocalNodeClientError::Execution)
     }
 
+    /// Executes or reconciles one retry-safe authoritative mailbox command.
+    pub fn mailbox_command(
+        &mut self,
+        request: MailboxCommandRequestDto,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .mailbox_command(request)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
     /// Executes or reconciles one retry-safe durable project command.
     pub fn project(
         &mut self,
@@ -280,6 +290,16 @@ impl LocalNodeEventClient {
     pub fn request(&mut self, request: Request) -> Result<ClientEvent, LocalNodeClientError> {
         self.runner
             .request(request)
+            .map_err(LocalNodeClientError::Execution)
+    }
+
+    /// Executes or reconciles one retry-safe mailbox command on the subscribed connection.
+    pub fn mailbox_command(
+        &mut self,
+        request: MailboxCommandRequestDto,
+    ) -> Result<ClientEvent, LocalNodeClientError> {
+        self.runner
+            .mailbox_command(request)
             .map_err(LocalNodeClientError::Execution)
     }
 

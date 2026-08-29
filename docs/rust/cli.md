@@ -21,6 +21,14 @@ The foreground role closes every non-standard inherited descriptor before runtim
 autostart caller never remains coupled to the long-lived daemon by an unrelated pipe or socket.
 These commands never inspect terminal state or prompt.
 
+Human `answer`, `archive`, and `restore` submit through the ordinary retry-safe mailbox-command
+endpoint. The node, not the CLI snapshot, resolves the current question root, target fact, state
+frontier, and local human authority inside the canonical transaction. This preserves exact replay
+after response loss and prevents a stale client from supplying obsolete causal facts. `cancel`
+retains its separate question-owner cancellation planner. The same endpoint also supports direct
+agent messages and self-notes for the interactive client, while durable draft autosave/load/delete
+remain local operational state rather than canonical facts.
+
 `identity init|show|export|import` and `config get|set` are deliberately offline operations. They
 acquire the same exclusive state owner as the node and refuse a live owner instead of reading or
 writing behind it. Initialization and import never overwrite an identity. Export and import require

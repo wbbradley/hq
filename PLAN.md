@@ -54,16 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[mailbox/high] Add the durable local draft and mailbox-command service** — Add typed
-  installation-local reply, direct-message, and self-note drafts with stable identities, bounded
-  content, explicit targets, autosave/load/delete operations, and restart persistence. Expose draft
-  operations plus reply/send/archive/restore through the ordinary local API, resolve every target
-  and causal frontier authoritatively in the node, reconcile commands by stable request identity,
-  and consume a submitted draft atomically with its canonical mutation receipt. Preserve stale
-  targets for recovery rather than deleting their text. Complete this work when store failpoint,
-  restart, replay, changed-request, stale-target, and CLI parity tests pass without a storage
-  migration or compatibility reader.
-
 - **[tui/high] Implement retained mailbox composition and actions** — Add pure reply,
   direct-message, self-note, archive, and restore interactions over the ordinary mailbox-command
   service. Preserve applicable draft identity, focus, target reselection, modal state, logical

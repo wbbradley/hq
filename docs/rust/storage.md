@@ -187,6 +187,21 @@ strict application-owned v1 outcome encoding documented in `docs/rust/applicatio
 not serialized Rust domain structs or diagnostic prose. The application gateway requires the
 decoded committed/rejected outcome to agree with the separately stored closed result kind.
 
+`mailbox_drafts` retains at most 128 installation-local compositions by stable 32-byte operation
+identity. Each row stores a closed reply/direct/self-note target, possibly empty UTF-8 content up to
+the canonical content bound, and a positive fixed-width optimistic version. Targets do not
+reference canonical or projection tables, so repair and a stale/disappearing target cannot destroy
+recoverable text. Create requires absence, replacement requires the exact current version, and
+delete is idempotent with an explicit conflict carrying the current record. Draft records are the
+same passive application type at the store boundary; there is no parallel stored/runtime shape.
+
+A draft-backed `LocalMutationRequest` loads the draft after constructing the complete transaction
+snapshot. Only a committed decision deletes it, after canonical ingest and receipt insertion but
+before the same SQLite commit. Rejection leaves it intact. A failpoint after deletion proves that
+draft, fact, projection changes, revision, outbox, and receipt all roll back together. Receipt
+replay occurs before draft lookup, so response loss returns the original result even though the
+successfully consumed draft is absent.
+
 `change_revision` stores the full unsigned 64-bit revision as fixed-width big-endian bytes, so it
 does not silently lose the upper half of the domain in SQLite's signed integer representation.
 Allocation is monotonic and fails explicitly at `u64::MAX` rather than wrapping. Public reads expose

@@ -17,13 +17,12 @@ use hq_application::{
     HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority, MailboxGrantRequest,
     MailboxRevokeRequest, MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest,
     PeerRouteRequest, ProjectCommandAction, ProjectCommandRequest, ProjectCreationRequest,
-    ReplyRequest, ThreadCancellationRequest, WorktreeProvisioningRequest,
-    plan_agent_mailbox_creation, plan_agent_name_claim, plan_agent_session_rename,
-    plan_agent_session_selection, plan_asynchronous_message, plan_human_account_creation,
-    plan_human_account_selection, plan_human_device_acceptance, plan_human_device_grant,
-    plan_human_device_revoke, plan_human_mailbox_creation, plan_mailbox_grant, plan_mailbox_revoke,
-    plan_message_archive, plan_message_restore, plan_peer_route_block, plan_peer_route_set,
-    plan_question, plan_reply, plan_thread_cancellation,
+    ThreadCancellationRequest, WorktreeProvisioningRequest, plan_agent_mailbox_creation,
+    plan_agent_name_claim, plan_agent_session_rename, plan_agent_session_selection,
+    plan_asynchronous_message, plan_human_account_creation, plan_human_account_selection,
+    plan_human_device_acceptance, plan_human_device_grant, plan_human_device_revoke,
+    plan_human_mailbox_creation, plan_mailbox_grant, plan_mailbox_revoke, plan_message_archive,
+    plan_peer_route_block, plan_peer_route_set, plan_question, plan_thread_cancellation,
 };
 use hq_domain::{
     AccountId, AgentId, AuthorityReference, AuthorityRole, BoundedText, CommandId, ContentText,
@@ -41,8 +40,9 @@ use hq_local_api::{
         CanonicalEvidenceDto, CanonicalEvidenceRequestDto, ConversationEntryDto,
         ConversationMessageDto, ConversationPageRequest, DeviceGrantDto, EffectOutcomeDto,
         EffectRequestDto, HealthDomainDto, Id32, LaunchEnvironmentDto, LifecycleRequest,
-        LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
-        PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, ProjectCommandOutcomeDto,
+        LifecycleState, MailboxCommandActionDto, MailboxCommandRequestDto, MessagePurposeDto,
+        MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
+        PeerRouteCandidateDto, PresentationKindDto, ProjectCommandOutcomeDto,
         ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
         RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request,
         ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
@@ -6291,22 +6291,17 @@ fn run_human_message(
             ))
         }
         HumanMessageCommand::Answer { message_id, body } => {
-            let root = answerable_human_question(all, *message_id, human)?;
+            let _root = answerable_human_question(all, *message_id, human)?;
             let answer_id = random_message_id()?;
-            let plan = plan_reply(
-                message_authority(&snapshot, local, human)?,
-                stable_inputs(),
-                ReplyRequest {
-                    thread_id: root.thread_id,
-                    root_fact: root.fact_id,
-                    root: message_content(&root)?,
-                    root_scope: FactScope::InstallationPrivate(local),
-                    message_id: answer_id,
-                    body: message_body(body.as_ref(), input)?,
-                    presentation: PresentationKind::Message,
+            let content = message_body(body.as_ref(), input)?.into_string();
+            submit_mailbox_command(
+                &mut client,
+                MailboxCommandActionDto::Reply {
+                    target_message: Id32::new(*message_id.as_bytes()),
+                    message_id: Id32::new(*answer_id.as_bytes()),
                 },
+                Some(content),
             )?;
-            submit_message_plan(&mut client, plan)?;
             Ok(human_message_result(
                 "answer",
                 human,
@@ -6346,24 +6341,22 @@ fn run_human_message(
             if target.incomplete {
                 return Err(CliError::MessagingState);
             }
-            let request = MessageStateRequest {
-                message_id: *message_id,
-                target_fact: target.fact_id,
-                state_frontier: target.state_frontier,
-            };
-            let authority = message_authority(&snapshot, local, human)?;
-            let (operation, plan) = if matches!(action, HumanMessageCommand::Archive { .. }) {
+            let (operation, command) = if matches!(action, HumanMessageCommand::Archive { .. }) {
                 (
                     "archive",
-                    plan_message_archive(authority, stable_inputs(), request)?,
+                    MailboxCommandActionDto::Archive {
+                        target_message: Id32::new(*message_id.as_bytes()),
+                    },
                 )
             } else {
                 (
                     "restore",
-                    plan_message_restore(authority, stable_inputs(), request)?,
+                    MailboxCommandActionDto::Restore {
+                        target_message: Id32::new(*message_id.as_bytes()),
+                    },
                 )
             };
-            submit_message_plan(&mut client, plan)?;
+            submit_mailbox_command(&mut client, command, None)?;
             Ok(human_message_result(
                 operation,
                 human,
@@ -6753,6 +6746,30 @@ fn submit_message_plan(
     let request = MutationRequest::from_plan(random_command_id()?, plan)
         .map_err(|_| CliError::MessagingState)?;
     match client.mutation(request)? {
+        ClientEvent::Mutation(MutationAttemptDto::Completed {
+            outcome: MutationOutcomeDto::Committed,
+            ..
+        }) => Ok(()),
+        _ => Err(CliError::MessagingState),
+    }
+}
+
+fn submit_mailbox_command(
+    client: &mut LocalNodeClient,
+    action: MailboxCommandActionDto,
+    content: Option<String>,
+) -> Result<(), CliError> {
+    let inputs = stable_inputs();
+    let command_id = random_command_id()?;
+    let request = MailboxCommandRequestDto::new(
+        Id32::new(*command_id.as_bytes()),
+        None,
+        action,
+        content,
+        inputs.authored_at.as_unix_millis(),
+        inputs.auxiliary_randomness,
+    );
+    match client.mailbox_command(request)? {
         ClientEvent::Mutation(MutationAttemptDto::Completed {
             outcome: MutationOutcomeDto::Committed,
             ..

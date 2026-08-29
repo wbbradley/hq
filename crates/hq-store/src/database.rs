@@ -16,10 +16,14 @@ use std::{
     time::Duration,
 };
 
-use hq_application::{ConversationSummary, IncompleteMessageSummary};
+use hq_application::{
+    ConversationSummary, IncompleteMessageSummary, MAX_MAILBOX_DRAFTS, MailboxDraft,
+    MailboxDraftDeleteOutcome, MailboxDraftDeleteRequest, MailboxDraftSaveOutcome,
+    MailboxDraftSaveRequest, MailboxDraftTarget,
+};
 use hq_domain::{
-    AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, Page,
-    PageCursor, SemanticPayload,
+    AuthorityRole, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
+    MailboxAddress, MailboxId, MessageId, OperationId, Page, PageCursor, SemanticPayload,
 };
 use hq_protocol::{
     DispatchOutcome, MAX_EVENT_BYTES, ProtocolNamespace, RawEventBytes, VerifiedSemanticFact,
@@ -46,7 +50,7 @@ use crate::{
 const APPLICATION_ID: i64 = 0x4851_5253;
 const SCHEMA_VERSION: i64 = 13;
 const SCHEMA_MARKER: &str = "hq-store-v13-project-remote-routing-2026-08-28";
-const SCHEMA_TABLES: [&str; 117] = [
+const SCHEMA_TABLES: [&str; 118] = [
     "storage_metadata",
     "canonical_facts",
     "fact_parents",
@@ -146,6 +150,7 @@ const SCHEMA_TABLES: [&str; 117] = [
     "project_commands",
     "project_command_support",
     "mutation_receipts",
+    "mailbox_drafts",
     "change_revision",
     "outbox_intents",
     "canonical_commits",
@@ -165,7 +170,7 @@ const SCHEMA_TABLES: [&str; 117] = [
     "project_sagas",
     "project_saga_reservations",
 ];
-const OPERATIONAL_TABLE_COUNT: usize = 18;
+const OPERATIONAL_TABLE_COUNT: usize = 19;
 const SCHEMA_INDEXES: [&str; 3] = [
     "conversation_messages_by_fact_id",
     "conversation_activities_by_fact_id",
@@ -1090,6 +1095,32 @@ CREATE TABLE mutation_receipts (
     revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE mailbox_drafts (
+    draft_id BLOB PRIMARY KEY NOT NULL
+        CHECK(typeof(draft_id) = 'blob' AND length(draft_id) = 32),
+    target_kind INTEGER NOT NULL CHECK(target_kind BETWEEN 1 AND 3),
+    target_installation BLOB
+        CHECK(target_installation IS NULL OR
+            (typeof(target_installation) = 'blob' AND length(target_installation) = 32)),
+    target_mailbox BLOB
+        CHECK(target_mailbox IS NULL OR
+            (typeof(target_mailbox) = 'blob' AND length(target_mailbox) = 32)),
+    target_message BLOB
+        CHECK(target_message IS NULL OR
+            (typeof(target_message) = 'blob' AND length(target_message) = 32)),
+    content TEXT NOT NULL
+        CHECK(typeof(content) = 'text' AND length(CAST(content AS BLOB)) <= 16384),
+    version BLOB NOT NULL CHECK(typeof(version) = 'blob' AND length(version) = 8),
+    CHECK(
+        (target_kind = 1 AND target_message IS NOT NULL AND
+            target_installation IS NULL AND target_mailbox IS NULL) OR
+        (target_kind = 2 AND target_message IS NULL AND
+            target_installation IS NOT NULL AND target_mailbox IS NOT NULL) OR
+        (target_kind = 3 AND target_message IS NULL AND
+            target_installation IS NULL AND target_mailbox IS NULL)
+    )
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE change_revision (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
     revision BLOB NOT NULL CHECK(typeof(revision) = 'blob' AND length(revision) = 8)
@@ -1465,6 +1496,24 @@ impl Database {
             request,
             LocalMutationFailpoint::Never,
         )
+    }
+
+    pub(super) fn load_mailbox_drafts(&self) -> Result<Vec<MailboxDraft>, StoreError> {
+        load_mailbox_drafts(&self.connection)
+    }
+
+    pub(super) fn save_mailbox_draft(
+        &mut self,
+        request: &MailboxDraftSaveRequest,
+    ) -> Result<MailboxDraftSaveOutcome, StoreError> {
+        save_mailbox_draft(&mut self.connection, request)
+    }
+
+    pub(super) fn delete_mailbox_draft(
+        &mut self,
+        request: MailboxDraftDeleteRequest,
+    ) -> Result<MailboxDraftDeleteOutcome, StoreError> {
+        delete_mailbox_draft(&mut self.connection, request)
     }
 
     pub(super) fn complete_snapshot(
@@ -2024,6 +2073,7 @@ enum LocalMutationFailpoint {
     Ingest(IngestFailpoint),
     AfterRejectedRevision,
     AfterReceipt,
+    AfterDraftConsume,
     BeforeCommit,
     AfterCommit,
 }
@@ -2314,12 +2364,243 @@ where
             })
 }
 
+fn load_mailbox_drafts(connection: &Connection) -> Result<Vec<MailboxDraft>, StoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT draft_id, target_kind, target_installation, target_mailbox, \
+                    target_message, content, version \
+             FROM mailbox_drafts ORDER BY draft_id LIMIT ?1",
+        )
+        .map_err(sql_error)?;
+    let limit = i64::try_from(MAX_MAILBOX_DRAFTS + 1)
+        .map_err(|_| StoreError::new(StoreErrorClass::InvalidOperationalRequest))?;
+    let rows = statement
+        .query_map([limit], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
+            ))
+        })
+        .map_err(sql_error)?;
+    let drafts = rows
+        .map(|row| {
+            let (draft_id, kind, installation, mailbox, message, content, version) =
+                row.map_err(sql_error)?;
+            decode_mailbox_draft(
+                draft_id,
+                kind,
+                installation,
+                mailbox,
+                message,
+                content,
+                version,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if drafts.len() > MAX_MAILBOX_DRAFTS {
+        return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+    }
+    Ok(drafts)
+}
+
+fn load_mailbox_draft(
+    connection: &Connection,
+    draft_id: OperationId,
+) -> Result<Option<MailboxDraft>, StoreError> {
+    connection
+        .query_row(
+            "SELECT target_kind, target_installation, target_mailbox, target_message, \
+                    content, version FROM mailbox_drafts WHERE draft_id = ?1",
+            [draft_id.as_bytes().as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(sql_error)?
+        .map(|(kind, installation, mailbox, message, content, version)| {
+            decode_mailbox_draft(
+                draft_id.as_bytes().to_vec(),
+                kind,
+                installation,
+                mailbox,
+                message,
+                content,
+                version,
+            )
+        })
+        .transpose()
+}
+
+fn save_mailbox_draft(
+    connection: &mut Connection,
+    request: &MailboxDraftSaveRequest,
+) -> Result<MailboxDraftSaveOutcome, StoreError> {
+    if request.content.len() > hq_domain::CONTENT_MAX_BYTES {
+        return Err(StoreError::new(StoreErrorClass::InvalidOperationalRequest));
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let current = load_mailbox_draft(&transaction, request.draft_id)?;
+    let version =
+        match (&current, request.expected_version) {
+            (None, None) => {
+                let count: i64 = transaction
+                    .query_row("SELECT count(*) FROM mailbox_drafts", [], |row| row.get(0))
+                    .map_err(sql_error)?;
+                if count >= i64::try_from(MAX_MAILBOX_DRAFTS).unwrap_or(i64::MAX) {
+                    return Err(StoreError::new(StoreErrorClass::MailboxDraftsFull));
+                }
+                1
+            }
+            (Some(current), Some(expected)) if current.version == expected => expected
+                .checked_add(1)
+                .ok_or_else(|| StoreError::new(StoreErrorClass::RevisionExhausted))?,
+            (Some(current), _) => {
+                transaction.commit().map_err(sql_error)?;
+                return Ok(MailboxDraftSaveOutcome::Conflict(current.clone()));
+            }
+            (None, Some(_)) => return Err(StoreError::new(StoreErrorClass::MutationConflict)),
+        };
+    let (kind, installation, mailbox, message) = encode_mailbox_draft_target(&request.target);
+    transaction
+        .execute(
+            "INSERT INTO mailbox_drafts(\
+                draft_id, target_kind, target_installation, target_mailbox, target_message, \
+                content, version\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(draft_id) DO UPDATE SET \
+                target_kind = excluded.target_kind, \
+                target_installation = excluded.target_installation, \
+                target_mailbox = excluded.target_mailbox, \
+                target_message = excluded.target_message, \
+                content = excluded.content, version = excluded.version",
+            params![
+                request.draft_id.as_bytes().as_slice(),
+                kind,
+                installation,
+                mailbox,
+                message,
+                request.content,
+                version.to_be_bytes().as_slice(),
+            ],
+        )
+        .map_err(sql_error)?;
+    let saved = MailboxDraft {
+        draft_id: request.draft_id,
+        target: request.target.clone(),
+        content: request.content.clone(),
+        version,
+    };
+    transaction.commit().map_err(sql_error)?;
+    Ok(MailboxDraftSaveOutcome::Saved(saved))
+}
+
+fn delete_mailbox_draft(
+    connection: &mut Connection,
+    request: MailboxDraftDeleteRequest,
+) -> Result<MailboxDraftDeleteOutcome, StoreError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let Some(current) = load_mailbox_draft(&transaction, request.draft_id)? else {
+        transaction.commit().map_err(sql_error)?;
+        return Ok(MailboxDraftDeleteOutcome::NotFound);
+    };
+    if current.version != request.expected_version {
+        transaction.commit().map_err(sql_error)?;
+        return Ok(MailboxDraftDeleteOutcome::Conflict(current));
+    }
+    let changed = transaction
+        .execute(
+            "DELETE FROM mailbox_drafts WHERE draft_id = ?1",
+            [request.draft_id.as_bytes().as_slice()],
+        )
+        .map_err(sql_error)?;
+    if changed != 1 {
+        return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+    }
+    transaction.commit().map_err(sql_error)?;
+    Ok(MailboxDraftDeleteOutcome::Deleted)
+}
+
+type EncodedMailboxDraftTarget = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn encode_mailbox_draft_target(target: &MailboxDraftTarget) -> EncodedMailboxDraftTarget {
+    match target {
+        MailboxDraftTarget::Reply { message_id } => {
+            (1, None, None, Some(message_id.as_bytes().to_vec()))
+        }
+        MailboxDraftTarget::Direct { recipient } => (
+            2,
+            Some(recipient.installation_id().as_bytes().to_vec()),
+            Some(recipient.mailbox_id().as_bytes().to_vec()),
+            None,
+        ),
+        MailboxDraftTarget::SelfNote => (3, None, None, None),
+    }
+}
+
+fn decode_mailbox_draft(
+    draft_id: Vec<u8>,
+    kind: i64,
+    installation: Option<Vec<u8>>,
+    mailbox: Option<Vec<u8>>,
+    message: Option<Vec<u8>>,
+    content: String,
+    version: Vec<u8>,
+) -> Result<MailboxDraft, StoreError> {
+    if content.len() > hq_domain::CONTENT_MAX_BYTES {
+        return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+    }
+    let target = match (kind, installation, mailbox, message) {
+        (1, None, None, Some(message)) => MailboxDraftTarget::Reply {
+            message_id: MessageId::from_bytes(fixed_bytes(message)?),
+        },
+        (2, Some(installation), Some(mailbox), None) => MailboxDraftTarget::Direct {
+            recipient: MailboxAddress::new(
+                InstallationId::from_bytes(fixed_bytes(installation)?),
+                MailboxId::from_bytes(fixed_bytes(mailbox)?),
+            ),
+        },
+        (3, None, None, None) => MailboxDraftTarget::SelfNote,
+        _ => return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt)),
+    };
+    let version = u64::from_be_bytes(
+        version
+            .try_into()
+            .map_err(|_| StoreError::new(StoreErrorClass::OperationalStateCorrupt))?,
+    );
+    if version == 0 {
+        return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+    }
+    Ok(MailboxDraft {
+        draft_id: OperationId::from_bytes(fixed_bytes(draft_id)?),
+        target,
+        content,
+        version,
+    })
+}
+
 fn execute_local_mutation_with_failpoint(
     connection: &mut Connection,
     request: LocalMutationRequest,
     failpoint: LocalMutationFailpoint,
 ) -> Result<(MutationReceipt, bool), StoreError> {
-    let (command_id, request_digest, policy, signer, decide) = request.into_parts();
+    let (command_id, request_digest, policy, signer, draft_id, decide) = request.into_parts();
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
@@ -2334,8 +2615,12 @@ fn execute_local_mutation_with_failpoint(
 
     let facts = load_facts(&transaction)?;
     let snapshot = build_complete_snapshot(&facts, policy)?;
+    let draft = draft_id
+        .map(|draft_id| load_mailbox_draft(&transaction, draft_id))
+        .transpose()?
+        .flatten();
     fail_local_at(failpoint, LocalMutationFailpoint::AfterSnapshot)?;
-    let (kind, result, revision, changed) = match decide(&snapshot).into_parts() {
+    let (kind, result, revision, changed) = match decide(&snapshot, draft.as_ref()).into_parts() {
         LocalMutationDecisionParts::Commit(commit) => {
             fail_local_at(failpoint, LocalMutationFailpoint::AfterDecision)?;
             let fact = commit
@@ -2375,6 +2660,22 @@ fn execute_local_mutation_with_failpoint(
         return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
     }
     fail_local_at(failpoint, LocalMutationFailpoint::AfterReceipt)?;
+    if kind == MutationResultKind::Committed
+        && let Some(draft_id) = draft_id
+    {
+        if draft.is_none()
+            || transaction
+                .execute(
+                    "DELETE FROM mailbox_drafts WHERE draft_id = ?1",
+                    [draft_id.as_bytes().as_slice()],
+                )
+                .map_err(sql_error)?
+                != 1
+        {
+            return Err(StoreError::new(StoreErrorClass::OperationalStateCorrupt));
+        }
+        fail_local_at(failpoint, LocalMutationFailpoint::AfterDraftConsume)?;
+    }
     fail_local_at(failpoint, LocalMutationFailpoint::BeforeCommit)?;
     transaction.commit().map_err(sql_error)?;
     fail_local_at(failpoint, LocalMutationFailpoint::AfterCommit)?;
@@ -3477,6 +3778,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn draft_consumption_failpoint_is_atomic_with_fact_and_receipt() {
+        let mut connection = Connection::open_in_memory().expect("database opens");
+        connection.execute_batch(SCHEMA).expect("schema creates");
+        let draft_id = hq_domain::OperationId::from_bytes([0xa1; 32]);
+        let save = hq_application::MailboxDraftSaveRequest {
+            draft_id,
+            target: hq_application::MailboxDraftTarget::SelfNote,
+            content: "survive rollback".to_owned(),
+            expected_version: None,
+        };
+        save_mailbox_draft(&mut connection, &save).expect("draft saves");
+        let command_id = hq_domain::CommandId::from_bytes([0xa2; 32]);
+
+        let error = execute_local_mutation_with_failpoint(
+            &mut connection,
+            draft_local_request(command_id, draft_id),
+            LocalMutationFailpoint::AfterDraftConsume,
+        )
+        .expect_err("failure after draft deletion rolls back the transaction");
+        assert_eq!(error.class(), StoreErrorClass::DatabaseUnavailable);
+        assert_eq!(
+            load_mailbox_drafts(&connection).expect("draft loads").len(),
+            1
+        );
+        assert!(
+            operational::load_receipt(&connection, command_id)
+                .expect("receipt query succeeds")
+                .is_none()
+        );
+        assert!(load_facts(&connection).expect("corpus loads").is_empty());
+
+        let (receipt, inserted) = execute_local_mutation_with_failpoint(
+            &mut connection,
+            draft_local_request(command_id, draft_id),
+            LocalMutationFailpoint::Never,
+        )
+        .expect("retry commits all three changes");
+        assert!(inserted);
+        assert_eq!(receipt.result_kind(), MutationResultKind::Committed);
+        assert!(
+            load_mailbox_drafts(&connection)
+                .expect("drafts load")
+                .is_empty()
+        );
+        assert_eq!(load_facts(&connection).expect("corpus loads").len(), 1);
+        assert_eq!(
+            operational::load_receipt(&connection, command_id).expect("receipt loads"),
+            Some(receipt)
+        );
+    }
+
+    #[test]
     fn lost_local_response_replays_receipt_without_deciding_or_signing_again() {
         let mut connection = Connection::open_in_memory().expect("database opens");
         connection.execute_batch(SCHEMA).expect("schema creates");
@@ -3676,6 +4029,29 @@ pub(crate) mod tests {
             |_| {
                 crate::LocalMutationDecision::reject(
                     crate::MutationResultBytes::new(b"rejected".to_vec())
+                        .expect("result is bounded"),
+                )
+            },
+        )
+    }
+
+    fn draft_local_request(
+        command_id: hq_domain::CommandId,
+        draft_id: hq_domain::OperationId,
+    ) -> crate::LocalMutationRequest {
+        let plan = CanonicalEventPlan::from_fact(root_fixture().fact());
+        crate::LocalMutationRequest::new_with_draft(
+            command_id,
+            hq_domain::CommandDigest::from_bytes([0xa3; 32]),
+            local_policy(),
+            Arc::new(fixture_signer()),
+            draft_id,
+            move |_, draft| {
+                assert!(draft.is_some(), "draft is loaded inside the transaction");
+                crate::LocalMutationDecision::commit(
+                    plan,
+                    [6; 32],
+                    crate::MutationResultBytes::new(b"committed".to_vec())
                         .expect("result is bounded"),
                 )
             },
