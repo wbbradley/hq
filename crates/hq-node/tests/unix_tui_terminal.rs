@@ -24,6 +24,7 @@ use support::TestDirectory;
 
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
+const LIFECYCLE_STATE_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 // This is an inactivity watchdog for installed process tests, not a product latency budget.
 const PROCESS_INACTIVITY_WATCHDOG: Duration = Duration::from_secs(30);
 
@@ -475,6 +476,15 @@ enum PtyInteraction<'content> {
 
 #[allow(clippy::too_many_lines)]
 fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>) -> PtyRun {
+    // Ratatui's differential output is not a screen transcript, so lifecycle completion must
+    // synchronize against authoritative state instead of a possibly split rendered phrase.
+    let lifecycle_target = match interaction {
+        PtyInteraction::CloseProject { name } => Some((name, "closed", false)),
+        PtyInteraction::OpenProject { name } => Some((name, "open", false)),
+        PtyInteraction::SetProjectArchived { name, archived } => Some((name, "closed", archived)),
+        _ => None,
+    }
+    .map(|(name, lifecycle, archived)| (project_id(state_root, name), lifecycle, archived));
     let dimensions = Winsize {
         ws_row: 30,
         ws_col: 100,
@@ -510,6 +520,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut managed_provider_sent = false;
     let mut resource_commit_sent = false;
     let mut exit_sent = false;
+    let mut next_lifecycle_probe_at = Instant::now();
     let status = loop {
         let previous_output_length = bytes.len();
         let mut buffer = [0_u8; 8192];
@@ -903,25 +914,22 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.flush().expect("Ctrl-C flushes");
             exit_sent = true;
         }
-        if matches!(
-            interaction,
-            PtyInteraction::CloseProject { .. }
-                | PtyInteraction::OpenProject { .. }
-                | PtyInteraction::SetProjectArchived { .. }
-        ) && (resource_commit_sent
+        let lifecycle_action_sent = resource_commit_sent
             || managed_action_sent && matches!(interaction, PtyInteraction::OpenProject { .. })
             || managed_provider_sent
-                && matches!(interaction, PtyInteraction::SetProjectArchived { .. }))
-            && !exit_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"Completed".len())
-                    .any(|window| window == b"Completed")
-            })
-        {
-            master.write_all(&[0x03]).expect("Ctrl-C writes");
-            master.flush().expect("Ctrl-C flushes");
-            exit_sent = true;
+                && matches!(interaction, PtyInteraction::SetProjectArchived { .. });
+        if lifecycle_action_sent && !exit_sent && Instant::now() >= next_lifecycle_probe_at {
+            next_lifecycle_probe_at = Instant::now() + LIFECYCLE_STATE_PROBE_INTERVAL;
+            if lifecycle_target
+                .as_ref()
+                .is_some_and(|(project_id, lifecycle, archived)| {
+                    project_has_state(state_root, project_id, lifecycle, *archived)
+                })
+            {
+                master.write_all(&[0x03]).expect("Ctrl-C writes");
+                master.flush().expect("Ctrl-C flushes");
+                exit_sent = true;
+            }
         }
         if matches!(interaction, PtyInteraction::CreateExistingProject { .. })
             && content_sent
@@ -1078,6 +1086,23 @@ fn project_json(state_root: &Path, name: &str) -> serde_json::Value {
     serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("project show is JSON")["data"]
         ["projects"][0]
         .clone()
+}
+
+fn project_has_state(state_root: &Path, project_id: &str, lifecycle: &str, archived: bool) -> bool {
+    let output = hq_output(
+        state_root,
+        &["--output", "json", "project", "show", project_id],
+    );
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    value["data"]["projects"]
+        .as_array()
+        .and_then(|projects| projects.first())
+        .is_some_and(|project| project["lifecycle"] == lifecycle && project["archived"] == archived)
 }
 
 fn hq_output(state_root: &Path, arguments: &[&str]) -> std::process::Output {
