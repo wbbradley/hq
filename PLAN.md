@@ -54,6 +54,15 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
+- **[test/high] Bound Linux workspace test-process lifecycles** — The complete Ubuntu Rust suite
+  reaches the job timeout twice after entering `cargo test`, retains the runner through its
+  cancellation grace period, and publishes no log blob, while the same revision's native Linux
+  qualification workloads and macOS workspace suite pass. Split the Linux suite into independently
+  bounded owning groups, identify the test process or daemon retaining completion, and correct its
+  lifecycle without serializing unrelated tests or weakening coverage. Complete this work when the
+  full Linux workspace suite terminates normally on repeated runs, every spawned owner is reaped,
+  and a failed test can still publish actionable diagnostics.
+
 - **[verification/high] Record cross-platform qualification and complete the acceptance audit** —
   Run and record the deterministic qualification commands and applicable installed lifecycle and
   provider evidence on the ADR-0001 Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon matrix.
