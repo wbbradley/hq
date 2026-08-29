@@ -82,6 +82,16 @@ fn locator(path: &Path) -> ResourceLocator {
 }
 
 fn request(source: &Path, destination: &Path, branch: &str) -> EffectRequest<GitWorktreeRequest> {
+    request_with_mode(source, destination, branch, Some("HEAD"), true)
+}
+
+fn request_with_mode(
+    source: &Path,
+    destination: &Path,
+    branch: &str,
+    base: Option<&str>,
+    create_branch: bool,
+) -> EffectRequest<GitWorktreeRequest> {
     EffectRequest::new(
         OperationId::from_bytes([1; 32]),
         CommandDigest::from_bytes([2; 32]),
@@ -90,9 +100,24 @@ fn request(source: &Path, destination: &Path, branch: &str) -> EffectRequest<Git
             source: locator(source),
             destination: locator(destination),
             branch: ShortText::new(branch).expect("bounded branch"),
-            create_branch: true,
+            base: base.map(|base| ShortText::new(base).expect("bounded base")),
+            create_branch,
         },
     )
+}
+
+fn git_output(directory: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(arguments)
+        .output()
+        .expect("git starts");
+    assert!(output.status.success(), "git {arguments:?} succeeds");
+    String::from_utf8(output.stdout)
+        .expect("Git output is UTF-8")
+        .trim()
+        .to_owned()
 }
 
 fn adapter() -> GitWorktreeAdapter<ExecGit> {
@@ -133,6 +158,77 @@ fn real_git_create_is_exact_and_replay_safe() {
     assert_eq!(
         adapter.create(&request).expect("exact replay succeeds"),
         EffectOutcome::Accepted(())
+    );
+}
+
+#[test]
+fn real_git_new_branch_uses_the_exact_validated_base() {
+    let root = TestDirectory::new();
+    let repository = root.join("repository");
+    let destination = root.join("worktree");
+    initialize_repository(&repository);
+    let base = git_output(&repository, &["rev-parse", "HEAD"]);
+    fs::write(repository.join("tracked.txt"), b"later\n").expect("later content writes");
+    git(&repository, &["commit", "-qam", "later"]);
+    let request = request_with_mode(
+        &repository,
+        &destination,
+        "feature/from-base",
+        Some(&base),
+        true,
+    );
+
+    assert_eq!(
+        adapter().create(&request).expect("create succeeds"),
+        EffectOutcome::Accepted(())
+    );
+    assert_eq!(git_output(&destination, &["rev-parse", "HEAD"]), base);
+    assert_eq!(
+        fs::read(destination.join("tracked.txt")).expect("worktree content reads"),
+        b"initial\n"
+    );
+}
+
+#[test]
+fn real_git_rejects_an_invalid_base_and_supports_an_existing_branch() {
+    let root = TestDirectory::new();
+    let repository = root.join("repository");
+    let invalid_destination = root.join("invalid-worktree");
+    initialize_repository(&repository);
+    let adapter = adapter();
+    let invalid = request_with_mode(
+        &repository,
+        &invalid_destination,
+        "feature/invalid-base",
+        Some("refs/heads/missing"),
+        true,
+    );
+    assert!(matches!(
+        adapter
+            .lookup(&invalid)
+            .expect("invalid base is a domain result"),
+        EffectOutcome::Rejected(_)
+    ));
+    assert!(!invalid_destination.exists());
+
+    git(&repository, &["branch", "feature/existing"]);
+    let existing_destination = root.join("existing-worktree");
+    let existing = request_with_mode(
+        &repository,
+        &existing_destination,
+        "feature/existing",
+        None,
+        false,
+    );
+    assert_eq!(
+        adapter.create(&existing).expect("existing branch creates"),
+        EffectOutcome::Accepted(())
+    );
+    assert_eq!(
+        adapter
+            .lookup(&existing)
+            .expect("existing branch reconciles"),
+        EffectOutcome::Accepted(GitWorktreeState::Created)
     );
 }
 

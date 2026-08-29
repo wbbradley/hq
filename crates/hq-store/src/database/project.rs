@@ -6,9 +6,9 @@ use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText,
     CommandDigest, CommandId, ContentText, DispatchId, ErrorCode, FactId, InstallationId,
     MailboxAddress, MailboxId, MessageContent, MessageId, MessagePurpose, OperationCorrelation,
-    OperationId, PresentationKind, ProjectId, ProjectResource, ProviderId, ProviderSessionId,
-    RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme,
-    RuntimeObservation, ShortText, ThreadId, Timestamp,
+    OperationId, PresentationKind, ProjectExternalStateWarning, ProjectId, ProjectResource,
+    ProviderId, ProviderSessionId, RemoteCommandResult, ResourceHealth, ResourceId,
+    ResourceLocator, ResourceScheme, RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
 use hq_reducer::{
     ProjectAggregateKey, ProjectAssignmentPhase, ProjectAssignmentView, ProjectDispatchView,
@@ -1335,6 +1335,9 @@ fn insert_command(
     let mut result_kind = 0;
     let mut result_head = ZERO;
     let mut result_error = "";
+    let mut external_warning_kind = 0;
+    let mut external_warning_destination = "";
+    let mut external_warning_branch = "";
     let mut runtime_kind = 0;
     let mut runtime_error = "";
     let stage = match &view.stage {
@@ -1366,9 +1369,21 @@ fn insert_command(
                     result_kind = 1;
                     result_head = *head.as_bytes();
                 }
-                RemoteCommandResult::Rejected(error) => {
+                RemoteCommandResult::Rejected {
+                    error,
+                    external_state_warning,
+                } => {
                     result_kind = 2;
                     result_error = error.as_str();
+                    if let Some(ProjectExternalStateWarning::WorktreeMayExist {
+                        destination,
+                        branch,
+                    }) = external_state_warning
+                    {
+                        external_warning_kind = 1;
+                        external_warning_destination = destination.value();
+                        external_warning_branch = branch.as_str();
+                    }
                 }
             }
             if let Some(runtime) = runtime {
@@ -1394,9 +1409,10 @@ fn insert_command(
                  key_digest, account_id, digest, project_id, target_home, expected_head, \
                  operation_provider, operation_session, operation_id, command_body, issued_at, \
                  request_fact, stage, receipt_fact, received_head, received_at, outcome_fact, \
-                 result_kind, result_head, result_error, runtime_kind, runtime_error \
+                 result_kind, result_head, result_error, external_warning_kind, \
+                 external_warning_destination, external_warning_branch, runtime_kind, runtime_error \
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
-                       ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                       ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 digest.as_slice(),
                 view.account_id.as_bytes().as_slice(),
@@ -1418,6 +1434,9 @@ fn insert_command(
                 result_kind,
                 result_head.as_slice(),
                 result_error,
+                external_warning_kind,
+                external_warning_destination,
+                external_warning_branch,
                 runtime_kind,
                 runtime_error,
             ],
@@ -1442,7 +1461,8 @@ fn load_command(
             "SELECT account_id, digest, project_id, target_home, expected_head, \
                     operation_provider, operation_session, operation_id, command_body, issued_at, \
                     request_fact, stage, receipt_fact, received_head, received_at, outcome_fact, \
-                    result_kind, result_head, result_error, runtime_kind, runtime_error \
+                    result_kind, result_head, result_error, external_warning_kind, \
+                    external_warning_destination, external_warning_branch, runtime_kind, runtime_error \
              FROM project_commands WHERE key_digest = ?1",
             [digest.as_slice()],
             |row| {
@@ -1468,6 +1488,9 @@ fn load_command(
                     row.get::<_, String>(18)?,
                     row.get::<_, i64>(19)?,
                     row.get::<_, String>(20)?,
+                    row.get::<_, String>(21)?,
+                    row.get::<_, i64>(22)?,
+                    row.get::<_, String>(23)?,
                 ))
             },
         )
@@ -1486,7 +1509,10 @@ fn load_command(
             && result_head == ZERO
             && row.18.is_empty()
             && row.19 == 0
-            && row.20.is_empty() =>
+            && row.20.is_empty()
+            && row.21.is_empty()
+            && row.22 == 0
+            && row.23.is_empty() =>
         {
             RemoteCommandStage::Queued
         }
@@ -1496,7 +1522,10 @@ fn load_command(
             && result_head == ZERO
             && row.18.is_empty()
             && row.19 == 0
-            && row.20.is_empty() =>
+            && row.20.is_empty()
+            && row.21.is_empty()
+            && row.22 == 0
+            && row.23.is_empty() =>
         {
             RemoteCommandStage::Received {
                 receipt_fact: FactId::from_bytes(receipt_fact),
@@ -1509,8 +1538,8 @@ fn load_command(
             received_head: received_head.map(FactId::from_bytes),
             received_at: Timestamp::from_unix_millis(row.14),
             outcome_fact: FactId::from_bytes(outcome_fact),
-            result: decode_result(row.16, result_head, row.18)?,
-            runtime: decode_runtime(row.19, row.20)?,
+            result: decode_result(row.16, result_head, row.18, row.19, row.20, row.21)?,
+            runtime: decode_runtime(row.22, row.23)?,
         },
         4 if receipt_fact == ZERO
             && received_head.is_none()
@@ -1520,7 +1549,10 @@ fn load_command(
             && result_head == ZERO
             && row.18.is_empty()
             && row.19 == 0
-            && row.20.is_empty() =>
+            && row.20.is_empty()
+            && row.21.is_empty()
+            && row.22 == 0
+            && row.23.is_empty() =>
         {
             RemoteCommandStage::Conflicted
         }
@@ -1568,12 +1600,31 @@ fn decode_result(
     kind: i64,
     head: [u8; 32],
     error: String,
+    warning_kind: i64,
+    warning_destination: String,
+    warning_branch: String,
 ) -> Result<RemoteCommandResult, StoreError> {
-    match (kind, head == ZERO, error.is_empty()) {
-        (1, false, true) => Ok(RemoteCommandResult::Committed(FactId::from_bytes(head))),
-        (2, true, false) => Ok(RemoteCommandResult::Rejected(
-            ErrorCode::new(error).map_err(|_| corrupt())?,
-        )),
+    let warning = match (
+        warning_kind,
+        warning_destination.is_empty(),
+        warning_branch.is_empty(),
+    ) {
+        (0, true, true) => None,
+        (1, false, false) => Some(ProjectExternalStateWarning::WorktreeMayExist {
+            destination: ResourceLocator::new(
+                ResourceScheme::WorkingTree,
+                BoundedText::new(warning_destination).map_err(|_| corrupt())?,
+            ),
+            branch: ShortText::new(warning_branch).map_err(|_| corrupt())?,
+        }),
+        _ => return Err(corrupt()),
+    };
+    match (kind, head == ZERO, error.is_empty(), warning.is_none()) {
+        (1, false, true, true) => Ok(RemoteCommandResult::Committed(FactId::from_bytes(head))),
+        (2, true, false, _) => Ok(RemoteCommandResult::Rejected {
+            error: ErrorCode::new(error).map_err(|_| corrupt())?,
+            external_state_warning: warning,
+        }),
         _ => Err(corrupt()),
     }
 }
@@ -2089,7 +2140,7 @@ mod tests {
         assert_eq!(decode_u64(u64::MAX.to_be_bytes().to_vec()), Ok(u64::MAX));
         assert!(decode_u64(vec![0; 7]).is_err());
         assert!(decode_runtime(1, "unexpected".to_owned()).is_err());
-        assert!(decode_result(2, ZERO, String::new()).is_err());
+        assert!(decode_result(2, ZERO, String::new(), 0, String::new(), String::new()).is_err());
     }
 
     #[test]
@@ -2368,7 +2419,13 @@ mod tests {
                 received_head: Some(id(23)),
                 received_at: Timestamp::from_unix_millis(92),
                 outcome_fact: id(93),
-                result: RemoteCommandResult::Rejected(error("rejected")),
+                result: RemoteCommandResult::Rejected {
+                    error: error("rejected"),
+                    external_state_warning: Some(ProjectExternalStateWarning::WorktreeMayExist {
+                        destination: locator(ResourceScheme::WorkingTree, "/worktrees/orphan"),
+                        branch: short("feature/orphan"),
+                    }),
+                },
                 runtime: Some(RuntimeObservation::Succeeded),
             },
             RemoteCommandStage::Terminal {
@@ -2376,7 +2433,10 @@ mod tests {
                 received_head: Some(id(23)),
                 received_at: Timestamp::from_unix_millis(92),
                 outcome_fact: id(93),
-                result: RemoteCommandResult::Rejected(error("failed")),
+                result: RemoteCommandResult::Rejected {
+                    error: error("failed"),
+                    external_state_warning: None,
+                },
                 runtime: Some(RuntimeObservation::Failed(error("runtime-failed"))),
             },
             RemoteCommandStage::Terminal {
@@ -2384,7 +2444,10 @@ mod tests {
                 received_head: Some(id(23)),
                 received_at: Timestamp::from_unix_millis(92),
                 outcome_fact: id(93),
-                result: RemoteCommandResult::Rejected(error("uncertain")),
+                result: RemoteCommandResult::Rejected {
+                    error: error("uncertain"),
+                    external_state_warning: None,
+                },
                 runtime: Some(RuntimeObservation::Uncertain(error("runtime-uncertain"))),
             },
             RemoteCommandStage::Conflicted,

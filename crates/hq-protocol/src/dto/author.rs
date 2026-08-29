@@ -857,12 +857,25 @@ fn remote_result(value: &domain::RemoteCommandResult) -> model::RemoteResultDto 
                 head: id(head),
             })
         }
-        domain::RemoteCommandResult::Rejected(code) => {
-            model::RemoteResultDto::Rejected(model::RejectedResultDto {
-                state: model::RejectedStateTag::Rejected,
-                code: short_string(code.as_str()),
-            })
-        }
+        domain::RemoteCommandResult::Rejected {
+            error,
+            external_state_warning,
+        } => model::RemoteResultDto::Rejected(model::RejectedResultDto {
+            state: model::RejectedStateTag::Rejected,
+            code: short_string(error.as_str()),
+            external_state_warning: model::RequiredOption(external_state_warning.as_ref().map(
+                |warning| match warning {
+                    domain::ProjectExternalStateWarning::WorktreeMayExist {
+                        destination,
+                        branch,
+                    } => model::ExternalStateWarningDto {
+                        kind: model::ExternalStateWarningKindDto::WorktreeMayExist,
+                        destination: locator(destination),
+                        branch: short_string(branch.as_str()),
+                    },
+                },
+            )),
+        }),
     }
 }
 

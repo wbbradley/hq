@@ -1066,6 +1066,9 @@ CREATE TABLE project_commands (
     result_kind INTEGER NOT NULL CHECK(result_kind BETWEEN 0 AND 2),
     result_head BLOB NOT NULL CHECK(typeof(result_head) = 'blob' AND length(result_head) = 32),
     result_error TEXT NOT NULL CHECK(typeof(result_error) = 'text' AND length(CAST(result_error AS BLOB)) <= 128),
+    external_warning_kind INTEGER NOT NULL CHECK(external_warning_kind BETWEEN 0 AND 1),
+    external_warning_destination TEXT NOT NULL CHECK(typeof(external_warning_destination) = 'text' AND length(CAST(external_warning_destination AS BLOB)) <= 4096),
+    external_warning_branch TEXT NOT NULL CHECK(typeof(external_warning_branch) = 'text' AND length(CAST(external_warning_branch AS BLOB)) <= 1024),
     runtime_kind INTEGER NOT NULL CHECK(runtime_kind BETWEEN 0 AND 3),
     runtime_error TEXT NOT NULL CHECK(typeof(runtime_error) = 'text' AND length(CAST(runtime_error AS BLOB)) <= 128)
 ) STRICT, WITHOUT ROWID;

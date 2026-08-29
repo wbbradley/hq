@@ -10,12 +10,13 @@ use crate::protocol::v1::{
     MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, ProjectCommandStageDto, RelayAccessDto, RelayAuthenticationDto,
-    RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
-    RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
-    RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
-    SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
+    ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
+    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto,
+    RelayStatusDto, RemoteCommandProgressDto, RemoteCommandResultDto, RepositoryContextDto,
+    ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
+    ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto, RuntimeObservationDto,
+    SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionRequestDto,
+    SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentLaunchContext, AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest,
@@ -34,9 +35,9 @@ use hq_application::{
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
     MailboxAddress, MailboxId, MessagePurpose, OperationId, Page, PageCursor, PresentationKind,
-    ProjectId, ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult,
-    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, Revision, RuntimeObservation,
-    ShortText, ThreadId, Timestamp,
+    ProjectExternalStateWarning, ProjectId, ProviderId, ProviderSessionId,
+    RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator,
+    ResourceScheme, Revision, RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
 
 /// Converts bounded exact canonical evidence into its wire representation.
@@ -1107,6 +1108,7 @@ fn project_action_to_v1(action: &ProjectCommandAction) -> ProjectCommandActionDt
                     source: locator_to_v1(&request.source),
                     destination: locator_to_v1(&request.destination),
                     branch: request.branch.as_str().to_owned(),
+                    base: request.base.as_ref().map(|base| base.as_str().to_owned()),
                     create_branch: request.create_branch,
                 },
             )
@@ -1144,19 +1146,41 @@ pub fn project_command_to_v1(outcome: &ProjectCommandOutcome) -> ProjectCommandO
             operation_id,
             error,
             runtime,
+            external_state_warning,
         } => ProjectCommandOutcomeDto::Rejected {
             operation_id: id32(operation_id.as_bytes()),
             error: domain_error_to_v1(error),
             runtime: runtime.as_ref().map(runtime_to_v1),
+            external_state_warning: external_state_warning
+                .as_ref()
+                .map(project_external_state_warning_to_v1),
         },
         ProjectCommandOutcome::Reconcilable {
             operation_id,
             stage,
             error,
+            external_state_warning,
         } => ProjectCommandOutcomeDto::Reconcilable {
             operation_id: id32(operation_id.as_bytes()),
             stage: project_stage_to_v1(*stage),
             error: domain_error_to_v1(error),
+            external_state_warning: external_state_warning
+                .as_ref()
+                .map(project_external_state_warning_to_v1),
+        },
+    }
+}
+
+fn project_external_state_warning_to_v1(
+    warning: &ProjectExternalStateWarning,
+) -> ProjectExternalStateWarningDto {
+    match warning {
+        ProjectExternalStateWarning::WorktreeMayExist {
+            destination,
+            branch,
+        } => ProjectExternalStateWarningDto::WorktreeMayExist {
+            destination: locator_to_v1(destination),
+            branch: branch.as_str().to_owned(),
         },
     }
 }
@@ -1323,6 +1347,11 @@ fn project_action_from_v1(
                 source: locator_from_v1(request.source)?,
                 destination: locator_from_v1(request.destination)?,
                 branch: ShortText::new(request.branch).map_err(|_| ValueError::InvalidText)?,
+                base: request
+                    .base
+                    .map(ShortText::new)
+                    .transpose()
+                    .map_err(|_| ValueError::InvalidText)?,
                 create_branch: request.create_branch,
             })
         }
@@ -1367,9 +1396,15 @@ fn remote_progress_to_v1(stage: &ClientRemoteCommandStage) -> RemoteCommandProgr
                 RemoteCommandResult::Committed(head) => {
                     RemoteCommandResultDto::Committed(id32(head.as_bytes()))
                 }
-                RemoteCommandResult::Rejected(code) => {
-                    RemoteCommandResultDto::Rejected(code.as_str().to_owned())
-                }
+                RemoteCommandResult::Rejected {
+                    error,
+                    external_state_warning,
+                } => RemoteCommandResultDto::Rejected {
+                    error: error.as_str().to_owned(),
+                    external_state_warning: external_state_warning
+                        .as_ref()
+                        .map(project_external_state_warning_to_v1),
+                },
             },
             runtime: runtime.as_ref().map(runtime_to_v1),
         },

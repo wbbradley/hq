@@ -261,7 +261,7 @@ constants remain evidence only unless a row below explicitly adopts the underlyi
 | CLI-008 | redesign | required | Known-message inspection | Typed direct-ID inspection is non-consuming and does not become an authority bypass. | README and agent help; application/CLI packages |
 | CLI-009 | redesign | required | Human list/answer/cancel/restore workflows | Expose typed filtering, reply, archive/cancel, restore, delivery, and causal state through application services. | README and CLI dispatcher; CLI/application packages |
 | CLI-010 | redesign | required | Administrative workflows | Identity, human, peer, capability, relay, sync, status, repair, node, agent/session, and configuration operations have client commands. Identity/configuration are implemented as exclusive offline commands; remaining administration uses the local API. | `docs/rust/cli.md`; named-agent catalog and retirement application/client/foreground E2E tests; runtime/project packages remain queued |
-| CLI-011 | redesign | required | Project workflows | Expose every required project/resource/worktree/remote-result operation from ADR 0003. | `docs/projects.md`; project list/show/create parser and machine output, existing-resource identity, concurrent claim, response-loss, restart E2E, and CLI projection fixtures; remaining mutations queued |
+| CLI-011 | redesign | required | Project workflows | Expose every required project/resource/worktree/remote-result operation from ADR 0003. | `docs/projects.md`; complete project/resource parser and machine-output tests; fake and real-Git worktree response-loss/restart tests; foreground lifecycle, mutation, worktree, and restart E2E; remote-home signed-warning fixture |
 | CLI-012 | redesign | required | Machine-readable automation | Supported commands emit stable typed Rust-era data and errors without preserving Go JSON. | `docs/rust/cli.md`; CLI machine-output, project catalog/operation determinism, and redaction fixtures |
 | CLI-013 | redesign | required | Pure Ratatui state/effect architecture | `UiModel + UiEvent` produces effects; renderer performs no I/O or mutation and stale completions carry identity. | Rewrite design; TUI package |
 | CLI-014 | retain | required | TUI semantic mailbox workflows | Open/sent/archived filters, mixed histories, answer/archive/restore, new direct/self messages, details, activity, and status are available. | README and TUI work; TUI package |
@@ -343,7 +343,12 @@ row. It proves workflow coverage; it does not reserve the command names.
 | `hq config get/set` | Manage typed installation-local provider/relay preferences. | redesign: `IDN-007`, `CLI-010` |
 | `hq help`; `hq version` | Inspect supported workflows and build/protocol compatibility. | redesign: `CLI-024` |
 | global database/path selector | Choose an explicit Rust installation root without opening Go state. | redesign: `CMP-007`, `IDN-007` |
-| global immediate-sync suppression | Suppress only the client's prompt wake, never claim node-wide offline operation. | redesign: `NET-011` |
+| global immediate-sync suppression | Rust mutations send no implicit prompt wake; `relay sync` requests one explicitly and never claims node-wide offline operation. | redesign: `NET-011` |
+
+The 2026-08-28 non-TUI parity audit matched every retained row above against the closed parser,
+root/topic help snapshots, stable human/JSON renderers, and foreground Unix tests. It closed the
+last two gaps: recoverable `project worktree` provisioning and bare noninteractive `hq` inbox
+listing. Terminal-only rows remain owned by the explicitly queued Ratatui packages.
 
 | Documented TUI workflow | Product outcome | Classification and row |
 | --- | --- | --- |

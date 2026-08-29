@@ -194,10 +194,15 @@ impl<G: GitRunner> GitWorktreeAdapter<G> {
                     "project_git_branch_lookup_unknown",
                 )
             })?;
+        let base_is_valid = match (&request.base, request.create_branch) {
+            (Some(base), true) => self.valid_base(source, base.as_str()),
+            (None, false) => true,
+            _ => false,
+        };
         let safe = if request.create_branch {
-            !branch_exists && !branch_registered
+            base_is_valid && !branch_exists && !branch_registered
         } else {
-            branch_exists && !branch_registered
+            base_is_valid && branch_exists && !branch_registered
         };
         if safe {
             Ok(GitWorktreeState::ReadyToCreate)
@@ -244,6 +249,22 @@ impl<G: GitRunner> GitWorktreeAdapter<G> {
             .is_ok_and(|output| output.success)
     }
 
+    fn valid_base(&self, source: &Path, base: &str) -> bool {
+        let revision = format!("{base}^{{commit}}");
+        self.git
+            .run(
+                source,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    &revision,
+                ],
+            )
+            .is_ok_and(|output| output.success)
+    }
+
     fn run_create(
         &self,
         request: &GitWorktreeRequest,
@@ -259,6 +280,10 @@ impl<G: GitRunner> GitWorktreeAdapter<G> {
                     "-b",
                     request.branch.as_str(),
                     request.destination.value(),
+                    request
+                        .base
+                        .as_ref()
+                        .map_or("", hq_domain::ShortText::as_str),
                 ],
             )
         } else {

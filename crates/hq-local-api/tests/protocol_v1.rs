@@ -21,15 +21,16 @@ use hq_local_api::protocol::v1::{
     LifecycleState, LifecycleStatus, MAX_FRAME_BYTES, MailboxAddressDto, MessagePurposeDto,
     MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, ProjectCreationRequestDto, RelayAccessDto, RelayAuthenticationDto,
-    RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto, Request,
-    RequestEnvelope, RequestId, ResourceHealthDto, ResourceInspectionRequestDto,
-    ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
-    ResponseEnvelope, ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto,
-    SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement,
-    SubscriptionRequestDto, SynchronizationRequestDto, V1, ValueError, VersionRange,
-    VersionRejected, WireMessage, WorktreeProvisioningRequestDto, agent_session_request_digest,
-    negotiate, resource_inspection_request_digest,
+    ProjectCommandRequestDto, ProjectCreationRequestDto, ProjectExternalStateWarningDto,
+    RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto,
+    RelayStatusDto, RemoteCommandProgressDto, Request, RequestEnvelope, RequestId,
+    ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
+    ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto, ResponseEnvelope,
+    ResponseResult, RevisionInvalidation, ServerHello, SessionControlDto, SnapshotItem,
+    StateHealthDto, StateRepairReportDto, SubscriptionAcknowledgement, SubscriptionRequestDto,
+    SynchronizationRequestDto, V1, ValueError, VersionRange, VersionRejected, WireMessage,
+    WorktreeProvisioningRequestDto, agent_session_request_digest, negotiate,
+    resource_inspection_request_digest,
 };
 use hq_local_api::{project_command_from_v1, project_command_request_to_v1};
 
@@ -218,6 +219,7 @@ fn project_head_presence_matches_creation_semantics() {
             source: locator(),
             destination: locator(),
             branch: "feature".to_owned(),
+            base: Some("main".to_owned()),
             create_branch: true,
         })
     };
@@ -691,6 +693,23 @@ fn every_success_and_error_response_family_interoperates() {
             DomainErrorDto::new("conflict".to_owned(), "relay-conflict".to_owned())
                 .expect("domain error"),
         )),
+    )));
+}
+
+#[test]
+fn project_external_state_warning_interoperates_as_typed_data() {
+    round_trip(&WireMessage::Response(ResponseEnvelope::success(
+        RequestId::new(9).expect("nonzero"),
+        ResponseResult::ProjectCommand(ProjectCommandOutcomeDto::Reconcilable {
+            operation_id: Id32::new([42; 32]),
+            stage: hq_local_api::protocol::v1::ProjectCommandStageDto::CreatingWorktree,
+            error: DomainErrorDto::new("effect".to_owned(), "git_unknown".to_owned())
+                .expect("domain error"),
+            external_state_warning: Some(ProjectExternalStateWarningDto::WorktreeMayExist {
+                destination: locator(),
+                branch: "feature/exact".to_owned(),
+            }),
+        }),
     )));
 }
 

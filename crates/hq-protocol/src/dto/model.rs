@@ -454,6 +454,18 @@ pub(super) enum RejectedStateTag {
     Rejected,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(super) enum ExternalStateWarningKindDto {
+    #[serde(rename = "worktree-may-exist")]
+    WorktreeMayExist,
+}
+
+object!(ExternalStateWarningDto {
+    kind: ExternalStateWarningKindDto,
+    destination: LocatorDto,
+    branch: ShortText,
+});
+
 object!(CommittedResultDto {
     state: CommittedStateTag,
     head: Hex32,
@@ -461,6 +473,8 @@ object!(CommittedResultDto {
 object!(RejectedResultDto {
     state: RejectedStateTag,
     code: ShortText,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    external_state_warning: RequiredOption<ExternalStateWarningDto>,
 });
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

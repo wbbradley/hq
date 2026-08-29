@@ -126,7 +126,9 @@ pub struct WorktreeProvisioningRequest {
     pub destination: ResourceLocator,
     /// Exact branch spelling requested from Git.
     pub branch: ShortText,
-    /// Whether Git should create the branch rather than require it to exist.
+    /// Exact revision from which a new branch is created, absent for an existing branch.
+    pub base: Option<ShortText>,
+    /// Whether Git should create the branch from `base` rather than require it to exist.
     pub create_branch: bool,
 }
 
@@ -300,6 +302,8 @@ pub enum ProjectCommandOutcome {
         error: DomainError,
         /// Definite or uncertain runtime truth observed before rejection.
         runtime: Option<RuntimeObservation>,
+        /// External state deliberately retained for operator inspection.
+        external_state_warning: Option<hq_domain::ProjectExternalStateWarning>,
     },
     /// External truth is unknown and the exact operation remains recoverable.
     Reconcilable {
@@ -309,6 +313,8 @@ pub enum ProjectCommandOutcome {
         stage: ProjectCommandStage,
         /// Stable typed reason for surfacing the unknown outcome.
         error: DomainError,
+        /// External state that may exist while reconciliation remains pending.
+        external_state_warning: Option<hq_domain::ProjectExternalStateWarning>,
     },
 }
 

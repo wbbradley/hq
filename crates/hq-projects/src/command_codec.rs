@@ -509,6 +509,7 @@ struct WireProvisioning {
     source: WireLocator,
     destination: WireLocator,
     branch: String,
+    base: Option<String>,
     create_branch: bool,
 }
 
@@ -524,6 +525,7 @@ impl From<&WorktreeProvisioningRequest> for WireProvisioning {
             source: WireLocator::from(&request.source),
             destination: WireLocator::from(&request.destination),
             branch: request.branch.as_str().to_owned(),
+            base: request.base.as_ref().map(|base| base.as_str().to_owned()),
             create_branch: request.create_branch,
         }
     }
@@ -544,6 +546,11 @@ impl TryFrom<WireProvisioning> for WorktreeProvisioningRequest {
             source: request.source.try_into()?,
             destination: request.destination.try_into()?,
             branch: ShortText::new(request.branch).map_err(|_| Self::Error::Invalid)?,
+            base: request
+                .base
+                .map(ShortText::new)
+                .transpose()
+                .map_err(|_| Self::Error::Invalid)?,
             create_branch: request.create_branch,
         })
     }

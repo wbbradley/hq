@@ -4,7 +4,10 @@
 
 use std::num::NonZeroU64;
 
-use hq_application::{ProjectCommandAction, ProjectCommandRequest, ProjectCreationRequest};
+use hq_application::{
+    ProjectCommandAction, ProjectCommandRequest, ProjectCreationRequest,
+    WorktreeProvisioningRequest,
+};
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, BoundedText, CommandDigest, CommandId,
     ContentText, DispatchId, ErrorCode, FactId, InstallationId, MailboxId, MessageId, OperationId,
@@ -96,6 +99,33 @@ fn desired_resource_intent_bodies_round_trip_without_caller_observations() {
             action
         );
     }
+}
+
+#[test]
+fn worktree_body_round_trips_and_binds_the_exact_optional_base() {
+    let worktree = WorktreeProvisioningRequest {
+        mailbox_id: MailboxId::from_bytes([43; 32]),
+        project_name: ShortText::new("worktree").expect("name"),
+        brief: Some(ContentText::new("exact base").expect("brief")),
+        source: locator("/repo/source"),
+        destination: locator("/repo/worktree"),
+        branch: ShortText::new("feature/exact").expect("branch"),
+        base: Some(ShortText::new("refs/heads/main").expect("base")),
+        create_branch: true,
+    };
+    let action = ProjectCommandAction::ProvisionWorktree(worktree.clone());
+    let encoded = encode_project_command_action(&action).expect("action encodes");
+    assert_eq!(
+        decode_project_command_action(&encoded).expect("action decodes"),
+        action
+    );
+    let mut changed = worktree;
+    changed.base = Some(ShortText::new("HEAD~1").expect("changed base"));
+    assert_ne!(
+        encode_project_command_action(&ProjectCommandAction::ProvisionWorktree(changed))
+            .expect("changed action encodes"),
+        encoded
+    );
 }
 
 #[test]

@@ -11,8 +11,8 @@ use hq_domain::{
     AccountId, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences, CommandDigest,
     CommandId, DomainError, ErrorCategory, ErrorCode, FactId, FactScope, InstallationId,
     MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, OperationCorrelation, OperationId, ProjectId,
-    ProviderId, ProviderSessionId, RemoteCommandResult, RuntimeObservation, SemanticPayload,
-    Timestamp,
+    ProviderId, ProviderSessionId, RemoteCommandResult, ResourceLocator, RuntimeObservation,
+    SemanticPayload, Timestamp,
 };
 use hq_reducer::{
     AuthorityProjection, AuthorityProjectionKey, MembershipState, ProjectProjection,
@@ -593,9 +593,23 @@ fn remote_result_digest(
             digest.update([1]);
             digest.update(head.as_bytes());
         }
-        RemoteCommandResult::Rejected(error) => {
+        RemoteCommandResult::Rejected {
+            error,
+            external_state_warning,
+        } => {
             digest.update([2]);
             put(&mut digest, error.as_str().as_bytes());
+            match external_state_warning {
+                None => digest.update([0]),
+                Some(hq_domain::ProjectExternalStateWarning::WorktreeMayExist {
+                    destination,
+                    branch,
+                }) => {
+                    digest.update([1]);
+                    put_locator(&mut digest, destination);
+                    put(&mut digest, branch.as_str().as_bytes());
+                }
+            }
         }
     }
     match runtime {
@@ -624,6 +638,17 @@ fn hash(parts: &[&[u8]]) -> [u8; 32] {
 fn put(digest: &mut Sha256, value: &[u8]) {
     digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
     digest.update(value);
+}
+
+fn put_locator(digest: &mut Sha256, locator: &ResourceLocator) {
+    let scheme = match locator.scheme() {
+        hq_domain::ResourceScheme::GitRepository => 1_u8,
+        hq_domain::ResourceScheme::WorkingTree => 2,
+        hq_domain::ResourceScheme::Container => 3,
+        hq_domain::ResourceScheme::Opaque => 4,
+    };
+    put(digest, &[scheme]);
+    put(digest, locator.value().as_bytes());
 }
 
 fn domain_error(category: ErrorCategory, code: &str) -> DomainError {
@@ -712,7 +737,10 @@ mod tests {
             &received,
             fixture.home,
             fixture.command,
-            RemoteCommandResult::Rejected(ErrorCode::new("conflict").expect("code")),
+            RemoteCommandResult::Rejected {
+                error: ErrorCode::new("conflict").expect("code"),
+                external_state_warning: None,
+            },
             None,
         )
         .expect("rejected creation outcome does not require a project");

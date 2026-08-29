@@ -4,8 +4,12 @@
 fn main() {
     use std::io::{IsTerminal as _, Write as _};
 
-    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let mut arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    if !has_top_level_command(&arguments) && (!stdin.is_terminal() || !stdout.is_terminal()) {
+        arguments.push("list".into());
+    }
     let execution = if stdin.is_terminal()
         && arguments
             .iter()
@@ -15,7 +19,6 @@ fn main() {
     } else {
         hq_node::execute_cli_with_input(arguments, &mut stdin.lock())
     };
-    let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     if stdout.write_all(execution.stdout.as_bytes()).is_err() || stdout.flush().is_err() {
         std::process::exit(1);
@@ -38,6 +41,18 @@ fn main() {
     if execution.exit_code != 0 {
         std::process::exit(i32::from(execution.exit_code));
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn has_top_level_command(arguments: &[std::ffi::OsString]) -> bool {
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--output" | "--state-root") if index + 1 < arguments.len() => index += 2,
+            _ => return true,
+        }
+    }
+    false
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

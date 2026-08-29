@@ -731,6 +731,23 @@ fn project_catalog_reads_authoritative_state_and_survives_restart() {
 }
 
 #[test]
+fn bare_noninteractive_invocation_renders_the_human_inbox() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _stop = DaemonStopGuard(state_root.clone());
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+
+    let listed = offline_output(&state_root, std::iter::empty::<OsString>(), None);
+    assert!(listed.status.success(), "bare stderr: {:?}", listed.stderr);
+    let listed: serde_json::Value =
+        serde_json::from_slice(&listed.stdout).expect("bare inbox JSON");
+    assert_eq!(listed["kind"], "messages");
+    assert_eq!(listed["data"]["operation"], "list");
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "complete real-node creation race and restart"
@@ -861,6 +878,111 @@ fn project_create_claims_one_existing_path_and_survives_restart() {
         stopped.status.success(),
         "stop stderr: {:?}",
         stopped.stderr
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "complete foreground exact-base worktree lifecycle"
+)]
+fn project_worktree_provisions_real_git_state_and_never_cleans_it_up() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let repository = directory.path().join("repository");
+    let destination = directory.path().join("provisioned-worktree");
+    fs::create_dir(&repository).expect("repository creates");
+    let git = |working_tree: &Path, arguments: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(working_tree)
+            .args(arguments)
+            .output()
+            .expect("Git runs");
+        assert!(output.status.success(), "Git failed: {output:?}");
+        String::from_utf8(output.stdout)
+            .expect("Git output is UTF-8")
+            .trim()
+            .to_owned()
+    };
+    git(&repository, &["init", "-q"]);
+    git(&repository, &["config", "user.email", "hq@example.invalid"]);
+    git(&repository, &["config", "user.name", "HQ Test"]);
+    fs::write(repository.join("tracked.txt"), "initial\n").expect("initial content writes");
+    git(&repository, &["add", "tracked.txt"]);
+    git(&repository, &["commit", "-qm", "initial"]);
+    let base = git(&repository, &["rev-parse", "HEAD"]);
+    fs::write(repository.join("tracked.txt"), "later\n").expect("later content writes");
+    git(&repository, &["commit", "-qam", "later"]);
+
+    initialize_identity(&state_root);
+    let _stop = DaemonStopGuard(state_root.clone());
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+    let provisioned = project_json(
+        &state_root,
+        &[
+            "worktree",
+            "Exact base project",
+            "--brief",
+            "recoverable real Git provisioning",
+            "--source",
+            repository.to_str().expect("UTF-8 repository"),
+            "--destination",
+            destination.to_str().expect("UTF-8 destination"),
+            "--branch",
+            "feature/exact-base",
+            "--create-branch",
+            &base,
+        ],
+    );
+    assert_eq!(provisioned["kind"], "project_operation");
+    assert_eq!(provisioned["data"]["operation"], "worktree");
+    assert_eq!(provisioned["data"]["status"], "completed");
+    assert!(provisioned["data"]["external_state_warning"].is_null());
+    let project_id = provisioned["data"]["project_id"]
+        .as_str()
+        .expect("project identity")
+        .to_owned();
+
+    assert_eq!(git(&destination, &["rev-parse", "HEAD"]), base);
+    assert_eq!(
+        git(&destination, &["branch", "--show-current"]),
+        "feature/exact-base"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("tracked.txt")).expect("worktree content reads"),
+        "initial\n"
+    );
+    let shown = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(
+        shown["data"]["projects"][0]["resources"][0]["display_locator"]["value"],
+        destination.to_str().expect("UTF-8 destination")
+    );
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let after_restart = project_json(&state_root, &["show", &project_id]);
+    assert_eq!(
+        after_restart["data"]["projects"][0]["name"],
+        "Exact base project"
+    );
+
+    let closed = project_json(&state_root, &["close", &project_id, "--yes"]);
+    assert_eq!(closed["data"]["status"], "completed");
+    let archived = project_json(&state_root, &["archive", &project_id]);
+    assert_eq!(archived["data"]["status"], "completed");
+    assert!(destination.join(".git").is_file());
+    assert_eq!(
+        git(
+            &repository,
+            &["show-ref", "--hash", "refs/heads/feature/exact-base"]
+        ),
+        base
     );
 }
 

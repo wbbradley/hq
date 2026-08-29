@@ -54,12 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Add recoverable worktree provisioning and audit non-TUI parity** — Expose exact Git
-  worktree provisioning with destination reservation, source/base/branch validation, optional
-  branch creation, local or remote home, durable progress, reconciliation, and orphaned external
-  state warnings. Add fake-node and real-Git response-loss/restart tests, then audit every retained
-  non-TUI behavior-ledger workflow and close any remaining CLI gap.
-
 - **[tui/high] Build the pure Ratatui application architecture and terminal shell** — Implement
   `UiModel`, the closed `UiEvent` enum, pure update transitions, explicit `UiEffect` values, stale
   effect-response suppression, one effect executor, borrowed rendering, responsive layout,

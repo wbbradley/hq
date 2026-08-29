@@ -171,6 +171,7 @@ where
                             operation_id: record.request.operation_id,
                             error,
                             runtime: None,
+                            external_state_warning: None,
                         });
                     }
                     RemoteProjectFactOutcome::Uncertain => {
@@ -198,8 +199,16 @@ where
                 RemoteCommandResult::Committed(*project_head),
                 runtime.clone(),
             ),
-            ProjectCommandOutcome::Rejected { error, runtime, .. } => (
-                RemoteCommandResult::Rejected(error.code().clone()),
+            ProjectCommandOutcome::Rejected {
+                error,
+                runtime,
+                external_state_warning,
+                ..
+            } => (
+                RemoteCommandResult::Rejected {
+                    error: error.code().clone(),
+                    external_state_warning: external_state_warning.clone(),
+                },
                 runtime.clone(),
             ),
             ProjectCommandOutcome::Accepted { .. }
@@ -215,6 +224,7 @@ where
                 operation_id: record.request.operation_id,
                 error,
                 runtime: None,
+                external_state_warning: None,
             }),
             RemoteProjectFactOutcome::Uncertain => Ok(reconcilable(
                 &record.request,
@@ -266,6 +276,7 @@ where
                 operation_id: request.operation_id,
                 error,
                 runtime: None,
+                external_state_warning: None,
             }),
             RemoteProjectFactOutcome::Uncertain => Ok(reconcilable(
                 &request,
@@ -336,10 +347,14 @@ fn outcome_from_record(record: &RemoteProjectCommandRecord) -> ProjectCommandOut
                 project_head: *project_head,
                 runtime: runtime.clone(),
             },
-            RemoteCommandResult::Rejected(code) => ProjectCommandOutcome::Rejected {
+            RemoteCommandResult::Rejected {
+                error,
+                external_state_warning,
+            } => ProjectCommandOutcome::Rejected {
                 operation_id: record.request.operation_id,
-                error: DomainError::new(ErrorCategory::Conflict, code.clone()),
+                error: DomainError::new(ErrorCategory::Conflict, error.clone()),
                 runtime: runtime.clone(),
+                external_state_warning: external_state_warning.clone(),
             },
         },
         RemoteProjectCommandProgress::Conflicted => rejected(
@@ -361,6 +376,7 @@ fn rejected(
         operation_id: request.operation_id,
         error: DomainError::new(category, stable_code(code)),
         runtime,
+        external_state_warning: None,
     }
 }
 
@@ -373,6 +389,7 @@ fn reconcilable(
         operation_id: request.operation_id,
         stage,
         error: DomainError::new(ErrorCategory::Unresolved, stable_code(code)),
+        external_state_warning: None,
     }
 }
 

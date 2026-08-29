@@ -1,5 +1,53 @@
 # Completed
 
+## 2026-08-28 — Recoverable worktree provisioning and non-TUI parity
+
+Added `project worktree NAME --source ABSOLUTE_PATH --destination ABSOLUTE_PATH --branch BRANCH
+[--create-branch BASE] [--brief TEXT] [--home INSTALLATION_ID]` through the existing durable
+project saga. Existing-branch mode requires the exact named branch; creation mode validates the
+exact base commit and creates the branch from it. The selected home—not the calling client—observes
+the source, base, destination, common repository, branch, resource identity, and advisory claim,
+so the same command works locally or through signed remote-home routing.
+
+Reservation, Git intent/result, resource identification, and canonical project creation remain
+separate durable checkpoints. Reconciliation proves the exact destination, common repository, and
+branch before continuing. A typed `worktree-may-exist` warning now survives workflow storage,
+local API transport, CLI human/JSON output, remote canonical signing, reducer projection, and
+restart whenever Git may have retained external state. HQ never removes or rewrites that worktree
+or branch automatically, including after rejection, close, or archive.
+
+The unshipped application, control protocol, local API, and storage schema evolved in place. No
+version bump, migration, compatibility shape, accessor facade, or duplicate stored/runtime record
+was introduced. Worktree requests, warning views, and other passive records expose public fields;
+only invariant-bearing values retain constructors and accessors.
+
+Fake-port tests prove reservation ordering, incoherent branch-mode rejection before effects,
+response-loss repair, exact replay, canonical rejection warnings, and no duplicate Git mutation. A
+real-Git test loses a successful creation response, reconstructs the workflow manager from its
+durable checkpoint, and repairs by lookup without a second mutation. Real-Git adapter tests prove
+exact older-base creation, invalid-base and branch conflicts, existing-branch mode, symlink safety,
+stale registration handling, and repository serialization. Foreground CLI coverage provisions the
+exact older commit, restarts the daemon, preserves the project/resource identity, and proves close
+and archive leave both worktree and branch intact.
+
+The retained non-TUI behavior-ledger audit found and closed one additional gap: a bare `hq` without
+a terminal now lists the human inbox, while pure `parse_cli([])` still renders help and terminal
+selection remains available to the queued Ratatui package. Stale Go-era `--no-sync` prose was
+removed because Rust mutations send no implicit wake; `hq relay sync` is the explicit prompt.
+
+Full workspace all-target/all-feature tests, strict Clippy, format/check, architecture,
+behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. The dependency audit
+retains only the existing yanked `chacha20 0.10.1` warning, and the final exact executable-name
+process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[cli/high] Add recoverable worktree provisioning and audit non-TUI parity** — Expose exact Git
+  worktree provisioning with destination reservation, source/base/branch validation, optional
+  branch creation, local or remote home, durable progress, reconciliation, and orphaned external
+  state warnings. Add fake-node and real-Git response-loss/restart tests, then audit every retained
+  non-TUI behavior-ledger workflow and close any remaining CLI gap.
+
 ## 2026-08-28 — Desired-resource mutation commands
 
 Added `project resource add`, `remove`, `replace`, and `primary` through the stable project-command

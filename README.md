@@ -180,7 +180,8 @@ Troubleshooting:
 - Run `hq help harness` to confirm syntax and `codex --version` to confirm v0.149.0.
 - An unsupported server request stops the bridge with compatibility guidance instead of guessing a permissive response.
 - If readiness fails, verify Codex authentication, the caller environment, the working directory, and HQ identity; sensitive child environment and raw child stderr are deliberately absent from diagnostics.
-- If an immediate relay sync request is undesirable, use global `--no-sync`; local HQ and Codex delivery still operate, but a network-enabled node may still publish durable outbox work.
+- Rust-era mutations do not issue an implicit relay wake. Use `hq relay sync` only when an explicit
+  prompt is useful; ordinary durable outbox work remains independent of that request.
 - Do not delete the sidecar ledger while a bridge is running.
 
 The opt-in smoke test checks the installed v0.149.0 executable, the official initialize/initialized handshake, and an ephemeral yolo thread without starting a turn or consuming model quota:
@@ -303,7 +304,7 @@ Projects keep resource claims, conversation history, assignment epochs, and exec
 
 ```sh
 hq project create widget --path /work/widget
-hq project worktree --repo /work/widget --base main --destination /work/widget-fix --branch fix/widget widget-fix
+hq project worktree widget-fix --source /work/widget --destination /work/widget-fix --branch fix/widget --create-branch main
 hq project send PROJECT_ID "Investigate the failing integration test"
 hq project activate PROJECT_ID --agent alice --provider codex --new-session
 hq project dispatch PROJECT_ID
@@ -321,7 +322,7 @@ hq project unarchive PROJECT_ID
 hq project open PROJECT_ID
 ```
 
-Use `hq project list`, `show`, `open`, `activate`, `dispatch`, `handoff`, `check`, and `resource` for inspection and lifecycle management. Activation requires either `--new-session` or an exact `--session SESSION --thread THREAD_ID`; a new provider session may optionally continue one historical project thread. Without `--dir`, activation launches from the authoritative primary resource. `dispatch` reconciles and drains pending accepted inputs in home-assigned order. Close requires `--yes`; `--force` separately authorizes dirty/unknown release or failed/uncertain runtime cessation. `project worktree` reserves its destination on the selected home before the daemon invokes Git. `--home INSTALLATION_ID` creates or provisions on another active human-account device. Remote mutations remain visibly queued until the home returns a signed received/committed/rejected result; expected-head comparison rejects delayed stale commands. Closing and archival release HQ's advisory claims but never delete files, worktrees, branches, or containers.
+Use `hq project list`, `show`, `open`, `activate`, `dispatch`, `handoff`, `check`, and `resource` for inspection and lifecycle management. Activation requires either `--new-session` or an exact `--session SESSION --thread THREAD_ID`; a new provider session may optionally continue one historical project thread. Without `--dir`, activation launches from the authoritative primary resource. `dispatch` reconciles and drains pending accepted inputs in home-assigned order. Close requires `--yes`; `--force` separately authorizes dirty/unknown release or failed/uncertain runtime cessation. `project worktree` reserves its destination on the selected home before the daemon invokes Git. `--create-branch BASE` creates the named branch from that exact revision; omit it to use an existing branch. `--home INSTALLATION_ID` creates or provisions on another active human-account device. Remote mutations remain visibly queued until the home returns a signed received/committed/rejected result; expected-head comparison rejects delayed stale commands. A rejected or reconcilable operation reports `worktree_may_exist` when Git may have left the exact destination and branch for operator inspection. Closing and archival release HQ's advisory claims but never delete files, worktrees, branches, or containers.
 
 `project resource list/show` reports the stable desired resource ID, display and canonical locators,
 primary selection, projected health, advisory claim, and every conflict from one authoritative
@@ -394,7 +395,10 @@ hq tui
 hq agents [commands|sync-semantics|delivery-semantics]
 ```
 
-Set `HQ_DB` or pass global `--db PATH` before the command to use another database. Mutating commands ask the node to commit their signed event and may wait up to three seconds for an immediate relay synchronization request. `--no-sync` skips only that client request; it is not a node-wide offline switch. Relay errors go to stderr and never undo the local event.
+Pass global `--state-root ABSOLUTE_PATH` to select another Rust installation root. Mutating
+commands commit locally without an implicit relay wake. `hq relay sync [URL]` explicitly prompts
+the node when desired; relay failure never undoes a local commit and the command is not a node-wide
+offline switch.
 
 The local node is required and normally auto-starts on the first client connection. `hq daemon run` runs it in the foreground; systemd or launchd may keep it warm for uninterrupted relay subscriptions. The node appends debug-level structured `log/slog` text records to `~/logs/hq.log`; HQ creates `~/logs` with mode `0700` when absent and always protects the file with mode `0600`. Records cover daemon ownership, control sockets, sync and restart lifecycle, named-agent launch decisions, bridge readiness and termination, and adapter diagnostics. Codex additionally records app-server PID, exit status, forced kills, and line-oriented stderr. Correlate generic worker records with the `harness`, `agent`, `request_id`, and `session_id` attributes. `hq daemon status` reads the protected lifecycle RPC, `stop` requests a clean stop, and `restart` replaces the in-process runtime while connected clients reconnect and resubscribe. Because `restart` does not reload the daemon executable, after installing a new HQ build use `hq daemon stop`, wait for it to exit, and let the next normal command auto-start the new binary. `hq sync` asks the owning node to wake its network engine. Build drift is allowed when wire ranges remain compatible and is shown with restart guidance; incompatible ranges identify the stale side.
 

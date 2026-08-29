@@ -955,6 +955,7 @@ pub struct WorktreeProvisioningRequestDto {
     pub source: ResourceLocatorDto,
     pub destination: ResourceLocatorDto,
     pub branch: String,
+    pub base: Option<String>,
     pub create_branch: bool,
 }
 
@@ -1117,11 +1118,24 @@ pub enum ProjectCommandOutcomeDto {
         operation_id: Id32,
         error: DomainErrorDto,
         runtime: Option<RuntimeObservationDto>,
+        external_state_warning: Option<ProjectExternalStateWarningDto>,
     },
     Reconcilable {
         operation_id: Id32,
         stage: ProjectCommandStageDto,
         error: DomainErrorDto,
+        external_state_warning: Option<ProjectExternalStateWarningDto>,
+    },
+}
+
+/// External state deliberately retained after a project workflow boundary.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectExternalStateWarningDto {
+    WorktreeMayExist {
+        destination: ResourceLocatorDto,
+        branch: String,
     },
 }
 
@@ -1157,7 +1171,10 @@ pub enum AgentRetirementOutcomeDto {
 #[serde(tag = "state", content = "value", rename_all = "snake_case")]
 pub enum RemoteCommandResultDto {
     Committed(Id32),
-    Rejected(String),
+    Rejected {
+        error: String,
+        external_state_warning: Option<ProjectExternalStateWarningDto>,
+    },
 }
 
 /// Authoritative remote-control checkpoint with exact fact attribution.
@@ -2620,7 +2637,14 @@ fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), Va
             }
             validate_locator(&request.source)?;
             validate_locator(&request.destination)?;
-            validate_text(&request.branch, SHORT_TEXT_MAX_BYTES)
+            validate_text(&request.branch, SHORT_TEXT_MAX_BYTES)?;
+            if let Some(base) = &request.base {
+                validate_text(base, SHORT_TEXT_MAX_BYTES)?;
+            }
+            if request.create_branch != request.base.is_some() {
+                return Err(ValueError::InvalidValueCombination);
+            }
+            Ok(())
         }
     }
 }
@@ -2642,11 +2666,42 @@ fn validate_project_outcome(outcome: &ProjectCommandOutcomeDto) -> Result<(), Va
         ProjectCommandOutcomeDto::Completed { runtime, .. } => {
             runtime.as_ref().map_or(Ok(()), validate_runtime)
         }
-        ProjectCommandOutcomeDto::Rejected { error, runtime, .. } => {
+        ProjectCommandOutcomeDto::Rejected {
+            error,
+            runtime,
+            external_state_warning,
+            ..
+        } => {
             validate_domain_error(error)?;
-            runtime.as_ref().map_or(Ok(()), validate_runtime)
+            runtime.as_ref().map_or(Ok(()), validate_runtime)?;
+            external_state_warning
+                .as_ref()
+                .map_or(Ok(()), validate_project_external_state_warning)
         }
-        ProjectCommandOutcomeDto::Reconcilable { error, .. } => validate_domain_error(error),
+        ProjectCommandOutcomeDto::Reconcilable {
+            error,
+            external_state_warning,
+            ..
+        } => {
+            validate_domain_error(error)?;
+            external_state_warning
+                .as_ref()
+                .map_or(Ok(()), validate_project_external_state_warning)
+        }
+    }
+}
+
+fn validate_project_external_state_warning(
+    warning: &ProjectExternalStateWarningDto,
+) -> Result<(), ValueError> {
+    match warning {
+        ProjectExternalStateWarningDto::WorktreeMayExist {
+            destination,
+            branch,
+        } => {
+            validate_locator(destination)?;
+            validate_text(branch, SHORT_TEXT_MAX_BYTES)
+        }
     }
 }
 
@@ -3133,12 +3188,19 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
                 validate_text(operation_session, PROVIDER_SESSION_ID_MAX_BYTES)?;
                 validate_text(body, CONTENT_MAX_BYTES)?;
                 if let RemoteCommandProgressDto::Terminal {
-                    result: RemoteCommandResultDto::Rejected(code),
+                    result:
+                        RemoteCommandResultDto::Rejected {
+                            error: code,
+                            external_state_warning,
+                        },
                     runtime,
                     ..
                 } = progress.as_ref()
                 {
                     validate_text(code, ERROR_CODE_MAX_BYTES)?;
+                    if let Some(warning) = external_state_warning {
+                        validate_project_external_state_warning(warning)?;
+                    }
                     if let Some(runtime) = runtime {
                         validate_runtime(runtime)?;
                     }

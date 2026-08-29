@@ -10,11 +10,13 @@ use std::{
 use hq_application::{
     ApplicationError, ControlProjects, ProjectCommandAction, ProjectCommandOutcome,
     ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
+    WorktreeProvisioningRequest,
 };
 use hq_domain::{
-    AccountId, BoundedText, CommandDigest, CommandId, ErrorCategory, ErrorCode, FactId,
-    InstallationId, MailboxId, OperationId, ProjectId, RemoteCommandResult, ResourceId,
-    ResourceLocator, ResourceScheme, RuntimeObservation, ShortText, Timestamp,
+    AccountId, BoundedText, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode,
+    FactId, InstallationId, MailboxId, OperationId, ProjectExternalStateWarning, ProjectId,
+    RemoteCommandResult, ResourceId, ResourceLocator, ResourceScheme, RuntimeObservation,
+    ShortText, Timestamp,
 };
 use hq_projects::{
     ProjectCommandRouter, RemoteProjectCommandPort, RemoteProjectCommandProgress,
@@ -316,6 +318,78 @@ fn no_head_creation_routes_to_its_remote_home_and_reaches_a_terminal_result() {
             result: RemoteCommandResult::Committed(head),
             ..
         } if head == project_head
+    ));
+}
+
+#[test]
+fn remote_home_preserves_an_orphaned_worktree_warning_in_its_terminal_result() {
+    let requester = InstallationId::from_bytes([9; 32]);
+    let home = InstallationId::from_bytes([8; 32]);
+    let destination = ResourceLocator::new(
+        ResourceScheme::WorkingTree,
+        BoundedText::new("/work/remote-worktree").expect("path"),
+    );
+    let branch = ShortText::new("feature/remote").expect("branch");
+    let mut request = request(home);
+    request.expected_head = None;
+    request.action = ProjectCommandAction::ProvisionWorktree(WorktreeProvisioningRequest {
+        mailbox_id: MailboxId::from_bytes([41; 32]),
+        project_name: ShortText::new("remote-worktree").expect("name"),
+        brief: None,
+        source: ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new("/work/repository").expect("source"),
+        ),
+        destination: destination.clone(),
+        branch: branch.clone(),
+        base: Some(ShortText::new("main").expect("base")),
+        create_branch: true,
+    });
+    request.request_digest = project_command_request_digest(&request).expect("request digest");
+    let warning = ProjectExternalStateWarning::WorktreeMayExist {
+        destination,
+        branch,
+    };
+    let outcome = ProjectCommandOutcome::Rejected {
+        operation_id: request.operation_id,
+        error: DomainError::new(
+            ErrorCategory::Conflict,
+            ErrorCode::new("project_create_conflict").expect("code"),
+        ),
+        runtime: None,
+        external_state_warning: Some(warning.clone()),
+    };
+    let remote = MemoryRemote::default();
+    let local = ScriptedLocal {
+        calls: Rc::new(Cell::new(0)),
+        outcome: outcome.clone(),
+    };
+
+    let requester_router = ProjectCommandRouter::new(requester, local.clone(), remote.clone());
+    assert!(matches!(
+        requester_router
+            .control_project(request.clone())
+            .expect("queue provisioning"),
+        ProjectCommandOutcome::Accepted { .. }
+    ));
+    ProjectCommandRouter::new(home, local, remote.clone())
+        .repair_remote(Timestamp::from_unix_millis(99), 4)
+        .expect("home repair");
+    assert_eq!(
+        requester_router
+            .control_project(request)
+            .expect("terminal remote view"),
+        outcome
+    );
+    assert!(matches!(
+        remote.record.borrow().as_ref().map(|record| &record.progress),
+        Some(RemoteProjectCommandProgress::Terminal {
+            result: RemoteCommandResult::Rejected {
+                external_state_warning: Some(retained),
+                ..
+            },
+            ..
+        }) if retained == &warning
     ));
 }
 

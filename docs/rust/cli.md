@@ -192,6 +192,21 @@ exits 1 and reconcilable uncertainty exits 3. Creation and catalog state survive
 state. Because HQ has no shipped installations, this capability extends local API v1 in place and
 adds no storage migration or compatibility shape.
 
+`project worktree NAME --source ABSOLUTE_PATH --destination ABSOLUTE_PATH --branch BRANCH
+[--create-branch BASE] [--brief TEXT] [--home INSTALLATION_ID]` reserves and provisions one exact
+Git worktree before creating its project. With `--create-branch`, the home validates the base as an
+exact commit and creates `BRANCH` from it. Without that option, `BRANCH` must already exist. Source
+and destination are normalized lexically by the client but observed only on the selected home, so
+remote-home requests never inspect the caller's filesystem namespace. Command, operation, project,
+mailbox, and resource identities remain stable through replay.
+
+The home checkpoints reservation, Git intent/result, resource identification, and canonical
+creation independently. A lost Git success response is repaired by reconciling the common
+repository, destination, and branch; HQ does not issue a second mutation once exact created state
+is visible. Rejected and reconcilable output includes a typed `worktree_may_exist` warning with the
+exact destination and branch whenever Git may have retained external state. HQ never prunes,
+resets, removes, or otherwise compensates that worktree or branch automatically.
+
 `project send PROJECT_ID [MESSAGE]` authors an ordinary asynchronous account message whose typed
 project ID and direct recipient name the project's immutable mailbox. With no argument it consumes
 one bounded UTF-8 body from stdin. The selected local human account must match the project account;

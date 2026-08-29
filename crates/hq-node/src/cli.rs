@@ -17,13 +17,13 @@ use hq_application::{
     HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority, MailboxGrantRequest,
     MailboxRevokeRequest, MessageAuthoringAuthority, MessageStateRequest, NewMessageRequest,
     PeerRouteRequest, ProjectCommandAction, ProjectCommandRequest, ProjectCreationRequest,
-    ReplyRequest, ThreadCancellationRequest, plan_agent_mailbox_creation, plan_agent_name_claim,
-    plan_agent_session_rename, plan_agent_session_selection, plan_asynchronous_message,
-    plan_human_account_creation, plan_human_account_selection, plan_human_device_acceptance,
-    plan_human_device_grant, plan_human_device_revoke, plan_human_mailbox_creation,
-    plan_mailbox_grant, plan_mailbox_revoke, plan_message_archive, plan_message_restore,
-    plan_peer_route_block, plan_peer_route_set, plan_question, plan_reply,
-    plan_thread_cancellation,
+    ReplyRequest, ThreadCancellationRequest, WorktreeProvisioningRequest,
+    plan_agent_mailbox_creation, plan_agent_name_claim, plan_agent_session_rename,
+    plan_agent_session_selection, plan_asynchronous_message, plan_human_account_creation,
+    plan_human_account_selection, plan_human_device_acceptance, plan_human_device_grant,
+    plan_human_device_revoke, plan_human_mailbox_creation, plan_mailbox_grant, plan_mailbox_revoke,
+    plan_message_archive, plan_message_restore, plan_peer_route_block, plan_peer_route_set,
+    plan_question, plan_reply, plan_thread_cancellation,
 };
 use hq_domain::{
     AccountId, AgentId, AuthorityReference, AuthorityRole, BoundedText, CommandId, ContentText,
@@ -43,12 +43,13 @@ use hq_local_api::{
         EffectRequestDto, HealthDomainDto, Id32, LaunchEnvironmentDto, LifecycleRequest,
         LifecycleState, MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest,
         PeerRouteBlockDto, PeerRouteCandidateDto, PresentationKindDto, ProjectCommandOutcomeDto,
-        ProjectCommandRequestDto, ProjectCommandStageDto, RelayAccessDto, RelayAuthenticationDto,
-        RelayConfigurationDto, RelayStatusDto, Request, ResourceHealthDto,
-        ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
-        ResourceReleaseStateDto, ResourceSchemeDto, ResponseResult, RuntimeObservationDto,
-        SessionControlDto, SnapshotItem, StateHealthDto, SynchronizationRequestDto,
-        agent_session_request_digest, resource_inspection_request_digest,
+        ProjectCommandRequestDto, ProjectCommandStageDto, ProjectExternalStateWarningDto,
+        RelayAccessDto, RelayAuthenticationDto, RelayConfigurationDto, RelayStatusDto, Request,
+        ResourceHealthDto, ResourceInspectionRequestDto, ResourceInspectionResultDto,
+        ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto, ResponseResult,
+        RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto,
+        SynchronizationRequestDto, agent_session_request_digest,
+        resource_inspection_request_digest,
     },
 };
 use hq_projects::{agent_retirement_request_digest, project_command_request_digest};
@@ -455,6 +456,8 @@ pub enum ProjectCliCommand {
         /// Selected immutable home, or the local installation by default.
         home: Option<InstallationId>,
     },
+    /// Provision one Git worktree and create its project through one durable saga.
+    Worktree(WorktreeCliRequest),
     /// Open one exact closed project.
     Open(ProjectId),
     /// Activate one exact named agent assignment.
@@ -502,6 +505,25 @@ pub enum ProjectCliCommand {
     Archive(ProjectId),
     /// Restore one exact archived project to ordinary closed presentation.
     Unarchive(ProjectId),
+}
+
+/// Passive parsed input for one recoverable Git worktree project.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorktreeCliRequest {
+    /// Human-visible project name.
+    pub name: ShortText,
+    /// Optional bounded project brief.
+    pub brief: Option<ContentText>,
+    /// Existing repository or worktree on the selected home.
+    pub source: PathBuf,
+    /// Exact normalized destination reserved on the selected home.
+    pub destination: PathBuf,
+    /// Exact existing or newly created branch name.
+    pub branch: ShortText,
+    /// Exact base revision when creating the branch; absent for an existing branch.
+    pub base: Option<ShortText>,
+    /// Selected immutable home, or the local installation by default.
+    pub home: Option<InstallationId>,
 }
 
 /// Closed snapshot-only desired-resource inspection behavior.
@@ -694,6 +716,8 @@ pub struct RemoteProjectCommandView {
     pub runtime_state: Option<&'static str>,
     /// Runtime failure or uncertainty code, when present.
     pub runtime_code: Option<String>,
+    /// External Git state retained by the authoritative home, when reported.
+    pub external_state_warning: Option<ProjectExternalStateWarningView>,
 }
 
 /// Passive complete presentation for one authoritative project.
@@ -836,6 +860,19 @@ pub struct ProjectOperationView {
     pub runtime_state: Option<&'static str>,
     /// Runtime failure or uncertainty code.
     pub runtime_code: Option<String>,
+    /// External Git state deliberately retained for operator inspection.
+    pub external_state_warning: Option<ProjectExternalStateWarningView>,
+}
+
+/// Passive actionable warning for external state HQ never removes automatically.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectExternalStateWarningView {
+    /// Stable warning kind.
+    pub kind: &'static str,
+    /// Exact requested worktree destination.
+    pub destination: String,
+    /// Exact requested branch.
+    pub branch: String,
 }
 
 /// Passive exact provider-session identity shown by catalog commands.
@@ -1932,6 +1969,7 @@ fn parse_project_catalog(
             ),
         },
         [action, rest @ ..] if action == "create" => parse_project_create(rest)?,
+        [action, rest @ ..] if action == "worktree" => parse_project_worktree(rest)?,
         [action, project_id] if action == "open" => {
             ProjectCliCommand::Open(ProjectId::from_bytes(parse_hex32(project_id)?))
         }
@@ -2264,6 +2302,81 @@ fn parse_project_create(arguments: &[OsString]) -> Result<ProjectCliCommand, Cli
         path,
         home,
     })
+}
+
+fn parse_project_worktree(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
+    let mut name = None;
+    let mut brief = None;
+    let mut source = None;
+    let mut destination = None;
+    let mut branch = None;
+    let mut base = None;
+    let mut home = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--brief") if brief.is_none() => {
+                index += 1;
+                brief = Some(
+                    ContentText::new(required_utf8_argument(arguments, index)?.to_owned())
+                        .map_err(|_| CliError::Arguments)?,
+                );
+            }
+            Some("--source") if source.is_none() => {
+                index += 1;
+                source = Some(PathBuf::from(required_utf8_argument(arguments, index)?));
+            }
+            Some("--destination") if destination.is_none() => {
+                index += 1;
+                destination = Some(PathBuf::from(required_utf8_argument(arguments, index)?));
+            }
+            Some("--branch") if branch.is_none() => {
+                index += 1;
+                branch = Some(
+                    ShortText::new(required_utf8_argument(arguments, index)?.to_owned())
+                        .map_err(|_| CliError::Arguments)?,
+                );
+            }
+            Some("--create-branch") if base.is_none() => {
+                index += 1;
+                base = Some(
+                    ShortText::new(required_utf8_argument(arguments, index)?.to_owned())
+                        .map_err(|_| CliError::Arguments)?,
+                );
+            }
+            Some("--home") if home.is_none() => {
+                index += 1;
+                home = Some(InstallationId::from_bytes(parse_hex32(
+                    arguments.get(index).ok_or(CliError::Arguments)?,
+                )?));
+            }
+            Some(value) if !value.starts_with('-') && name.is_none() => {
+                name = Some(ShortText::new(value.to_owned()).map_err(|_| CliError::Arguments)?);
+            }
+            _ => return Err(CliError::Arguments),
+        }
+        index += 1;
+    }
+    let source = source.ok_or(CliError::Arguments)?;
+    let destination = destination.ok_or(CliError::Arguments)?;
+    let _ = normalized_existing_resource(&source)?;
+    let _ = normalized_existing_resource(&destination)?;
+    Ok(ProjectCliCommand::Worktree(WorktreeCliRequest {
+        name: name.ok_or(CliError::Arguments)?,
+        brief,
+        source,
+        destination,
+        branch: branch.ok_or(CliError::Arguments)?,
+        base,
+        home,
+    }))
+}
+
+fn required_utf8_argument(arguments: &[OsString], index: usize) -> Result<&str, CliError> {
+    arguments
+        .get(index)
+        .and_then(|value| value.to_str())
+        .ok_or(CliError::Arguments)
 }
 
 fn parse_harness(
@@ -3252,6 +3365,7 @@ fn run_project(
             path,
             home,
         } => create_project(&mut client, &snapshot, name, brief.as_ref(), path, *home),
+        ProjectCliCommand::Worktree(request) => worktree_project(&mut client, &snapshot, request),
         ProjectCliCommand::Send { project_id, body } => {
             send_project_message(&mut client, &snapshot, *project_id, body.as_ref(), input)
         }
@@ -3893,6 +4007,64 @@ fn create_project(
     .map(CliResult::ProjectOperation)
 }
 
+fn worktree_project(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    request: &WorktreeCliRequest,
+) -> Result<CliResult, CliError> {
+    let local = client.installation_id();
+    let account_id = local_selection(snapshot, local)
+        .map_err(|_| CliError::ProjectState)?
+        .active
+        .ok_or(CliError::ProjectState)?;
+    let home = request.home.unwrap_or(local);
+    require_active_project_home(snapshot, account_id, home)?;
+    let source = normalized_existing_resource(&request.source)?;
+    let destination = normalized_existing_resource(&request.destination)?;
+    let command_id = random_command_id()?;
+    let operation_id = project_creation_operation_id(command_id);
+    let project_id = ProjectId::from_bytes(project_creation_identity(operation_id, b"project"));
+    let mailbox_id = MailboxId::from_bytes(project_creation_identity(operation_id, b"mailbox"));
+    let wire = project_command_request(
+        command_id,
+        operation_id,
+        account_id,
+        project_id,
+        home,
+        None,
+        current_unix_millis()?,
+        ProjectCommandAction::ProvisionWorktree(WorktreeProvisioningRequest {
+            mailbox_id,
+            project_name: request.name.clone(),
+            brief: request.brief.clone(),
+            source,
+            destination,
+            branch: request.branch.clone(),
+            base: request.base.clone(),
+            create_branch: request.base.is_some(),
+        }),
+    )?;
+    let ClientEvent::ProjectCommand {
+        command_id: completed,
+        outcome,
+    } = client.project(wire)?
+    else {
+        return Err(CliError::ProjectState);
+    };
+    if completed != command_id {
+        return Err(CliError::ProjectState);
+    }
+    project_operation_view(
+        "worktree",
+        command_id,
+        project_id,
+        home,
+        operation_id,
+        outcome,
+    )
+    .map(CliResult::ProjectOperation)
+}
+
 fn project_creation_request(
     command_id: CommandId,
     account_id: AccountId,
@@ -4037,45 +4209,66 @@ fn project_operation_view(
     expected_operation: OperationId,
     outcome: ProjectCommandOutcomeDto,
 ) -> Result<ProjectOperationView, CliError> {
-    let (operation_id, status, stage, project_head, error, runtime) = match outcome {
-        ProjectCommandOutcomeDto::Accepted {
-            operation_id,
-            stage,
-        } => (operation_id, "accepted", Some(stage), None, None, None),
-        ProjectCommandOutcomeDto::Running {
-            operation_id,
-            stage,
-        } => (operation_id, "running", Some(stage), None, None, None),
-        ProjectCommandOutcomeDto::Completed {
-            operation_id,
-            project_head,
-            runtime,
-        } => (
-            operation_id,
-            "completed",
-            None,
-            Some(FactId::from_bytes(project_head.bytes())),
-            None,
-            runtime,
-        ),
-        ProjectCommandOutcomeDto::Rejected {
-            operation_id,
-            error,
-            runtime,
-        } => (operation_id, "rejected", None, None, Some(error), runtime),
-        ProjectCommandOutcomeDto::Reconcilable {
-            operation_id,
-            stage,
-            error,
-        } => (
-            operation_id,
-            "reconcilable",
-            Some(stage),
-            None,
-            Some(error),
-            None,
-        ),
-    };
+    let (operation_id, status, stage, project_head, error, runtime, external_state_warning) =
+        match outcome {
+            ProjectCommandOutcomeDto::Accepted {
+                operation_id,
+                stage,
+            } => (
+                operation_id,
+                "accepted",
+                Some(stage),
+                None,
+                None,
+                None,
+                None,
+            ),
+            ProjectCommandOutcomeDto::Running {
+                operation_id,
+                stage,
+            } => (operation_id, "running", Some(stage), None, None, None, None),
+            ProjectCommandOutcomeDto::Completed {
+                operation_id,
+                project_head,
+                runtime,
+            } => (
+                operation_id,
+                "completed",
+                None,
+                Some(FactId::from_bytes(project_head.bytes())),
+                None,
+                runtime,
+                None,
+            ),
+            ProjectCommandOutcomeDto::Rejected {
+                operation_id,
+                error,
+                runtime,
+                external_state_warning,
+            } => (
+                operation_id,
+                "rejected",
+                None,
+                None,
+                Some(error),
+                runtime,
+                external_state_warning.map(project_external_state_warning_view),
+            ),
+            ProjectCommandOutcomeDto::Reconcilable {
+                operation_id,
+                stage,
+                error,
+                external_state_warning,
+            } => (
+                operation_id,
+                "reconcilable",
+                Some(stage),
+                None,
+                Some(error),
+                None,
+                external_state_warning.map(project_external_state_warning_view),
+            ),
+        };
     let operation_id = OperationId::from_bytes(operation_id.bytes());
     if operation_id != expected_operation {
         return Err(CliError::ProjectState);
@@ -4094,7 +4287,23 @@ fn project_operation_view(
         error_code: error.map(|error| error.code),
         runtime_state,
         runtime_code,
+        external_state_warning,
     })
+}
+
+fn project_external_state_warning_view(
+    warning: ProjectExternalStateWarningDto,
+) -> ProjectExternalStateWarningView {
+    match warning {
+        ProjectExternalStateWarningDto::WorktreeMayExist {
+            destination,
+            branch,
+        } => ProjectExternalStateWarningView {
+            kind: "worktree_may_exist",
+            destination: destination.value,
+            branch,
+        },
+    }
 }
 
 const fn project_stage_label(stage: ProjectCommandStageDto) -> &'static str {
@@ -4146,6 +4355,7 @@ fn project_catalog_view(
             vec![projects.remove(project_id).ok_or(CliError::ProjectState)?]
         }
         ProjectCliCommand::Create { .. }
+        | ProjectCliCommand::Worktree(_)
         | ProjectCliCommand::Resource(_)
         | ProjectCliCommand::Check { .. }
         | ProjectCliCommand::Send { .. }
@@ -4164,6 +4374,7 @@ fn project_catalog_view(
             ProjectCliCommand::List => "list",
             ProjectCliCommand::Show(_) => "show",
             ProjectCliCommand::Create { .. }
+            | ProjectCliCommand::Worktree(_)
             | ProjectCliCommand::Resource(_)
             | ProjectCliCommand::Check { .. }
             | ProjectCliCommand::Send { .. }
@@ -4595,6 +4806,7 @@ fn remote_project_command_view(
         result_value: None,
         runtime_state: None,
         runtime_code: None,
+        external_state_warning: None,
     };
     match progress {
         RemoteCommandProgressDto::Queued => {}
@@ -4626,9 +4838,15 @@ fn remote_project_command_view(
                     view.result_state = Some("committed");
                     view.result_value = Some(encode_id(&head.bytes()));
                 }
-                RemoteCommandResultDto::Rejected(code) => {
+                RemoteCommandResultDto::Rejected {
+                    error,
+                    external_state_warning,
+                } => {
                     view.result_state = Some("rejected");
-                    view.result_value = Some(code.clone());
+                    view.result_value = Some(error.clone());
+                    view.external_state_warning = external_state_warning
+                        .clone()
+                        .map(project_external_state_warning_view);
                 }
             }
             if let Some(runtime) = runtime {
@@ -8780,7 +8998,7 @@ fn render_project_operation(
 ) -> Result<String, CliError> {
     match format {
         CliOutputFormat::Human => Ok(format!(
-            "project_operation operation={} status={} project={} home={} command_id={} operation_id={} stage={} project_head={} error={}:{} runtime={}:{}\n",
+            "project_operation operation={} status={} project={} home={} command_id={} operation_id={} stage={} project_head={} error={}:{} runtime={}:{} external_state_warning={}\n",
             view.operation,
             view.status,
             encode_id(view.project_id.as_bytes()),
@@ -8793,6 +9011,13 @@ fn render_project_operation(
             view.error_code.as_deref().unwrap_or("none"),
             view.runtime_state.unwrap_or("none"),
             view.runtime_code.as_deref().unwrap_or("none"),
+            view.external_state_warning.as_ref().map_or_else(
+                || "none".to_owned(),
+                |warning| format!(
+                    "{}:{}:{}",
+                    warning.kind, warning.destination, warning.branch
+                ),
+            ),
         )),
         CliOutputFormat::Json => machine_record(
             "project_operation",
@@ -8800,6 +9025,11 @@ fn render_project_operation(
                 "command_id": encode_id(view.command_id.as_bytes()),
                 "error_category": view.error_category,
                 "error_code": view.error_code,
+                "external_state_warning": view.external_state_warning.as_ref().map(|warning| serde_json::json!({
+                    "branch": warning.branch,
+                    "destination": warning.destination,
+                    "kind": warning.kind,
+                })),
                 "home": encode_id(view.home.as_bytes()),
                 "operation": view.operation,
                 "operation_id": encode_id(view.operation_id.as_bytes()),
@@ -8935,7 +9165,7 @@ fn render_project_catalog_human(view: &ProjectCatalogView) -> Result<String, Cli
         for command in &project.remote_commands {
             writeln!(
                 output,
-                "remote_command project={} id={} progress={} target_home={} expected_head={} operation_id={} provider={} session={} issued_at_unix_millis={} request_fact={} receipt_fact={} received_head={} received_at_unix_millis={} outcome_fact={} result_state={} result_value={} runtime_state={} runtime_code={}",
+                "remote_command project={} id={} progress={} target_home={} expected_head={} operation_id={} provider={} session={} issued_at_unix_millis={} request_fact={} receipt_fact={} received_head={} received_at_unix_millis={} outcome_fact={} result_state={} result_value={} runtime_state={} runtime_code={} external_state_warning={}",
                 project_id,
                 encode_id(command.command_id.as_bytes()),
                 command.progress,
@@ -8954,6 +9184,13 @@ fn render_project_catalog_human(view: &ProjectCatalogView) -> Result<String, Cli
                 command.result_value.as_deref().unwrap_or("none"),
                 command.runtime_state.unwrap_or("none"),
                 command.runtime_code.as_deref().unwrap_or("none"),
+                command.external_state_warning.as_ref().map_or_else(
+                    || "none".to_owned(),
+                    |warning| format!(
+                        "{}:{}:{}",
+                        warning.kind, warning.destination, warning.branch
+                    ),
+                ),
             )
             .map_err(|_| CliError::Runtime)?;
         }
@@ -9047,6 +9284,11 @@ fn remote_project_command_json(command: &RemoteProjectCommandView) -> serde_json
         "result_value": command.result_value,
         "runtime_code": command.runtime_code,
         "runtime_state": command.runtime_state,
+        "external_state_warning": command.external_state_warning.as_ref().map(|warning| serde_json::json!({
+            "branch": warning.branch,
+            "destination": warning.destination,
+            "kind": warning.kind,
+        })),
         "target_home": encode_id(command.target_home.as_bytes()),
     })
 }
@@ -9936,6 +10178,7 @@ fn help_text(topic: &[String]) -> Option<&'static str> {
                             | "unarchive"
                             | "check"
                             | "resource"
+                            | "worktree"
                     )) =>
         {
             match command.as_str() {
@@ -9975,9 +10218,9 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
         ),
         [command] if command == "project" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
-             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  resource list PROJECT_ID                  List exact desired resources\n  resource show PROJECT_ID RESOURCE_ID      Show one exact desired resource\n  resource add PROJECT_ID --path ABSOLUTE_PATH [--primary]\n  resource remove PROJECT_ID RESOURCE_ID [--force]\n  resource replace PROJECT_ID RESOURCE_ID --path ABSOLUTE_PATH\n  resource primary PROJECT_ID RESOURCE_ID   Select the launch primary\n  check PROJECT_ID [RESOURCE_ID]            Freshly inspect health and release state\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
+             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  resource list PROJECT_ID                  List exact desired resources\n  resource show PROJECT_ID RESOURCE_ID      Show one exact desired resource\n  resource add PROJECT_ID --path ABSOLUTE_PATH [--primary]\n  resource remove PROJECT_ID RESOURCE_ID [--force]\n  resource replace PROJECT_ID RESOURCE_ID --path ABSOLUTE_PATH\n  resource primary PROJECT_ID RESOURCE_ID   Select the launch primary\n  check PROJECT_ID [RESOURCE_ID]            Freshly inspect health and release state\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n  worktree NAME --source ABSOLUTE_PATH --destination ABSOLUTE_PATH --branch BRANCH [--create-branch BASE] [--brief TEXT] [--home INSTALLATION_ID]\n                                            Provision a recoverable Git worktree and project\n\n\
   open PROJECT_ID                           Open one closed project\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --new-session [--thread THREAD_ID] [--dir ABSOLUTE_PATH]\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --session SESSION --thread THREAD_ID [--dir ABSOLUTE_PATH]\n                                            Activate one exact agent assignment\n  dispatch PROJECT_ID                       Dispatch all pending accepted inputs\n  handoff PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER (--new-session | --session SESSION) --thread THREAD_ID [--dir ABSOLUTE_PATH] --yes [--force]\n                                            Hand off to one exact historical target\n  close PROJECT_ID --yes [--force]          Close and release advisory claims\n  archive PROJECT_ID                        Gracefully close and hide one project\n  unarchive PROJECT_ID                      Restore one archived project as closed\n\n\
-             Resource list/show read only the authoritative snapshot. Add and replace send a normalized display path and stable resource identity for authoritative home-side identification; primary changes the future launch default without reordering membership. Remove changes only HQ desired membership and requires --force only while assigned. Check re-observes path identity and Git release state through the read-only home adapter; it fails closed when the project's immutable home is not this installation. No resource command mutates or deletes filesystem or Git state. Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Handoff always requires one historical target thread and explicit --yes; --force separately authorizes takeover after blocked or uncertain quiescence. Without --dir, assignment commands use the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
+             Resource list/show read only the authoritative snapshot. Add and replace send a normalized display path and stable resource identity for authoritative home-side identification; primary changes the future launch default without reordering membership. Remove changes only HQ desired membership and requires --force only while assigned. Check re-observes path identity and Git release state through the read-only home adapter; it fails closed when the project's immutable home is not this installation. No resource command mutates or deletes filesystem or Git state. Worktree uses an existing branch by default; --create-branch BASE creates the named branch from that exact Git revision. The selected home reserves the destination, reconciles Git before every retry, and never prunes, resets, removes, or otherwise compensates external Git state. Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Handoff always requires one historical target thread and explicit --yes; --force separately authorizes takeover after blocked or uncertain quiescence. Without --dir, assignment commands use the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
@@ -10075,11 +10318,11 @@ mod tests {
         CliOutputFormat, ConfigurationCommand, DaemonCommand, HarnessCommand, HarnessSessionView,
         HumanCommand, HumanDeviceState, HumanMessageCommand, HumanMessageFilters, IdentityCommand,
         MailboxCommand, MessageCommandView, NamedAgentCommand, NamedAgentSelector, PeerCommand,
-        ProjectCliCommand, ProjectResourceCliCommand, RelayCommand, completion_for,
-        copy_launch_environment, effect_outcome, ensure_resource_check_home, execute_cli,
-        harness_request, human_devices_view, human_view, mailbox_discovery_view, message_body,
-        named_agent_catalog_view, normalized_existing_resource, pairing_grant_id, parse_cli,
-        project_activation_action, project_catalog_view, project_command_request,
+        ProjectCliCommand, ProjectResourceCliCommand, RelayCommand, WorktreeCliRequest,
+        completion_for, copy_launch_environment, effect_outcome, ensure_resource_check_home,
+        execute_cli, harness_request, human_devices_view, human_view, mailbox_discovery_view,
+        message_body, named_agent_catalog_view, normalized_existing_resource, pairing_grant_id,
+        parse_cli, project_activation_action, project_catalog_view, project_command_request,
         project_creation_request, project_handoff_action, project_operation_view,
         project_resource_catalog_view, project_resource_operation_identity, read_password,
         render_project_catalog, render_project_resource_catalog, render_project_resource_check,
@@ -10097,9 +10340,10 @@ mod tests {
         AgentLaunchContextDto, AgentSessionBindingDto, AuthoritativeSnapshotDto, DeviceGrantDto,
         DomainErrorDto, EffectOutcomeDto, Id32, MailboxAddressDto, MessagePurposeDto,
         PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-        ProjectCommandStageDto, RelayAccessDto, RelayAuthenticationDto, RemoteCommandProgressDto,
-        RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto, ResourceLocatorDto,
-        ResourceSchemeDto, RuntimeObservationDto, SnapshotItem, SynchronizationRequestDto,
+        ProjectCommandStageDto, ProjectExternalStateWarningDto, RelayAccessDto,
+        RelayAuthenticationDto, RemoteCommandProgressDto, RemoteCommandResultDto,
+        RepositoryContextDto, ResourceHealthDto, ResourceLocatorDto, ResourceSchemeDto,
+        RuntimeObservationDto, SnapshotItem, SynchronizationRequestDto,
     };
 
     #[test]
@@ -10238,6 +10482,101 @@ mod tests {
             vec!["project", "send", &"22".repeat(32), "one", "two"],
             vec!["project", "create", "later"],
             vec!["project", "create", "name", "--path", "relative"],
+        ] {
+            assert_eq!(
+                parse_cli(arguments.into_iter().map(OsString::from)),
+                Err(CliError::Arguments)
+            );
+        }
+    }
+
+    #[test]
+    fn parser_accepts_exact_worktree_provisioning_modes() {
+        let created = parse_cli([
+            OsString::from("project"),
+            OsString::from("worktree"),
+            OsString::from("feature-work"),
+            OsString::from("--source"),
+            OsString::from("/repo/source"),
+            OsString::from("--destination"),
+            OsString::from("/repo/worktrees/feature"),
+            OsString::from("--branch"),
+            OsString::from("feature/exact"),
+            OsString::from("--create-branch"),
+            OsString::from("refs/heads/main"),
+            OsString::from("--brief"),
+            OsString::from("bounded work"),
+            OsString::from("--home"),
+            OsString::from("33".repeat(32)),
+        ])
+        .expect("new-branch worktree parses");
+        assert!(matches!(
+            created.command,
+            CliCommand::Project {
+                action: ProjectCliCommand::Worktree(WorktreeCliRequest {
+                    name,
+                    brief: Some(brief),
+                    source,
+                    destination,
+                    branch,
+                    base: Some(base),
+                    home: Some(home),
+                }),
+                ..
+            } if name.as_str() == "feature-work"
+                && brief.as_str() == "bounded work"
+                && source == Path::new("/repo/source")
+                && destination == Path::new("/repo/worktrees/feature")
+                && branch.as_str() == "feature/exact"
+                && base.as_str() == "refs/heads/main"
+                && home.as_bytes() == &[0x33; 32]
+        ));
+
+        let existing = parse_cli([
+            OsString::from("project"),
+            OsString::from("worktree"),
+            OsString::from("existing"),
+            OsString::from("--source"),
+            OsString::from("/repo/source"),
+            OsString::from("--destination"),
+            OsString::from("/repo/worktrees/existing"),
+            OsString::from("--branch"),
+            OsString::from("feature/existing"),
+        ])
+        .expect("existing-branch worktree parses");
+        assert!(matches!(
+            existing.command,
+            CliCommand::Project {
+                action: ProjectCliCommand::Worktree(WorktreeCliRequest { base: None, .. }),
+                ..
+            }
+        ));
+
+        for arguments in [
+            vec!["project", "worktree", "name"],
+            vec![
+                "project",
+                "worktree",
+                "name",
+                "--source",
+                "relative",
+                "--destination",
+                "/worktree",
+                "--branch",
+                "feature",
+            ],
+            vec![
+                "project",
+                "worktree",
+                "name",
+                "--source",
+                "/repo",
+                "--destination",
+                "/worktree",
+                "--branch",
+                "feature",
+                "--create-branch",
+            ],
         ] {
             assert_eq!(
                 parse_cli(arguments.into_iter().map(OsString::from)),
@@ -11152,6 +11491,14 @@ mod tests {
                 error: DomainErrorDto::new("project".to_owned(), "resource_conflict".to_owned())
                     .expect("domain error"),
                 runtime: Some(RuntimeObservationDto::Failed("stop_failed".to_owned())),
+                external_state_warning: Some(ProjectExternalStateWarningDto::WorktreeMayExist {
+                    destination: ResourceLocatorDto::new(
+                        ResourceSchemeDto::WorkingTree,
+                        "/repo/worktree".to_owned(),
+                    )
+                    .expect("warning locator"),
+                    branch: "feature/exact".to_owned(),
+                }),
             },
         )
         .expect("rejected view");
@@ -11165,6 +11512,14 @@ mod tests {
         assert_eq!(value["data"]["error_code"], "resource_conflict");
         assert_eq!(value["data"]["runtime_state"], "failed");
         assert_eq!(value["data"]["runtime_code"], "stop_failed");
+        assert_eq!(
+            value["data"]["external_state_warning"]["kind"],
+            "worktree_may_exist"
+        );
+        assert_eq!(
+            value["data"]["external_state_warning"]["destination"],
+            "/repo/worktree"
+        );
 
         let uncertain = project_operation_view(
             "close",
@@ -11194,11 +11549,15 @@ mod tests {
                 stage: ProjectCommandStageDto::IdentifyingResource,
                 error: DomainErrorDto::new("effect".to_owned(), "outcome_unknown".to_owned())
                     .expect("domain error"),
+                external_state_warning: None,
             },
         )
         .expect("reconcilable view");
         let reconcilable_result = super::CliResult::ProjectOperation(reconcilable);
         assert_eq!(successful_result_exit_code(&reconcilable_result, false), 3);
+        let output = render_result(CliOutputFormat::Json, &reconcilable_result).expect("JSON");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("JSON");
+        assert!(value["data"]["external_state_warning"].is_null());
     }
 
     #[test]
@@ -11329,7 +11688,10 @@ mod tests {
                         received_head: Some(Id32::new([21; 32])),
                         received_at_unix_millis: 1_700_000_000_001,
                         outcome_fact: Id32::new([77; 32]),
-                        result: RemoteCommandResultDto::Rejected("stale_head".to_owned()),
+                        result: RemoteCommandResultDto::Rejected {
+                            error: "stale_head".to_owned(),
+                            external_state_warning: None,
+                        },
                         runtime: Some(RuntimeObservationDto::Uncertain("runtime_lost".to_owned())),
                     }),
                 },

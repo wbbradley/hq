@@ -2,7 +2,7 @@
 
 use hq_application::{
     ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage,
-    ProjectCreationRequest,
+    ProjectCreationRequest, WorktreeProvisioningRequest,
 };
 use hq_domain::{
     AccountId, AgentId, BoundedText, CommandDigest, CommandId, FactId, InstallationId, MailboxId,
@@ -92,6 +92,27 @@ fn project_command_values_are_plain_public_data() -> Result<(), Box<dyn std::err
     assert_eq!(
         ProjectCommandAction::SetPrimaryResource { resource_id },
         ProjectCommandAction::SetPrimaryResource { resource_id },
+    );
+
+    let provisioning = WorktreeProvisioningRequest {
+        mailbox_id: MailboxId::from_bytes(id(13)),
+        project_name: ShortText::new("provisioned")?,
+        brief: None,
+        source: ResourceLocator::new(
+            ResourceScheme::GitRepository,
+            BoundedText::new("/repo/.git")?,
+        ),
+        destination: ResourceLocator::new(
+            ResourceScheme::WorkingTree,
+            BoundedText::new("/repo/worktrees/new")?,
+        ),
+        branch: ShortText::new("feature/exact")?,
+        base: Some(ShortText::new("refs/heads/main")?),
+        create_branch: true,
+    };
+    assert_eq!(
+        provisioning.base.as_ref().map(ShortText::as_str),
+        Some("refs/heads/main")
     );
     Ok(())
 }

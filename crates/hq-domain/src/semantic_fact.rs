@@ -217,7 +217,24 @@ pub enum RemoteCommandResult {
     /// Canonical project facts committed at the returned head.
     Committed(FactId),
     /// Home rejected the request with a stable domain code.
-    Rejected(ErrorCode),
+    Rejected {
+        /// Stable rejection code.
+        error: ErrorCode,
+        /// External state deliberately retained by the authoritative home.
+        external_state_warning: Option<ProjectExternalStateWarning>,
+    },
+}
+
+/// External state that HQ deliberately leaves untouched after a project command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectExternalStateWarning {
+    /// The exact Git worktree or branch may exist and requires operator inspection.
+    WorktreeMayExist {
+        /// Exact requested worktree destination.
+        destination: ResourceLocator,
+        /// Exact requested branch.
+        branch: ShortText,
+    },
 }
 
 /// Exhaustive typed semantic payload catalog.

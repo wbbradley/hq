@@ -10,9 +10,10 @@ use hq_application::{
 use hq_domain::{
     AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, CommandDigest,
     CommandId, ContentText, DispatchId, DomainError, ErrorCategory, ErrorCode, FactId,
-    InstallationId, MailboxId, MessageId, OperationCorrelation, OperationId, ProjectId,
-    ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId, ResourceLocator,
-    ResourceScheme, RuntimeObservation, ShortText, ThreadId, Timestamp,
+    InstallationId, MailboxId, MessageId, OperationCorrelation, OperationId,
+    ProjectExternalStateWarning, ProjectId, ProjectResource, ProviderId, ProviderSessionId,
+    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, RuntimeObservation, ShortText,
+    ThreadId, Timestamp,
 };
 use hq_resources::{
     PathReleaseAssessment, ReleaseDecision, decide_release, normalize_absolute_path,
@@ -411,7 +412,9 @@ pub struct GitWorktreeRequest {
     pub destination: ResourceLocator,
     /// Exact validated branch spelling.
     pub branch: hq_domain::ShortText,
-    /// Whether the branch should be created from the source's current head.
+    /// Exact revision from which a new branch is created, absent for an existing branch.
+    pub base: Option<hq_domain::ShortText>,
+    /// Whether the branch should be created from the exact requested base.
     pub create_branch: bool,
 }
 
@@ -421,6 +424,7 @@ impl From<&WorktreeProvisioningRequest> for GitWorktreeRequest {
             source: request.source.clone(),
             destination: request.destination.clone(),
             branch: request.branch.clone(),
+            base: request.base.clone(),
             create_branch: request.create_branch,
         }
     }
@@ -588,6 +592,7 @@ where
                     operation_id,
                     error: error(ErrorCategory::Conflict, "project_command_identity_conflict"),
                     runtime: None,
+                    external_state_warning: None,
                 });
             }
             BeginSagaOutcome::ProjectBusy => {
@@ -595,6 +600,7 @@ where
                     operation_id,
                     error: error(ErrorCategory::Conflict, "project_command_in_progress"),
                     runtime: None,
+                    external_state_warning: None,
                 });
             }
         };
@@ -2957,6 +2963,14 @@ fn initial_command_error(record: &ProjectSagaRecord) -> Option<DomainError> {
         ));
     }
     match &record.action {
+        ProjectCommandAction::ProvisionWorktree(request)
+            if request.create_branch != request.base.is_some() =>
+        {
+            Some(error(
+                ErrorCategory::InvalidInput,
+                "project_worktree_branch_mode_invalid",
+            ))
+        }
         ProjectCommandAction::ProvisionWorktree(request) if !valid_provisioning_paths(request) => {
             Some(error(
                 ErrorCategory::InvalidInput,
@@ -3066,6 +3080,7 @@ fn retirement_from_project(
             operation_id,
             error,
             runtime,
+            ..
         } => AgentRetirementOutcome::Rejected {
             operation_id,
             error,
@@ -3075,6 +3090,7 @@ fn retirement_from_project(
             operation_id,
             stage,
             error,
+            ..
         } => AgentRetirementOutcome::Reconcilable {
             operation_id,
             stage,
@@ -3400,6 +3416,7 @@ fn terminal_outcome(record: &ProjectSagaRecord) -> Option<ProjectCommandOutcome>
             operation_id: record.operation_id,
             error: error.clone(),
             runtime: reported_runtime(record),
+            external_state_warning: external_state_warning(record),
         }),
         ProjectSagaState::Running(_) | ProjectSagaState::Reconcilable { .. } => None,
     }
@@ -3411,6 +3428,7 @@ fn progress_outcome(record: &ProjectSagaRecord) -> ProjectCommandOutcome {
             operation_id: record.operation_id,
             stage: *stage,
             error: error.clone(),
+            external_state_warning: external_state_warning(record),
         },
         ProjectSagaState::Running(stage) => ProjectCommandOutcome::Running {
             operation_id: record.operation_id,
@@ -3425,8 +3443,23 @@ fn progress_outcome(record: &ProjectSagaRecord) -> ProjectCommandOutcome {
             operation_id: record.operation_id,
             error: error.clone(),
             runtime: reported_runtime(record),
+            external_state_warning: external_state_warning(record),
         },
     }
+}
+
+fn external_state_warning(record: &ProjectSagaRecord) -> Option<ProjectExternalStateWarning> {
+    let ProjectCommandAction::ProvisionWorktree(request) = &record.action else {
+        return None;
+    };
+    matches!(
+        record.git_effect,
+        SagaEffectState::Pending | SagaEffectState::Accepted | SagaEffectState::Uncertain(_)
+    )
+    .then(|| ProjectExternalStateWarning::WorktreeMayExist {
+        destination: request.destination.clone(),
+        branch: request.branch.clone(),
+    })
 }
 
 fn reported_runtime(record: &ProjectSagaRecord) -> Option<RuntimeObservation> {
@@ -3482,6 +3515,10 @@ fn git_effect_request(
     put_locator(&mut digest, &request.source);
     put_locator(&mut digest, &request.destination);
     put(&mut digest, request.branch.as_str().as_bytes());
+    put_optional_text(
+        &mut digest,
+        request.base.as_ref().map(hq_domain::ShortText::as_str),
+    );
     put(&mut digest, &[u8::from(request.create_branch)]);
     EffectRequest::new(
         operation_id,

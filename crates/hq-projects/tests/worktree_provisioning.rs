@@ -4,7 +4,15 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Mutex},
+    fs,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use hq_application::{
@@ -14,19 +22,23 @@ use hq_application::{
 };
 use hq_domain::{
     AccountId, BoundedText, CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode,
-    FactId, InstallationId, MailboxId, OperationId, ProjectId, ProjectResource, ResourceHealth,
-    ResourceId, ResourceLocator, ResourceScheme, ShortText, Timestamp,
+    FactId, InstallationId, MailboxId, OperationId, ProjectExternalStateWarning, ProjectId,
+    ProjectResource, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, ShortText,
+    Timestamp,
 };
 use hq_projects::{
     BeginSagaOutcome, CanonicalProjectMutation, CanonicalProjectMutationAction,
-    CanonicalProjectMutationOutcome, CanonicalProjectPort, GitWorktreePort, GitWorktreeRequest,
-    GitWorktreeState, ProjectLaunchObservation, ProjectLaunchValidationRequest,
-    ProjectReleaseAssessmentRequest, ProjectResourceIdentificationRequest,
-    ProjectResourceObservation, ProjectResourcePort, ProjectResourceValidationRequest,
-    ProjectRuntimeDelivery, ProjectRuntimePort, ProjectRuntimeRequest, ProjectSagaRecord,
-    ProjectSagaStore, SagaStoreError, project_command_request_digest,
+    CanonicalProjectMutationOutcome, CanonicalProjectPort, GitWorktreeAdapter,
+    GitWorktreeAdapterConfig, GitWorktreePort, GitWorktreeRequest, GitWorktreeState,
+    ProjectLaunchObservation, ProjectLaunchValidationRequest, ProjectReleaseAssessmentRequest,
+    ProjectResourceIdentificationRequest, ProjectResourceObservation, ProjectResourcePort,
+    ProjectResourceValidationRequest, ProjectRuntimeDelivery, ProjectRuntimePort,
+    ProjectRuntimeRequest, ProjectSagaRecord, ProjectSagaStore, SagaStoreError,
+    project_command_request_digest,
 };
-use hq_resources::PathReleaseAssessment;
+use hq_resources::{ExecGit, GitCommandConfig, PathReleaseAssessment};
+
+static NEXT_GIT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Default)]
 struct MemoryStore(Arc<Mutex<BTreeMap<OperationId, ProjectSagaRecord>>>);
@@ -178,6 +190,70 @@ impl GitWorktreePort for ScriptedGit {
             .expect("creates")
             .pop_front()
             .ok_or_else(|| ApplicationError::new(ApplicationErrorCode::AdapterUnavailable))
+    }
+}
+
+struct LoseFirstAcceptedCreate<G> {
+    inner: Arc<G>,
+    lose_response: Arc<AtomicBool>,
+    create_calls: Arc<AtomicU64>,
+}
+
+impl<G> Clone for LoseFirstAcceptedCreate<G> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            lose_response: Arc::clone(&self.lose_response),
+            create_calls: Arc::clone(&self.create_calls),
+        }
+    }
+}
+
+impl<G: GitWorktreePort> GitWorktreePort for LoseFirstAcceptedCreate<G> {
+    fn lookup(
+        &self,
+        request: &EffectRequest<GitWorktreeRequest>,
+    ) -> Result<EffectOutcome<GitWorktreeState>, ApplicationError> {
+        self.inner.lookup(request)
+    }
+
+    fn create(
+        &self,
+        request: &EffectRequest<GitWorktreeRequest>,
+    ) -> Result<EffectOutcome<()>, ApplicationError> {
+        self.create_calls.fetch_add(1, Ordering::Relaxed);
+        let outcome = self.inner.create(request)?;
+        if matches!(outcome, EffectOutcome::Accepted(()))
+            && self.lose_response.swap(false, Ordering::AcqRel)
+        {
+            Ok(EffectOutcome::Uncertain(request.operation_id))
+        } else {
+            Ok(outcome)
+        }
+    }
+}
+
+struct GitDirectory(PathBuf);
+
+impl GitDirectory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "hq-project-workflow-git-{}-{}",
+            std::process::id(),
+            NEXT_GIT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).expect("Git fixture directory creates");
+        Self(path)
+    }
+
+    fn join(&self, child: &str) -> PathBuf {
+        self.0.join(child)
+    }
+}
+
+impl Drop for GitDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -358,9 +434,17 @@ fn lost_create_response_repairs_by_lookup_without_a_second_git_mutation() {
         git.clone(),
     );
 
+    let first = manager.control(request.clone()).expect("first attempt");
     assert!(matches!(
-        manager.control(request.clone()).expect("first attempt"),
-        ProjectCommandOutcome::Reconcilable { .. }
+        first,
+        ProjectCommandOutcome::Reconcilable {
+            external_state_warning: Some(ProjectExternalStateWarning::WorktreeMayExist {
+                destination,
+                branch,
+            }),
+            ..
+        } if destination.value() == "/tmp/hq-destination"
+            && branch.as_str() == "feature/exact"
     ));
     assert!(matches!(
         manager.control(request).expect("repair"),
@@ -368,6 +452,104 @@ fn lost_create_response_repairs_by_lookup_without_a_second_git_mutation() {
     ));
     assert_eq!(git.lookup_calls.lock().expect("lookup calls").len(), 2);
     assert_eq!(git.create_calls.lock().expect("create calls").len(), 1);
+}
+
+#[test]
+fn real_git_response_loss_repairs_after_manager_restart_without_a_second_mutation() {
+    let directory = GitDirectory::new();
+    let repository = directory.join("repository");
+    let destination = directory.join("worktree");
+    initialize_git_repository(&repository);
+    let mut request = provisioning_request();
+    let ProjectCommandAction::ProvisionWorktree(provisioning) = &mut request.action else {
+        panic!("provisioning request")
+    };
+    provisioning.source = path_locator(&repository);
+    provisioning.destination = path_locator(&destination);
+    provisioning.base = Some(ShortText::new("HEAD").expect("base"));
+    request.request_digest = project_command_request_digest(&request).expect("digest");
+
+    let real_git = GitWorktreeAdapter::new(
+        GitWorktreeAdapterConfig {
+            max_repository_locks: NonZeroUsize::new(4).expect("positive lock bound"),
+        },
+        ExecGit::new(GitCommandConfig {
+            executable: PathBuf::from("git"),
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 1024 * 1024,
+        })
+        .expect("bounded Git runner"),
+    );
+    let git = LoseFirstAcceptedCreate {
+        inner: Arc::new(real_git),
+        lose_response: Arc::new(AtomicBool::new(true)),
+        create_calls: Arc::new(AtomicU64::new(0)),
+    };
+    let store = MemoryStore::default();
+    let canonical = ScriptedCanonical::committing();
+
+    let first = hq_projects::ProjectWorkflowManager::with_git(
+        store.clone(),
+        canonical.clone(),
+        UnusedRuntime,
+        IdentifiedResource(identified_resource(&request)),
+        git.clone(),
+    )
+    .control(request.clone())
+    .expect("first manager reports response loss");
+    assert!(matches!(
+        first,
+        ProjectCommandOutcome::Reconcilable {
+            external_state_warning: Some(ProjectExternalStateWarning::WorktreeMayExist { .. }),
+            ..
+        }
+    ));
+    assert!(destination.join(".git").is_file());
+
+    let repaired = hq_projects::ProjectWorkflowManager::with_git(
+        store,
+        canonical,
+        UnusedRuntime,
+        IdentifiedResource(identified_resource(&request)),
+        git.clone(),
+    )
+    .control(request)
+    .expect("restarted manager reconciles exact Git state");
+    assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
+    assert_eq!(git.create_calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn post_git_canonical_rejection_warns_without_removing_external_state() {
+    let request = provisioning_request();
+    let git = ScriptedGit::new(
+        [EffectOutcome::Accepted(GitWorktreeState::ReadyToCreate)],
+        [EffectOutcome::Accepted(())],
+    );
+    let canonical = ScriptedCanonical::with_outcomes([CanonicalProjectMutationOutcome::Rejected(
+        domain_error(ErrorCategory::Conflict, "project_create_conflict"),
+    )]);
+    let outcome = hq_projects::ProjectWorkflowManager::with_git(
+        MemoryStore::default(),
+        canonical,
+        UnusedRuntime,
+        IdentifiedResource(identified_resource(&request)),
+        git,
+    )
+    .control(request)
+    .expect("definite canonical rejection");
+
+    assert!(matches!(
+        outcome,
+        ProjectCommandOutcome::Rejected {
+            external_state_warning: Some(ProjectExternalStateWarning::WorktreeMayExist {
+                destination,
+                branch,
+            }),
+            ..
+        } if destination.value() == "/tmp/hq-destination"
+            && branch.as_str() == "feature/exact"
+    ));
 }
 
 #[test]
@@ -423,6 +605,38 @@ fn non_normalized_destination_is_rejected_before_any_external_effect() {
     assert!(git.create_calls.lock().expect("create calls").is_empty());
 }
 
+#[test]
+fn branch_creation_mode_must_agree_with_the_presence_of_an_exact_base() {
+    for (base, create_branch) in [(None, true), (Some("main"), false)] {
+        let mut request = provisioning_request();
+        let ProjectCommandAction::ProvisionWorktree(provisioning) = &mut request.action else {
+            panic!("provisioning request")
+        };
+        provisioning.base = base.map(|value| ShortText::new(value).expect("base"));
+        provisioning.create_branch = create_branch;
+        request.request_digest = project_command_request_digest(&request).expect("digest");
+        let git = ScriptedGit::new([], []);
+        let manager = hq_projects::ProjectWorkflowManager::with_git(
+            MemoryStore::default(),
+            ScriptedCanonical::committing(),
+            UnusedRuntime,
+            IdentifiedResource(identified_resource(&request)),
+            git.clone(),
+        );
+
+        assert!(matches!(
+            manager.control(request).expect("definite rejection"),
+            ProjectCommandOutcome::Rejected {
+                error,
+                external_state_warning: None,
+                ..
+            } if error.code().as_str() == "project_worktree_branch_mode_invalid"
+        ));
+        assert!(git.lookup_calls.lock().expect("lookup calls").is_empty());
+        assert!(git.create_calls.lock().expect("create calls").is_empty());
+    }
+}
+
 fn provisioning_request() -> ProjectCommandRequest {
     let source = locator("/tmp/hq-source");
     let destination = locator("/tmp/hq-destination");
@@ -442,6 +656,7 @@ fn provisioning_request() -> ProjectCommandRequest {
             source,
             destination,
             branch: ShortText::new("feature/exact").expect("branch"),
+            base: Some(ShortText::new("main").expect("base")),
             create_branch: true,
         }),
     };
@@ -513,6 +728,34 @@ fn locator(value: &str) -> ResourceLocator {
         ResourceScheme::WorkingTree,
         BoundedText::new(value).expect("locator"),
     )
+}
+
+fn path_locator(path: &Path) -> ResourceLocator {
+    locator(path.to_str().expect("UTF-8 test path"))
+}
+
+fn initialize_git_repository(repository: &Path) {
+    fs::create_dir(repository).expect("repository creates");
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "hq@example.invalid"],
+        vec!["config", "user.name", "HQ Test"],
+    ] {
+        run_git(repository, &arguments);
+    }
+    fs::write(repository.join("tracked.txt"), "initial\n").expect("tracked file writes");
+    run_git(repository, &["add", "tracked.txt"]);
+    run_git(repository, &["commit", "-qm", "initial"]);
+}
+
+fn run_git(repository: &Path, arguments: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .expect("Git runs");
+    assert!(output.status.success(), "Git failed: {output:?}");
 }
 
 fn unavailable<T>() -> Result<T, ApplicationError> {

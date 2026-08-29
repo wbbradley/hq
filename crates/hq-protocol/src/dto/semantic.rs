@@ -664,9 +664,23 @@ fn remote_result(
         model::RemoteResultDto::Committed(result) => {
             domain::RemoteCommandResult::Committed(domain::FactId::from_bytes(result.head.0))
         }
-        model::RemoteResultDto::Rejected(result) => {
-            domain::RemoteCommandResult::Rejected(error_code(&result.code)?)
-        }
+        model::RemoteResultDto::Rejected(result) => domain::RemoteCommandResult::Rejected {
+            error: error_code(&result.code)?,
+            external_state_warning: result
+                .external_state_warning
+                .0
+                .as_ref()
+                .map(|warning| match warning.kind {
+                    model::ExternalStateWarningKindDto::WorktreeMayExist => {
+                        Ok(domain::ProjectExternalStateWarning::WorktreeMayExist {
+                            destination: locator(&warning.destination)?,
+                            branch: domain::ShortText::new(warning.branch.0.clone())
+                                .map_err(domain_value)?,
+                        })
+                    }
+                })
+                .transpose()?,
+        },
     })
 }
 

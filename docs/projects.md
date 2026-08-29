@@ -389,9 +389,14 @@ branch. A definite failure before Git releases the reservation, while any state 
 unowned external worktree stays reserved for explicit operator reconciliation. HQ never performs
 automatic worktree prune/reset/removal as compensation.
 
-The CLI exposes the same workflow as `hq project worktree`; both surfaces use one stable operation
-ID. A retry resumes after reservation, Git creation, or project creation rather than creating a
-second worktree or project.
+The CLI exposes the same workflow as `hq project worktree NAME --source ABSOLUTE_PATH
+--destination ABSOLUTE_PATH --branch BRANCH [--create-branch BASE] [--brief TEXT] [--home
+INSTALLATION_ID]`; both surfaces use one stable operation ID. `--create-branch BASE` creates the
+named branch from that exact validated commit, while omitting it requires the branch to exist. A
+retry resumes after reservation, Git creation, or project creation rather than creating a second
+worktree or project. Rejected or reconcilable results carry a typed `worktree-may-exist` warning
+with the exact destination and branch whenever an external worktree may remain. The same warning is
+bound into a signed remote-home result instead of being inferred from error prose.
 
 ## Authority, consistency, and transport
 

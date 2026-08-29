@@ -1312,7 +1312,7 @@ fn validate_remote_control(
                                 && project_id_of(candidate) == Some(*project_id)
                         })
                 }
-                RemoteCommandResult::Rejected(_) => true,
+                RemoteCommandResult::Rejected { .. } => true,
             };
             if fact.author().installation_id() != target_home
                 || !valid_project_home(fact, target_home, context)

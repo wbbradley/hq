@@ -118,7 +118,7 @@ semantic catalog and reducer; the protocol accepts only role names applicable to
 | FCT-045 | 45 | ProjectOutputRecorded | hq/canonical | `{"project":hex,"output":hex,"dispatch":hex,"binding":binding,"thread":hex,"message":message}` | complete provenance and message; message ID equals output, purpose is `project-output`, and message project equals project |
 | FCT-046 | 46 | RemoteProjectCommandRequested | hq/control | `{"command":hex,"digest":hex,"project":hex,"target_home":hex,"expected_head":hex,"operation":operation,"body":content}` | stable command/digest, project/home/head, exact operation and inert body; target home equals control scope |
 | FCT-047 | 47 | RemoteProjectCommandReceipt | hq/control | `{"command":hex,"digest":hex,"project":hex,"received_head":hex,"received_at":milliseconds}` | fields match cited request; received head is a canonical project head; author is scoped home |
-| FCT-048 | 48 | RemoteProjectCommandOutcome | hq/control | `{"command":hex,"digest":hex,"project":hex,"result":remote-result,"runtime":optional-runtime}` | command tuple matches request; result is committed head or rejected code; author is scoped home |
+| FCT-048 | 48 | RemoteProjectCommandOutcome | hq/control | `{"command":hex,"digest":hex,"project":hex,"result":remote-result,"runtime":optional-runtime}` | command tuple matches request; result is committed head or rejected code plus optional external-state warning; author is scoped home |
 
 ## Remote result DTO
 
@@ -126,7 +126,10 @@ semantic catalog and reducer; the protocol accepts only role names applicable to
 
 - `{"state":"committed","head":hex}` maps to `RemoteCommandResult::Committed`; the exact
   canonical head is also a typed `c` parent.
-- `{"state":"rejected","code":short}` maps to `RemoteCommandResult::Rejected`.
+- `{"state":"rejected","code":short,"external_state_warning":warning-or-null}` maps to
+  `RemoteCommandResult::Rejected`. The nullable member is required. `warning` is exactly
+  `{"kind":"worktree-may-exist","destination":locator,"branch":short}` and is signed as part of
+  the result.
 
 No boolean success shorthand, null result, error object, or Go command-result alias is accepted.
 

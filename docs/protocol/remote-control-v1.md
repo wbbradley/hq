@@ -102,8 +102,13 @@ at the stated head; it does not prove commitment or external execution.
 
 ```text
 {"state":"committed","head":hex}
-{"state":"rejected","code":text}
+{"state":"rejected","code":text,"external_state_warning":warning-or-null}
 ```
+
+`warning` is exactly
+`{"kind":"worktree-may-exist","destination":locator,"branch":short}`. The nullable member is
+required. It identifies external Git state that HQ deliberately leaves for operator inspection;
+it is part of the signed terminal result rather than an inference from the rejection code.
 
 `runtime` uses canonical v1's runtime-observation DTO. A committed outcome cites its canonical head
 with namespace `c` and cites request/receipt control parents with namespace `r`. A rejected outcome

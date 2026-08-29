@@ -261,11 +261,13 @@ impl<S: ProjectSagaStore> ProjectSagaManager<S> {
                 operation_id,
                 error: domain_error(ErrorCategory::Conflict, "project_command_identity_conflict")?,
                 runtime: None,
+                external_state_warning: None,
             }),
             BeginSagaOutcome::ProjectBusy => Ok(ProjectCommandOutcome::Rejected {
                 operation_id,
                 error: domain_error(ErrorCategory::Conflict, "project_command_in_progress")?,
                 runtime: None,
+                external_state_warning: None,
             }),
         }
     }
@@ -300,11 +302,13 @@ fn outcome(record: &ProjectSagaRecord) -> ProjectCommandOutcome {
             operation_id: record.operation_id,
             error: error.clone(),
             runtime: None,
+            external_state_warning: None,
         },
         ProjectSagaState::Reconcilable { stage, error } => ProjectCommandOutcome::Reconcilable {
             operation_id: record.operation_id,
             stage: *stage,
             error: error.clone(),
+            external_state_warning: None,
         },
     }
 }
