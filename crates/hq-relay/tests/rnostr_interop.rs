@@ -130,14 +130,16 @@ fn request_retained(connection: &mut dyn RelayConnection, subscription: &str, re
 
 fn assert_retained(
     connection: &mut dyn RelayConnection,
-    subscription: &str,
+    subscription_prefix: &str,
     expected_wrapper: &[u8],
     receiver: &EnvelopeCodec,
     canonical: &VerifiedSemanticFact,
 ) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut observed = false;
-    request_retained(connection, subscription, receiver.public_key());
+    let mut attempt = 0_u32;
+    let mut subscription = format!("{subscription_prefix}-{attempt}");
+    request_retained(connection, &subscription, receiver.public_key());
     loop {
         let frame = receive_frame(connection, deadline);
         match frame {
@@ -158,7 +160,7 @@ fn assert_retained(
             RelayFrame::EndOfStoredEvents(candidate) if candidate == subscription => {
                 if observed {
                     connection
-                        .send(RelayFrame::Close(subscription.to_owned()))
+                        .send(RelayFrame::Close(subscription.clone()))
                         .expect("completed retained subscription closes");
                     return;
                 }
@@ -167,10 +169,12 @@ fn assert_retained(
                     "controlled relay never made the acknowledged wrapper query-visible"
                 );
                 connection
-                    .send(RelayFrame::Close(subscription.to_owned()))
+                    .send(RelayFrame::Close(subscription.clone()))
                     .expect("empty retained subscription closes before retry");
                 std::thread::sleep(Duration::from_millis(25));
-                request_retained(connection, subscription, receiver.public_key());
+                attempt = attempt.checked_add(1).expect("retry count remains bounded");
+                subscription = format!("{subscription_prefix}-{attempt}");
+                request_retained(connection, &subscription, receiver.public_key());
             }
             RelayFrame::Closed {
                 subscription: candidate,
