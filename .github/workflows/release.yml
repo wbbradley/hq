@@ -1,27 +1,96 @@
-name: Release
+name: Rust release candidate
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  prepare:
+    name: Prepare native release matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
     steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.25.x"
-          cache: true
-      - uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Generate matrix from the acceptance contract
+        id: targets
+        run: |
+          targets=$(scripts/rust-qualification-matrix-json.sh)
+          jq -e '.include | length == 4' <<<"$targets" >/dev/null
+          printf 'targets=%s\n' "$targets" >>"$GITHUB_OUTPUT"
+
+  package:
+    name: Native release artifact (${{ matrix.rust_host }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.targets) }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Verify native Rust host
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_RUST_HOST: ${{ matrix.rust_host }}
+        run: |
+          actual_rust_host=$(rustc -vV | sed -n 's/^host: //p')
+          test "$actual_rust_host" = "$EXPECTED_RUST_HOST"
+      - name: Build revision-stamped release executable
+        env:
+          HQ_BUILD_COMMIT: ${{ github.sha }}
+        run: cargo build --locked --release -p hq-node --bin hq
+      - name: Package and verify installed lifecycle
+        env:
+          RUST_HOST: ${{ matrix.rust_host }}
+        run: |
+          artifact_directory="$RUNNER_TEMP/hq-rust-release"
+          mkdir -p "$artifact_directory"
+          scripts/package-rust-release.sh \
+            "$PWD/target/release/hq" "$artifact_directory" "${{ github.sha }}" "$RUST_HOST"
+          scripts/verify-rust-release-artifact.sh \
+            "$artifact_directory" "${{ github.sha }}" "$RUST_HOST"
+      - name: Upload native release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-release-${{ matrix.rust_host }}
+          path: ${{ runner.temp }}/hq-rust-release
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    name: Verify native release matrix
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Test release artifact validator
+        run: scripts/test-rust-release-artifacts.sh
+      - name: Download native release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: rust-release-*
+          path: ${{ runner.temp }}/hq-rust-release-matrix
+          merge-multiple: true
+      - name: Verify complete release matrix
+        run: |
+          scripts/verify-rust-release-matrix.sh \
+            "$RUNNER_TEMP/hq-rust-release-matrix" "${{ github.sha }}" \
+            "$RUNNER_TEMP/hq-rust-release-matrix/release-manifest.json"
+          jq . "$RUNNER_TEMP/hq-rust-release-matrix/release-manifest.json" \
+            >>"$GITHUB_STEP_SUMMARY"
+      - name: Upload combined release-candidate evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-release-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/hq-rust-release-matrix
+          if-no-files-found: error
+          retention-days: 30
