@@ -8893,3 +8893,34 @@ finds no remaining debug or release `hq` daemon.
   it, and show stale or conflicted data as typed actionable state. Complete this work when mailbox
   browsing is fully snapshot-driven and pure model/render tests prove canonical presentation and
   state preservation.
+
+## 2026-08-29 — Assignment-aware agent status
+
+Agent rows now describe what a person can act on: active agents without project work are
+`unassigned`; assigned agents name their project and distinguish `setting up` from `ready`; blocked
+or conflicting states say `needs attention`; and retired agents say `retired`. The mapping is based
+on typed lifecycle and current-assignment evidence rather than display strings or inferred runtime
+presence.
+
+Agent details retain the exact project, assignment, provider, session, and block evidence behind
+the plain-language status. Mapper, pure-model, and responsive render tests cover unassigned,
+assigned, blocked, conflicted, and retired states. Formatting, architecture checks, strict Clippy,
+the locked full-workspace test suite, and the all-target/all-feature workspace build pass.
+
+### Original plan entry
+
+### Present assignment-aware agent status
+
+Replace the generic `waiting` presentation with typed user-facing agent status derived from the
+agent lifecycle and current project assignments, without parsing display strings or inventing
+runtime presence.
+
+- Present a newly created active agent with no project assignment as `unassigned`.
+- Present an assigned agent with the project name and distinguish configuring, available/runnable,
+  and blocked assignments in plain language supported by typed snapshot fields.
+- Reserve `needs attention` for conflicts or blocked state and `retired` for retirement. Do not claim
+  `running` or `idle` without typed runtime-presence evidence.
+- Keep stable IDs, provider/session selection, and assignment evidence available in details rather
+  than using them as the primary row status.
+- Add mapper, pure-model, and render tests for unassigned, assigned, blocked, conflicted, and retired
+  agents at narrow and wide terminal sizes. Update `docs/rust/tui.md` with the status vocabulary.
