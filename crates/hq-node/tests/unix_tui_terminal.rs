@@ -24,8 +24,8 @@ use support::TestDirectory;
 
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
-// This is a deadlock watchdog for installed process tests, not a product latency budget.
-const PROCESS_COMPLETION_WATCHDOG: Duration = Duration::from_secs(30);
+// This is an inactivity watchdog for installed process tests, not a product latency budget.
+const PROCESS_INACTIVITY_WATCHDOG: Duration = Duration::from_secs(30);
 
 #[test]
 fn explicit_and_bare_tui_render_and_restore_the_pseudoterminal() {
@@ -501,7 +501,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut master = File::from(pair.master);
     fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).expect("master is nonblocking");
 
-    let deadline = Instant::now() + PROCESS_COMPLETION_WATCHDOG;
+    let mut last_output_at = Instant::now();
     let mut bytes = Vec::new();
     let mut initial_key_sent = false;
     let mut content_sent = false;
@@ -511,6 +511,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut resource_commit_sent = false;
     let mut exit_sent = false;
     let status = loop {
+        let previous_output_length = bytes.len();
         let mut buffer = [0_u8; 8192];
         match master.read(&mut buffer) {
             Ok(0) => {}
@@ -518,6 +519,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             Err(error) if error.kind() == ErrorKind::WouldBlock => {}
             Err(error) if error.raw_os_error() == Some(5) => {}
             Err(error) => panic!("pseudoterminal read failed: {error}"),
+        }
+        if bytes.len() > previous_output_length {
+            last_output_at = Instant::now();
         }
         let alternate_screen_entered = bytes
             .windows(ENTER_ALTERNATE_SCREEN.len())
@@ -1013,7 +1017,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         if let Some(status) = child.try_wait().expect("TUI process status") {
             break status;
         }
-        if Instant::now() >= deadline {
+        if Instant::now().duration_since(last_output_at) >= PROCESS_INACTIVITY_WATCHDOG {
             let _ = child.kill();
             let _ = child.wait();
             panic!("TUI process timed out; bytes: {bytes:?}");
