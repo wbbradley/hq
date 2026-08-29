@@ -9,7 +9,7 @@ use hq_tui::{
     UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject, UiProjectAction,
     UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
     UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
-    UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection, render, update,
+    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -36,12 +36,13 @@ fn compact_layout_matches_snapshot_without_mutating_the_model() {
 }
 
 #[test]
-fn mailbox_footer_explains_thread_and_exact_message_actions() {
+fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     let summary = render_text(&ready_model(UiSize {
         width: 104,
         height: 18,
     }));
-    assert!(summary.contains("Enter open thread for archive/restore"));
+    assert!(summary.contains("Enter open · d message · n note · ? help · q quit"));
+    assert!(!summary.contains("archive/restore"));
     assert!(!summary.contains("a/u state"));
 
     let conversation = render_text(&conversation_model(UiSize {
@@ -61,7 +62,7 @@ fn mailbox_footer_explains_thread_and_exact_message_actions() {
     ));
     assert!(archived.contains("u restore"));
     assert!(!archived.contains("a archive"));
-    assert!(archived.contains("Enter info · Esc back · q quit"));
+    assert!(archived.contains("u restore · Enter info · Esc back · ? help"));
 
     let confirmation = update(
         conversation_model(UiSize {
@@ -106,6 +107,84 @@ fn identity_only_state_renders_setup_and_recovery_actions() {
     assert!(rendered.contains("hq human create"));
     assert!(rendered.contains("hq human join"));
     assert!(rendered.contains("hq relay sync"));
+}
+
+#[test]
+fn contextual_help_covers_every_section_with_and_without_a_selection() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 18,
+        },
+    ] {
+        for section in [
+            UiSection::Inbox,
+            UiSection::Sent,
+            UiSection::Archived,
+            UiSection::Agents,
+            UiSection::Projects,
+        ] {
+            for selected in [false, true] {
+                let context = contextual_help_model(size, section, selected);
+                let rendered = render_text(&context);
+                assert!(rendered.contains("Help"));
+                assert!(rendered.contains("What this is"));
+                assert!(
+                    rendered.contains(section_help_phrase(section)),
+                    "missing section phrase for {section:?} at {size:?}:\n{rendered}"
+                );
+                assert!(rendered.contains("Available actions"));
+                assert!(rendered.contains("? / Esc — close help"));
+                if selected {
+                    assert!(rendered.contains("Selected: Example item"));
+                    assert!(rendered.contains("State: needs attention"));
+                } else {
+                    assert!(rendered.contains("No item is selected"));
+                }
+
+                let technical = update(context, UiEvent::Input(UiInput::Character('t')))
+                    .expect("technical help page")
+                    .model;
+                let technical = render_text(&technical);
+                assert!(technical.contains("Technical details"));
+                assert!(technical.contains("Connection: ready"));
+                assert!(technical.contains("Recovery evidence: none"));
+                if selected {
+                    assert!(technical.contains("Stable item ID: example-id"));
+                }
+            }
+        }
+    }
+
+    let context = contextual_help_model(
+        UiSize {
+            width: 64,
+            height: 18,
+        },
+        UiSection::Inbox,
+        true,
+    );
+    let failed = update(
+        context,
+        UiEvent::ClientFailed {
+            generation: 4,
+            failure: hq_tui::UiFailure {
+                code: "connection_lost".to_owned(),
+                action: "waiting to reconnect".to_owned(),
+            },
+        },
+    )
+    .expect("failure evidence while help is open");
+    let technical = update(failed.model, UiEvent::Input(UiInput::Character('t')))
+        .expect("show failure evidence")
+        .model;
+    let rendered = render_text(&technical);
+    assert!(rendered.contains("Recovery evidence: connection_lost"));
+    assert!(rendered.contains("waiting to reconnect"));
 }
 
 #[test]
@@ -730,6 +809,74 @@ fn render_text(model: &UiModel) -> String {
         .expect("render buffer");
     assert_eq!(model, &before);
     snapshot_text(terminal.backend().buffer())
+}
+
+fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> UiModel {
+    let rows = selected.then(|| {
+        vec![UiRow {
+            id: "example-id".to_owned(),
+            title: "Example item".to_owned(),
+            detail: "requires a decision".to_owned(),
+            state: UiRowState::Attention,
+            kind: match section {
+                UiSection::Agents => UiRowKind::Agent,
+                UiSection::Projects => UiRowKind::Project,
+                UiSection::Inbox | UiSection::Sent | UiSection::Archived => UiRowKind::Conversation,
+            },
+        }]
+    });
+    let rows_for = |candidate| {
+        if candidate == section {
+            rows.clone().unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    };
+    let mut model = loaded_snapshot_model(
+        size,
+        UiSnapshot {
+            revision: 42,
+            human_state: UiHumanState::Ready,
+            inbox_rows: rows_for(UiSection::Inbox),
+            sent_rows: rows_for(UiSection::Sent),
+            archived_rows: rows_for(UiSection::Archived),
+            agent_rows: rows_for(UiSection::Agents),
+            project_rows: rows_for(UiSection::Projects),
+            direct_targets: Vec::new(),
+            agents: Vec::new(),
+            projects: Vec::new(),
+        },
+    );
+    let section_steps = match section {
+        UiSection::Inbox => 0,
+        UiSection::Sent => 1,
+        UiSection::Archived => 2,
+        UiSection::Agents => 3,
+        UiSection::Projects => 4,
+    };
+    let section_input = if size.width >= 96 {
+        UiInput::NextItem
+    } else {
+        UiInput::NextSection
+    };
+    for _ in 0..section_steps {
+        model = update(model, UiEvent::Input(section_input.clone()))
+            .expect("select help section")
+            .model;
+    }
+    update(model, UiEvent::Input(UiInput::Character('?')))
+        .expect("open contextual help")
+        .model
+}
+
+const fn section_help_phrase(section: UiSection) -> &'static str {
+    match section {
+        UiSection::Inbox => "Inbox contains messages",
+        UiSection::Sent => "Sent contains conversations",
+        UiSection::Archived => "Archived contains conversations",
+        UiSection::Agents => "Agents are named workers",
+        UiSection::Projects => "Projects describe work",
+    }
 }
 
 fn ready_model(size: UiSize) -> UiModel {

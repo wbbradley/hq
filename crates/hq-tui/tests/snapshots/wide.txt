@@ -15,4 +15,4 @@
                        │
                        │
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- ←/h nav · ↑/↓ select · Enter open thread for archive/restore · d direct · n note · q quit
+ Enter open · d message · n note · ? help · q quit

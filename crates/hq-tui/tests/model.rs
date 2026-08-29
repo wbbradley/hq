@@ -8,8 +8,8 @@ use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase, UiAgentLifecycle,
     UiAgentMailbox, UiAgentModal, UiAgentProjectAssignment, UiAgentSession, UiAgentStatus,
     UiConnectionState, UiConversationEntry, UiConversationEntryKind, UiConversationPage,
-    UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHumanState, UiInput, UiMailboxAction,
-    UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
+    UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput,
+    UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
     UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectModal,
     UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
@@ -182,6 +182,62 @@ fn logical_selection_focus_section_resize_and_quit_are_pure_transitions() {
     let quit = update(resized.model, UiEvent::Input(UiInput::Quit)).expect("quit transition");
     assert!(quit.model.should_exit());
     assert_eq!(quit.effects, vec![UiEffect::Exit]);
+}
+
+#[test]
+fn contextual_help_freezes_background_actions_and_survives_resize() {
+    let loaded = loaded_model(snapshot(1, &["alpha", "beta"]));
+    let selected = loaded.selected_row().map(str::to_owned);
+
+    let opened = update(loaded, UiEvent::Input(UiInput::Character('?'))).expect("open help");
+    assert_eq!(opened.model.help_page(), Some(UiHelpPage::Context));
+    assert_eq!(redraw_count(&opened.effects), 1);
+
+    let frozen = update(opened.model, UiEvent::Input(UiInput::NextItem))
+        .expect("help owns navigation input");
+    assert_eq!(frozen.model.selected_row(), selected.as_deref());
+    assert_eq!(frozen.model.help_page(), Some(UiHelpPage::Context));
+    assert!(frozen.effects.is_empty());
+
+    let quit = update(
+        frozen.model.clone(),
+        UiEvent::Input(UiInput::Character('q')),
+    )
+    .expect("quit remains available from help");
+    assert!(quit.model.should_exit());
+    assert_eq!(quit.effects, vec![UiEffect::Exit]);
+
+    let technical =
+        update(frozen.model, UiEvent::Input(UiInput::Character('t'))).expect("show technical help");
+    assert_eq!(technical.model.help_page(), Some(UiHelpPage::Technical));
+    assert_eq!(redraw_count(&technical.effects), 1);
+
+    let invalidated = update(technical.model, UiEvent::Invalidated { revision: 2 })
+        .expect("refresh while help is open");
+    let refresh_id = snapshot_effect(&invalidated.effects);
+    let refreshed = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: refresh_id,
+            snapshot: snapshot(2, &["alpha", "beta"]),
+        },
+    )
+    .expect("authoritative refresh while help is open");
+    assert_eq!(refreshed.model.help_page(), Some(UiHelpPage::Technical));
+
+    let resized = update(
+        refreshed.model,
+        UiEvent::Resized(UiSize {
+            width: 64,
+            height: 18,
+        }),
+    )
+    .expect("resize while help is open");
+    assert_eq!(resized.model.help_page(), Some(UiHelpPage::Technical));
+
+    let closed = update(resized.model, UiEvent::Input(UiInput::Escape)).expect("close help");
+    assert_eq!(closed.model.help_page(), None);
+    assert_eq!(redraw_count(&closed.effects), 1);
 }
 
 #[test]
@@ -746,13 +802,17 @@ fn activity_never_becomes_a_reply_or_state_action_target() {
     ]);
     let activity = update(opened, UiEvent::Input(UiInput::NextItem)).expect("select activity");
     for shortcut in ['r', 'a', 'u'] {
-        let inert = update(
+        let guided = update(
             activity.model.clone(),
             UiEvent::Input(UiInput::Character(shortcut)),
         )
-        .expect("activity shortcut is inert");
-        assert!(inert.model.mailbox_modal().is_none());
-        assert!(inert.effects.is_empty());
+        .expect("activity shortcut explains its prerequisite");
+        assert!(guided.model.mailbox_modal().is_none());
+        assert_eq!(
+            guided.model.transient_help(),
+            Some("select a message; activity updates cannot be replied to, archived, or restored")
+        );
+        assert_eq!(redraw_count(&guided.effects), 1);
     }
 
     let message =
@@ -793,15 +853,17 @@ fn summary_state_shortcuts_explain_that_an_exact_message_must_be_selected() {
             .expect("summary state shortcut provides guidance");
         assert!(attempted.model.last_failure().is_none());
         assert_eq!(
-            attempted.model.mailbox_hint(),
-            Some("open the thread with Enter, then select the message to archive or restore")
+            attempted.model.transient_help(),
+            Some(
+                "open the conversation with Enter, then select a message to reply, archive, or restore"
+            )
         );
         assert_eq!(redraw_count(&attempted.effects), 1);
         assert!(attempted.model.mailbox_modal().is_none());
 
         let dismissed = update(attempted.model, UiEvent::Input(UiInput::NextItem))
             .expect("the next input dismisses transient guidance");
-        assert!(dismissed.model.mailbox_hint().is_none());
+        assert!(dismissed.model.transient_help().is_none());
         assert_eq!(redraw_count(&dismissed.effects), 1);
     }
 }

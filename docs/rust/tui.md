@@ -181,16 +181,30 @@ and `h`/`l` move focus between navigation and content. In compact layouts, Left/
 continue to move through the horizontal section navigation.
 
 The header reports the selected section, connection state, authoritative revision, and background
-refresh state without hiding retained rows. Rows expose
-selection, stable presentation state, and bounded detail. An activated conversation uses a
+refresh state without hiding retained rows. Rows expose selection, stable presentation state, and
+bounded detail. `?` opens contextual help from every ordinary section screen, whether or not that
+section contains or selects an item. The first help page explains the section's purpose, the
+selected item's plain-language state, and every action available in that context. `t` switches to a
+separate technical page containing stable identity, authoritative revision, connection state, and
+current recovery evidence; `?` or Escape closes help. Help freezes background user actions while it
+is open but survives resize and authoritative refresh. Text-entry dialogs continue to accept a
+literal `?` as content.
+
+Ordinary footers stay focused on immediate actions such as `Enter open`, `c create`, and `? help`;
+the contextual overlay owns the complete shortcut reference. Guidance from an inapplicable
+shortcut is transient presentation state rather than an operation failure. It explains the missing
+prerequisite—for example, selecting a message rather than an activity update—and disappears on the
+next meaningful input. Stable failures remain visually and behaviorally distinct.
+
+An activated conversation uses a
 responsive second pane, centers rendering around the stable fact anchor, labels activity as
 non-actionable, and expands only typed routing, semantics, evidence, or activity sections. Enter
 opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
-page; Escape collapses details and then the conversation. The summary footer explains that Enter
-opens the thread for per-message archive/restore actions. The conversation footer spells out the
-applicable `a archive` or `u restore` control for the selected exact message alongside discoverable
-controls for reply, direct, self-note, navigation, and quit, or the latest stable failure
-code and operator action. The Agents footer exposes search, inspect, and create controls; responsive
+page; Escape collapses details and then the conversation. The conversation footer spells out the
+applicable `a archive` or `u restore` control for the selected exact message; contextual help carries
+the wider reply, direct-message, note, navigation, and quit reference. Stable failures replace the
+ordinary footer with their code and operator action. The Agents and Projects footers expose their
+primary inspect, create, search, and help controls; responsive
 modal tests cover wide and compact draft, agent-detail, and managed-switch rendering. Styling
 supplements these text markers and is not the sole carrier of state.
 

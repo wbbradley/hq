@@ -99,6 +99,15 @@ pub enum UiFocus {
     Conversation,
 }
 
+/// Page shown by the persistent contextual-help overlay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiHelpPage {
+    /// Plain-language purpose, state, and available actions.
+    Context,
+    /// Stable identities and recovery evidence for the current context.
+    Technical,
+}
+
 /// Shell-normalized terminal input understood by the pure model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiInput {
@@ -1087,15 +1096,19 @@ pub struct UiFailure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UiMailboxHint {
-    SelectMessage,
+enum UiTransientHelp {
+    OpenConversationMessage,
+    SelectConversationMessage,
 }
 
-impl UiMailboxHint {
+impl UiTransientHelp {
     const fn text(self) -> &'static str {
         match self {
-            Self::SelectMessage => {
-                "open the thread with Enter, then select the message to archive or restore"
+            Self::OpenConversationMessage => {
+                "open the conversation with Enter, then select a message to reply, archive, or restore"
+            }
+            Self::SelectConversationMessage => {
+                "select a message; activity updates cannot be replied to, archived, or restored"
             }
         }
     }
@@ -1418,6 +1431,7 @@ pub struct UiModel {
     project_modal: Option<UiProjectModal>,
     agent_search: String,
     project_search: String,
+    help_page: Option<UiHelpPage>,
     required_revision: Option<u64>,
     pending_snapshot: Option<PendingSnapshot>,
     pending_conversation: Option<PendingConversation>,
@@ -1431,7 +1445,7 @@ pub struct UiModel {
     autosave_timer: Option<EffectId>,
     next_effect_id: Option<NonZeroU64>,
     last_failure: Option<UiFailure>,
-    mailbox_hint: Option<UiMailboxHint>,
+    transient_help: Option<UiTransientHelp>,
     started: bool,
     should_exit: bool,
 }
@@ -1455,6 +1469,7 @@ impl UiModel {
             project_modal: None,
             agent_search: String::new(),
             project_search: String::new(),
+            help_page: None,
             required_revision: None,
             pending_snapshot: None,
             pending_conversation: None,
@@ -1468,7 +1483,7 @@ impl UiModel {
             autosave_timer: None,
             next_effect_id: NonZeroU64::new(1),
             last_failure: None,
-            mailbox_hint: None,
+            transient_help: None,
             started: false,
             should_exit: false,
         }
@@ -1519,6 +1534,17 @@ impl UiModel {
     /// Returns the selected stable row identity.
     pub fn selected_row(&self) -> Option<&str> {
         self.selected_row.as_deref()
+    }
+
+    /// Borrows the selected row's current authoritative presentation data.
+    pub fn selected_row_data(&self) -> Option<&UiRow> {
+        let selected = self.selected_row.as_deref()?;
+        self.rows()?.iter().find(|row| row.id == selected)
+    }
+
+    /// Returns the currently visible contextual-help page.
+    pub const fn help_page(&self) -> Option<UiHelpPage> {
+        self.help_page
     }
 
     /// Borrows the reducer-ordered conversation loaded for the selected row.
@@ -1613,9 +1639,9 @@ impl UiModel {
         self.last_failure.as_ref()
     }
 
-    /// Returns transient mailbox guidance produced by the latest input.
-    pub fn mailbox_hint(&self) -> Option<&'static str> {
-        self.mailbox_hint.map(UiMailboxHint::text)
+    /// Returns transient prerequisite guidance produced by the latest input.
+    pub fn transient_help(&self) -> Option<&'static str> {
+        self.transient_help.map(UiTransientHelp::text)
     }
 
     /// Reports whether the model requested loop exit.
@@ -1957,7 +1983,7 @@ pub fn update(mut model: UiModel, event: UiEvent) -> Result<UiTransition, UiErro
     let mut effects = Vec::new();
     match event {
         UiEvent::Started => start(&mut model, &mut effects)?,
-        UiEvent::Input(value) => apply_input(&mut model, value, &mut effects)?,
+        UiEvent::Input(value) => apply_input(&mut model, &value, &mut effects)?,
         UiEvent::Resized(viewport) => {
             if model.viewport != viewport {
                 model.viewport = viewport;
@@ -2043,31 +2069,23 @@ fn start(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<(), UiError
 
 fn apply_input(
     model: &mut UiModel,
-    input: UiInput,
+    input: &UiInput,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
-    if model.project_modal.is_some() {
-        let changed = apply_project_modal_input(model, input, effects)?;
+    if let Some(changed) = apply_open_modal_input(model, input, effects)? {
         if changed {
             effects.push(UiEffect::RequestRedraw);
         }
         return Ok(());
     }
-    if model.agent_modal.is_some() {
-        let changed = apply_agent_modal_input(model, input, effects)?;
+    if model.help_page.is_some() {
+        let changed = apply_help_input(model, input, effects);
         if changed {
             effects.push(UiEffect::RequestRedraw);
         }
         return Ok(());
     }
-    if model.mailbox_modal.is_some() {
-        let changed = apply_modal_input(model, input, effects)?;
-        if changed {
-            effects.push(UiEffect::RequestRedraw);
-        }
-        return Ok(());
-    }
-    let dismissed_mailbox_hint = model.mailbox_hint.take().is_some();
+    let dismissed_transient_help = model.transient_help.take().is_some();
     let changed = match input {
         UiInput::Quit => {
             if model.should_exit {
@@ -2135,13 +2153,58 @@ fn apply_input(
         UiInput::Activate => activate(model, effects)?,
         UiInput::LoadMore => load_more(model, effects)?,
         UiInput::Escape => escape(model),
-        UiInput::Character(character) => mailbox_shortcut(model, character, effects)?,
+        UiInput::Character('?') => {
+            model.help_page = Some(UiHelpPage::Context);
+            true
+        }
+        UiInput::Character(character) => mailbox_shortcut(model, *character, effects)?,
         UiInput::Paste(_) | UiInput::Backspace => false,
     };
-    if changed || dismissed_mailbox_hint {
+    if changed || dismissed_transient_help {
         effects.push(UiEffect::RequestRedraw);
     }
     Ok(())
+}
+
+fn apply_open_modal_input(
+    model: &mut UiModel,
+    input: &UiInput,
+    effects: &mut Vec<UiEffect>,
+) -> Result<Option<bool>, UiError> {
+    if model.project_modal.is_some() {
+        return apply_project_modal_input(model, input.clone(), effects).map(Some);
+    }
+    if model.agent_modal.is_some() {
+        return apply_agent_modal_input(model, input.clone(), effects).map(Some);
+    }
+    if model.mailbox_modal.is_some() {
+        return apply_modal_input(model, input.clone(), effects).map(Some);
+    }
+    Ok(None)
+}
+
+fn apply_help_input(model: &mut UiModel, input: &UiInput, effects: &mut Vec<UiEffect>) -> bool {
+    match input {
+        UiInput::Quit | UiInput::Character('q' | 'Q') => {
+            if !model.should_exit {
+                model.should_exit = true;
+                effects.push(UiEffect::Exit);
+            }
+            false
+        }
+        UiInput::Escape | UiInput::Character('?') => {
+            model.help_page = None;
+            true
+        }
+        UiInput::Character('t' | 'T') => {
+            model.help_page = Some(match model.help_page {
+                Some(UiHelpPage::Context) => UiHelpPage::Technical,
+                Some(UiHelpPage::Technical) | None => UiHelpPage::Context,
+            });
+            true
+        }
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4175,7 +4238,7 @@ fn mailbox_shortcut(
             }
             let Some(target) = selected_message_target(model).filter(|target| target.reply_allowed)
             else {
-                return Ok(false);
+                return Ok(show_select_message_help(model));
             };
             model.open_draft(
                 UiMailboxDraftTarget::Reply {
@@ -4307,11 +4370,7 @@ fn selected_message_target(model: &UiModel) -> Option<UiMessageTarget> {
 
 fn confirm_message_state(model: &mut UiModel, restore: bool) -> bool {
     let Some(target) = selected_message_target(model) else {
-        if model.conversation.is_none() && model.selected_row_is_conversation() {
-            model.mailbox_hint = Some(UiMailboxHint::SelectMessage);
-            return true;
-        }
-        return false;
+        return show_select_message_help(model);
     };
     let state = model
         .conversation
@@ -4340,6 +4399,18 @@ fn confirm_message_state(model: &mut UiModel, restore: bool) -> bool {
         },
     });
     true
+}
+
+fn show_select_message_help(model: &mut UiModel) -> bool {
+    let help = if model.conversation.is_some() {
+        Some(UiTransientHelp::SelectConversationMessage)
+    } else if model.selected_row_is_conversation() {
+        Some(UiTransientHelp::OpenConversationMessage)
+    } else {
+        None
+    };
+    model.transient_help = help;
+    help.is_some()
 }
 
 fn draft_action(target: &UiMailboxDraftTarget) -> UiMailboxAction {

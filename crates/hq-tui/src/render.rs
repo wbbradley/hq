@@ -13,10 +13,11 @@ use ratatui::{
 use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
     UiAgentProjectAssignment, UiAgentStatus, UiConnectionState, UiConversationEntry,
-    UiConversationEntryKind, UiFocus, UiHumanState, UiMailboxAction, UiMailboxDraftTarget,
-    UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel,
-    UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread, UiRow,
-    UiRowKind, UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
+    UiConversationEntryKind, UiFocus, UiHelpPage, UiHumanState, UiMailboxAction,
+    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
+    UiMessageState, UiModel, UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome,
+    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection,
+    model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -48,6 +49,168 @@ pub fn render(frame: &mut Frame<'_>, model: &UiModel) {
     render_mailbox_modal(frame, model, content);
     render_agent_modal(frame, model, content);
     render_project_modal(frame, model, content);
+    render_help(frame, model, content);
+}
+
+fn render_help(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+    let Some(page) = model.help_page() else {
+        return;
+    };
+    let width = available.width.saturating_sub(4).clamp(1, 88);
+    let height = available.height.clamp(1, 18);
+    let area = Rect {
+        x: available.x + available.width.saturating_sub(width) / 2,
+        y: available.y + available.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let (title, lines) = match page {
+        UiHelpPage::Context => (" Help ", contextual_help_lines(model)),
+        UiHelpPage::Technical => (" Technical details ", technical_help_lines(model)),
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(Style::new().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn contextual_help_lines(model: &UiModel) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled("What this is", Style::new().fg(Color::Cyan).bold()),
+        Line::from(section_help_text(model.section())),
+    ];
+    if let Some(row) = model.selected_row_data() {
+        lines.push(Line::from(format!("Selected: {}", row.title)));
+        lines.push(Line::from(format!(
+            "State: {} · {}",
+            row_state_help_label(row.state),
+            row.detail
+        )));
+    } else {
+        lines.push(Line::from("No item is selected."));
+    }
+    lines.push(Line::styled(
+        "Available actions",
+        Style::new().fg(Color::Cyan).bold(),
+    ));
+    lines.extend(section_help_actions(model));
+    lines.push(Line::from(
+        "q — quit · t — technical details · ? / Esc — close help",
+    ));
+    lines
+}
+
+fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!(
+            "Section: {} · Connection: {}",
+            section_label(model.section()),
+            connection_label(model.connection())
+        )),
+        Line::from(model.snapshot().map_or_else(
+            || "Authoritative revision: not loaded".to_owned(),
+            |snapshot| format!("Authoritative revision: {}", snapshot.revision),
+        )),
+    ];
+    if let Some(row) = model.selected_row_data() {
+        lines.push(Line::from(format!("Stable item ID: {}", row.id)));
+        lines.push(Line::from(format!(
+            "Item type: {}",
+            row_kind_label(row.kind)
+        )));
+        lines.push(Line::from(format!(
+            "Presentation state: {}",
+            row_state_help_label(row.state)
+        )));
+        lines.push(Line::from(
+            "Open the item with Enter for its complete typed evidence.",
+        ));
+    } else {
+        lines.push(Line::from("Stable item ID: none selected"));
+    }
+    if let Some(failure) = model.last_failure() {
+        lines.push(Line::styled(
+            format!("Recovery evidence: {} · {}", failure.code, failure.action),
+            Style::new().fg(Color::Yellow),
+        ));
+    } else {
+        lines.push(Line::from("Recovery evidence: none"));
+    }
+    lines.push(Line::from("t — contextual help · ? / Esc — close help"));
+    lines
+}
+
+const fn section_help_text(section: UiSection) -> &'static str {
+    match section {
+        UiSection::Inbox => "Inbox contains messages and updates that need your attention.",
+        UiSection::Sent => "Sent contains conversations you have started or replied to.",
+        UiSection::Archived => "Archived contains conversations you have put away.",
+        UiSection::Agents => "Agents are named workers you can assign and contact.",
+        UiSection::Projects => "Projects describe work and the resources it owns.",
+    }
+}
+
+fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
+    let mut actions = vec![
+        Line::from("↑/↓ or j/k — select · ←/→ or h/l — sections"),
+        Line::from("Tab / Shift-Tab — change focus"),
+    ];
+    match model.section() {
+        UiSection::Inbox | UiSection::Sent | UiSection::Archived => {
+            if model.conversation().is_some() {
+                actions.push(Line::from(
+                    "↑/↓ — select message · Enter — details · Esc — close conversation",
+                ));
+                actions.push(Line::from(
+                    "r — reply · a — archive · u — restore · PgDn — load more",
+                ));
+            } else if model.selected_row_data().is_some() {
+                actions.push(Line::from("Enter — open selected conversation"));
+            }
+            actions.push(Line::from(
+                "d — write a direct message · n — write a personal note",
+            ));
+        }
+        UiSection::Agents => actions.push(Line::from(if model.selected_row_data().is_some() {
+            "/ — search · Enter — inspect selected agent · c — create agent"
+        } else {
+            "/ — search · c — create agent"
+        })),
+        UiSection::Projects => {
+            actions.push(Line::from(if model.selected_row_data().is_some() {
+                "/ — search · Enter — inspect selected project · c — create from folder"
+            } else {
+                "/ — search · c — create from folder"
+            }));
+            actions.push(Line::from("w — create an isolated Git worktree"));
+        }
+    }
+    actions
+}
+
+const fn row_state_help_label(state: UiRowState) -> &'static str {
+    match state {
+        UiRowState::Open => "open",
+        UiRowState::Waiting => "waiting",
+        UiRowState::Archived => "archived",
+        UiRowState::Attention => "needs attention",
+    }
+}
+
+const fn row_kind_label(kind: UiRowKind) -> &'static str {
+    match kind {
+        UiRowKind::Conversation => "conversation",
+        UiRowKind::Agent => "agent",
+        UiRowKind::Project => "project",
+        UiRowKind::Diagnostic => "diagnostic",
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1461,45 +1624,35 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
 }
 
 fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
-    let content = model.last_failure().map_or_else(
-        || {
-            if let Some(hint) = model.mailbox_hint() {
-                return format!(" Hint · {hint}");
-            }
-            if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
-                " ↑/↓ or j/k section · Enter/→/l content · q quit".to_owned()
-            } else if model.focus() == UiFocus::Navigation {
-                " ←/→ or h/l section · ↑/↓ or j/k select · Enter open · q quit".to_owned()
-            } else if model.section() == UiSection::Agents {
-                format!(
-                    " ←/h navigation · / search ({}) · Enter inspect · c create · q quit",
-                    if model.agent_search().is_empty() {
-                        "all"
-                    } else {
-                        model.agent_search()
-                    }
-                )
-            } else if model.section() == UiSection::Projects {
-                format!(
-                    " ←/h navigation · / search ({}) · Enter inspect · c existing · w worktree · q quit",
-                    if model.project_search().is_empty() {
-                        "all"
-                    } else {
-                        model.project_search()
-                    }
-                )
-            } else if model.focus() == UiFocus::Conversation {
-                conversation_footer(model)
-            } else if model.viewport().width >= WIDE_WIDTH {
-                " ←/h nav · ↑/↓ select · Enter open thread for archive/restore · d direct · n note · q quit"
-                    .to_owned()
-            } else {
-                " ↑/↓ select · Enter open thread for archive/restore · q quit".to_owned()
-            }
-        },
-        |failure| format!(" {} · {}", failure.code, failure.action),
-    );
-    let style = if model.last_failure().is_some() {
+    let content = if let Some(page) = model.help_page() {
+        match page {
+            UiHelpPage::Context => " t technical details · ?/Esc close help".to_owned(),
+            UiHelpPage::Technical => " t contextual help · ?/Esc close help".to_owned(),
+        }
+    } else if let Some(failure) = model.last_failure() {
+        format!(" {} · {}", failure.code, failure.action)
+    } else if let Some(hint) = model.transient_help() {
+        format!(" Hint · {hint}")
+    } else if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
+        " ↑/↓ section · Enter content · ? help · q quit".to_owned()
+    } else if model.focus() == UiFocus::Navigation {
+        " ←/→ section · Enter content · ? help · q quit".to_owned()
+    } else if matches!(model.section(), UiSection::Agents | UiSection::Projects) {
+        if model.selected_row_data().is_some() {
+            " Enter inspect · c create · / search · ? help · q quit".to_owned()
+        } else {
+            " c create · / search · ? help · q quit".to_owned()
+        }
+    } else if model.focus() == UiFocus::Conversation {
+        conversation_footer(model)
+    } else if model.selected_row_data().is_none() {
+        " d message · n note · ? help · q quit".to_owned()
+    } else if model.viewport().width >= WIDE_WIDTH {
+        " Enter open · d message · n note · ? help · q quit".to_owned()
+    } else {
+        " Enter open · ? help · q quit".to_owned()
+    };
+    let style = if model.last_failure().is_some() && model.help_page().is_none() {
         Style::new().fg(Color::Yellow)
     } else {
         Style::new().fg(Color::DarkGray)
@@ -1519,11 +1672,11 @@ fn conversation_footer(model: &UiModel) -> String {
         let anchor = model.conversation_anchor()?;
         conversation.entries.iter().find(|entry| entry.id == anchor)
     });
-    let mut controls = Vec::new();
-    if model.viewport().width >= WIDE_WIDTH {
-        controls.push("←/h nav");
-    }
-    controls.push("↑/↓ msg");
+    let mut controls = vec![if model.viewport().width >= WIDE_WIDTH {
+        "↑/↓ message"
+    } else {
+        "↑/↓ msg"
+    }];
     if selected
         .and_then(|entry| entry.message_target)
         .is_some_and(|target| target.reply_allowed)
@@ -1535,16 +1688,17 @@ fn conversation_footer(model: &UiModel) -> String {
         Some((_, UiMessageState::Archived)) => controls.push("u restore"),
         Some((_, UiMessageState::Rejected)) | None => {}
     }
-    if model.viewport().width >= WIDE_WIDTH {
-        controls.push("Enter details");
-        controls.push("Esc close");
-        controls.push("d direct");
-        controls.push("n note");
+    controls.push(if model.viewport().width >= WIDE_WIDTH {
+        "Enter details"
     } else {
-        controls.push("Enter info");
-        controls.push("Esc back");
-    }
-    controls.push("q quit");
+        "Enter info"
+    });
+    controls.push(if model.viewport().width >= WIDE_WIDTH {
+        "Esc close"
+    } else {
+        "Esc back"
+    });
+    controls.push("? help");
     format!(" {}", controls.join(" · "))
 }
 

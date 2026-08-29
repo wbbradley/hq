@@ -13,4 +13,4 @@ Inbox · Sent · Archived · Agents · Projects
      attention · relay needs attention
 
 ────────────────────────────────────────────────────────────────────────
- ↑/↓ select · Enter open thread for archive/restore · q quit
+ Enter open · ? help · q quit
