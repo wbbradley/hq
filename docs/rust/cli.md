@@ -170,6 +170,15 @@ Because resource namespaces and adapters are co-located with the immutable home 
 a project homed on another installation fails closed instead of inspecting the caller's local path.
 The unshipped local API v1 is evolved in place with no compatibility shape or storage migration.
 
+`project resource add PROJECT_ID --path ABSOLUTE_PATH [--primary]`, `remove PROJECT_ID RESOURCE_ID
+[--force]`, `replace PROJECT_ID RESOURCE_ID --path ABSOLUTE_PATH`, and `primary PROJECT_ID
+RESOURCE_ID` use the same durable expected-head command path as lifecycle control. Add and replace
+allocate stable resource identities from the command operation and carry only normalized display
+locators; the immutable home performs canonical identification before its serialized mutation.
+Replace is atomic, and primary selection changes the future launch default without reordering
+membership. Remove requires force only while assigned. None of these commands deletes or modifies
+paths, repositories, worktrees, branches, or files, including across close and archive.
+
 `project create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]` creates an
 initially open project over one existing directory. The caller sends only its normalized absolute
 spelling; the selected authoritative home resolves the canonical filesystem identity and requires a

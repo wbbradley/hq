@@ -10,13 +10,12 @@ use crate::protocol::v1::{
     MAX_CANONICAL_EVIDENCE_BYTES, MAX_CANONICAL_EVIDENCE_ITEMS, MailboxAddressDto,
     MessagePurposeDto, MutationAttemptDto, MutationOutcomeDto, MutationRequest, PeerRouteBlockDto,
     PeerRouteCandidateDto, PresentationKindDto, ProjectCommandActionDto, ProjectCommandOutcomeDto,
-    ProjectCommandRequestDto, ProjectCommandStageDto, ProjectResourceDto, RelayAccessDto,
-    RelayAuthenticationDto, RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto,
-    RemoteCommandProgressDto, RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto,
-    ResourceInspectionRequestDto, ResourceInspectionResultDto, ResourceLocatorDto,
-    ResourceReleaseStateDto, ResourceSchemeDto, RuntimeObservationDto, SessionControlDto,
-    SnapshotItem, StateHealthDto, StateRepairReportDto, SubscriptionRequestDto,
-    SynchronizationRequestDto, ValueError,
+    ProjectCommandRequestDto, ProjectCommandStageDto, RelayAccessDto, RelayAuthenticationDto,
+    RelayConfigurationDto, RelayPolicyStatusDto, RelayStatusDto, RemoteCommandProgressDto,
+    RemoteCommandResultDto, RepositoryContextDto, ResourceHealthDto, ResourceInspectionRequestDto,
+    ResourceInspectionResultDto, ResourceLocatorDto, ResourceReleaseStateDto, ResourceSchemeDto,
+    RuntimeObservationDto, SessionControlDto, SnapshotItem, StateHealthDto, StateRepairReportDto,
+    SubscriptionRequestDto, SynchronizationRequestDto, ValueError,
 };
 use hq_application::{
     AgentLaunchContext, AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest,
@@ -35,9 +34,9 @@ use hq_application::{
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
     MailboxAddress, MailboxId, MessagePurpose, OperationId, Page, PageCursor, PresentationKind,
-    ProjectId, ProjectResource, ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES,
-    RemoteCommandResult, ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, Revision,
-    RuntimeObservation, ShortText, ThreadId, Timestamp,
+    ProjectId, ProviderId, ProviderSessionId, RESOURCE_LOCATOR_MAX_BYTES, RemoteCommandResult,
+    ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, Revision, RuntimeObservation,
+    ShortText, ThreadId, Timestamp,
 };
 
 /// Converts bounded exact canonical evidence into its wire representation.
@@ -1008,6 +1007,7 @@ pub fn project_command_request_to_v1(request: &ProjectCommandRequest) -> Project
     }
 }
 
+#[allow(clippy::too_many_lines, reason = "closed project action conversion")]
 fn project_action_to_v1(action: &ProjectCommandAction) -> ProjectCommandActionDto {
     match action {
         ProjectCommandAction::Create(request) => {
@@ -1067,10 +1067,12 @@ fn project_action_to_v1(action: &ProjectCommandAction) -> ProjectCommandActionDt
             }
         }
         ProjectCommandAction::AddResource {
+            resource_id,
             resource,
             make_primary,
         } => ProjectCommandActionDto::AddResource {
-            resource: project_resource_to_v1(resource),
+            resource_id: id32(resource_id.as_bytes()),
+            resource: locator_to_v1(resource),
             make_primary: *make_primary,
         },
         ProjectCommandAction::RemoveResource { resource_id, force } => {
@@ -1081,11 +1083,18 @@ fn project_action_to_v1(action: &ProjectCommandAction) -> ProjectCommandActionDt
         }
         ProjectCommandAction::ReplaceResource {
             old_resource_id,
-            new_resource,
+            new_resource_id,
+            resource,
         } => ProjectCommandActionDto::ReplaceResource {
             old_resource_id: id32(old_resource_id.as_bytes()),
-            new_resource: project_resource_to_v1(new_resource),
+            new_resource_id: id32(new_resource_id.as_bytes()),
+            resource: locator_to_v1(resource),
         },
+        ProjectCommandAction::SetPrimaryResource { resource_id } => {
+            ProjectCommandActionDto::SetPrimaryResource {
+                resource_id: id32(resource_id.as_bytes()),
+            }
+        }
         ProjectCommandAction::ProvisionWorktree(request) => {
             ProjectCommandActionDto::ProvisionWorktree(
                 crate::protocol::v1::WorktreeProvisioningRequestDto {
@@ -1102,15 +1111,6 @@ fn project_action_to_v1(action: &ProjectCommandAction) -> ProjectCommandActionDt
                 },
             )
         }
-    }
-}
-
-fn project_resource_to_v1(resource: &ProjectResource) -> ProjectResourceDto {
-    ProjectResourceDto {
-        resource_id: id32(resource.resource_id.as_bytes()),
-        display_locator: locator_to_v1(&resource.display_locator),
-        canonical_locator: locator_to_v1(&resource.canonical_locator),
-        health: resource_health_to_v1(resource.health),
     }
 }
 
@@ -1282,10 +1282,12 @@ fn project_action_from_v1(
             }
         }
         ProjectCommandActionDto::AddResource {
+            resource_id,
             resource,
             make_primary,
         } => ProjectCommandAction::AddResource {
-            resource: project_resource_from_v1(resource)?,
+            resource_id: ResourceId::from_bytes(resource_id.bytes()),
+            resource: locator_from_v1(resource)?,
             make_primary,
         },
         ProjectCommandActionDto::RemoveResource { resource_id, force } => {
@@ -1296,11 +1298,18 @@ fn project_action_from_v1(
         }
         ProjectCommandActionDto::ReplaceResource {
             old_resource_id,
-            new_resource,
+            new_resource_id,
+            resource,
         } => ProjectCommandAction::ReplaceResource {
             old_resource_id: ResourceId::from_bytes(old_resource_id.bytes()),
-            new_resource: project_resource_from_v1(new_resource)?,
+            new_resource_id: ResourceId::from_bytes(new_resource_id.bytes()),
+            resource: locator_from_v1(resource)?,
         },
+        ProjectCommandActionDto::SetPrimaryResource { resource_id } => {
+            ProjectCommandAction::SetPrimaryResource {
+                resource_id: ResourceId::from_bytes(resource_id.bytes()),
+            }
+        }
         ProjectCommandActionDto::ProvisionWorktree(request) => {
             ProjectCommandAction::ProvisionWorktree(WorktreeProvisioningRequest {
                 mailbox_id: MailboxId::from_bytes(request.mailbox_id.bytes()),
@@ -1318,24 +1327,6 @@ fn project_action_from_v1(
             })
         }
     })
-}
-
-fn project_resource_from_v1(resource: ProjectResourceDto) -> Result<ProjectResource, ValueError> {
-    Ok(ProjectResource {
-        resource_id: ResourceId::from_bytes(resource.resource_id.bytes()),
-        display_locator: locator_from_v1(resource.display_locator)?,
-        canonical_locator: locator_from_v1(resource.canonical_locator)?,
-        health: resource_health_from_v1(resource.health),
-    })
-}
-
-const fn resource_health_from_v1(health: ResourceHealthDto) -> ResourceHealth {
-    match health {
-        ResourceHealthDto::Unknown => ResourceHealth::Unknown,
-        ResourceHealthDto::Healthy => ResourceHealth::Healthy,
-        ResourceHealthDto::Degraded => ResourceHealth::Degraded,
-        ResourceHealthDto::Unavailable => ResourceHealth::Unavailable,
-    }
 }
 
 fn runtime_to_v1(runtime: &RuntimeObservation) -> RuntimeObservationDto {

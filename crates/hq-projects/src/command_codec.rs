@@ -154,7 +154,8 @@ enum WireAction {
         force: bool,
     },
     AddResource {
-        resource: WireProjectResource,
+        resource_id: String,
+        resource: WireLocator,
         make_primary: bool,
     },
     RemoveResource {
@@ -163,7 +164,11 @@ enum WireAction {
     },
     ReplaceResource {
         old_resource_id: String,
-        new_resource: WireProjectResource,
+        new_resource_id: String,
+        resource: WireLocator,
+    },
+    SetPrimaryResource {
+        resource_id: String,
     },
     ProvisionWorktree {
         request: WireProvisioning,
@@ -219,10 +224,12 @@ impl From<&ProjectCommandAction> for WireAction {
                 force: *force,
             },
             ProjectCommandAction::AddResource {
+                resource_id,
                 resource,
                 make_primary,
             } => Self::AddResource {
-                resource: WireProjectResource::from(resource),
+                resource_id: id_text(resource_id.as_bytes()),
+                resource: WireLocator::from(resource),
                 make_primary: *make_primary,
             },
             ProjectCommandAction::RemoveResource { resource_id, force } => Self::RemoveResource {
@@ -231,10 +238,15 @@ impl From<&ProjectCommandAction> for WireAction {
             },
             ProjectCommandAction::ReplaceResource {
                 old_resource_id,
-                new_resource,
+                new_resource_id,
+                resource,
             } => Self::ReplaceResource {
                 old_resource_id: id_text(old_resource_id.as_bytes()),
-                new_resource: WireProjectResource::from(new_resource),
+                new_resource_id: id_text(new_resource_id.as_bytes()),
+                resource: WireLocator::from(resource),
+            },
+            ProjectCommandAction::SetPrimaryResource { resource_id } => Self::SetPrimaryResource {
+                resource_id: id_text(resource_id.as_bytes()),
             },
             ProjectCommandAction::ProvisionWorktree(request) => Self::ProvisionWorktree {
                 request: WireProvisioning::from(request),
@@ -294,9 +306,11 @@ impl TryFrom<WireAction> for ProjectCommandAction {
                 force,
             },
             WireAction::AddResource {
+                resource_id,
                 resource,
                 make_primary,
             } => Self::AddResource {
+                resource_id: ResourceId::from_bytes(parse_id(&resource_id)?),
                 resource: resource.try_into()?,
                 make_primary,
             },
@@ -306,10 +320,15 @@ impl TryFrom<WireAction> for ProjectCommandAction {
             },
             WireAction::ReplaceResource {
                 old_resource_id,
-                new_resource,
+                new_resource_id,
+                resource,
             } => Self::ReplaceResource {
                 old_resource_id: ResourceId::from_bytes(parse_id(&old_resource_id)?),
-                new_resource: new_resource.try_into()?,
+                new_resource_id: ResourceId::from_bytes(parse_id(&new_resource_id)?),
+                resource: resource.try_into()?,
+            },
+            WireAction::SetPrimaryResource { resource_id } => Self::SetPrimaryResource {
+                resource_id: ResourceId::from_bytes(parse_id(&resource_id)?),
             },
             WireAction::ProvisionWorktree { request } => {
                 Self::ProvisionWorktree(request.try_into()?)
@@ -634,6 +653,9 @@ enum WireCanonicalAction {
         old_resource_id: String,
         new_resource: WireProjectResource,
     },
+    SetPrimaryResource {
+        resource_id: String,
+    },
     Configure {
         assignment: String,
         agent: String,
@@ -707,6 +729,11 @@ impl From<&CanonicalProjectMutationAction> for WireCanonicalAction {
                 old_resource_id: id_text(old_resource_id.as_bytes()),
                 new_resource: WireProjectResource::from(new_resource),
             },
+            CanonicalProjectMutationAction::SetPrimaryResource { resource_id } => {
+                Self::SetPrimaryResource {
+                    resource_id: id_text(resource_id.as_bytes()),
+                }
+            }
             CanonicalProjectMutationAction::Configure(intent) => Self::Configure {
                 assignment: id_text(intent.assignment_id.as_bytes()),
                 agent: id_text(intent.agent_id.as_bytes()),
@@ -803,6 +830,9 @@ impl TryFrom<WireCanonicalAction> for CanonicalProjectMutationAction {
             } => Self::ReplaceResource {
                 old_resource_id: ResourceId::from_bytes(parse_id(&old_resource_id)?),
                 new_resource: new_resource.try_into()?,
+            },
+            WireCanonicalAction::SetPrimaryResource { resource_id } => Self::SetPrimaryResource {
+                resource_id: ResourceId::from_bytes(parse_id(&resource_id)?),
             },
             WireCanonicalAction::Configure {
                 assignment,

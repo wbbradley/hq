@@ -54,11 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[cli/high] Add desired-resource mutation commands** — Expose resource add, remove, replace, and
-  primary selection through the stable project-command path. Preserve stable resource identities,
-  exact expected heads, and explicit force semantics. Test overlap conflicts, stale heads, response
-  loss, restart, and no external deletion or mutation on close, archive, or remove.
-
 - **[cli/high] Add recoverable worktree provisioning and audit non-TUI parity** — Expose exact Git
   worktree provisioning with destination reservation, source/base/branch validation, optional
   branch creation, local or remote home, durable progress, reconciliation, and orphaned external

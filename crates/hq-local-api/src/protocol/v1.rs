@@ -944,17 +944,6 @@ pub fn resource_inspection_request_digest(
     Ok(CommandDigest::from_bytes(digest.finalize().into()))
 }
 
-/// Desired project resource carried by a control request.
-#[allow(missing_docs)]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectResourceDto {
-    pub resource_id: Id32,
-    pub display_locator: ResourceLocatorDto,
-    pub canonical_locator: ResourceLocatorDto,
-    pub health: ResourceHealthDto,
-}
-
 /// Exact worktree provisioning input.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1015,7 +1004,8 @@ pub enum ProjectCommandActionDto {
         force: bool,
     },
     AddResource {
-        resource: ProjectResourceDto,
+        resource_id: Id32,
+        resource: ResourceLocatorDto,
         make_primary: bool,
     },
     RemoveResource {
@@ -1024,7 +1014,11 @@ pub enum ProjectCommandActionDto {
     },
     ReplaceResource {
         old_resource_id: Id32,
-        new_resource: ProjectResourceDto,
+        new_resource_id: Id32,
+        resource: ResourceLocatorDto,
+    },
+    SetPrimaryResource {
+        resource_id: Id32,
     },
     ProvisionWorktree(WorktreeProvisioningRequestDto),
 }
@@ -2590,7 +2584,8 @@ fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), Va
         | ProjectCommandActionDto::Close { .. }
         | ProjectCommandActionDto::SetArchived { .. }
         | ProjectCommandActionDto::RetireAgent { .. }
-        | ProjectCommandActionDto::RemoveResource { .. } => Ok(()),
+        | ProjectCommandActionDto::RemoveResource { .. }
+        | ProjectCommandActionDto::SetPrimaryResource { .. } => Ok(()),
         ProjectCommandActionDto::Activate {
             provider,
             resume_session,
@@ -2610,10 +2605,7 @@ fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), Va
             validate_locator(launch_directory)
         }
         ProjectCommandActionDto::AddResource { resource, .. }
-        | ProjectCommandActionDto::ReplaceResource {
-            new_resource: resource,
-            ..
-        } => validate_project_resource(resource),
+        | ProjectCommandActionDto::ReplaceResource { resource, .. } => validate_locator(resource),
         ProjectCommandActionDto::Create(request) => {
             validate_text(&request.project_name, SHORT_TEXT_MAX_BYTES)?;
             if let Some(brief) = &request.brief {
@@ -2631,15 +2623,6 @@ fn validate_project_request(request: &ProjectCommandRequestDto) -> Result<(), Va
             validate_text(&request.branch, SHORT_TEXT_MAX_BYTES)
         }
     }
-}
-
-fn validate_project_resource(resource: &ProjectResourceDto) -> Result<(), ValueError> {
-    validate_locator(&resource.display_locator)?;
-    validate_locator(&resource.canonical_locator)?;
-    if resource.display_locator.scheme != resource.canonical_locator.scheme {
-        return Err(ValueError::InvalidValueCombination);
-    }
-    Ok(())
 }
 
 fn validate_runtime(runtime: &RuntimeObservationDto) -> Result<(), ValueError> {

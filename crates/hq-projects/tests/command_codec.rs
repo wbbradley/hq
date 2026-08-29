@@ -75,6 +75,30 @@ fn existing_resource_creation_body_round_trips_canonically() {
 }
 
 #[test]
+fn desired_resource_intent_bodies_round_trip_without_caller_observations() {
+    let resource_id = ResourceId::from_bytes([41; 32]);
+    for action in [
+        ProjectCommandAction::AddResource {
+            resource_id,
+            resource: locator("/repo/added"),
+            make_primary: true,
+        },
+        ProjectCommandAction::ReplaceResource {
+            old_resource_id: ResourceId::from_bytes([42; 32]),
+            new_resource_id: resource_id,
+            resource: locator("/repo/replaced"),
+        },
+        ProjectCommandAction::SetPrimaryResource { resource_id },
+    ] {
+        let encoded = encode_project_command_action(&action).expect("action encodes");
+        assert_eq!(
+            decode_project_command_action(&encoded).expect("action decodes"),
+            action
+        );
+    }
+}
+
+#[test]
 fn unknown_version_and_noncanonical_json_are_rejected() {
     let unknown =
         hq_domain::ContentText::new("hq-project-command-v2:{}").expect("bounded unknown body");
@@ -205,6 +229,9 @@ fn in_flight_resource_mutations_round_trip_exactly() {
         CanonicalProjectMutationAction::ReplaceResource {
             old_resource_id: ResourceId::from_bytes([32; 32]),
             new_resource: resource.clone(),
+        },
+        CanonicalProjectMutationAction::SetPrimaryResource {
+            resource_id: resource.resource_id,
         },
     ] {
         let mutation = CanonicalProjectMutation {

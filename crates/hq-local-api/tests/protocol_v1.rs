@@ -4,9 +4,10 @@
 
 use hq_application::{ProjectCommandAction, ProjectCommandRequest};
 use hq_domain::{
-    AccountId, BoundedSet, CausalReferences, CommandDigest, CommandId, EncryptionPublicKey, FactId,
-    FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS, OperationId, ProjectId,
-    SemanticPayload, ShortText, SigningPublicKey, Timestamp,
+    AccountId, BoundedSet, BoundedText, CausalReferences, CommandDigest, CommandId,
+    EncryptionPublicKey, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
+    OperationId, ProjectId, ResourceId, ResourceLocator, ResourceScheme, SemanticPayload,
+    ShortText, SigningPublicKey, Timestamp,
 };
 use hq_local_api::protocol::v1::{
     AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
@@ -277,6 +278,25 @@ fn lifecycle_project_commands_round_trip_through_the_application_boundary() {
         ProjectCommandAction::Close { force: true },
         ProjectCommandAction::SetArchived { archived: true },
         ProjectCommandAction::SetArchived { archived: false },
+        ProjectCommandAction::AddResource {
+            resource_id: ResourceId::from_bytes([8; 32]),
+            resource: ResourceLocator::new(
+                ResourceScheme::WorkingTree,
+                BoundedText::new("/work/added".to_owned()).expect("locator"),
+            ),
+            make_primary: true,
+        },
+        ProjectCommandAction::ReplaceResource {
+            old_resource_id: ResourceId::from_bytes([9; 32]),
+            new_resource_id: ResourceId::from_bytes([10; 32]),
+            resource: ResourceLocator::new(
+                ResourceScheme::WorkingTree,
+                BoundedText::new("/work/replaced".to_owned()).expect("locator"),
+            ),
+        },
+        ProjectCommandAction::SetPrimaryResource {
+            resource_id: ResourceId::from_bytes([11; 32]),
+        },
     ] {
         let request = ProjectCommandRequest {
             command_id: CommandId::from_bytes([1; 32]),

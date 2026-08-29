@@ -113,6 +113,7 @@ enum MutationBoundary {
     Open,
     AddResource,
     ReplaceResource,
+    SetPrimaryResource,
     Configure,
     MakeRunnable,
     BeginClosing,
@@ -256,7 +257,8 @@ impl CanonicalProjectPort for ScriptedCanonical {
         }
         state.mutations.push(action.clone());
         match action.clone() {
-            CanonicalProjectMutationAction::Create { .. } => {}
+            CanonicalProjectMutationAction::Create { .. }
+            | CanonicalProjectMutationAction::SetPrimaryResource { .. } => {}
             CanonicalProjectMutationAction::Open => {
                 state.snapshot.lifecycle = CanonicalProjectLifecycle::Open;
             }
@@ -341,6 +343,9 @@ impl CanonicalProjectPort for ScriptedCanonical {
             CanonicalProjectMutationAction::ReplaceResource { .. } => {
                 Some(MutationBoundary::ReplaceResource)
             }
+            CanonicalProjectMutationAction::SetPrimaryResource { .. } => {
+                Some(MutationBoundary::SetPrimaryResource)
+            }
             CanonicalProjectMutationAction::Configure(_) => Some(MutationBoundary::Configure),
             CanonicalProjectMutationAction::MakeRunnable { .. } => {
                 Some(MutationBoundary::MakeRunnable)
@@ -388,6 +393,18 @@ impl CanonicalProjectPort for ScriptedCanonical {
 struct HealthyResources;
 
 impl ProjectResourcePort for HealthyResources {
+    fn identify_resource(
+        &self,
+        request: &EffectRequest<hq_projects::ProjectResourceIdentificationRequest>,
+    ) -> Result<EffectOutcome<ProjectResource>, ApplicationError> {
+        Ok(EffectOutcome::Accepted(ProjectResource {
+            resource_id: request.body.resource_id,
+            display_locator: request.body.destination.clone(),
+            canonical_locator: request.body.destination.clone(),
+            health: ResourceHealth::Healthy,
+        }))
+    }
+
     fn validate_resources(
         &self,
         request: &EffectRequest<ProjectResourceValidationRequest>,
@@ -476,6 +493,24 @@ impl ScriptedResources {
 }
 
 impl ProjectResourcePort for ScriptedResources {
+    fn identify_resource(
+        &self,
+        request: &EffectRequest<hq_projects::ProjectResourceIdentificationRequest>,
+    ) -> Result<EffectOutcome<ProjectResource>, ApplicationError> {
+        if matches!(self.behavior, ResourceBehavior::UncertainResources) && self.take_first_call() {
+            return Ok(EffectOutcome::Uncertain(request.operation_id));
+        }
+        if matches!(self.behavior, ResourceBehavior::ChangedResource) {
+            return Ok(EffectOutcome::Accepted(ProjectResource {
+                resource_id: request.body.resource_id,
+                display_locator: locator("/observed/elsewhere"),
+                canonical_locator: locator("/observed/elsewhere"),
+                health: ResourceHealth::Healthy,
+            }));
+        }
+        HealthyResources.identify_resource(request)
+    }
+
     fn validate_resources(
         &self,
         request: &EffectRequest<ProjectResourceValidationRequest>,
@@ -1171,7 +1206,8 @@ fn explicit_open_and_resource_mutations_commit_one_canonical_transition_each() {
         vec![CanonicalProjectMutationAction::Open]
     );
 
-    let added = resource(30, "/work/added");
+    let mut added = resource(30, "/work/added");
+    added.health = ResourceHealth::Healthy;
     let add_canonical = ScriptedCanonical::new(snapshot(CanonicalProjectLifecycle::Open));
     let add_manager = ProjectWorkflowManager::new(
         MemorySagaStore::default(),
@@ -1181,7 +1217,8 @@ fn explicit_open_and_resource_mutations_commit_one_canonical_transition_each() {
     );
     let add = add_manager
         .control(request_for(ProjectCommandAction::AddResource {
-            resource: added.clone(),
+            resource_id: added.resource_id,
+            resource: added.display_locator.clone(),
             make_primary: true,
         }))
         .expect("add");
@@ -1194,7 +1231,8 @@ fn explicit_open_and_resource_mutations_commit_one_canonical_transition_each() {
         }]
     );
 
-    let replacement = resource(31, "/work/replacement");
+    let mut replacement = resource(31, "/work/replacement");
+    replacement.health = ResourceHealth::Healthy;
     let replace_canonical = ScriptedCanonical::new(snapshot(CanonicalProjectLifecycle::Open));
     let old_resource = replace_canonical.snapshot_value().resources[0].resource_id;
     let replace_manager = ProjectWorkflowManager::new(
@@ -1206,7 +1244,8 @@ fn explicit_open_and_resource_mutations_commit_one_canonical_transition_each() {
     let replace = replace_manager
         .control(request_for(ProjectCommandAction::ReplaceResource {
             old_resource_id: old_resource,
-            new_resource: replacement.clone(),
+            new_resource_id: replacement.resource_id,
+            resource: replacement.display_locator.clone(),
         }))
         .expect("replace");
     assert!(matches!(replace, ProjectCommandOutcome::Completed { .. }));
@@ -1216,6 +1255,60 @@ fn explicit_open_and_resource_mutations_commit_one_canonical_transition_each() {
             old_resource_id: old_resource,
             new_resource: replacement,
         }]
+    );
+
+    let primary_canonical = ScriptedCanonical::new(snapshot(CanonicalProjectLifecycle::Open));
+    let primary_id = primary_canonical.snapshot_value().resources[0].resource_id;
+    let primary_manager = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        primary_canonical.clone(),
+        ScriptedRuntime::default(),
+        HealthyResources,
+    );
+    let primary = primary_manager
+        .control(request_for(ProjectCommandAction::SetPrimaryResource {
+            resource_id: primary_id,
+        }))
+        .expect("select primary");
+    assert!(matches!(primary, ProjectCommandOutcome::Completed { .. }));
+    assert_eq!(
+        primary_canonical.mutations(),
+        vec![CanonicalProjectMutationAction::SetPrimaryResource {
+            resource_id: primary_id,
+        }]
+    );
+}
+
+#[test]
+fn primary_selection_response_loss_replays_one_exact_canonical_mutation() {
+    let initial = snapshot(CanonicalProjectLifecycle::Open);
+    let resource_id = initial.resources[0].resource_id;
+    let canonical =
+        ScriptedCanonical::uncertain_once(initial, MutationBoundary::SetPrimaryResource);
+    let store = MemorySagaStore::default();
+    let request = request_for(ProjectCommandAction::SetPrimaryResource { resource_id });
+    let first = ProjectWorkflowManager::new(
+        store.clone(),
+        canonical.clone(),
+        ScriptedRuntime::default(),
+        HealthyResources,
+    )
+    .control(request.clone())
+    .expect("lost primary response");
+    assert!(matches!(first, ProjectCommandOutcome::Reconcilable { .. }));
+
+    let replay = ProjectWorkflowManager::new(
+        store,
+        canonical.clone(),
+        ScriptedRuntime::default(),
+        HealthyResources,
+    )
+    .control(request)
+    .expect("primary replay");
+    assert!(matches!(replay, ProjectCommandOutcome::Completed { .. }));
+    assert_eq!(
+        canonical.mutations(),
+        [CanonicalProjectMutationAction::SetPrimaryResource { resource_id }]
     );
 }
 
@@ -1264,6 +1357,12 @@ fn direct_mutation_preconditions_reject_without_canonical_changes() {
     archived.archived = true;
     let mut stale_request = request_for(ProjectCommandAction::Open);
     stale_request.expected_head = Some(FactId::from_bytes([99; 32]));
+    let mut stale_resource_request = request_for(ProjectCommandAction::AddResource {
+        resource_id: ResourceId::from_bytes([32; 32]),
+        resource: locator("/work/stale-resource"),
+        make_primary: false,
+    });
+    stale_resource_request.expected_head = Some(FactId::from_bytes([99; 32]));
     let mut inactive = snapshot(CanonicalProjectLifecycle::Closed);
     inactive.active_human = false;
     let mut conflicted = snapshot(CanonicalProjectLifecycle::Closed);
@@ -1278,6 +1377,11 @@ fn direct_mutation_preconditions_reject_without_canonical_changes() {
         (
             snapshot(CanonicalProjectLifecycle::Closed),
             stale_request,
+            "project_stale_head",
+        ),
+        (
+            snapshot(CanonicalProjectLifecycle::Open),
+            stale_resource_request,
             "project_stale_head",
         ),
         (
@@ -1323,7 +1427,8 @@ fn changed_resource_identity_rejects_before_canonical_mutation() {
         ScriptedResources::new(ResourceBehavior::ChangedResource),
     )
     .control(request_for(ProjectCommandAction::AddResource {
-        resource: resource(32, "/work/desired"),
+        resource_id: ResourceId::from_bytes([32; 32]),
+        resource: locator("/work/desired"),
         make_primary: false,
     }))
     .expect("changed identity rejection");
@@ -1339,7 +1444,8 @@ fn changed_resource_identity_rejects_before_canonical_mutation() {
 fn resource_and_commit_uncertainty_repair_without_duplicate_mutation() {
     let requested = resource(33, "/work/retry");
     let request = request_for(ProjectCommandAction::AddResource {
-        resource: requested.clone(),
+        resource_id: requested.resource_id,
+        resource: requested.display_locator.clone(),
         make_primary: false,
     });
     let store = MemorySagaStore::default();
@@ -1367,7 +1473,8 @@ fn resource_and_commit_uncertainty_repair_without_duplicate_mutation() {
     assert!(matches!(repaired, ProjectCommandOutcome::Completed { .. }));
     assert_eq!(canonical.mutations().len(), 1);
 
-    let replacement = resource(34, "/work/atomic-retry");
+    let mut replacement = resource(34, "/work/atomic-retry");
+    replacement.health = ResourceHealth::Healthy;
     let canonical = ScriptedCanonical::uncertain_once(
         snapshot(CanonicalProjectLifecycle::Open),
         MutationBoundary::ReplaceResource,
@@ -1375,7 +1482,8 @@ fn resource_and_commit_uncertainty_repair_without_duplicate_mutation() {
     let old_resource_id = canonical.snapshot_value().resources[0].resource_id;
     let request = request_for(ProjectCommandAction::ReplaceResource {
         old_resource_id,
-        new_resource: replacement.clone(),
+        new_resource_id: replacement.resource_id,
+        resource: replacement.display_locator.clone(),
     });
     let store = MemorySagaStore::default();
     let first = ProjectWorkflowManager::new(

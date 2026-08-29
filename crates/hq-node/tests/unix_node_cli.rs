@@ -985,6 +985,172 @@ fn project_resource_checks_observe_git_and_symlink_changes_across_restart() {
 #[test]
 #[allow(
     clippy::too_many_lines,
+    reason = "complete foreground desired-resource mutation lifecycle"
+)]
+fn project_resource_mutations_preserve_external_paths_and_survive_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let original = directory.path().join("original");
+    let added = directory.path().join("added");
+    let replacement = directory.path().join("replacement");
+    let overlapping = added.join("nested");
+    for path in [&original, &added, &replacement, &overlapping] {
+        fs::create_dir_all(path).expect("resource directory");
+        fs::write(path.join("owned-by-human.txt"), "untouched\n").expect("resource marker");
+    }
+
+    initialize_identity(&state_root);
+    let _stop = DaemonStopGuard(state_root.clone());
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+    let created = project_json(
+        &state_root,
+        &[
+            "create",
+            "Mutable resources",
+            "--path",
+            original.to_str().expect("UTF-8 original"),
+        ],
+    );
+    let project_id = created["data"]["project_id"]
+        .as_str()
+        .expect("project id")
+        .to_owned();
+    let original_id = project_json(&state_root, &["resource", "list", &project_id])["data"]
+        ["resources"][0]["resource_id"]
+        .as_str()
+        .expect("original resource")
+        .to_owned();
+
+    let add = project_json(
+        &state_root,
+        &[
+            "resource",
+            "add",
+            &project_id,
+            "--path",
+            added.to_str().expect("UTF-8 added"),
+            "--primary",
+        ],
+    );
+    assert_eq!(add["data"]["status"], "completed");
+    assert_eq!(add["data"]["operation"], "resource_add");
+    let resources = project_json(&state_root, &["resource", "list", &project_id]);
+    assert_eq!(
+        resources["data"]["resources"].as_array().map(Vec::len),
+        Some(2)
+    );
+    let added_resource = resources["data"]["resources"]
+        .as_array()
+        .expect("resources")
+        .iter()
+        .find(|resource| {
+            resource["display_locator"]["value"] == added.to_str().expect("UTF-8 added path")
+        })
+        .expect("added resource");
+    assert_eq!(added_resource["primary"], true);
+    let added_id = added_resource["resource_id"]
+        .as_str()
+        .expect("added resource id")
+        .to_owned();
+
+    let conflict = admin_output(
+        &state_root,
+        "project",
+        &[
+            "create",
+            "Overlap",
+            "--path",
+            overlapping.to_str().expect("UTF-8 overlap"),
+        ],
+    );
+    assert_eq!(conflict.status.code(), Some(1));
+    let conflict: serde_json::Value =
+        serde_json::from_slice(&conflict.stdout).expect("conflict JSON");
+    assert_eq!(conflict["data"]["status"], "rejected");
+    assert_eq!(
+        conflict["data"]["error_code"],
+        "project_creation_resource_conflict"
+    );
+
+    let primary = project_json(
+        &state_root,
+        &["resource", "primary", &project_id, &original_id],
+    );
+    assert_eq!(primary["data"]["status"], "completed");
+    let replace = project_json(
+        &state_root,
+        &[
+            "resource",
+            "replace",
+            &project_id,
+            &added_id,
+            "--path",
+            replacement.to_str().expect("UTF-8 replacement"),
+        ],
+    );
+    assert_eq!(replace["data"]["status"], "completed");
+    let replaced = project_json(&state_root, &["resource", "list", &project_id]);
+    let replacement_id = replaced["data"]["resources"]
+        .as_array()
+        .expect("replaced resources")
+        .iter()
+        .find(|resource| {
+            resource["display_locator"]["value"]
+                == replacement.to_str().expect("UTF-8 replacement path")
+        })
+        .and_then(|resource| resource["resource_id"].as_str())
+        .expect("replacement resource id")
+        .to_owned();
+    assert_ne!(replacement_id, added_id);
+
+    let removed = project_json(
+        &state_root,
+        &["resource", "remove", &project_id, &replacement_id],
+    );
+    assert_eq!(removed["data"]["status"], "completed");
+    for path in [&original, &added, &replacement, &overlapping] {
+        assert_eq!(
+            fs::read_to_string(path.join("owned-by-human.txt")).expect("marker remains"),
+            "untouched\n"
+        );
+    }
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let after_restart = project_json(&state_root, &["resource", "list", &project_id]);
+    assert_eq!(
+        after_restart["data"]["resources"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        after_restart["data"]["resources"][0]["resource_id"],
+        original_id
+    );
+
+    let closed = project_json(&state_root, &["close", &project_id, "--yes"]);
+    assert_eq!(closed["data"]["status"], "completed");
+    let archived = project_json(&state_root, &["archive", &project_id]);
+    assert_eq!(archived["data"]["status"], "completed");
+    for path in [&original, &added, &replacement, &overlapping] {
+        assert!(path.join("owned-by-human.txt").is_file());
+    }
+
+    let stopped = output("stop", &state_root);
+    assert!(
+        stopped.status.success(),
+        "stop stderr: {:?}",
+        stopped.stderr
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
     reason = "complete foreground project lifecycle"
 )]
 fn project_lifecycle_runs_in_foreground_and_survives_restart() {

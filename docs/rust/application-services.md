@@ -162,13 +162,15 @@ saga row and is validated again in the fact commit transaction. The existing uns
 schema and local API v1 were extended in place: there is no migration, compatibility facade, or
 version bump.
 
-Explicit open and resource add/replace commands re-observe the exact desired display/canonical
-identity before commit. The serialized canonical callback then repeats lifecycle, authority,
+Explicit resource add/replace commands carry a stable new resource identity and normalized display
+locator to the immutable home, which identifies the canonical path before commit. Open re-observes
+every existing desired display/canonical identity. The serialized canonical callback then repeats lifecycle, authority,
 expected-head, normalized path identity, and home-qualified claim checks against the complete
 post-mutation resource set. Closed projects may retain overlapping desired resources; opening or
 mutating an open project may not acquire a conflicting active claim. Remove requires explicit
-force while assigned, and replace authors one atomic fact. These commands only change HQ's desired
-membership and advisory claims; they never mutate Git or filesystem state.
+force while assigned, replace authors one atomic fact, and primary selection authors one explicit
+fact without reordering membership. These commands only change HQ's desired membership, primary,
+and advisory claims; they never mutate Git or filesystem state.
 
 Close begins with one stable, batched, read-only release assessment. Clean and non-Git resources
 may proceed gracefully; dirty or unknown observations require explicit force. A graceful close

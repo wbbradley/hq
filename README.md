@@ -310,6 +310,10 @@ hq project dispatch PROJECT_ID
 hq project handoff PROJECT_ID --agent bob --provider codex --new-session --thread THREAD_ID --yes
 hq project resource list PROJECT_ID
 hq project resource show PROJECT_ID RESOURCE_ID
+hq project resource add PROJECT_ID --path /work/widget-docs
+hq project resource primary PROJECT_ID RESOURCE_ID
+hq project resource replace PROJECT_ID RESOURCE_ID --path /work/widget-next
+hq project resource remove PROJECT_ID RESOURCE_ID
 hq project check PROJECT_ID
 hq project close PROJECT_ID --yes
 hq project archive PROJECT_ID
@@ -324,6 +328,13 @@ primary selection, projected health, advisory claim, and every conflict from one
 snapshot. `project check PROJECT_ID [RESOURCE_ID]` performs a fresh read-only identity and Git
 release observation on the project's home installation. A check for a project homed elsewhere
 fails closed instead of inspecting the caller's unrelated filesystem namespace.
+
+`project resource add` and `replace` allocate a stable resource identity and send only the
+normalized display path; the immutable home resolves the canonical path before committing the
+exact expected head. `--primary` on add selects the new default, while `project resource primary`
+selects any existing desired resource without changing membership order. Remove changes only HQ's
+desired membership. It requires `--force` while an agent is assigned, and never deletes or modifies
+the path, repository, worktree, branch, or files.
 
 Handoff requires an exact historical target thread and `--yes`. `--force` is separate takeover
 authorization used only after ordinary quiescence is blocked or uncertain; it never substitutes for

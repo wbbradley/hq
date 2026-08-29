@@ -2,8 +2,8 @@
 
 use hq_domain::{
     AccountId, AgentId, CommandDigest, CommandId, ContentText, DomainError, FactId, InstallationId,
-    MailboxId, OperationId, ProjectId, ProjectResource, ProviderId, ProviderSessionId, ResourceId,
-    ResourceLocator, RuntimeObservation, ShortText, ThreadId, Timestamp,
+    MailboxId, OperationId, ProjectId, ProviderId, ProviderSessionId, ResourceId, ResourceLocator,
+    RuntimeObservation, ShortText, ThreadId, Timestamp,
 };
 
 use crate::ApplicationError;
@@ -64,8 +64,10 @@ pub enum ProjectCommandAction {
     },
     /// Add one desired resource.
     AddResource {
-        /// Exact desired resource and current observation.
-        resource: ProjectResource,
+        /// Stable desired resource identity allocated by the caller.
+        resource_id: ResourceId,
+        /// Normalized home-local display locator to identify authoritatively.
+        resource: ResourceLocator,
         /// Whether this resource becomes the launch primary.
         make_primary: bool,
     },
@@ -80,8 +82,15 @@ pub enum ProjectCommandAction {
     ReplaceResource {
         /// Existing resource identity.
         old_resource_id: ResourceId,
-        /// Replacement resource.
-        new_resource: ProjectResource,
+        /// Stable replacement identity allocated by the caller.
+        new_resource_id: ResourceId,
+        /// Normalized home-local replacement display locator.
+        resource: ResourceLocator,
+    },
+    /// Select one existing desired resource as the launch primary.
+    SetPrimaryResource {
+        /// Stable desired resource identity.
+        resource_id: ResourceId,
     },
     /// Provision a Git worktree and create its project exactly once.
     ProvisionWorktree(WorktreeProvisioningRequest),

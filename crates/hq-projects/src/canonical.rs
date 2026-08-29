@@ -560,6 +560,7 @@ fn payload(
         CanonicalProjectMutationAction::AddResource { .. }
             | CanonicalProjectMutationAction::RemoveResource { .. }
             | CanonicalProjectMutationAction::ReplaceResource { .. }
+            | CanonicalProjectMutationAction::SetPrimaryResource { .. }
     ) {
         return resource_payload(snapshot, mutation, view).ok_or_else(invalid);
     }
@@ -860,6 +861,14 @@ fn resource_payload(
                 project_id: mutation.project_id,
                 old_resource_id: *old_resource_id,
                 new_resource: new_resource.clone(),
+            })
+        }
+        CanonicalProjectMutationAction::SetPrimaryResource { resource_id }
+            if view.resources.contains_key(resource_id) && view.primary != Some(*resource_id) =>
+        {
+            Some(SemanticPayload::ProjectPrimaryResourceChanged {
+                project_id: mutation.project_id,
+                resource_id: *resource_id,
             })
         }
         _ => None,
@@ -1259,6 +1268,24 @@ mod tests {
 
         let snapshot = project_snapshot(current_id, closed.clone(), other_id, other.clone());
         assert!(resource_payload(&snapshot, &add, &closed).is_some());
+
+        let with_two = view(
+            current_id,
+            ProjectLifecycle::Open,
+            [old.clone(), candidate.clone()],
+        );
+        let select_primary = mutation(
+            current_id,
+            CanonicalProjectMutationAction::SetPrimaryResource {
+                resource_id: candidate.resource_id,
+            },
+        );
+        let snapshot = project_snapshot(current_id, with_two.clone(), other_id, other.clone());
+        assert!(matches!(
+            resource_payload(&snapshot, &select_primary, &with_two),
+            Some(SemanticPayload::ProjectPrimaryResourceChanged { resource_id, .. })
+                if resource_id == candidate.resource_id
+        ));
 
         let replacement = resource(3, "/independent");
         let replace = mutation(

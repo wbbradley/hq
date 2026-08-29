@@ -519,6 +519,40 @@ pub enum ProjectResourceCliCommand {
         /// Stable resource identity.
         resource_id: hq_domain::ResourceId,
     },
+    /// Add one home-identified desired path.
+    Add {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Normalized absolute display path.
+        path: PathBuf,
+        /// Whether the new resource becomes primary.
+        make_primary: bool,
+    },
+    /// Remove one desired resource without touching external state.
+    Remove {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Stable desired resource identity.
+        resource_id: hq_domain::ResourceId,
+        /// Whether assigned-project removal is authorized.
+        force: bool,
+    },
+    /// Atomically replace one desired resource with a home-identified path.
+    Replace {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Existing desired resource identity.
+        resource_id: hq_domain::ResourceId,
+        /// Normalized absolute replacement display path.
+        path: PathBuf,
+    },
+    /// Select one exact desired resource as primary.
+    Primary {
+        /// Stable project identity.
+        project_id: ProjectId,
+        /// Stable desired resource identity.
+        resource_id: hq_domain::ResourceId,
+    },
 }
 
 /// Passive desired-resource and advisory-claim presentation.
@@ -1934,8 +1968,85 @@ fn parse_project_resource(arguments: &[OsString]) -> Result<ProjectCliCommand, C
                 resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
             },
         )),
+        [action, rest @ ..] if action == "add" => parse_project_resource_add(rest),
+        [action, rest @ ..] if action == "remove" => parse_project_resource_remove(rest),
+        [action, rest @ ..] if action == "replace" => parse_project_resource_replace(rest),
+        [action, project_id, resource_id] if action == "primary" => Ok(
+            ProjectCliCommand::Resource(ProjectResourceCliCommand::Primary {
+                project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+                resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
+            }),
+        ),
         _ => Err(CliError::Arguments),
     }
+}
+
+fn parse_project_resource_add(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
+    let project_id =
+        ProjectId::from_bytes(parse_hex32(arguments.first().ok_or(CliError::Arguments)?)?);
+    let mut path = None;
+    let mut make_primary = false;
+    let mut index = 1;
+    while index < arguments.len() {
+        match arguments[index].to_str() {
+            Some("--path") if path.is_none() => {
+                path = Some(PathBuf::from(
+                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
+                ));
+                index += 2;
+            }
+            Some("--primary") if !make_primary => {
+                make_primary = true;
+                index += 1;
+            }
+            _ => return Err(CliError::Arguments),
+        }
+    }
+    let path = path.ok_or(CliError::Arguments)?;
+    let _ = normalized_existing_resource(&path)?;
+    Ok(ProjectCliCommand::Resource(
+        ProjectResourceCliCommand::Add {
+            project_id,
+            path,
+            make_primary,
+        },
+    ))
+}
+
+fn parse_project_resource_remove(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
+    let [project_id, resource_id, rest @ ..] = arguments else {
+        return Err(CliError::Arguments);
+    };
+    let force = match rest {
+        [] => false,
+        [force] if force == "--force" => true,
+        _ => return Err(CliError::Arguments),
+    };
+    Ok(ProjectCliCommand::Resource(
+        ProjectResourceCliCommand::Remove {
+            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+            resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
+            force,
+        },
+    ))
+}
+
+fn parse_project_resource_replace(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
+    let [project_id, resource_id, path_flag, path] = arguments else {
+        return Err(CliError::Arguments);
+    };
+    if path_flag != "--path" {
+        return Err(CliError::Arguments);
+    }
+    let path = PathBuf::from(path);
+    let _ = normalized_existing_resource(&path)?;
+    Ok(ProjectCliCommand::Resource(
+        ProjectResourceCliCommand::Replace {
+            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
+            resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
+            path,
+        },
+    ))
 }
 
 fn parse_project_handoff(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
@@ -3127,8 +3238,9 @@ fn run_project(
             project_catalog_view(&snapshot, action)
                 .map(|view| CliResult::ProjectCatalog(Box::new(view)))
         }
-        ProjectCliCommand::Resource(resource) => project_resource_catalog_view(&snapshot, resource)
-            .map(|view| CliResult::ProjectResourceCatalog(Box::new(view))),
+        ProjectCliCommand::Resource(resource) => {
+            run_project_resource(&mut client, &snapshot, resource)
+        }
         ProjectCliCommand::Check {
             project_id,
             resource_id,
@@ -3219,6 +3331,86 @@ fn run_project(
     }
 }
 
+fn run_project_resource(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    action: &ProjectResourceCliCommand,
+) -> Result<CliResult, CliError> {
+    match action {
+        resource @ (ProjectResourceCliCommand::List { .. }
+        | ProjectResourceCliCommand::Show { .. }) => {
+            project_resource_catalog_view(snapshot, resource)
+                .map(|view| CliResult::ProjectResourceCatalog(Box::new(view)))
+        }
+        ProjectResourceCliCommand::Add {
+            project_id,
+            path,
+            make_primary,
+        } => {
+            let locator = normalized_existing_resource(path)?;
+            control_project_with_action(
+                client,
+                snapshot,
+                "resource_add",
+                *project_id,
+                |operation_id| {
+                    Ok(ProjectCommandAction::AddResource {
+                        resource_id: project_resource_operation_identity(operation_id),
+                        resource: locator,
+                        make_primary: *make_primary,
+                    })
+                },
+            )
+        }
+        ProjectResourceCliCommand::Remove {
+            project_id,
+            resource_id,
+            force,
+        } => control_project(
+            client,
+            snapshot,
+            "resource_remove",
+            *project_id,
+            ProjectCommandAction::RemoveResource {
+                resource_id: *resource_id,
+                force: *force,
+            },
+        ),
+        ProjectResourceCliCommand::Replace {
+            project_id,
+            resource_id,
+            path,
+        } => {
+            let locator = normalized_existing_resource(path)?;
+            control_project_with_action(
+                client,
+                snapshot,
+                "resource_replace",
+                *project_id,
+                |operation_id| {
+                    Ok(ProjectCommandAction::ReplaceResource {
+                        old_resource_id: *resource_id,
+                        new_resource_id: project_resource_operation_identity(operation_id),
+                        resource: locator,
+                    })
+                },
+            )
+        }
+        ProjectResourceCliCommand::Primary {
+            project_id,
+            resource_id,
+        } => control_project(
+            client,
+            snapshot,
+            "resource_primary",
+            *project_id,
+            ProjectCommandAction::SetPrimaryResource {
+                resource_id: *resource_id,
+            },
+        ),
+    }
+}
+
 fn project_resource_catalog_view(
     snapshot: &AuthoritativeSnapshotDto,
     action: &ProjectResourceCliCommand,
@@ -3229,6 +3421,10 @@ fn project_resource_catalog_view(
             project_id,
             resource_id,
         } => ("resource_show", *project_id, Some(*resource_id)),
+        ProjectResourceCliCommand::Add { .. }
+        | ProjectResourceCliCommand::Remove { .. }
+        | ProjectResourceCliCommand::Replace { .. }
+        | ProjectResourceCliCommand::Primary { .. } => return Err(CliError::ProjectState),
     };
     let mut catalog = project_catalog_view(snapshot, &ProjectCliCommand::Show(project_id))?;
     let project = catalog.projects.pop().ok_or(CliError::ProjectState)?;
@@ -3554,6 +3750,16 @@ fn control_project(
     project_id: ProjectId,
     action: ProjectCommandAction,
 ) -> Result<CliResult, CliError> {
+    control_project_with_action(client, snapshot, operation, project_id, |_| Ok(action))
+}
+
+fn control_project_with_action(
+    client: &mut LocalNodeClient,
+    snapshot: &AuthoritativeSnapshotDto,
+    operation: &'static str,
+    project_id: ProjectId,
+    action: impl FnOnce(OperationId) -> Result<ProjectCommandAction, CliError>,
+) -> Result<CliResult, CliError> {
     let project = project_rows(snapshot)?
         .remove(&project_id)
         .ok_or(CliError::ProjectState)?;
@@ -3566,6 +3772,7 @@ fn control_project(
     require_active_project_home(snapshot, account_id, project.home)?;
     let command_id = random_command_id()?;
     let operation_id = project_operation_id(command_id);
+    let action = action(operation_id)?;
     let wire = project_command_request(
         command_id,
         operation_id,
@@ -3595,6 +3802,13 @@ fn control_project(
         outcome,
     )
     .map(CliResult::ProjectOperation)
+}
+
+fn project_resource_operation_identity(operation_id: OperationId) -> hq_domain::ResourceId {
+    let mut digest = Sha256::new();
+    digest.update(b"hq-project-resource-operation-identity-v1\0");
+    digest.update(operation_id.as_bytes());
+    hq_domain::ResourceId::from_bytes(digest.finalize().into())
 }
 
 fn send_project_message(
@@ -9761,9 +9975,9 @@ fn short_help_text(topic: &[String]) -> Option<&'static str> {
         ),
         [command] if command == "project" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
-             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  resource list PROJECT_ID                  List exact desired resources\n  resource show PROJECT_ID RESOURCE_ID      Show one exact desired resource\n  check PROJECT_ID [RESOURCE_ID]            Freshly inspect health and release state\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
+             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  resource list PROJECT_ID                  List exact desired resources\n  resource show PROJECT_ID RESOURCE_ID      Show one exact desired resource\n  resource add PROJECT_ID --path ABSOLUTE_PATH [--primary]\n  resource remove PROJECT_ID RESOURCE_ID [--force]\n  resource replace PROJECT_ID RESOURCE_ID --path ABSOLUTE_PATH\n  resource primary PROJECT_ID RESOURCE_ID   Select the launch primary\n  check PROJECT_ID [RESOURCE_ID]            Freshly inspect health and release state\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n\n\
   open PROJECT_ID                           Open one closed project\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --new-session [--thread THREAD_ID] [--dir ABSOLUTE_PATH]\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --session SESSION --thread THREAD_ID [--dir ABSOLUTE_PATH]\n                                            Activate one exact agent assignment\n  dispatch PROJECT_ID                       Dispatch all pending accepted inputs\n  handoff PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER (--new-session | --session SESSION) --thread THREAD_ID [--dir ABSOLUTE_PATH] --yes [--force]\n                                            Hand off to one exact historical target\n  close PROJECT_ID --yes [--force]          Close and release advisory claims\n  archive PROJECT_ID                        Gracefully close and hide one project\n  unarchive PROJECT_ID                      Restore one archived project as closed\n\n\
-             Resource list/show read only the authoritative snapshot. Check re-observes path identity and Git release state through the read-only home adapter; it fails closed when the project's immutable home is not this installation and never mutates the filesystem or Git. Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Handoff always requires one historical target thread and explicit --yes; --force separately authorizes takeover after blocked or uncertain quiescence. Without --dir, assignment commands use the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
+             Resource list/show read only the authoritative snapshot. Add and replace send a normalized display path and stable resource identity for authoritative home-side identification; primary changes the future launch default without reordering membership. Remove changes only HQ desired membership and requires --force only while assigned. Check re-observes path identity and Git release state through the read-only home adapter; it fails closed when the project's immutable home is not this installation. No resource command mutates or deletes filesystem or Git state. Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Handoff always requires one historical target thread and explicit --yes; --force separately authorizes takeover after blocked or uncertain quiescence. Without --dir, assignment commands use the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
         ),
         [command] if command == "daemon" => Some(
             "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
@@ -9867,11 +10081,11 @@ mod tests {
         named_agent_catalog_view, normalized_existing_resource, pairing_grant_id, parse_cli,
         project_activation_action, project_catalog_view, project_command_request,
         project_creation_request, project_handoff_action, project_operation_view,
-        project_resource_catalog_view, read_password, render_project_catalog,
-        render_project_resource_catalog, render_project_resource_check, render_result,
-        resolve_environment_session, resolve_named_agent_id, resource_inspection_request, run_cli,
-        session_binding_fact, session_context, stable_relay_effect, stable_repair_operation,
-        successful_result_exit_code,
+        project_resource_catalog_view, project_resource_operation_identity, read_password,
+        render_project_catalog, render_project_resource_catalog, render_project_resource_check,
+        render_result, resolve_environment_session, resolve_named_agent_id,
+        resource_inspection_request, run_cli, session_binding_fact, session_context,
+        stable_relay_effect, stable_repair_operation, successful_result_exit_code,
     };
     use hq_application::ProjectCommandAction;
     use hq_domain::{
@@ -10077,6 +10291,108 @@ mod tests {
                 CliCommand::Project { action, .. } if action == expected
             ));
         }
+    }
+
+    #[test]
+    fn parser_accepts_desired_resource_mutations() {
+        let project_id = ProjectId::from_bytes([0x22; 32]);
+        let resource_id = hq_domain::ResourceId::from_bytes([0x33; 32]);
+
+        let added = parse_cli([
+            OsString::from("project"),
+            OsString::from("resource"),
+            OsString::from("add"),
+            OsString::from("22".repeat(32)),
+            OsString::from("--path"),
+            OsString::from("/work/added"),
+            OsString::from("--primary"),
+        ])
+        .expect("resource add parses");
+        assert!(matches!(
+            added.command,
+            CliCommand::Project {
+                action: ProjectCliCommand::Resource(ProjectResourceCliCommand::Add {
+                    project_id: candidate,
+                    path,
+                    make_primary: true,
+                }),
+                ..
+            } if candidate == project_id && path == Path::new("/work/added")
+        ));
+
+        let removed = parse_cli([
+            OsString::from("project"),
+            OsString::from("resource"),
+            OsString::from("remove"),
+            OsString::from("22".repeat(32)),
+            OsString::from("33".repeat(32)),
+            OsString::from("--force"),
+        ])
+        .expect("resource remove parses");
+        assert!(matches!(
+            removed.command,
+            CliCommand::Project {
+                action: ProjectCliCommand::Resource(ProjectResourceCliCommand::Remove {
+                    project_id: candidate_project,
+                    resource_id: candidate_resource,
+                    force: true,
+                }),
+                ..
+            } if candidate_project == project_id && candidate_resource == resource_id
+        ));
+
+        let replaced = parse_cli([
+            OsString::from("project"),
+            OsString::from("resource"),
+            OsString::from("replace"),
+            OsString::from("22".repeat(32)),
+            OsString::from("33".repeat(32)),
+            OsString::from("--path"),
+            OsString::from("/work/replaced"),
+        ])
+        .expect("resource replace parses");
+        assert!(matches!(
+            replaced.command,
+            CliCommand::Project {
+                action: ProjectCliCommand::Resource(ProjectResourceCliCommand::Replace {
+                    project_id: candidate_project,
+                    resource_id: candidate_resource,
+                    path,
+                }),
+                ..
+            } if candidate_project == project_id
+                && candidate_resource == resource_id
+                && path == Path::new("/work/replaced")
+        ));
+
+        let primary = parse_cli([
+            OsString::from("project"),
+            OsString::from("resource"),
+            OsString::from("primary"),
+            OsString::from("22".repeat(32)),
+            OsString::from("33".repeat(32)),
+        ])
+        .expect("resource primary parses");
+        assert!(matches!(
+            primary.command,
+            CliCommand::Project {
+                action: ProjectCliCommand::Resource(ProjectResourceCliCommand::Primary {
+                    project_id: candidate_project,
+                    resource_id: candidate_resource,
+                }),
+                ..
+            } if candidate_project == project_id && candidate_resource == resource_id
+        ));
+
+        let operation = OperationId::from_bytes([0x77; 32]);
+        assert_eq!(
+            project_resource_operation_identity(operation),
+            project_resource_operation_identity(operation)
+        );
+        assert_ne!(
+            project_resource_operation_identity(operation),
+            project_resource_operation_identity(OperationId::from_bytes([0x78; 32]))
+        );
     }
 
     #[test]

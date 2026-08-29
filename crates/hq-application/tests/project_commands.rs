@@ -70,5 +70,28 @@ fn project_command_values_are_plain_public_data() -> Result<(), Box<dyn std::err
     };
     assert_eq!(creation.project_name.as_str(), "existing");
     assert_eq!(creation.resource.value(), "/repo/existing");
+
+    let resource_id = ResourceId::from_bytes(id(12));
+    let desired = ResourceLocator::new(
+        ResourceScheme::WorkingTree,
+        BoundedText::new("/repo/desired")?,
+    );
+    let add = ProjectCommandAction::AddResource {
+        resource_id,
+        resource: desired.clone(),
+        make_primary: true,
+    };
+    assert!(matches!(
+        add,
+        ProjectCommandAction::AddResource {
+            resource_id: candidate,
+            resource,
+            make_primary: true,
+        } if candidate == resource_id && resource == desired
+    ));
+    assert_eq!(
+        ProjectCommandAction::SetPrimaryResource { resource_id },
+        ProjectCommandAction::SetPrimaryResource { resource_id },
+    );
     Ok(())
 }

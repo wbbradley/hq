@@ -1,5 +1,38 @@
 # Completed
 
+## 2026-08-28 — Desired-resource mutation commands
+
+Added `project resource add`, `remove`, `replace`, and `primary` through the stable project-command
+path. Add and replace carry a caller-allocated stable resource identity plus a normalized display
+locator; the immutable home identifies the canonical locator and current health before the exact
+expected-head mutation can commit. Replacement receives a fresh stable identity, primary selection
+names an existing identity directly, and assigned-resource removal still requires a separate
+`--force` authority.
+
+The unshipped application, saga codec, and local API vocabulary evolved in place. No storage or API
+version was bumped, and no migration, compatibility record, accessor facade, or duplicate
+stored/runtime type was introduced. Resource command values remain passive public-field records;
+filesystem observation and overlap policy stay behind the resource port and canonical reducer.
+
+Pure workflow and codec coverage proves normalized inputs, changed identification, overlap and
+identity conflicts, resource-specific stale-head rejection before mutation, assigned removal force,
+primary selection, response-loss replay, and exactly-once canonical effects. A real foreground test
+adds and selects a resource, rejects a cross-project nested overlap, replaces and removes resources,
+restarts the daemon, and verifies stable remaining identity. Marker files prove add, replace,
+remove, close, and archive never delete or modify external paths.
+
+Full workspace all-target/all-feature tests, strict Clippy, format/check, architecture,
+behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. The dependency audit
+retains only the existing yanked `chacha20 0.10.1` warning, and the final executable-name process
+audit found no HQ daemon.
+
+### Original plan entry
+
+- **[cli/high] Add desired-resource mutation commands** — Expose resource add, remove, replace, and
+  primary selection through the stable project-command path. Preserve stable resource identities,
+  exact expected heads, and explicit force semantics. Test overlap conflicts, stale heads, response
+  loss, restart, and no external deletion or mutation on close, archive, or remove.
+
 ## 2026-08-28 — Desired-resource inspection and fresh checks
 
 Added snapshot-only `project resource list PROJECT_ID` and `project resource show PROJECT_ID
