@@ -54,13 +54,24 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement durable mailbox composition and actions** — Add reply, direct-message,
-  self-note, archive, and restore workflows through ordinary local-API mutations. Persist
-  installation-local drafts, focus, target reselection, and modal state across reload/reconnect and
-  resize where appropriate; submit and consume drafts atomically; preserve stale targets for
-  recovery; cancel modals without mutation; and reconcile in-flight commands by stable request
-  identity. Complete this work when actionable errors and model, restart, stale-target, and
-  CLI/TUI parity tests cover every retained mailbox mutation without selected-row leakage.
+- **[mailbox/high] Add the durable local draft and mailbox-command service** — Add typed
+  installation-local reply, direct-message, and self-note drafts with stable identities, bounded
+  content, explicit targets, autosave/load/delete operations, and restart persistence. Expose draft
+  operations plus reply/send/archive/restore through the ordinary local API, resolve every target
+  and causal frontier authoritatively in the node, reconcile commands by stable request identity,
+  and consume a submitted draft atomically with its canonical mutation receipt. Preserve stale
+  targets for recovery rather than deleting their text. Complete this work when store failpoint,
+  restart, replay, changed-request, stale-target, and CLI parity tests pass without a storage
+  migration or compatibility reader.
+
+- **[tui/high] Implement retained mailbox composition and actions** — Add pure reply,
+  direct-message, self-note, archive, and restore interactions over the ordinary mailbox-command
+  service. Preserve applicable draft identity, focus, target reselection, modal state, logical
+  selection, and scroll anchors across authoritative reload, reconnect, and resize; cancel modals
+  without mutation; and reconcile in-flight effects by stable request identity. Complete this work
+  when responsive render, model, executor, actionable-error, stale-target, modal-cancellation, and
+  installed TUI/CLI parity tests cover every retained mailbox interaction without selected-row or
+  activity-target leakage.
 
 - **[tui/high] Implement retained agent and session workflows** — Add named-agent search and
   inspection plus create, retire, start, exact resume, rename, live switch confirmation, and stop
