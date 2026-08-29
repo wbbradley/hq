@@ -24,7 +24,7 @@ use support::TestDirectory;
 
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
-const LIFECYCLE_STATE_PROBE_INTERVAL: Duration = Duration::from_millis(50);
+const AUTHORITATIVE_STATE_PROBE_INTERVAL: Duration = Duration::from_millis(50);
 // This is an inactivity watchdog for installed process tests, not a product latency budget.
 const PROCESS_INACTIVITY_WATCHDOG: Duration = Duration::from_secs(30);
 
@@ -476,8 +476,12 @@ enum PtyInteraction<'content> {
 
 #[allow(clippy::too_many_lines)]
 fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>) -> PtyRun {
-    // Ratatui's differential output is not a screen transcript, so lifecycle completion must
-    // synchronize against authoritative state instead of a possibly split rendered phrase.
+    // Ratatui's differential output is not a screen transcript, so durable mutation completion
+    // must synchronize against authoritative state instead of a possibly split rendered phrase.
+    let agent_target = match interaction {
+        PtyInteraction::CreateAgent(name) => Some(name),
+        _ => None,
+    };
     let lifecycle_target = match interaction {
         PtyInteraction::CloseProject { name } => Some((name, "closed", false)),
         PtyInteraction::OpenProject { name } => Some((name, "open", false)),
@@ -520,7 +524,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
     let mut managed_provider_sent = false;
     let mut resource_commit_sent = false;
     let mut exit_sent = false;
-    let mut next_lifecycle_probe_at = Instant::now();
+    let mut next_state_probe_at = Instant::now();
     let status = loop {
         let previous_output_length = bytes.len();
         let mut buffer = [0_u8; 8192];
@@ -918,14 +922,20 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             || managed_action_sent && matches!(interaction, PtyInteraction::OpenProject { .. })
             || managed_provider_sent
                 && matches!(interaction, PtyInteraction::SetProjectArchived { .. });
-        if lifecycle_action_sent && !exit_sent && Instant::now() >= next_lifecycle_probe_at {
-            next_lifecycle_probe_at = Instant::now() + LIFECYCLE_STATE_PROBE_INTERVAL;
-            if lifecycle_target
-                .as_ref()
-                .is_some_and(|(project_id, lifecycle, archived)| {
-                    project_has_state(state_root, project_id, lifecycle, *archived)
-                })
-            {
+        let agent_action_sent = content_sent && agent_target.is_some();
+        if (lifecycle_action_sent || agent_action_sent)
+            && !exit_sent
+            && Instant::now() >= next_state_probe_at
+        {
+            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+            let lifecycle_reached =
+                lifecycle_target
+                    .as_ref()
+                    .is_some_and(|(project_id, lifecycle, archived)| {
+                        project_has_state(state_root, project_id, lifecycle, *archived)
+                    });
+            let agent_reached = agent_target.is_some_and(|name| agent_exists(state_root, name));
+            if lifecycle_reached || agent_reached {
                 master.write_all(&[0x03]).expect("Ctrl-C writes");
                 master.flush().expect("Ctrl-C flushes");
                 exit_sent = true;
@@ -990,19 +1000,6 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 bytes[offset..]
                     .windows(b"at head".len())
                     .any(|window| window == b"at head")
-            })
-        {
-            master.write_all(&[0x03]).expect("Ctrl-C writes");
-            master.flush().expect("Ctrl-C flushes");
-            exit_sent = true;
-        }
-        if let PtyInteraction::CreateAgent(_) = interaction
-            && content_sent
-            && !exit_sent
-            && completion_offset.is_some_and(|offset| {
-                bytes[offset..]
-                    .windows(b"revision ".len())
-                    .any(|window| window == b"revision ")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
