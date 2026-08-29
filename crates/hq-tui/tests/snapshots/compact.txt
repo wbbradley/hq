@@ -13,4 +13,4 @@ Inbox · Sent · Archived · Agents · Projects
      attention · relay needs attention
 
 ────────────────────────────────────────────────────────────────────────
- ↑/↓ select · r reply · d direct · n note · a/u state · q quit
+ ↑/↓ select · Enter open thread for archive/restore · q quit

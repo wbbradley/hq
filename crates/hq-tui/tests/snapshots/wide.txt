@@ -15,4 +15,4 @@
                        │
                        │
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- ←/h navigation · ↑/↓ select · r reply · d direct · n note · a/u state · q quit
+ ←/h nav · ↑/↓ select · Enter open thread for archive/restore · d direct · n note · q quit

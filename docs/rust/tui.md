@@ -45,10 +45,13 @@ edited text, direct target identity, or pending submission.
 
 ## Mailbox composition and actions
 
-The pure model owns reply, direct-message, self-note, archive, and restore interaction state. `r`
-opens an applicable reply draft only for a typed message target whose purpose permits replies; `d`
-selects one unconflicted named-agent mailbox by stable installation/mailbox identity; `n` opens a
-self-note; and `a`/`u` open explicit archive/restore confirmations for an exact message. Activity
+The pure model owns reply, direct-message, self-note, archive, and restore interaction state. Enter
+opens a selected conversation summary so the operator can select an exact message. `r` opens an
+applicable reply draft only for a typed message target whose purpose permits replies; `d` selects
+one unconflicted named-agent mailbox by stable installation/mailbox identity; `n` opens a self-note;
+`a` opens archive confirmation for an open message; and `u` opens restore confirmation for an
+archived message. Using either state shortcut on a conversation summary explains that the thread
+must be opened first instead of silently ignoring the input. Activity
 entries carry no `UiMessageTarget`, so no key sequence can turn activity into a reply or reversible
 state target. Escape cancels selectors and confirmations without a canonical mutation.
 
@@ -173,8 +176,10 @@ selection, stable presentation state, and bounded detail. An activated conversat
 responsive second pane, centers rendering around the stable fact anchor, labels activity as
 non-actionable, and expands only typed routing, semantics, evidence, or activity sections. Enter
 opens a conversation or toggles its selected entry's details; PageDown requests the opaque next
-page; Escape collapses details and then the conversation. The footer exposes discoverable controls
-for reply, direct, self-note, archive/restore, navigation, and quit, or the latest stable failure
+page; Escape collapses details and then the conversation. The summary footer explains that Enter
+opens the thread for per-message archive/restore actions. The conversation footer spells out the
+applicable `a archive` or `u restore` control for the selected exact message alongside discoverable
+controls for reply, direct, self-note, navigation, and quit, or the latest stable failure
 code and operator action. The Agents footer exposes search, inspect, and create controls; responsive
 modal tests cover wide and compact draft, agent-detail, and managed-switch rendering. Styling
 supplements these text markers and is not the sole carrier of state.

@@ -4221,6 +4221,13 @@ fn selected_message_target(model: &UiModel) -> Option<UiMessageTarget> {
 
 fn confirm_message_state(model: &mut UiModel, restore: bool) -> bool {
     let Some(target) = selected_message_target(model) else {
+        if model.conversation.is_none() && model.selected_row_is_conversation() {
+            model.last_failure = Some(UiFailure {
+                code: "message_not_selected".to_owned(),
+                action: "press Enter to open the thread, then select an exact message".to_owned(),
+            });
+            return true;
+        }
         return false;
     };
     let state = model

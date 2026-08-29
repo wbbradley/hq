@@ -36,6 +36,35 @@ fn compact_layout_matches_snapshot_without_mutating_the_model() {
 }
 
 #[test]
+fn mailbox_footer_explains_thread_and_exact_message_actions() {
+    let summary = render_text(&ready_model(UiSize {
+        width: 104,
+        height: 18,
+    }));
+    assert!(summary.contains("Enter open thread for archive/restore"));
+    assert!(!summary.contains("a/u state"));
+
+    let conversation = render_text(&conversation_model(UiSize {
+        width: 104,
+        height: 18,
+    }));
+    assert!(conversation.contains("a archive"));
+    assert!(!conversation.contains("u restore"));
+    assert!(!conversation.contains("a/u state"));
+
+    let archived = render_text(&conversation_model_with_state(
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+        UiMessageState::Archived,
+    ));
+    assert!(archived.contains("u restore"));
+    assert!(!archived.contains("a archive"));
+    assert!(archived.contains("Enter info · Esc back · q quit"));
+}
+
+#[test]
 fn too_small_layout_matches_snapshot_without_mutating_the_model() {
     assert_snapshot(
         &ready_model(UiSize {
@@ -887,6 +916,10 @@ fn project_model_with_state(
 }
 
 fn conversation_model(size: UiSize) -> UiModel {
+    conversation_model_with_state(size, UiMessageState::Open)
+}
+
+fn conversation_model_with_state(size: UiSize, state: UiMessageState) -> UiModel {
     let ready = ready_model(size);
     let opening = update(ready, UiEvent::Input(UiInput::Activate)).expect("open conversation");
     let effect_id = opening
@@ -909,8 +942,11 @@ fn conversation_model(size: UiSize) -> UiModel {
                         kind: UiConversationEntryKind::Message,
                         content: "Can we ship?".to_owned(),
                         summary: "question · peer".to_owned(),
-                        message_state: Some(UiMessageState::Open),
-                        message_target: None,
+                        message_state: Some(state),
+                        message_target: Some(hq_tui::UiMessageTarget {
+                            message_id: [1; 32],
+                            reply_allowed: true,
+                        }),
                         technical: Vec::new(),
                     },
                     UiConversationEntry {

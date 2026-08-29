@@ -784,6 +784,25 @@ fn activity_never_becomes_a_reply_or_state_action_target() {
 }
 
 #[test]
+fn summary_state_shortcuts_explain_that_an_exact_message_must_be_selected() {
+    let loaded = loaded_model(snapshot(1, &["thread-a"]));
+
+    for shortcut in ['a', 'u'] {
+        let attempted = update(loaded.clone(), UiEvent::Input(UiInput::Character(shortcut)))
+            .expect("summary state shortcut provides guidance");
+        assert_eq!(
+            attempted.model.last_failure(),
+            Some(&UiFailure {
+                code: "message_not_selected".to_owned(),
+                action: "press Enter to open the thread, then select an exact message".to_owned(),
+            })
+        );
+        assert_eq!(redraw_count(&attempted.effects), 1);
+        assert!(attempted.model.mailbox_modal().is_none());
+    }
+}
+
+#[test]
 fn dirty_reply_saves_before_submit_and_stale_rejection_preserves_text() {
     let opened = opened_conversation(vec![actionable_entry("question", [3; 32])]);
     let opening = update(opened, UiEvent::Input(UiInput::Character('r'))).expect("reply");

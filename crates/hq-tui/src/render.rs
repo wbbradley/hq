@@ -1411,11 +1411,13 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
                         model.project_search()
                     }
                 )
+            } else if model.focus() == UiFocus::Conversation {
+                conversation_footer(model)
             } else if model.viewport().width >= WIDE_WIDTH {
-                " ←/h navigation · ↑/↓ select · r reply · d direct · n note · a/u state · q quit"
+                " ←/h nav · ↑/↓ select · Enter open thread for archive/restore · d direct · n note · q quit"
                     .to_owned()
             } else {
-                " ↑/↓ select · r reply · d direct · n note · a/u state · q quit".to_owned()
+                " ↑/↓ select · Enter open thread for archive/restore · q quit".to_owned()
             }
         },
         |failure| format!(" {} · {}", failure.code, failure.action),
@@ -1433,6 +1435,40 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         ),
         area,
     );
+}
+
+fn conversation_footer(model: &UiModel) -> String {
+    let selected = model.conversation().and_then(|conversation| {
+        let anchor = model.conversation_anchor()?;
+        conversation.entries.iter().find(|entry| entry.id == anchor)
+    });
+    let mut controls = Vec::new();
+    if model.viewport().width >= WIDE_WIDTH {
+        controls.push("←/h nav");
+    }
+    controls.push("↑/↓ msg");
+    if selected
+        .and_then(|entry| entry.message_target)
+        .is_some_and(|target| target.reply_allowed)
+    {
+        controls.push("r reply");
+    }
+    match selected.and_then(|entry| entry.message_target.zip(entry.message_state)) {
+        Some((_, UiMessageState::Open)) => controls.push("a archive"),
+        Some((_, UiMessageState::Archived)) => controls.push("u restore"),
+        Some((_, UiMessageState::Rejected)) | None => {}
+    }
+    if model.viewport().width >= WIDE_WIDTH {
+        controls.push("Enter details");
+        controls.push("Esc close");
+        controls.push("d direct");
+        controls.push("n note");
+    } else {
+        controls.push("Enter info");
+        controls.push("Esc back");
+    }
+    controls.push("q quit");
+    format!(" {}", controls.join(" · "))
 }
 
 fn selected_style(focused: bool) -> Style {
