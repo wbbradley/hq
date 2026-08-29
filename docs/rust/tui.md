@@ -74,6 +74,14 @@ names; the query and stable selected agent survive authoritative reorder, reconn
 Enter opens identity-bound details, and session selection remains bound to exact provider/session
 identity rather than vector position as the catalog reloads.
 
+Agent rows use assignment-aware language derived from the typed agent and project catalogs. An
+active agent with no current project is `unassigned`; one current assignment names its project and
+is `setting up` or `ready`; blocked, cardinality-conflicted, or identity-conflicted state is
+`needs attention`; and an absorbing retirement is `retired`. The row never substitutes durable
+session selection for runtime presence and therefore does not label an agent `running` or `idle`.
+Agent details retain the exact project, assignment, provider, and session evidence behind that
+summary.
+
 `c` composes one permanent agent name. Agent details use `r` to rename or explicitly clear the
 selected durable session display name and `x` to open permanent-retirement confirmation. Retirement
 does not emit an effect until Enter confirms it; `f` visibly opts into forced project/runtime

@@ -11,11 +11,12 @@ use ratatui::{
 };
 
 use crate::{
-    UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentModal, UiConnectionState,
-    UiConversationEntry, UiConversationEntryKind, UiFocus, UiHumanState, UiMailboxAction,
-    UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
-    UiMessageState, UiModel, UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome,
-    UiProjectThread, UiRow, UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
+    UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
+    UiAgentProjectAssignment, UiAgentStatus, UiConnectionState, UiConversationEntry,
+    UiConversationEntryKind, UiFocus, UiHumanState, UiMailboxAction, UiMailboxDraftTarget,
+    UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel,
+    UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread, UiRow,
+    UiRowKind, UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -881,26 +882,81 @@ fn short_identity(identity: [u8; 32]) -> String {
 }
 
 fn agent_summary(agent: &UiAgent) -> Vec<Line<'_>> {
-    let lifecycle = match agent.lifecycle {
-        UiAgentLifecycle::Active => "active",
-        UiAgentLifecycle::Conflicted => "conflicted",
-        UiAgentLifecycle::Retired => "retired",
-    };
-    vec![
+    let mut lines = vec![
         Line::styled(
             agent.names.first().map_or("Unnamed agent", String::as_str),
             Style::new().fg(Color::Cyan).bold(),
         ),
+        Line::from(format!("Status: {}", agent_status_label(&agent.status))),
         Line::from(format!(
-            "Identity: {:02x}{:02x}{:02x}{:02x}…",
-            agent.agent_id[0], agent.agent_id[1], agent.agent_id[2], agent.agent_id[3]
-        )),
-        Line::from(format!(
-            "Lifecycle: {lifecycle} · runnable: {} · mailboxes: {}",
-            agent.runnable,
+            "Identity: {:02x}{:02x}{:02x}{:02x}… · mailboxes: {}",
+            agent.agent_id[0],
+            agent.agent_id[1],
+            agent.agent_id[2],
+            agent.agent_id[3],
             agent.mailboxes.len()
         )),
-    ]
+    ];
+    match &agent.status {
+        UiAgentStatus::Assigned(assignment) => {
+            lines.extend(agent_assignment_evidence(assignment));
+        }
+        UiAgentStatus::NeedsAttention { assignments, .. } => {
+            for assignment in assignments {
+                lines.extend(agent_assignment_evidence(assignment));
+            }
+        }
+        UiAgentStatus::Unassigned | UiAgentStatus::Retired => {}
+    }
+    lines
+}
+
+fn agent_status_label(status: &UiAgentStatus) -> String {
+    match status {
+        UiAgentStatus::Unassigned => "Unassigned".to_owned(),
+        UiAgentStatus::Assigned(assignment) => format!(
+            "Assigned to {} · {}",
+            assignment.project_name,
+            agent_assignment_phase_label(assignment.phase)
+        ),
+        UiAgentStatus::NeedsAttention { reason, .. } => format!(
+            "Needs attention · {}",
+            match reason {
+                UiAgentAttentionReason::IdentityConflict => "identity conflict",
+                UiAgentAttentionReason::AssignmentConflict => "assignment conflict",
+                UiAgentAttentionReason::AssignmentBlocked => "assignment blocked",
+            }
+        ),
+        UiAgentStatus::Retired => "Retired".to_owned(),
+    }
+}
+
+fn agent_assignment_phase_label(phase: UiAgentAssignmentPhase) -> &'static str {
+    match phase {
+        UiAgentAssignmentPhase::SettingUp => "setting up",
+        UiAgentAssignmentPhase::Ready => "ready",
+        UiAgentAssignmentPhase::Blocked => "blocked",
+    }
+}
+
+fn agent_assignment_evidence(assignment: &UiAgentProjectAssignment) -> Vec<Line<'_>> {
+    let mut lines = vec![
+        Line::from(format!(
+            "Project: {} ({})",
+            assignment.project_name,
+            short_identity(assignment.project_id)
+        )),
+        Line::from(format!(
+            "Assignment: {} · {} · {}",
+            short_identity(assignment.assignment_id),
+            assignment.provider,
+            assignment.session.as_deref().unwrap_or("session pending")
+        )),
+    ];
+    if let Some(blocked) = &assignment.blocked {
+        lines.push(Line::from(format!("Blocked: {blocked}")));
+    }
+    lines
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1382,17 +1438,25 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
     } else {
         Style::new()
     };
-    [
+    let detail = if row.kind == UiRowKind::Agent {
         Line::from(vec![
-            Span::styled(marker, title_style),
-            Span::styled(row.title.as_str(), title_style),
-        ]),
+            Span::raw("     "),
+            Span::styled(row.detail.as_str(), row_state_style(row.state)),
+        ])
+    } else {
         Line::from(vec![
             Span::raw("     "),
             Span::styled(row_state_label(row.state), row_state_style(row.state)),
             Span::raw(" · "),
             Span::styled(row.detail.as_str(), Style::new().fg(Color::DarkGray)),
+        ])
+    };
+    [
+        Line::from(vec![
+            Span::styled(marker, title_style),
+            Span::styled(row.title.as_str(), title_style),
         ]),
+        detail,
     ]
 }
 

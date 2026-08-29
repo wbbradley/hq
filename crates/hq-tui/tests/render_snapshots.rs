@@ -3,13 +3,13 @@
 #![allow(clippy::expect_used)]
 
 use hq_tui::{
-    UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentMailbox, UiAgentSession,
-    UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent,
-    UiHumanState, UiInput, UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel,
-    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection, render,
-    update,
+    UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentLifecycle, UiAgentMailbox,
+    UiAgentProjectAssignment, UiAgentSession, UiAgentStatus, UiConversationEntry,
+    UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiHumanState, UiInput,
+    UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
+    UiRowKind, UiRowState, UiSize, UiSnapshot, UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -204,8 +204,74 @@ fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
         let rendered = snapshot_text(terminal.backend().buffer());
         assert!(rendered.contains("Agent details"));
         assert!(rendered.contains("builder"));
+        assert!(rendered.contains("Status: Unassigned"));
         assert!(rendered.contains("codex/session-1"));
         assert!(rendered.contains("r rename/clear"));
+        assert!(!rendered.contains("runnable:"));
+    }
+}
+
+#[test]
+fn assigned_agent_details_show_plain_status_and_exact_assignment_evidence() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 18,
+        },
+    ] {
+        let assignment = UiAgentProjectAssignment {
+            project_id: [4; 32],
+            project_name: "release".to_owned(),
+            assignment_id: [5; 32],
+            provider: "codex".to_owned(),
+            session: Some("session-1".to_owned()),
+            phase: UiAgentAssignmentPhase::Ready,
+            blocked: None,
+            cardinality_conflicted: false,
+        };
+        let model = agent_details_model_with_status(size, UiAgentStatus::Assigned(assignment));
+        let backend = TestBackend::new(size.width, size.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &model))
+            .expect("render assigned agent details");
+        let rendered = snapshot_text(terminal.backend().buffer());
+        assert!(rendered.contains("Status: Assigned to release · ready"));
+        assert!(rendered.contains("Project: release (040404040404)"));
+        assert!(rendered.contains("Assignment: 050505050505 · codex · session-1"));
+        assert!(!rendered.contains("runnable:"));
+    }
+}
+
+#[test]
+fn agent_rows_show_assignment_status_without_generic_open_or_waiting_labels() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 24,
+        },
+    ] {
+        let model = agent_status_rows_model(size);
+        let backend = TestBackend::new(size.width, size.height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &model))
+            .expect("render agent statuses");
+        let rendered = snapshot_text(terminal.backend().buffer());
+        assert!(rendered.contains("unassigned"));
+        assert!(rendered.contains("assigned to release · setting up"));
+        assert!(rendered.contains("needs attention · migration blocked"));
+        assert!(rendered.contains("retired"));
+        assert!(!rendered.contains("open · unassigned"));
+        assert!(!rendered.contains("waiting"));
     }
 }
 
@@ -749,6 +815,65 @@ fn row(id: &str, title: &str, detail: &str, state: UiRowState) -> UiRow {
 }
 
 fn agent_details_model(size: UiSize) -> UiModel {
+    agent_details_model_with_status(size, UiAgentStatus::Unassigned)
+}
+
+fn agent_status_rows_model(size: UiSize) -> UiModel {
+    let rows = [
+        ("builder", "unassigned", UiRowState::Open),
+        (
+            "reviewer",
+            "assigned to release · setting up",
+            UiRowState::Open,
+        ),
+        (
+            "operator",
+            "needs attention · migration blocked",
+            UiRowState::Attention,
+        ),
+        ("historian", "retired", UiRowState::Archived),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (title, detail, state))| UiRow {
+        id: format!("{:02x}", index + 1).repeat(32),
+        title: title.to_owned(),
+        detail: detail.to_owned(),
+        state,
+        kind: UiRowKind::Agent,
+    })
+    .collect();
+    let mut model = loaded_snapshot_model(
+        size,
+        UiSnapshot {
+            revision: 42,
+            human_state: UiHumanState::Ready,
+            inbox_rows: Vec::new(),
+            sent_rows: Vec::new(),
+            archived_rows: Vec::new(),
+            agent_rows: rows,
+            project_rows: Vec::new(),
+            direct_targets: Vec::new(),
+            agents: Vec::new(),
+            projects: Vec::new(),
+        },
+    );
+    let section_input = if size.width >= 96 {
+        UiInput::NextItem
+    } else {
+        UiInput::Character('l')
+    };
+    for _ in 0..3 {
+        model = update(model, UiEvent::Input(section_input.clone()))
+            .expect("next cached section")
+            .model;
+    }
+    update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("focus agent rows")
+        .model
+}
+
+fn agent_details_model_with_status(size: UiSize, status: UiAgentStatus) -> UiModel {
     let agent = UiAgent {
         agent_id: [1; 32],
         names: vec!["builder".to_owned()],
@@ -758,6 +883,7 @@ fn agent_details_model(size: UiSize) -> UiModel {
         }],
         lifecycle: UiAgentLifecycle::Active,
         runnable: true,
+        status,
         sessions: vec![UiAgentSession {
             provider: "codex".to_owned(),
             session: "session-1".to_owned(),
@@ -882,6 +1008,7 @@ fn project_model_with_state(
         }],
         lifecycle: UiAgentLifecycle::Active,
         runnable: true,
+        status: UiAgentStatus::Unassigned,
         sessions: vec![UiAgentSession {
             provider: "codex".to_owned(),
             session: session.to_owned(),

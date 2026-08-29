@@ -8,10 +8,11 @@ mod model;
 mod render;
 
 pub use model::{
-    EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox,
-    UiAgentModal, UiAgentSession, UiConnectionState, UiConversation, UiConversationEntry,
-    UiConversationEntryKind, UiConversationPage, UiDirectTarget, UiEffect, UiError, UiEvent,
-    UiFailure, UiFocus, UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft,
+    EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
+    UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentModal,
+    UiAgentProjectAssignment, UiAgentSession, UiAgentStatus, UiConnectionState, UiConversation,
+    UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiDirectTarget, UiEffect,
+    UiError, UiEvent, UiFailure, UiFocus, UiHumanState, UiInput, UiMailboxAction, UiMailboxDraft,
     UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome,
     UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel, UiProject, UiProjectAction,
     UiProjectAssignment, UiProjectExternalWarning, UiProjectFormField, UiProjectModal,

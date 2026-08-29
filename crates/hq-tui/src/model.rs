@@ -351,6 +351,67 @@ pub struct UiAgentSession {
     pub display_name: Option<String>,
 }
 
+/// User-facing phase of one current project assignment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiAgentAssignmentPhase {
+    /// HQ is preparing the provider session and project conversation.
+    SettingUp,
+    /// The durable assignment is ready to accept project input.
+    Ready,
+    /// The assignment cannot currently accept project input.
+    Blocked,
+}
+
+/// Exact project-assignment context retained for agent status and details.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiAgentProjectAssignment {
+    /// Stable project identity.
+    pub project_id: [u8; 32],
+    /// Bounded project display name.
+    pub project_name: String,
+    /// Immutable assignment epoch.
+    pub assignment_id: [u8; 32],
+    /// Selected provider namespace.
+    pub provider: String,
+    /// Acknowledged exact provider session, when present.
+    pub session: Option<String>,
+    /// User-facing assignment phase derived from typed projection fields.
+    pub phase: UiAgentAssignmentPhase,
+    /// Stable blocking evidence retained for technical details.
+    pub blocked: Option<String>,
+    /// Whether global project/agent cardinality is conflicted.
+    pub cardinality_conflicted: bool,
+}
+
+/// Closed reason an agent requires user attention.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiAgentAttentionReason {
+    /// Permanent identity claims are incomplete or conflicted.
+    IdentityConflict,
+    /// More than one project assignment or an explicit cardinality conflict exists.
+    AssignmentConflict,
+    /// The one current project assignment is explicitly blocked.
+    AssignmentBlocked,
+}
+
+/// User-facing status for one named agent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UiAgentStatus {
+    /// The active agent is not currently assigned to project work.
+    Unassigned,
+    /// One unconflicted current project assignment exists.
+    Assigned(UiAgentProjectAssignment),
+    /// Identity or assignment state requires explicit inspection or recovery.
+    NeedsAttention {
+        /// Stable user-facing attention category.
+        reason: UiAgentAttentionReason,
+        /// Every current assignment retained as exact supporting context.
+        assignments: Vec<UiAgentProjectAssignment>,
+    },
+    /// Retirement is absorbing and the agent is historical only.
+    Retired,
+}
+
 /// Complete passive named-agent presentation used by search and inspection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiAgent {
@@ -364,6 +425,8 @@ pub struct UiAgent {
     pub lifecycle: UiAgentLifecycle,
     /// Whether one durable provider session is selected without conflict.
     pub runnable: bool,
+    /// Assignment-aware user-facing status.
+    pub status: UiAgentStatus,
     /// Compatible durable provider sessions in stable order.
     pub sessions: Vec<UiAgentSession>,
 }

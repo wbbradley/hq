@@ -15,7 +15,7 @@ use std::{
 use hq_local_api::protocol::v1::{
     ActivityStatusDto, AuthoritativeSnapshotDto, ConversationEntryDto, ConversationKeyDto,
     ConversationMessageDto, ConversationPageDto, DeviceGrantDto, Id32, MailboxAddressDto,
-    MessagePurposeDto, PresentationKindDto, SnapshotItem,
+    MessagePurposeDto, PresentationKindDto, ResourceLocatorDto, ResourceSchemeDto, SnapshotItem,
 };
 use hq_node::{
     TuiClientObservation, TuiClientPort, TuiClock, TuiDraftError, TuiEffectExecutor,
@@ -596,6 +596,7 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
 
     assert_eq!(snapshot.agent_rows.len(), 1);
     assert_eq!(snapshot.agent_rows[0].title, "builder");
+    assert_eq!(snapshot.agent_rows[0].detail, "unassigned");
     assert_eq!(snapshot.agent_rows[0].state, hq_tui::UiRowState::Open);
     assert_eq!(snapshot.agents.len(), 1);
     assert_eq!(snapshot.agents[0].agent_id, [5; 32]);
@@ -623,6 +624,177 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
 }
 
 #[test]
+fn authoritative_snapshot_maps_a_new_agent_as_unassigned() {
+    let source = AuthoritativeSnapshotDto::new(
+        1,
+        vec![SnapshotItem::Agent {
+            agent_id: Id32::new([5; 32]),
+            claims: vec![Id32::new([6; 32])],
+            names: vec!["builder".to_owned()],
+            mailboxes: vec![MailboxAddressDto {
+                installation_id: Id32::new([7; 32]),
+                mailbox_id: Id32::new([8; 32]),
+            }],
+            retirements: Vec::new(),
+            lifecycle: "active".to_owned(),
+            runnable: false,
+        }],
+    )
+    .expect("authoritative snapshot");
+
+    let snapshot = tui_snapshot([99; 32], &source);
+    assert_eq!(snapshot.agent_rows.len(), 1);
+    assert_eq!(snapshot.agent_rows[0].detail, "unassigned");
+    assert_eq!(snapshot.agent_rows[0].state, hq_tui::UiRowState::Open);
+}
+
+#[test]
+fn authoritative_snapshot_maps_current_project_assignment_states_onto_agents() {
+    let mut items = vec![
+        agent_snapshot_item(11, "setting-up", "active", false, false),
+        agent_snapshot_item(12, "ready", "active", true, false),
+        agent_snapshot_item(13, "blocked", "active", true, false),
+        agent_snapshot_item(14, "conflicted", "conflicted", false, false),
+        agent_snapshot_item(15, "retired", "retired", false, true),
+        agent_snapshot_item(16, "double-booked", "active", true, false),
+    ];
+    items.extend(project_assignment_snapshot_items(
+        21,
+        "compiler",
+        11,
+        "configuring",
+        false,
+        None,
+        false,
+    ));
+    items.extend(project_assignment_snapshot_items(
+        22, "release", 12, "runnable", true, None, false,
+    ));
+    items.extend(project_assignment_snapshot_items(
+        23,
+        "migration",
+        13,
+        "blocked",
+        false,
+        Some("runtime_unavailable"),
+        false,
+    ));
+    items.extend(project_assignment_snapshot_items(
+        24, "client", 16, "runnable", false, None, true,
+    ));
+
+    let source = AuthoritativeSnapshotDto::new(1, items).expect("authoritative snapshot");
+    let snapshot = tui_snapshot([99; 32], &source);
+    let row = |name: &str| {
+        snapshot
+            .agent_rows
+            .iter()
+            .find(|row| row.title == name)
+            .expect("agent row")
+    };
+
+    assert_eq!(
+        row("setting-up").detail,
+        "assigned to compiler · setting up"
+    );
+    assert_eq!(row("setting-up").state, hq_tui::UiRowState::Open);
+    assert_eq!(row("ready").detail, "assigned to release · ready");
+    assert_eq!(row("ready").state, hq_tui::UiRowState::Open);
+    assert_eq!(row("blocked").detail, "needs attention · migration blocked");
+    assert_eq!(row("blocked").state, hq_tui::UiRowState::Attention);
+    assert_eq!(
+        row("conflicted").detail,
+        "needs attention · identity conflict"
+    );
+    assert_eq!(row("conflicted").state, hq_tui::UiRowState::Attention);
+    assert_eq!(
+        row("double-booked").detail,
+        "needs attention · assignment conflict"
+    );
+    assert_eq!(row("double-booked").state, hq_tui::UiRowState::Attention);
+    assert_eq!(row("retired").detail, "retired");
+    assert_eq!(row("retired").state, hq_tui::UiRowState::Archived);
+}
+
+fn agent_snapshot_item(
+    byte: u8,
+    name: &str,
+    lifecycle: &str,
+    runnable: bool,
+    retired: bool,
+) -> SnapshotItem {
+    SnapshotItem::Agent {
+        agent_id: Id32::new([byte; 32]),
+        claims: vec![Id32::new([byte.saturating_add(80); 32])],
+        names: vec![name.to_owned()],
+        mailboxes: vec![MailboxAddressDto {
+            installation_id: Id32::new([1; 32]),
+            mailbox_id: Id32::new([byte.saturating_add(100); 32]),
+        }],
+        retirements: retired
+            .then(|| Id32::new([byte.saturating_add(120); 32]))
+            .into_iter()
+            .collect(),
+        lifecycle: lifecycle.to_owned(),
+        runnable,
+    }
+}
+
+fn project_assignment_snapshot_items(
+    project_byte: u8,
+    name: &str,
+    agent_byte: u8,
+    phase: &str,
+    runnable: bool,
+    blocked: Option<&str>,
+    cardinality_conflicted: bool,
+) -> Vec<SnapshotItem> {
+    let assignment_id = Id32::new([project_byte.saturating_add(80); 32]);
+    let runtime_fields = (phase == "runnable").then(|| {
+        (
+            Some("session-1".to_owned()),
+            Some(Id32::new([project_byte.saturating_add(100); 32])),
+            Some(
+                ResourceLocatorDto::new(
+                    ResourceSchemeDto::WorkingTree,
+                    format!("/workspace/{name}"),
+                )
+                .expect("launch directory"),
+            ),
+        )
+    });
+    let (session, thread_id, launch_directory) = runtime_fields.unwrap_or((None, None, None));
+    vec![
+        SnapshotItem::Project {
+            project_id: Id32::new([project_byte; 32]),
+            home: Id32::new([1; 32]),
+            account_id: Id32::new([2; 32]),
+            mailbox_id: Id32::new([project_byte.saturating_add(40); 32]),
+            name: name.to_owned(),
+            lifecycle: "open".to_owned(),
+            archived: false,
+            claimable: true,
+            head: Id32::new([project_byte.saturating_add(60); 32]),
+            input_sequence: 0,
+        },
+        SnapshotItem::ProjectAssignment {
+            project_id: Id32::new([project_byte; 32]),
+            assignment_id,
+            agent_id: Id32::new([agent_byte; 32]),
+            provider: "codex".to_owned(),
+            session,
+            phase: phase.to_owned(),
+            thread_id,
+            launch_directory,
+            blocked: blocked.map(str::to_owned),
+            cardinality_conflicted,
+            runnable,
+            support: vec![assignment_id],
+        },
+    ]
+}
+
+#[test]
 fn authoritative_snapshot_mapping_never_forwards_terminal_controls() {
     let source = AuthoritativeSnapshotDto::new(
         1,
@@ -641,7 +813,10 @@ fn authoritative_snapshot_mapping_never_forwards_terminal_controls() {
     let snapshot = tui_snapshot([99; 32], &source);
     assert_eq!(snapshot.agent_rows.len(), 1);
     assert_eq!(snapshot.agent_rows[0].title, "builder [31m");
-    assert_eq!(snapshot.agent_rows[0].detail, "ready spoof");
+    assert_eq!(
+        snapshot.agent_rows[0].detail,
+        "needs attention · identity conflict"
+    );
     assert!(
         snapshot.agent_rows[0]
             .title

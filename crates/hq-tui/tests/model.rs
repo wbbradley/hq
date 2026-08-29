@@ -5,15 +5,16 @@
 use std::time::Duration;
 
 use hq_tui::{
-    UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox, UiAgentModal,
-    UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
-    UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHumanState,
-    UiInput, UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState,
-    UiMessageTarget, UiModel, UiProject, UiProjectAction, UiProjectAssignment,
-    UiProjectExternalWarning, UiProjectModal, UiProjectOutcome, UiProjectResource,
-    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
-    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase, UiAgentLifecycle,
+    UiAgentMailbox, UiAgentModal, UiAgentProjectAssignment, UiAgentSession, UiAgentStatus,
+    UiConnectionState, UiConversationEntry, UiConversationEntryKind, UiConversationPage,
+    UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHumanState, UiInput, UiMailboxAction,
+    UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
+    UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
+    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectModal,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1152,6 +1153,45 @@ fn agent_search_and_details_keep_stable_identity_across_reload_reconnect_and_res
     assert!(matches!(
         reconnecting.model.agent_modal(),
         Some(UiAgentModal::Details { agent, .. }) if agent.agent_id == [2; 32]
+    ));
+}
+
+#[test]
+fn open_agent_details_adopt_assignment_aware_status_from_a_new_snapshot() {
+    let model = loaded_agents_model(1, &[agent(2, "builder")]);
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("open agent details");
+    let invalidated = update(details.model, UiEvent::Invalidated { revision: 2 }).expect("reload");
+    let request = snapshot_effect(&invalidated.effects);
+    let mut assigned = agent(2, "builder");
+    assigned.status = UiAgentStatus::Assigned(UiAgentProjectAssignment {
+        project_id: [7; 32],
+        project_name: "release".to_owned(),
+        assignment_id: [8; 32],
+        provider: "codex".to_owned(),
+        session: None,
+        phase: UiAgentAssignmentPhase::SettingUp,
+        blocked: None,
+        cardinality_conflicted: false,
+    });
+    let reloaded = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: request,
+            snapshot: agents_snapshot(2, vec![assigned]),
+        },
+    )
+    .expect("authoritative assignment update");
+
+    assert!(matches!(
+        reloaded.model.agent_modal(),
+        Some(UiAgentModal::Details {
+            agent: UiAgent {
+                status: UiAgentStatus::Assigned(assignment),
+                ..
+            },
+            ..
+        }) if assignment.project_name == "release"
+            && assignment.phase == UiAgentAssignmentPhase::SettingUp
     ));
 }
 
@@ -2444,6 +2484,7 @@ fn project_agent(byte: u8, home: [u8; 32]) -> UiAgent {
         }],
         lifecycle: UiAgentLifecycle::Active,
         runnable: true,
+        status: UiAgentStatus::Unassigned,
         sessions: vec![UiAgentSession {
             provider: "codex".to_owned(),
             session: format!("session-{byte}"),
@@ -2539,6 +2580,7 @@ fn agent(byte: u8, name: &str) -> UiAgent {
         }],
         lifecycle: UiAgentLifecycle::Active,
         runnable: true,
+        status: UiAgentStatus::Unassigned,
         sessions: vec![UiAgentSession {
             provider: "codex".to_owned(),
             session: format!("session-{byte}"),

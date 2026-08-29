@@ -22,8 +22,9 @@ use hq_local_api::{
     },
 };
 use hq_tui::{
-    EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentLifecycle, UiAgentMailbox,
-    UiAgentSession, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
+    EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
+    UiAgentAttentionReason, UiAgentLifecycle, UiAgentMailbox, UiAgentProjectAssignment,
+    UiAgentSession, UiAgentStatus, UiConnectionState, UiConversationEntry, UiConversationEntryKind,
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiHumanState,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject,
@@ -1149,48 +1150,53 @@ fn tui_snapshot_with_projects(
     projects: Vec<LocalProject>,
 ) -> UiSnapshot {
     let human_state = tui_human_state(local_installation, snapshot);
+    let projects = tui_projects(projects);
     let agents = tui_named_agent_catalog(snapshot)
         .into_iter()
-        .map(|agent| UiAgent {
-            agent_id: *agent.agent_id.as_bytes(),
-            names: agent
-                .names
-                .into_iter()
-                .map(|name| terminal_text(&name))
-                .collect(),
-            mailboxes: agent
-                .mailboxes
-                .into_iter()
-                .map(|mailbox| UiAgentMailbox {
-                    installation_id: *mailbox.installation_id().as_bytes(),
-                    mailbox_id: *mailbox.mailbox_id().as_bytes(),
-                })
-                .collect(),
-            lifecycle: match agent.lifecycle.as_str() {
+        .map(|agent| {
+            let agent_id = *agent.agent_id.as_bytes();
+            let lifecycle = match agent.lifecycle.as_str() {
                 "active" => UiAgentLifecycle::Active,
                 "retired" => UiAgentLifecycle::Retired,
                 _ => UiAgentLifecycle::Conflicted,
-            },
-            runnable: agent.runnable,
-            sessions: agent
-                .sessions
-                .into_iter()
-                .map(|session| UiAgentSession {
-                    provider: session.provider,
-                    session: session.session,
-                    mailbox: session.mailbox.map(|mailbox| UiAgentMailbox {
+            };
+            UiAgent {
+                agent_id,
+                names: agent
+                    .names
+                    .into_iter()
+                    .map(|name| terminal_text(&name))
+                    .collect(),
+                mailboxes: agent
+                    .mailboxes
+                    .into_iter()
+                    .map(|mailbox| UiAgentMailbox {
                         installation_id: *mailbox.installation_id().as_bytes(),
                         mailbox_id: *mailbox.mailbox_id().as_bytes(),
-                    }),
-                    conflicted: session.conflicted,
-                    selected: session.selected,
-                    name_resolved: session.name_resolved,
-                    display_name: session.display_name.map(|name| terminal_text(&name)),
-                })
-                .collect(),
+                    })
+                    .collect(),
+                lifecycle,
+                runnable: agent.runnable,
+                status: agent_status(agent_id, lifecycle, &projects),
+                sessions: agent
+                    .sessions
+                    .into_iter()
+                    .map(|session| UiAgentSession {
+                        provider: session.provider,
+                        session: session.session,
+                        mailbox: session.mailbox.map(|mailbox| UiAgentMailbox {
+                            installation_id: *mailbox.installation_id().as_bytes(),
+                            mailbox_id: *mailbox.mailbox_id().as_bytes(),
+                        }),
+                        conflicted: session.conflicted,
+                        selected: session.selected,
+                        name_resolved: session.name_resolved,
+                        display_name: session.display_name.map(|name| terminal_text(&name)),
+                    })
+                    .collect(),
+            }
         })
-        .collect();
-    let projects = tui_projects(projects);
+        .collect::<Vec<_>>();
     let mut direct_targets = snapshot
         .items
         .iter()
@@ -1231,7 +1237,7 @@ fn tui_snapshot_with_projects(
         inbox_rows: rows(UiSection::Inbox),
         sent_rows: rows(UiSection::Sent),
         archived_rows: rows(UiSection::Archived),
-        agent_rows: rows(UiSection::Agents),
+        agent_rows: agents.iter().map(agent_row).collect(),
         project_rows: rows(UiSection::Projects),
         direct_targets,
         agents,
@@ -1611,23 +1617,6 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
             kind: UiRowKind::Diagnostic,
         }),
         (
-            UiSection::Agents,
-            SnapshotItem::Agent {
-                agent_id,
-                names,
-                retirements,
-                lifecycle,
-                runnable,
-                ..
-            },
-        ) => Some(agent_row(
-            *agent_id,
-            names,
-            retirements.is_empty(),
-            lifecycle,
-            *runnable,
-        )),
-        (
             UiSection::Projects,
             SnapshotItem::Project {
                 project_id,
@@ -1654,33 +1643,111 @@ fn snapshot_row(section: UiSection, item: &SnapshotItem) -> Option<UiRow> {
     }
 }
 
-fn agent_row(
-    agent_id: Id32,
-    names: &[String],
-    active: bool,
-    lifecycle: &str,
-    runnable: bool,
-) -> UiRow {
-    let title = match names {
+fn agent_row(agent: &UiAgent) -> UiRow {
+    let title = match agent.names.as_slice() {
         [name] => terminal_text(name),
-        [] => format!("Agent {}", short_id(agent_id)),
-        _ => format!("Conflicted agent {}", short_id(agent_id)),
+        [] => format!("Agent {}", short_id(Id32::new(agent.agent_id))),
+        _ => format!("Conflicted agent {}", short_id(Id32::new(agent.agent_id))),
     };
-    let state = if names.len() > 1 {
-        UiRowState::Attention
-    } else if !active {
-        UiRowState::Archived
-    } else if runnable {
-        UiRowState::Open
-    } else {
-        UiRowState::Waiting
+    let (state, detail) = match &agent.status {
+        UiAgentStatus::Unassigned => (UiRowState::Open, "unassigned".to_owned()),
+        UiAgentStatus::Assigned(assignment) => (
+            UiRowState::Open,
+            format!(
+                "assigned to {} · {}",
+                assignment.project_name,
+                match assignment.phase {
+                    UiAgentAssignmentPhase::SettingUp => "setting up",
+                    UiAgentAssignmentPhase::Ready => "ready",
+                    UiAgentAssignmentPhase::Blocked => "blocked",
+                }
+            ),
+        ),
+        UiAgentStatus::NeedsAttention {
+            reason,
+            assignments,
+        } => {
+            let detail = match reason {
+                UiAgentAttentionReason::IdentityConflict => {
+                    "needs attention · identity conflict".to_owned()
+                }
+                UiAgentAttentionReason::AssignmentConflict => {
+                    "needs attention · assignment conflict".to_owned()
+                }
+                UiAgentAttentionReason::AssignmentBlocked => assignments.first().map_or_else(
+                    || "needs attention · assignment blocked".to_owned(),
+                    |assignment| format!("needs attention · {} blocked", assignment.project_name),
+                ),
+            };
+            (UiRowState::Attention, detail)
+        }
+        UiAgentStatus::Retired => (UiRowState::Archived, "retired".to_owned()),
     };
     UiRow {
-        id: full_id(agent_id),
+        id: full_id(Id32::new(agent.agent_id)),
         title,
-        detail: terminal_text(lifecycle),
+        detail,
         state,
         kind: UiRowKind::Agent,
+    }
+}
+
+fn agent_status(
+    agent_id: [u8; 32],
+    lifecycle: UiAgentLifecycle,
+    projects: &[UiProject],
+) -> UiAgentStatus {
+    let assignments = projects
+        .iter()
+        .filter_map(|project| {
+            let assignment = project
+                .assignment
+                .as_ref()
+                .filter(|assignment| assignment.agent_id == agent_id)?;
+            let phase = if assignment.blocked.is_some() {
+                UiAgentAssignmentPhase::Blocked
+            } else if assignment.runnable {
+                UiAgentAssignmentPhase::Ready
+            } else {
+                UiAgentAssignmentPhase::SettingUp
+            };
+            Some(UiAgentProjectAssignment {
+                project_id: project.project_id,
+                project_name: project.name.clone(),
+                assignment_id: assignment.assignment_id,
+                provider: assignment.provider.clone(),
+                session: assignment.session.clone(),
+                phase,
+                blocked: assignment.blocked.clone(),
+                cardinality_conflicted: assignment.cardinality_conflicted,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    match lifecycle {
+        UiAgentLifecycle::Retired => UiAgentStatus::Retired,
+        UiAgentLifecycle::Conflicted => UiAgentStatus::NeedsAttention {
+            reason: UiAgentAttentionReason::IdentityConflict,
+            assignments,
+        },
+        UiAgentLifecycle::Active => match assignments.as_slice() {
+            [] => UiAgentStatus::Unassigned,
+            [assignment] if assignment.cardinality_conflicted => UiAgentStatus::NeedsAttention {
+                reason: UiAgentAttentionReason::AssignmentConflict,
+                assignments,
+            },
+            [assignment] if assignment.phase == UiAgentAssignmentPhase::Blocked => {
+                UiAgentStatus::NeedsAttention {
+                    reason: UiAgentAttentionReason::AssignmentBlocked,
+                    assignments,
+                }
+            }
+            [assignment] => UiAgentStatus::Assigned(assignment.clone()),
+            [_, _, ..] => UiAgentStatus::NeedsAttention {
+                reason: UiAgentAttentionReason::AssignmentConflict,
+                assignments,
+            },
+        },
     }
 }
 
