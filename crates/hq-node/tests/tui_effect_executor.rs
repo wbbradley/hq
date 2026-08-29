@@ -4,9 +4,12 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use hq_local_api::protocol::v1::{
@@ -768,6 +771,39 @@ fn shutdown_drains_saturated_worker_results_before_joining() {
     executor.shutdown().expect("saturated worker joins");
 }
 
+#[test]
+fn shutdown_preempts_queued_client_work_before_joining() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = SlowSnapshotClient {
+        calls: Arc::clone(&calls),
+    };
+    let mut executor =
+        TuiEffectExecutor::spawn(client, ManualClock::default()).expect("spawn slow executor");
+    executor
+        .execute(snapshot_load_effects(8))
+        .expect("fill command queue");
+    let observation_deadline = Instant::now() + Duration::from_secs(1);
+    while calls.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < observation_deadline,
+            "worker did not begin queued work"
+        );
+        thread::yield_now();
+    }
+
+    let started = Instant::now();
+    executor.shutdown().expect("queued worker joins");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "shutdown drained stale queued work before joining"
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) < 8,
+        "shutdown executed every stale queued command"
+    );
+}
+
 #[derive(Clone, Default)]
 struct ManualClock {
     now: Arc<Mutex<Duration>>,
@@ -1133,6 +1169,61 @@ impl TuiClientPort for PanickingClient {
 }
 
 struct ImmediateSnapshotClient;
+
+struct SlowSnapshotClient {
+    calls: Arc<AtomicUsize>,
+}
+
+impl TuiClientPort for SlowSnapshotClient {
+    fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(100));
+        Ok(UiSnapshot {
+            section,
+            revision: 1,
+            rows: Vec::new(),
+            direct_targets: Vec::new(),
+            agents: Vec::new(),
+            projects: Vec::new(),
+        })
+    }
+
+    fn load_conversation(
+        &mut self,
+        row_id: &str,
+        _cursor: Option<String>,
+    ) -> Result<UiConversationPage, UiFailure> {
+        Ok(UiConversationPage {
+            row_id: row_id.to_owned(),
+            entries: Vec::new(),
+            next_cursor: None,
+        })
+    }
+
+    fn open_draft(
+        &mut self,
+        _target: UiMailboxDraftTarget,
+    ) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn save_draft(&mut self, _draft: UiMailboxDraft) -> Result<UiMailboxDraft, TuiDraftError> {
+        Err(unsupported_draft())
+    }
+
+    fn submit_mailbox_command(
+        &mut self,
+        _draft: Option<UiMailboxDraft>,
+        _action: UiMailboxAction,
+    ) -> Result<u64, UiFailure> {
+        Err(unsupported_failure())
+    }
+
+    fn poll(&mut self, wait: Duration) -> Vec<TuiClientObservation> {
+        thread::sleep(wait);
+        Vec::new()
+    }
+}
 
 impl TuiClientPort for ImmediateSnapshotClient {
     fn load_snapshot(&mut self, section: UiSection) -> Result<UiSnapshot, UiFailure> {

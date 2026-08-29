@@ -2,7 +2,11 @@
 
 use std::{
     collections::BTreeMap,
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -702,6 +706,7 @@ pub struct TuiEffectExecutor<C: TuiClock> {
     commands: SyncSender<WorkerCommand>,
     events: Receiver<UiEvent>,
     worker: Option<JoinHandle<()>>,
+    cancellation: Arc<AtomicBool>,
     timers: Vec<ScheduledTimer>,
     outstanding_snapshots: Vec<EffectId>,
     redraw_pending: bool,
@@ -716,15 +721,25 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
     ) -> Result<Self, TuiExecutorError> {
         let (commands, command_receiver) = mpsc::sync_channel(CLIENT_COMMAND_CAPACITY);
         let (event_sender, events) = mpsc::sync_channel(CLIENT_EVENT_CAPACITY);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_cancellation = Arc::clone(&cancellation);
         let worker = thread::Builder::new()
             .name("hq-tui-client".to_owned())
-            .spawn(move || client_worker(client, &command_receiver, &event_sender))
+            .spawn(move || {
+                client_worker(
+                    client,
+                    &command_receiver,
+                    &event_sender,
+                    &worker_cancellation,
+                );
+            })
             .map_err(|_| TuiExecutorError::WorkerSpawn)?;
         Ok(Self {
             clock,
             commands,
             events,
             worker: Some(worker),
+            cancellation,
             timers: Vec::new(),
             outstanding_snapshots: Vec::new(),
             redraw_pending: false,
@@ -866,6 +881,7 @@ impl<C: TuiClock> TuiEffectExecutor<C> {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
+        self.cancellation.store(true, Ordering::SeqCst);
         let mut command = WorkerCommand::Shutdown;
         loop {
             match self.commands.try_send(command) {
@@ -953,9 +969,14 @@ fn client_worker<P: TuiClientPort>(
     mut client: P,
     commands: &Receiver<WorkerCommand>,
     events: &SyncSender<UiEvent>,
+    cancellation: &AtomicBool,
 ) {
     loop {
+        if cancellation.load(Ordering::SeqCst) {
+            break;
+        }
         match commands.recv_timeout(COMMAND_WAIT) {
+            Ok(_) if cancellation.load(Ordering::SeqCst) => break,
             Ok(WorkerCommand::LoadSnapshot { id, section }) => {
                 let event = match client.load_snapshot(section) {
                     Ok(snapshot) => UiEvent::SnapshotLoaded {
@@ -1080,6 +1101,9 @@ fn client_worker<P: TuiClientPort>(
             }
             Ok(WorkerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancellation.load(Ordering::SeqCst) {
+                    break;
+                }
                 for observation in client.poll(CLIENT_POLL_WAIT) {
                     let event = match observation {
                         TuiClientObservation::Invalidated { revision } => {
