@@ -1,0 +1,161 @@
+name: Publish Rust GitHub release
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Rust release candidate workflow run ID from main
+        required: true
+        type: string
+      tag:
+        description: v-prefixed release tag matching the candidate version
+        required: true
+        default: v0.1.0
+        type: string
+      prerelease:
+        description: Publish as a GitHub prerelease
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: rust-github-release-publication
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    name: Validate and publish GitHub release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Resolve successful candidate run
+        id: candidate
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            printf 'candidate run ID must be a positive integer\n' >&2
+            exit 1
+          }
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID")
+          jq -e --arg repository "$GITHUB_REPOSITORY" '
+            .path == ".github/workflows/release.yml" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .head_branch == "main" and
+            .head_repository.full_name == $repository and
+            (.head_sha | test("^[0-9a-f]{40}$"))
+          ' <<<"$run" >/dev/null || {
+            printf 'run is not a successful Rust release candidate dispatched from main\n' >&2
+            exit 1
+          }
+          candidate_sha=$(jq -er '.head_sha' <<<"$run")
+          artifact_name="rust-release-candidate-$candidate_sha"
+          artifacts=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100")
+          jq -e --arg name "$artifact_name" \
+            '[.artifacts[] | select(.name == $name and .expired == false)] | length == 1' \
+            <<<"$artifacts" >/dev/null || {
+            printf 'run does not have one unexpired combined candidate artifact\n' >&2
+            exit 1
+          }
+          printf 'sha=%s\n' "$candidate_sha" >>"$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$artifact_name" >>"$GITHUB_OUTPUT"
+
+      - name: Check out the candidate revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.candidate.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Verify candidate revision belongs to main
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$CANDIDATE_SHA" refs/remotes/origin/main || {
+            printf 'candidate revision is no longer in main history\n' >&2
+            exit 1
+          }
+
+      - name: Download and revalidate combined candidate
+        env:
+          ARTIFACT_NAME: ${{ steps.candidate.outputs.artifact_name }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          candidate_directory="$RUNNER_TEMP/rust-release-candidate"
+          publication_directory="$RUNNER_TEMP/rust-release-publication"
+          mkdir -m 700 "$candidate_directory"
+          gh run download "$CANDIDATE_RUN_ID" --name "$ARTIFACT_NAME" \
+            --dir "$candidate_directory"
+          scripts/prepare-rust-release-publication.sh \
+            "$candidate_directory" "$CANDIDATE_SHA" "$RELEASE_TAG" \
+            "$publication_directory"
+
+      - name: Refuse an existing tag or release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            printf 'tag already exists: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'GitHub release already exists: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release and exact tag
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          assets=("$RUNNER_TEMP/rust-release-publication"/*)
+          release_flags=(
+            --repo "$GITHUB_REPOSITORY"
+            --target "$CANDIDATE_SHA"
+            --title "$RELEASE_TAG"
+            --generate-notes
+            --fail-on-no-commits
+          )
+          if [[ "$PRERELEASE" == true ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" "${release_flags[@]}"
+
+      - name: Verify published release
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+          EXPECTED_PRERELEASE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          tag_ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+          # shellcheck disable=SC2016
+          jq -e --arg revision "$CANDIDATE_SHA" \
+            '.object.type == "commit" and .object.sha == $revision' \
+            <<<"$tag_ref" >/dev/null
+          release=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,url)
+          # shellcheck disable=SC2016
+          jq -e --arg tag "$RELEASE_TAG" --argjson prerelease "$EXPECTED_PRERELEASE" '
+            .tagName == $tag and .isDraft == false and .isPrerelease == $prerelease
+          ' <<<"$release" >/dev/null
+          release_url=$(jq -er '.url' <<<"$release")
+          printf "Published [%s](%s) from candidate run %s at %s.\n" \
+            "$RELEASE_TAG" "$release_url" "$CANDIDATE_RUN_ID" \
+            "$CANDIDATE_SHA" >>"$GITHUB_STEP_SUMMARY"

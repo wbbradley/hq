@@ -161,6 +161,7 @@ jobs:
           scripts/test-rust-go-independence.sh
           scripts/verify-rust-go-independence.sh
           scripts/test-rust-release-artifacts.sh
+          scripts/test-rust-release-publication.sh
           scripts/test-rust-recovery-rehearsal.sh
           scripts/test-rust-controlled-failure.sh
           scripts/test-rust-cutover-rollback.sh

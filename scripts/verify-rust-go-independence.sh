@@ -26,6 +26,7 @@ required_inputs=(
   Cargo.lock
   crates/hq-node/Cargo.toml
   crates/hq-node/src/identity/paths.rs
+  .github/workflows/publish-release.yml
   .github/workflows/release.yml
   deploy
   scripts/package-rust-release.sh
@@ -70,6 +71,7 @@ if grep -Einq \
 fi
 
 operational_inputs=(
+  "$scan_root/.github/workflows/publish-release.yml"
   "$scan_root/.github/workflows/release.yml"
   "$scan_root/scripts/package-rust-release.sh"
   "${deployment_inputs[@]}"

@@ -43,6 +43,10 @@ On macOS, use `shasum -a 256 -c` instead of `sha256sum --check`. The reported co
 40-character workflow revision. The complete artifact and evidence validation procedure is in
 [docs/rust/release-artifacts.md](docs/rust/release-artifacts.md).
 
+After an approved candidate is published, the same archives and checksums are available from the
+repository's [GitHub Releases](https://github.com/wbbradley/hq/releases) page. Release publication
+is a separate manual workflow bound to the successful candidate's exact run ID and revision.
+
 ## First start
 
 HQ stores state below `$XDG_STATE_HOME/hq`, or `$HOME/.local/state/hq` when `XDG_STATE_HOME` is not

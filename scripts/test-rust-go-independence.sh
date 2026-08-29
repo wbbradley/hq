@@ -29,6 +29,9 @@ EOF
 cat >"$fixture/.github/workflows/release.yml" <<'EOF'
 - run: cargo build --locked --release -p hq-node --bin hq
 EOF
+cat >"$fixture/.github/workflows/publish-release.yml" <<'EOF'
+- run: scripts/prepare-rust-release-publication.sh
+EOF
 cat >"$fixture/deploy/hq.service" <<'EOF'
 ExecStart=/usr/local/bin/hq daemon run
 EOF

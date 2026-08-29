@@ -70,6 +70,8 @@ jobs:
         run: scripts/verify-rust-architecture.sh
       - name: Verify Rust normal-operation independence
         run: scripts/verify-rust-go-independence.sh
+      - name: Test release publication contract
+        run: scripts/test-rust-release-publication.sh
       - name: Check
         run: cargo check --locked --workspace --all-targets --all-features
       - name: Clippy

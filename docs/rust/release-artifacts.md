@@ -3,7 +3,8 @@
 HQ's first Rust release is one executable on each of the four native targets in
 `qualification/platform-matrix.tsv`. Release-candidate automation is deliberately separate from
 release publication: `.github/workflows/release.yml` is manually dispatched, has read-only
-repository permissions, and does not create a tag or GitHub release.
+repository permissions, and does not create a tag or GitHub release. A second manual workflow,
+`.github/workflows/publish-release.yml`, is the only automated publication path.
 
 ## Per-target evidence
 
@@ -40,6 +41,27 @@ leave the temporary verification daemon running.
 The supported candidate-install procedure is the checksum, extraction, absolute-path installation,
 and embedded revision check in the repository README. A successful workflow makes artifacts
 available for review; it does not install, tag, publish, soak, activate, or change a service.
+
+## GitHub release publication
+
+Run `Rust release candidate` from `main` and wait for every job to succeed. Then manually dispatch
+`Publish Rust GitHub release` with that exact workflow run ID, the `v`-prefixed version tag, and the
+desired prerelease setting. Publication performs these checks before creating external state:
+
+- the selected run is a completed, successful dispatch of `.github/workflows/release.yml` from
+  this repository's `main` branch;
+- its exact source revision remains in `main` history and it has one unexpired combined candidate
+  artifact;
+- the requested tag equals `v` plus the version recorded by every candidate evidence record;
+- regenerated release and recovery manifests equal the candidate manifests, every archive checksum
+  is valid, and the controlled-failure, rollback, and cutover evidence remains complete; and
+- neither the requested tag nor its GitHub release already exists.
+
+The workflow creates the tag at the candidate revision and publishes a GitHub release containing
+the four native archives, their checksum files, and the aggregate release, recovery, failure,
+rollback, and cutover manifests. It refuses to update or replace an existing tag or release.
+Publication is not soak, activation, production cutover, or permission to access an operator's
+identity or state.
 
 ## Local rehearsal
 
