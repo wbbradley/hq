@@ -8924,3 +8924,36 @@ runtime presence.
   than using them as the primary row status.
 - Add mapper, pure-model, and render tests for unassigned, assigned, blocked, conflicted, and retired
   agents at narrow and wide terminal sizes. Update `docs/rust/tui.md` with the status vocabulary.
+
+## 2026-08-29 — Persistent contextual TUI help and focused footers
+
+Every ordinary TUI section now opens contextual help with `?`, including empty sections and
+sections with a selected item. Context help explains the section, the selected item's
+plain-language state, and the applicable key reference; `t` switches to stable identities,
+authoritative revision, connection state, and recovery evidence. Help owns background input while
+open, survives resize and authoritative refresh, and closes with `?` or Escape.
+
+Ordinary footers now show only the most relevant available actions and consistently expose
+`? help`. Inapplicable message actions produce dismissible prerequisite guidance instead of a
+persistent failure, including a specific explanation that activity updates are not actionable.
+Pure-model and responsive render coverage exercises all five sections with and without selections
+at narrow and wide sizes. Formatting, architecture checks, strict Clippy, the locked full-workspace
+test suite, and the all-target/all-feature workspace build pass.
+
+### Original plan entry
+
+### Add persistent contextual TUI help and focused footers
+
+Make help available before and after the TUI contains data, while keeping the ordinary footer
+focused on immediate actions.
+
+- Add an always-available `?` contextual help overlay. It must explain the current section, list all
+  available actions in plain language, describe the selected item's user-facing state, and offer a
+  separate technical-details view for identities and recovery evidence.
+- Simplify footers to the few actions relevant in the current context and use labels such as
+  `c create`, `n new`, `? help`, and `Enter open`. Keep the complete key reference in contextual
+  help rather than forcing every shortcut into the status bar.
+- Treat guidance caused by an inapplicable shortcut as transient help, not a persistent operation
+  failure. Explain the prerequisite and dismiss the hint on the next meaningful input.
+- Add pure-model tests and render snapshots for help opened from every section, with and without a
+  selected item, at narrow and wide terminal sizes. Document the help contract in `docs/rust/tui.md`.

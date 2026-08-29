@@ -27,22 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Add persistent contextual TUI help and focused footers
-
-Make help available before and after the TUI contains data, while keeping the ordinary footer
-focused on immediate actions.
-
-- Add an always-available `?` contextual help overlay. It must explain the current section, list all
-  available actions in plain language, describe the selected item's user-facing state, and offer a
-  separate technical-details view for identities and recovery evidence.
-- Simplify footers to the few actions relevant in the current context and use labels such as
-  `c create`, `n new`, `? help`, and `Enter open`. Keep the complete key reference in contextual
-  help rather than forcing every shortcut into the status bar.
-- Treat guidance caused by an inapplicable shortcut as transient help, not a persistent operation
-  failure. Explain the prerequisite and dismiss the hint on the next meaningful input.
-- Add pure-model tests and render snapshots for help opened from every section, with and without a
-  selected item, at narrow and wide terminal sizes. Document the help contract in `docs/rust/tui.md`.
-
 ### Explain empty and conflicted states with exact next actions
 
 Give every empty or blocked section an explanation and one or two concrete next actions.
