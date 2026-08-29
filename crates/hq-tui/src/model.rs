@@ -375,6 +375,44 @@ pub struct UiProjectResource {
     pub conflicting_projects: Vec<[u8; 32]>,
 }
 
+/// Passive current project-assignment presentation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiProjectAssignment {
+    /// Immutable assignment epoch.
+    pub assignment_id: [u8; 32],
+    /// Assigned durable named agent.
+    pub agent_id: [u8; 32],
+    /// Selected provider namespace.
+    pub provider: String,
+    /// Acknowledged exact provider session.
+    pub session: Option<String>,
+    /// Stable configuring, runnable, or blocked phase.
+    pub phase: String,
+    /// Runnable project thread when present.
+    pub thread_id: Option<[u8; 32]>,
+    /// Acknowledged runtime launch directory.
+    pub launch_directory: Option<String>,
+    /// Stable blocked cause when present.
+    pub blocked: Option<String>,
+    /// Whether project/agent cardinality is conflicted.
+    pub cardinality_conflicted: bool,
+    /// Whether the assignment is currently runnable.
+    pub runnable: bool,
+}
+
+/// Passive exact historical provider-session/project-thread binding.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct UiProjectThread {
+    /// Durable agent that owned the thread.
+    pub agent_id: [u8; 32],
+    /// Provider namespace.
+    pub provider: String,
+    /// Exact durable provider session.
+    pub session: String,
+    /// Immutable project-scoped thread.
+    pub thread_id: [u8; 32],
+}
+
 /// Complete passive project presentation used by selection and details.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiProject {
@@ -390,8 +428,10 @@ pub struct UiProject {
     pub archived: bool,
     /// Whether its desired resources can currently be claimed.
     pub claimable: bool,
-    /// Whether one current assignment exists.
-    pub assigned: bool,
+    /// Current authoritative assignment, when present.
+    pub assignment: Option<UiProjectAssignment>,
+    /// Complete exact project-scoped historical threads.
+    pub threads: Vec<UiProjectThread>,
     /// Exact project head used for optimistic commands.
     pub head: [u8; 32],
     /// Next durable input sequence.
@@ -453,6 +493,26 @@ pub enum UiProjectAction {
     CheckResources {
         project_id: [u8; 32],
         resource_id: Option<[u8; 32]>,
+    },
+    Activate {
+        project_id: [u8; 32],
+        agent_id: [u8; 32],
+        provider: String,
+        resume_session: Option<String>,
+        resume_thread: Option<[u8; 32]>,
+        launch_directory: String,
+    },
+    DispatchPending {
+        project_id: [u8; 32],
+    },
+    Handoff {
+        project_id: [u8; 32],
+        agent_id: [u8; 32],
+        provider: String,
+        resume_session: Option<String>,
+        thread_id: [u8; 32],
+        launch_directory: String,
+        force_takeover: bool,
     },
 }
 
@@ -549,6 +609,10 @@ pub struct UiProjectResult {
     pub operation_id: [u8; 32],
     /// Project affected by the operation.
     pub project_id: [u8; 32],
+    /// Stable succeeded, failed, or uncertain runtime observation.
+    pub runtime_state: Option<String>,
+    /// Stable runtime failure or uncertainty code.
+    pub runtime_code: Option<String>,
     /// Typed authoritative outcome.
     pub outcome: UiProjectOutcome,
 }
@@ -572,6 +636,20 @@ pub enum UiProjectFormField {
     Base,
     /// Project input content.
     Content,
+    /// Provider namespace.
+    Provider,
+    /// Runtime launch directory.
+    Directory,
+    /// Stable named-agent selection.
+    Agent,
+    /// New-session or exact-resume mode.
+    SessionMode,
+    /// Exact project-scoped historical thread.
+    Thread,
+    /// Separate handoff confirmation.
+    Confirmation,
+    /// Separate force-takeover authorization.
+    Force,
 }
 
 /// Current project catalog, creation, input, or outcome interaction.
@@ -628,6 +706,30 @@ pub enum UiProjectModal {
     ConfirmPrimaryResource {
         project: UiProject,
         resource_id: [u8; 32],
+        submitting: bool,
+    },
+    Activate {
+        project: UiProject,
+        agents: Vec<UiAgent>,
+        agent_id: Option<[u8; 32]>,
+        thread: Option<UiProjectThread>,
+        new_session: bool,
+        provider: String,
+        directory: String,
+        field: UiProjectFormField,
+        submitting: bool,
+    },
+    Handoff {
+        project: UiProject,
+        agents: Vec<UiAgent>,
+        agent_id: Option<[u8; 32]>,
+        thread: Option<UiProjectThread>,
+        new_session: bool,
+        provider: String,
+        directory: String,
+        field: UiProjectFormField,
+        confirmed: bool,
+        force_takeover: bool,
         submitting: bool,
     },
     Outcome {
@@ -874,6 +976,7 @@ pub enum UiTimerKind {
 }
 
 /// Closed event vocabulary accepted by the pure UI model.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiEvent {
     /// Start the model exactly once.
@@ -2173,6 +2276,37 @@ fn apply_project_modal_input(
                 )?;
                 Ok(true)
             }
+            UiInput::Character('v') => {
+                if project.assignment.is_some() {
+                    model.last_failure = Some(UiFailure {
+                        code: "project_already_assigned".to_owned(),
+                        action: "use handoff for a project with a current assignment".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                open_project_activation(model, project, false);
+                Ok(true)
+            }
+            UiInput::Character('d') => {
+                model.submit_project(
+                    UiProjectAction::DispatchPending {
+                        project_id: project.project_id,
+                    },
+                    effects,
+                )?;
+                Ok(true)
+            }
+            UiInput::Character('h') => {
+                if project.assignment.is_none() {
+                    model.last_failure = Some(UiFailure {
+                        code: "project_unassigned".to_owned(),
+                        action: "activate an agent before requesting a handoff".to_owned(),
+                    });
+                    return Ok(true);
+                }
+                open_project_activation(model, project, true);
+                Ok(true)
+            }
             _ => Ok(false),
         },
         Some(
@@ -2227,7 +2361,7 @@ fn apply_project_modal_input(
                 Ok(true)
             }
             UiInput::Activate if !submitting => {
-                if project.assigned && !force {
+                if project.assignment.is_some() && !force {
                     model.last_failure = Some(UiFailure {
                         code: "project_resource_remove_force_required".to_owned(),
                         action: "toggle force to authorize assigned-project removal".to_owned(),
@@ -2271,10 +2405,310 @@ fn apply_project_modal_input(
             )?;
             Ok(true)
         }
+        Some(
+            UiProjectModal::Activate { submitting, .. }
+            | UiProjectModal::Handoff { submitting, .. },
+        ) => {
+            if submitting {
+                return Ok(false);
+            }
+            match input {
+                UiInput::NextFocus | UiInput::PreviousFocus => {
+                    cycle_activation_field(model, matches!(input, UiInput::NextFocus));
+                    Ok(true)
+                }
+                UiInput::NextItem | UiInput::PreviousItem => {
+                    adjust_activation_selection(model);
+                    Ok(true)
+                }
+                UiInput::Character(value) => {
+                    let mut encoded = [0_u8; 4];
+                    Ok(edit_project_field(
+                        model,
+                        Some(value.encode_utf8(&mut encoded)),
+                        false,
+                    ))
+                }
+                UiInput::Paste(value) => Ok(edit_project_field(model, Some(&value), false)),
+                UiInput::Backspace => Ok(edit_project_field(model, None, true)),
+                UiInput::Activate => submit_project_modal(model, effects),
+                _ => Ok(false),
+            }
+        }
         Some(UiProjectModal::Outcome { result }) => {
             submit_resource_preview(model, &result, &input, effects)
         }
         Some(UiProjectModal::ConfirmPrimaryResource { .. }) | None => Ok(false),
+    }
+}
+
+fn open_project_activation(model: &mut UiModel, project: UiProject, handoff: bool) {
+    let agents = model
+        .snapshot
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .filter(|agent| {
+                    agent.lifecycle == UiAgentLifecycle::Active
+                        && agent
+                            .mailboxes
+                            .iter()
+                            .any(|mailbox| mailbox.installation_id == project.home)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let current_agent = project.assignment.as_ref().map(|value| value.agent_id);
+    let agent_id = agents
+        .iter()
+        .find(|agent| !handoff || Some(agent.agent_id) != current_agent)
+        .or_else(|| agents.first())
+        .map(|agent| agent.agent_id);
+    let thread = agent_id.and_then(|agent_id| {
+        project
+            .threads
+            .iter()
+            .find(|thread| thread.agent_id == agent_id)
+            .cloned()
+    });
+    let provider = thread
+        .as_ref()
+        .map(|thread| thread.provider.clone())
+        .or_else(|| {
+            agent_id.and_then(|agent_id| {
+                agents
+                    .iter()
+                    .find(|agent| agent.agent_id == agent_id)
+                    .and_then(|agent| agent.sessions.first())
+                    .map(|session| session.provider.clone())
+            })
+        })
+        .unwrap_or_default();
+    let directory = project
+        .resources
+        .iter()
+        .find(|resource| resource.primary)
+        .or_else(|| project.resources.first())
+        .map(|resource| resource.display_path.clone())
+        .unwrap_or_default();
+    model.project_modal = Some(if handoff {
+        UiProjectModal::Handoff {
+            project,
+            agents,
+            agent_id,
+            thread,
+            new_session: true,
+            provider,
+            directory,
+            field: UiProjectFormField::Agent,
+            confirmed: false,
+            force_takeover: false,
+            submitting: false,
+        }
+    } else {
+        UiProjectModal::Activate {
+            project,
+            agents,
+            agent_id,
+            thread,
+            new_session: true,
+            provider,
+            directory,
+            field: UiProjectFormField::Agent,
+            submitting: false,
+        }
+    });
+    model.last_failure = None;
+}
+
+fn cycle_activation_field(model: &mut UiModel, forward: bool) {
+    let is_handoff = matches!(&model.project_modal, Some(UiProjectModal::Handoff { .. }));
+    let Some(UiProjectModal::Activate { field, .. } | UiProjectModal::Handoff { field, .. }) =
+        &mut model.project_modal
+    else {
+        return;
+    };
+    let activation = [
+        UiProjectFormField::Agent,
+        UiProjectFormField::SessionMode,
+        UiProjectFormField::Thread,
+        UiProjectFormField::Provider,
+        UiProjectFormField::Directory,
+    ];
+    let handoff = [
+        UiProjectFormField::Agent,
+        UiProjectFormField::SessionMode,
+        UiProjectFormField::Thread,
+        UiProjectFormField::Provider,
+        UiProjectFormField::Directory,
+        UiProjectFormField::Confirmation,
+        UiProjectFormField::Force,
+    ];
+    let fields = if is_handoff {
+        handoff.as_slice()
+    } else {
+        activation.as_slice()
+    };
+    let current = fields
+        .iter()
+        .position(|candidate| candidate == field)
+        .unwrap_or(0);
+    let next = if forward {
+        (current + 1) % fields.len()
+    } else {
+        current.checked_sub(1).unwrap_or(fields.len() - 1)
+    };
+    *field = fields[next];
+}
+
+fn adjust_activation_selection(model: &mut UiModel) {
+    let field = match &model.project_modal {
+        Some(UiProjectModal::Activate { field, .. } | UiProjectModal::Handoff { field, .. }) => {
+            *field
+        }
+        _ => return,
+    };
+    match field {
+        UiProjectFormField::Agent => cycle_activation_agent(model),
+        UiProjectFormField::Thread => cycle_activation_thread(model),
+        UiProjectFormField::SessionMode => toggle_activation_mode(model),
+        UiProjectFormField::Confirmation => {
+            if let Some(UiProjectModal::Handoff { confirmed, .. }) = &mut model.project_modal {
+                *confirmed = !*confirmed;
+            }
+        }
+        UiProjectFormField::Force => {
+            if let Some(UiProjectModal::Handoff { force_takeover, .. }) = &mut model.project_modal {
+                *force_takeover = !*force_takeover;
+            }
+        }
+        _ => {}
+    }
+    model.last_failure = None;
+}
+
+fn cycle_activation_agent(model: &mut UiModel) {
+    let Some(
+        UiProjectModal::Activate {
+            project,
+            agents,
+            agent_id,
+            thread,
+            provider,
+            ..
+        }
+        | UiProjectModal::Handoff {
+            project,
+            agents,
+            agent_id,
+            thread,
+            provider,
+            ..
+        },
+    ) = &mut model.project_modal
+    else {
+        return;
+    };
+    if agents.is_empty() {
+        return;
+    }
+    let current = agent_id
+        .and_then(|id| agents.iter().position(|agent| agent.agent_id == id))
+        .unwrap_or(agents.len() - 1);
+    let selected = agents[(current + 1) % agents.len()].agent_id;
+    *agent_id = Some(selected);
+    *thread = project
+        .threads
+        .iter()
+        .find(|candidate| candidate.agent_id == selected)
+        .cloned();
+    if let Some(selected_thread) = thread {
+        provider.clone_from(&selected_thread.provider);
+    }
+    model.last_failure = None;
+}
+
+fn cycle_activation_thread(model: &mut UiModel) {
+    let Some(
+        UiProjectModal::Activate {
+            project,
+            agent_id,
+            thread,
+            provider,
+            ..
+        }
+        | UiProjectModal::Handoff {
+            project,
+            agent_id,
+            thread,
+            provider,
+            ..
+        },
+    ) = &mut model.project_modal
+    else {
+        return;
+    };
+    let Some(agent_id) = *agent_id else { return };
+    let candidates = project
+        .threads
+        .iter()
+        .filter(|candidate| candidate.agent_id == agent_id)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        *thread = None;
+        return;
+    }
+    let current = thread
+        .as_ref()
+        .and_then(|selected| {
+            candidates
+                .iter()
+                .position(|candidate| **candidate == *selected)
+        })
+        .unwrap_or(candidates.len() - 1);
+    let selected = candidates[(current + 1) % candidates.len()].clone();
+    provider.clone_from(&selected.provider);
+    *thread = Some(selected);
+    model.last_failure = None;
+}
+
+fn toggle_activation_mode(model: &mut UiModel) {
+    if let Some(
+        UiProjectModal::Activate {
+            new_session,
+            project,
+            agent_id,
+            thread,
+            provider,
+            ..
+        }
+        | UiProjectModal::Handoff {
+            new_session,
+            project,
+            agent_id,
+            thread,
+            provider,
+            ..
+        },
+    ) = &mut model.project_modal
+    {
+        *new_session = !*new_session;
+        if !*new_session && thread.is_none() {
+            *thread = agent_id.and_then(|id| {
+                project
+                    .threads
+                    .iter()
+                    .find(|candidate| candidate.agent_id == id)
+                    .cloned()
+            });
+        }
+        if let Some(selected) = thread {
+            provider.clone_from(&selected.provider);
+        }
+        model.last_failure = None;
     }
 }
 
@@ -2320,6 +2754,24 @@ fn edit_project_field(model: &mut UiModel, value: Option<&str>, backspace: bool)
         Some(
             UiProjectModal::AddResource { path, .. } | UiProjectModal::ReplaceResource { path, .. },
         ) => path,
+        Some(
+            UiProjectModal::Activate {
+                provider,
+                directory,
+                field,
+                ..
+            }
+            | UiProjectModal::Handoff {
+                provider,
+                directory,
+                field,
+                ..
+            },
+        ) => match field {
+            UiProjectFormField::Provider => provider,
+            UiProjectFormField::Directory => directory,
+            _ => return false,
+        },
         _ => return false,
     };
     let changed = if backspace {
@@ -2377,6 +2829,7 @@ fn cycle_project_field(model: &mut UiModel, forward: bool) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<bool, UiError> {
     let action = match model.project_modal.clone() {
         Some(UiProjectModal::CreateExisting {
@@ -2434,6 +2887,56 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
             resource_id,
             path,
         },
+        Some(UiProjectModal::Activate {
+            project,
+            agent_id: Some(agent_id),
+            thread,
+            new_session,
+            provider,
+            directory,
+            ..
+        }) if !provider.is_empty()
+            && !directory.is_empty()
+            && (new_session
+                || thread
+                    .as_ref()
+                    .is_some_and(|selected| selected.provider == provider)) =>
+        {
+            UiProjectAction::Activate {
+                project_id: project.project_id,
+                agent_id,
+                provider,
+                resume_session: (!new_session)
+                    .then(|| thread.as_ref().map(|value| value.session.clone()))
+                    .flatten(),
+                resume_thread: thread.map(|value| value.thread_id),
+                launch_directory: directory,
+            }
+        }
+        Some(UiProjectModal::Handoff {
+            project,
+            agent_id: Some(agent_id),
+            thread: Some(thread),
+            new_session,
+            provider,
+            directory,
+            confirmed: true,
+            force_takeover,
+            ..
+        }) if !provider.is_empty()
+            && !directory.is_empty()
+            && (new_session || thread.provider == provider) =>
+        {
+            UiProjectAction::Handoff {
+                project_id: project.project_id,
+                agent_id,
+                provider,
+                resume_session: (!new_session).then_some(thread.session),
+                thread_id: thread.thread_id,
+                launch_directory: directory,
+                force_takeover,
+            }
+        }
         Some(UiProjectModal::CreateExisting { .. }) => {
             model.last_failure = Some(UiFailure {
                 code: "project_create_fields_empty".to_owned(),
@@ -2462,6 +2965,27 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
             });
             return Ok(true);
         }
+        Some(UiProjectModal::Activate { .. }) => {
+            model.last_failure = Some(UiFailure {
+                code: "project_activation_target_incomplete".to_owned(),
+                action:
+                    "select an agent and exact thread for resume, then enter provider and directory"
+                        .to_owned(),
+            });
+            return Ok(true);
+        }
+        Some(UiProjectModal::Handoff { confirmed, .. }) => {
+            model.last_failure = Some(UiFailure {
+                code: if confirmed {
+                    "project_handoff_target_incomplete"
+                } else {
+                    "project_handoff_confirmation_required"
+                }
+                .to_owned(),
+                action: "select an exact target and separately confirm the handoff".to_owned(),
+            });
+            return Ok(true);
+        }
         _ => return Ok(false),
     };
     match &mut model.project_modal {
@@ -2470,7 +2994,9 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
             | UiProjectModal::CreateWorktree { submitting, .. }
             | UiProjectModal::SendInput { submitting, .. }
             | UiProjectModal::AddResource { submitting, .. }
-            | UiProjectModal::ReplaceResource { submitting, .. },
+            | UiProjectModal::ReplaceResource { submitting, .. }
+            | UiProjectModal::Activate { submitting, .. }
+            | UiProjectModal::Handoff { submitting, .. },
         ) => *submitting = true,
         _ => return Ok(false),
     }
@@ -3186,6 +3712,7 @@ fn refresh_agent_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
     let identity = match &model.project_modal {
         Some(
@@ -3194,7 +3721,9 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
             | UiProjectModal::AddResource { project, .. }
             | UiProjectModal::ReplaceResource { project, .. }
             | UiProjectModal::ConfirmRemoveResource { project, .. }
-            | UiProjectModal::ConfirmPrimaryResource { project, .. },
+            | UiProjectModal::ConfirmPrimaryResource { project, .. }
+            | UiProjectModal::Activate { project, .. }
+            | UiProjectModal::Handoff { project, .. },
         ) => Some(project.project_id),
         _ => None,
     };
@@ -3220,6 +3749,58 @@ fn refresh_project_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
                         .any(|resource| resource.resource_id == *selected)
                 })
                 .or_else(|| default_project_resource(&current));
+            *project = current;
+        }
+        (
+            Some(
+                UiProjectModal::Activate {
+                    project,
+                    agents,
+                    agent_id,
+                    thread,
+                    ..
+                }
+                | UiProjectModal::Handoff {
+                    project,
+                    agents,
+                    agent_id,
+                    thread,
+                    ..
+                },
+            ),
+            Some(current),
+        ) => {
+            *agents = snapshot
+                .agents
+                .iter()
+                .filter(|agent| {
+                    agent.lifecycle == UiAgentLifecycle::Active
+                        && agent
+                            .mailboxes
+                            .iter()
+                            .any(|mailbox| mailbox.installation_id == current.home)
+                })
+                .cloned()
+                .collect();
+            if agent_id
+                .is_some_and(|selected| !agents.iter().any(|agent| agent.agent_id == selected))
+            {
+                model.last_failure = Some(UiFailure {
+                    code: "project_agent_target_stale".to_owned(),
+                    action: "select a current local named agent before retrying".to_owned(),
+                });
+            }
+            if thread.as_ref().is_some_and(|selected| {
+                !current
+                    .threads
+                    .iter()
+                    .any(|candidate| candidate == selected)
+            }) {
+                model.last_failure = Some(UiFailure {
+                    code: "project_thread_target_stale".to_owned(),
+                    action: "select a current exact project thread before retrying".to_owned(),
+                });
+            }
             *project = current;
         }
         (
@@ -3964,7 +4545,9 @@ fn project_command_failed(
         | UiProjectModal::AddResource { submitting, .. }
         | UiProjectModal::ReplaceResource { submitting, .. }
         | UiProjectModal::ConfirmRemoveResource { submitting, .. }
-        | UiProjectModal::ConfirmPrimaryResource { submitting, .. },
+        | UiProjectModal::ConfirmPrimaryResource { submitting, .. }
+        | UiProjectModal::Activate { submitting, .. }
+        | UiProjectModal::Handoff { submitting, .. },
     ) = &mut model.project_modal
     {
         *submitting = false;

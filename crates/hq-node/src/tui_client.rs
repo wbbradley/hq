@@ -23,9 +23,9 @@ use hq_tui::{
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiMailboxAction,
     UiMailboxDraft, UiMailboxDraftTarget, UiManagedSessionAction, UiManagedSessionOutcome,
     UiManagedSessionResult, UiMessageState, UiMessageTarget, UiProject, UiProjectAction,
-    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
-    UiProjectResourceConflict, UiProjectResult, UiRow, UiRowKind, UiRowState, UiSection,
-    UiSnapshot, UiTechnicalSection, UiTimerKind,
+    UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow,
+    UiRowKind, UiRowState, UiSection, UiSnapshot, UiTechnicalSection, UiTimerKind,
 };
 
 use crate::{
@@ -516,6 +516,8 @@ impl TuiClientPort for LocalTuiClient {
             command_id: result.command_id,
             operation_id: result.operation_id,
             project_id: result.project_id,
+            runtime_state: result.runtime_state,
+            runtime_code: result.runtime_code,
             outcome,
         })
     }
@@ -1198,6 +1200,7 @@ fn tui_snapshot_with_projects(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn local_project_command(action: &UiProjectAction) -> LocalProjectCommand {
     match action {
         UiProjectAction::CreateExisting { name, brief, path } => {
@@ -1288,6 +1291,41 @@ fn local_project_command(action: &UiProjectAction) -> LocalProjectCommand {
             project_id: *project_id,
             resource_id: *resource_id,
         },
+        UiProjectAction::Activate {
+            project_id,
+            agent_id,
+            provider,
+            resume_session,
+            resume_thread,
+            launch_directory,
+        } => LocalProjectCommand::Activate {
+            project_id: *project_id,
+            agent_id: *agent_id,
+            provider: provider.clone(),
+            resume_session: resume_session.clone(),
+            resume_thread: *resume_thread,
+            launch_directory: launch_directory.clone(),
+        },
+        UiProjectAction::DispatchPending { project_id } => LocalProjectCommand::DispatchPending {
+            project_id: *project_id,
+        },
+        UiProjectAction::Handoff {
+            project_id,
+            agent_id,
+            provider,
+            resume_session,
+            thread_id,
+            launch_directory,
+            force_takeover,
+        } => LocalProjectCommand::Handoff {
+            project_id: *project_id,
+            agent_id: *agent_id,
+            provider: provider.clone(),
+            resume_session: resume_session.clone(),
+            thread_id: *thread_id,
+            launch_directory: launch_directory.clone(),
+            force_takeover: *force_takeover,
+        },
     }
 }
 
@@ -1363,7 +1401,30 @@ fn tui_projects(projects: Vec<LocalProject>) -> Vec<UiProject> {
             lifecycle: project.lifecycle,
             archived: project.archived,
             claimable: project.claimable,
-            assigned: project.assigned,
+            assignment: project.assignment.map(|assignment| UiProjectAssignment {
+                assignment_id: assignment.assignment_id,
+                agent_id: assignment.agent_id,
+                provider: terminal_text(&assignment.provider),
+                session: assignment.session.map(|session| terminal_text(&session)),
+                phase: assignment.phase,
+                thread_id: assignment.thread_id,
+                launch_directory: assignment
+                    .launch_directory
+                    .map(|directory| terminal_text(&directory)),
+                blocked: assignment.blocked.map(|blocked| terminal_text(&blocked)),
+                cardinality_conflicted: assignment.cardinality_conflicted,
+                runnable: assignment.runnable,
+            }),
+            threads: project
+                .threads
+                .into_iter()
+                .map(|thread| UiProjectThread {
+                    agent_id: thread.agent_id,
+                    provider: terminal_text(&thread.provider),
+                    session: terminal_text(&thread.session),
+                    thread_id: thread.thread_id,
+                })
+                .collect(),
             head: project.head,
             input_sequence: project.input_sequence,
             resources: project
@@ -1807,7 +1868,8 @@ mod tests {
     use hq_tui::{UiProjectAction, UiProjectOutcome};
 
     #[test]
-    fn every_resource_action_maps_to_the_exact_ordinary_client_command() {
+    #[allow(clippy::too_many_lines)]
+    fn every_project_action_maps_to_the_exact_ordinary_client_command() {
         let project_id = [1; 32];
         let resource_id = [2; 32];
         let cases = [
@@ -1899,6 +1961,48 @@ mod tests {
                 LocalProjectCommand::CheckResources {
                     project_id,
                     resource_id: None,
+                },
+            ),
+            (
+                UiProjectAction::Activate {
+                    project_id,
+                    agent_id: [3; 32],
+                    provider: "codex".to_owned(),
+                    resume_session: Some("session".to_owned()),
+                    resume_thread: Some([4; 32]),
+                    launch_directory: "/work".to_owned(),
+                },
+                LocalProjectCommand::Activate {
+                    project_id,
+                    agent_id: [3; 32],
+                    provider: "codex".to_owned(),
+                    resume_session: Some("session".to_owned()),
+                    resume_thread: Some([4; 32]),
+                    launch_directory: "/work".to_owned(),
+                },
+            ),
+            (
+                UiProjectAction::DispatchPending { project_id },
+                LocalProjectCommand::DispatchPending { project_id },
+            ),
+            (
+                UiProjectAction::Handoff {
+                    project_id,
+                    agent_id: [5; 32],
+                    provider: "codex".to_owned(),
+                    resume_session: None,
+                    thread_id: [6; 32],
+                    launch_directory: "/handoff".to_owned(),
+                    force_takeover: true,
+                },
+                LocalProjectCommand::Handoff {
+                    project_id,
+                    agent_id: [5; 32],
+                    provider: "codex".to_owned(),
+                    resume_session: None,
+                    thread_id: [6; 32],
+                    launch_directory: "/handoff".to_owned(),
+                    force_takeover: true,
                 },
             ),
         ];

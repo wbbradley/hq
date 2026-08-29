@@ -162,6 +162,7 @@ fn installed_tui_starts_explicit_provider_and_renders_typed_rejection() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -217,6 +218,25 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
             .any(|window| window == b"Project operation outcome"),
         "TUI did not render typed input completion: {:?}",
         sent.bytes
+    );
+
+    let dispatched = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::DispatchProjectInput { name },
+    );
+    assert!(
+        dispatched.status.success(),
+        "TUI dispatch failed: {:?}",
+        dispatched.bytes
+    );
+    assert!(
+        dispatched
+            .bytes
+            .windows(b"Rejected:".len())
+            .any(|window| window == b"Rejected:"),
+        "unassigned dispatch did not retain typed rejection: {:?}",
+        dispatched.bytes
     );
 
     let added_resource = directory.path().join("added-resource");
@@ -362,6 +382,9 @@ enum PtyInteraction<'content> {
         name: &'content str,
         content: &'content str,
     },
+    DispatchProjectInput {
+        name: &'content str,
+    },
     AddProjectResource {
         name: &'content str,
         path: &'content str,
@@ -432,6 +455,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::StartRejectedSession => b"lll".as_slice(),
                 PtyInteraction::CreateExistingProject { .. } => b"llllc".as_slice(),
                 PtyInteraction::SendProjectInput { .. }
+                | PtyInteraction::DispatchProjectInput { .. }
                 | PtyInteraction::AddProjectResource { .. } => b"llll".as_slice(),
                 PtyInteraction::CreateWorktreeProject { .. } => b"llllw".as_slice(),
             };
@@ -540,6 +564,32 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             master.write_all(b"\r").expect("project details key writes");
             master.flush().expect("project details key flushes");
             content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::DispatchProjectInput { name } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(name.len())
+                .any(|window| window == name.as_bytes())
+        {
+            master.write_all(b"\r").expect("project details key writes");
+            master.flush().expect("project details key flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::DispatchProjectInput { .. })
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Unassigned".len())
+                    .any(|window| window == b"Unassigned")
+            })
+        {
+            master.write_all(b"d").expect("project dispatch key writes");
+            master.flush().expect("project dispatch key flushes");
+            managed_action_sent = true;
             completion_offset = Some(bytes.len());
         }
         if matches!(interaction, PtyInteraction::AddProjectResource { .. })
@@ -692,6 +742,19 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 bytes[offset..]
                     .windows(b"Project operation outcome".len())
                     .any(|window| window == b"Project operation outcome")
+            })
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
+        }
+        if matches!(interaction, PtyInteraction::DispatchProjectInput { .. })
+            && managed_action_sent
+            && !exit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Rejected:".len())
+                    .any(|window| window == b"Rejected:")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");

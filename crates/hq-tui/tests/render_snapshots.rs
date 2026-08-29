@@ -6,9 +6,9 @@ use hq_tui::{
     UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentMailbox, UiAgentSession,
     UiConversationEntry, UiConversationEntryKind, UiConversationPage, UiEffect, UiEvent, UiInput,
     UiMailboxDraft, UiMailboxDraftTarget, UiMessageState, UiModel, UiProject, UiProjectAction,
-    UiProjectExternalWarning, UiProjectOutcome, UiProjectResource, UiProjectResourceConflict,
-    UiProjectResult, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, render, update,
+    UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome, UiProjectResource,
+    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState,
+    UiSection, UiSize, UiSnapshot, UiTechnicalSection, render, update,
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
@@ -235,6 +235,8 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
                     command_id: [2; 32],
                     operation_id: [3; 32],
                     project_id: [4; 32],
+                    runtime_state: Some("uncertain".to_owned()),
+                    runtime_code: Some("response_lost".to_owned()),
                     outcome: UiProjectOutcome::Reconcilable {
                         stage: "worktree_created".to_owned(),
                         category: "external_state".to_owned(),
@@ -252,6 +254,7 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
         .model;
         let rendered = render_text(&outcome);
         assert!(rendered.contains("Project operation outcome"));
+        assert!(rendered.contains("Runtime: uncertain/response_lost"));
         assert!(rendered.contains("response_lost"));
         assert!(rendered.contains("retained_worktree"));
     }
@@ -314,6 +317,8 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
                     command_id: [5; 32],
                     operation_id: [6; 32],
                     project_id: [1; 32],
+                    runtime_state: None,
+                    runtime_code: None,
                     outcome: UiProjectOutcome::ResourcePreview {
                         display_path: "/shared".to_owned(),
                         canonical_path: "/canonical/shared".to_owned(),
@@ -334,6 +339,64 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
         assert!(rendered.contains("Preview desired-resource addition"));
         assert!(rendered.contains("descendant"));
         assert!(rendered.contains("Claim conflicts block mutation"));
+    }
+}
+
+#[test]
+fn project_activation_form_is_responsive_and_discloses_exact_resume() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+    ] {
+        let details = update(project_model(size), UiEvent::Input(UiInput::Activate))
+            .expect("project details")
+            .model;
+        let activation = update(details, UiEvent::Input(UiInput::Character('v')))
+            .expect("activation")
+            .model;
+        let rendered = render_text(&activation);
+        assert!(rendered.contains("Activate project assignment"));
+        assert!(rendered.contains("new session"));
+        assert!(rendered.contains("agent-5"));
+        assert!(rendered.contains("/workspace/release"));
+    }
+}
+
+#[test]
+fn project_handoff_form_separates_confirmation_force_and_runtime_truth() {
+    for size in [
+        UiSize {
+            width: 120,
+            height: 24,
+        },
+        UiSize {
+            width: 64,
+            height: 16,
+        },
+    ] {
+        let details = update(
+            project_model_with_assignment(size, true),
+            UiEvent::Input(UiInput::Activate),
+        )
+        .expect("project details")
+        .model;
+        let handoff = update(details, UiEvent::Input(UiInput::Character('h')))
+            .expect("handoff")
+            .model;
+        let rendered = render_text(&handoff);
+        assert!(rendered.contains("Confirm project handoff"));
+        assert!(rendered.contains("Confirmed: false"));
+        if size.width >= 120 {
+            assert!(rendered.contains("Force takeover: false"));
+            assert!(rendered.contains("Force revokes HQ authority"));
+            assert!(rendered.contains("does not prove external runtime cessation"));
+        }
     }
 }
 
@@ -503,6 +566,11 @@ fn agent_details_model(size: UiSize) -> UiModel {
 }
 
 fn project_model(size: UiSize) -> UiModel {
+    project_model_with_assignment(size, false)
+}
+
+#[allow(clippy::too_many_lines)]
+fn project_model_with_assignment(size: UiSize, assigned: bool) -> UiModel {
     let mut model = ready_model(size);
     for section in [
         UiSection::Sent,
@@ -527,7 +595,32 @@ fn project_model(size: UiSize) -> UiModel {
                 lifecycle: "open".to_owned(),
                 archived: false,
                 claimable: true,
-                assigned: false,
+                assignment: assigned.then(|| UiProjectAssignment {
+                    assignment_id: [8; 32],
+                    agent_id: [5; 32],
+                    provider: "codex".to_owned(),
+                    session: Some("project-session".to_owned()),
+                    phase: "blocked".to_owned(),
+                    thread_id: Some([6; 32]),
+                    launch_directory: Some("/workspace/release".to_owned()),
+                    blocked: Some("runtime_stop_uncertain".to_owned()),
+                    cardinality_conflicted: false,
+                    runnable: false,
+                }),
+                threads: vec![
+                    UiProjectThread {
+                        agent_id: [5; 32],
+                        provider: "codex".to_owned(),
+                        session: "project-session".to_owned(),
+                        thread_id: [6; 32],
+                    },
+                    UiProjectThread {
+                        agent_id: [9; 32],
+                        provider: "codex".to_owned(),
+                        session: "target-session".to_owned(),
+                        thread_id: [10; 32],
+                    },
+                ],
                 head: [3; 32],
                 input_sequence: 0,
                 resources: vec![UiProjectResource {
@@ -562,7 +655,35 @@ fn project_model(size: UiSize) -> UiModel {
                     revision: 44,
                     rows,
                     direct_targets: Vec::new(),
-                    agents: Vec::new(),
+                    agents: if section == UiSection::Projects {
+                        [
+                            (5, "agent-5", "project-session"),
+                            (9, "agent-9", "target-session"),
+                        ]
+                        .into_iter()
+                        .map(|(byte, name, session)| UiAgent {
+                            agent_id: [byte; 32],
+                            names: vec![name.to_owned()],
+                            mailboxes: vec![UiAgentMailbox {
+                                installation_id: [2; 32],
+                                mailbox_id: [byte.saturating_add(1); 32],
+                            }],
+                            lifecycle: UiAgentLifecycle::Active,
+                            runnable: true,
+                            sessions: vec![UiAgentSession {
+                                provider: "codex".to_owned(),
+                                session: session.to_owned(),
+                                mailbox: None,
+                                conflicted: false,
+                                selected: true,
+                                name_resolved: true,
+                                display_name: None,
+                            }],
+                        })
+                        .collect()
+                    } else {
+                        Vec::new()
+                    },
                     projects,
                 },
             },

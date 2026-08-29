@@ -312,7 +312,13 @@ details to send durable project input. In project details, arrows select an exac
 selected resource and `K` checks all desired resources. Add and replace first show the freshly
 canonicalized path and every domain-selected claim conflict; conflicts block mutation. Removing a
 resource from an assigned project requires an explicit `f` force toggle and never deletes external
-files. Arrow keys move between form fields. Forms, exact logical selection, and typed operation,
+files. `v` activates a stable named agent, `d` dispatches pending accepted input, and `h` opens an
+assignment handoff. Activation can start a new provider session or resume only an exact
+project/agent/provider/session/thread binding from authoritative history. Handoff requires a
+separate confirmation; force takeover only revokes HQ authority after blocked or uncertain
+quiescence and does not claim the external runtime stopped. Tab moves between agent, mode, thread,
+provider, directory, confirmation, and force fields; arrows change the selected choice.
+Forms, exact logical selection, and typed operation,
 health, release, rejection, and reconciliation outcomes survive authoritative reloads and
 reconnects; canceling a form performs no mutation. A reconcilable worktree outcome names any
 external destination and branch that HQ deliberately retained for operator recovery.

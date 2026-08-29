@@ -13,6 +13,7 @@ use std::{
 
 use hq_domain::{
     AgentId, ContentText, InstallationId, ProjectId, ProviderId, ProviderSessionId, ShortText,
+    ThreadId,
 };
 use hq_local_api::{
     BlockingClientConfig, BlockingClientError, BlockingClientRunner, ClientConnectionState,
@@ -183,6 +184,28 @@ pub(crate) struct LocalProjectResource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalProjectAssignment {
+    pub assignment_id: [u8; 32],
+    pub agent_id: [u8; 32],
+    pub provider: String,
+    pub session: Option<String>,
+    pub phase: String,
+    pub thread_id: Option<[u8; 32]>,
+    pub launch_directory: Option<String>,
+    pub blocked: Option<String>,
+    pub cardinality_conflicted: bool,
+    pub runnable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalProjectThread {
+    pub agent_id: [u8; 32],
+    pub provider: String,
+    pub session: String,
+    pub thread_id: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LocalProject {
     pub project_id: [u8; 32],
     pub home: [u8; 32],
@@ -190,7 +213,8 @@ pub(crate) struct LocalProject {
     pub lifecycle: String,
     pub archived: bool,
     pub claimable: bool,
-    pub assigned: bool,
+    pub assignment: Option<LocalProjectAssignment>,
+    pub threads: Vec<LocalProjectThread>,
     pub head: [u8; 32],
     pub input_sequence: u64,
     pub resources: Vec<LocalProjectResource>,
@@ -209,7 +233,28 @@ pub(crate) fn tui_project_catalog(
             lifecycle: project.lifecycle,
             archived: project.archived,
             claimable: project.claimable,
-            assigned: project.assignment.is_some(),
+            assignment: project.assignment.map(|assignment| LocalProjectAssignment {
+                assignment_id: *assignment.assignment_id.as_bytes(),
+                agent_id: *assignment.agent_id.as_bytes(),
+                provider: assignment.provider,
+                session: assignment.session,
+                phase: assignment.phase,
+                thread_id: assignment.thread_id.map(|thread| *thread.as_bytes()),
+                launch_directory: assignment.launch_directory.map(|path| path.value),
+                blocked: assignment.blocked,
+                cardinality_conflicted: assignment.cardinality_conflicted,
+                runnable: assignment.runnable,
+            }),
+            threads: project
+                .threads
+                .into_iter()
+                .map(|thread| LocalProjectThread {
+                    agent_id: *thread.agent_id.as_bytes(),
+                    provider: thread.provider,
+                    session: thread.session,
+                    thread_id: *thread.thread_id.as_bytes(),
+                })
+                .collect(),
             head: *project.head.as_bytes(),
             input_sequence: project.input_sequence,
             resources: project
@@ -285,6 +330,26 @@ pub(crate) enum LocalProjectCommand {
         project_id: [u8; 32],
         resource_id: Option<[u8; 32]>,
     },
+    Activate {
+        project_id: [u8; 32],
+        agent_id: [u8; 32],
+        provider: String,
+        resume_session: Option<String>,
+        resume_thread: Option<[u8; 32]>,
+        launch_directory: String,
+    },
+    DispatchPending {
+        project_id: [u8; 32],
+    },
+    Handoff {
+        project_id: [u8; 32],
+        agent_id: [u8; 32],
+        provider: String,
+        resume_session: Option<String>,
+        thread_id: [u8; 32],
+        launch_directory: String,
+        force_takeover: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -353,9 +418,12 @@ pub(crate) struct LocalProjectResult {
     pub command_id: [u8; 32],
     pub operation_id: [u8; 32],
     pub project_id: [u8; 32],
+    pub runtime_state: Option<String>,
+    pub runtime_code: Option<String>,
     pub outcome: LocalProjectOutcome,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn execute_project_command(
     state: &StatePaths,
     command: LocalProjectCommand,
@@ -446,6 +514,49 @@ pub(crate) fn execute_project_command(
             project_id: ProjectId::from_bytes(*project_id),
             resource_id: resource_id.map(hq_domain::ResourceId::from_bytes),
         },
+        LocalProjectCommand::Activate {
+            project_id,
+            agent_id,
+            provider,
+            resume_session,
+            resume_thread,
+            launch_directory,
+        } => ProjectCliCommand::Activate {
+            project_id: ProjectId::from_bytes(*project_id),
+            agent: NamedAgentSelector::Id(AgentId::from_bytes(*agent_id)),
+            provider: ProviderId::new(provider.clone()).map_err(|_| CliError::Arguments)?,
+            resume_session: resume_session
+                .clone()
+                .map(ProviderSessionId::new)
+                .transpose()
+                .map_err(|_| CliError::Arguments)?,
+            resume_thread: resume_thread.map(ThreadId::from_bytes),
+            directory: Some(PathBuf::from(launch_directory)),
+        },
+        LocalProjectCommand::DispatchPending { project_id } => {
+            ProjectCliCommand::Dispatch(ProjectId::from_bytes(*project_id))
+        }
+        LocalProjectCommand::Handoff {
+            project_id,
+            agent_id,
+            provider,
+            resume_session,
+            thread_id,
+            launch_directory,
+            force_takeover,
+        } => ProjectCliCommand::Handoff {
+            project_id: ProjectId::from_bytes(*project_id),
+            agent: NamedAgentSelector::Id(AgentId::from_bytes(*agent_id)),
+            provider: ProviderId::new(provider.clone()).map_err(|_| CliError::Arguments)?,
+            resume_session: resume_session
+                .clone()
+                .map(ProviderSessionId::new)
+                .transpose()
+                .map_err(|_| CliError::Arguments)?,
+            thread_id: ThreadId::from_bytes(*thread_id),
+            directory: Some(PathBuf::from(launch_directory)),
+            force: *force_takeover,
+        },
         LocalProjectCommand::PreviewAddResource { .. }
         | LocalProjectCommand::PreviewReplaceResource { .. } => {
             unreachable!("preview commands return before command conversion")
@@ -478,6 +589,8 @@ fn execute_project_preview(
         command_id: operation_id,
         operation_id,
         project_id: *preview.project_id.as_bytes(),
+        runtime_state: None,
+        runtime_code: None,
         outcome: LocalProjectOutcome::ResourcePreview {
             display_path: preview.display_path,
             canonical_path: preview.canonical_path,
@@ -502,6 +615,8 @@ fn project_result(
 ) -> Result<LocalProjectResult, CliError> {
     match result {
         ProjectTuiResult::Operation(view) => {
+            let runtime_state = view.runtime_state.map(str::to_owned);
+            let runtime_code = view.runtime_code;
             let outcome = match view.status {
                 "accepted" | "running" => LocalProjectOutcome::Running {
                     stage: view.stage.ok_or(CliError::ProjectState)?.to_owned(),
@@ -532,6 +647,8 @@ fn project_result(
                 command_id: *view.command_id.as_bytes(),
                 operation_id: *view.operation_id.as_bytes(),
                 project_id: *view.project_id.as_bytes(),
+                runtime_state,
+                runtime_code,
                 outcome,
             })
         }
@@ -543,6 +660,8 @@ fn project_result(
             command_id: *message_id.as_bytes(),
             operation_id: *message_id.as_bytes(),
             project_id: *project_id.as_bytes(),
+            runtime_state: None,
+            runtime_code: None,
             outcome: LocalProjectOutcome::InputSent {
                 message_id: *message_id.as_bytes(),
             },
@@ -557,6 +676,8 @@ fn project_result(
                 command_id: operation_id,
                 operation_id,
                 project_id: *view.project_id.as_bytes(),
+                runtime_state: None,
+                runtime_code: None,
                 outcome: LocalProjectOutcome::ResourceChecks {
                     checks: view
                         .checks

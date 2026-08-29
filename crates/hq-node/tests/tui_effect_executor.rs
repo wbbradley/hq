@@ -348,6 +348,8 @@ fn executor_submits_exact_project_command_and_preserves_reconciliation_evidence(
         command_id: [81; 32],
         operation_id: [82; 32],
         project_id: [83; 32],
+        runtime_state: Some("uncertain".to_owned()),
+        runtime_code: Some("response_lost".to_owned()),
         outcome: UiProjectOutcome::Reconcilable {
             stage: "worktree_created".to_owned(),
             category: "external_state".to_owned(),
@@ -413,6 +415,8 @@ fn executor_preserves_exact_resource_check_target_and_typed_failure_evidence() {
                 command_id: [81; 32],
                 operation_id: [82; 32],
                 project_id: [83; 32],
+                runtime_state: None,
+                runtime_code: None,
                 outcome: UiProjectOutcome::ResourceChecks {
                     checks: vec![UiProjectResourceCheck {
                         resource_id: [84; 32],
@@ -926,6 +930,7 @@ impl TuiClientPort for ProjectTuiClient {
         action: UiProjectAction,
     ) -> Result<UiProjectResult, UiFailure> {
         self.calls.lock().expect("calls lock").push(action.clone());
+        let resource_check = matches!(&action, UiProjectAction::CheckResources { .. });
         let outcome = match &action {
             UiProjectAction::CheckResources { resource_id, .. } => {
                 UiProjectOutcome::ResourceChecks {
@@ -961,6 +966,8 @@ impl TuiClientPort for ProjectTuiClient {
             command_id: [81; 32],
             operation_id: [82; 32],
             project_id: [83; 32],
+            runtime_state: (!resource_check).then(|| "uncertain".to_owned()),
+            runtime_code: (!resource_check).then(|| "response_lost".to_owned()),
             outcome,
         })
     }

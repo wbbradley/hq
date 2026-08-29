@@ -10,9 +10,10 @@ use hq_tui::{
     UiConversationPage, UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiInput,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiProject, UiProjectAction, UiProjectExternalWarning, UiProjectModal, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult, UiRow,
-    UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectModal,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1531,6 +1532,8 @@ fn project_input_retains_text_on_failure_and_exposes_reconcilable_external_state
         command_id: [3; 32],
         operation_id: [4; 32],
         project_id: target.project_id,
+        runtime_state: Some("uncertain".to_owned()),
+        runtime_code: Some("response_lost".to_owned()),
         outcome: UiProjectOutcome::Reconcilable {
             stage: "worktree_created".to_owned(),
             category: "external_state".to_owned(),
@@ -1584,6 +1587,8 @@ fn project_progress_stale_rejection_and_mismatched_responses_remain_typed() {
                 command_id: [1; 32],
                 operation_id: [2; 32],
                 project_id: target.project_id,
+                runtime_state: None,
+                runtime_code: None,
                 outcome: UiProjectOutcome::Running {
                     stage: "git_identified".to_owned(),
                 },
@@ -1608,6 +1613,8 @@ fn project_progress_stale_rejection_and_mismatched_responses_remain_typed() {
                 command_id: [3; 32],
                 operation_id: [4; 32],
                 project_id: target.project_id,
+                runtime_state: Some("failed".to_owned()),
+                runtime_code: Some("stale_project_head".to_owned()),
                 outcome: UiProjectOutcome::Rejected {
                     category: "conflict".to_owned(),
                     code: "stale_project_head".to_owned(),
@@ -1638,6 +1645,8 @@ fn project_progress_stale_rejection_and_mismatched_responses_remain_typed() {
                 command_id: [5; 32],
                 operation_id: [6; 32],
                 project_id: target.project_id,
+                runtime_state: None,
+                runtime_code: None,
                 outcome: UiProjectOutcome::InputSent {
                     message_id: [7; 32],
                 },
@@ -1689,6 +1698,8 @@ fn resource_add_previews_authoritative_conflicts_before_mutation() {
                 command_id: [4; 32],
                 operation_id: [5; 32],
                 project_id: target.project_id,
+                runtime_state: None,
+                runtime_code: None,
                 outcome: UiProjectOutcome::ResourcePreview {
                     display_path: "/shared".to_owned(),
                     canonical_path: "/canonical/shared".to_owned(),
@@ -1723,7 +1734,18 @@ fn resource_add_previews_authoritative_conflicts_before_mutation() {
 #[test]
 fn resource_edits_force_gate_selection_and_fresh_checks_use_exact_identities() {
     let mut target = project(10, "assigned", "/first");
-    target.assigned = true;
+    target.assignment = Some(UiProjectAssignment {
+        assignment_id: [40; 32],
+        agent_id: [41; 32],
+        provider: "codex".to_owned(),
+        session: Some("session".to_owned()),
+        phase: "runnable".to_owned(),
+        thread_id: Some([42; 32]),
+        launch_directory: Some("/first".to_owned()),
+        blocked: None,
+        cardinality_conflicted: false,
+        runnable: true,
+    });
     target.resources.push(UiProjectResource {
         resource_id: [22; 32],
         display_path: "/second".to_owned(),
@@ -1787,6 +1809,8 @@ fn resource_edits_force_gate_selection_and_fresh_checks_use_exact_identities() {
                 command_id: [7; 32],
                 operation_id: [8; 32],
                 project_id: target.project_id,
+                runtime_state: None,
+                runtime_code: None,
                 outcome: UiProjectOutcome::ResourceChecks {
                     checks: vec![UiProjectResourceCheck {
                         resource_id: target.resources[0].resource_id,
@@ -1809,6 +1833,204 @@ fn resource_edits_force_gate_selection_and_fresh_checks_use_exact_identities() {
         Some(UiProjectModal::Outcome { result })
             if matches!(result.outcome, UiProjectOutcome::ResourceChecks { .. })
     ));
+}
+
+#[test]
+fn project_activation_uses_exact_project_thread_and_retained_directory() {
+    let mut target = project(50, "activate", "/workspace/activate");
+    target.threads.push(UiProjectThread {
+        agent_id: [60; 32],
+        provider: "codex".to_owned(),
+        session: "durable-session".to_owned(),
+        thread_id: [61; 32],
+    });
+    let mut model = loaded_projects_model_with_agents(
+        1,
+        vec![target.clone()],
+        vec![project_agent(60, target.home)],
+    );
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('v')))
+        .expect("activation")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("mode field")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("exact mode")
+        .model;
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit");
+    assert!(submitted.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::SubmitProjectCommand {
+            action: UiProjectAction::Activate {
+                project_id,
+                agent_id,
+                provider,
+                resume_session: Some(session),
+                resume_thread: Some(thread),
+                launch_directory,
+            },
+            ..
+        } if *project_id == target.project_id
+            && *agent_id == [60; 32]
+            && provider == "codex"
+            && session == "durable-session"
+            && *thread == [61; 32]
+            && launch_directory == "/workspace/activate"
+    )));
+}
+
+#[test]
+fn activation_target_and_edited_fields_survive_authoritative_reload() {
+    let mut target = project(51, "retained activation", "/workspace/retained");
+    target.threads.push(UiProjectThread {
+        agent_id: [62; 32],
+        provider: "codex".to_owned(),
+        session: "retained-session".to_owned(),
+        thread_id: [63; 32],
+    });
+    let agent = project_agent(62, target.home);
+    let mut model = loaded_projects_model_with_agents(1, vec![target.clone()], vec![agent.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('v')))
+        .expect("activation")
+        .model;
+    for _ in 0..3 {
+        model = update(model, UiEvent::Input(UiInput::NextFocus))
+            .expect("provider field")
+            .model;
+    }
+    model = update(model, UiEvent::Input(UiInput::Paste("-edited".to_owned())))
+        .expect("provider edit")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("directory field")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("/child".to_owned())))
+        .expect("directory edit")
+        .model;
+    let invalidated = update(model, UiEvent::Invalidated { revision: 2 }).expect("reload");
+    let effect_id = snapshot_effect(&invalidated.effects);
+    let mut snapshot = projects_snapshot(2, vec![target]);
+    snapshot.agents = vec![agent];
+    let reloaded = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id,
+            snapshot,
+        },
+    )
+    .expect("authoritative reload")
+    .model;
+    let Some(UiProjectModal::Activate {
+        agent_id,
+        thread,
+        provider,
+        directory,
+        ..
+    }) = reloaded.project_modal()
+    else {
+        panic!("activation remains open");
+    };
+    assert_eq!(*agent_id, Some([62; 32]));
+    assert_eq!(thread.as_ref().map(|value| value.thread_id), Some([63; 32]));
+    assert_eq!(provider, "codex-edited");
+    assert_eq!(directory, "/workspace/retained/child");
+}
+
+#[test]
+fn handoff_requires_confirmation_and_keeps_force_separate() {
+    let mut target = project(70, "handoff", "/workspace/handoff");
+    target.assignment = Some(UiProjectAssignment {
+        assignment_id: [71; 32],
+        agent_id: [72; 32],
+        provider: "codex".to_owned(),
+        session: Some("old-session".to_owned()),
+        phase: "blocked".to_owned(),
+        thread_id: Some([73; 32]),
+        launch_directory: Some("/workspace/handoff".to_owned()),
+        blocked: Some("runtime_stop_uncertain".to_owned()),
+        cardinality_conflicted: false,
+        runnable: false,
+    });
+    target.threads.push(UiProjectThread {
+        agent_id: [80; 32],
+        provider: "codex".to_owned(),
+        session: "target-session".to_owned(),
+        thread_id: [81; 32],
+    });
+    let mut model = loaded_projects_model_with_agents(
+        1,
+        vec![target.clone()],
+        vec![
+            project_agent(72, target.home),
+            project_agent(80, target.home),
+        ],
+    );
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('h')))
+        .expect("handoff")
+        .model;
+    let blocked = update(model, UiEvent::Input(UiInput::Activate)).expect("confirmation gate");
+    assert!(
+        blocked
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+    let mut confirmed = blocked.model;
+    for _ in 0..5 {
+        confirmed = update(confirmed, UiEvent::Input(UiInput::NextFocus))
+            .expect("confirmation field")
+            .model;
+    }
+    confirmed = update(confirmed, UiEvent::Input(UiInput::NextItem))
+        .expect("confirm")
+        .model;
+    let force_field = update(confirmed, UiEvent::Input(UiInput::NextFocus))
+        .expect("force field")
+        .model;
+    let forced = update(force_field, UiEvent::Input(UiInput::NextItem))
+        .expect("force")
+        .model;
+    let submitted = update(forced, UiEvent::Input(UiInput::Activate)).expect("submit");
+    assert!(submitted.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::SubmitProjectCommand {
+            action: UiProjectAction::Handoff {
+                project_id,
+                agent_id,
+                thread_id,
+                force_takeover: true,
+                ..
+            },
+            ..
+        } if *project_id == target.project_id && *agent_id == [80; 32] && *thread_id == [81; 32]
+    )));
+}
+
+#[test]
+fn project_dispatch_submits_the_exact_selected_project() {
+    let target = project(90, "dispatch", "/workspace/dispatch");
+    let mut model = loaded_projects_model(1, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    let submitted = update(model, UiEvent::Input(UiInput::Character('d'))).expect("dispatch");
+    assert!(submitted.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::SubmitProjectCommand {
+            action: UiProjectAction::DispatchPending { project_id },
+            ..
+        } if *project_id == target.project_id
+    )));
 }
 
 #[test]
@@ -1879,6 +2101,8 @@ fn resource_add_retains_input_across_reload_and_preview_failure() {
                 command_id: [40; 32],
                 operation_id: [41; 32],
                 project_id: target.project_id,
+                runtime_state: None,
+                runtime_code: None,
                 outcome: UiProjectOutcome::ResourcePreview {
                     display_path: "/added".to_owned(),
                     canonical_path: "/canonical/added".to_owned(),
@@ -2095,6 +2319,49 @@ fn loaded_projects_model(revision: u64, projects: Vec<UiProject>) -> UiModel {
     .model
 }
 
+fn loaded_projects_model_with_agents(
+    revision: u64,
+    projects: Vec<UiProject>,
+    agents: Vec<UiAgent>,
+) -> UiModel {
+    let model = loaded_agents_model(revision, &agents);
+    let moved = update(model, UiEvent::Input(UiInput::Character('l'))).expect("projects section");
+    let request = snapshot_effect(&moved.effects);
+    let mut snapshot = projects_snapshot(revision, projects);
+    snapshot.agents = agents;
+    update(
+        moved.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: request,
+            snapshot,
+        },
+    )
+    .expect("projects loaded")
+    .model
+}
+
+fn project_agent(byte: u8, home: [u8; 32]) -> UiAgent {
+    UiAgent {
+        agent_id: [byte; 32],
+        names: vec![format!("agent-{byte}")],
+        mailboxes: vec![UiAgentMailbox {
+            installation_id: home,
+            mailbox_id: [byte.saturating_add(1); 32],
+        }],
+        lifecycle: UiAgentLifecycle::Active,
+        runnable: true,
+        sessions: vec![UiAgentSession {
+            provider: "codex".to_owned(),
+            session: format!("session-{byte}"),
+            mailbox: None,
+            conflicted: false,
+            selected: true,
+            name_resolved: true,
+            display_name: None,
+        }],
+    }
+}
+
 fn projects_snapshot(revision: u64, projects: Vec<UiProject>) -> UiSnapshot {
     UiSnapshot {
         section: UiSection::Projects,
@@ -2123,7 +2390,8 @@ fn project(byte: u8, name: &str, path: &str) -> UiProject {
         lifecycle: "open".to_owned(),
         archived: false,
         claimable: true,
-        assigned: false,
+        assignment: None,
+        threads: Vec::new(),
         head: [byte.saturating_add(1); 32],
         input_sequence: 1,
         resources: vec![UiProjectResource {

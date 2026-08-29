@@ -54,15 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[tui/high] Implement retained project assignment, activation, dispatch, and handoff** — Add
-  stable named-agent selection, new-session or exact-session activation, pending-input dispatch,
-  and confirmed handoff/takeover through ordinary local-API commands. Preserve exact project,
-  agent, provider/session, thread, and directory targets across reload/reconnect; require separate
-  confirmation and force choices; and render saga progress, stale heads, runtime rejection,
-  uncertainty, and recovery actions without importing project or provider authority into the TUI.
-  Complete this work when pure model, responsive renderer, executor, and installed-client parity
-  tests cover every assignment, activation, dispatch, handoff, cancellation, and failure path.
-
 - **[tui/high] Implement retained project lifecycle controls** — Add confirmed close, force-gated
   takeover/close recovery, reopen, archive, and unarchive through ordinary local-API commands.
   Preserve project selection and modal state across authoritative reload/reconnect, reconcile

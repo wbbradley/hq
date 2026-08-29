@@ -1,5 +1,47 @@
 # Completed
 
+## 2026-08-29 — Retained project assignment, activation, dispatch, and handoff
+
+Added passive public-field current-assignment and exact historical project-thread records to the
+TUI project catalog. Project details render configuring, runnable, blocked, and cardinality-conflict
+state. Stable local named-agent selection joins only authoritative project/agent/provider/session/
+thread tuples; the broader agent session catalog is never treated as project resume authority.
+
+Added new-session and exact-session activation, pending-input dispatch, and handoff through the
+existing ordinary local-client project commands. Tab selects agent, mode, thread, provider,
+directory, confirmation, and force fields without stealing printable form characters; arrows
+change stable choices. Exact resume requires a matching project thread. Handoff requires a
+separate confirmation, while force takeover remains independent authority and explicitly does not
+claim external runtime cessation. Exact selections and edited text survive reload and reconnect.
+
+Every project result now retains the existing typed runtime state and failure/uncertainty code in
+addition to command identity, operation identity, saga stage, canonical head, rejection,
+reconciliation, and external-state warnings. The TUI renders that evidence directly and never
+imports project, provider, harness, filesystem, storage, or signing authority. No accessor facade,
+duplicate stored/runtime state, storage migration, compatibility layer, protocol change, or
+lockfile change was introduced.
+
+Pure-model tests cover new and exact activation, stable reload retention, exact dispatch,
+confirmation and force gates, cancellation through the common modal contract, stale response and
+typed failure handling. Wide and compact renderer tests cover activation, blocked assignment,
+handoff, takeover disclosure, and runtime uncertainty. Executor tests cover every exact action and
+runtime evidence. Installed terminal coverage drives real pending dispatch and renders its typed
+rejection; the installed CLI parity suite exercises activation, dispatch, handoff, restart, and
+stale target failures. Full all-target/all-feature workspace tests, strict Clippy, formatting,
+architecture, behavior-ledger, causal, protocol, protocol-fuzz, and dependency gates pass. The
+final exact executable-name process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[tui/high] Implement retained project assignment, activation, dispatch, and handoff** — Add
+  stable named-agent selection, new-session or exact-session activation, pending-input dispatch,
+  and confirmed handoff/takeover through ordinary local-API commands. Preserve exact project,
+  agent, provider/session, thread, and directory targets across reload/reconnect; require separate
+  confirmation and force choices; and render saga progress, stale heads, runtime rejection,
+  uncertainty, and recovery actions without importing project or provider authority into the TUI.
+  Complete this work when pure model, responsive renderer, executor, and installed-client parity
+  tests cover every assignment, activation, dispatch, handoff, cancellation, and failure path.
+
 ## 2026-08-29 — Retained desired-resource editing and conflict previews
 
 Added exact desired-resource selection and retained add, replace, remove, and primary-selection

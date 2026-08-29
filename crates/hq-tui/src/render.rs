@@ -14,8 +14,8 @@ use crate::{
     UiActivityStatus, UiAgent, UiAgentLifecycle, UiAgentModal, UiConnectionState,
     UiConversationEntry, UiConversationEntryKind, UiFocus, UiMailboxAction, UiMailboxDraftTarget,
     UiMailboxModal, UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel,
-    UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiRow, UiRowState,
-    UiSection, UiTechnicalSection,
+    UiProjectAction, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread, UiRow,
+    UiRowState, UiSection, UiTechnicalSection,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -112,10 +112,36 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 lines.push(Line::from(" No desired resources"));
             }
             lines.push(Line::default());
+            lines.push(Line::styled("Assignment", Style::new().fg(Color::Cyan)));
+            if let Some(assignment) = &project.assignment {
+                lines.push(Line::from(format!(
+                    "{} · agent {} · provider {} · runnable {}",
+                    assignment.phase,
+                    short_identity(assignment.agent_id),
+                    assignment.provider,
+                    assignment.runnable
+                )));
+                if let Some(blocked) = &assignment.blocked {
+                    lines.push(Line::styled(
+                        format!("Blocked: {blocked}"),
+                        Style::new().fg(Color::Yellow),
+                    ));
+                }
+                if assignment.cardinality_conflicted {
+                    lines.push(Line::styled(
+                        "Assignment cardinality conflict",
+                        Style::new().fg(Color::Red),
+                    ));
+                }
+            } else {
+                lines.push(Line::from("Unassigned"));
+            }
+            lines.push(Line::default());
             lines.push(Line::from("↑/↓ resource · a add · e replace · x remove"));
             lines.push(Line::from(
                 "p primary · k check selected · K check all · n send input",
             ));
+            lines.push(Line::from("v activate · d dispatch pending · h handoff"));
             (" Project details ", lines)
         }
         UiProjectModal::CreateExisting {
@@ -233,7 +259,10 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             vec![
                 Line::from(format!("Project: {}", project.name)),
                 Line::from(format!("Resource: {}", short_identity(*resource_id))),
-                Line::from(format!("Assigned: {} · force: {force}", project.assigned)),
+                Line::from(format!(
+                    "Assigned: {} · force: {force}",
+                    project.assignment.is_some()
+                )),
                 Line::from("External paths, files, worktrees, and branches are retained."),
                 Line::default(),
                 Line::from(if *submitting {
@@ -260,6 +289,58 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 }),
             ],
         ),
+        UiProjectModal::Activate {
+            project,
+            agents,
+            agent_id,
+            thread,
+            new_session,
+            provider,
+            directory,
+            field,
+            submitting,
+        } => (
+            " Activate project assignment ",
+            project_activation_lines(
+                project,
+                agents,
+                *agent_id,
+                thread.as_ref(),
+                *new_session,
+                provider,
+                directory,
+                *field,
+                None,
+                *submitting,
+            ),
+        ),
+        UiProjectModal::Handoff {
+            project,
+            agents,
+            agent_id,
+            thread,
+            new_session,
+            provider,
+            directory,
+            field,
+            confirmed,
+            force_takeover,
+            submitting,
+        } => (
+            " Confirm project handoff ",
+            project_activation_lines(
+                project,
+                agents,
+                *agent_id,
+                thread.as_ref(),
+                *new_session,
+                provider,
+                directory,
+                *field,
+                Some((*confirmed, *force_takeover)),
+                *submitting,
+            ),
+        ),
         UiProjectModal::Outcome { result } => {
             let mut lines = vec![Line::from(project_action_label(&result.action))];
             lines.push(Line::from(format!(
@@ -268,6 +349,15 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 short_identity(result.operation_id)
             )));
             lines.push(Line::default());
+            if let Some(runtime_state) = &result.runtime_state {
+                lines.push(Line::from(format!(
+                    "Runtime: {runtime_state}{}",
+                    result
+                        .runtime_code
+                        .as_ref()
+                        .map_or_else(String::new, |code| format!("/{code}"))
+                )));
+            }
             match &result.outcome {
                 UiProjectOutcome::Completed { project_head } => lines.push(Line::from(format!(
                     "Completed{}",
@@ -375,6 +465,91 @@ fn project_field_line<'value>(label: &str, value: &'value str, selected: bool) -
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn project_activation_lines<'value>(
+    project: &'value crate::UiProject,
+    agents: &'value [UiAgent],
+    agent_id: Option<[u8; 32]>,
+    thread: Option<&'value UiProjectThread>,
+    new_session: bool,
+    provider: &'value str,
+    directory: &'value str,
+    field: UiProjectFormField,
+    handoff: Option<(bool, bool)>,
+    submitting: bool,
+) -> Vec<Line<'value>> {
+    let agent = agent_id
+        .and_then(|id| agents.iter().find(|agent| agent.agent_id == id))
+        .and_then(|agent| agent.names.first().map(String::as_str))
+        .unwrap_or("none");
+    let thread_label = thread.map_or_else(
+        || "none".to_owned(),
+        |thread| {
+            format!(
+                "{}/{} · {}",
+                thread.provider,
+                thread.session,
+                short_identity(thread.thread_id)
+            )
+        },
+    );
+    let mut lines = vec![
+        Line::from(format!("Project: {}", project.name)),
+        project_choice_line("Agent", agent, field == UiProjectFormField::Agent),
+        project_choice_line(
+            "Mode",
+            if new_session {
+                "new session"
+            } else {
+                "exact resume"
+            },
+            field == UiProjectFormField::SessionMode,
+        ),
+        project_choice_line("Thread", &thread_label, field == UiProjectFormField::Thread),
+        project_field_line("Provider", provider, field == UiProjectFormField::Provider),
+        project_field_line(
+            "Directory",
+            directory,
+            field == UiProjectFormField::Directory,
+        ),
+    ];
+    if let Some((confirmed, force)) = handoff {
+        lines.push(project_choice_line(
+            "Confirmed",
+            if confirmed { "true" } else { "false" },
+            field == UiProjectFormField::Confirmation,
+        ));
+        lines.push(project_choice_line(
+            "Force takeover",
+            if force { "true" } else { "false" },
+            field == UiProjectFormField::Force,
+        ));
+        lines.push(Line::from(
+            "Force revokes HQ authority; it does not prove external runtime cessation.",
+        ));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(if submitting {
+        "Reconciling one stable project operation…"
+    } else if handoff.is_some() {
+        "Tab field · ↑/↓ change choice · Enter handoff"
+    } else {
+        "Tab field · ↑/↓ change choice · Enter activate"
+    }));
+    lines
+}
+
+fn project_choice_line(label: &str, value: &str, selected: bool) -> Line<'static> {
+    Line::styled(
+        format!("{} {label}: {value}", if selected { '›' } else { ' ' }),
+        if selected {
+            selected_style(true)
+        } else {
+            Style::new()
+        },
+    )
+}
+
 fn project_action_label(action: &UiProjectAction) -> String {
     match action {
         UiProjectAction::CreateExisting { name, .. } => format!("Create {name} from existing tree"),
@@ -391,6 +566,9 @@ fn project_action_label(action: &UiProjectAction) -> String {
         UiProjectAction::RemoveResource { .. } => "Remove desired resource".to_owned(),
         UiProjectAction::SetPrimaryResource { .. } => "Select primary resource".to_owned(),
         UiProjectAction::CheckResources { .. } => "Check desired resources".to_owned(),
+        UiProjectAction::Activate { .. } => "Activate project assignment".to_owned(),
+        UiProjectAction::DispatchPending { .. } => "Dispatch pending project input".to_owned(),
+        UiProjectAction::Handoff { .. } => "Hand off project assignment".to_owned(),
     }
 }
 
