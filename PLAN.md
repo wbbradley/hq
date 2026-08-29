@@ -27,19 +27,37 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Explain empty and conflicted states with exact next actions
+### Explain empty states with exact next actions
 
-Give every empty or blocked section an explanation and one or two concrete next actions.
+Give every empty section and empty recipient chooser a plain-language purpose and one or two
+actions that are possible from the current screen.
 
-- Cover no projects, no agents, no conversations, no direct-message targets, no configured
-  provider, and unavailable or conflicted human-account state.
-- Split aggregate diagnostics such as ambiguous selection/authority into the exact typed condition
-  and an applicable recovery action; do not make the user inspect unrelated IDs to discover what is
-  wrong.
-- Preserve technical evidence behind a details action while keeping the primary explanation in
-  ordinary language.
-- Add mapper/model tests and narrow/wide render snapshots for every empty, unavailable, and
-  conflicted state.
+- Distinguish an empty Inbox, Sent, and Archived section; explain what each normally contains and
+  point to the applicable direct-message, personal-note, or `New...` action without implying that
+  project work is the only collaboration path.
+- Explain that an empty Agents section contains no named workers yet and offer agent creation. For
+  an empty Projects section, explain project/resource ownership and offer project creation without
+  positioning HQ as a worktree manager.
+- When no direct-message target is available, explain that no reachable recipient exists, offer the
+  applicable agent-creation path now, and leave the copy compatible with future human recipients.
+  Do not render selection or submission controls that cannot work.
+- Keep the contextual-help and focused-footer actions consistent with each empty state. Add pure
+  model tests and narrow/wide render snapshots for every section and the empty recipient chooser.
+
+### Explain unavailable and conflicted human accounts from typed evidence
+
+Replace the aggregate unavailable/ambiguous human-account presentation with exact typed conditions
+and applicable recovery actions derived by the node mapper.
+
+- Distinguish no local account selection, several local selection candidates, several local
+  selection records, a selected account with no local creator/device authority, and conflicting or
+  inactive local membership evidence without parsing diagnostic prose.
+- Explain each condition in ordinary language and offer only the applicable create, join, select,
+  sync, repair, or retry action. Do not make the user inspect unrelated IDs to discover the problem.
+- Preserve candidate account IDs, selection frontier, membership/authority evidence, and stable
+  recovery codes in contextual technical details.
+- Add mapper, pure-model, and narrow/wide render coverage for every unavailable and conflicted
+  condition. Update `docs/rust/tui.md` with the typed recovery vocabulary.
 
 ### Complete the TUI vocabulary and progressive-disclosure audit
 
