@@ -87,6 +87,13 @@ pre-existing controlled `ws://` or `wss://` endpoint can be tested by setting
 `HQ_CONTROLLED_RELAY_URL` and invoking the ignored Cargo test directly. Never put production keys in
 this test.
 
+The manual Rust release-candidate workflow also consumes the packaged Linux x86_64 executable in a
+larger controlled-failure rehearsal. It adds a new release-node identity to the temporary relay,
+proves retained offline catch-up, stops and restores that exact relay while the node remains ready,
+and runs the provider-crash and ordered-drain contracts before clean shutdown. See
+[`docs/rust/controlled-failure-rehearsal.md`](rust/controlled-failure-rehearsal.md) for its isolation
+and evidence boundaries.
+
 ## Legacy end-to-end smoke test
 
 The older full-product smoke builds the Go client while the Rust CLI is incomplete. It creates three

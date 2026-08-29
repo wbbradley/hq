@@ -72,9 +72,47 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  controlled-failure:
+    name: Controlled relay and provider failure
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - name: Download Linux x86_64 release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-release-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/hq-rust-controlled-failure
+      - name: Extract verified release candidate
+        run: |
+          artifact_directory="$RUNNER_TEMP/hq-rust-controlled-failure"
+          archives=("$artifact_directory"/hq-v*-x86_64-unknown-linux-gnu.tar.gz)
+          test "${#archives[@]}" = 1
+          cd "$artifact_directory"
+          sha256sum --check "$(basename "${archives[0]}").sha256"
+          mkdir installed
+          tar -xzf "${archives[0]}" -C installed
+      - name: Rehearse controlled relay and provider failure
+        run: |
+          scripts/rehearse-rust-controlled-failure.sh \
+            "$RUNNER_TEMP/hq-rust-controlled-failure/installed/hq" \
+            "$RUNNER_TEMP/hq-rust-controlled-failure/controlled-failure.json" \
+            "${{ github.sha }}"
+      - name: Upload controlled-failure evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-controlled-failure-${{ github.sha }}
+          path: ${{ runner.temp }}/hq-rust-controlled-failure/controlled-failure.json
+          if-no-files-found: error
+          retention-days: 30
+
   aggregate:
     name: Verify native release matrix
-    needs: package
+    needs: [package, controlled-failure]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -84,12 +122,18 @@ jobs:
         run: |
           scripts/test-rust-release-artifacts.sh
           scripts/test-rust-recovery-rehearsal.sh
+          scripts/test-rust-controlled-failure.sh
       - name: Download native release artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: rust-release-*
           path: ${{ runner.temp }}/hq-rust-release-matrix
           merge-multiple: true
+      - name: Download controlled-failure evidence
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-controlled-failure-${{ github.sha }}
+          path: ${{ runner.temp }}/hq-rust-release-matrix
       - name: Verify complete release matrix
         run: |
           scripts/verify-rust-release-matrix.sh \
@@ -98,9 +142,14 @@ jobs:
           scripts/verify-rust-recovery-matrix.sh \
             "$RUNNER_TEMP/hq-rust-release-matrix" "${{ github.sha }}" \
             "$RUNNER_TEMP/hq-rust-release-matrix/recovery-manifest.json"
+          scripts/verify-rust-controlled-failure.sh \
+            "$RUNNER_TEMP/hq-rust-release-matrix/controlled-failure.json" \
+            "${{ github.sha }}"
           jq . "$RUNNER_TEMP/hq-rust-release-matrix/release-manifest.json" \
             >>"$GITHUB_STEP_SUMMARY"
           jq . "$RUNNER_TEMP/hq-rust-release-matrix/recovery-manifest.json" \
+            >>"$GITHUB_STEP_SUMMARY"
+          jq . "$RUNNER_TEMP/hq-rust-release-matrix/controlled-failure.json" \
             >>"$GITHUB_STEP_SUMMARY"
       - name: Upload combined release-candidate evidence
         uses: actions/upload-artifact@v7
