@@ -4,7 +4,10 @@
 
 use hq_application::{RelayAccess, RelayAuthentication};
 use hq_domain::{CommandDigest, OperationId};
-use hq_relay::{DesiredRelayPolicy, RelayPolicyChange, RelayUrl};
+use hq_relay::{
+    CLIENT_AUTH_KIND, DesiredRelayPolicy, EnvelopeCodec, RelayEnvelopePort, RelayPolicyChange,
+    RelayUrl,
+};
 
 const SPEC: &str = include_str!("../../../docs/protocol/relay-sync-v1.md");
 
@@ -49,4 +52,17 @@ fn passive_policy_records_expose_fields_while_url_validation_remains_opaque() {
     assert_eq!(change.desired.access, RelayAccess::ReadWrite);
     assert_eq!(change.desired.authentication, RelayAuthentication::Required);
     assert!(change.desired.enabled);
+}
+
+#[test]
+fn generic_nostr_authentication_uses_transport_verification_not_semantic_fact_parsing() {
+    let codec = EnvelopeCodec::from_secret_bytes([4; 32]).expect("codec constructs");
+    let url = RelayUrl::new("wss://relay.example".to_owned()).expect("URL validates");
+    let prepared = RelayEnvelopePort::authenticate(&codec, &url, "relay-challenge", 1_800_000_000)
+        .expect("generic Nostr authentication signs and verifies");
+    let event: serde_json::Value =
+        serde_json::from_slice(&prepared.exact_event).expect("authentication JSON parses");
+    assert_eq!(event["kind"], CLIENT_AUTH_KIND);
+    assert_eq!(event["id"].as_str().map(str::len), Some(64));
+    assert_ne!(prepared.event_id, [0; 32]);
 }

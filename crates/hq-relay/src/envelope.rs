@@ -356,6 +356,12 @@ impl EnvelopeCodec {
     }
 }
 
+pub(crate) fn verified_transport_event_id(raw: &[u8]) -> Result<[u8; 32], EnvelopeError> {
+    let event = parse_signed(raw)?;
+    verify_signed(&event)?;
+    decode_hex(&event.id)
+}
+
 /// Enforces the durable one-use public-key uniqueness claim.
 pub fn check_one_use_key_claim(
     existing_wrapper_id: [u8; 32],
@@ -773,6 +779,10 @@ mod tests {
         assert_eq!(
             verify_signed(&event).expect("auth verifies"),
             codec.public_key()
+        );
+        assert_eq!(
+            verified_transport_event_id(&wire).expect("transport event identity verifies"),
+            decode_hex(&event.id).expect("event identity decodes")
         );
         assert_eq!(
             codec

@@ -6,6 +6,7 @@ use crate::{
     AuthInput, EnvelopeCodec, FailureClass, LogicalEnvelopeId, OpenedRelayEnvelope, OutboundIntent,
     PreparedOutbound, PreparedRelayAuthentication, RandomSource, RejectedRelayEnvelope,
     RelayEnvelopePort, RelayOpenOutcome, RelayPortError, RelayUrl, SystemRandom,
+    envelope::verified_transport_event_id,
 };
 
 impl RelayEnvelopePort for EnvelopeCodec {
@@ -78,11 +79,8 @@ impl RelayEnvelopePort for EnvelopeCodec {
                 auxiliary_randomness,
             )
             .map_err(map_local_envelope_error)?;
-        let event_id = hq_protocol::RawEventBytes::new(exact_event.clone())
-            .and_then(hq_protocol::RawEventBytes::parse)
-            .and_then(hq_protocol::ParsedOuterEvent::verify)
-            .map_err(|_| RelayPortError::Corrupt)?
-            .event_id();
+        let event_id =
+            verified_transport_event_id(&exact_event).map_err(map_local_envelope_error)?;
         Ok(PreparedRelayAuthentication {
             event_id,
             exact_event,
