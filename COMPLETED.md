@@ -1,5 +1,40 @@
 # Completed
 
+## 2026-08-28 — Project activation and pending-dispatch CLI
+
+Added `project activate` with explicit fresh-session or exact-session/thread selection and `project
+dispatch` for pending accepted inputs. Activation resolves the named agent, provider, immutable
+project home, current head, exact session binding, historical project thread, and launch directory
+from one authoritative snapshot. Exact resume requires the complete
+agent/provider/session/project/thread tuple; fresh sessions may optionally continue one historical
+thread. The sole authoritative primary resource supplies the default launch directory, while an
+explicit absolute directory remains subject to home-side claim validation.
+
+Extended the application projection and unshipped local API v1 in place with passive public-field
+assignment and deduplicated historical-thread records. Assignment phase is explicit and independent
+of current runnability, preserving cardinality and claim conflicts without an accessor facade. No
+storage schema, version bump, migration, compatibility path, or duplicate stored/runtime type was
+added. Project catalog human and JSON output now includes current assignment phase, runtime binding,
+blocking state, support, and historical session/thread provenance.
+
+The production foreground harness boundary now converts a missing provider or exact session into a
+typed rejected runtime effect, allowing the project workflow to compensate and render its normal
+terminal rejection instead of leaking a generic adapter error. Parser, invalid session/thread,
+exact binding, primary directory, projection deduplication, protocol phase invariants, stable command
+identity, stale-head, response-loss, workflow recovery, and real-process restart tests pass. Full
+workspace all-target/all-feature tests, strict Clippy, format/check, architecture, behavior-ledger,
+causal, protocol, and dependency gates pass. The dependency audit retains only the existing yanked
+`chacha20 0.10.1` warning, and the final process-table audit found no HQ daemon.
+
+### Original plan entry
+
+- **[cli/high] Add project activation and pending-dispatch commands** — Extend the stable
+  project-command builder with activation, exact-session/thread resume, and pending dispatch.
+  Resolve the named agent, provider, launch directory, active assignment, and historical thread
+  bindings from authoritative state; render every workflow stage, rejection, runtime
+  failure/uncertainty, and reconcilable operation. Test invalid session/thread combinations, stale
+  heads, response loss, restart repair, and real foreground execution.
+
 ## 2026-08-28 — Project lifecycle CLI
 
 Added `project open PROJECT_ID`, `project close PROJECT_ID --yes [--force]`, `project archive

@@ -1570,6 +1570,46 @@ pub enum SnapshotItem {
         /// Last accepted contiguous input sequence.
         input_sequence: u64,
     },
+    /// Current authoritative project assignment.
+    ProjectAssignment {
+        /// Owning project.
+        project_id: Id32,
+        /// Immutable assignment epoch.
+        assignment_id: Id32,
+        /// Assigned named agent.
+        agent_id: Id32,
+        /// Selected provider namespace.
+        provider: String,
+        /// Acknowledged provider session, when startup reached one.
+        session: Option<String>,
+        /// Stable configuring, runnable, or blocked phase.
+        phase: String,
+        /// Runnable project thread, when startup completed.
+        thread_id: Option<Id32>,
+        /// Runnable launch directory, when startup completed.
+        launch_directory: Option<ResourceLocatorDto>,
+        /// Stable blocking error code, when blocked.
+        blocked: Option<String>,
+        /// Whether project/agent cardinality is conflicted.
+        cardinality_conflicted: bool,
+        /// Whether the assignment is currently runnable.
+        runnable: bool,
+        /// Exact supporting fact set.
+        support: Vec<Id32>,
+    },
+    /// One exact historical provider-session/project-thread binding.
+    ProjectThread {
+        /// Owning project.
+        project_id: Id32,
+        /// Named agent that owned the thread.
+        agent_id: Id32,
+        /// Provider namespace.
+        provider: String,
+        /// Exact provider session.
+        session: String,
+        /// Immutable project thread.
+        thread_id: Id32,
+    },
     /// One desired project path and its advisory claim state.
     ProjectResource {
         /// Owning project identity.
@@ -2975,6 +3015,9 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
             }
             SnapshotItem::AgentDirectSession {
                 provider, session, ..
+            }
+            | SnapshotItem::ProjectThread {
+                provider, session, ..
             } => {
                 validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
                 validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
@@ -2984,6 +3027,49 @@ fn validate_snapshot(snapshot: &AuthoritativeSnapshotDto) -> Result<(), ValueErr
             } => {
                 validate_text(name, SHORT_TEXT_MAX_BYTES)?;
                 validate_text(lifecycle, SHORT_TEXT_MAX_BYTES)?;
+            }
+            SnapshotItem::ProjectAssignment {
+                provider,
+                session,
+                phase,
+                thread_id,
+                launch_directory,
+                blocked,
+                runnable,
+                support,
+                ..
+            } => {
+                validate_text(provider, PROVIDER_ID_MAX_BYTES)?;
+                validate_text(phase, SHORT_TEXT_MAX_BYTES)?;
+                if let Some(session) = session {
+                    validate_text(session, PROVIDER_SESSION_ID_MAX_BYTES)?;
+                }
+                if let Some(directory) = launch_directory {
+                    validate_locator(directory)?;
+                }
+                if let Some(blocked) = blocked {
+                    validate_text(blocked, ERROR_CODE_MAX_BYTES)?;
+                }
+                validate_id_set(support, MAX_SNAPSHOT_ITEMS)?;
+                let runnable_phase = phase == "runnable"
+                    && session.is_some()
+                    && thread_id.is_some()
+                    && launch_directory.is_some()
+                    && blocked.is_none();
+                let configuring = phase == "configuring"
+                    && !*runnable
+                    && session.is_none()
+                    && thread_id.is_none()
+                    && launch_directory.is_none()
+                    && blocked.is_none();
+                let blocked_state = phase == "blocked"
+                    && !*runnable
+                    && thread_id.is_none()
+                    && launch_directory.is_none()
+                    && blocked.is_some();
+                if !(runnable_phase || configuring || blocked_state) {
+                    return Err(ValueError::InvalidValueCombination);
+                }
             }
             SnapshotItem::ProjectResource {
                 display_locator,

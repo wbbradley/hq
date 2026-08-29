@@ -71,8 +71,9 @@ pub use service::{Application, MutationCompletion, PreparedSubscription};
 pub use snapshot::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot,
     ClientAgentLifecycle, ClientDeviceGrant, ClientMembershipState, ClientPeerRouteBlock,
-    ClientPeerRouteCandidate, ClientPeerRouteState, ClientProjectLifecycle,
-    ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
+    ClientPeerRouteCandidate, ClientPeerRouteState, ClientProjectAssignment,
+    ClientProjectAssignmentPhase, ClientProjectLifecycle, ClientProjectOutputStatus,
+    ClientProjectThread, ClientProjection, ClientRemoteCommandStage, ConversationEntry,
     ConversationMessageEntry, ConversationProjectionSnapshot, ConversationSummary, DomainSnapshot,
     IncompleteMessageSummary, ProjectProjectionSnapshot, ProjectionSnapshot,
 };

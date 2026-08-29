@@ -193,6 +193,19 @@ completed, rejected, or reconcilable workflow truth with runtime failure/uncerta
 Exact requests replay after local response loss, and durable workflow checkpoints repair after
 restart. This extends local API v1 in place because no HQ installation has shipped.
 
+`project activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --new-session [--thread
+THREAD_ID] [--dir ABSOLUTE_PATH]` starts a new provider session. The optional thread must be an
+authoritative historical thread for that exact project and agent. `project activate PROJECT_ID
+--agent NAME|AGENT_ID --provider PROVIDER --session SESSION --thread THREAD_ID [--dir
+ABSOLUTE_PATH]` instead resumes an exact authoritative agent/provider/session/project/thread tuple
+and never falls back to a new session. The agent mailbox must belong to the immutable project home.
+Without `--dir`, the CLI uses the sole authoritative primary resource; the home still validates the
+launch directory and current claims. `project dispatch PROJECT_ID` reconciles and drains all pending
+accepted inputs in sequence through the same stable expected-head command path. Catalog output
+includes the current assignment and deduplicated historical thread bindings as passive public-field
+records. These additions evolve the unshipped local API v1 in place without a migration, compatibility
+shape, or second stored representation.
+
 `agents [messaging|retry|synchronization|delivery|causality|administration]` is installed guidance
 for agents. It explains stable retry identity, explicit sync, at-least-once completion, inert
 dependency-incomplete history, and the boundary that humans own identity, authority, durable

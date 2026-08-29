@@ -556,8 +556,14 @@ impl ProjectRuntimePort for HarnessNodeComponent {
             } else {
                 supervisor.launch(launch)
             }
-            .map(EffectOutcome::Accepted)
         });
+        let outcome = match outcome {
+            Ok(session) => Ok(EffectOutcome::Accepted(session)),
+            Err(error) if error.code() == ApplicationErrorCode::ItemNotFound => Ok(
+                EffectOutcome::Rejected(harness_domain_error("project_runtime_unavailable")),
+            ),
+            Err(error) => Err(error),
+        };
         self.wake_event_task();
         outcome
     }

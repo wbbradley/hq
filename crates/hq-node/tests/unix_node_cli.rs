@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     num::NonZeroUsize,
     os::unix::net::UnixStream,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant},
 };
@@ -44,6 +44,14 @@ impl Drop for ChildGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+struct DaemonStopGuard(PathBuf);
+
+impl Drop for DaemonStopGuard {
+    fn drop(&mut self) {
+        let _ = output("stop", &self.0);
     }
 }
 
@@ -1059,6 +1067,91 @@ fn project_send_sequences_argument_and_stdin_work_and_survives_restart() {
         stopped.status.success(),
         "stop stderr: {:?}",
         stopped.stderr
+    );
+}
+
+#[test]
+fn project_activation_and_dispatch_execute_against_the_foreground_node_and_survive_restart() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("activation-worktree");
+    fs::create_dir(&worktree).expect("existing working tree");
+    initialize_identity(&state_root);
+    let _stop = DaemonStopGuard(state_root.clone());
+    let human = human_output(&state_root, &["create", "Personal"]);
+    assert!(human.status.success(), "human stderr: {:?}", human.stderr);
+    let agent = agent_output(&state_root, &["create", "runtime-agent"]);
+    assert!(agent.status.success(), "agent stderr: {:?}", agent.stderr);
+    let created = project_json(
+        &state_root,
+        &[
+            "create",
+            "Activation target",
+            "--path",
+            worktree.to_str().expect("UTF-8 worktree"),
+        ],
+    );
+    let project_id = created["data"]["project_id"]
+        .as_str()
+        .expect("project identity")
+        .to_owned();
+    let sent = admin_output(
+        &state_root,
+        "project",
+        &["send", &project_id, "pending instruction"],
+    );
+    assert!(sent.status.success(), "send stderr: {:?}", sent.stderr);
+
+    let activation = admin_output(
+        &state_root,
+        "project",
+        &[
+            "activate",
+            &project_id,
+            "--agent",
+            "runtime-agent",
+            "--provider",
+            "unregistered",
+            "--new-session",
+        ],
+    );
+    assert_eq!(activation.status.code(), Some(1));
+    assert!(
+        activation.stderr.is_empty(),
+        "activation stderr: {:?}",
+        activation.stderr
+    );
+    let activation: serde_json::Value =
+        serde_json::from_slice(&activation.stdout).expect("activation JSON");
+    assert_eq!(activation["kind"], "project_operation");
+    assert_eq!(activation["data"]["operation"], "activate");
+    assert_eq!(activation["data"]["status"], "rejected");
+    assert_eq!(
+        activation["data"]["error_code"],
+        "project_runtime_start_rejected"
+    );
+
+    let dispatch = admin_output(&state_root, "project", &["dispatch", &project_id]);
+    assert_eq!(dispatch.status.code(), Some(1));
+    assert!(dispatch.stderr.is_empty());
+    let dispatch: serde_json::Value =
+        serde_json::from_slice(&dispatch.stdout).expect("dispatch JSON");
+    assert_eq!(dispatch["data"]["operation"], "dispatch");
+    assert_eq!(dispatch["data"]["status"], "rejected");
+
+    let restarted = output("restart", &state_root);
+    assert!(
+        restarted.status.success(),
+        "restart stderr: {:?}",
+        restarted.stderr
+    );
+    let shown = project_json(&state_root, &["show", &project_id]);
+    assert!(shown["data"]["projects"][0]["assignment"].is_null());
+    assert_eq!(shown["data"]["projects"][0]["input_sequence"], 1);
+    assert!(
+        shown["data"]["projects"][0]["dispatches"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
     );
 }
 

@@ -6,19 +6,20 @@ use std::{
 };
 
 use hq_domain::{
-    AccountId, AgentId, CommandDigest, CommandId, ContentText, DispatchId, EncryptionPublicKey,
-    FactId, GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxKind,
-    MessageContent, MessageId, ProjectId, ProviderId, ProviderSessionId, RelayHints,
-    RemoteCommandResult, RepositoryContext, ResourceHealth, ResourceId, ResourceLocator, Revision,
-    RuntimeObservation, ShortText, SigningPublicKey, Timestamp,
+    AccountId, AgentId, AssignmentId, CommandDigest, CommandId, ContentText, DispatchId,
+    EncryptionPublicKey, ErrorCode, FactId, GrantId, InstallationAddress, InstallationId,
+    MailboxAddress, MailboxKind, MessageContent, MessageId, ProjectId, ProviderId,
+    ProviderSessionId, RelayHints, RemoteCommandResult, RepositoryContext, ResourceHealth,
+    ResourceId, ResourceLocator, Revision, RuntimeObservation, ShortText, SigningPublicKey,
+    ThreadId, Timestamp,
 };
 use hq_reducer::{
     ActivityView, AgentAggregateKey, AgentLifecycle, AgentProjection, AgentProjectionKey,
     AgentReport, AuthorityAggregateKey, AuthorityProjection, AuthorityProjectionKey,
     AuthorityReport, ConversationAggregateKey, ConversationProjection, ConversationProjectionKey,
     ConversationReport, MembershipState, MessageView, PeerRouteState, ProjectAggregateKey,
-    ProjectLifecycle, ProjectOutputStatus, ProjectProjection, ProjectProjectionKey, ProjectReport,
-    RemoteCommandStage,
+    ProjectAssignmentPhase, ProjectLifecycle, ProjectOutputStatus, ProjectProjection,
+    ProjectProjectionKey, ProjectReport, RemoteCommandStage,
 };
 
 use crate::ApplicationValueError;
@@ -432,6 +433,46 @@ impl DomainSnapshot {
             }
         }
 
+        let input_projects = self
+            .project
+            .projections()
+            .values()
+            .filter_map(|projection| match projection {
+                ProjectProjection::Input(input) => Some((input.message_id, input.project_id)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut project_threads = BTreeSet::new();
+        for projection in self.project.projections().values() {
+            match projection {
+                ProjectProjection::Dispatch(dispatch) if !dispatch.conflicted => {
+                    if let Some(project_id) = input_projects.get(&dispatch.message_id) {
+                        project_threads.insert(ClientProjectThread {
+                            project_id: *project_id,
+                            agent_id: dispatch.binding.agent_id,
+                            provider: dispatch.binding.provider.clone(),
+                            session: dispatch.binding.session.clone(),
+                            thread_id: dispatch.thread_id,
+                        });
+                    }
+                }
+                ProjectProjection::Output(output)
+                    if output.status != ProjectOutputStatus::Conflicted =>
+                {
+                    if let Some(project_id) = output.message.project_id {
+                        project_threads.insert(ClientProjectThread {
+                            project_id,
+                            agent_id: output.binding.agent_id,
+                            provider: output.binding.provider.clone(),
+                            session: output.binding.session.clone(),
+                            thread_id: output.thread_id,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
         for (key, projection) in self.project.projections() {
             let item = match (key, projection) {
                 (ProjectProjectionKey::Project(project_id), ProjectProjection::Project(view)) => {
@@ -451,6 +492,39 @@ impl DomainSnapshot {
                         head: view.head,
                         input_sequence: view.input_sequence,
                     });
+                    if let Some(assignment) = &view.assignment {
+                        let phase = match &assignment.phase {
+                            ProjectAssignmentPhase::Configuring => {
+                                ClientProjectAssignmentPhase::Configuring
+                            }
+                            ProjectAssignmentPhase::Runnable {
+                                thread_id,
+                                launch_directory,
+                            } => ClientProjectAssignmentPhase::Runnable {
+                                thread_id: *thread_id,
+                                launch_directory: launch_directory.clone(),
+                            },
+                            ProjectAssignmentPhase::Blocked(error) => {
+                                ClientProjectAssignmentPhase::Blocked(error.clone())
+                            }
+                        };
+                        items.push(ClientProjection::ProjectAssignment {
+                            assignment: ClientProjectAssignment {
+                                project_id: *project_id,
+                                assignment_id: assignment.intent.assignment_id,
+                                agent_id: assignment.intent.agent_id,
+                                provider: assignment.intent.provider.clone(),
+                                session: assignment
+                                    .binding
+                                    .as_ref()
+                                    .map(|binding| binding.session.clone()),
+                                phase,
+                                cardinality_conflicted: assignment.cardinality_conflicted,
+                                runnable: assignment.runnable,
+                                support: assignment.support.clone(),
+                            },
+                        });
+                    }
                     for (resource_id, resource) in &view.resources {
                         items.push(ClientProjection::ProjectResource {
                             project_id: *project_id,
@@ -548,6 +622,11 @@ impl DomainSnapshot {
             };
             items.push(item);
         }
+        items.extend(
+            project_threads
+                .into_iter()
+                .map(|thread| ClientProjection::ProjectThread { thread }),
+        );
         Ok(items)
     }
 }
@@ -638,6 +717,44 @@ pub enum ClientProjectOutputStatus {
     Current,
     LateFromInactive,
     Conflicted,
+}
+
+/// Current authoritative project assignment exposed to passive clients.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientProjectAssignment {
+    pub project_id: ProjectId,
+    pub assignment_id: AssignmentId,
+    pub agent_id: AgentId,
+    pub provider: ProviderId,
+    pub session: Option<ProviderSessionId>,
+    pub phase: ClientProjectAssignmentPhase,
+    pub cardinality_conflicted: bool,
+    pub runnable: bool,
+    pub support: BTreeSet<FactId>,
+}
+
+/// Current phase of one authoritative project assignment.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientProjectAssignmentPhase {
+    Configuring,
+    Runnable {
+        thread_id: ThreadId,
+        launch_directory: ResourceLocator,
+    },
+    Blocked(ErrorCode),
+}
+
+/// One exact historical provider-session/project-thread binding.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ClientProjectThread {
+    pub project_id: ProjectId,
+    pub agent_id: AgentId,
+    pub provider: ProviderId,
+    pub session: ProviderSessionId,
+    pub thread_id: ThreadId,
 }
 /// Stable client presentation of remote-command progress.
 #[allow(missing_docs)]
@@ -782,6 +899,12 @@ pub enum ClientProjection {
         claimable: bool,
         head: FactId,
         input_sequence: u64,
+    },
+    ProjectAssignment {
+        assignment: ClientProjectAssignment,
+    },
+    ProjectThread {
+        thread: ClientProjectThread,
     },
     ProjectResource {
         project_id: ProjectId,

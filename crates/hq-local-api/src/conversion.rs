@@ -21,14 +21,15 @@ use hq_application::{
     AgentLaunchContext, AgentRetirementOutcome, AgentRetirementRequest, AgentSessionRequest,
     AgentSessionResult, ApplicationError, ApplicationErrorClass, AuthoritativeSnapshot,
     CanonicalEvidence, ClientAgentLifecycle, ClientMembershipState, ClientPeerRouteState,
-    ClientProjectLifecycle, ClientProjectOutputStatus, ClientProjection, ClientRemoteCommandStage,
-    ConversationEntry, ConversationKey, DomainHealth, EffectOutcome, EffectRequest,
-    EvidenceIngestOutcome, FactMutation, HealthDomain, LaunchEnvironment, MutationAttempt,
-    MutationDecision, MutationOutcome, MutationReceipt, ProjectCommandAction,
-    ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage, ProjectCreationRequest,
-    RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus, ResourceInspectionRequest,
-    ResourceInspectionResult, SessionControl, StateHealth, StateRepairReport, SubscriptionRequest,
-    SubscriptionTopic, SynchronizationRequest, WorktreeProvisioningRequest,
+    ClientProjectAssignmentPhase, ClientProjectLifecycle, ClientProjectOutputStatus,
+    ClientProjection, ClientRemoteCommandStage, ConversationEntry, ConversationKey, DomainHealth,
+    EffectOutcome, EffectRequest, EvidenceIngestOutcome, FactMutation, HealthDomain,
+    LaunchEnvironment, MutationAttempt, MutationDecision, MutationOutcome, MutationReceipt,
+    ProjectCommandAction, ProjectCommandOutcome, ProjectCommandRequest, ProjectCommandStage,
+    ProjectCreationRequest, RelayAccess, RelayAuthentication, RelayConfiguration, RelayStatus,
+    ResourceInspectionRequest, ResourceInspectionResult, SessionControl, StateHealth,
+    StateRepairReport, SubscriptionRequest, SubscriptionTopic, SynchronizationRequest,
+    WorktreeProvisioningRequest,
 };
 use hq_domain::{
     ActivityStatus, AgentId, BoundedText, CommandDigest, CommandId, ErrorCategory, FactId,
@@ -524,6 +525,50 @@ pub fn snapshot_to_v1(
                 claimable,
                 head: id32(head.as_bytes()),
                 input_sequence,
+            },
+            ClientProjection::ProjectAssignment { assignment } => {
+                let (phase, thread_id, launch_directory, blocked) = match assignment.phase {
+                    ClientProjectAssignmentPhase::Configuring => ("configuring", None, None, None),
+                    ClientProjectAssignmentPhase::Runnable {
+                        thread_id,
+                        launch_directory,
+                    } => (
+                        "runnable",
+                        Some(id32(thread_id.as_bytes())),
+                        Some(locator_to_v1(&launch_directory)),
+                        None,
+                    ),
+                    ClientProjectAssignmentPhase::Blocked(error) => {
+                        ("blocked", None, None, Some(error.as_str().to_owned()))
+                    }
+                };
+                SnapshotItem::ProjectAssignment {
+                    project_id: id32(assignment.project_id.as_bytes()),
+                    assignment_id: id32(assignment.assignment_id.as_bytes()),
+                    agent_id: id32(assignment.agent_id.as_bytes()),
+                    provider: assignment.provider.as_str().to_owned(),
+                    session: assignment
+                        .session
+                        .map(|session| session.as_str().to_owned()),
+                    phase: phase.to_owned(),
+                    thread_id,
+                    launch_directory,
+                    blocked,
+                    cardinality_conflicted: assignment.cardinality_conflicted,
+                    runnable: assignment.runnable,
+                    support: assignment
+                        .support
+                        .iter()
+                        .map(|fact| id32(fact.as_bytes()))
+                        .collect(),
+                }
+            }
+            ClientProjection::ProjectThread { thread } => SnapshotItem::ProjectThread {
+                project_id: id32(thread.project_id.as_bytes()),
+                agent_id: id32(thread.agent_id.as_bytes()),
+                provider: thread.provider.as_str().to_owned(),
+                session: thread.session.as_str().to_owned(),
+                thread_id: id32(thread.thread_id.as_bytes()),
             },
             ClientProjection::ProjectResource {
                 project_id,

@@ -992,6 +992,33 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
             head: id(15),
             input_sequence: 1,
         },
+        SnapshotItem::ProjectAssignment {
+            project_id: id(14),
+            assignment_id: id(39),
+            agent_id: id(12),
+            provider: "fake".to_owned(),
+            session: Some("session-1".to_owned()),
+            phase: "runnable".to_owned(),
+            thread_id: Some(id(40)),
+            launch_directory: Some(
+                ResourceLocatorDto::new(
+                    ResourceSchemeDto::WorkingTree,
+                    "/workspace/rewrite".to_owned(),
+                )
+                .expect("launch directory validates"),
+            ),
+            blocked: None,
+            cardinality_conflicted: true,
+            runnable: false,
+            support: vec![id(39)],
+        },
+        SnapshotItem::ProjectThread {
+            project_id: id(14),
+            agent_id: id(12),
+            provider: "fake".to_owned(),
+            session: "session-1".to_owned(),
+            thread_id: id(40),
+        },
         SnapshotItem::ProjectResource {
             project_id: id(14),
             resource_id: id(23),
@@ -1054,6 +1081,29 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
         RequestId::new(3).expect("nonzero"),
         ResponseResult::AuthoritativeSnapshot(snapshot),
     )));
+}
+
+#[test]
+fn project_assignment_snapshot_rejects_inconsistent_phase_fields() {
+    let id = |byte| Id32::new([byte; 32]);
+    let assignment = SnapshotItem::ProjectAssignment {
+        project_id: id(1),
+        assignment_id: id(2),
+        agent_id: id(3),
+        provider: "fake".to_owned(),
+        session: None,
+        phase: "configuring".to_owned(),
+        thread_id: Some(id(4)),
+        launch_directory: None,
+        blocked: None,
+        cardinality_conflicted: false,
+        runnable: false,
+        support: vec![id(2)],
+    };
+    assert_eq!(
+        AuthoritativeSnapshotDto::new(1, vec![assignment]),
+        Err(ValueError::InvalidValueCombination)
+    );
 }
 
 #[test]
