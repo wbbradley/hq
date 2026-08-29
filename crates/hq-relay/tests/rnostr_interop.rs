@@ -65,7 +65,6 @@ fn controlled_rnostr_auth_publish_retained_and_reconnect() {
     let subscription = "hq-controlled-retained";
     let mut reader = connector.connect(&url).expect("reader connects");
     authenticate(&mut *reader, &receiver, &url);
-    request_retained(&mut *reader, subscription, receiver.public_key());
     assert_retained(
         &mut *reader,
         subscription,
@@ -77,7 +76,6 @@ fn controlled_rnostr_auth_publish_retained_and_reconnect() {
 
     let mut reconnected = connector.connect(&url).expect("reader reconnects");
     authenticate(&mut *reconnected, &receiver, &url);
-    request_retained(&mut *reconnected, subscription, receiver.public_key());
     assert_retained(
         &mut *reconnected,
         subscription,
@@ -139,6 +137,7 @@ fn assert_retained(
 ) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut observed = false;
+    request_retained(connection, subscription, receiver.public_key());
     loop {
         let frame = receive_frame(connection, deadline);
         match frame {
@@ -157,11 +156,15 @@ fn assert_retained(
                 }
             }
             RelayFrame::EndOfStoredEvents(candidate) if candidate == subscription => {
+                if observed {
+                    return;
+                }
                 assert!(
-                    observed,
-                    "controlled relay reached EOSE without the published wrapper"
+                    Instant::now() < deadline,
+                    "controlled relay never made the acknowledged wrapper query-visible"
                 );
-                return;
+                std::thread::sleep(Duration::from_millis(25));
+                request_retained(connection, subscription, receiver.public_key());
             }
             RelayFrame::Closed {
                 subscription: candidate,

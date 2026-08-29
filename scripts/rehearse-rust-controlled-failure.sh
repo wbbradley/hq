@@ -137,7 +137,10 @@ jq -e \
 HQ_RUN_CONTROLLED_RELAY_SMOKE=1 HQ_CONTROLLED_RELAY_URL="$relay_url" \
   cargo test --locked --manifest-path "$repository_root/Cargo.toml" -p hq-relay \
     --test rnostr_interop controlled_rnostr_auth_publish_retained_and_reconnect -- --exact --ignored \
-  || fail 'controlled relay offline catch-up contract failed'
+  || {
+    docker logs "$container" >&2 || true
+    fail 'controlled relay offline catch-up contract failed'
+  }
 
 docker stop --time 5 "$container" >/dev/null || fail 'controlled relay stop failed'
 if curl -fsS "http://127.0.0.1:$relay_port/" >/dev/null 2>&1; then
@@ -156,7 +159,10 @@ fi
 HQ_RUN_CONTROLLED_RELAY_SMOKE=1 HQ_CONTROLLED_RELAY_URL="$relay_url" \
   cargo test --locked --manifest-path "$repository_root/Cargo.toml" -p hq-relay \
     --test rnostr_interop controlled_rnostr_auth_publish_retained_and_reconnect -- --exact --ignored \
-  || fail 'controlled relay reconnect contract failed'
+  || {
+    docker logs "$container" >&2 || true
+    fail 'controlled relay reconnect contract failed'
+  }
 hq_command relay sync "$relay_url" >/dev/null || fail 'post-recovery synchronization wake failed'
 recovery_status=$(hq_command relay status) || fail 'post-recovery relay status failed'
 jq -e \
