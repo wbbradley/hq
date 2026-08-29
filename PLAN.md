@@ -54,13 +54,6 @@ Use these sources in order when they disagree:
 
 ## Next Up
 
-- **[verification/high] Record cross-platform qualification and complete the acceptance audit** —
-  Run and record the deterministic qualification commands and applicable installed lifecycle and
-  provider evidence on the ADR-0001 Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon matrix.
-  Cross-check every acceptance-matrix row against direct current evidence, add any remaining gap
-  back to the front of the queue rather than waiving it, and complete integrated qualification only
-  when all required evidence is current and all quantitative budgets pass.
-
 - **[release/high] Produce and rehearse the cutover-ready Rust release candidate** — Build the
   single-executable Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon release artifacts, complete
   operator and recovery documentation, verify identity backup behavior in

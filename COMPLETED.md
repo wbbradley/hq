@@ -1,5 +1,39 @@
 # Completed
 
+## 2026-08-29 — Cross-platform qualification and acceptance audit
+
+Recorded the complete ADR-0001 native matrix for implementation revision
+`762f0785059a87cf8c9bfeb34a6bd11bdc54de4a` and GitHub Actions run 33250739592. The combined
+artifact contains the exact Linux x86-64, Linux ARM64, macOS x86-64, and Apple-Silicon environment
+records. An independent download and replay of the repository validator accepted their common
+revision, native host identities, complete budget set, exact record set, and clean release builds
+of 95, 94, 184, and 165 seconds respectively against the 900-second limit.
+
+Revalidated all eleven acceptance-inventory areas and the matrix validator's acceptance and
+different-revision rejection paths. Reran the architecture gate, all eight installed PTY workflows,
+the provider-neutral harness conformance suite, and the real Codex adapter seam. The audit found
+direct current behavioral or configuration evidence for every integrated acceptance row, no
+unexplained failure or exceeded budget, and no additional in-process, protocol, ownership,
+recovery, or platform gap.
+
+Updated the normative qualification document with the immutable run, implementation SHA, combined
+artifact name, validator-produced platform table, installed lifecycle/provider scope, and
+definition-of-done disposition. Operator-controlled relay/provider dogfood, backup/restore,
+offline catch-up, failure and repair drills, node replacement, read-only Go archival, and rollback
+rehearsal remain explicit in the next release-candidate task rather than being waived. No
+production record accessor facade, storage shape or version, migration, compatibility reader,
+duplicate stored/runtime state, dependency, or lockfile changed. The final exact executable-name
+process audit found no HQ daemon.
+
+### Original plan entry
+
+- **[verification/high] Record cross-platform qualification and complete the acceptance audit** —
+  Run and record the deterministic qualification commands and applicable installed lifecycle and
+  provider evidence on the ADR-0001 Linux x86-64/ARM64 and macOS x86-64/Apple-Silicon matrix.
+  Cross-check every acceptance-matrix row against direct current evidence, add any remaining gap
+  back to the front of the queue rather than waiving it, and complete integrated qualification only
+  when all required evidence is current and all quantitative budgets pass.
+
 ## 2026-08-29 — Bounded Linux workspace test-process lifecycles
 
 Split the Ubuntu Rust suite into fourteen independently bounded crate owners while retaining the
