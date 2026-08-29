@@ -6,12 +6,12 @@ encrypted Nostr relay synchronization, and managed provider sessions.
 
 ## Release status
 
-The first supported release candidate is `0.1.0`. HQ has not shipped, so this release starts with a
+The first release is `0.1.0`. HQ has not shipped, so this release starts with a
 new Rust identity and state directory. It does not migrate, inspect, import, or preserve a Go
 database, key, protocol, or command surface. The frozen Go implementation remains design history,
 not a supported installation path.
 
-The candidate supports these native targets:
+The release supports these native targets:
 
 | Operating system | Architecture | Rust host |
 | --- | --- | --- |
@@ -22,12 +22,10 @@ The candidate supports these native targets:
 
 Windows is not supported in v0.1.0.
 
-## Install a release candidate
+## Install a release
 
-Use the `Rust release candidate` GitHub Actions run for the exact revision an operator has approved.
-Download the `rust-release-<rust-host>` artifact for the current machine and the combined
-`rust-release-candidate-<revision>` evidence artifact from that same run. Never combine artifacts
-from different revisions.
+Download the archive and checksum for the current machine from the repository's
+[GitHub Releases](https://github.com/wbbradley/hq/releases) page.
 
 Verify and install the native archive:
 
@@ -40,12 +38,9 @@ install -m 0755 hq "$HOME/.local/bin/hq"
 ```
 
 On macOS, use `shasum -a 256 -c` instead of `sha256sum --check`. The reported commit must equal the
-40-character workflow revision. The complete artifact and evidence validation procedure is in
+40-character commit targeted by the release tag. The complete artifact and evidence validation
+procedure is in
 [docs/rust/release-artifacts.md](docs/rust/release-artifacts.md).
-
-After an approved candidate is published, the same archives and checksums are available from the
-repository's [GitHub Releases](https://github.com/wbbradley/hq/releases) page. Release publication
-is a separate manual workflow bound to the successful candidate's exact run ID and revision.
 
 ## First start
 

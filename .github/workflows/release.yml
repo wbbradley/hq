@@ -1,7 +1,22 @@
-name: Rust release candidate
+name: Rust GitHub release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: v-prefixed release tag matching the workspace version
+        required: true
+        default: v0.1.0
+        type: string
+      prerelease:
+        description: Publish as a GitHub prerelease
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: rust-github-release
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -16,6 +31,15 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+      - name: Verify release source and version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]
+          version=$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -er '.packages[] | select(.name == "hq-node") | .version')
+          test "$RELEASE_TAG" = "v$version"
       - name: Generate matrix from the acceptance contract
         id: targets
         run: |
@@ -87,7 +111,7 @@ jobs:
         with:
           name: rust-release-x86_64-unknown-linux-gnu
           path: ${{ runner.temp }}/hq-rust-controlled-failure
-      - name: Extract verified release candidate
+      - name: Extract verified release build
         run: |
           artifact_directory="$RUNNER_TEMP/hq-rust-controlled-failure"
           archives=("$artifact_directory"/hq-v*-x86_64-unknown-linux-gnu.tar.gz)
@@ -125,7 +149,7 @@ jobs:
         with:
           name: rust-release-x86_64-unknown-linux-gnu
           path: ${{ runner.temp }}/hq-rust-cutover-rollback
-      - name: Extract verified release candidate
+      - name: Extract verified release build
         run: |
           artifact_directory="$RUNNER_TEMP/hq-rust-cutover-rollback"
           archives=("$artifact_directory"/hq-v*-x86_64-unknown-linux-gnu.tar.gz)
@@ -199,20 +223,91 @@ jobs:
           scripts/generate-rust-cutover-evidence.sh \
             "$RUNNER_TEMP/hq-rust-release-matrix" "${{ github.sha }}" \
             "$RUNNER_TEMP/hq-rust-release-matrix/cutover-evidence.json"
-          jq . "$RUNNER_TEMP/hq-rust-release-matrix/release-manifest.json" \
-            >>"$GITHUB_STEP_SUMMARY"
-          jq . "$RUNNER_TEMP/hq-rust-release-matrix/recovery-manifest.json" \
-            >>"$GITHUB_STEP_SUMMARY"
-          jq . "$RUNNER_TEMP/hq-rust-release-matrix/controlled-failure.json" \
-            >>"$GITHUB_STEP_SUMMARY"
-          jq . "$RUNNER_TEMP/hq-rust-release-matrix/cutover-rollback.json" \
-            >>"$GITHUB_STEP_SUMMARY"
-          jq . "$RUNNER_TEMP/hq-rust-release-matrix/cutover-evidence.json" \
-            >>"$GITHUB_STEP_SUMMARY"
-      - name: Upload combined release-candidate evidence
+          {
+            jq . "$RUNNER_TEMP/hq-rust-release-matrix/release-manifest.json"
+            jq . "$RUNNER_TEMP/hq-rust-release-matrix/recovery-manifest.json"
+            jq . "$RUNNER_TEMP/hq-rust-release-matrix/controlled-failure.json"
+            jq . "$RUNNER_TEMP/hq-rust-release-matrix/cutover-rollback.json"
+            jq . "$RUNNER_TEMP/hq-rust-release-matrix/cutover-evidence.json"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Upload combined release bundle
         uses: actions/upload-artifact@v7
         with:
-          name: rust-release-candidate-${{ github.sha }}
+          name: rust-release-bundle-${{ github.sha }}
           path: ${{ runner.temp }}/hq-rust-release-matrix
           if-no-files-found: error
           retention-days: 30
+
+  publish:
+    name: Publish GitHub release
+    needs: aggregate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-release-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/hq-rust-release-bundle
+      - name: Revalidate and select release assets
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          scripts/prepare-rust-release-publication.sh \
+            "$RUNNER_TEMP/hq-rust-release-bundle" "${{ github.sha }}" "$RELEASE_TAG" \
+            "$RUNNER_TEMP/hq-rust-release-publication"
+      - name: Refuse an existing tag or release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            printf 'tag already exists: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            printf 'GitHub release already exists: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+      - name: Create GitHub release and exact tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          assets=("$RUNNER_TEMP/hq-rust-release-publication"/*)
+          release_flags=(
+            --repo "$GITHUB_REPOSITORY"
+            --target "${{ github.sha }}"
+            --title "$RELEASE_TAG"
+            --generate-notes
+            --fail-on-no-commits
+          )
+          if [[ "$PRERELEASE" == true ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" "${release_flags[@]}"
+      - name: Verify published release
+        env:
+          EXPECTED_PRERELEASE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          tag_ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+          # shellcheck disable=SC2016
+          jq -e --arg revision "${{ github.sha }}" \
+            '.object.type == "commit" and .object.sha == $revision' \
+            <<<"$tag_ref" >/dev/null
+          release=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,url)
+          # shellcheck disable=SC2016
+          jq -e --arg tag "$RELEASE_TAG" --argjson prerelease "$EXPECTED_PRERELEASE" '
+            .tagName == $tag and .isDraft == false and .isPrerelease == $prerelease
+          ' <<<"$release" >/dev/null
+          release_url=$(jq -er '.url' <<<"$release")
+          printf "Published [%s](%s) at %s.\n" \
+            "$RELEASE_TAG" "$release_url" "${{ github.sha }}" >>"$GITHUB_STEP_SUMMARY"
