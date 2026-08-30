@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
@@ -18,7 +18,7 @@ use crate::{
     UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel, UiNewChoice,
     UiNewModal, UiProjectAction, UiProjectCreationChoice, UiProjectFormField, UiProjectModal,
     UiProjectOutcome, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
-    UiTechnicalSection, model::WIDE_WIDTH,
+    UiTechnicalSection, UiTheme, UiThemeRole, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -26,11 +26,11 @@ const MINIMUM_HEIGHT: u16 = 10;
 const NAVIGATION_WIDTH: u16 = 24;
 
 /// Renders the complete model without mutation or I/O.
-pub fn render(frame: &mut Frame<'_>, model: &UiModel) {
+pub fn render(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme) {
     let area = frame.area();
-    frame.render_widget(Block::new().style(Style::new().bg(Color::Reset)), area);
+    frame.render_widget(Block::new().style(theme.style(UiThemeRole::Screen)), area);
     if area.width < MINIMUM_WIDTH || area.height < MINIMUM_HEIGHT {
-        render_too_small(frame, model, area);
+        render_too_small(frame, model, theme, area);
         return;
     }
 
@@ -40,22 +40,22 @@ pub fn render(frame: &mut Frame<'_>, model: &UiModel) {
         Constraint::Length(2),
     ])
     .areas(area);
-    render_header(frame, model, header);
+    render_header(frame, model, theme, header);
     if area.width >= WIDE_WIDTH {
-        render_wide_content(frame, model, content);
+        render_wide_content(frame, model, theme, content);
     } else {
-        render_compact_content(frame, model, content);
+        render_compact_content(frame, model, theme, content);
     }
-    render_footer(frame, model, footer);
-    render_new_modal(frame, model, content);
-    render_mailbox_modal(frame, model, content);
-    render_agent_modal(frame, model, content);
-    render_project_modal(frame, model, content);
-    render_help(frame, model, content);
+    render_footer(frame, model, theme, footer);
+    render_new_modal(frame, model, theme, content);
+    render_mailbox_modal(frame, model, theme, content);
+    render_agent_modal(frame, model, theme, content);
+    render_project_modal(frame, model, theme, content);
+    render_help(frame, model, theme, content);
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, available: Rect) {
     let Some(interaction) = model.new_modal() else {
         return;
     };
@@ -92,7 +92,12 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 Line::default(),
             ];
             for (choice, label, detail) in choices {
-                lines.push(project_choice_line(label, detail, *selected == choice));
+                lines.push(project_choice_line(
+                    theme,
+                    label,
+                    detail,
+                    *selected == choice,
+                ));
             }
             (" New… ", lines)
         }
@@ -108,6 +113,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             ];
             for project in projects {
                 lines.push(project_choice_line(
+                    theme,
                     &project.name,
                     project
                         .resources
@@ -121,6 +127,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 ));
             }
             lines.push(project_choice_line(
+                theme,
                 "Create a project",
                 "record a folder and its ownership first",
                 *create_new,
@@ -142,12 +149,14 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             ];
             for agent in agents {
                 lines.push(project_choice_line(
+                    theme,
                     agent.names.first().map_or("Unnamed agent", String::as_str),
                     &agent_status_label(&agent.status),
                     *selected == Some(agent.agent_id) && !*create_new,
                 ));
             }
             lines.push(project_choice_line(
+                theme,
                 "Create an agent",
                 "give a new worker a durable name",
                 *create_new,
@@ -190,7 +199,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                         "Agent service: {}",
                         provider_choice_label(providers, provider)
                     ),
-                    selected_style(true),
+                    selected_style(theme, true),
                 ));
                 lines.push(Line::from(
                     "Use ↑/↓ or j/k to choose; HQ uses the default when possible.",
@@ -209,7 +218,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             {
                 lines.push(Line::styled(
                     "No agent service is available. Configure one before continuing.",
-                    Style::new().fg(Color::Yellow),
+                    theme.style(UiThemeRole::Warning),
                 ));
                 lines.push(Line::default());
             }
@@ -268,7 +277,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                         agent.names.first().map_or("This agent", String::as_str),
                         competing_project
                     ),
-                    Style::new().fg(Color::Yellow).bold(),
+                    theme.style(UiThemeRole::Attention),
                 ),
                 Line::from(format!(
                     "HQ will not silently take the agent for {}.",
@@ -290,7 +299,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             vec![
                 Line::styled(
                     format!("{} cannot start work yet: {reason}.", project.name),
-                    Style::new().fg(Color::Yellow).bold(),
+                    theme.style(UiThemeRole::Attention),
                 ),
                 Line::from(competing_project.as_ref().map_or_else(
                     || "Inspect the project to see the conflicting folder evidence.".to_owned(),
@@ -326,14 +335,23 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
     }
     frame.render_widget(Clear, area);
     frame.render_widget(
+        Block::new().style(theme.style(UiThemeRole::ModalSurface)),
+        area,
+    );
+    frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(title))
+            .style(theme.style(UiThemeRole::Text))
+            .block(
+                Block::bordered()
+                    .title(Span::styled(title, theme.style(UiThemeRole::ModalTitle)))
+                    .border_style(theme.style(UiThemeRole::ModalBorder)),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+fn render_help(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, available: Rect) {
     let Some(page) = model.help_page() else {
         return;
     };
@@ -346,28 +364,33 @@ fn render_help(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
         height,
     };
     frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::new().style(theme.style(UiThemeRole::ModalSurface)),
+        area,
+    );
     let (title, lines) = match page {
-        UiHelpPage::Context => (" Help ", contextual_help_lines(model)),
-        UiHelpPage::Technical => (" Technical details ", technical_help_lines(model)),
+        UiHelpPage::Context => (" Help ", contextual_help_lines(model, theme)),
+        UiHelpPage::Technical => (" Technical details ", technical_help_lines(model, theme)),
     };
     frame.render_widget(
         Paragraph::new(lines)
+            .style(theme.style(UiThemeRole::Text))
             .block(
                 Block::bordered()
-                    .title(title)
-                    .border_style(Style::new().fg(Color::Cyan)),
+                    .title(Span::styled(title, theme.style(UiThemeRole::ModalTitle)))
+                    .border_style(theme.style(UiThemeRole::ModalBorder)),
             )
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
-fn contextual_help_lines(model: &UiModel) -> Vec<Line<'static>> {
-    if let Some(lines) = dialog_help_lines(model) {
+fn contextual_help_lines(model: &UiModel, theme: &UiTheme) -> Vec<Line<'static>> {
+    if let Some(lines) = dialog_help_lines(model, theme) {
         return lines;
     }
     let mut lines = vec![
-        Line::styled("What this is", Style::new().fg(Color::Cyan).bold()),
+        Line::styled("What this is", theme.style(UiThemeRole::Heading)),
         Line::from(section_help_text(model.section())),
     ];
     if let Some(row) = model.selected_row_data() {
@@ -388,7 +411,7 @@ fn contextual_help_lines(model: &UiModel) -> Vec<Line<'static>> {
     ) {
         lines.push(Line::styled(
             "Already have an HQ account?",
-            Style::new().fg(Color::Cyan).bold(),
+            theme.style(UiThemeRole::Heading),
         ));
         lines.push(Line::from(
             "Join it with: hq human join ABSOLUTE_INVITATION_PATH",
@@ -396,7 +419,7 @@ fn contextual_help_lines(model: &UiModel) -> Vec<Line<'static>> {
     }
     lines.push(Line::styled(
         "Available actions",
-        Style::new().fg(Color::Cyan).bold(),
+        theme.style(UiThemeRole::Heading),
     ));
     lines.extend(section_help_actions(model));
     lines.push(Line::from(
@@ -405,7 +428,7 @@ fn contextual_help_lines(model: &UiModel) -> Vec<Line<'static>> {
     lines
 }
 
-fn dialog_help_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
+fn dialog_help_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'static>>> {
     let (title, purpose) = if let Some(dialog) = model.new_modal() {
         match dialog {
             UiNewModal::Launcher { .. } => (
@@ -460,7 +483,7 @@ fn dialog_help_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
         return None;
     };
     Some(vec![
-        Line::styled(title, Style::new().fg(Color::Cyan).bold()),
+        Line::styled(title, theme.style(UiThemeRole::Heading)),
         Line::from(purpose),
         Line::default(),
         Line::from("Follow the labels and the action guide at the bottom of the dialog."),
@@ -468,7 +491,7 @@ fn dialog_help_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
     ])
 }
 
-fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
+fn technical_help_lines(model: &UiModel, theme: &UiTheme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(format!(
             "Section: {} · Connection: {}",
@@ -481,7 +504,7 @@ fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
         )),
     ];
     if let Some(UiHumanState::NeedsAttention(issue)) = model.human_state() {
-        lines.extend(technical_human_lines(model, issue));
+        lines.extend(technical_human_lines(model, issue, theme));
     } else if let Some(row) = model.selected_row_data() {
         lines.push(Line::from(format!("Stable item ID: {}", row.id)));
         lines.push(Line::from(format!(
@@ -501,7 +524,7 @@ fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
     if let Some(failure) = model.last_failure() {
         lines.push(Line::styled(
             format!("Recovery code: {}", failure.code),
-            Style::new().fg(Color::Yellow),
+            theme.style(UiThemeRole::Warning),
         ));
         lines.push(Line::from(format!("Recovery action: {}", failure.action)));
     } else {
@@ -511,10 +534,14 @@ fn technical_help_lines(model: &UiModel) -> Vec<Line<'static>> {
     lines
 }
 
-fn technical_human_lines(model: &UiModel, issue: &UiHumanIssue) -> Vec<Line<'static>> {
+fn technical_human_lines(
+    model: &UiModel,
+    issue: &UiHumanIssue,
+    theme: &UiTheme,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(
         format!("Human recovery code: {}", human_issue_code(issue)),
-        Style::new().fg(Color::Yellow),
+        theme.style(UiThemeRole::Warning),
     )];
     match issue {
         UiHumanIssue::NoAccountSelected => {
@@ -716,7 +743,7 @@ const fn row_kind_label(kind: UiRowKind) -> &'static str {
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, available: Rect) {
     let Some(interaction) = model.project_modal() else {
         return;
     };
@@ -729,6 +756,10 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         height,
     };
     frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::new().style(theme.style(UiThemeRole::ModalSurface)),
+        area,
+    );
     let (title, lines) = match interaction {
         UiProjectModal::ChooseCreation { selected } => (
             " Create project ",
@@ -736,11 +767,13 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 Line::from("How should this project's first folder be created?"),
                 Line::default(),
                 project_choice_line(
+                    theme,
                     "Use an existing folder",
                     "recommended · record its ownership in HQ",
                     *selected == UiProjectCreationChoice::ExistingFolder,
                 ),
                 project_choice_line(
+                    theme,
                     "Create an isolated Git worktree",
                     "optional advanced · create a branch and separate folder",
                     *selected == UiProjectCreationChoice::IsolatedWorktree,
@@ -756,6 +789,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             " Search projects ",
             vec![
                 text_field_line(
+                    theme,
                     "Query",
                     query,
                     model.search_field_cursor(query, true),
@@ -772,7 +806,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             selected_resource,
         } => {
             let mut lines = vec![
-                Line::styled(project.name.as_str(), Style::new().fg(Color::Cyan).bold()),
+                Line::styled(project.name.as_str(), theme.style(UiThemeRole::Heading)),
                 Line::from(format!(
                     "Status: {} · {}",
                     project_status_label(project),
@@ -786,7 +820,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             if model.viewport().width >= WIDE_WIDTH {
                 lines.push(Line::styled(
                     "Technical details",
-                    Style::new().fg(Color::DarkGray),
+                    theme.style(UiThemeRole::TextMuted),
                 ));
                 lines.push(Line::from(format!(
                     "Project {} · version {} · next message {}",
@@ -800,13 +834,13 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                         "Technical details: project {}",
                         short_identity(project.project_id)
                     ),
-                    Style::new().fg(Color::DarkGray),
+                    theme.style(UiThemeRole::TextMuted),
                 ));
             }
             lines.push(Line::default());
             lines.push(Line::styled(
                 "Folders and resources",
-                Style::new().fg(Color::Cyan),
+                theme.style(UiThemeRole::Accent),
             ));
             for resource in &project.resources {
                 let selected = *selected_resource == Some(resource.resource_id);
@@ -835,7 +869,10 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 lines.push(Line::from(" No folders or resources recorded"));
             }
             lines.push(Line::default());
-            lines.push(Line::styled("Assigned agent", Style::new().fg(Color::Cyan)));
+            lines.push(Line::styled(
+                "Assigned agent",
+                theme.style(UiThemeRole::Accent),
+            ));
             if let Some(assignment) = &project.assignment {
                 lines.push(Line::from(format!(
                     "{} · agent {}",
@@ -859,13 +896,13 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 if let Some(blocked) = &assignment.blocked {
                     lines.push(Line::styled(
                         format!("Needs attention: {blocked}"),
-                        Style::new().fg(Color::Yellow),
+                        theme.style(UiThemeRole::Warning),
                     ));
                 }
                 if assignment.cardinality_conflicted {
                     lines.push(Line::styled(
                         "More than one agent is assigned to this project. HQ will not guess.",
-                        Style::new().fg(Color::Red),
+                        theme.style(UiThemeRole::Error),
                     ));
                 }
             } else {
@@ -895,6 +932,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         } => {
             let mut lines = Vec::new();
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Path",
@@ -906,6 +944,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 true,
             );
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Name",
@@ -917,6 +956,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 false,
             );
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Brief",
@@ -956,6 +996,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         } => {
             let mut lines = Vec::new();
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Name",
@@ -967,6 +1008,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 false,
             );
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Brief",
@@ -978,6 +1020,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 false,
             );
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Source",
@@ -989,6 +1032,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 true,
             );
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Destination",
@@ -1000,6 +1044,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 true,
             );
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Branch",
@@ -1011,6 +1056,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 false,
             );
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Base",
@@ -1038,6 +1084,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         } => {
             let mut lines = vec![Line::from(format!("Project: {}", project.name))];
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Instructions",
@@ -1067,6 +1114,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         } => {
             let mut lines = vec![Line::from(format!("Project: {}", project.name))];
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Path",
@@ -1078,6 +1126,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 true,
             );
             lines.push(project_choice_line(
+                theme,
                 "Use as primary",
                 yes_no(*make_primary),
                 model.project_field_is_focused(UiProjectFormField::Primary),
@@ -1104,6 +1153,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 Line::from(format!("Replace: {}", short_identity(*resource_id))),
             ];
             push_project_text_field(
+                theme,
                 &mut lines,
                 model,
                 "Path",
@@ -1182,6 +1232,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         } => (
             " Set up project work ",
             project_activation_lines(
+                theme,
                 project,
                 agents,
                 providers,
@@ -1213,6 +1264,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         } => (
             " Move project work to another agent ",
             project_activation_lines(
+                theme,
                 project,
                 agents,
                 providers,
@@ -1243,7 +1295,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                     yes_no(project.assignment.is_some())
                 )),
                 Line::default(),
-                Line::styled("Folder release check", Style::new().fg(Color::Cyan)),
+                Line::styled("Folder release check", theme.style(UiThemeRole::Accent)),
             ];
             if checks.is_empty() {
                 lines.push(Line::from("No folders or resources are recorded."));
@@ -1266,12 +1318,13 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 if let (Some(category), Some(code)) = (&check.error_category, &check.error_code) {
                     lines.push(Line::styled(
                         format!("  rejected: {category}/{code}"),
-                        Style::new().fg(Color::Red),
+                        theme.style(UiThemeRole::Error),
                     ));
                 }
             }
             lines.push(Line::default());
             lines.push(project_choice_line(
+                theme,
                 "I understand",
                 yes_no(*confirmed),
                 model.project_field_is_focused(UiProjectFormField::Confirmation),
@@ -1279,10 +1332,11 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             if let Some(error) = model.project_field_error(UiProjectFormField::Confirmation) {
                 lines.push(Line::styled(
                     format!("  {error}"),
-                    Style::new().fg(Color::Red),
+                    theme.style(UiThemeRole::Error),
                 ));
             }
             lines.push(project_choice_line(
+                theme,
                 "Override safety check",
                 yes_no(*force),
                 model.project_field_is_focused(UiProjectFormField::Force),
@@ -1290,7 +1344,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             if let Some(error) = model.project_field_error(UiProjectFormField::Force) {
                 lines.push(Line::styled(
                     format!("  {error}"),
-                    Style::new().fg(Color::Red),
+                    theme.style(UiThemeRole::Error),
                 ));
             }
             lines.push(Line::from(
@@ -1371,7 +1425,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 UiProjectOutcome::Rejected { category, code } => {
                     lines.push(Line::styled(
                         "HQ could not make this change.",
-                        Style::new().fg(Color::Red),
+                        theme.style(UiThemeRole::Error),
                     ));
                     lines.push(Line::from(
                         "Review the technical reason, correct the problem, and try again.",
@@ -1386,7 +1440,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 } => {
                     lines.push(Line::styled(
                         "HQ could not confirm whether the change finished.",
-                        Style::new().fg(Color::Yellow),
+                        theme.style(UiThemeRole::Warning),
                     ));
                     if let Some(warning) = warning {
                         lines.push(Line::from(format!("Technical kind: {}", warning.kind)));
@@ -1425,7 +1479,10 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                         } else {
                             "No other project owns this path · Enter add"
                         };
-                        lines.push(Line::styled(continuation, Style::new().fg(Color::Green)));
+                        lines.push(Line::styled(
+                            continuation,
+                            theme.style(UiThemeRole::Success),
+                        ));
                     } else {
                         let subject = if matches!(
                             result.action,
@@ -1437,7 +1494,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                         };
                         lines.push(Line::styled(
                             format!("Another project already owns this {subject}:"),
-                            Style::new().fg(Color::Red),
+                            theme.style(UiThemeRole::Error),
                         ));
                         for conflict in conflicts {
                             let project = model
@@ -1482,7 +1539,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                         {
                             lines.push(Line::styled(
                                 format!("  Technical reason: {category}/{code}"),
-                                Style::new().fg(Color::Red),
+                                theme.style(UiThemeRole::Error),
                             ));
                         }
                         if matches!(result.action, UiProjectAction::PreviewCreateExisting { .. }) {
@@ -1498,13 +1555,19 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(title))
+            .style(theme.style(UiThemeRole::Text))
+            .block(
+                Block::bordered()
+                    .title(Span::styled(title, theme.style(UiThemeRole::ModalTitle)))
+                    .border_style(theme.style(UiThemeRole::ModalBorder)),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
 fn text_field_line(
+    theme: &UiTheme,
     label: &str,
     value: &str,
     cursor: usize,
@@ -1514,7 +1577,7 @@ fn text_field_line(
     let cursor = cursor.min(value.len());
     let (left, right) = value.split_at(cursor);
     let style = if selected {
-        selected_style(true)
+        selected_style(theme, true)
     } else {
         Style::new()
     };
@@ -1523,16 +1586,14 @@ fn text_field_line(
         style,
     )];
     if selected {
-        spans.push(Span::styled(
-            "│",
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ));
+        spans.push(Span::styled("│", theme.style(UiThemeRole::Cursor)));
     }
     spans.push(Span::styled(format!("{right} {requirement}"), style));
     Line::from(spans)
 }
 
 fn project_text_field_line(
+    theme: &UiTheme,
     model: &UiModel,
     label: &str,
     value: &str,
@@ -1541,6 +1602,7 @@ fn project_text_field_line(
     required: bool,
 ) -> Line<'static> {
     text_field_line(
+        theme,
         label,
         value,
         model.project_field_cursor(field, value),
@@ -1551,6 +1613,7 @@ fn project_text_field_line(
 
 #[allow(clippy::too_many_arguments)]
 fn push_project_text_field(
+    theme: &UiTheme,
     lines: &mut Vec<Line<'static>>,
     model: &UiModel,
     label: &str,
@@ -1562,17 +1625,17 @@ fn push_project_text_field(
     path: bool,
 ) {
     lines.push(project_text_field_line(
-        model, label, value, field, selected, required,
+        theme, model, label, value, field, selected, required,
     ));
     if let Some(error) = model.project_field_error(field) {
         lines.push(Line::styled(
             format!("  {error}"),
-            Style::new().fg(Color::Red),
+            theme.style(UiThemeRole::Error),
         ));
     } else if selected {
         lines.push(Line::styled(
             format!("  {guidance}"),
-            Style::new().fg(Color::DarkGray),
+            theme.style(UiThemeRole::TextMuted),
         ));
     }
     if path && selected && !value.is_empty() {
@@ -1580,7 +1643,7 @@ fn push_project_text_field(
             Ok(path) => format!("  Will use: {path}"),
             Err(error) => format!("  {error}"),
         };
-        lines.push(Line::styled(preview, Style::new().fg(Color::DarkGray)));
+        lines.push(Line::styled(preview, theme.style(UiThemeRole::TextMuted)));
     }
 }
 
@@ -1602,6 +1665,7 @@ fn provider_choice_label(providers: &[UiProvider], selected: &str) -> String {
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn project_activation_lines<'value>(
+    theme: &UiTheme,
     project: &'value crate::UiProject,
     agents: &'value [UiAgent],
     providers: &'value [UiProvider],
@@ -1640,6 +1704,7 @@ fn project_activation_lines<'value>(
         }));
     }
     lines.push(project_choice_line(
+        theme,
         "Agent",
         agent,
         field == UiProjectFormField::Agent,
@@ -1647,10 +1712,11 @@ fn project_activation_lines<'value>(
     if let Some(error) = model.project_field_error(UiProjectFormField::Agent) {
         lines.push(Line::styled(
             format!("  {error}"),
-            Style::new().fg(Color::Red),
+            theme.style(UiThemeRole::Error),
         ));
     }
     lines.push(project_choice_line(
+        theme,
         "Conversation",
         if new_session {
             if wide {
@@ -1667,6 +1733,7 @@ fn project_activation_lines<'value>(
     ));
     if !new_session {
         lines.push(project_choice_line(
+            theme,
             if wide { "Saved conversation" } else { "Saved" },
             &thread_label,
             field == UiProjectFormField::Thread,
@@ -1674,7 +1741,7 @@ fn project_activation_lines<'value>(
         if let Some(error) = model.project_field_error(UiProjectFormField::Thread) {
             lines.push(Line::styled(
                 format!("  {error}"),
-                Style::new().fg(Color::Red),
+                theme.style(UiThemeRole::Error),
             ));
         }
     }
@@ -1684,6 +1751,7 @@ fn project_activation_lines<'value>(
         "from the saved conversation".to_owned()
     };
     lines.push(project_choice_line(
+        theme,
         "Agent service",
         &provider_label,
         new_session && field == UiProjectFormField::Provider,
@@ -1691,19 +1759,20 @@ fn project_activation_lines<'value>(
     if let Some(error) = model.project_field_error(UiProjectFormField::Provider) {
         lines.push(Line::styled(
             format!("  {error}"),
-            Style::new().fg(Color::Red),
+            theme.style(UiThemeRole::Error),
         ));
     }
     if new_session && !providers.iter().any(|provider| provider.available) {
         lines.push(Line::styled(
             "  No agent services are available on this device.",
-            Style::new().fg(Color::Yellow),
+            theme.style(UiThemeRole::Warning),
         ));
         lines.push(Line::from(
             "  Configure or install a provider, then reload HQ.",
         ));
     }
     lines.push(project_text_field_line(
+        theme,
         model,
         "Working folder",
         directory,
@@ -1714,17 +1783,18 @@ fn project_activation_lines<'value>(
     if let Some(error) = model.project_field_error(UiProjectFormField::Directory) {
         lines.push(Line::styled(
             format!("  {error}"),
-            Style::new().fg(Color::Red),
+            theme.style(UiThemeRole::Error),
         ));
     } else if field == UiProjectFormField::Directory && !directory.is_empty() {
         let preview = match model.normalized_path_preview(directory) {
             Ok(path) => format!("  Will use: {path}"),
             Err(error) => format!("  {error}"),
         };
-        lines.push(Line::styled(preview, Style::new().fg(Color::DarkGray)));
+        lines.push(Line::styled(preview, theme.style(UiThemeRole::TextMuted)));
     }
     if let Some((confirmed, force)) = handoff {
         lines.push(project_choice_line(
+            theme,
             "I understand",
             yes_no(confirmed),
             field == UiProjectFormField::Confirmation,
@@ -1732,10 +1802,11 @@ fn project_activation_lines<'value>(
         if let Some(error) = model.project_field_error(UiProjectFormField::Confirmation) {
             lines.push(Line::styled(
                 format!("  {error}"),
-                Style::new().fg(Color::Red),
+                theme.style(UiThemeRole::Error),
             ));
         }
         lines.push(project_choice_line(
+            theme,
             "Override safety check",
             yes_no(force),
             field == UiProjectFormField::Force,
@@ -1765,11 +1836,11 @@ fn project_activation_lines<'value>(
     lines
 }
 
-fn project_choice_line(label: &str, value: &str, selected: bool) -> Line<'static> {
+fn project_choice_line(theme: &UiTheme, label: &str, value: &str, selected: bool) -> Line<'static> {
     Line::styled(
         format!("{} {label}: {value}", if selected { '›' } else { ' ' }),
         if selected {
-            selected_style(true)
+            selected_style(theme, true)
         } else {
             Style::new()
         },
@@ -1872,7 +1943,7 @@ fn project_action_label(action: &UiProjectAction) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, available: Rect) {
     let Some(interaction) = model.agent_modal() else {
         return;
     };
@@ -1885,11 +1956,16 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
         height,
     };
     frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::new().style(theme.style(UiThemeRole::ModalSurface)),
+        area,
+    );
     let (title, lines) = match interaction {
         UiAgentModal::Search { query } => (
             " Search agents ",
             vec![
                 text_field_line(
+                    theme,
                     "Query",
                     query,
                     model.search_field_cursor(query, false),
@@ -1905,11 +1981,11 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             agent,
             selected_session,
         } => {
-            let mut lines = agent_summary(agent);
+            let mut lines = agent_summary(agent, theme);
             lines.push(Line::default());
             lines.push(Line::styled(
                 "Saved conversations",
-                Style::new().fg(Color::Cyan),
+                theme.style(UiThemeRole::Accent),
             ));
             if model.viewport().width >= WIDE_WIDTH {
                 lines.push(Line::from(
@@ -1936,7 +2012,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                         session.session
                     ),
                     if selected {
-                        selected_style(true)
+                        selected_style(theme, true)
                     } else {
                         Style::new()
                     },
@@ -1962,6 +2038,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
         }
         UiAgentModal::Create { name, submitting } => {
             let mut lines = vec![text_field_line(
+                theme,
                 "Name",
                 name,
                 model.agent_field_cursor(name),
@@ -1971,7 +2048,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             if let Some(error) = model.agent_field_error() {
                 lines.push(Line::styled(
                     format!("  {error}"),
-                    Style::new().fg(Color::Red),
+                    theme.style(UiThemeRole::Error),
                 ));
             } else {
                 lines.push(Line::from(
@@ -2000,6 +2077,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             vec![
                 Line::from(format!("Technical conversation: {provider}/{session}")),
                 text_field_line(
+                    theme,
                     "Name",
                     display_name,
                     model.session_field_cursor(display_name),
@@ -2026,7 +2104,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 vec![
                     Line::styled(
                         format!("Retire {name}? This cannot be undone."),
-                        Style::new().fg(Color::Yellow),
+                        theme.style(UiThemeRole::Warning),
                     ),
                     Line::from(format!(
                         "Override active-work safety check: {}",
@@ -2068,18 +2146,18 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                         status
                     ),
                     if is_selected {
-                        selected_style(true)
+                        selected_style(theme, true)
                     } else if provider.available {
                         Style::new()
                     } else {
-                        Style::new().fg(Color::DarkGray)
+                        theme.style(UiThemeRole::TextMuted)
                     },
                 ));
             }
             if !providers.iter().any(|provider| provider.available) {
                 lines.push(Line::styled(
                     "No agent services are available on this device.",
-                    Style::new().fg(Color::Yellow).bold(),
+                    theme.style(UiThemeRole::Attention),
                 ));
                 lines.push(Line::from(
                     "Configure or install a provider, then reload HQ.",
@@ -2098,7 +2176,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             vec![
                 Line::styled(
                     "This differs from the agent's currently saved conversation.",
-                    Style::new().fg(Color::Yellow),
+                    theme.style(UiThemeRole::Warning),
                 ),
                 Line::from(managed_session_target(action)),
                 Line::default(),
@@ -2134,7 +2212,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 UiManagedSessionOutcome::Rejected { category, code } => {
                     lines.push(Line::styled(
                         "HQ could not change the agent conversation.",
-                        Style::new().fg(Color::Red),
+                        theme.style(UiThemeRole::Error),
                     ));
                     lines.push(Line::from(format!("Technical reason: {category}/{code}")));
                     lines.push(Line::from(
@@ -2144,7 +2222,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 UiManagedSessionOutcome::Uncertain { reconciliation_id } => {
                     lines.push(Line::styled(
                         "HQ could not confirm whether the change finished.",
-                        Style::new().fg(Color::Yellow),
+                        theme.style(UiThemeRole::Warning),
                     ));
                     lines.push(Line::from(format!(
                         "Technical recovery ID: {}",
@@ -2160,7 +2238,12 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(title))
+            .style(theme.style(UiThemeRole::Text))
+            .block(
+                Block::bordered()
+                    .title(Span::styled(title, theme.style(UiThemeRole::ModalTitle)))
+                    .border_style(theme.style(UiThemeRole::ModalBorder)),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -2198,14 +2281,14 @@ fn full_identity(identity: [u8; 32]) -> String {
         })
 }
 
-fn agent_summary(agent: &UiAgent) -> Vec<Line<'_>> {
+fn agent_summary<'agent>(agent: &'agent UiAgent, theme: &UiTheme) -> Vec<Line<'agent>> {
     let mut lines = vec![
         Line::styled(
             agent.names.first().map_or("Unnamed agent", String::as_str),
-            Style::new().fg(Color::Cyan).bold(),
+            theme.style(UiThemeRole::Heading),
         ),
         Line::from(format!("Status: {}", agent_status_label(&agent.status))),
-        Line::styled("Technical details", Style::new().fg(Color::DarkGray)),
+        Line::styled("Technical details", theme.style(UiThemeRole::TextMuted)),
         Line::from(format!(
             "Agent ID {:02x}{:02x}{:02x}{:02x}… · mailboxes {}",
             agent.agent_id[0],
@@ -2278,7 +2361,7 @@ fn agent_assignment_evidence(assignment: &UiAgentProjectAssignment) -> Vec<Line<
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, available: Rect) {
     let Some(interaction) = model.mailbox_modal() else {
         return;
     };
@@ -2291,11 +2374,15 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
         height,
     };
     frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::new().style(theme.style(UiThemeRole::ModalSurface)),
+        area,
+    );
     match interaction {
         UiMailboxModal::SelectDirect { targets, selected } => {
             let mut lines = vec![Line::styled(
                 "Choose who to message",
-                Style::new().fg(Color::Cyan),
+                theme.style(UiThemeRole::Accent),
             )];
             if !targets.is_empty() {
                 lines.push(Line::from(
@@ -2308,7 +2395,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 lines.push(Line::styled(
                     format!(" {} {}", if is_selected { '›' } else { ' ' }, target.label),
                     if is_selected {
-                        selected_style(true)
+                        selected_style(theme, true)
                     } else {
                         Style::new()
                     },
@@ -2317,7 +2404,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             if targets.is_empty() {
                 lines.push(Line::styled(
                     "No reachable recipients yet.",
-                    Style::new().fg(Color::Yellow).bold(),
+                    theme.style(UiThemeRole::Attention),
                 ));
                 lines.push(Line::from(
                     "Create an agent from the Agents section, then return here.",
@@ -2367,7 +2454,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             });
             frame.render_widget(
                 Block::bordered()
-                    .border_style(Style::new().fg(Color::Cyan))
+                    .border_style(theme.style(UiThemeRole::Accent))
                     .title(format!(
                         " {} · {status} · Message required · {}/{} bytes ",
                         draft_target_label(&draft.target),
@@ -2394,7 +2481,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 .unwrap_or("Enter submit · Esc save and close");
             frame.render_widget(
                 Paragraph::new(hint_text).style(if model.message_field_error().is_some() {
-                    Style::new().fg(Color::Red)
+                    theme.style(UiThemeRole::Error)
                 } else {
                     Style::new()
                 }),
@@ -2448,9 +2535,9 @@ const fn draft_target_label(target: &UiMailboxDraftTarget) -> &'static str {
     }
 }
 
-fn render_too_small(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+fn render_too_small(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let message = vec![
-        Line::styled("HQ", Style::new().fg(Color::Cyan).bold()),
+        Line::styled("HQ", theme.style(UiThemeRole::Heading)),
         Line::default(),
         Line::from("Terminal too small"),
         Line::from(format!(
@@ -2469,32 +2556,32 @@ fn render_too_small(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     );
 }
 
-fn render_header(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+fn render_header(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let status = if model.refreshing() {
         "Updating…"
     } else {
         workspace_connection_label(model.connection())
     };
     let title = Line::from(vec![
-        Span::styled(" HQ ", Style::new().fg(Color::Black).bg(Color::Cyan).bold()),
+        Span::styled(" HQ ", theme.style(UiThemeRole::HeaderBadge)),
         Span::raw("  "),
         Span::styled(section_label(model.section()), Style::new().bold()),
     ]);
     let context = Line::from(vec![
-        Span::styled(" this device ", Style::new().fg(Color::DarkGray)),
-        Span::styled(status, connection_style(model.connection())),
+        Span::styled(" this device ", theme.style(UiThemeRole::TextMuted)),
+        Span::styled(status, connection_style(theme, model.connection())),
     ]);
     frame.render_widget(
         Paragraph::new(vec![title, context]).block(
             Block::new()
                 .borders(Borders::BOTTOM)
-                .border_style(Style::new().fg(Color::DarkGray)),
+                .border_style(theme.style(UiThemeRole::TextMuted)),
         ),
         area,
     );
 }
 
-fn render_wide_content(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+fn render_wide_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let [navigation, rows] =
         Layout::horizontal([Constraint::Length(NAVIGATION_WIDTH), Constraint::Min(1)]).areas(area);
     let navigation_lines = UiSection::ALL
@@ -2503,9 +2590,9 @@ fn render_wide_content(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
             let selected = section == model.section();
             let marker = if selected { " › " } else { "   " };
             let style = if selected {
-                selected_style(model.focus() == UiFocus::Navigation)
+                selected_style(theme, model.focus() == UiFocus::Navigation)
             } else {
-                Style::new().fg(Color::DarkGray)
+                theme.style(UiThemeRole::TextMuted)
             };
             Line::styled(format!("{marker}{}", section_label(section)), style)
         })
@@ -2514,14 +2601,14 @@ fn render_wide_content(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         Paragraph::new(navigation_lines).block(
             Block::new()
                 .borders(Borders::RIGHT)
-                .border_style(Style::new().fg(Color::DarkGray)),
+                .border_style(theme.style(UiThemeRole::TextMuted)),
         ),
         navigation,
     );
-    render_rows(frame, model, rows);
+    render_rows(frame, model, theme, rows);
 }
 
-fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let [tabs, rows] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
     let tab_line = UiSection::ALL
         .into_iter()
@@ -2531,9 +2618,9 @@ fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
             separator.into_iter().chain(std::iter::once(Span::styled(
                 section_label(section),
                 if section == model.section() {
-                    selected_style(model.focus() == UiFocus::Navigation)
+                    selected_style(theme, model.focus() == UiFocus::Navigation)
                 } else {
-                    Style::new().fg(Color::DarkGray)
+                    theme.style(UiThemeRole::TextMuted)
                 },
             )))
         })
@@ -2542,34 +2629,34 @@ fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         Paragraph::new(Line::from(tab_line)).block(
             Block::new()
                 .borders(Borders::BOTTOM)
-                .border_style(Style::new().fg(Color::DarkGray)),
+                .border_style(theme.style(UiThemeRole::TextMuted)),
         ),
         tabs,
     );
-    render_rows(frame, model, rows);
+    render_rows(frame, model, theme, rows);
 }
 
-fn render_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+fn render_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     if model.conversation().is_some() {
         if area.width >= 72 {
             let [summaries, conversation] =
                 Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)])
                     .areas(area);
-            render_summary_rows(frame, model, summaries);
-            render_conversation(frame, model, conversation);
+            render_summary_rows(frame, model, theme, summaries);
+            render_conversation(frame, model, theme, conversation);
         } else {
             let [summaries, conversation] =
                 Layout::vertical([Constraint::Percentage(35), Constraint::Percentage(65)])
                     .areas(area);
-            render_summary_rows(frame, model, summaries);
-            render_conversation(frame, model, conversation);
+            render_summary_rows(frame, model, theme, summaries);
+            render_conversation(frame, model, theme, conversation);
         }
     } else {
-        render_summary_rows(frame, model, area);
+        render_summary_rows(frame, model, theme, area);
     }
 }
 
-fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let count = model.rows().map_or(0, <[UiRow]>::len);
     let mut lines = vec![
         Line::styled(
@@ -2578,37 +2665,37 @@ fn render_summary_rows(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
                 section_label(model.section()),
                 section_item_label(model.section(), count)
             ),
-            Style::new().fg(Color::Cyan).bold(),
+            theme.style(UiThemeRole::Heading),
         ),
         Line::default(),
     ];
     match model.human_state() {
         Some(UiHumanState::NeedsAttention(issue)) => {
-            lines.extend(human_issue_lines(issue));
+            lines.extend(human_issue_lines(issue, theme));
             lines.push(Line::default());
         }
         Some(UiHumanState::Ready) | None => {}
     }
-    if let Some(onboarding) = onboarding_lines(model) {
+    if let Some(onboarding) = onboarding_lines(model, theme) {
         lines.extend(onboarding);
         lines.push(Line::default());
     }
     match model.rows() {
-        Some([]) => lines.extend(empty_section_lines(model.section())),
+        Some([]) => lines.extend(empty_section_lines(model.section(), theme)),
         Some(rows) => {
             for row in rows {
-                lines.extend(render_row(model, row));
+                lines.extend(render_row(model, row, theme));
             }
         }
         None => lines.push(Line::styled(
             " Loading your workspace…",
-            Style::new().fg(Color::Yellow),
+            theme.style(UiThemeRole::Warning),
         )),
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
-fn onboarding_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
+fn onboarding_lines(model: &UiModel, theme: &UiTheme) -> Option<Vec<Line<'static>>> {
     let snapshot = model.snapshot()?;
     if model.section() != UiSection::Inbox
         || !matches!(snapshot.human_state, UiHumanState::Ready)
@@ -2626,13 +2713,13 @@ fn onboarding_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
     let has_provider = snapshot.providers.iter().any(|provider| provider.available);
     let mut lines = vec![Line::styled(
         " Get started with HQ",
-        Style::new().fg(Color::Cyan).bold(),
+        theme.style(UiThemeRole::Heading),
     )];
     lines.push(Line::from(" ✓ Account ready"));
     if !has_project {
         lines.push(Line::styled(
             " › Current: add a project and choose the folder or resource it owns",
-            Style::new().fg(Color::Yellow).bold(),
+            theme.style(UiThemeRole::Attention),
         ));
         lines.push(Line::from(
             " Press n New… and choose “Work with an agent on a project.”",
@@ -2643,7 +2730,7 @@ fn onboarding_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
     if !has_agent {
         lines.push(Line::styled(
             " › Current: create an agent to do the work",
-            Style::new().fg(Color::Yellow).bold(),
+            theme.style(UiThemeRole::Attention),
         ));
         lines.push(Line::from(
             " Press n New…; the project path can create one in place.",
@@ -2654,7 +2741,7 @@ fn onboarding_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
     if !has_provider {
         lines.push(Line::styled(
             " › Current: connect an agent service",
-            Style::new().fg(Color::Yellow).bold(),
+            theme.style(UiThemeRole::Attention),
         ));
         lines.push(Line::from(
             " Install or enable an agent service, then restart HQ to detect it.",
@@ -2664,7 +2751,7 @@ fn onboarding_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
     lines.push(Line::from(" ✓ Agent service ready"));
     lines.push(Line::styled(
         " › Current: send the first project instruction",
-        Style::new().fg(Color::Yellow).bold(),
+        theme.style(UiThemeRole::Attention),
     ));
     lines.push(Line::from(
         " Press n New…. HQ will ask you to choose only if more than one service is available.",
@@ -2672,8 +2759,8 @@ fn onboarding_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
     Some(lines)
 }
 
-fn human_issue_lines(issue: &UiHumanIssue) -> Vec<Line<'static>> {
-    let heading = Style::new().fg(Color::Yellow).bold();
+fn human_issue_lines(issue: &UiHumanIssue, theme: &UiTheme) -> Vec<Line<'static>> {
+    let heading = theme.style(UiThemeRole::Attention);
     match issue {
         UiHumanIssue::NoAccountSelected => vec![
             Line::styled(" No human account is selected on this device.", heading),
@@ -2730,8 +2817,8 @@ fn human_issue_lines(issue: &UiHumanIssue) -> Vec<Line<'static>> {
     }
 }
 
-fn empty_section_lines(section: UiSection) -> Vec<Line<'static>> {
-    let heading = Style::new().fg(Color::Cyan).bold();
+fn empty_section_lines(section: UiSection, theme: &UiTheme) -> Vec<Line<'static>> {
+    let heading = theme.style(UiThemeRole::Heading);
     match section {
         UiSection::Inbox => vec![
             Line::styled(" No conversations need your attention.", heading),
@@ -2760,7 +2847,7 @@ fn empty_section_lines(section: UiSection) -> Vec<Line<'static>> {
     }
 }
 
-fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let Some(conversation) = model.conversation() else {
         return;
     };
@@ -2783,12 +2870,12 @@ fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         .min(conversation.entries.len().saturating_sub(capacity));
     let mut lines = Vec::new();
     for entry in conversation.entries.iter().skip(start).take(capacity) {
-        lines.extend(render_conversation_entry(model, entry));
+        lines.extend(render_conversation_entry(model, entry, theme));
     }
     if conversation.entries.is_empty() {
         lines.push(Line::styled(
             " No conversation entries",
-            Style::new().fg(Color::DarkGray),
+            theme.style(UiThemeRole::TextMuted),
         ));
     }
     let paging = conversation
@@ -2801,9 +2888,9 @@ fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
                 Block::bordered()
                     .title(format!(" Conversation · {paging} "))
                     .border_style(if model.focus() == UiFocus::Conversation {
-                        Style::new().fg(Color::Cyan)
+                        theme.style(UiThemeRole::Accent)
                     } else {
-                        Style::new().fg(Color::DarkGray)
+                        theme.style(UiThemeRole::TextMuted)
                     }),
             )
             .wrap(Wrap { trim: false }),
@@ -2814,11 +2901,12 @@ fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
 fn render_conversation_entry<'entry>(
     model: &UiModel,
     entry: &'entry UiConversationEntry,
+    theme: &UiTheme,
 ) -> Vec<Line<'entry>> {
     let selected = model.conversation_anchor() == Some(entry.id.as_str());
     let marker = if selected { " › " } else { "   " };
     let style = if selected {
-        selected_style(model.focus() == UiFocus::Conversation)
+        selected_style(theme, model.focus() == UiFocus::Conversation)
     } else {
         Style::new()
     };
@@ -2844,7 +2932,7 @@ fn render_conversation_entry<'entry>(
         for section in &entry.technical {
             lines.push(Line::styled(
                 format!("     {}", technical_summary(section)),
-                Style::new().fg(Color::DarkGray),
+                theme.style(UiThemeRole::TextMuted),
             ));
         }
     }
@@ -2922,28 +3010,28 @@ fn short_technical(value: &str) -> &str {
     value.get(..12).unwrap_or(value)
 }
 
-fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
+fn render_row<'row>(model: &UiModel, row: &'row UiRow, theme: &UiTheme) -> [Line<'row>; 2] {
     let selected = model.selected_row() == Some(row.id.as_str());
     let marker = if selected { " › " } else { "   " };
     let title_style = if selected {
-        selected_style(model.focus() == UiFocus::Content)
+        selected_style(theme, model.focus() == UiFocus::Content)
     } else {
         Style::new()
     };
     let detail = if row.kind == UiRowKind::Agent {
         Line::from(vec![
             Span::raw("     "),
-            Span::styled(row.detail.as_str(), row_state_style(row.state)),
+            Span::styled(row.detail.as_str(), row_state_style(theme, row.state)),
         ])
     } else {
         Line::from(vec![
             Span::raw("     "),
             Span::styled(
                 row_state_label(model.section(), row.state),
-                row_state_style(row.state),
+                row_state_style(theme, row.state),
             ),
             Span::raw(" · "),
-            Span::styled(row.detail.as_str(), Style::new().fg(Color::DarkGray)),
+            Span::styled(row.detail.as_str(), theme.style(UiThemeRole::TextMuted)),
         ])
     };
     [
@@ -2955,7 +3043,7 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow) -> [Line<'row>; 2] {
     ]
 }
 
-fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
+fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: Rect) {
     let content = if let Some(page) = model.help_page() {
         match page {
             UiHelpPage::Context => " t technical details · F1/?/Esc close help".to_owned(),
@@ -2996,17 +3084,17 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         " Enter open · ? help · q quit".to_owned()
     };
     let style = if model.last_failure().is_some() && model.help_page().is_none() {
-        Style::new().fg(Color::Yellow)
+        theme.style(UiThemeRole::Warning)
     } else if model.completion_notice().is_some() && model.help_page().is_none() {
-        Style::new().fg(Color::Green)
+        theme.style(UiThemeRole::Success)
     } else {
-        Style::new().fg(Color::DarkGray)
+        theme.style(UiThemeRole::TextMuted)
     };
     frame.render_widget(
         Paragraph::new(Line::styled(content, style)).block(
             Block::new()
                 .borders(Borders::TOP)
-                .border_style(Style::new().fg(Color::DarkGray)),
+                .border_style(theme.style(UiThemeRole::TextMuted)),
         ),
         area,
     );
@@ -3047,13 +3135,12 @@ fn conversation_footer(model: &UiModel) -> String {
     format!(" {}", controls.join(" · "))
 }
 
-fn selected_style(focused: bool) -> Style {
-    let style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    if focused {
-        style.add_modifier(Modifier::REVERSED)
+fn selected_style(theme: &UiTheme, focused: bool) -> Style {
+    theme.style(if focused {
+        UiThemeRole::SelectionFocused
     } else {
-        style
-    }
+        UiThemeRole::SelectionUnfocused
+    })
 }
 
 const fn connection_label(state: UiConnectionState) -> &'static str {
@@ -3076,13 +3163,16 @@ const fn workspace_connection_label(state: UiConnectionState) -> &'static str {
     }
 }
 
-fn connection_style(state: UiConnectionState) -> Style {
-    let color = match state {
-        UiConnectionState::Ready => Color::Green,
-        UiConnectionState::Connecting | UiConnectionState::Reconnecting => Color::Yellow,
-        UiConnectionState::Disconnected | UiConnectionState::Incompatible => Color::Red,
-    };
-    Style::new().fg(color)
+fn connection_style(theme: &UiTheme, state: UiConnectionState) -> Style {
+    theme.style(match state {
+        UiConnectionState::Ready => UiThemeRole::ConnectionReady,
+        UiConnectionState::Connecting | UiConnectionState::Reconnecting => {
+            UiThemeRole::ConnectionPending
+        }
+        UiConnectionState::Disconnected | UiConnectionState::Incompatible => {
+            UiThemeRole::ConnectionError
+        }
+    })
 }
 
 const fn section_label(section: UiSection) -> &'static str {
@@ -3116,12 +3206,11 @@ const fn section_item_label(section: UiSection, count: usize) -> &'static str {
     }
 }
 
-fn row_state_style(state: UiRowState) -> Style {
-    let color = match state {
-        UiRowState::Open => Color::Green,
-        UiRowState::Waiting => Color::Yellow,
-        UiRowState::Archived => Color::DarkGray,
-        UiRowState::Attention => Color::Red,
-    };
-    Style::new().fg(color)
+fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
+    theme.style(match state {
+        UiRowState::Open => UiThemeRole::RowOpen,
+        UiRowState::Waiting => UiThemeRole::RowWaiting,
+        UiRowState::Archived => UiThemeRole::RowArchived,
+        UiRowState::Attention => UiThemeRole::RowAttention,
+    })
 }

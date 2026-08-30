@@ -6,6 +6,7 @@
 
 mod model;
 mod render;
+mod theme;
 
 pub use model::{
     EffectId, UiActivityStatus, UiAgent, UiAgentAction, UiAgentAssignmentPhase,
@@ -23,3 +24,4 @@ pub use model::{
     UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
 };
 pub use render::render;
+pub use theme::{Base16Palette, UiTheme, UiThemeRole};

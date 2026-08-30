@@ -12,7 +12,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use hq_local_api::{InitialView, protocol::v1::BuildMetadata};
-use hq_tui::{UiEvent, UiInput, UiModel, UiSize, update};
+use hq_tui::{UiEvent, UiInput, UiModel, UiSize, UiTheme, update};
 use nix::unistd::{Uid, User};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -146,6 +146,7 @@ pub trait TuiTerminalPort {
 /// Real Crossterm/Ratatui terminal capability for the installed executable.
 pub struct CrosstermTerminal {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    theme: UiTheme,
     activation: TerminalActivation,
 }
 
@@ -160,11 +161,12 @@ enum TerminalActivation {
 
 impl CrosstermTerminal {
     /// Constructs a terminal backend without changing process terminal modes.
-    pub fn new() -> Result<Self, TuiTerminalError> {
+    pub fn new(theme: UiTheme) -> Result<Self, TuiTerminalError> {
         let backend = CrosstermBackend::new(std::io::stdout());
         let terminal = Terminal::new(backend).map_err(|_| TuiTerminalError::Activate)?;
         Ok(Self {
             terminal,
+            theme,
             activation: TerminalActivation::Inactive,
         })
     }
@@ -204,7 +206,7 @@ impl TuiTerminalPort for CrosstermTerminal {
 
     fn draw(&mut self, model: &UiModel) -> Result<(), TuiTerminalError> {
         self.terminal
-            .draw(|frame| hq_tui::render(frame, model))
+            .draw(|frame| hq_tui::render(frame, model, &self.theme))
             .map(|_| ())
             .map_err(|_| TuiTerminalError::Draw)
     }
@@ -353,7 +355,7 @@ pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
         InitialView::OnDemand,
     ))
     .map_err(|_| TuiShellError::Client)?;
-    let terminal = CrosstermTerminal::new()?;
+    let terminal = CrosstermTerminal::new(UiTheme::terminal())?;
     run_tui_shell(
         terminal,
         LocalTuiClient::new(event_client, state),

@@ -10,9 +10,14 @@ use hq_tui::{
     UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectOutcome,
     UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
     UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, render, update,
+    UiTechnicalSection, UiTheme, UiThemeRole, render, update,
 };
-use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    buffer::Buffer,
+    style::{Color, Modifier, Style},
+};
 
 #[test]
 fn wide_layout_matches_snapshot_without_mutating_the_model() {
@@ -155,6 +160,115 @@ fn too_small_layout_matches_snapshot_without_mutating_the_model() {
         }),
         include_str!("snapshots/too-small.txt"),
     );
+}
+
+#[test]
+fn custom_normal_style_reaches_every_frame_cell() {
+    let foreground = Color::Rgb(222, 211, 195);
+    let background = Color::Rgb(31, 29, 27);
+    let theme = UiTheme::no_color().with_style(
+        UiThemeRole::Screen,
+        Style::new().fg(foreground).bg(background),
+    );
+    let buffer = render_buffer_with_theme(
+        &ready_model(UiSize {
+            width: 104,
+            height: 18,
+        }),
+        &theme,
+    );
+    assert!(buffer.content().iter().all(|cell| cell.fg == foreground));
+    assert!(buffer.content().iter().all(|cell| cell.bg == background));
+}
+
+#[test]
+fn modal_surface_and_selection_roles_survive_clear_independently() {
+    let screen = Color::Rgb(20, 22, 24);
+    let modal = Color::Rgb(52, 48, 44);
+    let selection = Color::Rgb(214, 93, 14);
+    let theme = UiTheme::no_color()
+        .with_style(
+            UiThemeRole::Screen,
+            Style::new().fg(Color::White).bg(screen),
+        )
+        .with_style(
+            UiThemeRole::ModalSurface,
+            Style::new().fg(Color::White).bg(modal),
+        )
+        .with_style(
+            UiThemeRole::SelectionFocused,
+            Style::new()
+                .fg(Color::Black)
+                .bg(selection)
+                .add_modifier(Modifier::BOLD),
+        );
+    let launcher = update(
+        project_model(UiSize {
+            width: 104,
+            height: 22,
+        }),
+        UiEvent::Input(UiInput::Character('n')),
+    )
+    .expect("open launcher")
+    .model;
+    let buffer = render_buffer_with_theme(&launcher, &theme);
+    assert_eq!(buffer.cell((0, 0)).expect("screen cell").bg, screen);
+    let modal_text = find_text_start(&buffer, "What would you like to do?");
+    assert_eq!(buffer.cell(modal_text).expect("modal text").bg, modal);
+    let selected_text = find_text_start(&buffer, "Work with an agent on a project");
+    let selected_cell = buffer.cell(selected_text).expect("selected text");
+    assert_eq!(selected_cell.bg, selection);
+    assert!(selected_cell.modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn status_roles_are_independently_overridable() {
+    let theme = UiTheme::terminal().with_style(
+        UiThemeRole::ConnectionReady,
+        Style::new().fg(Color::Magenta).bg(Color::LightGreen),
+    );
+    let buffer = render_buffer_with_theme(
+        &ready_model(UiSize {
+            width: 104,
+            height: 18,
+        }),
+        &theme,
+    );
+    let status = buffer
+        .cell(find_text_start(&buffer, "Connected"))
+        .expect("connection status");
+    assert_eq!(status.fg, Color::Magenta);
+    assert_eq!(status.bg, Color::LightGreen);
+}
+
+#[test]
+fn no_color_theme_retains_a_non_color_focus_cue() {
+    let launcher = update(
+        project_model(UiSize {
+            width: 104,
+            height: 22,
+        }),
+        UiEvent::Input(UiInput::Character('n')),
+    )
+    .expect("open launcher")
+    .model;
+    let buffer = render_buffer_with_theme(&launcher, &UiTheme::no_color());
+    let selected = buffer
+        .cell(find_text_start(&buffer, "Work with an agent on a project"))
+        .expect("selected choice");
+    assert_eq!(selected.fg, Color::Reset);
+    assert_eq!(selected.bg, Color::Reset);
+    assert!(selected.modifier.contains(Modifier::BOLD));
+    assert!(selected.modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
+fn renderer_contains_no_concrete_color_policy() {
+    let source = include_str!("../src/render.rs");
+    assert!(!source.contains("Color::"));
+    assert!(!source.contains("Color("));
+    assert!(!source.contains("Rgb("));
+    assert!(!source.contains("Indexed("));
 }
 
 #[test]
@@ -553,7 +667,7 @@ fn conversation_layout_preserves_reducer_order_and_typed_activity_state() {
     let backend = TestBackend::new(120, 24);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
-        .draw(|frame| render(frame, &model))
+        .draw(|frame| render(frame, &model, &UiTheme::terminal()))
         .expect("render buffer");
     assert_eq!(model, before, "rendering must only borrow the model");
     let rendered = snapshot_text(terminal.backend().buffer());
@@ -606,7 +720,7 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
         let backend = TestBackend::new(size.width, size.height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render(frame, &model))
+            .draw(|frame| render(frame, &model, &UiTheme::terminal()))
             .expect("render composer");
         assert_eq!(model, before);
         let rendered = snapshot_text(terminal.backend().buffer());
@@ -634,7 +748,7 @@ fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
         let backend = TestBackend::new(size.width, size.height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render(frame, &model))
+            .draw(|frame| render(frame, &model, &UiTheme::terminal()))
             .expect("render agent details");
         assert_eq!(model, before);
         let rendered = snapshot_text(terminal.backend().buffer());
@@ -697,7 +811,7 @@ fn assigned_agent_details_show_plain_status_and_exact_assignment_evidence() {
         let backend = TestBackend::new(size.width, size.height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render(frame, &model))
+            .draw(|frame| render(frame, &model, &UiTheme::terminal()))
             .expect("render assigned agent details");
         let rendered = snapshot_text(terminal.backend().buffer());
         assert!(rendered.contains("Status: Assigned to release · ready"));
@@ -725,7 +839,7 @@ fn agent_rows_show_assignment_status_without_generic_open_or_waiting_labels() {
         let backend = TestBackend::new(size.width, size.height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render(frame, &model))
+            .draw(|frame| render(frame, &model, &UiTheme::terminal()))
             .expect("render agent statuses");
         let rendered = snapshot_text(terminal.backend().buffer());
         assert!(rendered.contains("unassigned"));
@@ -759,7 +873,7 @@ fn managed_session_switch_confirmation_is_responsive_and_explicit_about_runtime_
         let backend = TestBackend::new(size.width, size.height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| render(frame, &model))
+            .draw(|frame| render(frame, &model, &UiTheme::terminal()))
             .expect("render managed-session confirmation");
         assert_eq!(model, before);
         let rendered = snapshot_text(terminal.backend().buffer());
@@ -1461,7 +1575,7 @@ fn assert_snapshot(model: &UiModel, expected: &str) {
     let backend = TestBackend::new(viewport.width, viewport.height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
-        .draw(|frame| render(frame, model))
+        .draw(|frame| render(frame, model, &UiTheme::terminal()))
         .expect("render buffer");
     assert_eq!(model, &before, "rendering must only borrow the model");
     assert_eq!(snapshot_text(terminal.backend().buffer()), expected);
@@ -1492,10 +1606,40 @@ fn render_text(model: &UiModel) -> String {
     let backend = TestBackend::new(viewport.width, viewport.height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal
-        .draw(|frame| render(frame, model))
+        .draw(|frame| render(frame, model, &UiTheme::terminal()))
         .expect("render buffer");
     assert_eq!(model, &before);
     snapshot_text(terminal.backend().buffer())
+}
+
+fn render_buffer_with_theme(model: &UiModel, theme: &UiTheme) -> Buffer {
+    let viewport = model.viewport();
+    let backend = TestBackend::new(viewport.width, viewport.height);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, model, theme))
+        .expect("render themed buffer");
+    terminal.backend().buffer().clone()
+}
+
+fn find_text_start(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    let needle = needle
+        .chars()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let width = usize::from(buffer.area.width);
+    for (row, cells) in buffer.content().chunks(width).enumerate() {
+        for column in 0..=cells.len().saturating_sub(needle.len()) {
+            if cells[column..column + needle.len()]
+                .iter()
+                .zip(&needle)
+                .all(|(cell, expected)| cell.symbol() == expected)
+            {
+                return (column as u16, row as u16);
+            }
+        }
+    }
+    panic!("rendered text not found: {}", needle.concat());
 }
 
 fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> UiModel {
