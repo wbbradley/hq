@@ -672,6 +672,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         .arg("--state-root")
         .arg(state_root)
         .env("TERM", "xterm-256color")
+        .env_remove("NO_COLOR")
         .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr);

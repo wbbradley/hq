@@ -6,7 +6,7 @@ use std::{fs, path::PathBuf};
 
 use hq_node::{
     BackupPassword, IdentityErrorClass, LocalConfiguration, RelayEndpoint, StateDirectoryOwner,
-    StatePaths,
+    StatePaths, ThemeSelection,
 };
 
 mod support;
@@ -129,6 +129,7 @@ fn configuration_rejects_noncanonical_duplicates_invalid_values_and_unsafe_modes
         br#"{"relays":[],"version":1,"default_provider":null}"#.as_slice(),
         br#"{"version":2,"relays":[],"default_provider":null}"#.as_slice(),
         br#"{"version":1,"relays":[],"unknown":null,"default_provider":null}"#.as_slice(),
+        br#"{"version":1,"relays":[],"default_provider":null,"theme":null}"#.as_slice(),
     ] {
         write_private(paths.configuration_file(), malformed);
         assert_eq!(
@@ -172,6 +173,11 @@ fn configuration_rejects_noncanonical_duplicates_invalid_values_and_unsafe_modes
         IdentityErrorClass::ConfigurationInvalid
     );
     RelayEndpoint::new(format!("wss://{}", "x".repeat(2_049))).expect_err("relay text is bounded");
+    assert!(ThemeSelection::new("gruvbox-dark-hard".to_owned()).is_ok());
+    assert!(ThemeSelection::new("/tmp/hq-theme.toml".to_owned()).is_ok());
+    assert!(ThemeSelection::new("/tmp/../hq-theme.toml".to_owned()).is_err());
+    assert!(ThemeSelection::new("relative/theme.toml".to_owned()).is_err());
+    assert!(ThemeSelection::new("x".repeat(1_025)).is_err());
     write_private(paths.configuration_file(), &vec![b'x'; 65_537]);
     assert_eq!(
         owner

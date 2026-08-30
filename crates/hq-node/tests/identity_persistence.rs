@@ -2,12 +2,15 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use hq_domain::ProviderId;
 use hq_node::{
     BackupPassword, IdentityErrorClass, LocalConfiguration, RelayEndpoint, StateDirectoryOwner,
-    StatePaths,
+    StatePaths, ThemeSelection,
 };
 
 mod support;
@@ -166,6 +169,28 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
         configuration
     );
     assert_private_mode(paths.configuration_file(), 0o600);
+    assert_eq!(
+        fs::read(paths.configuration_file()).expect("configuration bytes"),
+        br#"{"version":1,"relays":["ws://127.0.0.1:8080","wss://relay.example"],"default_provider":"codex"}"#,
+        "an unset theme keeps legacy version-1 bytes unchanged"
+    );
+
+    let themed = LocalConfiguration::from_parts(
+        configuration.relays.clone(),
+        configuration.default_provider.clone(),
+        Some(ThemeSelection::new("gruvbox-dark-hard".to_owned()).expect("theme selector")),
+    )
+    .expect("themed configuration is valid");
+    owner
+        .store_configuration(&themed)
+        .expect("themed configuration stores");
+    assert_eq!(paths.load_configuration().expect("read-only load"), themed);
+    assert!(
+        String::from_utf8(fs::read(paths.configuration_file()).expect("configuration bytes"))
+            .expect("configuration is UTF-8")
+            .ends_with("\"theme\":\"gruvbox-dark-hard\"}"),
+        "theme selection is persisted canonically"
+    );
 
     let replacement = LocalConfiguration::new(
         [RelayEndpoint::new("wss://other.example".to_owned()).expect("relay is valid")],
@@ -185,6 +210,7 @@ fn unsigned_local_configuration_is_typed_canonical_and_atomically_replaceable() 
     let invalid = LocalConfiguration {
         relays: vec![duplicate.clone(), duplicate],
         default_provider: None,
+        theme: None,
     };
     assert_eq!(
         owner

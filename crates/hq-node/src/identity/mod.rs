@@ -13,7 +13,7 @@ use hq_protocol::Bip340Signer;
 use zeroize::Zeroizing;
 
 pub use backup::BackupPassword;
-pub use config::LocalConfiguration;
+pub use config::{LocalConfiguration, ThemeSelection};
 pub use error::{IdentityError, IdentityErrorClass};
 pub use hq_relay::RelayUrl as RelayEndpoint;
 pub use paths::{StateDirectoryOwner, StatePaths};
@@ -149,19 +149,7 @@ impl StateDirectoryOwner {
 
     /// Loads unsigned local defaults, returning explicit defaults when the file is absent.
     pub fn load_configuration(&self) -> Result<LocalConfiguration, IdentityError> {
-        match std::fs::symlink_metadata(self.paths.configuration_file()) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(LocalConfiguration::default());
-            }
-            Ok(_) => {}
-            Err(_) => return Err(IdentityError::new(IdentityErrorClass::FileSystem)),
-        }
-        let bytes = read_private_bounded(
-            self.paths.configuration_file(),
-            MAX_CONFIGURATION_BYTES,
-            IdentityErrorClass::ConfigurationMalformed,
-        )?;
-        config::decode(&bytes)
+        load_configuration(self.paths.configuration_file())
     }
 
     /// Durably and atomically replaces only unsigned local defaults.
@@ -170,9 +158,10 @@ impl StateDirectoryOwner {
         configuration: &LocalConfiguration,
     ) -> Result<(), IdentityError> {
         reject_symlink(self.paths.configuration_file())?;
-        let validated = LocalConfiguration::new(
+        let validated = LocalConfiguration::from_parts(
             configuration.relays.clone(),
             configuration.default_provider.clone(),
+            configuration.theme.clone(),
         )?;
         let bytes = config::encode(&validated)?;
         atomic_write(self.paths.configuration_file(), &bytes, WriteMode::Replace)
@@ -188,6 +177,30 @@ impl StatePaths {
     pub(crate) fn validate_identity(&self) -> Result<PublicIdentity, IdentityError> {
         load_identity(self.identity_file()).map(|identity| identity.public_identity())
     }
+
+    /// Reads atomic unsigned defaults without claiming exclusive node ownership.
+    ///
+    /// This is suitable for startup-only presentation settings. Mutations still require a
+    /// [`StateDirectoryOwner`].
+    pub fn load_configuration(&self) -> Result<LocalConfiguration, IdentityError> {
+        load_configuration(self.configuration_file())
+    }
+}
+
+fn load_configuration(path: &Path) -> Result<LocalConfiguration, IdentityError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LocalConfiguration::default());
+        }
+        Ok(_) => {}
+        Err(_) => return Err(IdentityError::new(IdentityErrorClass::FileSystem)),
+    }
+    let bytes = read_private_bounded(
+        path,
+        MAX_CONFIGURATION_BYTES,
+        IdentityErrorClass::ConfigurationMalformed,
+    )?;
+    config::decode(&bytes)
 }
 
 fn load_identity(path: &Path) -> Result<InstallationIdentity, IdentityError> {

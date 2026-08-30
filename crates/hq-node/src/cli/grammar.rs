@@ -15,7 +15,7 @@ use super::{
     CliInvocation, CliOutputFormat, ConfigurationCommand, DaemonCommand, HarnessCommand,
     HumanCommand, HumanMessageCommand, HumanMessageFilters, IdentityCommand, MailboxCommand,
     NamedAgentCommand, NamedAgentSelector, PeerCommand, ProjectCliCommand,
-    ProjectResourceCliCommand, RelayCommand, WorktreeCliRequest, parsed_state,
+    ProjectResourceCliCommand, RelayCommand, ThemeSelection, WorktreeCliRequest, parsed_state,
 };
 
 const ID: &str = "64 lowercase hexadecimal characters";
@@ -406,6 +406,7 @@ fn config_command() -> Command {
         .long_about("Manage typed local defaults under exclusive offline ownership.")
         .subcommands([
             leaf("get", "Show all local defaults"),
+            leaf("themes", "List bundled and user-defined TUI themes"),
             Command::new("set").subcommands([
                 Command::new("default-provider").arg(
                     Arg::new("provider")
@@ -418,6 +419,13 @@ fn config_command() -> Command {
                         .num_args(1..)
                         .value_name("URL|none"),
                 ),
+                Command::new("theme")
+                    .about("Select a startup TUI theme or restore automatic selection")
+                    .arg(
+                        Arg::new("theme")
+                            .required(true)
+                            .value_name("NAME|ABSOLUTE_PATH|none"),
+                    ),
             ]),
         ])
 }
@@ -975,6 +983,9 @@ fn map_config(matches: &ArgMatches) -> Result<ConfigurationCommand, CliError> {
     if name == "get" {
         return Ok(ConfigurationCommand::Get);
     }
+    if name == "themes" {
+        return Ok(ConfigurationCommand::Themes);
+    }
     let (name, args) = args.subcommand().ok_or(CliError::Arguments)?;
     Ok(match name {
         "default-provider" => ConfigurationCommand::SetDefaultProvider {
@@ -1000,6 +1011,14 @@ fn map_config(matches: &ArgMatches) -> Result<ConfigurationCommand, CliError> {
             };
             ConfigurationCommand::SetRelays { relays }
         }
+        "theme" => ConfigurationCommand::SetTheme {
+            theme: match text(args, "theme")? {
+                "none" => None,
+                value => {
+                    Some(ThemeSelection::new(value.to_owned()).map_err(|_| CliError::Arguments)?)
+                }
+            },
+        },
         _ => return Err(CliError::Arguments),
     })
 }

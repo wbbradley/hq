@@ -18,8 +18,8 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
     IdentityError, IdentityErrorClass, LocalNodeEventClient, LocalTuiClient, MonotonicTuiClock,
-    StatePaths, TuiClientPort, TuiClock, TuiEffectExecutor,
-    local_client::installed_local_client_config,
+    StatePaths, TuiClientPort, TuiClock, TuiEffectExecutor, TuiThemeEnvironment, TuiThemeError,
+    local_client::installed_local_client_config, resolve_tui_theme,
 };
 
 const MAX_TERMINAL_WAIT: Duration = Duration::from_millis(50);
@@ -59,10 +59,14 @@ impl fmt::Display for TuiTerminalError {
 impl std::error::Error for TuiTerminalError {}
 
 /// Closed outer-shell failure without terminal, transport, or model prose.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TuiShellError {
     /// Installed identity state is absent, unsafe, or invalid.
     Identity(IdentityError),
+    /// Unsigned local configuration could not be read safely.
+    Configuration(IdentityError),
+    /// The configured startup theme could not be resolved completely.
+    Theme(TuiThemeError),
     /// The terminal boundary failed.
     Terminal(TuiTerminalError),
     /// The pure UI model rejected an event.
@@ -85,39 +89,49 @@ impl std::error::Error for TuiShellError {}
 
 impl TuiShellError {
     /// Returns the stable installed diagnostic code and actionable human message.
-    pub const fn diagnostic(&self) -> (&'static str, &'static str) {
+    pub fn diagnostic(&self) -> (&'static str, String) {
         match self {
             Self::Identity(error)
                 if matches!(error.class(), IdentityErrorClass::IdentityMissing) =>
             {
                 (
                     "setup.identity_required",
-                    "HQ needs a device identity before it can protect your account and messages.\nRun `hq identity init` to create it, or import an existing identity.\nThen run `hq` again; the next screen will guide account setup.",
+                    "HQ needs a device identity before it can protect your account and messages.\nRun `hq identity init` to create it, or import an existing identity.\nThen run `hq` again; the next screen will guide account setup.".to_owned(),
                 )
             }
             Self::Identity(_) => (
                 "setup.identity_invalid",
-                "inspect or restore the installation identity before starting the TUI",
+                "inspect or restore the installation identity before starting the TUI".to_owned(),
+            ),
+            Self::Configuration(_) => (
+                "tui.configuration_invalid",
+                "the local configuration is invalid; inspect it with `hq config get`".to_owned(),
+            ),
+            Self::Theme(error) => (
+                "tui.theme_invalid",
+                format!(
+                    "cannot load the selected theme: {error}\nRun `hq config themes` to inspect choices, or `hq config set theme none` to restore automatic selection."
+                ),
             ),
             Self::Terminal(_) => (
                 "tui.terminal_failed",
-                "the interactive terminal could not be activated, drawn, or restored",
+                "the interactive terminal could not be activated, drawn, or restored".to_owned(),
             ),
             Self::Model => (
                 "tui.model_failed",
-                "the interactive model rejected a terminal or client event",
+                "the interactive model rejected a terminal or client event".to_owned(),
             ),
             Self::Executor => (
                 "tui.executor_failed",
-                "the interactive client worker stopped unexpectedly",
+                "the interactive client worker stopped unexpectedly".to_owned(),
             ),
             Self::Client => (
                 "tui.client_failed",
-                "the local node client could not be started or connected",
+                "the local node client could not be started or connected".to_owned(),
             ),
             Self::Build => (
                 "tui.build_invalid",
-                "the installed build metadata is invalid",
+                "the installed build metadata is invalid".to_owned(),
             ),
         }
     }
@@ -343,6 +357,7 @@ fn current_user_home_directory() -> Option<String> {
 /// Composes the installed subscribed client and real terminal shell for one state root.
 pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
     state.validate_identity().map_err(TuiShellError::Identity)?;
+    let theme = resolve_installed_tui_theme(&state, &TuiThemeEnvironment::from_environment())?;
     let build = BuildMetadata::new(
         "hq",
         env!("CARGO_PKG_VERSION"),
@@ -355,12 +370,23 @@ pub fn run_installed_tui(state: StatePaths) -> Result<(), TuiShellError> {
         InitialView::OnDemand,
     ))
     .map_err(|_| TuiShellError::Client)?;
-    let terminal = CrosstermTerminal::new(UiTheme::terminal())?;
+    let terminal = CrosstermTerminal::new(theme)?;
     run_tui_shell(
         terminal,
         LocalTuiClient::new(event_client, state),
         MonotonicTuiClock::default(),
     )
+}
+
+/// Loads and resolves the immutable startup theme before any terminal mode is activated.
+pub fn resolve_installed_tui_theme(
+    state: &StatePaths,
+    environment: &TuiThemeEnvironment,
+) -> Result<UiTheme, TuiShellError> {
+    let configuration = state
+        .load_configuration()
+        .map_err(TuiShellError::Configuration)?;
+    resolve_tui_theme(configuration.theme.as_ref(), environment).map_err(TuiShellError::Theme)
 }
 
 struct TerminalGuard<T: TuiTerminalPort> {

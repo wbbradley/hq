@@ -269,6 +269,13 @@ fn renderer_contains_no_concrete_color_policy() {
     assert!(!source.contains("Color("));
     assert!(!source.contains("Rgb("));
     assert!(!source.contains("Indexed("));
+    for role in UiThemeRole::ALL {
+        assert!(
+            source.contains(&format!("UiThemeRole::{role:?}")),
+            "renderer must assign semantic role {} to at least one element",
+            role.key()
+        );
+    }
 }
 
 #[test]
@@ -1628,18 +1635,26 @@ fn find_text_start(buffer: &Buffer, needle: &str) -> (u16, u16) {
         .map(|value| value.to_string())
         .collect::<Vec<_>>();
     let width = usize::from(buffer.area.width);
-    for (row, cells) in buffer.content().chunks(width).enumerate() {
-        for column in 0..=cells.len().saturating_sub(needle.len()) {
-            if cells[column..column + needle.len()]
-                .iter()
-                .zip(&needle)
-                .all(|(cell, expected)| cell.symbol() == expected)
-            {
-                return (column as u16, row as u16);
-            }
-        }
-    }
-    panic!("rendered text not found: {}", needle.concat());
+    buffer
+        .content()
+        .chunks(width)
+        .enumerate()
+        .find_map(|(row, cells)| {
+            (0..=cells.len().saturating_sub(needle.len()))
+                .find(|&column| {
+                    cells[column..column + needle.len()]
+                        .iter()
+                        .zip(&needle)
+                        .all(|(cell, expected)| cell.symbol() == expected)
+                })
+                .map(|column| {
+                    (
+                        u16::try_from(column).expect("test column fits terminal coordinates"),
+                        u16::try_from(row).expect("test row fits terminal coordinates"),
+                    )
+                })
+        })
+        .expect("rendered text exists")
 }
 
 fn contextual_help_model(size: UiSize, section: UiSection, selected: bool) -> UiModel {

@@ -44,6 +44,7 @@ mod session_registry;
 mod tui_client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod tui_shell;
+mod tui_theme;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix_frame;
 
@@ -84,7 +85,7 @@ pub use harness_persistence::CanonicalHarnessPersistence;
 pub use harness_store::HarnessStoreAdapter;
 pub use identity::{
     BackupPassword, IdentityError, IdentityErrorClass, InstallationIdentity, LocalConfiguration,
-    PublicIdentity, RelayEndpoint, StateDirectoryOwner, StatePaths,
+    PublicIdentity, RelayEndpoint, StateDirectoryOwner, StatePaths, ThemeSelection,
 };
 pub use lifecycle::{
     NodeAdmission, NodeLifecycle, NodeLifecycleError, NodePhase, NodeTransitionOutcome,
@@ -148,7 +149,11 @@ pub use tui_client::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use tui_shell::{
     CrosstermTerminal, TuiShellError, TuiTerminalError, TuiTerminalEvent, TuiTerminalPort,
-    normalize_crossterm_event, run_installed_tui, run_tui_shell,
+    normalize_crossterm_event, resolve_installed_tui_theme, run_installed_tui, run_tui_shell,
+};
+pub use tui_theme::{
+    TuiThemeCatalogEntry, TuiThemeEnvironment, TuiThemeError, TuiThemeErrorClass, list_tui_themes,
+    resolve_tui_theme,
 };
 
 use hq_application::InMemoryApplication;

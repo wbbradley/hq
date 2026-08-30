@@ -80,15 +80,17 @@ Absent configuration means empty explicit defaults. A present file is bounded to
 is exact canonical JSON in this member order:
 
 ```json
-{"version":1,"relays":["wss://relay.example"],"default_provider":"provider"}
+{"version":1,"relays":["wss://relay.example"],"default_provider":"provider","theme":"gruvbox-dark-medium"}
 ```
 
-`default_provider` is required and may be `null`. Relays are a sorted, duplicate-free list of at
+`default_provider` is required and may be `null`. `theme` is an optional bounded built-in/user name
+or absolute theme-file path. It is omitted when unset so canonical files written before theme
+support remain byte-for-byte accepted; an explicit `null` is noncanonical. Relays are a sorted, duplicate-free list of at
 most 16 nonempty ASCII `ws://` or `wss://` endpoints, each at most 2048 bytes. The optional provider
 uses the domain's nonempty 64-byte `ProviderId` bound. Configuration has no conversion into a
 semantic payload and is replaced independently from identity and canonical history.
 
-`LocalConfiguration` is passive DTO data, so its relay and provider fields are public. Construction
+`LocalConfiguration` is passive DTO data, so its relay, provider, and theme fields are public. Construction
 canonicalizes and validates the value, and persistence reconstructs it through the same validator;
 direct caller mutation therefore cannot persist duplicates, excess entries, or noncanonical order.
 

@@ -1,6 +1,9 @@
 //! Typed unsigned local relay and provider defaults.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    path::{Component, Path},
+};
 
 use hq_domain::ProviderId;
 use hq_relay::RelayUrl;
@@ -9,7 +12,47 @@ use serde::{Deserialize, Serialize};
 use super::{IdentityError, IdentityErrorClass};
 
 const MAX_RELAYS: usize = 16;
+const MAX_THEME_SELECTION_BYTES: usize = 1_024;
 pub(super) const MAX_CONFIGURATION_BYTES: u64 = 65_536;
+
+/// One bounded built-in/user theme name or explicit absolute theme file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThemeSelection(String);
+
+impl ThemeSelection {
+    /// Validates one persisted theme selector without reading the filesystem.
+    pub fn new(value: String) -> Result<Self, IdentityError> {
+        let path = Path::new(&value);
+        if value.is_empty()
+            || value.len() > MAX_THEME_SELECTION_BYTES
+            || value.chars().any(char::is_control)
+            || (path.is_absolute()
+                && path
+                    .components()
+                    .any(|component| component == Component::ParentDir))
+            || (!path.is_absolute() && !valid_theme_name(&value))
+        {
+            return Err(IdentityError::new(IdentityErrorClass::ConfigurationInvalid));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the exact validated selector.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Reports whether the selector names an explicit absolute file.
+    pub fn is_absolute_path(&self) -> bool {
+        Path::new(&self.0).is_absolute()
+    }
+}
+
+fn valid_theme_name(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
 
 /// Versioned unsigned installation-local defaults.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -18,6 +61,8 @@ pub struct LocalConfiguration {
     pub relays: Vec<RelayUrl>,
     /// Optional provider default.
     pub default_provider: Option<ProviderId>,
+    /// Optional startup theme name or absolute file.
+    pub theme: Option<ThemeSelection>,
 }
 
 impl LocalConfiguration {
@@ -25,6 +70,15 @@ impl LocalConfiguration {
     pub fn new(
         relays: impl IntoIterator<Item = RelayUrl>,
         default_provider: Option<ProviderId>,
+    ) -> Result<Self, IdentityError> {
+        Self::from_parts(relays, default_provider, None)
+    }
+
+    /// Validates and owns every installation-local default.
+    pub fn from_parts(
+        relays: impl IntoIterator<Item = RelayUrl>,
+        default_provider: Option<ProviderId>,
+        theme: Option<ThemeSelection>,
     ) -> Result<Self, IdentityError> {
         let relays = relays.into_iter().collect::<Vec<_>>();
         if relays.len() > MAX_RELAYS {
@@ -37,6 +91,7 @@ impl LocalConfiguration {
         Ok(Self {
             relays: unique.into_iter().collect(),
             default_provider,
+            theme,
         })
     }
 }
@@ -47,6 +102,8 @@ struct ConfigurationDto {
     version: u64,
     relays: Vec<String>,
     default_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    theme: Option<String>,
 }
 
 pub(super) fn encode(value: &LocalConfiguration) -> Result<Vec<u8>, IdentityError> {
@@ -61,6 +118,7 @@ pub(super) fn encode(value: &LocalConfiguration) -> Result<Vec<u8>, IdentityErro
             .default_provider
             .as_ref()
             .map(|provider| provider.as_str().to_owned()),
+        theme: value.theme.as_ref().map(|theme| theme.as_str().to_owned()),
     };
     serde_json::to_vec(&dto)
         .map_err(|_| IdentityError::new(IdentityErrorClass::ConfigurationMalformed))
@@ -87,7 +145,8 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LocalConfiguration, IdentityError> 
         .map(ProviderId::new)
         .transpose()
         .map_err(|_| IdentityError::new(IdentityErrorClass::ConfigurationInvalid))?;
-    let configuration = LocalConfiguration::new(relays, provider)?;
+    let theme = dto.theme.map(ThemeSelection::new).transpose()?;
+    let configuration = LocalConfiguration::from_parts(relays, provider, theme)?;
     if encode(&configuration)?.as_slice() != bytes {
         return Err(IdentityError::new(
             IdentityErrorClass::ConfigurationMalformed,

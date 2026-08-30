@@ -70,7 +70,8 @@ use crate::{
     LifecycleClientConfig, LifecycleClientError, LifecycleObservation, LocalConfiguration,
     LocalNodeClient, LocalNodeClientError, NodeClientCoordinator, NodeCoordinatorConfig,
     NodeCoordinatorError, ProcessNodeLauncher, PublicIdentity, RelayEndpoint, RuntimePathError,
-    RuntimePaths, StateDirectoryOwner, StatePaths, agent_guidance::AgentGuidanceTopic,
+    RuntimePaths, StateDirectoryOwner, StatePaths, ThemeSelection, TuiThemeCatalogEntry,
+    TuiThemeEnvironment, agent_guidance::AgentGuidanceTopic, list_tui_themes, resolve_tui_theme,
     run_foreground,
 };
 
@@ -134,6 +135,13 @@ pub enum ConfigurationCommand {
     SetRelays {
         /// Complete replacement relay set.
         relays: Vec<RelayEndpoint>,
+    },
+    /// Discover bundled and user-defined TUI themes.
+    Themes,
+    /// Replace or clear the startup TUI theme.
+    SetTheme {
+        /// Replacement named or absolute-file selection, or `None` for automatic selection.
+        theme: Option<ThemeSelection>,
     },
 }
 
@@ -1598,6 +1606,8 @@ pub enum CliError {
     PairingArtifact,
     /// Backup password input was absent, oversized, malformed, or unreadable.
     SecretInput,
+    /// Theme discovery or validation failed.
+    Theme,
 }
 
 impl fmt::Display for CliError {
@@ -1646,6 +1656,7 @@ impl fmt::Display for CliError {
             }
             Self::PairingArtifact => formatter.write_str("human pairing invitation is invalid"),
             Self::SecretInput => formatter.write_str("backup password input is invalid"),
+            Self::Theme => formatter.write_str("TUI theme discovery or validation failed"),
         }
     }
 }
@@ -1766,6 +1777,11 @@ impl CliError {
                 CliExitClass::Failure,
             ),
             Self::PairingArtifact | Self::SecretInput => input_diagnostic(self),
+            Self::Theme => (
+                "theme.invalid",
+                "inspect available themes with `hq config themes`, or restore automatic selection with `hq config set theme none`",
+                CliExitClass::Failure,
+            ),
         }
     }
 }
@@ -3932,15 +3948,42 @@ fn run_configuration(
         ConfigurationCommand::Get => Ok(CliResult::Configuration(Box::new(configuration))),
         ConfigurationCommand::SetDefaultProvider { provider } => {
             configuration.default_provider.clone_from(provider);
-            let configuration =
-                LocalConfiguration::new(configuration.relays, configuration.default_provider)?;
+            let configuration = LocalConfiguration::from_parts(
+                configuration.relays,
+                configuration.default_provider,
+                configuration.theme,
+            )?;
             owner.store_configuration(&configuration)?;
             Ok(CliResult::Configuration(Box::new(configuration)))
         }
         ConfigurationCommand::SetRelays { relays } => {
             configuration.relays.clone_from(relays);
-            let configuration =
-                LocalConfiguration::new(configuration.relays, configuration.default_provider)?;
+            let configuration = LocalConfiguration::from_parts(
+                configuration.relays,
+                configuration.default_provider,
+                configuration.theme,
+            )?;
+            owner.store_configuration(&configuration)?;
+            Ok(CliResult::Configuration(Box::new(configuration)))
+        }
+        ConfigurationCommand::Themes => {
+            let entries = list_tui_themes(
+                configuration.theme.as_ref(),
+                &TuiThemeEnvironment::from_environment(),
+            )
+            .map_err(|_| CliError::Theme)?;
+            Ok(CliResult::ThemeCatalog(entries))
+        }
+        ConfigurationCommand::SetTheme { theme } => {
+            if let Some(selection) = theme {
+                resolve_tui_theme(Some(selection), &TuiThemeEnvironment::from_environment())
+                    .map_err(|_| CliError::Theme)?;
+            }
+            let configuration = LocalConfiguration::from_parts(
+                configuration.relays,
+                configuration.default_provider,
+                theme.clone(),
+            )?;
             owner.store_configuration(&configuration)?;
             Ok(CliResult::Configuration(Box::new(configuration)))
         }
@@ -7592,6 +7635,7 @@ enum CliResult {
     },
     Identity(Box<PublicIdentity>),
     Configuration(Box<LocalConfiguration>),
+    ThemeCatalog(Vec<TuiThemeCatalogEntry>),
     Human(Box<HumanView>),
     HumanPairing(HumanPairingView),
     HumanDevices(Box<HumanDevicesView>),
@@ -7611,6 +7655,26 @@ enum CliResult {
     },
 }
 
+fn render_theme_catalog(entries: &[TuiThemeCatalogEntry]) -> String {
+    let mut output = String::from("TUI themes (select with `hq config set theme NAME`):\n");
+    for entry in entries {
+        let marker = if entry.active { '*' } else { ' ' };
+        let _ = write!(
+            output,
+            "{marker} {} — {} [{}]",
+            entry.selector, entry.name, entry.source
+        );
+        if let Some(author) = &entry.author {
+            let _ = write!(output, " — {author}");
+        }
+        if let Some(error) = &entry.error {
+            let _ = write!(output, " — invalid: {error}");
+        }
+        output.push('\n');
+    }
+    output
+}
+
 #[allow(clippy::too_many_lines, reason = "closed CLI result rendering matrix")]
 fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, CliError> {
     if let Some(rendered) = render_agent_result(format, result) {
@@ -7628,7 +7692,7 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             identity.fingerprint,
         )),
         (CliOutputFormat::Human, CliResult::Configuration(configuration)) => Ok(format!(
-            "default_provider={} relays={}\n",
+            "default_provider={} relays={} theme={}\n",
             configuration
                 .default_provider
                 .as_ref()
@@ -7639,7 +7703,14 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
                 .map(RelayEndpoint::as_str)
                 .collect::<Vec<_>>()
                 .join(","),
+            configuration
+                .theme
+                .as_ref()
+                .map_or("automatic", ThemeSelection::as_str),
         )),
+        (CliOutputFormat::Human, CliResult::ThemeCatalog(entries)) => {
+            Ok(render_theme_catalog(entries))
+        }
         (CliOutputFormat::Human, CliResult::Human(view)) => render_human_view(view),
         (CliOutputFormat::Human, CliResult::HumanDevices(view)) => render_human_devices(view),
         (CliOutputFormat::Human, CliResult::HumanPairing(view)) => Ok(render_human_pairing(view)),
@@ -7670,6 +7741,20 @@ fn render_result(format: CliOutputFormat, result: &CliResult) -> Result<String, 
             &serde_json::json!({
                 "default_provider": configuration.default_provider.as_ref().map(ProviderId::as_str),
                 "relays": configuration.relays.iter().map(RelayEndpoint::as_str).collect::<Vec<_>>(),
+                "theme": configuration.theme.as_ref().map(ThemeSelection::as_str),
+            }),
+        ),
+        (CliOutputFormat::Json, CliResult::ThemeCatalog(entries)) => machine_record(
+            "themes",
+            &serde_json::json!({
+                "themes": entries.iter().map(|entry| serde_json::json!({
+                    "active": entry.active,
+                    "author": entry.author,
+                    "error": entry.error,
+                    "name": entry.name,
+                    "selector": entry.selector,
+                    "source": entry.source,
+                })).collect::<Vec<_>>(),
             }),
         ),
         (CliOutputFormat::Json, CliResult::Human(view)) => machine_record(
@@ -10733,6 +10818,27 @@ mod tests {
             action: ConfigurationCommand::SetDefaultProvider { provider: Some(provider) },
             state,
         } if state.root() == root && provider.as_str() == "codex"));
+
+        let theme = parse_cli([
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("theme"),
+            OsString::from("gruvbox-light-soft"),
+        ])
+        .expect("theme selection parses");
+        assert!(matches!(theme.command, CliCommand::Configuration {
+            action: ConfigurationCommand::SetTheme { theme: Some(theme) },
+            ..
+        } if theme.as_str() == "gruvbox-light-soft"));
+        assert!(matches!(
+            parse_cli([OsString::from("config"), OsString::from("themes")])
+                .expect("theme discovery parses")
+                .command,
+            CliCommand::Configuration {
+                action: ConfigurationCommand::Themes,
+                ..
+            }
+        ));
 
         assert_eq!(
             parse_cli([

@@ -368,13 +368,21 @@ fn render_help(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, availabl
         Block::new().style(theme.style(UiThemeRole::ModalSurface)),
         area,
     );
-    let (title, lines) = match page {
-        UiHelpPage::Context => (" Help ", contextual_help_lines(model, theme)),
-        UiHelpPage::Technical => (" Technical details ", technical_help_lines(model, theme)),
+    let (title, lines, text_role) = match page {
+        UiHelpPage::Context => (
+            " Help ",
+            contextual_help_lines(model, theme),
+            UiThemeRole::Text,
+        ),
+        UiHelpPage::Technical => (
+            " Technical details ",
+            technical_help_lines(model, theme),
+            UiThemeRole::TextTechnical,
+        ),
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .style(theme.style(UiThemeRole::Text))
+            .style(theme.style(text_role))
             .block(
                 Block::bordered()
                     .title(Span::styled(title, theme.style(UiThemeRole::ModalTitle)))
@@ -1579,7 +1587,7 @@ fn text_field_line(
     let style = if selected {
         selected_style(theme, true)
     } else {
-        Style::new()
+        theme.style(UiThemeRole::Input)
     };
     let mut spans = vec![Span::styled(
         format!("{} {label}: {left}", if selected { '›' } else { ' ' }),
@@ -1842,7 +1850,7 @@ fn project_choice_line(theme: &UiTheme, label: &str, value: &str, selected: bool
         if selected {
             selected_style(theme, true)
         } else {
-            Style::new()
+            theme.style(UiThemeRole::Input)
         },
     )
 }
@@ -2014,7 +2022,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, a
                     if selected {
                         selected_style(theme, true)
                     } else {
-                        Style::new()
+                        theme.style(UiThemeRole::Input)
                     },
                 ));
             }
@@ -2148,7 +2156,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, a
                     if is_selected {
                         selected_style(theme, true)
                     } else if provider.available {
-                        Style::new()
+                        theme.style(UiThemeRole::Input)
                     } else {
                         theme.style(UiThemeRole::TextMuted)
                     },
@@ -2397,7 +2405,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                     if is_selected {
                         selected_style(theme, true)
                     } else {
-                        Style::new()
+                        theme.style(UiThemeRole::Input)
                     },
                 ));
             }
@@ -2483,7 +2491,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                 Paragraph::new(hint_text).style(if model.message_field_error().is_some() {
                     theme.style(UiThemeRole::Error)
                 } else {
-                    Style::new()
+                    theme.style(UiThemeRole::Footer)
                 }),
                 hint,
             );
@@ -2550,7 +2558,11 @@ fn render_too_small(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, are
     ];
     frame.render_widget(
         Paragraph::new(message)
-            .block(Block::bordered().title(" HQ "))
+            .block(
+                Block::bordered()
+                    .title(" HQ ")
+                    .border_style(theme.style(UiThemeRole::BorderFocused)),
+            )
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -2565,7 +2577,10 @@ fn render_header(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
     let title = Line::from(vec![
         Span::styled(" HQ ", theme.style(UiThemeRole::HeaderBadge)),
         Span::raw("  "),
-        Span::styled(section_label(model.section()), Style::new().bold()),
+        Span::styled(
+            section_label(model.section()),
+            theme.style(UiThemeRole::Heading),
+        ),
     ]);
     let context = Line::from(vec![
         Span::styled(" this device ", theme.style(UiThemeRole::TextMuted)),
@@ -2575,7 +2590,7 @@ fn render_header(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         Paragraph::new(vec![title, context]).block(
             Block::new()
                 .borders(Borders::BOTTOM)
-                .border_style(theme.style(UiThemeRole::TextMuted)),
+                .border_style(theme.style(UiThemeRole::BorderUnfocused)),
         ),
         area,
     );
@@ -2598,11 +2613,13 @@ fn render_wide_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(navigation_lines).block(
-            Block::new()
-                .borders(Borders::RIGHT)
-                .border_style(theme.style(UiThemeRole::TextMuted)),
-        ),
+        Paragraph::new(navigation_lines).block(Block::new().borders(Borders::RIGHT).border_style(
+            theme.style(if model.focus() == UiFocus::Navigation {
+                UiThemeRole::BorderFocused
+            } else {
+                UiThemeRole::BorderUnfocused
+            }),
+        )),
         navigation,
     );
     render_rows(frame, model, theme, rows);
@@ -2629,7 +2646,11 @@ fn render_compact_content(frame: &mut Frame<'_>, model: &UiModel, theme: &UiThem
         Paragraph::new(Line::from(tab_line)).block(
             Block::new()
                 .borders(Borders::BOTTOM)
-                .border_style(theme.style(UiThemeRole::TextMuted)),
+                .border_style(theme.style(if model.focus() == UiFocus::Navigation {
+                    UiThemeRole::BorderFocused
+                } else {
+                    UiThemeRole::BorderUnfocused
+                })),
         ),
         tabs,
     );
@@ -2888,9 +2909,9 @@ fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, 
                 Block::bordered()
                     .title(format!(" Conversation · {paging} "))
                     .border_style(if model.focus() == UiFocus::Conversation {
-                        theme.style(UiThemeRole::Accent)
+                        theme.style(UiThemeRole::BorderFocused)
                     } else {
-                        theme.style(UiThemeRole::TextMuted)
+                        theme.style(UiThemeRole::BorderUnfocused)
                     }),
             )
             .wrap(Wrap { trim: false }),
@@ -2908,7 +2929,7 @@ fn render_conversation_entry<'entry>(
     let style = if selected {
         selected_style(theme, model.focus() == UiFocus::Conversation)
     } else {
-        Style::new()
+        theme.style(UiThemeRole::Text)
     };
     let kind = match entry.kind {
         UiConversationEntryKind::Message => "message",
@@ -3016,7 +3037,7 @@ fn render_row<'row>(model: &UiModel, row: &'row UiRow, theme: &UiTheme) -> [Line
     let title_style = if selected {
         selected_style(theme, model.focus() == UiFocus::Content)
     } else {
-        Style::new()
+        theme.style(UiThemeRole::Text)
     };
     let detail = if row.kind == UiRowKind::Agent {
         Line::from(vec![
@@ -3084,17 +3105,17 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, area: 
         " Enter open · ? help · q quit".to_owned()
     };
     let style = if model.last_failure().is_some() && model.help_page().is_none() {
-        theme.style(UiThemeRole::Warning)
+        theme.style(UiThemeRole::FooterWarning)
     } else if model.completion_notice().is_some() && model.help_page().is_none() {
-        theme.style(UiThemeRole::Success)
+        theme.style(UiThemeRole::FooterSuccess)
     } else {
-        theme.style(UiThemeRole::TextMuted)
+        theme.style(UiThemeRole::Footer)
     };
     frame.render_widget(
         Paragraph::new(Line::styled(content, style)).block(
             Block::new()
                 .borders(Borders::TOP)
-                .border_style(theme.style(UiThemeRole::TextMuted)),
+                .border_style(theme.style(UiThemeRole::BorderUnfocused)),
         ),
         area,
     );

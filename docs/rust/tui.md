@@ -233,8 +233,18 @@ cannot enter a transition.
 
 ## Borrowed rendering and layouts
 
-`render(Frame, &UiModel)` only borrows the complete model. It cannot update the model or invoke a
-capability. Tests clone the model around every render and compare deterministic terminal buffers.
+`render(Frame, &UiModel, &UiTheme)` only borrows the complete model and one immutable, fully
+resolved semantic theme. It cannot update the model, resolve visual fallbacks, or invoke a
+capability. `hq-tui` defines the closed role catalog and deterministic `terminal`, `no-color`, and
+Base16-to-role mappings, but performs no configuration, environment, or filesystem I/O. The node
+loads the selected native TOML, Base16 YAML, or bundled palette before it constructs the terminal;
+reconnect, F5, snapshots, and drawing never reload it. Tests clone the model around every render
+and compare deterministic terminal buffers and styles.
+
+The renderer paints `ui.screen` across every cell before drawing content, and explicitly repaints
+every cleared overlay with `ui.modal.surface`. All color, underline, and modifier decisions come
+from semantic roles; a source guard prevents concrete `Color` values in `render.rs`. The complete
+role and file-format reference is in [TUI themes](../tui-themes.md).
 
 The first responsive layouts are semantic Rust-era layouts, not Bubble Tea compatibility:
 

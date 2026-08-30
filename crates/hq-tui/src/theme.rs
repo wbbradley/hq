@@ -174,6 +174,10 @@ pub struct UiTheme {
 
 impl UiTheme {
     /// Reproduces HQ's terminal-native compatibility appearance.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "complete closed semantic role catalog"
+    )]
     pub fn terminal() -> Self {
         let mut styles = [Style::new(); ROLE_COUNT];
         set(
@@ -444,12 +448,14 @@ impl UiTheme {
     }
 
     /// Returns a copy with one semantic role replaced.
+    #[must_use]
     pub fn with_style(mut self, role: UiThemeRole, style: Style) -> Self {
         self.styles[role as usize] = style;
         self
     }
 
     /// Returns a copy with bounded, already-validated display metadata.
+    #[must_use]
     pub fn with_metadata(mut self, name: String, author: Option<String>) -> Self {
         self.name = name;
         self.author = author;
@@ -496,7 +502,8 @@ mod tests {
 
     #[test]
     fn base16_mapping_fills_every_semantic_status() {
-        let colors = std::array::from_fn(|index| Color::Indexed(index as u8));
+        let colors =
+            std::array::from_fn(|index| Color::Indexed(u8::try_from(index).unwrap_or(u8::MAX)));
         let theme = UiTheme::from_base16(
             "example".to_owned(),
             Some("Theme Author".to_owned()),

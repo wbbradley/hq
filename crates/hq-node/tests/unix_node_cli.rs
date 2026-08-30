@@ -2291,6 +2291,10 @@ fn identity_backup_restore_is_noninteractive_redacted_and_does_not_copy_configur
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one end-to-end contract covers preservation across every configuration mutation"
+)]
 fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -2310,6 +2314,17 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
         "provider stderr: {:?}",
         provider.stderr
     );
+    let theme = offline_output(
+        &state_root,
+        [
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("theme"),
+            OsString::from("gruvbox-dark-hard"),
+        ],
+        None,
+    );
+    assert!(theme.status.success(), "theme stderr: {:?}", theme.stderr);
     let relays = offline_output(
         &state_root,
         [
@@ -2330,6 +2345,7 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
         serde_json::from_slice(&relays.stdout).expect("configuration JSON");
     assert_eq!(relays["kind"], "configuration");
     assert_eq!(relays["data"]["default_provider"], "codex");
+    assert_eq!(relays["data"]["theme"], "gruvbox-dark-hard");
     assert_eq!(
         relays["data"]["relays"],
         serde_json::json!(["wss://a.example", "wss://z.example"])
@@ -2355,6 +2371,66 @@ fn typed_configuration_is_canonical_revalidated_and_refuses_a_live_owner() {
     let preserved: serde_json::Value =
         serde_json::from_slice(&preserved.stdout).expect("preserved configuration JSON");
     assert_eq!(preserved["data"], relays["data"]);
+
+    let themes = offline_output(
+        &state_root,
+        [OsString::from("config"), OsString::from("themes")],
+        None,
+    );
+    assert!(
+        themes.status.success(),
+        "themes stderr: {:?}",
+        themes.stderr
+    );
+    let themes: serde_json::Value =
+        serde_json::from_slice(&themes.stdout).expect("theme catalog JSON");
+    assert_eq!(themes["kind"], "themes");
+    assert!(
+        themes["data"]["themes"]
+            .as_array()
+            .expect("theme entries")
+            .iter()
+            .any(|entry| entry["selector"] == "gruvbox-dark-hard" && entry["active"] == true)
+    );
+
+    let missing = offline_output(
+        &state_root,
+        [
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("theme"),
+            OsString::from("missing-theme"),
+        ],
+        None,
+    );
+    assert!(!missing.status.success());
+    let after_missing = offline_output(
+        &state_root,
+        [OsString::from("config"), OsString::from("get")],
+        None,
+    );
+    let after_missing: serde_json::Value =
+        serde_json::from_slice(&after_missing.stdout).expect("preserved theme selection");
+    assert_eq!(after_missing["data"]["theme"], "gruvbox-dark-hard");
+
+    let cleared = offline_output(
+        &state_root,
+        [
+            OsString::from("config"),
+            OsString::from("set"),
+            OsString::from("theme"),
+            OsString::from("none"),
+        ],
+        None,
+    );
+    assert!(
+        cleared.status.success(),
+        "clear stderr: {:?}",
+        cleared.stderr
+    );
+    let cleared: serde_json::Value =
+        serde_json::from_slice(&cleared.stdout).expect("cleared configuration JSON");
+    assert_eq!(cleared["data"]["theme"], serde_json::Value::Null);
 
     let paths = StatePaths::new(state_root.clone()).expect("state paths");
     let live_owner = StateDirectoryOwner::acquire(paths).expect("test owns state");

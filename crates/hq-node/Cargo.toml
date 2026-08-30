@@ -30,7 +30,9 @@ ratatui = { workspace = true, features = ["crossterm_0_29"] }
 scrypt.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde-saphyr.workspace = true
 sha2.workspace = true
+toml.workspace = true
 unicode-normalization.workspace = true
 zeroize.workspace = true
 

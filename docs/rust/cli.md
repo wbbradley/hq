@@ -60,13 +60,23 @@ ready, stopped, rejected, and uncertain as distinct outcomes and does not equate
 with runtime presence. Installed pseudoterminal coverage exercises explicit-provider start and a
 typed rejection; installed CLI restart coverage exercises stop and stale exact resume.
 
-`identity init|show|export|import` and `config get|set` are deliberately offline operations. They
+`identity init|show|export|import` and `config get|set|themes` are deliberately offline operations. They
 acquire the same exclusive state owner as the node and refuse a live owner instead of reading or
 writing behind it. Initialization and import never overwrite an identity. Export and import require
 an absolute package path and the literal `--password-stdin`; exactly one bounded UTF-8 password line
 is then consumed from stdin, normalized and zeroized. The secret is never accepted as argv, echoed,
 retained in a diagnostic, or sent over the local API. A closed, oversized, malformed, or multiline
 input fails explicitly. Other commands do not read stdin.
+
+`config get` includes the optional startup TUI theme in human and JSON output. `config themes`
+lists the reserved bundled selectors plus discovered user files, marks the active choice, retains
+scheme name and author, and reports invalid definitions without requiring the user to guess a
+name. `config set theme NAME_OR_ABSOLUTE_PATH` validates and persists a selection;
+`config set theme none` restores automatic `terminal`/`NO_COLOR` behavior. Named files are found in
+`$XDG_CONFIG_HOME/hq/themes` or `~/.config/hq/themes`. Resolution happens before raw mode or the
+alternate screen, so a missing or invalid selected file produces an ordinary actionable terminal
+diagnostic. See [TUI themes](../tui-themes.md) for built-ins, Base16 import, and the native role
+schema.
 
 `human create [LABEL]` starts or connects to the node, reconciles the reserved human mailbox,
 authors the installation's deterministic but separately namespaced creator-account identity when
