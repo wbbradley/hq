@@ -9559,3 +9559,105 @@ Currently dialogs looks like:
 There is a pipe character at/after the cursor as you tab through the editable fields. It's unclear
 what that pipe character is for. Also, after a field has text we should not show (required) or
 (optional)
+
+## 2026-08-30 — Obvious fields and reliable guided project startup
+
+One-line dialog controls now have a full-width subdued surface, a distinct focused surface, a
+theme-composed caret, a gap after the label, and right-aligned empty required/optional hints.
+Display-cell-aware clipping keeps Unicode values and narrow dialogs safe. The semantic theme
+contract covers terminal, no-color, Base16-derived, and inherited native themes.
+
+The guided New flow now skips the provider confirmation when exactly one service is available,
+retains explicit choice and handoff review where they matter, submits a new project's first
+instruction before activation, correlates its accepted message to the exact authoritative thread,
+and dispatches it once after the assignment becomes runnable. Threadless activation is rejected
+before assignment or runtime effects. Snapshot/local API/CLI/TUI boundaries expose pending input
+thread identity, and canonical automated project transitions now carry the account and typed
+authorities required by the reducer and protocol.
+
+An installed pseudoterminal regression exercises the complete post-bootstrap project/agent/
+instruction path with a deterministic Codex adapter process. Formatting, architecture and protocol
+specification checks, strict workspace Clippy, locked all-target/all-feature tests and builds, and
+the full release qualification suite pass.
+
+### Original plan entry
+
+### Make editable fields obvious and make fresh project work reliable
+
+Make one-line dialog inputs read as actual controls, and restore the guided `n` workflow so a new
+user can create a project and agent, provide the first instruction, and start work without a
+redundant single-provider confirmation or an activation failure.
+
+The reported fresh-state failure is:
+
+- Dialog: `Project work` / `Set up project work`
+- Project: `2a04adc36452`
+- Request: `89d3719a2caf`
+- Runtime: `succeeded`
+- Reason: `conflict/project_activation_thread_missing`
+
+#### Editable field surfaces
+
+- Add tests first around the shared one-line field renderer in `crates/hq-tui/src/render.rs`, then
+  make it width-aware. Keep the label and colon outside the input surface, leave visible horizontal
+  space after the colon, and pad the input surface through the remaining inner width of the dialog.
+- Give the complete padded input surface an obvious subdued background while unfocused and a
+  distinct focused treatment when selected. Keep the insertion caret visible by composing its
+  semantic cursor style over the focused field style; do not insert a cursor glyph into the value.
+- While an input is empty, right-align `(required)` or `(optional)` inside the input surface. Remove
+  the hint as soon as content exists. The hint, cursor, value, and background must not overlap or
+  spill outside the dialog at supported narrow and wide sizes.
+- Apply the shared treatment to every one-line editable dialog field that uses the common renderer:
+  project and agent searches, project creation/resource/activation fields, agent creation, and
+  saved conversation naming. Audit other dialog inputs and reuse the component where they have the
+  same one-line editing contract; do not force choice rows or the multiline message editor into it.
+- Preserve Unicode-safe caret behavior and use terminal display width rather than UTF-8 byte length
+  when padding, clipping, or keeping the caret visible.
+- Add explicit semantic focused and unfocused field-surface theme roles, or an equivalently clear
+  additive theme contract. Give `terminal`, `no-color`, and Base16-derived themes accessible
+  defaults, keep focus discernible without color, and update native-theme parsing/coverage and
+  `docs/tui-themes.md`.
+
+#### Single-provider and first-instruction flow
+
+- In `crates/hq-tui/src/model.rs`, show `Start project work` only when the user has more than one
+  valid agent-service choice. Automatically use the sole available service. Preserve an actionable
+  unavailable state when there is no usable service, automatically retain an exact historical
+  provider/thread binding when resuming, and keep explicit review for a real assignment move or
+  handoff.
+- Repair the new-project ordering instead of weakening thread identity. When the selected
+  project/agent has no compatible historical thread, collect and durably submit the first project
+  instruction before activation, wait until the authoritative snapshot exposes its accepted
+  thread, then activate using that exact thread, wait for the runnable assignment, and dispatch/open
+  the resulting project conversation exactly once.
+- Retain the draft and exact project, agent, provider, and thread correlation across refresh,
+  reconnect, rejection, and reconcilable outcomes. A stale completion or retry must not silently
+  activate a different target or duplicate the initial instruction.
+- Strengthen `crates/hq-projects/src/workflow.rs` so activation verifies that an explicit historical
+  thread exists, or that a first pending input supplies a thread, before configuring an assignment
+  or starting the runtime. A threadless activation must fail without leaving a succeeded/orphaned
+  runtime or requiring late compensation.
+- Keep the advanced project activation form and CLI contract intact: explicit historical resumes
+  still require the exact thread/session pair, and ordinary pending-input activation still selects
+  and dispatches the first accepted input.
+
+#### Verification and documentation
+
+- Extend `crates/hq-tui/tests/render_snapshots.rs` with style-aware cell assertions proving field
+  padding reaches the dialog edge, empty hints sit at the right edge inside the field, filled fields
+  omit hints, focused and unfocused surfaces differ, the caret remains visible, and narrow/Unicode
+  cases do not wrap or corrupt values.
+- Extend `crates/hq-tui/tests/model.rs` for zero, one, and multiple available services; exact
+  historical resume; handoff review; refresh/reconnect retention; and the no-history path from first
+  instruction through activation and exactly-once dispatch.
+- Extend `crates/hq-projects/tests/activation_dispatch.rs` to prove missing thread prerequisites are
+  rejected before canonical assignment or runtime effects, while a pending first input selects its
+  exact thread and completes normally.
+- Add an installed or cross-layer regression in `crates/hq-node/tests/unix_tui_terminal.rs` that
+  follows the post-bootstrap-from-nothing `n` path through project creation, agent creation, one
+  automatically selected provider, initial instruction, runnable assignment, and conversation
+  opening. It must not render the redundant `Start project work` screen, report
+  `project_activation_thread_missing`, orphan a runtime, or send the instruction more than once.
+- Update `docs/rust/tui.md` to match the actual provider-skipping and first-instruction ordering,
+  plus the full-width focused/unfocused field contract. Finish with formatting, architecture and
+  qualification checks, strict Clippy, and the locked focused and workspace test suites.
