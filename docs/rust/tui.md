@@ -69,12 +69,13 @@ with a reselection action. Only a committed canonical receipt closes and consume
 ## Form interaction
 
 All editable dialogs use one pure form editor rather than dialog-specific cursor policy. Tab and
-Shift-Tab move forward and backward through fields; Up and Down change a focused choice or list;
-Left and Right move the insertion caret while a text field is open. Text fields also support Home,
-End, Unicode-safe Backspace and Delete, and atomic bounded paste. Modal handling precedes global
-navigation, so these keys cannot accidentally change sections while a dialog is open. Text,
-focus, caret positions, field errors, and pending submissions survive resize and authoritative
-refresh; async rejection keeps the user's input available for correction.
+Shift-Tab move forward and backward through fields; Up/Down and `k`/`j` change a focused choice or
+list; Left and Right move the insertion caret while a text field is open. In a text field, `j` and
+`k` remain literal input until a proper Vim editing mode exists. Text fields also support Home, End,
+Unicode-safe Backspace and Delete, and atomic bounded paste. Modal handling precedes global
+navigation, so these keys cannot accidentally change sections while a dialog is open. Text, focus,
+caret positions, field errors, and pending submissions survive resize and authoritative refresh;
+async rejection keeps the user's input available for correction.
 
 Focused fields have a visible selection treatment and insertion caret. Labels say whether input is
 required or optional, concise guidance and examples appear with the focused field, and known
@@ -98,19 +99,17 @@ names the competing project and links to its explicit project handoff controls. 
 agent creation, resource ownership, direct sessions, notes, and direct messages remain usable
 without this coordinator.
 
-A runnable current assignment skips setup and continues its exact conversation. Otherwise the
-coordinator reuses a compatible historical project thread when one exists, or selects an available
-provider using the shared typed provider policy and submits the existing retry-safe activation or
-handoff command. The user composes the initial instruction before a compact review names the
-project, agent, provider, conversation behavior, and any assignment move. After the authoritative
-snapshot proves the assignment runnable, the model emits the retained project input exactly once.
-Duplicate invalidations cannot repeat that submission.
+A runnable current assignment skips setup and opens the ordinary new-message form for that project.
+Otherwise the coordinator reuses a compatible historical project thread when one exists, or
+selects an available provider using the shared typed provider policy and submits the existing
+retry-safe activation or handoff command. A compact review names the project, agent, provider,
+conversation behavior, and any assignment move without asking for message content. After the
+authoritative snapshot proves the assignment runnable, the model opens the same empty project
+message form; starting work never sends a project input by itself.
 
-Successful input refreshes the authoritative Sent catalog, selects the exact project thread, loads
-its first bounded page, and shows a context banner naming the project, agent, and provider. A
-transport failure, rejection, response loss, reconcilable result, or reconnect retains every
-selection and the instruction draft. Decision-bearing and recovery outcomes remain modal; Escape
-returns from their evidence to the retained review instead of restarting the wizard.
+A transport failure, rejection, response loss, reconcilable result, or reconnect retains every
+setup selection. Decision-bearing and recovery outcomes remain modal; Escape returns from their
+evidence to the retained review instead of restarting the wizard.
 
 Project path fields share one lexical input boundary. Exact `~` and `~/...` forms expand using the
 current operating-system user's home directory, then `.` and `..` components normalize into the
@@ -243,7 +242,7 @@ The first responsive layouts are semantic Rust-era layouts, not Bubble Tea compa
 - 40 through 95 columns: compact horizontal section navigation above content;
 - below 40 columns or 10 rows: a bounded resize message that retains the quit hint.
 
-In the wide layout, Up/Down and `k`/`j` move through the vertical section list, while Left/Right
+In the wide layout, Up/Down and `j`/`k` move through the vertical section list, while Left/Right
 and `h`/`l` move focus between navigation and content. In compact layouts, Left/Right and `h`/`l`
 continue to move through the horizontal section navigation.
 
@@ -325,7 +324,7 @@ has never seen HQ, and its three intentions remain independent:
 │   Send a direct message                                           │
 │   Write a personal note                                           │
 │                                                                   │
-│ ↑/↓ choose · Enter continue · Esc back                            │
+│ ↑/↓ or j/k choose · Enter continue · Esc back                     │
 └───────────────────────────────────────────────────────────────────┘
 F1 help · Esc back/cancel · q quit
 ```

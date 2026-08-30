@@ -133,16 +133,16 @@ fn guided_new_workflow_explains_each_foreign_choice_in_user_terms() {
     );
     assert!(rendered.contains("Create an agent"), "{rendered}");
 
-    let composer = update(agents, UiEvent::Input(UiInput::Activate))
+    let provider = update(agents, UiEvent::Input(UiInput::Activate))
         .expect("choose agent")
         .model;
-    let rendered = render_text(&composer);
+    let rendered = render_text(&provider);
     assert!(rendered.contains("Start project work"), "{rendered}");
     assert!(
         rendered.contains("continue the compatible saved project conversation"),
         "{rendered}"
     );
-    assert!(rendered.contains("First instruction: │"), "{rendered}");
+    assert!(!rendered.contains("required"), "{rendered}");
     assert!(!rendered.contains("provider namespace"), "{rendered}");
 }
 

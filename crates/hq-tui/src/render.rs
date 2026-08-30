@@ -73,7 +73,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 (
                     UiNewChoice::ProjectWork,
                     "Work with an agent on a project",
-                    "choose the work, agent, and first instruction",
+                    "choose the work and the agent who should handle it",
                 ),
                 (
                     UiNewChoice::DirectMessage,
@@ -154,13 +154,11 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             ));
             (" Choose agent ", lines)
         }
-        UiNewModal::ComposeProject {
+        UiNewModal::ChooseProvider {
             project,
             agent,
             providers,
             provider,
-            content,
-            provider_focused,
         } => {
             let available = providers.iter().filter(|choice| choice.available).count();
             let mut lines = vec![
@@ -181,7 +179,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                     {
                         "HQ will continue the compatible saved project conversation."
                     } else {
-                        "HQ will prepare a project conversation before sending this instruction."
+                        "HQ will prepare a project conversation, then open a new message."
                     },
                 ),
                 Line::default(),
@@ -192,14 +190,10 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                         "Agent service: {}",
                         provider_choice_label(providers, provider)
                     ),
-                    if *provider_focused {
-                        selected_style(true)
-                    } else {
-                        Style::new()
-                    },
+                    selected_style(true),
                 ));
                 lines.push(Line::from(
-                    "Use ↑/↓ to choose; HQ uses the default when possible.",
+                    "Use ↑/↓ or j/k to choose; HQ uses the default when possible.",
                 ));
                 lines.push(Line::default());
             } else if available == 1 {
@@ -219,24 +213,12 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 ));
                 lines.push(Line::default());
             }
-            let cursor = model.project_field_cursor(UiProjectFormField::Content, content);
-            lines.push(text_field_line(
-                "First instruction",
-                content,
-                cursor,
-                !*provider_focused,
-                "required",
-            ));
-            if let Some(error) = model.project_field_error(UiProjectFormField::Content) {
-                lines.push(Line::styled(error, Style::new().fg(Color::Red)));
-            }
             (" Start project work ", lines)
         }
         UiNewModal::ReviewProject {
             project,
             agent,
             provider,
-            content,
             resumes_existing,
             moves_project,
             submitting,
@@ -264,8 +246,6 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 } else {
                     "Assignment: keep or create this project's assignment"
                 }),
-                Line::default(),
-                Line::from(format!("Instruction: {content}")),
                 Line::default(),
                 Line::from(if *submitting {
                     "Preparing project work safely…"
@@ -330,7 +310,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 Line::from(format!("Project: {project} · Agent: {agent}")),
                 Line::default(),
                 Line::from(stage.as_str()),
-                Line::from("Your choices and instruction are retained if setup needs attention."),
+                Line::from("Your project and agent choices are retained if setup needs attention."),
             ],
         ),
     };
@@ -342,7 +322,7 @@ fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             | UiNewModal::Working { .. }
     ) {
         lines.push(Line::default());
-        lines.push(Line::from("↑/↓ choose · Enter continue · Esc back"));
+        lines.push(Line::from("↑/↓ or j/k choose · Enter continue · Esc back"));
     }
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -440,9 +420,9 @@ fn dialog_help_lines(model: &UiModel) -> Option<Vec<Line<'static>>> {
                 "Help for choosing an agent",
                 "An agent is a named worker. Unassigned agents can begin this project without moving other work.",
             ),
-            UiNewModal::ComposeProject { .. } => (
-                "Help for the first instruction",
-                "Tell the agent the outcome you want. HQ chooses an available service automatically when it can.",
+            UiNewModal::ChooseProvider { .. } => (
+                "Help for choosing an agent service",
+                "HQ chooses an available service automatically when it can. Choose from the available services when there is more than one.",
             ),
             UiNewModal::ReviewProject { .. } => (
                 "Help for reviewing project work",
@@ -684,7 +664,7 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
         UiSection::Inbox | UiSection::Sent | UiSection::Archived => {
             if model.conversation().is_some() {
                 actions.push(Line::from(
-                    "↑/↓ — select message · Enter — details · Esc — close conversation",
+                    "↑/↓ or j/k — select message · Enter — details · Esc — close conversation",
                 ));
                 actions.push(Line::from(
                     "r — reply · a — archive · u — restore · PgDn — load more",
@@ -769,7 +749,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 Line::from(
                     "HQ tracks folder ownership; it does not take over Git or filesystem maintenance.",
                 ),
-                Line::from("↑/↓ choose · Enter continue · Esc cancel"),
+                Line::from("↑/↓ or j/k choose · Enter continue · Esc cancel"),
             ],
         ),
         UiProjectModal::Search { query } => (
@@ -892,9 +872,11 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 lines.push(Line::from("Unassigned"));
             }
             lines.push(Line::default());
-            lines.push(Line::from("↑/↓ resource · a add · e replace · x remove"));
             lines.push(Line::from(
-                "p primary · k check selected · K check all · n send instructions",
+                "↑/↓ or j/k resource · a add · e replace · x remove",
+            ));
+            lines.push(Line::from(
+                "p primary · r check selected · R check all · n send instructions",
             ));
             lines.push(Line::from("v set up work · d send pending · h move agent"));
             lines.push(Line::from(if project.lifecycle == "closed" {
@@ -1107,7 +1089,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             lines.push(Line::from(if *submitting {
                 "Checking whether another project owns this path…"
             } else {
-                "Tab/Shift-Tab field · ↑/↓ change choice · Enter preview · Esc cancel"
+                "Tab/Shift-Tab field · ↑/↓ or j/k change choice · Enter preview · Esc cancel"
             }));
             (" Add a folder or resource ", lines)
         }
@@ -1317,7 +1299,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             lines.push(Line::from(if *submitting {
                 "Closing the project safely…"
             } else {
-                "Tab/Shift-Tab field · ↑/↓ change choice · Enter close · Esc cancel"
+                "Tab/Shift-Tab field · ↑/↓ or j/k change choice · Enter close · Esc cancel"
             }));
             (" Confirm project close ", lines)
         }
@@ -1771,14 +1753,14 @@ fn project_activation_lines<'value>(
         "Setting up project work safely…"
     } else if handoff.is_some() {
         if wide {
-            "Tab field · ↑/↓ change choice · Enter move work"
+            "Tab field · ↑/↓ or j/k change choice · Enter move work"
         } else {
-            "Tab field · ↑/↓ choose · Enter move"
+            "Tab field · ↑/↓ or j/k choose · Enter move"
         }
     } else if wide {
-        "Tab field · ↑/↓ change choice · Enter set up work"
+        "Tab field · ↑/↓ or j/k change choice · Enter set up work"
     } else {
-        "Tab field · ↑/↓ choose · Enter set up"
+        "Tab field · ↑/↓ or j/k choose · Enter set up"
     }));
     lines
 }
@@ -1967,9 +1949,9 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
                 lines.push(Line::default());
             }
             lines.push(Line::from(if model.viewport().width >= WIDE_WIDTH {
-                "↑/↓ conversation · s start new · e continue · t stop"
+                "↑/↓ or j/k conversation · s start new · e continue · t stop"
             } else {
-                "↑/↓ choose · s new · e continue · t stop"
+                "↑/↓ or j/k choose · s new · e continue · t stop"
             }));
             lines.push(Line::from(if model.viewport().width >= WIDE_WIDTH {
                 "r name/clear · x retire agent · Esc close"
@@ -2105,7 +2087,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
             }
             lines.push(Line::default());
             lines.push(Line::from(if selected.is_some() {
-                "↑/↓ choose · Enter continue · Esc cancel"
+                "↑/↓ or j/k choose · Enter continue · Esc cancel"
             } else {
                 "Esc cancel"
             }));
@@ -2348,7 +2330,7 @@ fn render_mailbox_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             lines.push(Line::from(if targets.is_empty() {
                 "Esc close"
             } else {
-                "↑/↓ select · Enter compose · Esc cancel"
+                "↑/↓ or j/k select · Enter compose · Esc cancel"
             }));
             frame.render_widget(
                 Paragraph::new(lines)
@@ -2800,16 +2782,6 @@ fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         .saturating_sub(capacity / 2)
         .min(conversation.entries.len().saturating_sub(capacity));
     let mut lines = Vec::new();
-    if let Some(context) = model.conversation_context() {
-        lines.push(Line::styled(
-            format!(
-                " Project: {} · Agent: {} · Service: {} ",
-                context.project, context.agent, context.provider
-            ),
-            Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
-        ));
-        lines.push(Line::default());
-    }
     for entry in conversation.entries.iter().skip(start).take(capacity) {
         lines.extend(render_conversation_entry(model, entry));
     }
@@ -3005,7 +2977,7 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     } else if let Some(hint) = model.transient_help() {
         format!(" Hint · {hint}")
     } else if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
-        " ↑/↓ section · Enter content · ? help · q quit".to_owned()
+        " ↑/↓ or j/k section · Enter content · ? help · q quit".to_owned()
     } else if model.focus() == UiFocus::Navigation {
         " ←/→ section · Enter content · ? help · q quit".to_owned()
     } else if matches!(model.section(), UiSection::Agents | UiSection::Projects) {
@@ -3046,9 +3018,9 @@ fn conversation_footer(model: &UiModel) -> String {
         conversation.entries.iter().find(|entry| entry.id == anchor)
     });
     let mut controls = vec![if model.viewport().width >= WIDE_WIDTH {
-        "↑/↓ message"
+        "↑/↓ or j/k message"
     } else {
-        "↑/↓ msg"
+        "j/k msg"
     }];
     if selected
         .and_then(|entry| entry.message_target)

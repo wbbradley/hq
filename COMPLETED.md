@@ -127,17 +127,16 @@ personal notes distinct.
   selection so future human peers can appear alongside other typed recipients without changing the
   project workflow or inventing provider sessions for humans.
 - For project work, guide the user through selecting or creating a project, selecting or creating an
-  unassigned agent, choosing a provider only when necessary, and composing the initial instruction.
-  Show a compact review in user terms before any materially different assignment or handoff.
-- Orchestrate the existing retry-safe project activation/session and input operations behind the
-  workflow. Resume a compatible existing project conversation when selected; otherwise create the
-  required scoped session and assignment, then dispatch the initial instruction exactly once.
+  unassigned agent, and choosing a provider only when necessary. Show a compact review in user
+  terms before any materially different assignment or handoff.
+- Orchestrate the existing retry-safe project activation/session operations behind the workflow.
+  Resume a compatible existing project conversation when selected; otherwise create the required
+  scoped session and assignment, then open the ordinary project message composer.
 - Explain exceptional choices in place: an agent assigned to another project requires an explicit
   handoff path; resource or assignment conflicts identify the competing project; rejected or
-  uncertain setup retains the user's selections and draft for recovery.
-- On success, open the resulting conversation with a visible context banner naming the project,
-  agent, and provider. Do not expose the user to an empty Inbox, operation outcome dialog, or a
-  separate unexplained managed-session step.
+  uncertain setup retains the user's selections for recovery.
+- On success, open a new message addressed to the project and its assigned agent. Do not expose the
+  user to an empty Inbox, operation outcome dialog, or a separate unexplained managed-session step.
 - Preserve direct agent sessions, direct messaging, notes, and project/resource administration as
   independent capabilities. The guided project path is a convenience over the domain model, not a
   replacement for HQ's broader collaboration model.
