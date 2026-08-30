@@ -337,6 +337,18 @@ fn payload(
                 FailureClass::ScopePayloadMismatch,
             )?;
             Output::HarnessActivityRecorded {
+                project: value
+                    .project
+                    .as_ref()
+                    .map(|project| {
+                        Ok(domain::ProjectActivityAttribution {
+                            project_id: domain::ProjectId::from_bytes(project.project.0),
+                            dispatch_id: domain::DispatchId::from_bytes(project.dispatch.0),
+                            binding: binding(&project.binding)?,
+                            thread_id: domain::ThreadId::from_bytes(project.thread.0),
+                        })
+                    })
+                    .transpose()?,
                 source: mailbox_address(&value.source),
                 correlation: operation(&value.operation)?,
                 item: optional_short(&value.item)?,

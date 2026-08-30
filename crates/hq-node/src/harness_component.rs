@@ -409,6 +409,7 @@ impl HarnessPersistencePort for UnavailableHarnessPersistence {
         _agent_id: hq_domain::AgentId,
         _provider_id: &hq_domain::ProviderId,
         _session_id: &hq_domain::ProviderSessionId,
+        _delivery: Option<&hq_harness::HarnessDeliveryRecord>,
         _output: &HarnessOutput,
     ) -> Result<(), HarnessError> {
         Err(HarnessError::new(HarnessErrorClass::Unavailable))
@@ -419,6 +420,7 @@ impl HarnessPersistencePort for UnavailableHarnessPersistence {
         _agent_id: hq_domain::AgentId,
         _provider_id: &hq_domain::ProviderId,
         _session_id: &hq_domain::ProviderSessionId,
+        _delivery: Option<&hq_harness::HarnessDeliveryRecord>,
         _activity: &HarnessActivity,
     ) -> Result<(), HarnessError> {
         Err(HarnessError::new(HarnessErrorClass::Unavailable))
@@ -1078,6 +1080,7 @@ mod tests {
             _agent_id: AgentId,
             _provider_id: &ProviderId,
             _session_id: &ProviderSessionId,
+            _delivery: Option<&hq_harness::HarnessDeliveryRecord>,
             _output: &HarnessOutput,
         ) -> Result<(), HarnessError> {
             self.outputs.fetch_add(1, Ordering::SeqCst);
@@ -1089,6 +1092,7 @@ mod tests {
             _agent_id: AgentId,
             _provider_id: &ProviderId,
             _session_id: &ProviderSessionId,
+            _delivery: Option<&hq_harness::HarnessDeliveryRecord>,
             _activity: &HarnessActivity,
         ) -> Result<(), HarnessError> {
             Ok(())

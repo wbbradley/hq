@@ -286,6 +286,13 @@ pub trait HarnessStatePort: Send + Sync {
         submission_id: MessageId,
     ) -> Result<Option<HarnessDeliveryRecord>, HarnessError>;
 
+    /// Loads the unique durable delivery associated with one provider operation.
+    fn delivery_for_operation(
+        &self,
+        agent_id: AgentId,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<Option<HarnessDeliveryRecord>, HarnessError>;
+
     /// Loads one bounded durable runnable prefix for one exact agent.
     fn runnable_deliveries(
         &self,
@@ -302,6 +309,7 @@ pub trait HarnessPersistencePort: Send + Sync {
         agent_id: AgentId,
         provider_id: &ProviderId,
         session_id: &ProviderSessionId,
+        delivery: Option<&HarnessDeliveryRecord>,
         output: &HarnessOutput,
     ) -> Result<(), HarnessError>;
 
@@ -311,6 +319,7 @@ pub trait HarnessPersistencePort: Send + Sync {
         agent_id: AgentId,
         provider_id: &ProviderId,
         session_id: &ProviderSessionId,
+        delivery: Option<&HarnessDeliveryRecord>,
         activity: &HarnessActivity,
     ) -> Result<(), HarnessError>;
 }
@@ -1459,11 +1468,23 @@ fn persist_one(
             activity,
         } => (*event_id, *digest, Some(output), Some(activity)),
     };
+    if output
+        .zip(activity)
+        .is_some_and(|(output, activity)| output.operation_id != activity.operation_id)
+    {
+        return Err(HarnessError::new(HarnessErrorClass::PersistenceCollision));
+    }
+    let operation_id = output
+        .map(|value| value.operation_id)
+        .or_else(|| activity.map(|value| value.operation_id))
+        .ok_or_else(|| HarnessError::new(HarnessErrorClass::InvalidInput))?;
+    let delivery = attributed_delivery(dependencies, agent_id, worker, operation_id)?;
     if let Some(output) = output {
         dependencies.persistence.persist_output(
             agent_id,
             &worker.provider_id,
             &worker.session_id,
+            delivery.as_ref(),
             output,
         )?;
         checkpoint_event(
@@ -1483,6 +1504,7 @@ fn persist_one(
             agent_id,
             &worker.provider_id,
             &worker.session_id,
+            delivery.as_ref(),
             activity,
         )?;
         checkpoint_event(
@@ -1498,6 +1520,29 @@ fn persist_one(
         )?;
     }
     Ok(())
+}
+
+fn attributed_delivery(
+    dependencies: &HarnessSupervisorDependencies,
+    agent_id: AgentId,
+    worker: &HarnessWorker,
+    operation_id: hq_domain::OperationId,
+) -> Result<Option<HarnessDeliveryRecord>, HarnessError> {
+    let Some(delivery) = dependencies
+        .state
+        .delivery_for_operation(agent_id, operation_id)?
+    else {
+        return Ok(None);
+    };
+    if delivery.agent_id != agent_id
+        || delivery.provider_id != worker.provider_id
+        || delivery.session_id != worker.session_id
+        || delivery.submission.operation_id != operation_id
+        || delivery.project.is_none()
+    {
+        return Err(HarnessError::new(HarnessErrorClass::PersistenceCollision));
+    }
+    Ok(Some(delivery))
 }
 
 fn checkpoint_event(

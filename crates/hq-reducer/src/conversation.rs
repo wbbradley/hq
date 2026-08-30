@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
     AccountId, ActivityKind, ActivityStatus, Fact, FactId, FactScope, MailboxAddress,
-    MessageContent, MessageId, MessagePurpose, OperationCorrelation, PresentationKind, ProviderId,
-    ProviderSessionId, SemanticPayload, ShortText, ThreadId, Timestamp,
+    MessageContent, MessageId, MessagePurpose, OperationCorrelation, PresentationKind,
+    ProjectActivityAttribution, ProviderId, ProviderSessionId, SemanticPayload, ShortText,
+    ThreadId, Timestamp,
 };
 
 use crate::{
@@ -458,6 +459,32 @@ fn classify_conversation(
                     .ok_or(ConversationReason::MessageIdentityConflict)
             })
         }
+        SemanticPayload::ProjectOutputRecorded {
+            project_id,
+            dispatch_id,
+            binding,
+            thread_id,
+            message,
+            ..
+        } => validate_message_address(fact, message)
+            .and_then(|()| {
+                validate_project_runtime_parent(
+                    fact,
+                    *project_id,
+                    *dispatch_id,
+                    binding,
+                    *thread_id,
+                    message.sender,
+                    context,
+                )
+            })
+            .and_then(|()| {
+                message_identity_participants(message.message_id, context)
+                    .len()
+                    .eq(&1)
+                    .then_some(())
+                    .ok_or(ConversationReason::MessageIdentityConflict)
+            }),
         SemanticPayload::AnswerGiven { thread_id, message } => {
             validate_message_address(fact, message)
                 .and_then(|()| validate_answer(fact, *thread_id, message, context))
@@ -477,10 +504,18 @@ fn classify_conversation(
         | SemanticPayload::MessageRejected { message_id, .. } => {
             validate_message_state(fact, *message_id, context)
         }
-        SemanticPayload::HarnessActivityRecorded { source, .. } => {
-            validate_activity_source(fact, *source, context)
-                .and_then(|()| validate_activity_sequence(fact, context))
-        }
+        SemanticPayload::HarnessActivityRecorded {
+            project,
+            source,
+            correlation,
+            ..
+        } => validate_activity_source(fact, *source, context)
+            .and_then(|()| {
+                project.as_ref().map_or(Ok(()), |project| {
+                    validate_project_activity(fact, project, *source, correlation, context)
+                })
+            })
+            .and_then(|()| validate_activity_sequence(fact, context)),
         _ => Ok(()),
     };
     match result {
@@ -538,6 +573,74 @@ fn validate_activity_sequence(
     (activity_sequence_participants(fact, context).len() <= 1)
         .then_some(())
         .ok_or(ConversationReason::ActivitySequenceConflict)
+}
+
+fn validate_project_activity(
+    fact: &Fact,
+    project: &ProjectActivityAttribution,
+    source: MailboxAddress,
+    correlation: &OperationCorrelation,
+    context: &ReductionContext<'_, ConversationReason>,
+) -> Result<(), ConversationReason> {
+    if project.binding.provider != *correlation.provider()
+        || project.binding.session != *correlation.session()
+    {
+        return Err(ConversationReason::ActivitySourceMismatch);
+    }
+    validate_project_runtime_parent(
+        fact,
+        project.project_id,
+        project.dispatch_id,
+        &project.binding,
+        project.thread_id,
+        source,
+        context,
+    )
+}
+
+fn validate_project_runtime_parent(
+    fact: &Fact,
+    project_id: hq_domain::ProjectId,
+    dispatch_id: hq_domain::DispatchId,
+    binding: &hq_domain::AssignmentBinding,
+    thread_id: ThreadId,
+    source: MailboxAddress,
+    context: &ReductionContext<'_, ConversationReason>,
+) -> Result<(), ConversationReason> {
+    let exact_dispatch_parent = fact.causal().parents().iter().any(|parent| {
+        context.facts().get(*parent).is_some_and(|candidate| {
+            context.is_projected(candidate.id())
+                && matches!(
+                    candidate.payload(),
+                    SemanticPayload::ProjectInputDispatched {
+                        project_id: candidate_project,
+                        dispatch_id: candidate_dispatch,
+                        binding: candidate_binding,
+                        thread_id: candidate_thread,
+                        ..
+                    } if *candidate_project == project_id
+                        && *candidate_dispatch == dispatch_id
+                        && candidate_binding == binding
+                        && *candidate_thread == thread_id
+                )
+        })
+    });
+    let source_claimed_for_agent = context.facts().facts().any(|candidate| {
+        context.is_projected(candidate.id())
+            && candidate.author().installation_id() == source.installation_id()
+            && matches!(
+                candidate.payload(),
+                SemanticPayload::AgentNameClaimed {
+                    agent_id,
+                    mailbox_id,
+                    ..
+                } if *agent_id == binding.agent_id
+                    && *mailbox_id == source.mailbox_id()
+            )
+    });
+    (exact_dispatch_parent && source_claimed_for_agent)
+        .then_some(())
+        .ok_or(ConversationReason::ActivitySourceMismatch)
 }
 
 fn activity_sequence_participants(
@@ -695,7 +798,8 @@ fn message_content(fact: &Fact) -> Option<&MessageContent> {
     match fact.payload() {
         SemanticPayload::QuestionAsked(message)
         | SemanticPayload::AsynchronousMessageSent(message)
-        | SemanticPayload::AnswerGiven { message, .. } => Some(message),
+        | SemanticPayload::AnswerGiven { message, .. }
+        | SemanticPayload::ProjectOutputRecorded { message, .. } => Some(message),
         _ => None,
     }
 }
@@ -931,7 +1035,8 @@ fn message_projections(
                         | FactScope::RemoteControl { .. } => None,
                     },
                     thread_id: match fact.payload() {
-                        SemanticPayload::AnswerGiven { thread_id, .. } => *thread_id,
+                        SemanticPayload::AnswerGiven { thread_id, .. }
+                        | SemanticPayload::ProjectOutputRecorded { thread_id, .. } => *thread_id,
                         _ => thread_id(fact),
                     },
                     content: message.clone(),

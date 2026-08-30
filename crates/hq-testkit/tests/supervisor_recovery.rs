@@ -13,8 +13,8 @@ use std::{
 };
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, AgentId, CommandDigest, ContentText, MessageId, OperationId,
-    ProviderId, ProviderSessionId, ShortText,
+    ActivityKind, ActivityStatus, AgentId, AssignmentId, CommandDigest, ContentText, DispatchId,
+    MessageId, OperationId, ProjectId, ProviderId, ProviderSessionId, ShortText, ThreadId,
 };
 use hq_harness::{
     HarnessActivity, HarnessBufferedEvent, HarnessCancellationOutcome, HarnessCapabilities,
@@ -23,12 +23,12 @@ use hq_harness::{
     HarnessEventCheckpoint, HarnessEventPoll, HarnessFactory, HarnessInstance,
     HarnessInstanceRequest, HarnessInteractiveAnswer, HarnessLaunchRequest, HarnessLeaseOutcome,
     HarnessOutput, HarnessOutputKind, HarnessOwnerToken, HarnessPersistencePort,
-    HarnessReadySession, HarnessRegistry, HarnessSession, HarnessSessionControlOutcome,
-    HarnessSessionOperation, HarnessSessionOperationKind, HarnessSessionOperationState,
-    HarnessSessionRequest, HarnessStateMutation, HarnessStatePort, HarnessStateSnapshot,
-    HarnessSubmission, HarnessSubmissionLookup, HarnessSubmissionOutcome, HarnessSupervisor,
-    HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource, HarnessWorkerLease,
-    OpenedHarnessSession,
+    HarnessProjectDelivery, HarnessReadySession, HarnessRegistry, HarnessSession,
+    HarnessSessionControlOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
+    HarnessSessionOperationState, HarnessSessionRequest, HarnessStateMutation, HarnessStatePort,
+    HarnessStateSnapshot, HarnessSubmission, HarnessSubmissionLookup, HarnessSubmissionOutcome,
+    HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessTokenSource,
+    HarnessWorkerLease, OpenedHarnessSession,
 };
 
 #[test]
@@ -245,6 +245,7 @@ fn provider_poll_failure_is_redacted_and_releases_exact_worker_ownership() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn restart_reconciles_response_loss_and_partial_event_persistence_before_forced_teardown() {
     let agent = AgentId::from_bytes([1; 32]);
     let provider_id = ProviderId::new("scripted").expect("provider validates");
@@ -338,6 +339,16 @@ fn restart_reconciles_response_loss_and_partial_event_persistence_before_forced_
         persistence.calls.lock().expect("calls lock").as_slice(),
         ["output", "activity-failed", "output", "activity"]
     );
+    let mut expected_delivery = delivery(agent, &provider_id, &session_id);
+    expected_delivery.queued_at_millis = 10;
+    expected_delivery.state = HarnessDeliveryState::Accepted;
+    let observed_attributions = persistence.attributions.lock().expect("attributions lock");
+    assert!(
+        observed_attributions
+            .iter()
+            .all(|observed| observed.as_ref() == Some(&expected_delivery)),
+        "unexpected attribution: {observed_attributions:?}"
+    );
 
     assert_cancellation_intake(&restarted, agent);
 
@@ -384,6 +395,40 @@ fn stable_output_identity_rejects_changed_content() {
             .failures
             .contains(&HarnessErrorClass::PersistenceCollision)
     );
+}
+
+#[test]
+fn retained_unattributed_delivery_fails_closed_instead_of_becoming_direct_history() {
+    let agent = AgentId::from_bytes([0x41; 32]);
+    let provider_id = ProviderId::new("scripted").expect("provider validates");
+    let session_id = ProviderSessionId::new("durable-session").expect("session validates");
+    let provider = Arc::new(ProviderState::default());
+    let state = Arc::new(MemoryState::default());
+    let persistence = Arc::new(MemoryPersistence::available());
+    let runtime = supervisor(dependencies(
+        registry(provider_id.clone(), session_id.clone(), provider),
+        state,
+        persistence.clone(),
+        Arc::new(TestClock::new(10)),
+        Arc::new(TestTokens::default()),
+    ));
+    runtime
+        .launch(launch(
+            agent,
+            provider_id.clone(),
+            HarnessSessionRequest::Start,
+        ))
+        .expect("worker becomes ready");
+    let mut legacy = delivery(agent, &provider_id, &session_id);
+    legacy.project = None;
+    runtime
+        .deliver(legacy)
+        .expect("legacy delivery is accepted");
+    let error = runtime
+        .persist_event(agent, output_and_activity(0x42, "answer", "complete"))
+        .expect_err("missing retained attribution fails closed");
+    assert_eq!(error.class, HarnessErrorClass::PersistenceCollision);
+    assert!(persistence.calls.lock().expect("calls lock").is_empty());
 }
 
 #[test]
@@ -600,7 +645,13 @@ fn delivery(
             operation_id: OperationId::from_bytes([6; 32]),
             body: ContentText::new("durable input").expect("body validates"),
         },
-        project: None,
+        project: Some(HarnessProjectDelivery {
+            project_id: ProjectId::from_bytes([10; 32]),
+            dispatch_id: DispatchId::from_bytes([11; 32]),
+            assignment_id: AssignmentId::from_bytes([12; 32]),
+            thread_id: ThreadId::from_bytes([13; 32]),
+            sequence: NonZeroU64::new(1).expect("positive sequence"),
+        }),
         queued_at_millis: 0,
         state: HarnessDeliveryState::Pending,
     }
@@ -898,6 +949,30 @@ impl HarnessStatePort for MemoryState {
             .cloned())
     }
 
+    fn delivery_for_operation(
+        &self,
+        agent_id: AgentId,
+        operation_id: OperationId,
+    ) -> Result<Option<HarnessDeliveryRecord>, HarnessError> {
+        let matches = self
+            .inner
+            .lock()
+            .expect("state lock")
+            .deliveries
+            .values()
+            .filter(|delivery| {
+                delivery.agent_id == agent_id && delivery.submission.operation_id == operation_id
+            })
+            .take(2)
+            .cloned()
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => Ok(None),
+            [delivery] => Ok(Some(delivery.clone())),
+            _ => Err(HarnessError::new(HarnessErrorClass::PersistenceCollision)),
+        }
+    }
+
     fn runnable_deliveries(
         &self,
         agent_id: AgentId,
@@ -930,6 +1005,7 @@ fn same_delivery_identity(left: &HarnessDeliveryRecord, right: &HarnessDeliveryR
         && left.provider_id == right.provider_id
         && left.session_id == right.session_id
         && left.submission == right.submission
+        && left.project == right.project
 }
 
 fn exact_owner(
@@ -953,6 +1029,7 @@ struct MemoryPersistence {
     activities: Mutex<Vec<HarnessActivity>>,
     calls: Mutex<Vec<&'static str>>,
     persisted: Mutex<Vec<String>>,
+    attributions: Mutex<Vec<Option<HarnessDeliveryRecord>>>,
     fail_outputs: AtomicUsize,
     fail_activities: AtomicUsize,
 }
@@ -972,6 +1049,7 @@ impl MemoryPersistence {
             activities: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             persisted: Mutex::new(Vec::new()),
+            attributions: Mutex::new(Vec::new()),
             fail_outputs: AtomicUsize::new(outputs),
             fail_activities: AtomicUsize::new(activities),
         }
@@ -989,8 +1067,13 @@ impl HarnessPersistencePort for MemoryPersistence {
         _agent_id: AgentId,
         _provider_id: &ProviderId,
         _session_id: &ProviderSessionId,
+        delivery: Option<&HarnessDeliveryRecord>,
         output: &HarnessOutput,
     ) -> Result<(), HarnessError> {
+        self.attributions
+            .lock()
+            .expect("attributions lock")
+            .push(delivery.cloned());
         if take_failure(&self.fail_outputs) {
             self.calls.lock().expect("calls lock").push("output-failed");
             return Err(HarnessError::new(HarnessErrorClass::Unavailable));
@@ -1018,8 +1101,13 @@ impl HarnessPersistencePort for MemoryPersistence {
         _agent_id: AgentId,
         _provider_id: &ProviderId,
         _session_id: &ProviderSessionId,
+        delivery: Option<&HarnessDeliveryRecord>,
         activity: &HarnessActivity,
     ) -> Result<(), HarnessError> {
+        self.attributions
+            .lock()
+            .expect("attributions lock")
+            .push(delivery.cloned());
         if take_failure(&self.fail_activities) {
             self.calls
                 .lock()

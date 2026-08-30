@@ -329,6 +329,7 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             })
         }
         Input::HarnessActivityRecorded {
+            project,
             source,
             correlation,
             item,
@@ -341,6 +342,14 @@ fn body(value: &domain::SemanticPayload) -> model::BodyDto {
             content,
             truncated,
         } => Output::HarnessActivityRecorded(model::HarnessActivityRecordedDto {
+            project: project
+                .as_ref()
+                .map(|project| model::ProjectActivityAttributionDto {
+                    project: id(&project.project_id),
+                    dispatch: id(&project.dispatch_id),
+                    binding: binding(&project.binding),
+                    thread: id(&project.thread_id),
+                }),
             source: mailbox_address(*source),
             operation: operation(correlation),
             item: optional_short(item.as_ref()),

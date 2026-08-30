@@ -29,7 +29,10 @@ semantic catalog; reducers implement the non-intrinsic causal rules.
 Harness activity additionally carries typed optional item correlation, activity kind/status,
 runtime-lifetime identity, positive source sequence, signed occurrence time, and explicit
 truncation. These signed values drive reducer-owned coalescing and presentation; activity content
-remains inert text. The normalized rules are documented in `docs/rust/conversation-model.md`.
+remains inert text. New project-attributed activity also carries an optional typed project,
+dispatch, captured assignment binding, and immutable thread. The field is omitted when absent, so
+historical signed FCT-022 payloads decode and re-encode without changing bytes. The normalized
+rules are documented in `docs/rust/conversation-model.md`.
 
 `SemanticFact::new` enforces the intrinsic envelope boundary. Remote-control payloads require a
 `RemoteControl` scope and canonical payloads reject it. Installation declarations must match their

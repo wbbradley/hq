@@ -3,9 +3,10 @@
 use std::{error::Error, num::NonZeroU64};
 
 use hq_domain::{
-    AccountId, ActivityKind, ActivityStatus, AuthorityReference, AuthorityRole, ContentText, Fact,
-    FactId, FactScope, GrantId, InstallationAddress, InstallationId, MailboxAddress, MailboxId,
-    MailboxKind, MessageContent, MessageId, MessagePurpose, OperationCorrelation, PresentationKind,
+    AccountId, ActivityKind, ActivityStatus, AgentId, AssignmentBinding, AssignmentId,
+    AuthorityReference, AuthorityRole, ContentText, DispatchId, Fact, FactId, FactScope, GrantId,
+    InstallationAddress, InstallationId, MailboxAddress, MailboxId, MailboxKind, MessageContent,
+    MessageId, MessagePurpose, OperationCorrelation, PresentationKind, ProjectActivityAttribution,
     ProjectId, ProviderId, ProviderSessionId, SemanticPayload, ShortText, SigningPublicKey,
     ThreadId, Timestamp,
 };
@@ -544,6 +545,7 @@ fn activity_fact(
             world.installation_root.id(),
         )],
         SemanticPayload::HarnessActivityRecorded {
+            project: None,
             source,
             correlation,
             item: item.map(ShortText::new).transpose()?,
@@ -573,6 +575,174 @@ fn operation(
         ProviderSessionId::new(session)?,
         hq_domain::OperationId::from_bytes([value; 32]),
     ))
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn attributed_activity_requires_its_exact_dispatch_and_agent_source() -> Result<(), Box<dyn Error>>
+{
+    let mut values = DeterministicValues::new(29);
+    let world = local_world(&mut values)?;
+    let agent_id = AgentId::from_bytes([0x31; 32]);
+    let claim = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(2),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [world.installation_root.id(), world.agent_root.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::AgentNameClaimed {
+            agent_id,
+            mailbox_id: world.agent.mailbox_id(),
+            name: ShortText::new("alice")?,
+        },
+    )?;
+    let project_id = ProjectId::from_bytes([0x32; 32]);
+    let dispatch_id = DispatchId::from_bytes([0x33; 32]);
+    let thread_id = ThreadId::from_bytes([0x34; 32]);
+    let binding = AssignmentBinding {
+        assignment_id: AssignmentId::from_bytes([0x35; 32]),
+        agent_id,
+        provider: ProviderId::new("provider")?,
+        session: ProviderSessionId::new("session")?,
+    };
+    let dispatch = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(3),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [world.installation_root.id(), claim.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::ProjectInputDispatched {
+            project_id,
+            message_id: MessageId::from_bytes([0x37; 32]),
+            sequence: NonZeroU64::MIN,
+            dispatch_id,
+            binding: binding.clone(),
+            thread_id,
+        },
+    )?;
+    let activity = |values: &mut DeterministicValues,
+                    attribution: ProjectActivityAttribution,
+                    logical_key: &str|
+     -> Result<Fact, Box<dyn Error>> {
+        Ok(FactBuilder::with_causal(
+            values,
+            world.installation,
+            Timestamp::from_unix_millis(4),
+            FactScope::InstallationPrivate(world.installation.installation_id()),
+            [
+                world.installation_root.id(),
+                world.agent_root.id(),
+                claim.id(),
+                dispatch.id(),
+            ],
+            [AuthorityReference::new(
+                AuthorityRole::LocalInstallation,
+                world.installation_root.id(),
+            )],
+            SemanticPayload::HarnessActivityRecorded {
+                project: Some(attribution),
+                source: world.agent,
+                correlation: OperationCorrelation::new(
+                    binding.provider.clone(),
+                    binding.session.clone(),
+                    hq_domain::OperationId::from_bytes([0x38; 32]),
+                ),
+                item: None,
+                kind: ActivityKind::Status,
+                logical_key: ShortText::new(logical_key)?,
+                runtime: ShortText::new("runtime")?,
+                sequence: NonZeroU64::MIN,
+                occurred_at: Timestamp::from_unix_millis(4),
+                status: ActivityStatus::Succeeded,
+                content: ContentText::new("complete")?,
+                truncated: false,
+            },
+        )?)
+    };
+    let exact = ProjectActivityAttribution {
+        project_id,
+        dispatch_id,
+        binding: binding.clone(),
+        thread_id,
+    };
+    let valid = activity(&mut values, exact.clone(), "operation")?;
+    let mut wrong_thread = exact;
+    wrong_thread.thread_id = ThreadId::from_bytes([0x39; 32]);
+    let invalid = activity(&mut values, wrong_thread, "other-operation")?;
+    let output_id = values.message_id();
+    let output = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(5),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [world.installation_root.id(), dispatch.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::ProjectOutputRecorded {
+            project_id,
+            output_id,
+            dispatch_id,
+            binding: binding.clone(),
+            thread_id,
+            message: MessageContent {
+                message_id: output_id,
+                sender: world.agent,
+                recipient: Some(world.human),
+                body: ContentText::new("project output")?,
+                purpose: MessagePurpose::ProjectOutput,
+                presentation: PresentationKind::FinalAnswer,
+                correlation: Some(OperationCorrelation::new(
+                    binding.provider.clone(),
+                    binding.session.clone(),
+                    hq_domain::OperationId::from_bytes([0x38; 32]),
+                )),
+                project_id: Some(project_id),
+            },
+        },
+    )?;
+    let report = reduce_complete(
+        world.base_facts().into_iter().chain([
+            claim,
+            dispatch,
+            valid.clone(),
+            invalid.clone(),
+            output.clone(),
+        ]),
+        &world.reducer(),
+    )?;
+    assert_eq!(
+        report.decisions()[&valid.id()].status(),
+        DecisionStatus::Projected
+    );
+    assert_eq!(
+        report.decisions()[&invalid.id()].status(),
+        DecisionStatus::Invalid
+    );
+    assert_eq!(
+        report.decisions()[&invalid.id()].reason(),
+        Some(&DecisionReason::Domain(
+            ConversationReason::ActivitySourceMismatch
+        ))
+    );
+    let Some(ConversationProjection::Message(message)) = report
+        .projections()
+        .get(&ConversationProjectionKey::Message(output_id))
+    else {
+        return Err("missing project output message projection".into());
+    };
+    assert_eq!(message.fact_id, output.id());
+    assert_eq!(message.thread_id, thread_id);
+    Ok(())
 }
 
 #[test]

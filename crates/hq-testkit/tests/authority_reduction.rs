@@ -1185,6 +1185,7 @@ fn account_actions_use_historical_membership_and_full_regrant_lineage() -> Resul
             old_acceptance.id(),
         )],
         SemanticPayload::HarnessActivityRecorded {
+            project: None,
             source: mailbox(device, 90),
             correlation: OperationCorrelation::new(
                 ProviderId::new("test-provider")?,

@@ -202,6 +202,19 @@ pub struct AssignmentBinding {
     pub session: ProviderSessionId,
 }
 
+/// Immutable project provenance carried by attributed runtime activity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectActivityAttribution {
+    /// Target project captured when the input was dispatched.
+    pub project_id: ProjectId,
+    /// Stable canonical dispatch identity.
+    pub dispatch_id: DispatchId,
+    /// Assignment and provider session captured by the dispatch.
+    pub binding: AssignmentBinding,
+    /// Immutable project conversation thread selected for the dispatch.
+    pub thread_id: ThreadId,
+}
+
 /// Lifecycle starting state for a new project.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InitialProjectState {
@@ -350,6 +363,8 @@ pub enum SemanticPayload {
     },
     /// FCT-022.
     HarnessActivityRecorded {
+        /// Project provenance, absent for direct-agent activity and historical payloads.
+        project: Option<ProjectActivityAttribution>,
         source: MailboxAddress,
         correlation: OperationCorrelation,
         item: Option<ShortText>,

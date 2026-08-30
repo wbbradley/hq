@@ -167,6 +167,7 @@ impl FactBuilder {
                 reason: ErrorCode::new("rejected")?,
             },
             SemanticPayload::HarnessActivityRecorded {
+                project: None,
                 source: mailbox,
                 correlation: operation.clone(),
                 item: Some(text("item")?),

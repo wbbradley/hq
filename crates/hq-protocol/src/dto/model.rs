@@ -355,6 +355,12 @@ object!(BindingDto {
     provider: ProviderText,
     session: SessionText,
 });
+object!(ProjectActivityAttributionDto {
+    project: Hex32,
+    dispatch: Hex32,
+    binding: BindingDto,
+    thread: Hex32,
+});
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -571,6 +577,8 @@ object!(MessageRejectedDto {
     reason: ShortText,
 });
 object!(HarnessActivityRecordedDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<ProjectActivityAttributionDto>,
     source: MailboxAddressDto,
     operation: OperationDto,
     #[serde(deserialize_with = "deserialize_required_option")]

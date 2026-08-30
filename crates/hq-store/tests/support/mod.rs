@@ -359,6 +359,7 @@ fn authored_conversation_entry_with_retention(
     );
     let payload = if activity {
         SemanticPayload::HarnessActivityRecorded {
+            project: None,
             source: local,
             correlation,
             item: durable

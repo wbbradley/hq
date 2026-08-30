@@ -197,6 +197,13 @@ hanging silently. The child is then killed if necessary and `Wait` completes. Su
 cancels every logical worker and waits for all worker lifetimes. Stopping one worker releases only
 that named agent's ownership and does not mutate another worker's runtime state.
 
+Before persisting a normalized event, the neutral supervisor looks up the unique retained delivery
+for the exact agent and operation and verifies its provider and session. A complete project-bound
+delivery is passed intact to canonical persistence: output becomes `ProjectOutputRecorded`, while
+activity remains FCT-022 with optional project/dispatch/assignment/thread provenance. No matching
+delivery retains the direct-agent behavior. Ambiguous delivery identity, mismatched runtime
+identity, or a migrated matching row whose project provenance is absent fails closed.
+
 ## Codex 0.149.0 protocol boundary
 
 HQ writes these methods:

@@ -34,7 +34,8 @@ pub use error::{
 };
 pub use harness::{
     HarnessActivityFactRequest, HarnessAuthoringAuthority, HarnessOutputFactRequest,
-    plan_harness_activity, plan_harness_output,
+    ProjectHarnessAuthoringAuthority, plan_harness_activity, plan_harness_output,
+    plan_project_harness_activity, plan_project_harness_output,
 };
 pub use human::{
     HumanDeviceGrantRequest, HumanDeviceRevokeRequest, LocalFactInputs, LocalInstallationAuthority,

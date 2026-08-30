@@ -83,6 +83,14 @@ provenance conflicts. Output causally after its assignment ended is marked late 
 output that preceded the end retains current-at-production attribution. Neither class can change
 lifecycle, claims, assignment, or dispatch authority.
 
+For new managed-runtime events, the supervisor resolves the unique retained delivery by agent and
+operation before canonical authoring. Project output advances from the transaction's current
+project head while directly citing the immutable originating dispatch, so output after handoff is
+retained as late history. Project activity does not advance the project head, but carries the same
+project, dispatch, assignment, and thread provenance in FCT-022. A matching legacy delivery without
+provenance, an ambiguous operation lookup, or any mismatch fails closed instead of producing a
+direct-agent message.
+
 ## Remote control
 
 Remote project commands occupy a disjoint control projection. An active-device request is queued

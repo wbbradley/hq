@@ -5,21 +5,23 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 use hq_application::{
     ApplicationError, ApplicationErrorCode, CommitFacts, FactMutation, HarnessActivityFactRequest,
     HarnessAuthoringAuthority, HarnessOutputFactRequest, LocalFactInputs, MutationAttempt,
-    MutationDecision, MutationOutcome, plan_harness_activity, plan_harness_output,
+    MutationDecision, MutationOutcome, ProjectHarnessAuthoringAuthority, plan_harness_activity,
+    plan_harness_output, plan_project_harness_activity, plan_project_harness_output,
 };
 use hq_domain::{
-    ActivityKind, ActivityStatus, AgentId, AuthorityReference, AuthorityRole, CommandDigest,
-    CommandId, DomainError, ErrorCategory, ErrorCode, InstallationId, MailboxAddress, MailboxId,
-    MessageId, OperationCorrelation, PresentationKind, ProviderId, ProviderSessionId, Timestamp,
+    ActivityKind, ActivityStatus, AgentId, AssignmentBinding, AuthorityReference, AuthorityRole,
+    CommandDigest, CommandId, DomainError, ErrorCategory, ErrorCode, InstallationId,
+    MailboxAddress, MailboxId, MessageId, OperationCorrelation, PresentationKind, ProviderId,
+    ProviderSessionId, Timestamp,
 };
 use hq_harness::{
-    HarnessActivity, HarnessClock, HarnessError, HarnessErrorClass, HarnessOutput,
-    HarnessOutputKind, HarnessPersistencePort,
+    HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessError, HarnessErrorClass,
+    HarnessOutput, HarnessOutputKind, HarnessPersistencePort,
 };
 use hq_reducer::{
     ActivityKey, AgentLifecycle, AgentProjection, AgentProjectionKey, AuthorityProjection,
     AuthorityProjectionKey, ConversationAggregateKey, ConversationProjection,
-    ConversationProjectionKey, ProjectProjection, SessionIdentity,
+    ConversationProjectionKey, ProjectProjection, ProjectProjectionKey, SessionIdentity,
 };
 use sha2::{Digest, Sha256};
 
@@ -54,18 +56,51 @@ impl<P: CommitFacts + Send + Sync> HarnessPersistencePort for CanonicalHarnessPe
         agent_id: AgentId,
         provider_id: &ProviderId,
         session_id: &ProviderSessionId,
+        delivery: Option<&HarnessDeliveryRecord>,
         output: &HarnessOutput,
     ) -> Result<(), HarnessError> {
+        validate_delivery_runtime(
+            agent_id,
+            provider_id,
+            session_id,
+            delivery,
+            output.operation_id,
+        )?;
         let identity = output_identity(output.output_id);
-        let digest = output_digest(agent_id, provider_id, session_id, output);
+        let digest = output_digest(agent_id, provider_id, session_id, delivery, output);
         let authored_at = timestamp(self.clock.now_millis());
         let randomness = fact_randomness(identity, digest);
         let home = self.home;
         let human_mailbox = self.human_mailbox;
         let provider = provider_id.clone();
         let session = session_id.clone();
+        let delivery = delivery.cloned();
         let output = output.clone();
         self.commit(identity, digest, move |snapshot| {
+            let request = HarnessOutputFactRequest {
+                output_id: output.output_id,
+                correlation: OperationCorrelation::new(
+                    provider.clone(),
+                    session.clone(),
+                    output.operation_id,
+                ),
+                presentation: match output.kind {
+                    HarnessOutputKind::Update => PresentationKind::Status,
+                    HarnessOutputKind::FinalAnswer => PresentationKind::FinalAnswer,
+                },
+                body: output.body,
+            };
+            if let Some(delivery) = delivery.as_ref() {
+                let authority = project_authoring_authority(snapshot, home, delivery, None)?;
+                return plan_project_harness_output(
+                    &authority,
+                    LocalFactInputs {
+                        authored_at,
+                        auxiliary_randomness: randomness,
+                    },
+                    request,
+                );
+            }
             let authority = authoring_authority(
                 snapshot,
                 home,
@@ -81,15 +116,7 @@ impl<P: CommitFacts + Send + Sync> HarnessPersistencePort for CanonicalHarnessPe
                     authored_at,
                     auxiliary_randomness: randomness,
                 },
-                HarnessOutputFactRequest {
-                    output_id: output.output_id,
-                    correlation: OperationCorrelation::new(provider, session, output.operation_id),
-                    presentation: match output.kind {
-                        HarnessOutputKind::Update => PresentationKind::Status,
-                        HarnessOutputKind::FinalAnswer => PresentationKind::FinalAnswer,
-                    },
-                    body: output.body,
-                },
+                request,
             )
         })
     }
@@ -99,16 +126,25 @@ impl<P: CommitFacts + Send + Sync> HarnessPersistencePort for CanonicalHarnessPe
         agent_id: AgentId,
         provider_id: &ProviderId,
         session_id: &ProviderSessionId,
+        delivery: Option<&HarnessDeliveryRecord>,
         activity: &HarnessActivity,
     ) -> Result<(), HarnessError> {
+        validate_delivery_runtime(
+            agent_id,
+            provider_id,
+            session_id,
+            delivery,
+            activity.operation_id,
+        )?;
         let identity = activity_identity(agent_id, provider_id, session_id, activity);
-        let digest = activity_digest(agent_id, provider_id, session_id, activity);
+        let digest = activity_digest(agent_id, provider_id, session_id, delivery, activity);
         let occurred_at = timestamp(self.clock.now_millis());
         let randomness = fact_randomness(identity, digest);
         let home = self.home;
         let human_mailbox = self.human_mailbox;
         let provider = provider_id.clone();
         let session = session_id.clone();
+        let delivery = delivery.cloned();
         let activity = activity.clone();
         self.commit(identity, digest, move |snapshot| {
             let correlation =
@@ -121,6 +157,26 @@ impl<P: CommitFacts + Send + Sync> HarnessPersistencePort for CanonicalHarnessPe
                 logical_key: activity.logical_key.clone(),
                 runtime: activity.runtime.clone(),
             };
+            let request = HarnessActivityFactRequest {
+                correlation,
+                item: activity.item,
+                kind: activity.kind,
+                logical_key: activity.logical_key,
+                runtime: activity.runtime,
+                sequence: activity.sequence,
+                occurred_at,
+                status: activity.status,
+                content: activity.content,
+                truncated: activity.truncated,
+            };
+            let inputs = LocalFactInputs {
+                authored_at: occurred_at,
+                auxiliary_randomness: randomness,
+            };
+            if let Some(delivery) = delivery.as_ref() {
+                let authority = project_authoring_authority(snapshot, home, delivery, Some(&key))?;
+                return plan_project_harness_activity(&authority, inputs, request);
+            }
             let authority = authoring_authority(
                 snapshot,
                 home,
@@ -130,25 +186,7 @@ impl<P: CommitFacts + Send + Sync> HarnessPersistencePort for CanonicalHarnessPe
                 &session,
                 Some(&key),
             )?;
-            plan_harness_activity(
-                &authority,
-                LocalFactInputs {
-                    authored_at: occurred_at,
-                    auxiliary_randomness: randomness,
-                },
-                HarnessActivityFactRequest {
-                    correlation,
-                    item: activity.item,
-                    kind: activity.kind,
-                    logical_key: activity.logical_key,
-                    runtime: activity.runtime,
-                    sequence: activity.sequence,
-                    occurred_at,
-                    status: activity.status,
-                    content: activity.content,
-                    truncated: activity.truncated,
-                },
-            )
+            plan_harness_activity(&authority, inputs, request)
         })
     }
 }
@@ -298,6 +336,164 @@ fn authoring_authority(
     })
 }
 
+fn project_authoring_authority(
+    snapshot: &hq_application::DomainSnapshot,
+    home: InstallationId,
+    delivery: &HarnessDeliveryRecord,
+    activity_key: Option<&ActivityKey>,
+) -> Result<ProjectHarnessAuthoringAuthority, ApplicationError> {
+    let project_delivery = delivery.project.as_ref().ok_or_else(identity_error)?;
+    let agent_id = delivery.agent_id;
+    let provider = &delivery.provider_id;
+    let session = &delivery.session_id;
+    let Some(ProjectProjection::Project(project)) = snapshot
+        .project()
+        .projection(ProjectProjectionKey::Project(project_delivery.project_id))
+    else {
+        return Err(identity_error());
+    };
+    if project.home != home || !project.fork_participants.is_empty() {
+        return Err(identity_error());
+    }
+    let Some(ProjectProjection::Dispatch(dispatch)) = snapshot
+        .project()
+        .projection(ProjectProjectionKey::Dispatch(project_delivery.dispatch_id))
+    else {
+        return Err(identity_error());
+    };
+    let binding = AssignmentBinding {
+        assignment_id: project_delivery.assignment_id,
+        agent_id,
+        provider: provider.clone(),
+        session: session.clone(),
+    };
+    if dispatch.conflicted
+        || dispatch.message_id != delivery.submission.submission_id
+        || dispatch.sequence != project_delivery.sequence.get()
+        || dispatch.binding != binding
+        || dispatch.thread_id != project_delivery.thread_id
+        || !matches!(
+            snapshot
+                .project()
+                .projection(ProjectProjectionKey::Input(dispatch.message_id)),
+            Some(ProjectProjection::Input(input))
+                if input.project_id == project_delivery.project_id
+                    && input.sequence == project_delivery.sequence.get()
+        )
+    {
+        return Err(identity_error());
+    }
+    let source = source_mailbox(snapshot, home, agent_id)?;
+    let Some(AuthorityProjection::Installation(installation)) = snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::Installation(home))
+    else {
+        return Err(identity_error());
+    };
+    let account_membership = active_account_authority(snapshot, project.account_id, home)?;
+    let Some(AuthorityProjection::Mailbox(agent_mailbox)) = snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::Mailbox(source))
+    else {
+        return Err(identity_error());
+    };
+    if agent_mailbox.kind != hq_domain::MailboxKind::Agent {
+        return Err(identity_error());
+    }
+    let mut support = BTreeSet::from([
+        installation.root_fact,
+        account_membership,
+        agent_mailbox.create_fact,
+        project.root,
+        dispatch.fact_id,
+    ]);
+    if let Some(key) = activity_key {
+        if let Some(ConversationProjection::Activity(previous)) = snapshot
+            .conversation()
+            .projection(ConversationProjectionKey::Activity(key.clone()))
+        {
+            support.insert(previous.fact_id);
+        }
+        if let Some(frontier) = snapshot
+            .conversation()
+            .frontiers()
+            .get(&ConversationAggregateKey::Activity(key.clone()))
+        {
+            support.extend(frontier.iter().copied());
+        }
+    }
+    Ok(ProjectHarnessAuthoringAuthority {
+        author: home,
+        account_id: project.account_id,
+        project_id: project_delivery.project_id,
+        project_head: project.head,
+        installation_root: installation.root_fact,
+        account_membership,
+        dispatch_fact: dispatch.fact_id,
+        dispatch_id: project_delivery.dispatch_id,
+        source,
+        recipient: project.mailbox,
+        binding,
+        thread_id: project_delivery.thread_id,
+        support,
+    })
+}
+
+fn active_account_authority(
+    snapshot: &hq_application::DomainSnapshot,
+    account_id: hq_domain::AccountId,
+    home: InstallationId,
+) -> Result<hq_domain::FactId, ApplicationError> {
+    if let Some(AuthorityProjection::Account {
+        root_fact, creator, ..
+    }) = snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::Account(account_id))
+        && creator.installation_id() == home
+    {
+        return Ok(*root_fact);
+    }
+    match snapshot
+        .authority()
+        .projection(AuthorityProjectionKey::Membership {
+            account: account_id,
+            device: home,
+        }) {
+        Some(AuthorityProjection::Membership(membership))
+            if membership.state() == hq_reducer::MembershipState::Active =>
+        {
+            membership
+                .active_acceptances
+                .iter()
+                .next()
+                .copied()
+                .ok_or_else(identity_error)
+        }
+        _ => Err(identity_error()),
+    }
+}
+
+fn validate_delivery_runtime(
+    agent_id: AgentId,
+    provider: &ProviderId,
+    session: &ProviderSessionId,
+    delivery: Option<&HarnessDeliveryRecord>,
+    operation_id: hq_domain::OperationId,
+) -> Result<(), HarnessError> {
+    let Some(delivery) = delivery else {
+        return Ok(());
+    };
+    if delivery.agent_id != agent_id
+        || delivery.provider_id != *provider
+        || delivery.session_id != *session
+        || delivery.submission.operation_id != operation_id
+        || delivery.project.is_none()
+    {
+        return Err(collision());
+    }
+    Ok(())
+}
+
 fn source_mailbox(
     snapshot: &hq_application::DomainSnapshot,
     home: InstallationId,
@@ -332,6 +528,7 @@ fn output_digest(
     agent_id: AgentId,
     provider: &ProviderId,
     session: &ProviderSessionId,
+    delivery: Option<&HarnessDeliveryRecord>,
     output: &HarnessOutput,
 ) -> CommandDigest {
     let mut digest = Sha256::new();
@@ -347,6 +544,7 @@ fn output_digest(
     }]);
     update_status(&mut digest, &output.status);
     update_text(&mut digest, output.body.as_str());
+    update_delivery_attribution(&mut digest, delivery);
     CommandDigest::from_bytes(digest.finalize().into())
 }
 
@@ -377,6 +575,7 @@ fn activity_digest(
     agent_id: AgentId,
     provider: &ProviderId,
     session: &ProviderSessionId,
+    delivery: Option<&HarnessDeliveryRecord>,
     activity: &HarnessActivity,
 ) -> CommandDigest {
     let identity = activity_identity(agent_id, provider, session, activity);
@@ -386,7 +585,25 @@ fn activity_digest(
     update_status(&mut digest, &activity.status);
     update_text(&mut digest, activity.content.as_str());
     digest.update([u8::from(activity.truncated)]);
+    update_delivery_attribution(&mut digest, delivery);
     CommandDigest::from_bytes(digest.finalize().into())
+}
+
+fn update_delivery_attribution(digest: &mut Sha256, delivery: Option<&HarnessDeliveryRecord>) {
+    let Some(delivery) = delivery else {
+        return;
+    };
+    let Some(project) = delivery.project.as_ref() else {
+        digest.update([0]);
+        return;
+    };
+    digest.update([1]);
+    digest.update(delivery.submission.submission_id.as_bytes());
+    digest.update(project.project_id.as_bytes());
+    digest.update(project.dispatch_id.as_bytes());
+    digest.update(project.assignment_id.as_bytes());
+    digest.update(project.thread_id.as_bytes());
+    digest.update(project.sequence.get().to_be_bytes());
 }
 
 fn fact_randomness(command: CommandId, digest: CommandDigest) -> [u8; 32] {
@@ -482,13 +699,14 @@ mod tests {
     };
     use hq_domain::{
         AccountId, AssignmentBinding, AssignmentId, AssignmentIntent, BoundedText, ContentText,
-        EncryptionPublicKey, FactId, MailboxKind, OperationId, ProjectId, ResourceLocator,
-        ResourceScheme, Revision, ShortText, SigningPublicKey, ThreadId,
+        DispatchId, EncryptionPublicKey, FactId, MailboxKind, OperationId, ProjectId,
+        ResourceLocator, ResourceScheme, Revision, ShortText, SigningPublicKey, ThreadId,
     };
+    use hq_harness::{HarnessDeliveryState, HarnessProjectDelivery, HarnessSubmission};
     use hq_reducer::{
         AgentView, AuthorityProjection, InstallationView, MailboxView, ProjectAssignmentPhase,
-        ProjectAssignmentView, ProjectLifecycle, ProjectProjectionKey, ProjectView,
-        SessionBindingView,
+        ProjectAssignmentView, ProjectDispatchView, ProjectInputView, ProjectLifecycle,
+        ProjectProjectionKey, ProjectView, SessionBindingView,
     };
 
     use super::*;
@@ -547,6 +765,7 @@ mod tests {
         source: MailboxAddress,
     }
 
+    #[allow(clippy::too_many_lines)]
     fn fixture(bound: bool) -> Fixture {
         let home = InstallationId::from_bytes([1; 32]);
         let human_id = MailboxId::from_bytes([2; 32]);
@@ -572,6 +791,17 @@ mod tests {
                     }),
                 ),
                 (
+                    AuthorityProjectionKey::Account(AccountId::from_bytes([20; 32])),
+                    AuthorityProjection::Account {
+                        root_fact: FactId::from_bytes([30; 32]),
+                        creator: hq_domain::InstallationAddress::new(
+                            home,
+                            SigningPublicKey::from_bytes([6; 32]),
+                        ),
+                        label: None,
+                    },
+                ),
+                (
                     AuthorityProjectionKey::Mailbox(recipient),
                     AuthorityProjection::Mailbox(MailboxView {
                         create_fact: FactId::from_bytes([8; 32]),
@@ -584,6 +814,17 @@ mod tests {
                     AuthorityProjection::Mailbox(MailboxView {
                         create_fact: FactId::from_bytes([9; 32]),
                         kind: MailboxKind::Agent,
+                        label: None,
+                    }),
+                ),
+                (
+                    AuthorityProjectionKey::Mailbox(MailboxAddress::new(
+                        home,
+                        MailboxId::from_bytes([19; 32]),
+                    )),
+                    AuthorityProjection::Mailbox(MailboxView {
+                        create_fact: FactId::from_bytes([31; 32]),
+                        kind: MailboxKind::Human,
                         label: None,
                     }),
                 ),
@@ -671,6 +912,7 @@ mod tests {
                 fixture.agent,
                 &fixture.provider,
                 &fixture.session,
+                None,
                 &output("done"),
             )
             .expect("first output");
@@ -680,6 +922,7 @@ mod tests {
                 fixture.agent,
                 &fixture.provider,
                 &fixture.session,
+                None,
                 &output("done"),
             )
             .expect("duplicate output");
@@ -704,6 +947,7 @@ mod tests {
                 fixture.agent,
                 &fixture.provider,
                 &fixture.session,
+                None,
                 &output("changed"),
             )
             .expect_err("changed output collides");
@@ -726,7 +970,13 @@ mod tests {
         };
         active
             .persistence
-            .persist_activity(active.agent, &active.provider, &active.session, &activity)
+            .persist_activity(
+                active.agent,
+                &active.provider,
+                &active.session,
+                None,
+                &activity,
+            )
             .expect("activity");
         let retained = active.ports.0.retained.lock().expect("retained lock");
         assert!(retained.values().any(|(_, payload)| matches!(
@@ -742,7 +992,13 @@ mod tests {
         let stale = fixture(false);
         let error = stale
             .persistence
-            .persist_activity(stale.agent, &stale.provider, &stale.session, &activity)
+            .persist_activity(
+                stale.agent,
+                &stale.provider,
+                &stale.session,
+                None,
+                &activity,
+            )
             .expect_err("stale binding rejects");
         assert_eq!(error.class, HarnessErrorClass::PersistenceCollision);
         assert!(!format!("{error:?}").contains("secret diagnostic text"));
@@ -750,7 +1006,8 @@ mod tests {
     }
 
     #[test]
-    fn runnable_project_binding_authorizes_its_exact_session_without_a_direct_selection() {
+    #[allow(clippy::too_many_lines)]
+    fn attributed_project_events_preserve_exact_dispatch_provenance() {
         let stale = fixture(false);
         let home = stale.source.installation_id();
         let assignment_id = AssignmentId::from_bytes([15; 32]);
@@ -796,18 +1053,51 @@ mod tests {
                 runnable: true,
                 support: BTreeSet::from([FactId::from_bytes([18; 32])]),
             }),
-            input_sequence: 0,
+            input_sequence: 1,
         };
+        let submission_id = MessageId::from_bytes([21; 32]);
+        let dispatch_id = DispatchId::from_bytes([22; 32]);
+        let dispatch_fact = FactId::from_bytes([23; 32]);
+        let thread_id = ThreadId::from_bytes([20; 32]);
         let snapshot = DomainSnapshot::new(
             stale.ports.0.snapshot.authority().clone(),
             stale.ports.0.snapshot.conversation().clone(),
             stale.ports.0.snapshot.agent().clone(),
             ProjectProjectionSnapshot::new(
                 BTreeMap::new(),
-                BTreeMap::from([(
-                    ProjectProjectionKey::Project(project_id),
-                    ProjectProjection::Project(Box::new(project)),
-                )]),
+                BTreeMap::from([
+                    (
+                        ProjectProjectionKey::Project(project_id),
+                        ProjectProjection::Project(Box::new(project)),
+                    ),
+                    (
+                        ProjectProjectionKey::Input(submission_id),
+                        ProjectProjection::Input(Box::new(ProjectInputView {
+                            project_id,
+                            message_id: submission_id,
+                            input_fact_id: FactId::from_bytes([24; 32]),
+                            sequence: 1,
+                            accepted_fact: FactId::from_bytes([25; 32]),
+                        })),
+                    ),
+                    (
+                        ProjectProjectionKey::Dispatch(dispatch_id),
+                        ProjectProjection::Dispatch(Box::new(ProjectDispatchView {
+                            dispatch_id,
+                            message_id: submission_id,
+                            sequence: 1,
+                            binding: AssignmentBinding {
+                                assignment_id,
+                                agent_id: stale.agent,
+                                provider: stale.provider.clone(),
+                                session: stale.session.clone(),
+                            },
+                            thread_id,
+                            fact_id: dispatch_fact,
+                            conflicted: false,
+                        })),
+                    ),
+                ]),
                 BTreeMap::new(),
             ),
         );
@@ -816,18 +1106,108 @@ mod tests {
             retained: Mutex::new(BTreeMap::new()),
         }));
         let persistence = CanonicalHarnessPersistence::new(
-            ports,
+            ports.clone(),
             home,
             MailboxId::from_bytes([2; 32]),
             Arc::new(Clock),
         );
+        let delivery = HarnessDeliveryRecord {
+            agent_id: stale.agent,
+            provider_id: stale.provider.clone(),
+            session_id: stale.session.clone(),
+            submission: HarnessSubmission {
+                submission_id,
+                digest: CommandDigest::from_bytes([26; 32]),
+                operation_id: OperationId::from_bytes([13; 32]),
+                body: ContentText::new("project input").expect("input"),
+            },
+            project: Some(HarnessProjectDelivery {
+                project_id,
+                dispatch_id,
+                assignment_id,
+                thread_id,
+                sequence: NonZeroU64::MIN,
+            }),
+            queued_at_millis: 1,
+            state: HarnessDeliveryState::Accepted,
+        };
+        let resolved = project_authoring_authority(&ports.0.snapshot, home, &delivery, None)
+            .expect("project authority resolves");
+        plan_project_harness_output(
+            &resolved,
+            LocalFactInputs {
+                authored_at: Timestamp::from_unix_millis(123),
+                auxiliary_randomness: [1; 32],
+            },
+            HarnessOutputFactRequest {
+                output_id: output("project output").output_id,
+                correlation: OperationCorrelation::new(
+                    stale.provider.clone(),
+                    stale.session.clone(),
+                    delivery.submission.operation_id,
+                ),
+                presentation: PresentationKind::FinalAnswer,
+                body: ContentText::new("project output").expect("output"),
+            },
+        )
+        .expect("project output plan resolves");
         persistence
             .persist_output(
                 stale.agent,
                 &stale.provider,
                 &stale.session,
+                Some(&delivery),
                 &output("project output"),
             )
             .expect("project-bound output");
+        let activity = HarnessActivity {
+            operation_id: delivery.submission.operation_id,
+            item: None,
+            kind: ActivityKind::Status,
+            logical_key: ShortText::new("operation").expect("logical key"),
+            runtime: ShortText::new("runtime").expect("runtime"),
+            sequence: NonZeroU64::MIN,
+            status: ActivityStatus::Succeeded,
+            content: ContentText::new("complete").expect("activity"),
+            truncated: false,
+        };
+        persistence
+            .persist_activity(
+                stale.agent,
+                &stale.provider,
+                &stale.session,
+                Some(&delivery),
+                &activity,
+            )
+            .expect("project-bound activity");
+        let retained = ports.0.retained.lock().expect("retained lock");
+        assert!(retained.values().any(|(_, payload)| matches!(
+            payload,
+            hq_domain::SemanticPayload::ProjectOutputRecorded {
+                project_id: actual_project,
+                dispatch_id: actual_dispatch,
+                binding: actual_binding,
+                thread_id: actual_thread,
+                message,
+                ..
+            } if *actual_project == project_id
+                && *actual_dispatch == dispatch_id
+                && actual_binding.assignment_id == assignment_id
+                && *actual_thread == thread_id
+                && message.recipient == Some(MailboxAddress::new(home, MailboxId::from_bytes([19; 32])))
+                && message.purpose == hq_domain::MessagePurpose::ProjectOutput
+        )));
+        assert!(retained.values().any(|(_, payload)| matches!(
+            payload,
+            hq_domain::SemanticPayload::HarnessActivityRecorded {
+                project: Some(attribution),
+                correlation,
+                ..
+            } if attribution.project_id == project_id
+                && attribution.dispatch_id == dispatch_id
+                && attribution.binding.assignment_id == assignment_id
+                && attribution.thread_id == thread_id
+                && correlation.operation() == delivery.submission.operation_id
+        )));
     }
 }

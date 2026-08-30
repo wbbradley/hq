@@ -3,10 +3,14 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, AuthorityRole, FactId, FactKind, InstallationId, MessagePurpose,
-    RemoteCommandResult, ResourceHealth, RuntimeObservation, SemanticPayload, SigningPublicKey,
+    ActivityKind, ActivityStatus, AgentId, AssignmentBinding, AssignmentId, AuthorityRole,
+    DispatchId, FactId, FactKind, InstallationId, MessagePurpose, ProjectActivityAttribution,
+    ProjectId, ProviderId, ProviderSessionId, RemoteCommandResult, ResourceHealth,
+    RuntimeObservation, SemanticPayload, SigningPublicKey, ThreadId,
 };
-use hq_protocol::{Bip340Signer, DispatchOutcome, FailureClass, ProtocolNamespace};
+use hq_protocol::{
+    Bip340Signer, CanonicalEventPlan, DispatchOutcome, FailureClass, ProtocolNamespace,
+};
 
 mod support;
 
@@ -152,6 +156,83 @@ fn conversion_preserves_nested_activity_project_output_and_result_values() {
     };
     assert!(matches!(result, RemoteCommandResult::Committed(_)));
     assert_eq!(*runtime, Some(RuntimeObservation::Succeeded));
+}
+
+#[test]
+fn activity_project_attribution_is_additive_and_historical_bytes_remain_exact() {
+    let historical = verified_record(22, &valid_bodies()[21].1)
+        .into_semantic_fact()
+        .expect("historical activity converts");
+    assert!(matches!(
+        historical.fact().payload(),
+        SemanticPayload::HarnessActivityRecorded { project: None, .. }
+    ));
+    assert_eq!(
+        CanonicalEventPlan::from_fact(historical.fact())
+            .encode_content()
+            .expect("historical activity re-encodes"),
+        historical.content_bytes()
+    );
+
+    let SemanticPayload::HarnessActivityRecorded {
+        source,
+        correlation,
+        item,
+        kind,
+        logical_key,
+        runtime,
+        sequence,
+        occurred_at,
+        status,
+        content,
+        truncated,
+        ..
+    } = historical.fact().payload()
+    else {
+        panic!("family 22 must remain activity");
+    };
+    let attribution = ProjectActivityAttribution {
+        project_id: ProjectId::from_bytes([0x21; 32]),
+        dispatch_id: DispatchId::from_bytes([0x22; 32]),
+        binding: AssignmentBinding {
+            assignment_id: AssignmentId::from_bytes([0x23; 32]),
+            agent_id: AgentId::from_bytes([0x24; 32]),
+            provider: ProviderId::new("provider").expect("provider"),
+            session: ProviderSessionId::new("session").expect("session"),
+        },
+        thread_id: ThreadId::from_bytes([0x25; 32]),
+    };
+    let payload = SemanticPayload::HarnessActivityRecorded {
+        project: Some(attribution.clone()),
+        source: *source,
+        correlation: correlation.clone(),
+        item: item.clone(),
+        kind: *kind,
+        logical_key: logical_key.clone(),
+        runtime: runtime.clone(),
+        sequence: *sequence,
+        occurred_at: *occurred_at,
+        status: status.clone(),
+        content: content.clone(),
+        truncated: *truncated,
+    };
+    let encoded = CanonicalEventPlan::new(
+        historical.fact().author().installation_id(),
+        historical.fact().authored_at(),
+        historical.fact().scope().clone(),
+        historical.fact().causal().clone(),
+        payload,
+    )
+    .encode_content()
+    .expect("attributed activity encodes");
+    let decoded = CanonicalEventPlan::decode_content(&encoded).expect("attribution decodes");
+    assert!(matches!(
+        decoded.into_parts().4,
+        SemanticPayload::HarnessActivityRecorded {
+            project: Some(actual),
+            ..
+        } if actual == attribution
+    ));
 }
 
 #[test]

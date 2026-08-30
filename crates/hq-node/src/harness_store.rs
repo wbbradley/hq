@@ -64,6 +64,17 @@ impl HarnessStatePort for HarnessStoreAdapter {
             .map(|stored| stored.map(map_delivery))
     }
 
+    fn delivery_for_operation(
+        &self,
+        agent_id: hq_domain::AgentId,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<Option<HarnessDeliveryRecord>, HarnessError> {
+        self.store
+            .delivery_for_operation(agent_id, operation_id)
+            .map_err(|error| map_store_error(error, HarnessErrorClass::PersistenceCollision))
+            .map(|stored| stored.map(map_delivery))
+    }
+
     fn runnable_deliveries(
         &self,
         agent_id: hq_domain::AgentId,

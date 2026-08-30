@@ -1785,6 +1785,14 @@ impl Database {
         harness::load_delivery(&self.connection, agent_id, submission_id)
     }
 
+    pub(super) fn load_harness_delivery_for_operation(
+        &self,
+        agent_id: hq_domain::AgentId,
+        operation_id: hq_domain::OperationId,
+    ) -> Result<Option<crate::StoredHarnessDelivery>, StoreError> {
+        harness::load_delivery_for_operation(&self.connection, agent_id, operation_id)
+    }
+
     pub(super) fn load_harness_session_operation(
         &self,
         operation_id: hq_domain::OperationId,
@@ -3440,6 +3448,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn version_one_delivery_rows_migrate_as_explicitly_unattributed() {
         static NEXT_MIGRATION: AtomicUsize = AtomicUsize::new(1);
         const PROJECT_COLUMNS: &str = r"    project_id BLOB
@@ -3518,6 +3527,38 @@ pub(crate) mod tests {
             .expect("legacy delivery loads")
             .expect("legacy delivery remains");
         assert_eq!(retained.project, None);
+        assert_eq!(
+            database
+                .load_harness_delivery_for_operation(
+                    hq_domain::AgentId::from_bytes([1; 32]),
+                    hq_domain::OperationId::from_bytes([4; 32]),
+                )
+                .expect("operation delivery loads"),
+            Some(retained)
+        );
+        database
+            .connection
+            .execute(
+                "INSERT INTO harness_deliveries(
+                    agent_id, submission_id, provider_id, session_id, digest, operation_id, body,
+                    queued_at_millis, delivery_state
+                 ) VALUES (?1, ?2, 'scripted', 'legacy-session', ?3, ?4, 'duplicate operation', ?5, 1)",
+                params![
+                    [1_u8; 32].as_slice(),
+                    [6_u8; 32].as_slice(),
+                    [7_u8; 32].as_slice(),
+                    [4_u8; 32].as_slice(),
+                    8_u64.to_be_bytes().as_slice(),
+                ],
+            )
+            .expect("duplicate operation row inserts for conflict fixture");
+        let conflict = database
+            .load_harness_delivery_for_operation(
+                hq_domain::AgentId::from_bytes([1; 32]),
+                hq_domain::OperationId::from_bytes([4; 32]),
+            )
+            .expect_err("duplicate operation attribution fails closed");
+        assert_eq!(conflict.class(), StoreErrorClass::HarnessStateConflict);
         drop(database);
         fs::remove_dir_all(root).expect("test state cleans up");
     }

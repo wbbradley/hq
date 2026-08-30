@@ -277,6 +277,10 @@ replay after a partial output-before-activity commit without duplicate canonical
 
 Harness state snapshots and exact-delivery reads use typed records and bounded limits. Strict row
 decoding rejects malformed identities, text, booleans, state codes, tokens, and full-width times.
+Canonical runtime persistence also performs a bounded lookup by exact agent and operation. No row
+means an ordinary direct event; one complete project row supplies authoring provenance; multiple
+rows are an identity conflict. A matching migrated row with absent provenance is deliberately not
+reclassified as direct history.
 Projection repair excludes every harness operational table. Close/reopen preserves leases, ready
 sessions, deliveries, and partial event checkpoints without ever persisting environment values.
 

@@ -329,6 +329,11 @@ enum HarnessRequest {
         submission_id: hq_domain::MessageId,
         reply: SyncSender<Result<Option<crate::StoredHarnessDelivery>, StoreError>>,
     },
+    DeliveryForOperation {
+        agent_id: AgentId,
+        operation_id: OperationId,
+        reply: SyncSender<Result<Option<crate::StoredHarnessDelivery>, StoreError>>,
+    },
     RunnableDeliveries {
         agent_id: AgentId,
         limit: usize,
@@ -729,6 +734,27 @@ impl HarnessStateHandle {
                 submission_id,
                 reply,
             })))
+            .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
+        response
+            .recv()
+            .map_err(|_| StoreError::new(StoreErrorClass::WorkerStopped))?
+    }
+
+    /// Loads the unique durable delivery associated with one provider operation.
+    pub fn delivery_for_operation(
+        &self,
+        agent_id: AgentId,
+        operation_id: OperationId,
+    ) -> Result<Option<crate::StoredHarnessDelivery>, StoreError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(Request::Harness(Box::new(
+                HarnessRequest::DeliveryForOperation {
+                    agent_id,
+                    operation_id,
+                    reply,
+                },
+            )))
             .map_err(|_| StoreError::new(StoreErrorClass::ActorClosed))?;
         response
             .recv()
@@ -1433,6 +1459,14 @@ fn handle_harness_request(database: &mut Database, request: HarnessRequest) {
             reply,
         } => {
             let _ = reply.send(database.load_harness_delivery(agent_id, submission_id));
+        }
+        HarnessRequest::DeliveryForOperation {
+            agent_id,
+            operation_id,
+            reply,
+        } => {
+            let _ =
+                reply.send(database.load_harness_delivery_for_operation(agent_id, operation_id));
         }
         HarnessRequest::RunnableDeliveries {
             agent_id,

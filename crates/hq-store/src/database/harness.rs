@@ -740,6 +740,37 @@ pub(super) fn load_delivery(
         .transpose()
 }
 
+pub(super) fn load_delivery_for_operation(
+    connection: &Connection,
+    agent_id: AgentId,
+    operation_id: hq_domain::OperationId,
+) -> Result<Option<StoredHarnessDelivery>, StoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT agent_id, provider_id, session_id, submission_id, digest, operation_id, \
+                    project_id, dispatch_id, assignment_id, project_thread_id, input_sequence, \
+                    body, queued_at_millis, delivery_state \
+             FROM harness_deliveries WHERE agent_id = ?1 AND operation_id = ?2 LIMIT 2",
+        )
+        .map_err(database)?;
+    let deliveries = statement
+        .query_map(
+            params![
+                agent_id.as_bytes().as_slice(),
+                operation_id.as_bytes().as_slice()
+            ],
+            delivery_row,
+        )
+        .map_err(database)?
+        .map(|row| decode_delivery(row.map_err(database)?))
+        .collect::<Result<Vec<_>, _>>()?;
+    match deliveries.as_slice() {
+        [] => Ok(None),
+        [delivery] => Ok(Some(delivery.clone())),
+        _ => Err(conflict()),
+    }
+}
+
 fn load_event(
     connection: &Connection,
     agent_id: AgentId,
