@@ -237,8 +237,8 @@ fn installed_tui_new_launcher_explains_all_three_intents() {
         "Work with an agent on a project",
         "direct",
         "message:",
-        "personal",
-        "note:",
+        "Write a personal",
+        "yourself",
     ] {
         assert!(
             run.bytes

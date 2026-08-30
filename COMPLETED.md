@@ -1,5 +1,49 @@
 # Completed
 
+## 2026-08-29 — Clap-owned CLI grammar and generated help
+
+Replaced the installed client's handwritten parser and duplicated help matrix with one private,
+state-free Clap grammar. Clap 4.6.6 is workspace-pinned with only the std, help, usage, and
+error-context features. The grammar owns the complete command tree, global option placement,
+cardinality, defaults, conflicts, paired provider/session options, set/clear and archive/all
+choices, assignment session modes, repeated relay hints, and explicit destructive confirmation.
+The mapping boundary preserves the existing closed command types and keeps domain validation for
+IDs, names, durations, content, relays, and paths outside Clap.
+
+Root, command, and deeply nested help are generated from the same grammar and retain operational
+and safety guidance. Clap never prints, exits, or exposes rejected values: human and JSON failures
+continue through HQ's stable redacted usage diagnostic. Raw non-UTF operating-system paths remain
+accepted where commands take PathBuf values, textual values remain UTF-8, global options now work
+before or after subcommands, and both --output json and --output=json select typed errors. The
+executable's separate bare-terminal TUI/list default remains unchanged.
+
+Parser and help tests now cover generated nesting, relationships, global placement, raw paths, and
+redaction. The Rust CLI guide documents the authoritative generated grammar. An older PTY assertion
+was made robust against Ratatui differential cursor output while preserving its three-intent copy
+contract. Formatting, architecture verification, locked workspace check/test/build, strict
+workspace Clippy, and the dependency-policy audit pass; all 25 installed CLI scenarios, 12 PTY
+scenarios, 77 node unit tests, 68 TUI model tests, and 29 render contracts pass.
+
+### Original plan entry
+
+### Replace the handwritten CLI grammar with Clap
+
+Inventory the current accepted and rejected invocation matrix, decide the intended grammar, then replace the handwritten command grammar with a minimally featured, workspace-pinned Clap dependency. Backwards compatibility is explicitly a non-goal because HQ has not shipped: preserve the valuable architectural and safety boundaries, but freely simplify command spelling, option relationships, help, diagnostics, and structured output where the new grammar exposes a better design. Update tests, documentation, and internal consumers atomically for every intentional change.
+
+- Add Clap to the workspace and `hq-node` dependency manifests, with only the features the grammar adapter needs, and update the lockfile. The dependency must pass the repository's dependency-policy audit and remain isolated to the CLI adapter.
+- Introduce a private Clap grammar representation, preferably in a focused module such as `crates/hq-node/src/cli/grammar.rs`. Clap should own the root and nested command tree, positional and option cardinality, defaults, aliases, conflicts, requirements, and generated help. Keep `parse_cli` as the state-free `OsString` entry point and map the private representation into the existing `CliInvocation`/`CliCommand` tree so execution code does not become coupled to Clap.
+- Keep HQ domain validation custom: canonical 32-byte IDs, agent and provider names, durations, bounded content and labels, relay URLs and hints, and absolute/canonical path policy should continue through existing constructors or narrowly scoped value parsers. Preserve raw non-UTF path support everywhere the current parser accepts `PathBuf`, while continuing to reject non-UTF values for textual fields.
+- Review and deliberately model option relationships such as provider/session pairs, `--archived` versus `--all`, rename clear versus display name, project activation and handoff session choices, destructive confirmation, repeated relay hints, and the TUI's output-mode restriction. Existing relationships are design input, not compatibility requirements; prefer the clearest consistent Clap-native grammar and document intentional changes.
+- Do not allow Clap to print, terminate the process, or expose rejected argument values. Preserve diagnostic redaction as a security property and produce a consistent nonzero usage-error class. Help, version, human diagnostics, and the `hq-cli-output-v1` JSON shape may be revised rather than emulated if doing so yields a cleaner contract; keep HQ's authoritative build/protocol version data and update all affected tests, docs, and consumers together.
+- Replace the manually duplicated grammar in `help_text` with Clap-generated root and nested help, while carrying forward all operational and safety guidance as command metadata such as `long_about` or `after_help`. Snapshot command ordering, usage, required arguments, conflicts, aliases, and semantic warnings so generated help remains intentional and reviewable.
+- Keep the executable's pre-parse TTY default outside Clap: bare `hq`, including invocations containing only global options, must continue to choose `tui` when stdin and stdout are terminals and `list` otherwise. Preserve daemon descriptor isolation, TUI dispatch, password-stdin selection, and the no-prompt/state-free parsing boundary in `crates/hq-node/src/bin/hq.rs`.
+- Remove the handwritten `parse_*` grammar functions and obsolete help matrix only after tests cover the intended behavior for every command family; duplicate, unknown, missing, and conflicting options; invalid UTF-8 text versus raw paths; value bounds and invalid absolute paths; help and version; global-option placement; diagnostic redaction; JSON errors; and bare TTY/non-TTY behavior. Use the existing unit tests, installed-CLI tests, and CLI behavior ledger as an inventory of cases to reconsider, not as a compatibility baseline; delete or rewrite assertions that only preserve accidental parser behavior.
+- Update `docs/rust/cli.md` for the resulting command semantics and to explain that Clap owns command grammar and generated help. Finish with formatting, architecture verification, locked workspace check/test/build, strict Clippy, and the dependency-policy audit.
+
+Shell completions and broader execution-layer decomposition are out of scope.
+
+
+
 ## 2026-08-29 — First-run guidance and fresh-user acceptance
 
 Turned bare interactive `hq` into one ordered first-run journey. Missing device identity now fails

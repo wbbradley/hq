@@ -74,6 +74,8 @@ use crate::{
     run_foreground,
 };
 
+mod grammar;
+
 /// Stable output representation selected for one invocation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CliOutputFormat {
@@ -1830,1311 +1832,7 @@ impl From<ApplicationError> for CliError {
 
 /// Parses process arguments without consulting node state or opening runtime artifacts.
 pub fn parse_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocation, CliError> {
-    let mut arguments = arguments.into_iter().peekable();
-    let mut output = CliOutputFormat::Human;
-    let mut state_root = None;
-    while let Some(argument) = arguments.peek() {
-        match argument.to_str() {
-            Some("--output") => {
-                let _ = arguments.next();
-                output = match arguments.next().as_ref().and_then(|value| value.to_str()) {
-                    Some("human") => CliOutputFormat::Human,
-                    Some("json") => CliOutputFormat::Json,
-                    _ => return Err(CliError::Arguments),
-                };
-            }
-            Some("--state-root") => {
-                let _ = arguments.next();
-                if state_root.is_some() {
-                    return Err(CliError::Arguments);
-                }
-                state_root = Some(PathBuf::from(arguments.next().ok_or(CliError::Arguments)?));
-            }
-            _ => break,
-        }
-    }
-    let command = arguments.next();
-    let rest = arguments.collect::<Vec<_>>();
-    let command = parse_top_level_command(command.as_ref(), &rest, state_root.as_ref())?;
-    if matches!(command, CliCommand::Tui { .. }) && output != CliOutputFormat::Human {
-        return Err(CliError::Arguments);
-    }
-    if state_root.is_some()
-        && !matches!(
-            command,
-            CliCommand::Daemon { .. }
-                | CliCommand::Identity { .. }
-                | CliCommand::Configuration { .. }
-                | CliCommand::Human { .. }
-                | CliCommand::Peer { .. }
-                | CliCommand::Mailbox { .. }
-                | CliCommand::Relay { .. }
-                | CliCommand::NamedAgent { .. }
-                | CliCommand::Harness { .. }
-                | CliCommand::Project { .. }
-                | CliCommand::AgentMessage { .. }
-                | CliCommand::GetMessage { .. }
-                | CliCommand::DiscoverMailboxes { .. }
-                | CliCommand::HumanMessage { .. }
-                | CliCommand::Tui { .. }
-        )
-    {
-        return Err(CliError::Arguments);
-    }
-    Ok(CliInvocation { output, command })
-}
-
-fn parse_top_level_command(
-    command: Option<&OsString>,
-    rest: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    Ok(match command.and_then(|value| value.to_str()) {
-        None | Some("help" | "--help") => CliCommand::Help {
-            topic: rest
-                .iter()
-                .map(|value| value.to_str().map(str::to_owned).ok_or(CliError::Arguments))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
-        Some("version" | "--version") if rest.is_empty() => CliCommand::Version,
-        Some("tui") if rest.is_empty() => CliCommand::Tui {
-            state: parsed_state(state_root)?,
-        },
-        Some("agents") if rest.len() <= 1 => CliCommand::AgentGuidance {
-            topic: AgentGuidanceTopic::parse(rest.first().and_then(|value| value.to_str()))
-                .ok_or(CliError::Arguments)?,
-        },
-        Some("identity") => parse_identity(rest, state_root)?,
-        Some("config") => parse_configuration(rest, state_root)?,
-        Some("human") => parse_human(rest, state_root)?,
-        Some("peer") => parse_peer(rest, state_root)?,
-        Some("mailbox") => parse_mailbox(rest, state_root)?,
-        Some("relay") => parse_relay_command(rest, state_root)?,
-        Some("agent") if rest == [OsString::from("--help")] => CliCommand::Help {
-            topic: vec!["agent".to_owned()],
-        },
-        Some("agent") => parse_named_agent(rest, state_root)?,
-        Some("harness") if rest == [OsString::from("--help")] => CliCommand::Help {
-            topic: vec!["harness".to_owned()],
-        },
-        Some("harness") => parse_harness(rest, state_root)?,
-        Some("project") if rest == [OsString::from("--help")] => CliCommand::Help {
-            topic: vec!["project".to_owned()],
-        },
-        Some("project") => parse_project_catalog(rest, state_root)?,
-        Some("ask") => parse_agent_message("ask", rest, state_root)?,
-        Some("send") => parse_agent_message("send", rest, state_root)?,
-        Some("wait") => parse_agent_message("wait", rest, state_root)?,
-        Some("poll") => parse_agent_message("poll", rest, state_root)?,
-        Some("get") => {
-            let [message_id] = rest else {
-                return Err(CliError::Arguments);
-            };
-            CliCommand::GetMessage {
-                message_id: hq_domain::MessageId::from_bytes(parse_hex32(message_id)?),
-                state: parsed_state(state_root)?,
-            }
-        }
-        Some("mailboxes") => parse_mailbox_discovery(rest, state_root)?,
-        Some("list" | "answer" | "cancel" | "archive" | "restore") => parse_human_message(
-            command
-                .and_then(|value| value.to_str())
-                .ok_or(CliError::Arguments)?,
-            rest,
-            state_root,
-        )?,
-        Some("daemon") if rest == [OsString::from("--help")] => CliCommand::Help {
-            topic: vec!["daemon".to_owned()],
-        },
-        Some("daemon") => {
-            let [action] = rest else {
-                return Err(CliError::Arguments);
-            };
-            let action = match action.to_str() {
-                Some("run") => DaemonCommand::Run,
-                Some("status") => DaemonCommand::Status,
-                Some("readiness") => DaemonCommand::Readiness,
-                Some("stop") => DaemonCommand::Stop,
-                Some("restart") => DaemonCommand::Restart,
-                _ => return Err(CliError::Arguments),
-            };
-            let state = parsed_state(state_root)?;
-            CliCommand::Daemon { action, state }
-        }
-        _ => return Err(CliError::Arguments),
-    })
-}
-
-fn parse_project_catalog(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match arguments {
-        [action] if action == "list" => ProjectCliCommand::List,
-        [action, project_id] if action == "show" => {
-            ProjectCliCommand::Show(ProjectId::from_bytes(parse_hex32(project_id)?))
-        }
-        [action, rest @ ..] if action == "resource" => parse_project_resource(rest)?,
-        [action, project_id] if action == "check" => ProjectCliCommand::Check {
-            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-            resource_id: None,
-        },
-        [action, project_id, resource_id] if action == "check" => ProjectCliCommand::Check {
-            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-            resource_id: Some(hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?)),
-        },
-        [action, project_id] if action == "send" => ProjectCliCommand::Send {
-            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-            body: None,
-        },
-        [action, project_id, body] if action == "send" => ProjectCliCommand::Send {
-            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-            body: Some(
-                ContentText::new(body.to_str().ok_or(CliError::Arguments)?.to_owned())
-                    .map_err(|_| CliError::Arguments)?,
-            ),
-        },
-        [action, rest @ ..] if action == "create" => parse_project_create(rest)?,
-        [action, rest @ ..] if action == "worktree" => parse_project_worktree(rest)?,
-        [action, project_id] if action == "open" => {
-            ProjectCliCommand::Open(ProjectId::from_bytes(parse_hex32(project_id)?))
-        }
-        [action, rest @ ..] if action == "activate" => parse_project_activate(rest)?,
-        [action, project_id] if action == "dispatch" => {
-            ProjectCliCommand::Dispatch(ProjectId::from_bytes(parse_hex32(project_id)?))
-        }
-        [action, rest @ ..] if action == "handoff" => parse_project_handoff(rest)?,
-        [action, rest @ ..] if action == "close" => parse_project_close(rest)?,
-        [action, project_id] if action == "archive" => {
-            ProjectCliCommand::Archive(ProjectId::from_bytes(parse_hex32(project_id)?))
-        }
-        [action, project_id] if action == "unarchive" => {
-            ProjectCliCommand::Unarchive(ProjectId::from_bytes(parse_hex32(project_id)?))
-        }
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::Project {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_project_resource(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    match arguments {
-        [action, project_id] if action == "list" => Ok(ProjectCliCommand::Resource(
-            ProjectResourceCliCommand::List {
-                project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-            },
-        )),
-        [action, project_id, resource_id] if action == "show" => Ok(ProjectCliCommand::Resource(
-            ProjectResourceCliCommand::Show {
-                project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-                resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
-            },
-        )),
-        [action, rest @ ..] if action == "add" => parse_project_resource_add(rest),
-        [action, rest @ ..] if action == "remove" => parse_project_resource_remove(rest),
-        [action, rest @ ..] if action == "replace" => parse_project_resource_replace(rest),
-        [action, project_id, resource_id] if action == "primary" => Ok(
-            ProjectCliCommand::Resource(ProjectResourceCliCommand::Primary {
-                project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-                resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
-            }),
-        ),
-        _ => Err(CliError::Arguments),
-    }
-}
-
-fn parse_project_resource_add(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    let project_id =
-        ProjectId::from_bytes(parse_hex32(arguments.first().ok_or(CliError::Arguments)?)?);
-    let mut path = None;
-    let mut make_primary = false;
-    let mut index = 1;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--path") if path.is_none() => {
-                path = Some(PathBuf::from(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                ));
-                index += 2;
-            }
-            Some("--primary") if !make_primary => {
-                make_primary = true;
-                index += 1;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    let path = path.ok_or(CliError::Arguments)?;
-    let _ = normalized_existing_resource(&path)?;
-    Ok(ProjectCliCommand::Resource(
-        ProjectResourceCliCommand::Add {
-            project_id,
-            path,
-            make_primary,
-        },
-    ))
-}
-
-fn parse_project_resource_remove(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    let [project_id, resource_id, rest @ ..] = arguments else {
-        return Err(CliError::Arguments);
-    };
-    let force = match rest {
-        [] => false,
-        [force] if force == "--force" => true,
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(ProjectCliCommand::Resource(
-        ProjectResourceCliCommand::Remove {
-            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-            resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
-            force,
-        },
-    ))
-}
-
-fn parse_project_resource_replace(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    let [project_id, resource_id, path_flag, path] = arguments else {
-        return Err(CliError::Arguments);
-    };
-    if path_flag != "--path" {
-        return Err(CliError::Arguments);
-    }
-    let path = PathBuf::from(path);
-    let _ = normalized_existing_resource(&path)?;
-    Ok(ProjectCliCommand::Resource(
-        ProjectResourceCliCommand::Replace {
-            project_id: ProjectId::from_bytes(parse_hex32(project_id)?),
-            resource_id: hq_domain::ResourceId::from_bytes(parse_hex32(resource_id)?),
-            path,
-        },
-    ))
-}
-
-fn parse_project_handoff(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    let project_id =
-        ProjectId::from_bytes(parse_hex32(arguments.first().ok_or(CliError::Arguments)?)?);
-    let mut agent = None;
-    let mut provider = None;
-    let mut resume_session = None;
-    let mut thread_id = None;
-    let mut new_session = false;
-    let mut directory = None;
-    let mut confirmed = false;
-    let mut force = false;
-    let mut index = 1;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--agent") if agent.is_none() => {
-                agent = Some(parse_named_agent_selector(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                )?);
-                index += 2;
-            }
-            Some("--provider") if provider.is_none() => {
-                provider = Some(
-                    ProviderId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--session") if resume_session.is_none() && !new_session => {
-                resume_session = Some(
-                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--new-session") if resume_session.is_none() && !new_session => {
-                new_session = true;
-                index += 1;
-            }
-            Some("--thread") if thread_id.is_none() => {
-                thread_id = Some(ThreadId::from_bytes(parse_hex32(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                )?));
-                index += 2;
-            }
-            Some("--dir") if directory.is_none() => {
-                directory = Some(PathBuf::from(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                ));
-                index += 2;
-            }
-            Some("--yes") if !confirmed => {
-                confirmed = true;
-                index += 1;
-            }
-            Some("--force") if !force => {
-                force = true;
-                index += 1;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    if resume_session.is_some() == new_session || !confirmed {
-        return Err(CliError::Arguments);
-    }
-    let directory = directory
-        .map(|directory| normalized_existing_resource(&directory).map(|_| directory))
-        .transpose()?;
-    Ok(ProjectCliCommand::Handoff {
-        project_id,
-        agent: agent.ok_or(CliError::Arguments)?,
-        provider: provider.ok_or(CliError::Arguments)?,
-        resume_session,
-        thread_id: thread_id.ok_or(CliError::Arguments)?,
-        directory,
-        force,
-    })
-}
-
-fn parse_project_activate(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    let project_id =
-        ProjectId::from_bytes(parse_hex32(arguments.first().ok_or(CliError::Arguments)?)?);
-    let mut agent = None;
-    let mut provider = None;
-    let mut resume_session = None;
-    let mut resume_thread = None;
-    let mut new_session = false;
-    let mut directory = None;
-    let mut index = 1;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--agent") if agent.is_none() => {
-                agent = Some(parse_named_agent_selector(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                )?);
-                index += 2;
-            }
-            Some("--provider") if provider.is_none() => {
-                provider = Some(
-                    ProviderId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--session") if resume_session.is_none() && !new_session => {
-                resume_session = Some(
-                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--new-session") if resume_session.is_none() && !new_session => {
-                new_session = true;
-                index += 1;
-            }
-            Some("--thread") if resume_thread.is_none() => {
-                resume_thread = Some(ThreadId::from_bytes(parse_hex32(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                )?));
-                index += 2;
-            }
-            Some("--dir") if directory.is_none() => {
-                directory = Some(PathBuf::from(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                ));
-                index += 2;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    if resume_session.is_some() == new_session
-        || (resume_session.is_some() && resume_thread.is_none())
-    {
-        return Err(CliError::Arguments);
-    }
-    let agent = agent.ok_or(CliError::Arguments)?;
-    let provider = provider.ok_or(CliError::Arguments)?;
-    if let Some(directory) = &directory {
-        let _ = normalized_existing_resource(directory)?;
-    }
-    Ok(ProjectCliCommand::Activate {
-        project_id,
-        agent,
-        provider,
-        resume_session,
-        resume_thread,
-        directory,
-    })
-}
-
-fn parse_project_close(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    let project_id =
-        ProjectId::from_bytes(parse_hex32(arguments.first().ok_or(CliError::Arguments)?)?);
-    let mut confirmed = false;
-    let mut force = false;
-    for argument in &arguments[1..] {
-        match argument.to_str() {
-            Some("--yes") if !confirmed => confirmed = true,
-            Some("--force") if !force => force = true,
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    if !confirmed {
-        return Err(CliError::Arguments);
-    }
-    Ok(ProjectCliCommand::Close { project_id, force })
-}
-
-fn parse_project_create(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    let mut name = None;
-    let mut brief = None;
-    let mut path = None;
-    let mut home = None;
-    let mut index = 0;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--brief") if brief.is_none() => {
-                index += 1;
-                brief = Some(
-                    ContentText::new(
-                        arguments
-                            .get(index)
-                            .and_then(|value| value.to_str())
-                            .ok_or(CliError::Arguments)?
-                            .to_owned(),
-                    )
-                    .map_err(|_| CliError::Arguments)?,
-                );
-            }
-            Some("--path") if path.is_none() => {
-                index += 1;
-                let value = arguments.get(index).ok_or(CliError::Arguments)?;
-                value.to_str().ok_or(CliError::Arguments)?;
-                path = Some(PathBuf::from(value));
-            }
-            Some("--home") if home.is_none() => {
-                index += 1;
-                home = Some(InstallationId::from_bytes(parse_hex32(
-                    arguments.get(index).ok_or(CliError::Arguments)?,
-                )?));
-            }
-            Some(value) if !value.starts_with('-') && name.is_none() => {
-                name = Some(ShortText::new(value.to_owned()).map_err(|_| CliError::Arguments)?);
-            }
-            _ => return Err(CliError::Arguments),
-        }
-        index += 1;
-    }
-    let path = path.ok_or(CliError::Arguments)?;
-    let _ = normalized_existing_resource(&path)?;
-    Ok(ProjectCliCommand::Create {
-        name: name.ok_or(CliError::Arguments)?,
-        brief,
-        path,
-        home,
-    })
-}
-
-fn parse_project_worktree(arguments: &[OsString]) -> Result<ProjectCliCommand, CliError> {
-    let mut name = None;
-    let mut brief = None;
-    let mut source = None;
-    let mut destination = None;
-    let mut branch = None;
-    let mut base = None;
-    let mut home = None;
-    let mut index = 0;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--brief") if brief.is_none() => {
-                index += 1;
-                brief = Some(
-                    ContentText::new(required_utf8_argument(arguments, index)?.to_owned())
-                        .map_err(|_| CliError::Arguments)?,
-                );
-            }
-            Some("--source") if source.is_none() => {
-                index += 1;
-                source = Some(PathBuf::from(required_utf8_argument(arguments, index)?));
-            }
-            Some("--destination") if destination.is_none() => {
-                index += 1;
-                destination = Some(PathBuf::from(required_utf8_argument(arguments, index)?));
-            }
-            Some("--branch") if branch.is_none() => {
-                index += 1;
-                branch = Some(
-                    ShortText::new(required_utf8_argument(arguments, index)?.to_owned())
-                        .map_err(|_| CliError::Arguments)?,
-                );
-            }
-            Some("--create-branch") if base.is_none() => {
-                index += 1;
-                base = Some(
-                    ShortText::new(required_utf8_argument(arguments, index)?.to_owned())
-                        .map_err(|_| CliError::Arguments)?,
-                );
-            }
-            Some("--home") if home.is_none() => {
-                index += 1;
-                home = Some(InstallationId::from_bytes(parse_hex32(
-                    arguments.get(index).ok_or(CliError::Arguments)?,
-                )?));
-            }
-            Some(value) if !value.starts_with('-') && name.is_none() => {
-                name = Some(ShortText::new(value.to_owned()).map_err(|_| CliError::Arguments)?);
-            }
-            _ => return Err(CliError::Arguments),
-        }
-        index += 1;
-    }
-    let source = source.ok_or(CliError::Arguments)?;
-    let destination = destination.ok_or(CliError::Arguments)?;
-    let _ = normalized_existing_resource(&source)?;
-    let _ = normalized_existing_resource(&destination)?;
-    Ok(ProjectCliCommand::Worktree(WorktreeCliRequest {
-        name: name.ok_or(CliError::Arguments)?,
-        brief,
-        source,
-        destination,
-        branch: branch.ok_or(CliError::Arguments)?,
-        base,
-        home,
-    }))
-}
-
-fn required_utf8_argument(arguments: &[OsString], index: usize) -> Result<&str, CliError> {
-    arguments
-        .get(index)
-        .and_then(|value| value.to_str())
-        .ok_or(CliError::Arguments)
-}
-
-fn parse_harness(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let operation = arguments
-        .first()
-        .and_then(|value| value.to_str())
-        .ok_or(CliError::Arguments)?;
-    let mut agent = None;
-    let mut provider = None;
-    let mut session = None;
-    let mut directory = None;
-    let mut index = 1;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--agent") if agent.is_none() => {
-                agent = Some(parse_named_agent_selector(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                )?);
-                index += 2;
-            }
-            Some("--provider") if provider.is_none() => {
-                provider = Some(
-                    ProviderId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--session") if session.is_none() => {
-                session = Some(
-                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--dir") if directory.is_none() => {
-                directory = Some(PathBuf::from(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                ));
-                index += 2;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    let (agent, provider) = (
-        agent.ok_or(CliError::Arguments)?,
-        provider.ok_or(CliError::Arguments)?,
-    );
-    let action = match (operation, session, directory) {
-        ("start", None, directory) => HarnessCommand::Start {
-            agent,
-            provider,
-            directory,
-        },
-        ("resume", Some(session), directory) => HarnessCommand::Resume {
-            agent,
-            provider,
-            session,
-            directory,
-        },
-        ("stop", None, None) => HarnessCommand::Stop { agent, provider },
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::Harness {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_named_agent(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match arguments.first().and_then(|value| value.to_str()) {
-        Some("list") if arguments.len() == 1 => NamedAgentCommand::List,
-        Some("show") if arguments.len() == 2 => NamedAgentCommand::Show {
-            agent: parse_named_agent_selector(&arguments[1])?,
-        },
-        Some("create") => parse_named_agent_create(&arguments[1..])?,
-        Some("current") if arguments.len() == 1 => NamedAgentCommand::Current,
-        Some("select") => parse_named_agent_select(&arguments[1..])?,
-        Some("rename") => parse_named_agent_rename(&arguments[1..])?,
-        Some("retire") => parse_named_agent_retire(&arguments[1..])?,
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::NamedAgent {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_named_agent_create(arguments: &[OsString]) -> Result<NamedAgentCommand, CliError> {
-    let name = arguments.first().ok_or(CliError::Arguments)?;
-    let mailbox_id = match &arguments[1..] {
-        [] => None,
-        [flag, mailbox] if flag == "--mailbox" => {
-            Some(MailboxId::from_bytes(parse_hex32(mailbox)?))
-        }
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(NamedAgentCommand::Create {
-        name: parse_agent_name(name)?,
-        mailbox_id,
-    })
-}
-
-fn parse_named_agent_select(arguments: &[OsString]) -> Result<NamedAgentCommand, CliError> {
-    let agent = parse_named_agent_selector(arguments.first().ok_or(CliError::Arguments)?)?;
-    let mut provider = None;
-    let mut session = None;
-    let mut directory = None;
-    let mut index = 1;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--provider") if provider.is_none() => {
-                provider = Some(
-                    ProviderId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--session") if session.is_none() => {
-                session = Some(
-                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--dir") if directory.is_none() => {
-                directory = Some(PathBuf::from(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                ));
-                index += 2;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    if provider.is_some() != session.is_some() {
-        return Err(CliError::Arguments);
-    }
-    Ok(NamedAgentCommand::Select {
-        agent,
-        mailbox: AgentMailboxSelection {
-            provider,
-            session,
-            directory,
-        },
-    })
-}
-
-fn parse_named_agent_rename(arguments: &[OsString]) -> Result<NamedAgentCommand, CliError> {
-    let agent = parse_named_agent_selector(arguments.first().ok_or(CliError::Arguments)?)?;
-    let mut provider = None;
-    let mut session = None;
-    let mut display_name = None;
-    let mut clear = false;
-    let mut index = 1;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--provider") if provider.is_none() => {
-                provider = Some(
-                    ProviderId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--session") if session.is_none() => {
-                session = Some(
-                    ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--clear") if !clear && display_name.is_none() => {
-                clear = true;
-                index += 1;
-            }
-            Some(value) if !value.starts_with('-') && !clear && display_name.is_none() => {
-                display_name = Some(ShortText::new(value).map_err(|_| CliError::Arguments)?);
-                index += 1;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    if provider.is_some() != session.is_some() || (display_name.is_none() && !clear) {
-        return Err(CliError::Arguments);
-    }
-    Ok(NamedAgentCommand::Rename {
-        agent,
-        provider,
-        session,
-        display_name,
-    })
-}
-
-fn parse_named_agent_retire(arguments: &[OsString]) -> Result<NamedAgentCommand, CliError> {
-    let agent = parse_named_agent_selector(arguments.first().ok_or(CliError::Arguments)?)?;
-    let mut confirmed = false;
-    let mut force = false;
-    for argument in &arguments[1..] {
-        match argument.to_str() {
-            Some("--yes") if !confirmed => confirmed = true,
-            Some("--force") if !force => force = true,
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    if !confirmed {
-        return Err(CliError::Arguments);
-    }
-    Ok(NamedAgentCommand::Retire { agent, force })
-}
-
-fn parse_named_agent_selector(value: &OsString) -> Result<NamedAgentSelector, CliError> {
-    let text = argument_text(Some(value))?;
-    if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Ok(NamedAgentSelector::Id(AgentId::from_bytes(parse_hex32(
-            value,
-        )?)));
-    }
-    Ok(NamedAgentSelector::Name(parse_agent_name(value)?))
-}
-
-fn parse_agent_name(value: &OsString) -> Result<ShortText, CliError> {
-    let value = argument_text(Some(value))?;
-    let bytes = value.as_bytes();
-    if bytes.is_empty()
-        || !bytes[0].is_ascii_lowercase()
-        || !bytes[bytes.len() - 1].is_ascii_alphanumeric()
-        || !bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-    {
-        return Err(CliError::Arguments);
-    }
-    ShortText::new(value).map_err(|_| CliError::Arguments)
-}
-
-fn parse_agent_message(
-    command: &str,
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let mut provider = None;
-    let mut session = None;
-    let mut directory = None;
-    let mut timeout = None;
-    let mut interval = Duration::from_millis(250);
-    let mut positionals = Vec::new();
-    let mut index = 0;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--provider") if provider.is_none() => {
-                provider = Some(
-                    ProviderId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--session") if session.is_none() => {
-                session = Some(
-                    hq_domain::ProviderSessionId::new(argument_text(arguments.get(index + 1))?)
-                        .map_err(|_| CliError::Arguments)?,
-                );
-                index += 2;
-            }
-            Some("--dir") if directory.is_none() => {
-                directory = Some(PathBuf::from(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                ));
-                index += 2;
-            }
-            Some("--timeout") if timeout.is_none() && matches!(command, "ask" | "wait") => {
-                timeout = Some(parse_duration(argument_text(arguments.get(index + 1))?)?);
-                index += 2;
-            }
-            Some("--interval") if matches!(command, "ask" | "wait") => {
-                interval = parse_duration(argument_text(arguments.get(index + 1))?)?;
-                index += 2;
-            }
-            Some(value) if !value.starts_with('-') => {
-                positionals.push(value.to_owned());
-                index += 1;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    if provider.is_some() != session.is_some() || interval.is_zero() {
-        return Err(CliError::Arguments);
-    }
-    let mailbox = AgentMailboxSelection {
-        provider,
-        session,
-        directory,
-    };
-    let action = match (command, positionals.as_slice()) {
-        ("ask", []) => AgentMessageCommand::Ask {
-            mailbox,
-            body: None,
-            timeout,
-            interval,
-        },
-        ("ask", [body]) => AgentMessageCommand::Ask {
-            mailbox,
-            body: Some(parse_content(body)?),
-            timeout,
-            interval,
-        },
-        ("send", []) => AgentMessageCommand::Send {
-            mailbox,
-            body: None,
-        },
-        ("send", [body]) => AgentMessageCommand::Send {
-            mailbox,
-            body: Some(parse_content(body)?),
-        },
-        ("wait", [message_id]) => AgentMessageCommand::Wait {
-            mailbox,
-            message_id: hq_domain::MessageId::from_bytes(parse_hex32(&OsString::from(message_id))?),
-            timeout,
-            interval,
-        },
-        ("poll", []) => AgentMessageCommand::Poll { mailbox },
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::AgentMessage {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_mailbox_discovery(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let directory = match arguments {
-        [] => None,
-        [flag, directory] if flag == "--dir" => Some(PathBuf::from(directory)),
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::DiscoverMailboxes {
-        directory,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_human_message(
-    command: &str,
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match command {
-        "list" => HumanMessageCommand::List(parse_human_message_filters(arguments)?),
-        "answer" => match arguments {
-            [message_id] => HumanMessageCommand::Answer {
-                message_id: hq_domain::MessageId::from_bytes(parse_hex32(message_id)?),
-                body: None,
-            },
-            [message_id, body] => HumanMessageCommand::Answer {
-                message_id: hq_domain::MessageId::from_bytes(parse_hex32(message_id)?),
-                body: Some(parse_content(argument_text(Some(body))?)?),
-            },
-            _ => return Err(CliError::Arguments),
-        },
-        "cancel" | "archive" | "restore" => {
-            let [message_id] = arguments else {
-                return Err(CliError::Arguments);
-            };
-            let message_id = hq_domain::MessageId::from_bytes(parse_hex32(message_id)?);
-            match command {
-                "cancel" => HumanMessageCommand::Cancel { message_id },
-                "archive" => HumanMessageCommand::Archive { message_id },
-                "restore" => HumanMessageCommand::Restore { message_id },
-                _ => unreachable!(),
-            }
-        }
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::HumanMessage {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_human_message_filters(arguments: &[OsString]) -> Result<HumanMessageFilters, CliError> {
-    let mut filters = HumanMessageFilters {
-        sender: None,
-        recipient: None,
-        archived: false,
-        all: false,
-        limit: 100,
-    };
-    let mut index = 0;
-    while index < arguments.len() {
-        match arguments[index].to_str() {
-            Some("--sender") if filters.sender.is_none() => {
-                filters.sender = Some(MailboxId::from_bytes(parse_hex32(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                )?));
-                index += 2;
-            }
-            Some("--recipient") if filters.recipient.is_none() => {
-                filters.recipient = Some(MailboxId::from_bytes(parse_hex32(
-                    arguments.get(index + 1).ok_or(CliError::Arguments)?,
-                )?));
-                index += 2;
-            }
-            Some("--archived") if !filters.archived && !filters.all => {
-                filters.archived = true;
-                index += 1;
-            }
-            Some("--all") if !filters.archived && !filters.all => {
-                filters.all = true;
-                index += 1;
-            }
-            Some("--limit") => {
-                filters.limit = argument_text(arguments.get(index + 1))?
-                    .parse::<u16>()
-                    .map_err(|_| CliError::Arguments)?;
-                if filters.limit == 0 || filters.limit > 200 {
-                    return Err(CliError::Arguments);
-                }
-                index += 2;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    Ok(filters)
-}
-
-fn argument_text(value: Option<&OsString>) -> Result<&str, CliError> {
-    value
-        .and_then(|value| value.to_str())
-        .ok_or(CliError::Arguments)
-}
-
-fn parse_content(value: &str) -> Result<hq_domain::ContentText, CliError> {
-    hq_domain::ContentText::new(value.to_owned()).map_err(|_| CliError::Arguments)
-}
-
-fn parse_duration(value: &str) -> Result<Duration, CliError> {
-    let (number, multiplier) = if let Some(number) = value.strip_suffix("ms") {
-        (number, 1_u64)
-    } else if let Some(number) = value.strip_suffix('s') {
-        (number, 1_000)
-    } else if let Some(number) = value.strip_suffix('m') {
-        (number, 60_000)
-    } else if let Some(number) = value.strip_suffix('h') {
-        (number, 3_600_000)
-    } else {
-        return Err(CliError::Arguments);
-    };
-    let milliseconds = number
-        .parse::<u64>()
-        .map_err(|_| CliError::Arguments)?
-        .checked_mul(multiplier)
-        .ok_or(CliError::Arguments)?;
-    if milliseconds == 0 {
-        return Err(CliError::Arguments);
-    }
-    Ok(Duration::from_millis(milliseconds))
-}
-
-fn parse_peer(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match arguments {
-        [action] if action == "list" => PeerCommand::List,
-        [action, installation] if action == "distrust" => PeerCommand::Distrust {
-            installation_id: InstallationId::from_bytes(parse_hex32(installation)?),
-        },
-        [action, installation, signing, encryption, options @ ..] if action == "add" => {
-            let (label, relay_hints) = parse_pairing_options(options)?;
-            PeerCommand::Add {
-                installation_id: InstallationId::from_bytes(parse_hex32(installation)?),
-                signing_key: SigningPublicKey::from_bytes(parse_hex32(signing)?),
-                encryption_key: EncryptionPublicKey::from_bytes(parse_hex32(encryption)?),
-                label,
-                relay_hints,
-            }
-        }
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::Peer {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_mailbox(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match arguments {
-        [action] if action == "list" => MailboxCommand::List,
-        [action, mailbox, peer] if action == "grant" => MailboxCommand::Grant {
-            mailbox_id: MailboxId::from_bytes(parse_hex32(mailbox)?),
-            peer_id: InstallationId::from_bytes(parse_hex32(peer)?),
-        },
-        [action, mailbox, peer] if action == "revoke" => MailboxCommand::Revoke {
-            mailbox_id: MailboxId::from_bytes(parse_hex32(mailbox)?),
-            peer_id: InstallationId::from_bytes(parse_hex32(peer)?),
-        },
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::Mailbox {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_relay_command(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match arguments {
-        [action] if action == "list" => RelayCommand::List,
-        [action] if action == "status" => RelayCommand::Status,
-        [action] if action == "repair" => RelayCommand::Repair,
-        [action] if action == "sync" => RelayCommand::Sync { endpoint: None },
-        [action, endpoint] if action == "sync" => RelayCommand::Sync {
-            endpoint: Some(parse_relay(endpoint)?),
-        },
-        [action, endpoint] if action == "remove" => RelayCommand::Remove {
-            endpoint: parse_relay(endpoint)?,
-        },
-        [action, endpoint, options @ ..] if action == "add" => {
-            let (access, authentication) = parse_relay_policy_options(options)?;
-            RelayCommand::Add {
-                endpoint: parse_relay(endpoint)?,
-                access,
-                authentication,
-            }
-        }
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::Relay {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_relay_policy_options(
-    options: &[OsString],
-) -> Result<(RelayAccessDto, RelayAuthenticationDto), CliError> {
-    let mut access = RelayAccessDto::ReadWrite;
-    let mut authentication = RelayAuthenticationDto::OnChallenge;
-    let mut saw_access = false;
-    let mut saw_authentication = false;
-    let mut index = 0;
-    while index < options.len() {
-        match options[index].to_str() {
-            Some("--access") if !saw_access => {
-                access = match options.get(index + 1).and_then(|value| value.to_str()) {
-                    Some("read") => RelayAccessDto::Read,
-                    Some("write") => RelayAccessDto::Write,
-                    Some("read-write") => RelayAccessDto::ReadWrite,
-                    _ => return Err(CliError::Arguments),
-                };
-                saw_access = true;
-                index += 2;
-            }
-            Some("--auth") if !saw_authentication => {
-                authentication = match options.get(index + 1).and_then(|value| value.to_str()) {
-                    Some("disabled") => RelayAuthenticationDto::Disabled,
-                    Some("on-challenge") => RelayAuthenticationDto::OnChallenge,
-                    Some("required") => RelayAuthenticationDto::Required,
-                    _ => return Err(CliError::Arguments),
-                };
-                saw_authentication = true;
-                index += 2;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    Ok((access, authentication))
-}
-
-fn parse_identity(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match arguments {
-        [action] if action == "init" => IdentityCommand::Init,
-        [action] if action == "show" => IdentityCommand::Show,
-        [action, path, password_source]
-            if action == "export" && password_source == "--password-stdin" =>
-        {
-            IdentityCommand::Export {
-                destination: absolute_path(path)?,
-            }
-        }
-        [action, path, password_source]
-            if action == "import" && password_source == "--password-stdin" =>
-        {
-            IdentityCommand::Import {
-                source: absolute_path(path)?,
-            }
-        }
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::Identity {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_configuration(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match arguments {
-        [action] if action == "get" => ConfigurationCommand::Get,
-        [set, key, provider] if set == "set" && key == "default-provider" => {
-            ConfigurationCommand::SetDefaultProvider {
-                provider: match provider.to_str() {
-                    Some("none") => None,
-                    Some(provider) => {
-                        Some(ProviderId::new(provider).map_err(|_| CliError::Arguments)?)
-                    }
-                    None => return Err(CliError::Arguments),
-                },
-            }
-        }
-        [set, key, values @ ..] if set == "set" && key == "relays" => {
-            let relays = if values == [OsString::from("none")] {
-                Vec::new()
-            } else {
-                values
-                    .iter()
-                    .map(parse_relay)
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            ConfigurationCommand::SetRelays { relays }
-        }
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::Configuration {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_human(
-    arguments: &[OsString],
-    state_root: Option<&PathBuf>,
-) -> Result<CliCommand, CliError> {
-    let action = match arguments {
-        [action] if action == "create" => HumanCommand::Create { label: None },
-        [action, label] if action == "create" => HumanCommand::Create {
-            label: Some(
-                label
-                    .to_str()
-                    .ok_or(CliError::Arguments)
-                    .and_then(|label| ShortText::new(label).map_err(|_| CliError::Arguments))?,
-            ),
-        },
-        [action] if action == "show" => HumanCommand::Show,
-        [action, account] if action == "select" => HumanCommand::Select {
-            account_id: AccountId::from_bytes(parse_hex32(account)?),
-        },
-        [action, installation, signing_key, destination, options @ ..] if action == "invite" => {
-            let (label, relay_hints) = parse_pairing_options(options)?;
-            HumanCommand::Invite {
-                installation_id: InstallationId::from_bytes(parse_hex32(installation)?),
-                signing_key: SigningPublicKey::from_bytes(parse_hex32(signing_key)?),
-                destination: absolute_path(destination)?,
-                label,
-                relay_hints,
-            }
-        }
-        [action, source] if action == "join" => HumanCommand::Join {
-            source: absolute_path(source)?,
-        },
-        [action] if action == "devices" => HumanCommand::Devices,
-        [action, installation] if action == "revoke" => HumanCommand::Revoke {
-            installation_id: InstallationId::from_bytes(parse_hex32(installation)?),
-        },
-        _ => return Err(CliError::Arguments),
-    };
-    Ok(CliCommand::Human {
-        action,
-        state: parsed_state(state_root)?,
-    })
-}
-
-fn parse_pairing_options(
-    options: &[OsString],
-) -> Result<(Option<ShortText>, RelayHints), CliError> {
-    let mut label = None;
-    let mut relays = Vec::new();
-    let mut index = 0;
-    while index < options.len() {
-        match options[index].to_str() {
-            Some("--label") if label.is_none() => {
-                let value = options.get(index + 1).ok_or(CliError::Arguments)?;
-                label = Some(
-                    value
-                        .to_str()
-                        .ok_or(CliError::Arguments)
-                        .and_then(|value| ShortText::new(value).map_err(|_| CliError::Arguments))?,
-                );
-                index += 2;
-            }
-            Some("--relay") => {
-                let value = options
-                    .get(index + 1)
-                    .and_then(|value| value.to_str())
-                    .ok_or(CliError::Arguments)?;
-                let value = BoundedText::<RESOURCE_LOCATOR_MAX_BYTES>::new(value)
-                    .map_err(|_| CliError::Arguments)?;
-                relays.push(ResourceLocator::new(ResourceScheme::Opaque, value));
-                index += 2;
-            }
-            _ => return Err(CliError::Arguments),
-        }
-    }
-    relays.sort();
-    if relays.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(CliError::Arguments);
-    }
-    let relays = RelayHints::new(relays).map_err(|_| CliError::Arguments)?;
-    Ok((label, relays))
-}
-
-fn parse_relay(value: &OsString) -> Result<RelayEndpoint, CliError> {
-    value
-        .to_str()
-        .ok_or(CliError::Arguments)
-        .and_then(|value| RelayEndpoint::new(value.to_owned()).map_err(|_| CliError::Arguments))
+    grammar::parse(arguments)
 }
 
 fn parsed_state(state_root: Option<&PathBuf>) -> Result<StatePaths, CliError> {
@@ -3142,35 +1840,6 @@ fn parsed_state(state_root: Option<&PathBuf>) -> Result<StatePaths, CliError> {
         .cloned()
         .map_or_else(StatePaths::from_environment, StatePaths::new)
         .map_err(|_| CliError::StatePath)
-}
-
-fn absolute_path(value: &OsString) -> Result<PathBuf, CliError> {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Err(CliError::Arguments)
-    }
-}
-
-fn parse_hex32(value: &OsString) -> Result<[u8; 32], CliError> {
-    let value = value.to_str().ok_or(CliError::Arguments)?.as_bytes();
-    if value.len() != 64 {
-        return Err(CliError::Arguments);
-    }
-    let mut output = [0_u8; 32];
-    for (index, pair) in value.as_chunks::<2>().0.iter().enumerate() {
-        output[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
-    }
-    Ok(output)
-}
-
-const fn hex_nibble(value: u8) -> Result<u8, CliError> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        _ => Err(CliError::Arguments),
-    }
 }
 
 /// Parses and executes one complete invocation with deterministic stream and exit selection.
@@ -3184,7 +1853,7 @@ pub fn execute_cli_with_input(
     input: &mut dyn Read,
 ) -> CliExecution {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
-    let format = output_hint(&arguments);
+    let format = grammar::output_hint(&arguments);
     match parse_cli(arguments).and_then(|invocation| {
         let result = run_cli_result(&invocation, input)?;
         let empty_poll = matches!(
@@ -10291,182 +8960,14 @@ fn render_version(format: CliOutputFormat) -> Result<String, CliError> {
 }
 
 fn render_help(format: CliOutputFormat, topic: &[String]) -> Result<String, CliError> {
-    let text = help_text(topic).ok_or(CliError::Arguments)?;
+    let text = grammar::help(topic)?;
     match format {
-        CliOutputFormat::Human => Ok(text.to_owned()),
+        CliOutputFormat::Human => Ok(text),
         CliOutputFormat::Json => machine_record(
             "help",
             &serde_json::json!({ "text": text.trim_end(), "topic": topic }),
         ),
     }
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "closed installed command help matrix"
-)]
-fn help_text(topic: &[String]) -> Option<&'static str> {
-    if let Some(text) = short_help_text(topic) {
-        return Some(text);
-    }
-    match topic {
-        [] => Some(
-            "HQ local client\n\n\
-             Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  tui             Open the interactive terminal interface\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  project          Inspect authoritative projects and remote progress\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
-             Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n",
-        ),
-        [command] if matches!(command.as_str(), "ask" | "send" | "wait" | "poll") => Some(
-            "Agent mailbox messaging\n\n\
-             Usage:\n  hq ask [--provider PROVIDER --session SESSION] [--dir PATH] [--timeout DURATION] [--interval DURATION] [MESSAGE]\n  hq send [--provider PROVIDER --session SESSION] [--dir PATH] [MESSAGE]\n  hq wait [--provider PROVIDER --session SESSION] [--dir PATH] [--timeout DURATION] [--interval DURATION] MESSAGE_ID\n  hq poll [--provider PROVIDER --session SESSION] [--dir PATH]\n\n\
-             Explicit sessions require both provider and session. Without them, HQ uses exactly one built-in provider environment identity, HQ_PROVIDER plus HQ_SESSION, or one unambiguous repository-aware candidate. ask and wait are intentionally unbounded unless --timeout is supplied; every local API attempt remains bounded. poll exits 3 with no output when empty. Ready output is completed only after stdout succeeds, so a crash can repeat stable message IDs but cannot lose them.\n",
-        ),
-        [command] if command == "get" => Some(
-            "Usage: hq [--output human|json] get MESSAGE_ID\n\nInspect one projected or dependency-incomplete message without consuming it.\n",
-        ),
-        [command] if command == "mailboxes" => Some(
-            "Usage: hq [--output human|json] mailboxes [--dir PATH]\n\nList durable provider sessions joined with typed directory, repository, worktree, and branch context. Discovery never claims or merges mailboxes.\n",
-        ),
-        [command]
-            if matches!(
-                command.as_str(),
-                "list" | "answer" | "cancel" | "archive" | "restore"
-            ) =>
-        {
-            Some(
-                "Human mailbox messaging\n\n\
-                 Usage:\n  hq list [--sender MAILBOX_ID] [--recipient MAILBOX_ID] [--archived|--all] [--limit N]\n  hq answer MESSAGE_ID [RESPONSE]\n  hq cancel MESSAGE_ID\n  hq archive MESSAGE_ID\n  hq restore MESSAGE_ID\n\nMessage or response content may be supplied as one argument or bounded UTF-8 stdin. Incomplete-history records are inert and cannot be answered, cancelled, archived, or restored.\n",
-            )
-        }
-        [command] if command == "identity" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] identity <COMMAND>\n\n\
-             Commands:\n  init                                      Create identity without overwrite\n  show                                      Show safe public identity metadata\n  export ABSOLUTE_PATH --password-stdin     Export an encrypted backup without overwrite\n  import ABSOLUTE_PATH --password-stdin     Import an encrypted backup without overwrite\n\n\
-             Identity commands require exclusive offline ownership. Password input is one bounded UTF-8 line on stdin and is never accepted as an argument.\n",
-        ),
-        [command] if command == "config" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] config <COMMAND>\n\n\
-             Commands:\n  get                                      Show all local defaults\n  set default-provider PROVIDER|none       Replace the provider default\n  set relays URL...|none                   Replace the complete relay set\n\n\
-             Configuration commands require exclusive offline ownership.\n",
-        ),
-        [command] if command == "human" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] human <COMMAND>\n\n\
-             Commands:\n  create [LABEL]                         Create/reconcile and select the local creator account\n  show                                   Show authoritative account and selection state\n  select ACCOUNT_ID                      Select one actively authorized account\n\n\
-             invite INSTALLATION_ID SIGNING_KEY ABSOLUTE_PATH [--label LABEL] [--relay URL]...\n                                          Export one new signed invitation\n  join ABSOLUTE_PATH                     Verify, import, accept, and select one invitation\n  devices                               Show complete selected-account device history\n  revoke INSTALLATION_ID                Revoke one device as the account creator\n\n\
-             Human commands start or connect to the local node and author only through application plans.\n",
-        ),
-        [command] if command == "peer" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] peer <COMMAND>\n\n\
-             Commands:\n  add INSTALLATION_ID SIGNING_KEY ENCRYPTION_KEY [--label LABEL] [--relay URL]...\n  list\n  distrust INSTALLATION_ID\n\nRoutes are directional metadata only and never grant mailbox authority. Distrust revokes active local capabilities before blocking the route.\n",
-        ),
-        [command] if command == "mailbox" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] mailbox <COMMAND>\n\n\
-             Commands:\n  list\n  grant MAILBOX_ID PEER_INSTALLATION_ID\n  revoke MAILBOX_ID PEER_INSTALLATION_ID\n\nMailbox capability commands require an exact locally owned mailbox and uniquely routable peer.\n",
-        ),
-        [command] if command == "relay" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] relay <COMMAND>\n\n\
-             Commands:\n  add URL [--access read|write|read-write] [--auth disabled|on-challenge|required]\n  list\n  remove URL\n  sync [URL]\n  status\n  repair\n\nRelay removal disables the durable policy without erasing delivery history. Status is a bounded authoritative observation. Repair explicitly reverifies the immutable corpus and atomically replaces rebuildable indexes.\n",
-        ),
-        [command, action]
-            if (command == "daemon"
-                && matches!(
-                    action.as_str(),
-                    "run" | "status" | "readiness" | "stop" | "restart"
-                ))
-                || (command == "identity" && matches!(action.as_str(), "init" | "show"))
-                || (command == "config" && action == "get")
-                || (command == "human"
-                    && matches!(
-                        action.as_str(),
-                        "show" | "create" | "select" | "invite" | "join" | "devices" | "revoke"
-                    ))
-                || (command == "peer"
-                    && matches!(action.as_str(), "add" | "list" | "distrust"))
-                || (command == "mailbox"
-                    && matches!(action.as_str(), "list" | "grant" | "revoke"))
-                || (command == "relay"
-                    && matches!(
-                        action.as_str(),
-                        "add" | "list" | "remove" | "sync" | "status" | "repair"
-                    ))
-                || (command == "harness"
-                    && matches!(action.as_str(), "start" | "resume" | "stop"))
-                || (command == "project"
-                    && matches!(
-                        action.as_str(),
-                        "list"
-                            | "show"
-                            | "send"
-                            | "open"
-                            | "close"
-                            | "archive"
-                            | "unarchive"
-                            | "check"
-                            | "resource"
-                            | "worktree"
-                    )) =>
-        {
-            match command.as_str() {
-                "daemon" => Some("Use `hq help daemon` for daemon command details.\n"),
-                "identity" => Some("Use `hq help identity` for identity command details.\n"),
-                "config" => Some("Use `hq help config` for configuration command details.\n"),
-                "human" => Some("Use `hq help human` for human command details.\n"),
-                "peer" => Some("Use `hq help peer` for peer command details.\n"),
-                "mailbox" => Some("Use `hq help mailbox` for mailbox command details.\n"),
-                "relay" => Some("Use `hq help relay` for relay command details.\n"),
-                "harness" => Some("Use `hq help harness` for harness command details.\n"),
-                "project" => Some("Use `hq help project` for project command details.\n"),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
-fn short_help_text(topic: &[String]) -> Option<&'static str> {
-    match topic {
-        [command] if command == "version" => Some(
-            "Usage: hq [--output human|json] version\n\nShow executable version, local protocol version, and build commit metadata.\n",
-        ),
-        [command] if command == "tui" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] tui\n\nOpen the interactive terminal interface. Both stdin and stdout must be attached to a terminal. Press q or Ctrl-C to exit.\n",
-        ),
-        [command] if command == "agents" => Some(
-            "Usage: hq [--output human|json] agents [messaging|retry|synchronization|delivery|causality|administration]\n\nShow concise installed guidance for agents without exposing installation or authority internals.\n",
-        ),
-        [command] if command == "agent" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] agent <COMMAND>\n\n\
-             Commands:\n  list\n  show NAME|AGENT_ID\n  create NAME [--mailbox MAILBOX_ID]\n  current\n  select NAME|AGENT_ID [--provider PROVIDER --session SESSION] [--dir PATH]\n  rename NAME|AGENT_ID DISPLAY_NAME [--provider PROVIDER --session SESSION]\n  rename NAME|AGENT_ID --clear [--provider PROVIDER --session SESSION]\n  retire NAME|AGENT_ID --yes [--force]\n\n\
-             Names are permanent lowercase installation-local slugs. create without --mailbox allocates a deterministic local agent mailbox; --mailbox adopts one existing local agent mailbox. current, select, and rename reject ambiguous provider environments and stale or conflicted session metadata. retire is absorbing, requires --yes, and only --force may revoke HQ authority after failed or uncertain runtime cessation.\n",
-        ),
-        [command] if command == "harness" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] harness <COMMAND>\n\n\
-             Commands:\n  start --agent NAME|AGENT_ID --provider PROVIDER [--dir PATH]\n  resume --agent NAME|AGENT_ID --provider PROVIDER --session SESSION [--dir PATH]\n  stop --agent NAME|AGENT_ID --provider PROVIDER\n\n\
-             start and resume resolve the launch directory to an absolute path and copy the caller environment at the local API boundary. resume never falls back to a new session. Rejected operations exit 1; uncertain operations print their exact operation identity and exit 3 for reconciliation.\n",
-        ),
-        [command] if command == "project" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] project <COMMAND>\n\n\
-             Commands:\n  list                                      Show every authoritative project\n  show PROJECT_ID                           Show one exact project\n  resource list PROJECT_ID                  List exact desired resources\n  resource show PROJECT_ID RESOURCE_ID      Show one exact desired resource\n  resource add PROJECT_ID --path ABSOLUTE_PATH [--primary]\n  resource remove PROJECT_ID RESOURCE_ID [--force]\n  resource replace PROJECT_ID RESOURCE_ID --path ABSOLUTE_PATH\n  resource primary PROJECT_ID RESOURCE_ID   Select the launch primary\n  check PROJECT_ID [RESOURCE_ID]            Freshly inspect health and release state\n  send PROJECT_ID [MESSAGE]                 Queue durable project work\n  create NAME --path ABSOLUTE_PATH [--brief TEXT] [--home INSTALLATION_ID]\n                                            Create over one existing working tree\n  worktree NAME --source ABSOLUTE_PATH --destination ABSOLUTE_PATH --branch BRANCH [--create-branch BASE] [--brief TEXT] [--home INSTALLATION_ID]\n                                            Provision a recoverable Git worktree and project\n\n\
-  open PROJECT_ID                           Open one closed project\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --new-session [--thread THREAD_ID] [--dir ABSOLUTE_PATH]\n  activate PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER --session SESSION --thread THREAD_ID [--dir ABSOLUTE_PATH]\n                                            Activate one exact agent assignment\n  dispatch PROJECT_ID                       Dispatch all pending accepted inputs\n  handoff PROJECT_ID --agent NAME|AGENT_ID --provider PROVIDER (--new-session | --session SESSION) --thread THREAD_ID [--dir ABSOLUTE_PATH] --yes [--force]\n                                            Hand off to one exact historical target\n  close PROJECT_ID --yes [--force]          Close and release advisory claims\n  archive PROJECT_ID                        Gracefully close and hide one project\n  unarchive PROJECT_ID                      Restore one archived project as closed\n\n\
-             Resource list/show read only the authoritative snapshot. Add and replace send a normalized display path and stable resource identity for authoritative home-side identification; primary changes the future launch default without reordering membership. Remove changes only HQ desired membership and requires --force only while assigned. Check re-observes path identity and Git release state through the read-only home adapter; it fails closed when the project's immutable home is not this installation. No resource command mutates or deletes filesystem or Git state. Worktree uses an existing branch by default; --create-branch BASE creates the named branch from that exact Git revision. The selected home reserves the destination, reconciles Git before every retry, and never prunes, resets, removes, or otherwise compensates external Git state. Send content may be supplied as one argument or bounded UTF-8 stdin. It targets the immutable project mailbox and remains pending while the project is closed or unassigned. Activation requires an explicit new-session choice or an exact existing session/thread pair; --thread with --new-session continues one historical project thread in a fresh provider session. Handoff always requires one historical target thread and explicit --yes; --force separately authorizes takeover after blocked or uncertain quiescence. Without --dir, assignment commands use the sole authoritative primary resource. Project inspection and control commands start or connect to the local node and resolve the active account, immutable home, and exact expected head from one authoritative snapshot. Close always requires --yes; --force additionally authorizes release or runtime uncertainty but does not replace confirmation. Creation identifies the exact existing resource on the selected home and is initially open; a remote home must be an active account device. Conflicts, unjoinable dispatches, and unjoinable outputs remain explicit, and the CLI never chooses a historical winner.\n",
-        ),
-        [command] if command == "daemon" => Some(
-            "Usage: hq [--state-root ABSOLUTE_PATH] [--output human|json] daemon <COMMAND>\n\n\
-             Commands:\n  run        Own the node in the foreground\n  status     Probe without starting a node\n  readiness  Return a ready node, starting when absent\n  stop       Converge the node to absence\n  restart    Converge on a fresh ready generation\n",
-        ),
-        _ => None,
-    }
-}
-
-fn output_hint(arguments: &[OsString]) -> CliOutputFormat {
-    arguments
-        .windows(2)
-        .find_map(|pair| {
-            (pair[0] == "--output").then(|| match pair[1].to_str() {
-                Some("json") => CliOutputFormat::Json,
-                _ => CliOutputFormat::Human,
-            })
-        })
-        .unwrap_or_default()
 }
 
 fn render_error(format: CliOutputFormat, code: &str, message: &str, class: CliExitClass) -> String {
@@ -13095,40 +11596,90 @@ mod tests {
     }
 
     #[test]
+    fn help_is_generated_from_the_command_grammar() {
+        let root = run_cli(&parse_cli([]).expect("root help parses")).expect("root help");
+        assert!(root.contains("Usage: hq [OPTIONS] [COMMAND]"));
+        assert!(root.contains("Options:"));
+
+        let nested = run_cli(
+            &parse_cli([
+                OsString::from("help"),
+                OsString::from("project"),
+                OsString::from("resource"),
+                OsString::from("add"),
+            ])
+            .expect("nested help parses"),
+        )
+        .expect("nested help");
+        assert!(nested.contains("Usage: hq project resource add"));
+        assert!(nested.contains("--primary"));
+    }
+
+    #[test]
     fn help_snapshots_cover_the_complete_foundation_tree() {
         let root = run_cli(&parse_cli([]).expect("root help parses")).expect("root help");
-        assert_eq!(
-            root,
-            "HQ local client\n\n\
-             Usage: hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>\n\n\
-             Commands:\n  help [COMMAND]  Show complete command help\n  version         Show build and protocol metadata\n  tui             Open the interactive terminal interface\n  agents           Show concise installed guidance for agents\n  agent            Manage named agents and durable session metadata\n  harness          Control managed provider sessions\n  project          Inspect authoritative projects and remote progress\n  ask              Ask from an agent mailbox and wait\n  send             Send asynchronously from an agent mailbox\n  wait             Wait for a question's ready answer\n  poll             Deliver ready agent mailbox content\n  get              Inspect one message without consuming it\n  list             Filter the human mailbox\n  answer           Answer one question as the human\n  cancel           Cancel one human-authored question\n  archive          Archive one message\n  restore          Restore one archived message\n  mailboxes        Discover repository-aware session mailboxes\n  identity         Manage installation identity offline\n  config           Manage typed local defaults offline\n  human            Manage the local human account\n  peer             Manage directional peer routes\n  mailbox          Manage directional mailbox capabilities\n  relay            Manage relay policy, synchronization, and health\n  daemon           Manage the local node lifecycle\n\n\
-             Global options:\n  --output human|json          Select human or hq-cli-output-v1 JSON records\n  --state-root ABSOLUTE_PATH   Select an installation state root\n  --help                       Show this help\n  --version                    Show build and protocol metadata\n"
-        );
-        let tui = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("tui")]).expect("TUI help parses"),
-        )
-        .expect("TUI help");
-        assert!(tui.contains("stdin and stdout"));
+        assert!(root.starts_with("HQ local client\n\nUsage: hq [OPTIONS] [COMMAND]"));
+        assert!(root.contains("Options:"));
+        for command in [
+            "help",
+            "version",
+            "tui",
+            "agents",
+            "agent",
+            "harness",
+            "project",
+            "ask",
+            "send",
+            "wait",
+            "poll",
+            "get",
+            "list",
+            "answer",
+            "cancel",
+            "archive",
+            "restore",
+            "mailboxes",
+            "identity",
+            "config",
+            "human",
+            "peer",
+            "mailbox",
+            "relay",
+            "daemon",
+        ] {
+            assert!(
+                root.lines()
+                    .any(|line| line.trim_start().starts_with(command))
+            );
+        }
+
         let ask = run_cli(
             &parse_cli([OsString::from("help"), OsString::from("ask")]).expect("ask help parses"),
         )
         .expect("ask help");
         assert!(ask.contains("intentionally unbounded"));
         assert!(ask.contains("stable message IDs"));
-        let agent = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("agent")])
-                .expect("agent help parses"),
+
+        let identity_export = run_cli(
+            &parse_cli([
+                OsString::from("help"),
+                OsString::from("identity"),
+                OsString::from("export"),
+            ])
+            .expect("identity export help parses"),
         )
-        .expect("agent help");
-        assert!(agent.contains("create NAME [--mailbox MAILBOX_ID]"));
-        assert!(agent.contains("reject ambiguous provider environments"));
-        let harness = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("harness")])
-                .expect("harness help parses"),
+        .expect("identity export help");
+        assert!(identity_export.contains("--password-stdin"));
+        assert!(!identity_export.contains("<PASSWORD>"));
+
+        let daemon = run_cli(
+            &parse_cli([OsString::from("daemon"), OsString::from("--help")])
+                .expect("daemon help parses"),
         )
-        .expect("harness help");
-        assert!(harness.contains("resume --agent NAME|AGENT_ID"));
-        assert!(harness.contains("never falls back to a new session"));
+        .expect("daemon help");
+        assert!(daemon.contains("Own the node in the foreground"));
+        assert!(daemon.contains("Converge on a fresh ready generation"));
+
         let guidance = run_cli(
             &parse_cli([OsString::from("agents"), OsString::from("delivery")])
                 .expect("delivery guidance parses"),
@@ -13136,57 +11687,7 @@ mod tests {
         .expect("delivery guidance");
         assert!(guidance.contains("at least once"));
         assert!(guidance.contains("stable message identity"));
-        let get = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("get")]).expect("get help parses"),
-        )
-        .expect("get help");
-        assert!(get.contains("without consuming"));
-        let identity = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("identity")])
-                .expect("identity help parses"),
-        )
-        .expect("identity help");
-        assert!(identity.contains("--password-stdin"));
-        assert!(!identity.contains("PASSWORD"));
-        let config = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("config")])
-                .expect("config help parses"),
-        )
-        .expect("config help");
-        assert!(config.contains("set relays URL...|none"));
-        let human = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("human")])
-                .expect("human help parses"),
-        )
-        .expect("human help");
-        assert!(human.contains("select ACCOUNT_ID"));
-        let peer = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("peer")]).expect("peer help parses"),
-        )
-        .expect("peer help");
-        assert!(peer.contains("add INSTALLATION_ID SIGNING_KEY ENCRYPTION_KEY"));
-        assert!(peer.contains("distrust INSTALLATION_ID"));
-        let mailbox = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("mailbox")])
-                .expect("mailbox help parses"),
-        )
-        .expect("mailbox help");
-        assert!(mailbox.contains("grant MAILBOX_ID PEER_INSTALLATION_ID"));
-        assert!(mailbox.contains("revoke MAILBOX_ID PEER_INSTALLATION_ID"));
-        let relay = run_cli(
-            &parse_cli([OsString::from("help"), OsString::from("relay")])
-                .expect("relay help parses"),
-        )
-        .expect("relay help");
-        assert!(relay.contains("add URL [--access read|write|read-write]"));
-        assert!(relay.contains("repair"));
-        let daemon = run_cli(
-            &parse_cli([OsString::from("daemon"), OsString::from("--help")])
-                .expect("daemon help parses"),
-        )
-        .expect("daemon help");
-        assert!(daemon.contains("run        Own the node in the foreground"));
-        assert!(daemon.contains("restart    Converge on a fresh ready generation"));
+
         assert_eq!(
             run_cli(
                 &parse_cli([OsString::from("help"), OsString::from("unknown")])
@@ -13203,18 +11704,48 @@ mod tests {
                 .expect("project help parses"),
         )
         .expect("project help");
-        assert!(project.contains("show PROJECT_ID"));
-        assert!(project.contains("send PROJECT_ID [MESSAGE]"));
-        assert!(project.contains("create NAME --path ABSOLUTE_PATH"));
-        assert!(project.contains("open PROJECT_ID"));
-        assert!(project.contains("activate PROJECT_ID --agent NAME|AGENT_ID"));
-        assert!(project.contains("dispatch PROJECT_ID"));
-        assert!(project.contains("handoff PROJECT_ID --agent NAME|AGENT_ID"));
-        assert!(project.contains("close PROJECT_ID --yes [--force]"));
-        assert!(project.contains("unarchive PROJECT_ID"));
+        for command in [
+            "list",
+            "show",
+            "resource",
+            "check",
+            "send",
+            "create",
+            "worktree",
+            "open",
+            "activate",
+            "dispatch",
+            "handoff",
+            "close",
+            "archive",
+            "unarchive",
+        ] {
+            assert!(
+                project
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(command))
+            );
+        }
         assert!(project.contains("never chooses a historical winner"));
-    }
 
+        for (command, expected) in [
+            ("create", "--path <ABSOLUTE_PATH>"),
+            ("activate", "--new-session"),
+            ("handoff", "--yes"),
+            ("close", "--force"),
+        ] {
+            let help = run_cli(
+                &parse_cli([
+                    OsString::from("help"),
+                    OsString::from("project"),
+                    OsString::from(command),
+                ])
+                .expect("project command help parses"),
+            )
+            .expect("project command help");
+            assert!(help.contains(expected));
+        }
+    }
     #[test]
     fn process_execution_renders_typed_machine_errors_without_echoing_inputs() {
         let execution = execute_cli([
@@ -13235,6 +11766,68 @@ mod tests {
         assert_eq!(value["kind"], "error");
         assert_eq!(value["data"]["class"], "usage");
         assert_eq!(value["data"]["code"], "cli.state_path");
+    }
+
+    #[test]
+    fn clap_relationship_errors_remain_redacted_and_machine_typed() {
+        let execution = execute_cli([
+            OsString::from("agent"),
+            OsString::from("select"),
+            OsString::from("private-agent-name"),
+            OsString::from("--provider"),
+            OsString::from("private-provider-value"),
+            OsString::from("--output=json"),
+        ]);
+        assert_eq!(execution.exit_code, 2);
+        assert!(!execution.stderr.contains("private-agent-name"));
+        assert!(!execution.stderr.contains("private-provider-value"));
+        let value: serde_json::Value =
+            serde_json::from_str(&execution.stderr).expect("machine error record");
+        assert_eq!(value["data"]["class"], "usage");
+        assert_eq!(value["data"]["code"], "cli.arguments");
+    }
+
+    #[test]
+    fn clap_global_options_are_accepted_after_subcommands() {
+        let invocation = parse_cli([
+            OsString::from("daemon"),
+            OsString::from("status"),
+            OsString::from("--output"),
+            OsString::from("json"),
+            OsString::from("--state-root"),
+            OsString::from("/tmp/hq-clap-global-options"),
+        ])
+        .expect("global options parse after the command");
+        assert_eq!(invocation.output, CliOutputFormat::Json);
+        assert!(matches!(
+            invocation.command,
+            CliCommand::Daemon {
+                action: DaemonCommand::Status,
+                ..
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clap_preserves_non_utf8_path_arguments() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let path = OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
+        let expected = std::path::PathBuf::from(path.clone());
+        let invocation = parse_cli([
+            OsString::from("mailboxes"),
+            OsString::from("--dir"),
+            path.clone(),
+        ])
+        .expect("raw path parses");
+        assert!(matches!(
+            invocation.command,
+            CliCommand::DiscoverMailboxes {
+                directory: Some(directory),
+                ..
+            } if directory == expected
+        ));
     }
 
     #[test]

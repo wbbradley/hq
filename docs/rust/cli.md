@@ -1,17 +1,33 @@
 # Rust CLI
 
-HQ installs one `hq` executable. Global options precede the command:
+HQ installs one `hq` executable. Its command grammar and root/nested help are generated from one
+private Clap command tree. Global options may appear before or after a subcommand:
 
 ```text
-hq [--output human|json] [--state-root ABSOLUTE_PATH] <COMMAND>
+hq [OPTIONS] [COMMAND]
 ```
+
+Run `hq --help`, `hq COMMAND --help`, or `hq help COMMAND [SUBCOMMAND]...` for authoritative
+syntax. A bare non-terminal invocation also renders root help; the tiny executable adapter retains
+the separate bare-terminal default that opens the TUI. `--output` accepts `human` or `json` and
+defaults to `human`. `--state-root` accepts a raw operating-system path and is valid only for
+commands that operate on installation state. The TUI accepts only human output.
+
+Clap owns command and option names, positional cardinality, defaults, repeated values, required
+arguments, conflicts, and relationships such as provider/session pairs, rename set/clear choices,
+archive/all filters, assignment new/resume choices, and explicit `--yes` confirmation. The
+state-free mapping layer then validates domain values such as IDs, names, durations, content,
+relay endpoints, and absolute or existing paths before constructing the closed execution command.
+Usage failures keep one stable redacted diagnostic contract: neither Clap's detailed error text nor
+rejected argv values cross the human or JSON output boundary.
 
 The installed commands currently include `help`, `version`, `agents`, `identity`, `config`,
 `human create|show|select|invite|join|devices|revoke`,
 `peer add|list|distrust`, `mailbox list|grant|revoke`, and
 `relay add|list|remove|sync|status|repair`,
 `agent list|show|create|current|select|rename|retire`, and
-`harness start|resume|stop`, `project list|show|create|send`, the agent-side
+`harness start|resume|stop`, the complete `project` catalog/resource/creation/assignment/lifecycle
+tree, the agent-side
 `ask|send|wait|poll`, human-side `get|list|answer|cancel|archive|restore`, `mailboxes`, and
 `daemon run|status|readiness|stop|restart`. `daemon run` is the
 internal foreground ownership role used by
