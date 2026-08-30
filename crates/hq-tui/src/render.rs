@@ -1531,7 +1531,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                             short_identity(result.operation_id)
                         )
                     },
-                    Style::new().fg(Color::DarkGray),
+                    theme.style(UiThemeRole::TextTechnical),
                 ));
                 if let Some(runtime_state) = &result.runtime_state {
                     lines.push(Line::styled(
@@ -1542,13 +1542,13 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                                 .as_ref()
                                 .map_or_else(String::new, |code| format!("/{code}"))
                         ),
-                        Style::new().fg(Color::DarkGray),
+                        theme.style(UiThemeRole::TextTechnical),
                     ));
                 }
                 match &result.outcome {
                     UiProjectOutcome::Rejected { category, code } => lines.push(Line::styled(
                         format!("Technical reason: {category}/{code}"),
-                        Style::new().fg(Color::DarkGray),
+                        theme.style(UiThemeRole::TextTechnical),
                     )),
                     UiProjectOutcome::Reconcilable {
                         stage,
@@ -1557,7 +1557,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
                         ..
                     } => lines.push(Line::styled(
                         format!("Technical stage and reason: {stage} · {category}/{code}"),
-                        Style::new().fg(Color::DarkGray),
+                        theme.style(UiThemeRole::TextTechnical),
                     )),
                     _ => {}
                 }
