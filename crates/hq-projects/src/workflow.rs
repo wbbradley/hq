@@ -498,6 +498,8 @@ pub struct ProjectRuntimeRequest {
 pub struct ProjectRuntimeDelivery {
     /// Target project.
     pub project_id: ProjectId,
+    /// Stable canonical dispatch identity for this accepted input.
+    pub dispatch_id: DispatchId,
     /// Exact active assignment binding.
     pub binding: AssignmentBinding,
     /// Exact selected project thread.
@@ -2768,6 +2770,7 @@ where
             issued_at: record.issued_at,
             body: ProjectRuntimeDelivery {
                 project_id: record.project_id,
+                dispatch_id,
                 binding: binding.clone(),
                 thread_id,
                 submission_id: input.message_id,

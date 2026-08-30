@@ -48,7 +48,7 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA_MARKER: &str = "hq-store-v1";
 const SCHEMA_TABLES: [&str; 118] = [
     "storage_metadata",
@@ -1313,11 +1313,29 @@ CREATE TABLE harness_deliveries (
     digest BLOB NOT NULL CHECK(typeof(digest) = 'blob' AND length(digest) = 32),
     operation_id BLOB NOT NULL
         CHECK(typeof(operation_id) = 'blob' AND length(operation_id) = 32),
+    project_id BLOB
+        CHECK(project_id IS NULL OR (typeof(project_id) = 'blob' AND length(project_id) = 32)),
+    dispatch_id BLOB
+        CHECK(dispatch_id IS NULL OR (typeof(dispatch_id) = 'blob' AND length(dispatch_id) = 32)),
+    assignment_id BLOB
+        CHECK(assignment_id IS NULL OR
+            (typeof(assignment_id) = 'blob' AND length(assignment_id) = 32)),
+    project_thread_id BLOB
+        CHECK(project_thread_id IS NULL OR
+            (typeof(project_thread_id) = 'blob' AND length(project_thread_id) = 32)),
+    input_sequence BLOB
+        CHECK(input_sequence IS NULL OR
+            (typeof(input_sequence) = 'blob' AND length(input_sequence) = 8 AND
+             input_sequence != X'0000000000000000')),
     body TEXT NOT NULL
         CHECK(typeof(body) = 'text' AND length(CAST(body AS BLOB)) BETWEEN 1 AND 16384),
     queued_at_millis BLOB NOT NULL
         CHECK(typeof(queued_at_millis) = 'blob' AND length(queued_at_millis) = 8),
     delivery_state INTEGER NOT NULL CHECK(delivery_state BETWEEN 1 AND 4),
+    CHECK((project_id IS NULL AND dispatch_id IS NULL AND assignment_id IS NULL AND
+           project_thread_id IS NULL AND input_sequence IS NULL) OR
+          (project_id IS NOT NULL AND dispatch_id IS NOT NULL AND assignment_id IS NOT NULL AND
+           project_thread_id IS NOT NULL AND input_sequence IS NOT NULL)),
     PRIMARY KEY (agent_id, submission_id)
 ) STRICT, WITHOUT ROWID;
 
@@ -1466,6 +1484,7 @@ impl Database {
         if initialize {
             initialize_schema(&mut connection)?;
         } else {
+            migrate_schema(&mut connection)?;
             verify_schema(&connection)?;
         }
         verify_integrity(&connection)?;
@@ -2867,7 +2886,11 @@ fn inspect_existing(connection: &Connection) -> Result<bool, StoreError> {
             return Ok(true);
         }
     }
-    verify_schema(connection)?;
+    if application_id == APPLICATION_ID && user_version == 1 {
+        verify_schema_objects(connection)?;
+    } else {
+        verify_schema(connection)?;
+    }
     verify_integrity(connection)?;
     Ok(false)
 }
@@ -2931,6 +2954,49 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     transaction.commit().map_err(sql_error)
 }
 
+fn migrate_schema(connection: &mut Connection) -> Result<(), StoreError> {
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(sql_error)?;
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    if application_id != APPLICATION_ID || user_version == SCHEMA_VERSION {
+        return Ok(());
+    }
+    if user_version != 1 {
+        return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
+    }
+    verify_schema_objects(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Exclusive)
+        .map_err(sql_error)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE harness_deliveries ADD COLUMN project_id BLOB \
+                 CHECK(project_id IS NULL OR \
+                     (typeof(project_id) = 'blob' AND length(project_id) = 32));
+             ALTER TABLE harness_deliveries ADD COLUMN dispatch_id BLOB \
+                 CHECK(dispatch_id IS NULL OR \
+                     (typeof(dispatch_id) = 'blob' AND length(dispatch_id) = 32));
+             ALTER TABLE harness_deliveries ADD COLUMN assignment_id BLOB \
+                 CHECK(assignment_id IS NULL OR \
+                     (typeof(assignment_id) = 'blob' AND length(assignment_id) = 32));
+             ALTER TABLE harness_deliveries ADD COLUMN project_thread_id BLOB \
+                 CHECK(project_thread_id IS NULL OR \
+                     (typeof(project_thread_id) = 'blob' AND length(project_thread_id) = 32));
+             ALTER TABLE harness_deliveries ADD COLUMN input_sequence BLOB \
+                 CHECK(input_sequence IS NULL OR \
+                     (typeof(input_sequence) = 'blob' AND length(input_sequence) = 8 AND \
+                      input_sequence != X'0000000000000000'));",
+        )
+        .map_err(sql_error)?;
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(sql_error)?;
+    transaction.commit().map_err(sql_error)
+}
+
 fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
     let application_id: i64 = connection
         .pragma_query_value(None, "application_id", |row| row.get(0))
@@ -2941,6 +3007,10 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
     if application_id != APPLICATION_ID || user_version != SCHEMA_VERSION {
         return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
     }
+    verify_schema_objects(connection)
+}
+
+fn verify_schema_objects(connection: &Connection) -> Result<(), StoreError> {
     let table_count: i64 = connection
         .query_row(
             "SELECT count(*) FROM sqlite_schema \
@@ -2986,6 +3056,10 @@ fn verify_schema(connection: &Connection) -> Result<(), StoreError> {
             return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
         }
     }
+    verify_schema_marker(connection)
+}
+
+fn verify_schema_marker(connection: &Connection) -> Result<(), StoreError> {
     let marker: String = connection
         .query_row(
             "SELECT schema_marker FROM storage_metadata WHERE singleton = 1",
@@ -3327,9 +3401,12 @@ pub(crate) mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    use std::{
+        fs,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        },
     };
 
     use hq_protocol::{Bip340Signer, CanonicalEventPlan};
@@ -3360,6 +3437,89 @@ pub(crate) mod tests {
             AuthorityRole::ALL.map(encode_role),
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
+    }
+
+    #[test]
+    fn version_one_delivery_rows_migrate_as_explicitly_unattributed() {
+        static NEXT_MIGRATION: AtomicUsize = AtomicUsize::new(1);
+        const PROJECT_COLUMNS: &str = r"    project_id BLOB
+        CHECK(project_id IS NULL OR (typeof(project_id) = 'blob' AND length(project_id) = 32)),
+    dispatch_id BLOB
+        CHECK(dispatch_id IS NULL OR (typeof(dispatch_id) = 'blob' AND length(dispatch_id) = 32)),
+    assignment_id BLOB
+        CHECK(assignment_id IS NULL OR
+            (typeof(assignment_id) = 'blob' AND length(assignment_id) = 32)),
+    project_thread_id BLOB
+        CHECK(project_thread_id IS NULL OR
+            (typeof(project_thread_id) = 'blob' AND length(project_thread_id) = 32)),
+    input_sequence BLOB
+        CHECK(input_sequence IS NULL OR
+            (typeof(input_sequence) = 'blob' AND length(input_sequence) = 8 AND
+             input_sequence != X'0000000000000000')),
+";
+        const PROJECT_COMPLETENESS: &str = r"    CHECK((project_id IS NULL AND dispatch_id IS NULL AND assignment_id IS NULL AND
+           project_thread_id IS NULL AND input_sequence IS NULL) OR
+          (project_id IS NOT NULL AND dispatch_id IS NOT NULL AND assignment_id IS NOT NULL AND
+           project_thread_id IS NOT NULL AND input_sequence IS NOT NULL)),
+";
+
+        let old_schema =
+            SCHEMA
+                .replacen(PROJECT_COLUMNS, "", 1)
+                .replacen(PROJECT_COMPLETENESS, "", 1);
+        assert!(!old_schema.contains("project_thread_id"));
+        let unique = NEXT_MIGRATION.fetch_add(1, AtomicOrdering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "hq-rust-schema-migration-test-{}-{unique}",
+            std::process::id()
+        ));
+        let path = root.join("state").join("hq.sqlite3");
+        assert!(prepare_database_path(&path).expect("database path prepares"));
+        let connection = Connection::open(&path).expect("version one database opens");
+        connection
+            .execute_batch(&old_schema)
+            .expect("version one schema creates");
+        connection
+            .execute(
+                "INSERT INTO storage_metadata(singleton, schema_marker) VALUES (1, ?1)",
+                [SCHEMA_MARKER],
+            )
+            .expect("schema marker inserts");
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .expect("application id sets");
+        connection
+            .pragma_update(None, "user_version", 1)
+            .expect("old version sets");
+        connection
+            .execute(
+                "INSERT INTO harness_deliveries(
+                    agent_id, submission_id, provider_id, session_id, digest, operation_id, body,
+                    queued_at_millis, delivery_state
+                 ) VALUES (?1, ?2, 'scripted', 'legacy-session', ?3, ?4, 'legacy input', ?5, 1)",
+                params![
+                    [1_u8; 32].as_slice(),
+                    [2_u8; 32].as_slice(),
+                    [3_u8; 32].as_slice(),
+                    [4_u8; 32].as_slice(),
+                    5_u64.to_be_bytes().as_slice(),
+                ],
+            )
+            .expect("legacy delivery inserts");
+
+        drop(connection);
+
+        let database = Database::open(&path).expect("version one database migrates on open");
+        let retained = database
+            .load_harness_delivery(
+                hq_domain::AgentId::from_bytes([1; 32]),
+                hq_domain::MessageId::from_bytes([2; 32]),
+            )
+            .expect("legacy delivery loads")
+            .expect("legacy delivery remains");
+        assert_eq!(retained.project, None);
+        drop(database);
+        fs::remove_dir_all(root).expect("test state cleans up");
     }
 
     #[test]

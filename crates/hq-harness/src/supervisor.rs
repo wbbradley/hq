@@ -3,15 +3,15 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use hq_domain::{
-    ActivityKind, ActivityStatus, AgentId, CommandDigest, MessageId, ProjectId, ProviderId,
-    ProviderSessionId,
+    ActivityKind, ActivityStatus, AgentId, AssignmentId, CommandDigest, DispatchId, MessageId,
+    ProjectId, ProviderId, ProviderSessionId, ThreadId,
 };
 use sha2::{Digest, Sha256};
 
@@ -142,6 +142,21 @@ pub enum HarnessDeliveryState {
     Rejected,
 }
 
+/// Immutable project provenance captured before provider I/O.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarnessProjectDelivery {
+    /// Target project captured when the input was dispatched.
+    pub project_id: ProjectId,
+    /// Stable canonical dispatch identity.
+    pub dispatch_id: DispatchId,
+    /// Assignment captured by the dispatch.
+    pub assignment_id: AssignmentId,
+    /// Immutable project conversation thread selected for the dispatch.
+    pub thread_id: ThreadId,
+    /// Authoritative positive project-input sequence.
+    pub sequence: NonZeroU64,
+}
+
 /// Passive exact durable provider-delivery record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HarnessDeliveryRecord {
@@ -153,6 +168,8 @@ pub struct HarnessDeliveryRecord {
     pub session_id: ProviderSessionId,
     /// Complete exact neutral submission.
     pub submission: HarnessSubmission,
+    /// Exact project provenance, absent only when an older writer did not retain it.
+    pub project: Option<HarnessProjectDelivery>,
     /// Injected durable queue time.
     pub queued_at_millis: u64,
     /// Current monotonic state.

@@ -1,7 +1,10 @@
 //! Durable managed-runtime lease, delivery, and persistence checkpoints.
 
+use std::num::NonZeroU64;
+
 use hq_domain::{
-    AgentId, CommandDigest, ContentText, MessageId, OperationId, ProviderId, ProviderSessionId,
+    AgentId, AssignmentId, CommandDigest, ContentText, DispatchId, MessageId, OperationId,
+    ProjectId, ProviderId, ProviderSessionId, ThreadId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -9,8 +12,8 @@ use crate::{
     HarnessLeaseOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
     HarnessSessionOperationState, MAX_HARNESS_STATE_QUERY_ITEMS, StoreError, StoreErrorClass,
     StoredHarnessDelivery, StoredHarnessDeliveryState, StoredHarnessEventCheckpoint,
-    StoredHarnessLease, StoredHarnessReadySession, StoredHarnessStateMutation,
-    StoredHarnessStateSnapshot,
+    StoredHarnessLease, StoredHarnessProjectDelivery, StoredHarnessReadySession,
+    StoredHarnessStateMutation, StoredHarnessStateSnapshot,
 };
 
 pub(super) fn apply(
@@ -276,12 +279,16 @@ fn queue_delivery(
             Err(conflict())
         };
     }
+    let input_sequence = delivery
+        .project
+        .map(|project| project.sequence.get().to_be_bytes());
     transaction
         .execute(
             "INSERT INTO harness_deliveries(\
-                agent_id, submission_id, provider_id, session_id, digest, operation_id, body, \
+                agent_id, submission_id, provider_id, session_id, digest, operation_id, \
+                project_id, dispatch_id, assignment_id, project_thread_id, input_sequence, body, \
                 queued_at_millis, delivery_state\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 delivery.agent_id.as_bytes().as_slice(),
                 delivery.submission_id.as_bytes().as_slice(),
@@ -289,6 +296,23 @@ fn queue_delivery(
                 delivery.session_id.as_str(),
                 delivery.digest.as_bytes().as_slice(),
                 delivery.operation_id.as_bytes().as_slice(),
+                delivery
+                    .project
+                    .as_ref()
+                    .map(|value| value.project_id.as_bytes().as_slice()),
+                delivery
+                    .project
+                    .as_ref()
+                    .map(|value| value.dispatch_id.as_bytes().as_slice()),
+                delivery
+                    .project
+                    .as_ref()
+                    .map(|value| value.assignment_id.as_bytes().as_slice()),
+                delivery
+                    .project
+                    .as_ref()
+                    .map(|value| value.thread_id.as_bytes().as_slice()),
+                input_sequence.as_ref().map(<[u8; 8]>::as_slice),
                 delivery.body.as_str(),
                 delivery.queued_at_millis.to_be_bytes().as_slice(),
                 encode_delivery_state(delivery.state),
@@ -308,6 +332,7 @@ fn same_delivery_identity(
         && stored.submission_id == proposed.submission_id
         && stored.digest == proposed.digest
         && stored.operation_id == proposed.operation_id
+        && stored.project == proposed.project
         && stored.body == proposed.body
 }
 
@@ -418,8 +443,9 @@ fn load_deliveries(
 ) -> Result<Vec<StoredHarnessDelivery>, StoreError> {
     let mut statement = connection
         .prepare(
-            "SELECT agent_id, provider_id, session_id, submission_id, digest, operation_id, body, \
-                    queued_at_millis, delivery_state \
+            "SELECT agent_id, provider_id, session_id, submission_id, digest, operation_id, \
+                    project_id, dispatch_id, assignment_id, project_thread_id, input_sequence, \
+                    body, queued_at_millis, delivery_state \
              FROM harness_deliveries \
              ORDER BY queued_at_millis, agent_id, submission_id LIMIT ?1",
         )
@@ -439,8 +465,9 @@ pub(super) fn load_runnable_deliveries(
     let limit = bounded_limit(limit)?;
     let mut statement = connection
         .prepare(
-            "SELECT agent_id, provider_id, session_id, submission_id, digest, operation_id, body, \
-                    queued_at_millis, delivery_state \
+            "SELECT agent_id, provider_id, session_id, submission_id, digest, operation_id, \
+                    project_id, dispatch_id, assignment_id, project_thread_id, input_sequence, \
+                    body, queued_at_millis, delivery_state \
              FROM harness_deliveries \
              WHERE agent_id = ?1 AND delivery_state IN (1, 2) \
              ORDER BY queued_at_millis, submission_id LIMIT ?2",
@@ -620,6 +647,11 @@ type DeliveryRow = (
     Vec<u8>,
     Vec<u8>,
     Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
     String,
     Vec<u8>,
     i64,
@@ -636,6 +668,11 @@ fn delivery_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeliveryRow> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
     ))
 }
 
@@ -647,10 +684,37 @@ fn decode_delivery(row: DeliveryRow) -> Result<StoredHarnessDelivery, StoreError
         submission_id: MessageId::from_bytes(fixed(row.3)?),
         digest: CommandDigest::from_bytes(fixed(row.4)?),
         operation_id: OperationId::from_bytes(fixed(row.5)?),
-        body: ContentText::new(row.6).map_err(|_| corrupt())?,
-        queued_at_millis: decode_u64(row.7)?,
-        state: decode_delivery_state(row.8)?,
+        project: decode_project_delivery(row.6, row.7, row.8, row.9, row.10)?,
+        body: ContentText::new(row.11).map_err(|_| corrupt())?,
+        queued_at_millis: decode_u64(row.12)?,
+        state: decode_delivery_state(row.13)?,
     })
+}
+
+fn decode_project_delivery(
+    project_id: Option<Vec<u8>>,
+    dispatch_id: Option<Vec<u8>>,
+    assignment_id: Option<Vec<u8>>,
+    thread_id: Option<Vec<u8>>,
+    sequence: Option<Vec<u8>>,
+) -> Result<Option<StoredHarnessProjectDelivery>, StoreError> {
+    match (project_id, dispatch_id, assignment_id, thread_id, sequence) {
+        (None, None, None, None, None) => Ok(None),
+        (
+            Some(project_id),
+            Some(dispatch_id),
+            Some(assignment_id),
+            Some(thread_id),
+            Some(sequence),
+        ) => Ok(Some(StoredHarnessProjectDelivery {
+            project_id: ProjectId::from_bytes(fixed(project_id)?),
+            dispatch_id: DispatchId::from_bytes(fixed(dispatch_id)?),
+            assignment_id: AssignmentId::from_bytes(fixed(assignment_id)?),
+            thread_id: ThreadId::from_bytes(fixed(thread_id)?),
+            sequence: NonZeroU64::new(decode_u64(sequence)?).ok_or_else(corrupt)?,
+        })),
+        _ => Err(corrupt()),
+    }
 }
 
 pub(super) fn load_delivery(
@@ -660,8 +724,9 @@ pub(super) fn load_delivery(
 ) -> Result<Option<StoredHarnessDelivery>, StoreError> {
     connection
         .query_row(
-            "SELECT agent_id, provider_id, session_id, submission_id, digest, operation_id, body, \
-                    queued_at_millis, delivery_state \
+            "SELECT agent_id, provider_id, session_id, submission_id, digest, operation_id, \
+                    project_id, dispatch_id, assignment_id, project_thread_id, input_sequence, \
+                    body, queued_at_millis, delivery_state \
              FROM harness_deliveries WHERE agent_id = ?1 AND submission_id = ?2",
             params![
                 agent_id.as_bytes().as_slice(),

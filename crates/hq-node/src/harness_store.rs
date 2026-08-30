@@ -9,7 +9,8 @@ use hq_harness::{
 use hq_store::{
     HarnessStateHandle, Store, StoreError, StoreErrorClass, StoredHarnessDelivery,
     StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessLease,
-    StoredHarnessReadySession, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
+    StoredHarnessProjectDelivery, StoredHarnessReadySession, StoredHarnessStateMutation,
+    StoredHarnessStateSnapshot,
 };
 
 /// Neutral harness durable-state capability backed by the sole store actor.
@@ -173,6 +174,15 @@ fn store_delivery(delivery: HarnessDeliveryRecord) -> StoredHarnessDelivery {
         submission_id: delivery.submission.submission_id,
         digest: delivery.submission.digest,
         operation_id: delivery.submission.operation_id,
+        project: delivery
+            .project
+            .map(|project| StoredHarnessProjectDelivery {
+                project_id: project.project_id,
+                dispatch_id: project.dispatch_id,
+                assignment_id: project.assignment_id,
+                thread_id: project.thread_id,
+                sequence: project.sequence,
+            }),
         body: delivery.submission.body,
         queued_at_millis: delivery.queued_at_millis,
         state: store_delivery_state(delivery.state),
@@ -190,6 +200,15 @@ fn map_delivery(stored: StoredHarnessDelivery) -> HarnessDeliveryRecord {
             operation_id: stored.operation_id,
             body: stored.body,
         },
+        project: stored
+            .project
+            .map(|project| hq_harness::HarnessProjectDelivery {
+                project_id: project.project_id,
+                dispatch_id: project.dispatch_id,
+                assignment_id: project.assignment_id,
+                thread_id: project.thread_id,
+                sequence: project.sequence,
+            }),
         queued_at_millis: stored.queued_at_millis,
         state: map_delivery_state(stored.state),
     }
@@ -292,4 +311,47 @@ const fn map_store_error(error: StoreError, conflict: HarnessErrorClass) -> Harn
         | StoreErrorClass::RebuildableStateCorrupt => HarnessErrorClass::PersistenceCollision,
     };
     HarnessError::new(class)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use std::num::NonZeroU64;
+
+    use hq_domain::{
+        AgentId, AssignmentId, CommandDigest, ContentText, DispatchId, MessageId, OperationId,
+        ProjectId, ProviderId, ProviderSessionId, ThreadId,
+    };
+    use hq_harness::{
+        HarnessDeliveryRecord, HarnessDeliveryState, HarnessProjectDelivery, HarnessSubmission,
+    };
+
+    use super::{map_delivery, store_delivery};
+
+    #[test]
+    fn project_delivery_storage_mapping_round_trips_every_field() {
+        let delivery = HarnessDeliveryRecord {
+            agent_id: AgentId::from_bytes([1; 32]),
+            provider_id: ProviderId::new("provider").expect("provider"),
+            session_id: ProviderSessionId::new("session").expect("session"),
+            submission: HarnessSubmission {
+                submission_id: MessageId::from_bytes([2; 32]),
+                digest: CommandDigest::from_bytes([3; 32]),
+                operation_id: OperationId::from_bytes([4; 32]),
+                body: ContentText::new("body").expect("body"),
+            },
+            project: Some(HarnessProjectDelivery {
+                project_id: ProjectId::from_bytes([5; 32]),
+                dispatch_id: DispatchId::from_bytes([6; 32]),
+                assignment_id: AssignmentId::from_bytes([7; 32]),
+                thread_id: ThreadId::from_bytes([8; 32]),
+                sequence: NonZeroU64::new(9).expect("positive"),
+            }),
+            queued_at_millis: 10,
+            state: HarnessDeliveryState::Uncertain,
+        };
+
+        assert_eq!(map_delivery(store_delivery(delivery.clone())), delivery);
+    }
 }

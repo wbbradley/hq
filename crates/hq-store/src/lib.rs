@@ -43,7 +43,8 @@ pub use harness::{
     HarnessLeaseOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
     HarnessSessionOperationState, MAX_HARNESS_STATE_QUERY_ITEMS, StoredHarnessDelivery,
     StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessLease,
-    StoredHarnessReadySession, StoredHarnessStateMutation, StoredHarnessStateSnapshot,
+    StoredHarnessProjectDelivery, StoredHarnessReadySession, StoredHarnessStateMutation,
+    StoredHarnessStateSnapshot,
 };
 pub use hq_application::{
     AgentProjectionSnapshot, AuthoritativeSnapshot, AuthorityProjectionSnapshot, ConversationEntry,

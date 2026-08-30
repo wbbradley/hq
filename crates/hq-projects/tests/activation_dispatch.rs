@@ -603,6 +603,7 @@ struct RuntimeState {
     reject_stop: bool,
     uncertain_stop_once: bool,
     deliveries: BTreeMap<MessageId, CommandDigest>,
+    delivery_requests: Vec<ProjectRuntimeDelivery>,
     delivery_order: Vec<MessageId>,
     delivery_calls: usize,
     start_requests: Vec<ProjectRuntimeRequest>,
@@ -690,6 +691,7 @@ impl ProjectRuntimePort for ScriptedRuntime {
     ) -> Result<EffectOutcome<()>, ApplicationError> {
         let mut state = self.0.lock().expect("runtime lock");
         state.delivery_calls += 1;
+        state.delivery_requests.push(request.body.clone());
         if let Some(retained) = state.deliveries.get(&request.body.submission_id) {
             return Ok(if retained == &request.request_digest {
                 EffectOutcome::Accepted(())
@@ -765,15 +767,22 @@ fn closed_activation_binds_readiness_then_dispatches_each_pending_input_once() {
             .deliveries
             .contains_key(&expected_final_message)
     );
+    let delivered_dispatch = runtime_state.delivery_requests[0].dispatch_id;
     drop(runtime_state);
+    let mutations = canonical.mutations();
     assert!(matches!(
-        canonical.mutations().as_slice(),
+        mutations.as_slice(),
         [
             CanonicalProjectMutationAction::Open,
             CanonicalProjectMutationAction::Configure(_),
             CanonicalProjectMutationAction::MakeRunnable { .. },
             CanonicalProjectMutationAction::RecordDispatch { .. }
         ]
+    ));
+    assert!(matches!(
+        mutations.last(),
+        Some(CanonicalProjectMutationAction::RecordDispatch { dispatch_id, .. })
+            if *dispatch_id == delivered_dispatch
     ));
 }
 

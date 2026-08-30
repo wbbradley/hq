@@ -13,10 +13,10 @@ use hq_application::{
 use hq_harness::{
     HarnessActivity, HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEnvironment,
     HarnessError, HarnessErrorClass, HarnessLaunchRequest, HarnessOutput, HarnessOwnerToken,
-    HarnessPersistencePort, HarnessRegistry, HarnessSessionControlOutcome, HarnessSessionOperation,
-    HarnessSessionOperationKind, HarnessSessionOperationState, HarnessSessionRequest,
-    HarnessSubmission, HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies,
-    HarnessTokenSource,
+    HarnessPersistencePort, HarnessProjectDelivery, HarnessRegistry, HarnessSessionControlOutcome,
+    HarnessSessionOperation, HarnessSessionOperationKind, HarnessSessionOperationState,
+    HarnessSessionRequest, HarnessSubmission, HarnessSupervisor, HarnessSupervisorConfig,
+    HarnessSupervisorDependencies, HarnessTokenSource,
 };
 use hq_projects::{ProjectRuntimeDelivery, ProjectRuntimePort, ProjectRuntimeRequest};
 use hq_store::Store;
@@ -682,6 +682,13 @@ impl ProjectRuntimePort for HarnessNodeComponent {
                     operation_id: request.operation_id,
                     body: request.body.body.clone(),
                 },
+                project: Some(HarnessProjectDelivery {
+                    project_id: request.body.project_id,
+                    dispatch_id: request.body.dispatch_id,
+                    assignment_id: request.body.binding.assignment_id,
+                    thread_id: request.body.thread_id,
+                    sequence: request.body.sequence,
+                }),
                 queued_at_millis: 0,
                 state: HarnessDeliveryState::Pending,
             };
@@ -745,6 +752,13 @@ fn same_project_delivery(
         && delivery.submission.digest == request.request_digest
         && delivery.submission.operation_id == request.operation_id
         && delivery.submission.body == request.body.body
+        && delivery.project.as_ref().is_some_and(|project| {
+            project.project_id == request.body.project_id
+                && project.dispatch_id == request.body.dispatch_id
+                && project.assignment_id == request.body.binding.assignment_id
+                && project.thread_id == request.body.thread_id
+                && project.sequence == request.body.sequence
+        })
 }
 
 #[allow(
@@ -838,6 +852,13 @@ mod tests {
                 operation_id: request.operation_id,
                 body: request.body.body.clone(),
             },
+            project: Some(HarnessProjectDelivery {
+                project_id: request.body.project_id,
+                dispatch_id: request.body.dispatch_id,
+                assignment_id: request.body.binding.assignment_id,
+                thread_id: request.body.thread_id,
+                sequence: request.body.sequence,
+            }),
             queued_at_millis: 42,
             state: HarnessDeliveryState::Accepted,
         };
@@ -848,6 +869,38 @@ mod tests {
         retained.submission.digest = request.request_digest;
         retained.submission.body = ContentText::new("changed").expect("body");
         assert!(!same_project_delivery(&request, &retained));
+        retained.submission.body = request.body.body.clone();
+
+        let exact_project = retained.project.clone().expect("project provenance");
+        retained.project = None;
+        assert!(!same_project_delivery(&request, &retained));
+        retained.project = Some(HarnessProjectDelivery {
+            project_id: ProjectId::from_bytes([99; 32]),
+            ..exact_project.clone()
+        });
+        assert!(!same_project_delivery(&request, &retained));
+        retained.project = Some(HarnessProjectDelivery {
+            dispatch_id: hq_domain::DispatchId::from_bytes([99; 32]),
+            ..exact_project.clone()
+        });
+        assert!(!same_project_delivery(&request, &retained));
+        retained.project = Some(HarnessProjectDelivery {
+            assignment_id: AssignmentId::from_bytes([99; 32]),
+            ..exact_project.clone()
+        });
+        assert!(!same_project_delivery(&request, &retained));
+        retained.project = Some(HarnessProjectDelivery {
+            thread_id: ThreadId::from_bytes([99; 32]),
+            ..exact_project.clone()
+        });
+        assert!(!same_project_delivery(&request, &retained));
+        retained.project = Some(HarnessProjectDelivery {
+            sequence: NonZeroU64::new(99).expect("positive"),
+            ..exact_project.clone()
+        });
+        assert!(!same_project_delivery(&request, &retained));
+        retained.project = Some(exact_project);
+        assert!(same_project_delivery(&request, &retained));
     }
 
     #[test]
@@ -999,6 +1052,7 @@ mod tests {
             issued_at: Timestamp::from_unix_millis(3),
             body: ProjectRuntimeDelivery {
                 project_id: ProjectId::from_bytes([4; 32]),
+                dispatch_id: hq_domain::DispatchId::from_bytes([10; 32]),
                 binding: AssignmentBinding {
                     assignment_id: AssignmentId::from_bytes([5; 32]),
                     agent_id: AgentId::from_bytes([6; 32]),

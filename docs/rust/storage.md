@@ -263,9 +263,14 @@ or expired takeover; release and every external-effect mutation require the exac
 environment or credential material.
 
 `harness_deliveries` retains the exact bounded neutral submission fields needed for restart repair.
+Schema version 2 also retains optional immutable project, dispatch, assignment, thread, and input
+sequence provenance captured before provider I/O. Version 1 databases migrate in place; their
+existing delivery rows remain explicitly unattributed until exact canonical reconciliation can
+prove an association.
 Immutable identity replay is idempotent even after its state advances. Changed provider, session,
-digest, operation, or body under the same agent/submission identity is a conflict. Pending advances
-to uncertain before I/O; accepted and rejected are distinct absorbing terminal states.
+digest, operation, body, or retained project provenance under the same agent/submission identity is
+a conflict. Pending advances to uncertain before I/O; accepted and rejected are distinct absorbing
+terminal states.
 `harness_event_checkpoints` binds one event identity to its digest and monotonic output/activity
 completion bits. Digest changes and completion regression fail closed, which permits exact output
 replay after a partial output-before-activity commit without duplicate canonical effects.

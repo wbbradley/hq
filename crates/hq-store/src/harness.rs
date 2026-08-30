@@ -1,7 +1,10 @@
 //! Typed durable operational state for managed-runtime supervision.
 
+use std::num::NonZeroU64;
+
 use hq_domain::{
-    AgentId, CommandDigest, ContentText, MessageId, OperationId, ProviderId, ProviderSessionId,
+    AgentId, AssignmentId, CommandDigest, ContentText, DispatchId, MessageId, OperationId,
+    ProjectId, ProviderId, ProviderSessionId, ThreadId,
 };
 pub use hq_harness::{
     HarnessSessionOperation, HarnessSessionOperationKind, HarnessSessionOperationState,
@@ -56,6 +59,21 @@ pub enum StoredHarnessDeliveryState {
     Rejected,
 }
 
+/// Immutable project provenance retained before provider I/O.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoredHarnessProjectDelivery {
+    /// Target project captured at dispatch.
+    pub project_id: ProjectId,
+    /// Stable canonical dispatch identity.
+    pub dispatch_id: DispatchId,
+    /// Assignment captured by the dispatch.
+    pub assignment_id: AssignmentId,
+    /// Immutable selected project thread.
+    pub thread_id: ThreadId,
+    /// Authoritative positive project-input sequence.
+    pub sequence: NonZeroU64,
+}
+
 /// Exact durable provider input retained for restart reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredHarnessDelivery {
@@ -71,6 +89,8 @@ pub struct StoredHarnessDelivery {
     pub digest: CommandDigest,
     /// HQ operation correlation.
     pub operation_id: OperationId,
+    /// Exact project provenance, absent only for a legacy unattributed row.
+    pub project: Option<StoredHarnessProjectDelivery>,
     /// Bounded exact neutral body.
     pub body: ContentText,
     /// Injected durable queue time used only for deterministic scanning.

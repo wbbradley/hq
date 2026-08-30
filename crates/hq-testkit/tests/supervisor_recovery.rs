@@ -600,6 +600,7 @@ fn delivery(
             operation_id: OperationId::from_bytes([6; 32]),
             body: ContentText::new("durable input").expect("body validates"),
         },
+        project: None,
         queued_at_millis: 0,
         state: HarnessDeliveryState::Pending,
     }

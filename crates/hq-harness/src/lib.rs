@@ -24,9 +24,10 @@ pub use registry::{HarnessRegistry, RegisteredProviderView};
 pub use supervisor::{
     HarnessClock, HarnessDeliveryRecord, HarnessDeliveryState, HarnessEventCheckpoint,
     HarnessEventPumpReport, HarnessLaunchRequest, HarnessLeaseOutcome, HarnessOwnerToken,
-    HarnessPersistencePort, HarnessReadySession, HarnessSessionControlOutcome,
-    HarnessSessionOperation, HarnessSessionOperationKind, HarnessSessionOperationState,
-    HarnessStateMutation, HarnessStatePort, HarnessStateSnapshot, HarnessSupervisor,
-    HarnessSupervisorConfig, HarnessSupervisorDependencies, HarnessSupervisorReport,
-    HarnessTokenSource, HarnessWorkerLease, MAX_HARNESS_SUPERVISOR_STATE_ITEMS,
+    HarnessPersistencePort, HarnessProjectDelivery, HarnessReadySession,
+    HarnessSessionControlOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
+    HarnessSessionOperationState, HarnessStateMutation, HarnessStatePort, HarnessStateSnapshot,
+    HarnessSupervisor, HarnessSupervisorConfig, HarnessSupervisorDependencies,
+    HarnessSupervisorReport, HarnessTokenSource, HarnessWorkerLease,
+    MAX_HARNESS_SUPERVISOR_STATE_ITEMS,
 };

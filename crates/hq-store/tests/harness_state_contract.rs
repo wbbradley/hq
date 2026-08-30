@@ -2,13 +2,17 @@
 
 #![allow(clippy::expect_used)]
 
+use std::num::NonZeroU64;
+
 use hq_domain::{
-    AgentId, CommandDigest, ContentText, MessageId, OperationId, ProviderId, ProviderSessionId,
+    AgentId, AssignmentId, CommandDigest, ContentText, DispatchId, MessageId, OperationId,
+    ProjectId, ProviderId, ProviderSessionId, ThreadId,
 };
 use hq_store::{
     HarnessLeaseOutcome, HarnessSessionOperation, HarnessSessionOperationKind,
     HarnessSessionOperationState, StoreErrorClass, StoredHarnessDelivery,
-    StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessStateMutation,
+    StoredHarnessDeliveryState, StoredHarnessEventCheckpoint, StoredHarnessProjectDelivery,
+    StoredHarnessStateMutation,
 };
 
 mod support;
@@ -97,15 +101,7 @@ fn delivery_and_event_checkpoints_are_exact_monotonic_and_restart_durable() {
     store
         .apply_harness_state(StoredHarnessStateMutation::QueueDelivery(delivery.clone()))
         .expect("exact delivery replay is idempotent");
-    let mut changed = delivery.clone();
-    changed.digest = CommandDigest::from_bytes([99; 32]);
-    assert_eq!(
-        store
-            .apply_harness_state(StoredHarnessStateMutation::QueueDelivery(changed))
-            .expect_err("changed stable delivery collides")
-            .class(),
-        StoreErrorClass::HarnessStateConflict
-    );
+    assert_delivery_identity_collisions(&store, &delivery);
     store
         .apply_harness_state(StoredHarnessStateMutation::SetDeliveryState {
             agent_id: delivery.agent_id,
@@ -253,10 +249,38 @@ fn delivery() -> StoredHarnessDelivery {
         submission_id: MessageId::from_bytes([4; 32]),
         digest: CommandDigest::from_bytes([5; 32]),
         operation_id: OperationId::from_bytes([6; 32]),
+        project: Some(StoredHarnessProjectDelivery {
+            project_id: ProjectId::from_bytes([31; 32]),
+            dispatch_id: DispatchId::from_bytes([32; 32]),
+            assignment_id: AssignmentId::from_bytes([33; 32]),
+            thread_id: ThreadId::from_bytes([34; 32]),
+            sequence: NonZeroU64::new(35).expect("positive sequence"),
+        }),
         body: ContentText::new("durable exact input").expect("body validates"),
         queued_at_millis: 7,
         state: StoredHarnessDeliveryState::Pending,
     }
+}
+
+fn assert_delivery_identity_collisions(store: &hq_store::Store, delivery: &StoredHarnessDelivery) {
+    let mut changed = delivery.clone();
+    changed.digest = CommandDigest::from_bytes([99; 32]);
+    assert_eq!(
+        store
+            .apply_harness_state(StoredHarnessStateMutation::QueueDelivery(changed))
+            .expect_err("changed stable delivery collides")
+            .class(),
+        StoreErrorClass::HarnessStateConflict
+    );
+    let mut changed = delivery.clone();
+    changed.project.as_mut().expect("attribution").dispatch_id = DispatchId::from_bytes([98; 32]);
+    assert_eq!(
+        store
+            .apply_harness_state(StoredHarnessStateMutation::QueueDelivery(changed))
+            .expect_err("changed project provenance collides")
+            .class(),
+        StoreErrorClass::HarnessStateConflict
+    );
 }
 
 fn assert_terminal_delivery_replay(
