@@ -571,6 +571,13 @@ fn mailbox_command_digest(request: &MailboxCommandRequestDto) -> CommandDigest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConversationKeyDto {
+    /// One independently initiated project exchange.
+    ProjectThread {
+        /// Stable project identity.
+        project: Id32,
+        /// Stable initiating thread identity.
+        thread: Id32,
+    },
     /// One causal thread with an exact counterparty mailbox.
     Thread {
         /// Counterparty installation identity.

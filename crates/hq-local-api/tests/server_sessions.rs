@@ -558,9 +558,8 @@ fn every_typed_request_family_routes_without_storage_types() {
     let (mut server, application) = session(hub);
     negotiate(&mut server, &application);
     let page = ConversationPageRequest::new(
-        ConversationKeyDto::Thread {
-            counterparty_installation: Id32::new([1; 32]),
-            counterparty_mailbox: Id32::new([2; 32]),
+        ConversationKeyDto::ProjectThread {
+            project: Id32::new([1; 32]),
             thread: Id32::new([3; 32]),
         },
         32,

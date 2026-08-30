@@ -807,6 +807,11 @@ fn put_orders(digest: &mut Sha256, orders: &BTreeMap<ReductionDomain, Vec<FactId
 
 fn put_conversation_key(digest: &mut Sha256, key: &ConversationKey) {
     match key {
+        ConversationKey::ProjectThread { project_id, thread } => {
+            put_i64(digest, 3);
+            digest.update(project_id.as_bytes());
+            digest.update(thread.as_bytes());
+        }
         ConversationKey::Thread {
             counterparty,
             thread,

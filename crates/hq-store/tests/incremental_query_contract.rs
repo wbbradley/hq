@@ -3,7 +3,7 @@
 #![allow(clippy::expect_used)]
 
 use hq_application::ClientProjection;
-use hq_domain::{MailboxAddress, PageCursor, ProviderId, ProviderSessionId};
+use hq_domain::{MailboxAddress, PageCursor, ProjectId, ProviderId, ProviderSessionId, ThreadId};
 use hq_store::{ConversationEntry, ConversationKey, IngestOutcome, StoreErrorClass};
 use rusqlite::{Connection, params};
 
@@ -11,9 +11,60 @@ mod support;
 
 use support::{
     TestDirectory, TestStoreExt, authored_conversation_entry, authored_durable_conversation_entry,
-    authority_policy, open_store, seed_canonical_corpus, verified_account, verified_child,
-    verified_fact, verified_incomplete_peer_question, verified_question,
+    authored_project_input, authority_policy, open_store, seed_canonical_corpus, verified_account,
+    verified_child, verified_fact, verified_incomplete_peer_question, verified_question,
 };
+
+#[test]
+fn project_thread_keys_persist_rebuild_reopen_and_page_independently() {
+    let directory = TestDirectory::new();
+    let database = directory.database_path();
+    let store = open_store(&database);
+    let root = verified_fact();
+    let project_id = ProjectId::from_bytes([0x91; 32]);
+    let first = authored_project_input(1, project_id, "Let's have a conversation.");
+    let second = authored_project_input(2, project_id, "Let's have another conversation.");
+    let first_id = first.fact().id();
+    let second_id = second.fact().id();
+    let first_key = ConversationKey::ProjectThread {
+        project_id,
+        thread: ThreadId::from_bytes(*first_id.as_bytes()),
+    };
+    let second_key = ConversationKey::ProjectThread {
+        project_id,
+        thread: ThreadId::from_bytes(*second_id.as_bytes()),
+    };
+    store.append_verified(root).expect("root ingests");
+    store.append_verified(second).expect("second input ingests");
+    store.append_verified(first).expect("first input ingests");
+
+    assert_eq!(load_all_ids(&store, &first_key, 1), [first_id]);
+    assert_eq!(load_all_ids(&store, &second_key, 1), [second_id]);
+    let snapshot = store.authoritative_snapshot().expect("snapshot loads");
+    assert_eq!(
+        snapshot
+            .conversations()
+            .iter()
+            .map(|summary| summary.key.clone())
+            .collect::<Vec<_>>(),
+        vec![first_key.clone(), second_key.clone()]
+    );
+    let index = store.load_reduction_index().expect("index loads");
+    assert_eq!(index.conversation_orders().len(), 2);
+    assert!(!index.conversation_orders().keys().any(|key| matches!(
+        key,
+        ConversationKey::Thread { .. } | ConversationKey::ProviderSession { .. }
+    )));
+
+    store.repair(authority_policy()).expect("repair succeeds");
+    assert_eq!(load_all_ids(&store, &first_key, 1), [first_id]);
+    assert_eq!(load_all_ids(&store, &second_key, 1), [second_id]);
+    store.close().expect("store closes");
+
+    let reopened = open_store(&database);
+    assert_eq!(load_all_ids(&reopened, &first_key, 1), [first_id]);
+    assert_eq!(load_all_ids(&reopened, &second_key, 1), [second_id]);
+}
 
 #[test]
 fn incomplete_peer_message_is_bounded_inert_diagnostic_state_across_reopen() {

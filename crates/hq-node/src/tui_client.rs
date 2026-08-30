@@ -2061,6 +2061,10 @@ const fn presentation_label(presentation: PresentationKindDto) -> &'static str {
 
 fn conversation_identity(key: ConversationKeyDto) -> (String, String) {
     match key {
+        ConversationKeyDto::ProjectThread { project, thread } => (
+            format!("project:{}:{}", full_id(project), full_id(thread)),
+            "Project conversation".to_owned(),
+        ),
         ConversationKeyDto::Thread { thread, .. } => (
             format!("thread:{}", full_id(thread)),
             format!("Thread {}", short_id(thread)),
@@ -2191,12 +2195,26 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_project_command, ui_project_outcome};
+    use super::{conversation_identity, local_project_command, ui_project_outcome};
     use crate::local_client::{
         LocalProjectCommand, LocalProjectOutcome, LocalProjectResourceCheck,
         LocalProjectResourceConflict,
     };
+    use hq_local_api::protocol::v1::{ConversationKeyDto, Id32};
     use hq_tui::{UiProjectAction, UiProjectOutcome};
+
+    #[test]
+    fn project_conversation_identity_retains_both_full_ids_without_exposing_them_as_the_title() {
+        let (identity, title) = conversation_identity(ConversationKeyDto::ProjectThread {
+            project: Id32::new([0x11; 32]),
+            thread: Id32::new([0x22; 32]),
+        });
+        assert_eq!(
+            identity,
+            format!("project:{}:{}", "11".repeat(32), "22".repeat(32))
+        );
+        assert_eq!(title, "Project conversation");
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)]

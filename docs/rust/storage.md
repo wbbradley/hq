@@ -138,11 +138,18 @@ ordinary materialization writes incremental.
 
 ## Indexed conversation pages
 
-`ConversationKey` is a closed thread or provider-session identity with an exact installation-
-qualified counterparty mailbox. For every key, repair and ingest select only projected messages and
-selected/durable activity values, then invoke the reducer's canonical Kahn comparator on that
-induced conversation graph. `reduction_conversation_order` stores conversation-local positions and
-stable fact IDs; there is no dense global display rank and clients never recreate a lookalike sort.
+`ConversationKey` is a closed direct-thread, provider-session, or project-thread identity. Direct
+keys retain an exact installation-qualified counterparty mailbox. A project key retains the exact
+project ID and initiating thread ID; provider/session/operation remain provenance inside that
+exchange and do not determine its row. For every key, repair and ingest select only projected
+messages and selected/durable activity values, then invoke the reducer's canonical Kahn comparator
+on that induced conversation graph. `reduction_conversation_order` stores conversation-local
+positions and stable fact IDs; there is no dense global display rank and clients never recreate a
+lookalike sort.
+
+The current pre-release schema stores the three variants as closed key kinds in
+`reduction_conversation_keys`. This layout was changed in place without a schema migration or
+version bump; local databases created against an earlier unshipped layout may be discarded.
 
 `load_conversation_entries(key, limit, cursor)` returns a typed `Page<ConversationEntry>` whose
 closed union contains either a complete `MessageView` or `ActivityView`. Limits are `1..=200`.
@@ -262,11 +269,10 @@ or expired takeover; release and every external-effect mutation require the exac
 `harness_ready_sessions` retains only acknowledged provider/session identity. It contains no launch
 environment or credential material.
 
-`harness_deliveries` retains the exact bounded neutral submission fields needed for restart repair.
-Schema version 2 also retains optional immutable project, dispatch, assignment, thread, and input
-sequence provenance captured before provider I/O. Version 1 databases migrate in place; their
-existing delivery rows remain explicitly unattributed until exact canonical reconciliation can
-prove an association.
+`harness_deliveries` retains the exact bounded neutral submission fields needed for restart repair,
+including optional immutable project, dispatch, assignment, thread, and input-sequence provenance
+captured before provider I/O. These fields are part of the clean-sheet schema version 1 definition;
+there is no legacy delivery migration or attribution-repair path.
 Immutable identity replay is idempotent even after its state advances. Changed provider, session,
 digest, operation, body, or retained project provenance under the same agent/submission identity is
 a conflict. Pending advances to uncertain before I/O; accepted and rejected are distinct absorbing

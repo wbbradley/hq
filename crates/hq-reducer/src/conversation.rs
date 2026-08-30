@@ -20,6 +20,13 @@ pub type ConversationReport = DomainReductionReport<ConversationReducer>;
 /// Closed identity of one reducer-ordered conversation view.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ConversationKey {
+    /// One independently initiated project exchange.
+    ProjectThread {
+        /// Stable project receiving the initiating input.
+        project_id: hq_domain::ProjectId,
+        /// Stable causal thread shared by input, output, and activity.
+        thread: ThreadId,
+    },
     /// One uncorrelated causal thread with an exact counterparty mailbox.
     Thread {
         /// Installation-qualified mailbox at the other side of the local human view.
@@ -65,6 +72,7 @@ pub fn conversation_orders(
                     continue;
                 };
                 let SemanticPayload::HarnessActivityRecorded {
+                    project,
                     source,
                     correlation,
                     ..
@@ -73,14 +81,18 @@ pub fn conversation_orders(
                     continue;
                 };
                 if let Some(entry) = presentation_entry(fact) {
-                    entries
-                        .entry(ConversationKey::ProviderSession {
+                    let key = project.as_ref().map_or_else(
+                        || ConversationKey::ProviderSession {
                             counterparty: *source,
                             provider: correlation.provider().clone(),
                             session: correlation.session().clone(),
-                        })
-                        .or_default()
-                        .push(entry);
+                        },
+                        |project| ConversationKey::ProjectThread {
+                            project_id: project.project_id,
+                            thread: project.thread_id,
+                        },
+                    );
+                    entries.entry(key).or_default().push(entry);
                 }
             }
             _ => {}
@@ -98,6 +110,12 @@ fn message_conversation_key(
     message: &MessageView,
     policy: AuthorityPolicy,
 ) -> Option<ConversationKey> {
+    if let Some(project_id) = message.content.project_id {
+        return Some(ConversationKey::ProjectThread {
+            project_id,
+            thread: message.thread_id,
+        });
+    }
     let local = MailboxAddress::new(policy.local_installation(), policy.local_human_mailbox());
     let counterparty = if message.content.sender == local {
         message.content.recipient?

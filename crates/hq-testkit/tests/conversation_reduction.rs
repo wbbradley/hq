@@ -11,13 +11,14 @@ use hq_domain::{
     ThreadId, Timestamp,
 };
 use hq_reducer::{
-    ActivityKey, ActivitySessionKey, AuthorityPolicy, CausalRelation, ConversationProjection,
-    ConversationProjectionKey, ConversationReason, ConversationReducer, DecisionReason,
-    DecisionStatus, incomplete_addressed_observations, reduce_complete,
+    ActivityKey, ActivitySessionKey, AuthorityPolicy, CausalRelation, ConversationKey,
+    ConversationProjection, ConversationProjectionKey, ConversationReason, ConversationReducer,
+    DecisionReason, DecisionStatus, conversation_orders, incomplete_addressed_observations,
+    reduce_complete,
 };
 use hq_testkit::{DeterministicValues, FactBuilder, arrival_permutations};
 
-const CONVERSATION_SCENARIO_COVERAGE: [(&str, &str); 26] = [
+const CONVERSATION_SCENARIO_COVERAGE: [(&str, &str); 27] = [
     ("CONV-001", "local question and answer"),
     ("CONV-002", "multiple answers"),
     ("CONV-003", "answer and cancellation relations"),
@@ -34,6 +35,7 @@ const CONVERSATION_SCENARIO_COVERAGE: [(&str, &str); 26] = [
     ("CONV-014", "final answer selection"),
     ("CONV-015", "equal time mixed order"),
     ("CONV-016", "child clock before parent"),
+    ("CONV-017", "project exchanges retain initiating thread"),
     ("ACT-001", "activity inertness"),
     ("ACT-002", "sequenced snapshots"),
     ("ACT-003", "concurrent sequence winner"),
@@ -48,7 +50,7 @@ const CONVERSATION_SCENARIO_COVERAGE: [(&str, &str); 26] = [
 
 #[test]
 fn every_named_conversation_and_activity_scenario_is_mapped() {
-    assert_eq!(CONVERSATION_SCENARIO_COVERAGE.len(), 26);
+    assert_eq!(CONVERSATION_SCENARIO_COVERAGE.len(), 27);
     assert!(
         CONVERSATION_SCENARIO_COVERAGE
             .iter()
@@ -59,6 +61,224 @@ fn every_named_conversation_and_activity_scenario_is_mapped() {
                     && !executable_case.is_empty()
             })
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn project_output_and_activity_join_only_their_initiating_exchange_for_every_arrival_order()
+-> Result<(), Box<dyn Error>> {
+    let mut values = DeterministicValues::new(250);
+    let world = local_world(&mut values)?;
+    let project_id = ProjectId::from_bytes([0x41; 32]);
+    let project_mailbox = MailboxAddress::new(
+        world.installation.installation_id(),
+        MailboxId::from_bytes([0x42; 32]),
+    );
+    let first_message_id = values.message_id();
+    let first = project_input_fact(
+        &mut values,
+        &world,
+        project_id,
+        project_mailbox,
+        first_message_id,
+        10,
+        "Let's have a conversation.",
+    )?;
+    let first_thread = ThreadId::from_bytes(*first.id().as_bytes());
+    let second_message_id = values.message_id();
+    let second = project_input_fact(
+        &mut values,
+        &world,
+        project_id,
+        project_mailbox,
+        second_message_id,
+        20,
+        "Let's have another conversation.",
+    )?;
+    let second_thread = ThreadId::from_bytes(*second.id().as_bytes());
+    let agent_id = AgentId::from_bytes([0x43; 32]);
+    let claim = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(2),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [world.installation_root.id(), world.agent_root.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::AgentNameClaimed {
+            agent_id,
+            mailbox_id: world.agent.mailbox_id(),
+            name: ShortText::new("alice")?,
+        },
+    )?;
+    let dispatch_id = DispatchId::from_bytes([0x44; 32]);
+    let binding = AssignmentBinding {
+        assignment_id: AssignmentId::from_bytes([0x45; 32]),
+        agent_id,
+        provider: ProviderId::new("codex")?,
+        session: ProviderSessionId::new("01a0544a-af23-7a52-8df7-71f6dfbb4efc")?,
+    };
+    let dispatch = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(25),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [world.installation_root.id(), claim.id(), first.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::ProjectInputDispatched {
+            project_id,
+            message_id: first_message_id,
+            sequence: NonZeroU64::MIN,
+            dispatch_id,
+            binding: binding.clone(),
+            thread_id: first_thread,
+        },
+    )?;
+    let correlation = OperationCorrelation::new(
+        binding.provider.clone(),
+        binding.session.clone(),
+        hq_domain::OperationId::from_bytes([0x46; 32]),
+    );
+    let output_id = values.message_id();
+    let output = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(30),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [world.installation_root.id(), claim.id(), dispatch.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::ProjectOutputRecorded {
+            project_id,
+            output_id,
+            dispatch_id,
+            binding: binding.clone(),
+            thread_id: first_thread,
+            message: MessageContent {
+                message_id: output_id,
+                sender: world.agent,
+                recipient: Some(project_mailbox),
+                body: ContentText::new("Absolutely. What’s on your mind?")?,
+                purpose: MessagePurpose::ProjectOutput,
+                presentation: PresentationKind::FinalAnswer,
+                correlation: Some(correlation.clone()),
+                project_id: Some(project_id),
+            },
+        },
+    )?;
+    let activity = FactBuilder::with_causal(
+        &mut values,
+        world.installation,
+        Timestamp::from_unix_millis(40),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [
+            world.installation_root.id(),
+            world.agent_root.id(),
+            claim.id(),
+            dispatch.id(),
+        ],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::HarnessActivityRecorded {
+            project: Some(ProjectActivityAttribution {
+                project_id,
+                dispatch_id,
+                binding,
+                thread_id: first_thread,
+            }),
+            source: world.agent,
+            correlation,
+            item: None,
+            kind: ActivityKind::Status,
+            logical_key: ShortText::new("turn")?,
+            runtime: ShortText::new("runtime")?,
+            sequence: NonZeroU64::MIN,
+            occurred_at: Timestamp::from_unix_millis(40),
+            status: ActivityStatus::Succeeded,
+            content: ContentText::new("Codex turn completed")?,
+            truncated: false,
+        },
+    )?;
+    let variable = vec![
+        first.clone(),
+        second.clone(),
+        claim.clone(),
+        dispatch.clone(),
+        output.clone(),
+        activity.clone(),
+    ];
+    let policy = AuthorityPolicy::new(
+        world.installation.installation_id(),
+        world.human.mailbox_id(),
+    );
+    let expected = [
+        (
+            ConversationKey::ProjectThread {
+                project_id,
+                thread: first_thread,
+            },
+            vec![first.id(), output.id(), activity.id()],
+        ),
+        (
+            ConversationKey::ProjectThread {
+                project_id,
+                thread: second_thread,
+            },
+            vec![second.id()],
+        ),
+    ]
+    .into_iter()
+    .collect();
+    for arrival in arrival_permutations(&variable) {
+        let report = reduce_complete(
+            world.base_facts().into_iter().chain(arrival),
+            &world.reducer(),
+        )?;
+        assert_eq!(conversation_orders(&report, policy)?, expected);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_input_fact(
+    values: &mut DeterministicValues,
+    world: &LocalWorld,
+    project_id: ProjectId,
+    project_mailbox: MailboxAddress,
+    message_id: MessageId,
+    authored_at: i64,
+    body: &str,
+) -> Result<Fact, Box<dyn Error>> {
+    Ok(FactBuilder::with_causal(
+        values,
+        world.installation,
+        Timestamp::from_unix_millis(authored_at),
+        FactScope::InstallationPrivate(world.installation.installation_id()),
+        [world.installation_root.id(), world.human_root.id()],
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            world.installation_root.id(),
+        )],
+        SemanticPayload::AsynchronousMessageSent(MessageContent {
+            message_id,
+            sender: world.human,
+            recipient: Some(project_mailbox),
+            body: ContentText::new(body)?,
+            purpose: MessagePurpose::Asynchronous,
+            presentation: PresentationKind::Message,
+            correlation: None,
+            project_id: Some(project_id),
+        }),
+    )?)
 }
 
 fn address(value: u8) -> InstallationAddress {

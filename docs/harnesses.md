@@ -166,7 +166,9 @@ The canonical log retains superseded activity. The disposable SQLite projection 
 selected winners and the newest 200 progress records per source/provider session; a rebuild
 reproduces that projection. The legacy activity query returns at most 1,000 chronological projected
 rows. Mixed `conversation/entries` pages place typed messages and projected activity in reducer
-display order; the TUI consumes that order directly rather than sorting occurrence timestamps.
+display order; project-attributed activity joins the exact project/thread exchange captured by its
+dispatch, while direct activity remains provider-session grouped. The TUI consumes that order
+directly rather than sorting occurrence timestamps.
 
 The TUI hides non-actionable activity cards in the selected provider/session conversation by
 default. Focus the message pane and press `e` to show every activity card fully expanded or hide

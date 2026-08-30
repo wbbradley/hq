@@ -225,9 +225,13 @@ then uses ordinary idempotent canonical ingestion. Existing facts retain their o
 Neither operation grants authority; imported facts become usable only if ordinary complete
 reduction projects their signed lineage.
 
-Conversation bodies and activity are loaded through the bounded page method using a typed thread or
-provider-session conversation key. The continuation cursor is opaque, belongs to this query, and is
-never interpreted by a client. Page order is the reducer's canonical presentation order.
+Conversation bodies and activity are loaded through the bounded page method using a typed direct
+thread, provider-session, or project-thread conversation key. A project-thread key carries exact
+32-byte project and initiating-thread identities; it does not substitute the current agent or
+provider session. The continuation cursor is opaque, belongs to this query, and is never interpreted
+by a client. Page order is the reducer's canonical presentation order. This additional closed key
+variant is part of the existing unshipped local API v1 shape; there is no compatibility branch or
+version bump.
 
 ## Stable mutation retry
 

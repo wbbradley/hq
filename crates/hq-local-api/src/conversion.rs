@@ -1688,6 +1688,12 @@ fn mutation_receipt_to_v1(receipt: &MutationReceipt) -> MutationAttemptDto {
 
 fn conversation_key_from_v1(key: ConversationKeyDto) -> Result<ConversationKey, ValueError> {
     match key {
+        ConversationKeyDto::ProjectThread { project, thread } => {
+            Ok(ConversationKey::ProjectThread {
+                project_id: hq_domain::ProjectId::from_bytes(project.bytes()),
+                thread: hq_domain::ThreadId::from_bytes(thread.bytes()),
+            })
+        }
         ConversationKeyDto::Thread {
             counterparty_installation,
             counterparty_mailbox,
@@ -1717,6 +1723,12 @@ fn conversation_key_from_v1(key: ConversationKeyDto) -> Result<ConversationKey, 
 
 fn conversation_key_to_v1(key: &ConversationKey) -> ConversationKeyDto {
     match key {
+        ConversationKey::ProjectThread { project_id, thread } => {
+            ConversationKeyDto::ProjectThread {
+                project: id32(project_id.as_bytes()),
+                thread: id32(thread.as_bytes()),
+            }
+        }
         ConversationKey::Thread {
             counterparty,
             thread,

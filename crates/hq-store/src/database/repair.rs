@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use hq_domain::{
-    FactId, InstallationId, MailboxAddress, MailboxId, ProviderId, ProviderSessionId, ThreadId,
+    FactId, InstallationId, MailboxAddress, MailboxId, ProjectId, ProviderId, ProviderSessionId,
+    ThreadId,
 };
 use hq_reducer::{AuthorityPolicy, ConversationKey};
 use rusqlite::{
@@ -758,13 +759,14 @@ fn insert_conversation_orders(
             .execute(
                 "INSERT INTO reduction_conversation_keys( \
                      key_digest, key_kind, counterparty_installation, counterparty_mailbox, \
-                     thread_id, provider, session \
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     project_id, thread_id, provider, session \
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     digest.as_slice(),
                     parts.kind,
                     parts.counterparty.installation_id().as_bytes().as_slice(),
                     parts.counterparty.mailbox_id().as_bytes().as_slice(),
+                    parts.project.as_bytes().as_slice(),
                     parts.thread.as_bytes().as_slice(),
                     parts.provider,
                     parts.session
@@ -807,6 +809,7 @@ fn insert_conversation_orders(
 struct ConversationKeyParts<'a> {
     kind: i64,
     counterparty: MailboxAddress,
+    project: ProjectId,
     thread: ThreadId,
     provider: &'a str,
     session: &'a str,
@@ -814,12 +817,24 @@ struct ConversationKeyParts<'a> {
 
 fn conversation_key_parts(key: &ConversationKey) -> ConversationKeyParts<'_> {
     match key {
+        ConversationKey::ProjectThread { project_id, thread } => ConversationKeyParts {
+            kind: 3,
+            counterparty: MailboxAddress::new(
+                InstallationId::from_bytes([0; 32]),
+                MailboxId::from_bytes([0; 32]),
+            ),
+            project: *project_id,
+            thread: *thread,
+            provider: "",
+            session: "",
+        },
         ConversationKey::Thread {
             counterparty,
             thread,
         } => ConversationKeyParts {
             kind: 1,
             counterparty: *counterparty,
+            project: ProjectId::from_bytes([0; 32]),
             thread: *thread,
             provider: "",
             session: "",
@@ -831,6 +846,7 @@ fn conversation_key_parts(key: &ConversationKey) -> ConversationKeyParts<'_> {
         } => ConversationKeyParts {
             kind: 2,
             counterparty: *counterparty,
+            project: ProjectId::from_bytes([0; 32]),
             thread: ThreadId::from_bytes([0; 32]),
             provider: provider.as_str(),
             session: session.as_str(),
@@ -845,6 +861,7 @@ pub(crate) fn conversation_key_digest(key: &ConversationKey) -> [u8; 32] {
     digest.update(parts.kind.to_be_bytes());
     digest.update(parts.counterparty.installation_id().as_bytes());
     digest.update(parts.counterparty.mailbox_id().as_bytes());
+    digest.update(parts.project.as_bytes());
     digest.update(parts.thread.as_bytes());
     digest.update(
         u64::try_from(parts.provider.len())
@@ -871,13 +888,15 @@ pub(crate) fn conversation_key_is_persisted(
         .query_row(
             "SELECT count(*), sum(CASE WHEN key_kind = ?2 \
                AND counterparty_installation = ?3 AND counterparty_mailbox = ?4 \
-               AND thread_id = ?5 AND provider = ?6 AND session = ?7 THEN 1 ELSE 0 END) \
+               AND project_id = ?5 AND thread_id = ?6 AND provider = ?7 AND session = ?8 \
+               THEN 1 ELSE 0 END) \
              FROM reduction_conversation_keys WHERE key_digest = ?1",
             params![
                 digest.as_slice(),
                 parts.kind,
                 parts.counterparty.installation_id().as_bytes().as_slice(),
                 parts.counterparty.mailbox_id().as_bytes().as_slice(),
+                parts.project.as_bytes().as_slice(),
                 parts.thread.as_bytes().as_slice(),
                 parts.provider,
                 parts.session
@@ -1238,12 +1257,11 @@ fn load_orders(
 fn load_conversation_orders(
     connection: &Connection,
 ) -> Result<BTreeMap<ConversationKey, Vec<FactId>>, StoreError> {
-    type KeyRow = (Vec<u8>, i64, Vec<u8>, Vec<u8>, Vec<u8>, String, String);
     let mut by_digest = BTreeMap::<[u8; 32], ConversationKey>::new();
     let mut statement = connection
         .prepare(
             "SELECT key_digest, key_kind, counterparty_installation, counterparty_mailbox, \
-                    thread_id, provider, session \
+                    project_id, thread_id, provider, session \
              FROM reduction_conversation_keys ORDER BY key_digest",
         )
         .map_err(database)?;
@@ -1257,32 +1275,12 @@ fn load_conversation_orders(
                 row.get(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                row.get(7)?,
             ))
         })
         .map_err(database)?;
     for row in rows {
-        let (digest, kind, installation, mailbox, thread, provider, session): KeyRow =
-            row.map_err(database)?;
-        let digest = fixed(digest)?;
-        let counterparty = MailboxAddress::new(
-            InstallationId::from_bytes(fixed(installation)?),
-            MailboxId::from_bytes(fixed(mailbox)?),
-        );
-        let thread = fixed(thread)?;
-        let key = match kind {
-            1 if provider.is_empty() && session.is_empty() => ConversationKey::Thread {
-                counterparty,
-                thread: ThreadId::from_bytes(thread),
-            },
-            2 if thread == [0; 32] && !provider.is_empty() && !session.is_empty() => {
-                ConversationKey::ProviderSession {
-                    counterparty,
-                    provider: ProviderId::new(provider).map_err(|_| corrupt())?,
-                    session: ProviderSessionId::new(session).map_err(|_| corrupt())?,
-                }
-            }
-            _ => return Err(corrupt()),
-        };
+        let (digest, key) = decode_conversation_key_row(row.map_err(database)?)?;
         if digest != conversation_key_digest(&key) || by_digest.insert(digest, key).is_some() {
             return Err(corrupt());
         }
@@ -1321,6 +1319,63 @@ fn load_conversation_orders(
         order.push(FactId::from_bytes(fixed(fact_id)?));
     }
     Ok(orders)
+}
+
+type ConversationKeyRow = (
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    String,
+    String,
+);
+
+fn decode_conversation_key_row(
+    row: ConversationKeyRow,
+) -> Result<([u8; 32], ConversationKey), StoreError> {
+    let (digest, kind, installation, mailbox, project, thread, provider, session) = row;
+    let digest = fixed(digest)?;
+    let installation = fixed(installation)?;
+    let mailbox = fixed(mailbox)?;
+    let counterparty = MailboxAddress::new(
+        InstallationId::from_bytes(installation),
+        MailboxId::from_bytes(mailbox),
+    );
+    let project = fixed(project)?;
+    let thread = fixed(thread)?;
+    let key = match kind {
+        1 if project == [0; 32] && provider.is_empty() && session.is_empty() => {
+            ConversationKey::Thread {
+                counterparty,
+                thread: ThreadId::from_bytes(thread),
+            }
+        }
+        2 if project == [0; 32]
+            && thread == [0; 32]
+            && !provider.is_empty()
+            && !session.is_empty() =>
+        {
+            ConversationKey::ProviderSession {
+                counterparty,
+                provider: ProviderId::new(provider).map_err(|_| corrupt())?,
+                session: ProviderSessionId::new(session).map_err(|_| corrupt())?,
+            }
+        }
+        3 if installation == [0; 32]
+            && mailbox == [0; 32]
+            && provider.is_empty()
+            && session.is_empty() =>
+        {
+            ConversationKey::ProjectThread {
+                project_id: ProjectId::from_bytes(project),
+                thread: ThreadId::from_bytes(thread),
+            }
+        }
+        _ => return Err(corrupt()),
+    };
+    Ok((digest, key))
 }
 
 fn load_conflicts(
@@ -1651,4 +1706,42 @@ fn database(_: rusqlite::Error) -> StoreError {
 
 fn corrupt() -> StoreError {
     StoreError::new(StoreErrorClass::RebuildableStateCorrupt)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn closed_conversation_key_variants_have_distinct_digests() {
+        let thread = ThreadId::from_bytes([0x31; 32]);
+        let mailbox = MailboxAddress::new(
+            InstallationId::from_bytes([0x32; 32]),
+            MailboxId::from_bytes([0x33; 32]),
+        );
+        let keys = [
+            ConversationKey::ProjectThread {
+                project_id: ProjectId::from_bytes([0x34; 32]),
+                thread,
+            },
+            ConversationKey::Thread {
+                counterparty: mailbox,
+                thread,
+            },
+            ConversationKey::ProviderSession {
+                counterparty: mailbox,
+                provider: ProviderId::new("provider").expect("provider validates"),
+                session: ProviderSessionId::new("session").expect("session validates"),
+            },
+        ];
+        assert_eq!(
+            keys.iter()
+                .map(conversation_key_digest)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            keys.len()
+        );
+    }
 }

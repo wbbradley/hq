@@ -65,6 +65,14 @@ are derived from the same projected message set and explicit local authority pol
 filter metadata, not canonical facts or ordering inputs. Clients load history only through bounded
 opaque-cursor pages and must preserve the returned union order unchanged.
 
+Conversation identity is a closed typed union. Ordinary uncorrelated messages use an exact causal
+thread and counterparty; direct runtime output uses the exact counterparty/provider/session pair.
+Project-addressed messages instead use `(project_id, thread_id)`. The initiating input's fact-derived
+thread is retained by its dispatch and copied into typed project output and activity attribution, so
+provider-session changes or assignment handoff cannot split one exchange. A separately initiated
+message for the same project has a different thread and therefore remains a different conversation.
+No content, current assignment, display name, or row adjacency participates in grouping.
+
 ## Non-actionable activity
 
 `HarnessActivityRecorded` carries a full source mailbox, provider/session/operation and optional
@@ -87,8 +95,9 @@ facts and presentation order.
 ## Executable evidence
 
 `crates/hq-testkit/tests/conversation_reduction.rs` maps and executes `CONV-001` through
-`CONV-016` and `ACT-001` through `ACT-009`, including the `REG-002` comparator regression shape.
+`CONV-017` and `ACT-001` through `ACT-009`, including the `REG-002` comparator regression shape.
 It covers exhaustive permutations of small answer/cancellation and mixed message/activity graphs,
 missing history, public-ID collisions, all state transitions, typed prose inertness, peer receipt,
-account fanout, final-answer grouping, delayed occurrence, runtime/provider/source namespaces,
-equal-sequence conflicts, completed history, and a 205-record retention rebuild.
+account fanout, final-answer grouping, typed project-exchange grouping, delayed occurrence,
+runtime/provider/source namespaces, equal-sequence conflicts, completed history, and a 205-record
+retention rebuild.

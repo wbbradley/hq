@@ -2,12 +2,15 @@
 
 #![allow(clippy::expect_used)]
 
-use hq_application::{ProjectCommandAction, ProjectCommandRequest};
+use hq_application::{
+    AuthoritativeSnapshot, ConversationKey, ConversationSummary, DomainSnapshot,
+    ProjectCommandAction, ProjectCommandRequest,
+};
 use hq_domain::{
     AccountId, BoundedSet, BoundedText, CausalReferences, CommandDigest, CommandId,
     EncryptionPublicKey, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
-    OperationId, ProjectId, ResourceId, ResourceLocator, ResourceScheme, SemanticPayload,
-    ShortText, SigningPublicKey, Timestamp,
+    OperationId, ProjectId, ResourceId, ResourceLocator, ResourceScheme, Revision, SemanticPayload,
+    ShortText, SigningPublicKey, ThreadId, Timestamp,
 };
 use hq_local_api::protocol::v1::{
     ActivityStatusDto, AgentLaunchContextDto, AgentRetirementOutcomeDto, AgentRetirementRequestDto,
@@ -35,7 +38,7 @@ use hq_local_api::protocol::v1::{
     VersionRejected, WireMessage, WorktreeProvisioningRequestDto, agent_session_request_digest,
     negotiate, resource_inspection_request_digest,
 };
-use hq_local_api::{project_command_from_v1, project_command_request_to_v1};
+use hq_local_api::{project_command_from_v1, project_command_request_to_v1, snapshot_to_v1};
 
 fn build() -> BuildMetadata {
     BuildMetadata::new("hq", "0.1.0", Some("0123456789ab")).expect("bounded build metadata")
@@ -85,6 +88,59 @@ fn canonical_frame_round_trips_incrementally() {
         Some(hello())
     );
     assert_eq!(decoder.buffered_len(), 0);
+}
+
+#[test]
+fn project_thread_conversation_key_round_trips_in_local_api_v1() {
+    let key = ConversationKeyDto::ProjectThread {
+        project: Id32::new([0x31; 32]),
+        thread: Id32::new([0x32; 32]),
+    };
+    let message = WireMessage::Request(RequestEnvelope::new(
+        RequestId::new(1).expect("nonzero request"),
+        Request::ConversationPage(
+            ConversationPageRequest::new(key.clone(), 32, None).expect("page request"),
+        ),
+    ));
+    let value = serde_json::to_value(&message).expect("request serializes");
+    assert_eq!(
+        value["value"]["request"]["params"]["key"],
+        serde_json::json!({
+            "kind": "project_thread",
+            "project": vec![0x31; 32],
+            "thread": vec![0x32; 32]
+        })
+    );
+    assert_eq!(
+        WireMessage::decode_frame(&message.encode_frame().expect("request encodes")),
+        Ok(message)
+    );
+}
+
+#[test]
+fn project_thread_snapshot_summary_converts_to_the_same_typed_v1_key() {
+    let project_id = ProjectId::from_bytes([0x41; 32]);
+    let thread = ThreadId::from_bytes([0x42; 32]);
+    let snapshot = AuthoritativeSnapshot::with_conversations(
+        Revision::new(7),
+        DomainSnapshot::empty(),
+        vec![ConversationSummary {
+            key: ConversationKey::ProjectThread { project_id, thread },
+            latest_fact: Some(FactId::from_bytes([0x43; 32])),
+            open_messages: 1,
+            archived_messages: 0,
+            sent_messages: 1,
+        }],
+    );
+    let converted = snapshot_to_v1(&snapshot).expect("snapshot converts");
+    assert!(matches!(
+        converted.items.as_slice(),
+        [SnapshotItem::Conversation {
+            key: ConversationKeyDto::ProjectThread { project, thread: converted_thread },
+            ..
+        }] if project.bytes() == *project_id.as_bytes()
+            && converted_thread.bytes() == *thread.as_bytes()
+    ));
 }
 
 #[test]

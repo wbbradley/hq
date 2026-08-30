@@ -48,7 +48,7 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x4851_5253;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 1;
 const SCHEMA_MARKER: &str = "hq-store-v1";
 const SCHEMA_TABLES: [&str; 118] = [
     "storage_metadata",
@@ -308,11 +308,12 @@ CREATE TABLE reduction_presentation_order (
 
 CREATE TABLE reduction_conversation_keys (
     key_digest BLOB PRIMARY KEY NOT NULL CHECK(typeof(key_digest) = 'blob' AND length(key_digest) = 32),
-    key_kind INTEGER NOT NULL CHECK(key_kind IN (1, 2)),
+    key_kind INTEGER NOT NULL CHECK(key_kind IN (1, 2, 3)),
     counterparty_installation BLOB NOT NULL
         CHECK(typeof(counterparty_installation) = 'blob' AND length(counterparty_installation) = 32),
     counterparty_mailbox BLOB NOT NULL
         CHECK(typeof(counterparty_mailbox) = 'blob' AND length(counterparty_mailbox) = 32),
+    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),
     thread_id BLOB NOT NULL CHECK(typeof(thread_id) = 'blob' AND length(thread_id) = 32),
     provider TEXT NOT NULL CHECK(typeof(provider) = 'text' AND length(CAST(provider AS BLOB)) <= 64),
     session TEXT NOT NULL CHECK(typeof(session) = 'text' AND length(CAST(session AS BLOB)) <= 256)
@@ -1484,7 +1485,6 @@ impl Database {
         if initialize {
             initialize_schema(&mut connection)?;
         } else {
-            migrate_schema(&mut connection)?;
             verify_schema(&connection)?;
         }
         verify_integrity(&connection)?;
@@ -2894,11 +2894,7 @@ fn inspect_existing(connection: &Connection) -> Result<bool, StoreError> {
             return Ok(true);
         }
     }
-    if application_id == APPLICATION_ID && user_version == 1 {
-        verify_schema_objects(connection)?;
-    } else {
-        verify_schema(connection)?;
-    }
+    verify_schema(connection)?;
     verify_integrity(connection)?;
     Ok(false)
 }
@@ -2955,49 +2951,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
         .map_err(sql_error)?;
     transaction
         .pragma_update(None, "application_id", APPLICATION_ID)
-        .map_err(sql_error)?;
-    transaction
-        .pragma_update(None, "user_version", SCHEMA_VERSION)
-        .map_err(sql_error)?;
-    transaction.commit().map_err(sql_error)
-}
-
-fn migrate_schema(connection: &mut Connection) -> Result<(), StoreError> {
-    let application_id: i64 = connection
-        .pragma_query_value(None, "application_id", |row| row.get(0))
-        .map_err(sql_error)?;
-    let user_version: i64 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(sql_error)?;
-    if application_id != APPLICATION_ID || user_version == SCHEMA_VERSION {
-        return Ok(());
-    }
-    if user_version != 1 {
-        return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
-    }
-    verify_schema_objects(connection)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Exclusive)
-        .map_err(sql_error)?;
-    transaction
-        .execute_batch(
-            "ALTER TABLE harness_deliveries ADD COLUMN project_id BLOB \
-                 CHECK(project_id IS NULL OR \
-                     (typeof(project_id) = 'blob' AND length(project_id) = 32));
-             ALTER TABLE harness_deliveries ADD COLUMN dispatch_id BLOB \
-                 CHECK(dispatch_id IS NULL OR \
-                     (typeof(dispatch_id) = 'blob' AND length(dispatch_id) = 32));
-             ALTER TABLE harness_deliveries ADD COLUMN assignment_id BLOB \
-                 CHECK(assignment_id IS NULL OR \
-                     (typeof(assignment_id) = 'blob' AND length(assignment_id) = 32));
-             ALTER TABLE harness_deliveries ADD COLUMN project_thread_id BLOB \
-                 CHECK(project_thread_id IS NULL OR \
-                     (typeof(project_thread_id) = 'blob' AND length(project_thread_id) = 32));
-             ALTER TABLE harness_deliveries ADD COLUMN input_sequence BLOB \
-                 CHECK(input_sequence IS NULL OR \
-                     (typeof(input_sequence) = 'blob' AND length(input_sequence) = 8 AND \
-                      input_sequence != X'0000000000000000'));",
-        )
         .map_err(sql_error)?;
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -3063,6 +3016,26 @@ fn verify_schema_objects(connection: &Connection) -> Result<(), StoreError> {
         if present != 1 {
             return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
         }
+    }
+    let retained_project_columns: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('harness_deliveries') \
+             WHERE name IN ('project_id', 'dispatch_id', 'assignment_id', \
+                            'project_thread_id', 'input_sequence')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    let project_conversation_column: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('reduction_conversation_keys') \
+             WHERE name = 'project_id'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    if retained_project_columns != 5 || project_conversation_column != 1 {
+        return Err(StoreError::new(StoreErrorClass::IncompatibleSchema));
     }
     verify_schema_marker(connection)
 }
@@ -3409,12 +3382,9 @@ pub(crate) mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use std::{
-        fs,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering as AtomicOrdering},
-        },
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
     };
 
     use hq_protocol::{Bip340Signer, CanonicalEventPlan};
@@ -3448,46 +3418,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
-    fn version_one_delivery_rows_migrate_as_explicitly_unattributed() {
-        static NEXT_MIGRATION: AtomicUsize = AtomicUsize::new(1);
-        const PROJECT_COLUMNS: &str = r"    project_id BLOB
-        CHECK(project_id IS NULL OR (typeof(project_id) = 'blob' AND length(project_id) = 32)),
-    dispatch_id BLOB
-        CHECK(dispatch_id IS NULL OR (typeof(dispatch_id) = 'blob' AND length(dispatch_id) = 32)),
-    assignment_id BLOB
-        CHECK(assignment_id IS NULL OR
-            (typeof(assignment_id) = 'blob' AND length(assignment_id) = 32)),
-    project_thread_id BLOB
-        CHECK(project_thread_id IS NULL OR
-            (typeof(project_thread_id) = 'blob' AND length(project_thread_id) = 32)),
-    input_sequence BLOB
-        CHECK(input_sequence IS NULL OR
-            (typeof(input_sequence) = 'blob' AND length(input_sequence) = 8 AND
-             input_sequence != X'0000000000000000')),
-";
-        const PROJECT_COMPLETENESS: &str = r"    CHECK((project_id IS NULL AND dispatch_id IS NULL AND assignment_id IS NULL AND
-           project_thread_id IS NULL AND input_sequence IS NULL) OR
-          (project_id IS NOT NULL AND dispatch_id IS NOT NULL AND assignment_id IS NOT NULL AND
-           project_thread_id IS NOT NULL AND input_sequence IS NOT NULL)),
-";
-
-        let old_schema =
-            SCHEMA
-                .replacen(PROJECT_COLUMNS, "", 1)
-                .replacen(PROJECT_COMPLETENESS, "", 1);
-        assert!(!old_schema.contains("project_thread_id"));
-        let unique = NEXT_MIGRATION.fetch_add(1, AtomicOrdering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "hq-rust-schema-migration-test-{}-{unique}",
-            std::process::id()
-        ));
-        let path = root.join("state").join("hq.sqlite3");
-        assert!(prepare_database_path(&path).expect("database path prepares"));
-        let connection = Connection::open(&path).expect("version one database opens");
+    fn earlier_unshipped_version_one_layout_is_rejected_instead_of_migrated() {
+        const PROJECT_KEY_COLUMN: &str = "    project_id BLOB NOT NULL CHECK(typeof(project_id) = 'blob' AND length(project_id) = 32),\n";
+        let old_schema = SCHEMA.replacen(PROJECT_KEY_COLUMN, "", 1);
+        assert_ne!(old_schema, SCHEMA);
+        let connection = Connection::open_in_memory().expect("memory database opens");
         connection
             .execute_batch(&old_schema)
-            .expect("version one schema creates");
+            .expect("earlier unshipped layout creates");
         connection
             .execute(
                 "INSERT INTO storage_metadata(singleton, schema_marker) VALUES (1, ?1)",
@@ -3498,69 +3436,14 @@ pub(crate) mod tests {
             .pragma_update(None, "application_id", APPLICATION_ID)
             .expect("application id sets");
         connection
-            .pragma_update(None, "user_version", 1)
-            .expect("old version sets");
-        connection
-            .execute(
-                "INSERT INTO harness_deliveries(
-                    agent_id, submission_id, provider_id, session_id, digest, operation_id, body,
-                    queued_at_millis, delivery_state
-                 ) VALUES (?1, ?2, 'scripted', 'legacy-session', ?3, ?4, 'legacy input', ?5, 1)",
-                params![
-                    [1_u8; 32].as_slice(),
-                    [2_u8; 32].as_slice(),
-                    [3_u8; 32].as_slice(),
-                    [4_u8; 32].as_slice(),
-                    5_u64.to_be_bytes().as_slice(),
-                ],
-            )
-            .expect("legacy delivery inserts");
-
-        drop(connection);
-
-        let database = Database::open(&path).expect("version one database migrates on open");
-        let retained = database
-            .load_harness_delivery(
-                hq_domain::AgentId::from_bytes([1; 32]),
-                hq_domain::MessageId::from_bytes([2; 32]),
-            )
-            .expect("legacy delivery loads")
-            .expect("legacy delivery remains");
-        assert_eq!(retained.project, None);
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .expect("schema version sets");
         assert_eq!(
-            database
-                .load_harness_delivery_for_operation(
-                    hq_domain::AgentId::from_bytes([1; 32]),
-                    hq_domain::OperationId::from_bytes([4; 32]),
-                )
-                .expect("operation delivery loads"),
-            Some(retained)
+            verify_schema(&connection)
+                .expect_err("earlier layout rejects")
+                .class(),
+            StoreErrorClass::IncompatibleSchema
         );
-        database
-            .connection
-            .execute(
-                "INSERT INTO harness_deliveries(
-                    agent_id, submission_id, provider_id, session_id, digest, operation_id, body,
-                    queued_at_millis, delivery_state
-                 ) VALUES (?1, ?2, 'scripted', 'legacy-session', ?3, ?4, 'duplicate operation', ?5, 1)",
-                params![
-                    [1_u8; 32].as_slice(),
-                    [6_u8; 32].as_slice(),
-                    [7_u8; 32].as_slice(),
-                    [4_u8; 32].as_slice(),
-                    8_u64.to_be_bytes().as_slice(),
-                ],
-            )
-            .expect("duplicate operation row inserts for conflict fixture");
-        let conflict = database
-            .load_harness_delivery_for_operation(
-                hq_domain::AgentId::from_bytes([1; 32]),
-                hq_domain::OperationId::from_bytes([4; 32]),
-            )
-            .expect_err("duplicate operation attribution fails closed");
-        assert_eq!(conflict.class(), StoreErrorClass::HarnessStateConflict);
-        drop(database);
-        fs::remove_dir_all(root).expect("test state cleans up");
     }
 
     #[test]

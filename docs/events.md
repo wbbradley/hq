@@ -249,9 +249,11 @@ Messages and activity share this reducer order but remain separate semantic stre
 Its message values retain typed schema-3 presentation, correlation, and technical sections. The
 legacy `conversation/history` shape remains message-only. Conversation summaries, open/unread
 counts, delivery, reply/archive targets, drafts, and final-answer selection are also message-only.
-Persistence derives the comparator independently for each closed thread or provider-session key.
-Its opaque event-anchored cursor is bound to that conversation and resolves through an indexed
-local position; later pages neither scan nor sort complete history.
+Persistence derives the comparator independently for each closed direct-thread, provider-session,
+or project-thread key. Project input, output, and attributed activity use the exact project and
+initiating thread; provider/session/operation remain typed provenance within that exchange. Its
+opaque event-anchored cursor is bound to that conversation and resolves through an indexed local
+position; later pages neither scan nor sort complete history.
 
 Activity projection is latest-wins per full source/provider/session/operation/kind/item key.
 Operation, plan, and diff are snapshots; repeated item and progress keys coalesce; completed

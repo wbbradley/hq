@@ -705,6 +705,32 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
 }
 
 #[test]
+fn authoritative_snapshot_preserves_project_thread_conversation_identity() {
+    let source = AuthoritativeSnapshotDto::new(
+        1,
+        vec![SnapshotItem::Conversation {
+            key: ConversationKeyDto::ProjectThread {
+                project: Id32::new([0x31; 32]),
+                thread: Id32::new([0x42; 32]),
+            },
+            latest_fact: Some(Id32::new([0x53; 32])),
+            open_messages: 1,
+            archived_messages: 0,
+            sent_messages: 1,
+        }],
+    )
+    .expect("authoritative snapshot");
+
+    let snapshot = tui_snapshot([0x64; 32], &source);
+    assert_eq!(snapshot.inbox_rows.len(), 1);
+    assert_eq!(
+        snapshot.inbox_rows[0].id,
+        format!("project:{}:{}", "31".repeat(32), "42".repeat(32))
+    );
+    assert_eq!(snapshot.inbox_rows[0].title, "Project conversation");
+}
+
+#[test]
 fn provider_catalog_mapping_preserves_choices_defaults_unavailability_and_stale_defaults() {
     let snapshot = AuthoritativeSnapshotDto::new(1, Vec::new()).expect("empty snapshot");
     let catalog = ProviderCatalogDto::new(

@@ -11,7 +11,8 @@ use hq_domain::{
     ActivityKind, ActivityStatus, AuthorityReference, AuthorityRole, BoundedSet, CausalReferences,
     ContentText, FactId, FactScope, InstallationId, MAX_FACT_AUTHORITIES, MAX_FACT_PARENTS,
     MailboxAddress, MessageContent, MessageId, MessagePurpose, OperationCorrelation, OperationId,
-    PresentationKind, ProviderId, ProviderSessionId, SemanticPayload, ShortText, Timestamp,
+    PresentationKind, ProjectId, ProviderId, ProviderSessionId, SemanticPayload, ShortText,
+    Timestamp,
 };
 use hq_protocol::{Bip340Signer, CanonicalEventPlan, DispatchOutcome, VerifiedSemanticFact};
 use hq_store::Store;
@@ -332,6 +333,51 @@ pub fn authored_conversation_entry(index: u16, activity: bool) -> VerifiedSemant
 
 pub fn authored_durable_conversation_entry(index: u16, activity: bool) -> VerifiedSemanticFact {
     authored_conversation_entry_with_retention(index, activity, true)
+}
+
+pub fn authored_project_input(
+    index: u16,
+    project_id: ProjectId,
+    body: &str,
+) -> VerifiedSemanticFact {
+    let root = FactId::from_bytes(verified_fact().verified_event().event_id());
+    let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
+        BoundedSet::new([root]).expect("one parent validates"),
+        [AuthorityReference::new(
+            AuthorityRole::LocalInstallation,
+            root,
+        )],
+    )
+    .expect("local authority validates");
+    let local = MailboxAddress::new(
+        authority_policy().local_installation(),
+        authority_policy().local_human_mailbox(),
+    );
+    let project_mailbox = MailboxAddress::new(
+        authority_policy().local_installation(),
+        hq_domain::MailboxId::from_bytes(indexed_id(0x68, index)),
+    );
+    let mut auxiliary = [0_u8; 32];
+    auxiliary[0] = 3;
+    auxiliary[30..].copy_from_slice(&index.to_be_bytes());
+    CanonicalEventPlan::new(
+        authority_policy().local_installation(),
+        Timestamp::from_unix_millis(2_000 + i64::from(index)),
+        FactScope::InstallationPrivate(authority_policy().local_installation()),
+        causal,
+        SemanticPayload::AsynchronousMessageSent(MessageContent {
+            message_id: MessageId::from_bytes(indexed_id(0x58, index)),
+            sender: local,
+            recipient: Some(project_mailbox),
+            body: ContentText::new(body).expect("body validates"),
+            purpose: MessagePurpose::Asynchronous,
+            presentation: PresentationKind::Message,
+            correlation: None,
+            project_id: Some(project_id),
+        }),
+    )
+    .sign(&signer(1), auxiliary)
+    .expect("project input signs")
 }
 
 fn authored_conversation_entry_with_retention(
