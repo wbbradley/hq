@@ -27,23 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Replace routine outcome dialogs with contextual completion
-
-Create one typed presentation policy for command completion instead of opening an outcome modal for
-every project and managed-session response.
-
-- On ordinary success, close the form, request the authoritative snapshot, select the created or
-  changed object, and show a bounded transient confirmation in the footer/status area.
-- When success has an obvious continuation, navigate to it: project creation selects the new project;
-  starting project work opens its conversation or first-message composer; manual advanced session
-  administration returns to the agent with the selected session visible.
-- Keep a modal only when the user must make another decision, when a preview must be committed, or
-  when the result is rejected, uncertain, reconcilable, conflicted, or otherwise unsafe to dismiss.
-  Preserve operation identity and exact recovery evidence in those exceptional states.
-- Define and test completion behavior for every `UiProjectOutcome` and
-  `UiManagedSessionOutcome`, including reconnect and stale-completion cases, so no success path
-  strands the user or discards context.
-
 ### Add an extensible guided `New...` workflow
 
 Provide a clear path from intent to conversation while keeping project work, direct messages, and

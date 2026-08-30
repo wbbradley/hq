@@ -691,6 +691,54 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
 }
 
 #[test]
+fn routine_project_completion_uses_the_footer_without_an_outcome_dialog() {
+    let model = project_model(UiSize {
+        width: 104,
+        height: 20,
+    });
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("project details");
+    let composer = update(details.model, UiEvent::Input(UiInput::Character('n')))
+        .expect("project instructions");
+    let typed = update(
+        composer.model,
+        UiEvent::Input(UiInput::Paste("ship it".to_owned())),
+    )
+    .expect("instruction text");
+    let pending = update(typed.model, UiEvent::Input(UiInput::Activate)).expect("send");
+    let (effect_id, action) = pending
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            UiEffect::SubmitProjectCommand { id, action } => Some((*id, action.clone())),
+            _ => None,
+        })
+        .expect("project effect");
+    let completed = update(
+        pending.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action,
+                command_id: [11; 32],
+                operation_id: [12; 32],
+                project_id: [1; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::InputSent {
+                    message_id: [13; 32],
+                },
+            },
+        },
+    )
+    .expect("routine completion")
+    .model;
+    let rendered = render_text(&completed);
+    assert!(rendered.contains("Done · Instructions sent"), "{rendered}");
+    assert!(!rendered.contains("Project change"), "{rendered}");
+    assert!(!rendered.contains("Technical message ID"), "{rendered}");
+}
+
+#[test]
 fn project_creation_chooser_leads_with_folder_ownership_and_discloses_worktrees() {
     let chooser = update(
         project_model(UiSize {

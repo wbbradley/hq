@@ -2176,6 +2176,7 @@ const fn timer_kind_order(kind: UiTimerKind) -> u8 {
         UiTimerKind::PeriodicRefresh => 0,
         UiTimerKind::RetrySnapshot => 1,
         UiTimerKind::AutosaveDraft => 2,
+        UiTimerKind::DismissCompletion => 3,
     }
 }
 

@@ -2532,6 +2532,8 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
             " Could not complete that action · {} · ? details",
             failure.action
         )
+    } else if let Some(notice) = model.completion_notice() {
+        format!(" Done · {notice}")
     } else if let Some(hint) = model.transient_help() {
         format!(" Hint · {hint}")
     } else if model.focus() == UiFocus::Navigation && model.viewport().width >= WIDE_WIDTH {
@@ -2555,6 +2557,8 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
     };
     let style = if model.last_failure().is_some() && model.help_page().is_none() {
         Style::new().fg(Color::Yellow)
+    } else if model.completion_notice().is_some() && model.help_page().is_none() {
+        Style::new().fg(Color::Green)
     } else {
         Style::new().fg(Color::DarkGray)
     };

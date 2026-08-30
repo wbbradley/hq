@@ -10,6 +10,7 @@ use std::{
 const PERIODIC_REFRESH: Duration = Duration::from_secs(300);
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 const DRAFT_AUTOSAVE_DELAY: Duration = Duration::from_millis(250);
+const COMPLETION_NOTICE_DELAY: Duration = Duration::from_secs(4);
 const MAX_DRAFT_BYTES: usize = 16 * 1024;
 const MAX_AGENT_TEXT_BYTES: usize = 256;
 const MAX_PROJECT_TEXT_BYTES: usize = 16 * 1024;
@@ -1282,6 +1283,60 @@ impl UiTransientHelp {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiCompletionNotice {
+    AgentReady,
+    AgentStopped,
+    ProjectCreated,
+    ProjectUpdated,
+    InstructionsSent,
+    ProjectWorkReady,
+}
+
+impl UiCompletionNotice {
+    const fn text(self) -> &'static str {
+        match self {
+            Self::AgentReady => "Agent conversation ready",
+            Self::AgentStopped => "Agent stopped; saved conversation kept",
+            Self::ProjectCreated => "Project created",
+            Self::ProjectUpdated => "Project updated",
+            Self::InstructionsSent => "Instructions sent",
+            Self::ProjectWorkReady => "Project work is ready",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiProjectCompletionContinuation {
+    Select,
+    Details,
+    ComposeInput,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UiCompletionContext {
+    Agent {
+        agent_id: [u8; 32],
+        selected_session: Option<(String, String)>,
+    },
+    Project {
+        project_id: [u8; 32],
+        continuation: UiProjectCompletionContinuation,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UiCompletionRefresh {
+    Initial,
+    Followup,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UiPendingCompletion {
+    target: UiCompletionContext,
+    refresh: UiCompletionRefresh,
+}
+
 /// Closed timer purpose owned by the shell effect executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiTimerKind {
@@ -1291,6 +1346,8 @@ pub enum UiTimerKind {
     RetrySnapshot,
     /// Debounced local draft autosave.
     AutosaveDraft,
+    /// Bounded routine-completion confirmation.
+    DismissCompletion,
 }
 
 /// Closed event vocabulary accepted by the pure UI model.
@@ -1613,9 +1670,12 @@ pub struct UiModel {
     periodic_timer: Option<EffectId>,
     retry_timer: Option<EffectId>,
     autosave_timer: Option<EffectId>,
+    completion_timer: Option<EffectId>,
     next_effect_id: Option<NonZeroU64>,
     last_failure: Option<UiFailure>,
     transient_help: Option<UiTransientHelp>,
+    completion_notice: Option<UiCompletionNotice>,
+    completion_context: Option<UiPendingCompletion>,
     started: bool,
     should_exit: bool,
 }
@@ -1658,9 +1718,12 @@ impl UiModel {
             periodic_timer: None,
             retry_timer: None,
             autosave_timer: None,
+            completion_timer: None,
             next_effect_id: NonZeroU64::new(1),
             last_failure: None,
             transient_help: None,
+            completion_notice: None,
+            completion_context: None,
             started: false,
             should_exit: false,
         }
@@ -1955,6 +2018,11 @@ impl UiModel {
         self.transient_help.map(UiTransientHelp::text)
     }
 
+    /// Returns the current bounded routine-completion confirmation.
+    pub fn completion_notice(&self) -> Option<&'static str> {
+        self.completion_notice.map(UiCompletionNotice::text)
+    }
+
     /// Reports whether the model requested loop exit.
     pub const fn should_exit(&self) -> bool {
         self.should_exit
@@ -2157,6 +2225,7 @@ impl UiModel {
             UiTimerKind::PeriodicRefresh => self.periodic_timer = Some(id),
             UiTimerKind::RetrySnapshot => self.retry_timer = Some(id),
             UiTimerKind::AutosaveDraft => self.autosave_timer = Some(id),
+            UiTimerKind::DismissCompletion => self.completion_timer = Some(id),
         }
         effects.push(UiEffect::ScheduleTimer { id, kind, after });
         Ok(())
@@ -2385,8 +2454,12 @@ fn apply_input(
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
     model.sync_form();
+    let dismissed_completion = model.completion_notice.take().is_some();
+    if dismissed_completion {
+        model.completion_timer = None;
+    }
     if let Some(changed) = apply_open_modal_input(model, input, effects)? {
-        if changed {
+        if changed || dismissed_completion {
             effects.push(UiEffect::RequestRedraw);
         }
         return Ok(());
@@ -2481,7 +2554,7 @@ fn apply_input(
         | UiInput::MoveCursorEnd
         | UiInput::Delete => false,
     };
-    if changed || dismissed_transient_help {
+    if changed || dismissed_transient_help || dismissed_completion {
         effects.push(UiEffect::RequestRedraw);
     }
     Ok(())
@@ -5365,6 +5438,10 @@ fn timer_elapsed(
     } else if model.autosave_timer == Some(effect_id) {
         model.autosave_timer = None;
         model.save_draft(effects)?;
+    } else if model.completion_timer == Some(effect_id) {
+        model.completion_timer = None;
+        model.completion_notice = None;
+        effects.push(UiEffect::RequestRedraw);
     }
     Ok(())
 }
@@ -5388,6 +5465,7 @@ fn snapshot_loaded(
     let current_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
     if snapshot.revision >= current_revision {
         model.apply_snapshot(snapshot);
+        apply_completion_context(model);
     }
     let observed_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
     let required_revision = model
@@ -5399,6 +5477,24 @@ fn snapshot_loaded(
     } else {
         model.required_revision = Some(required_revision);
         model.request_snapshot(effects)?;
+    }
+    if model.completion_context.is_some() && model.pending_snapshot.is_none() {
+        let followup_requested = model
+            .completion_context
+            .as_ref()
+            .is_some_and(|pending| pending.refresh == UiCompletionRefresh::Followup);
+        if followup_requested {
+            model.completion_context = None;
+            model.last_failure = Some(UiFailure {
+                code: "completion_target_stale".to_owned(),
+                action: "reload and select the changed project or agent".to_owned(),
+            });
+        } else {
+            if let Some(pending) = &mut model.completion_context {
+                pending.refresh = UiCompletionRefresh::Followup;
+            }
+            model.request_snapshot(effects)?;
+        }
     }
     if model.required_revision.is_none()
         && let Some(row_id) = model
@@ -5723,21 +5819,159 @@ fn managed_session_completed(
         return Ok(());
     }
     model.pending_managed_session = None;
-    model.last_failure = match &result.outcome {
-        UiManagedSessionOutcome::Rejected { code, .. } => Some(UiFailure {
-            code: code.clone(),
-            action: "reload durable sessions, then select an exact current target".to_owned(),
-        }),
-        UiManagedSessionOutcome::Uncertain { .. } => Some(UiFailure {
-            code: "managed_session_uncertain".to_owned(),
-            action: "keep this operation identity while HQ reconciles the same request".to_owned(),
-        }),
-        UiManagedSessionOutcome::Ready { .. } | UiManagedSessionOutcome::Stopped => None,
-    };
-    model.agent_modal = Some(UiAgentModal::ManagedSessionOutcome { agent, result });
+    model.completion_notice = None;
+    model.completion_timer = None;
+    model.completion_context = None;
+    match &result.outcome {
+        UiManagedSessionOutcome::Rejected { code, .. } => {
+            model.last_failure = Some(UiFailure {
+                code: code.clone(),
+                action: "reload durable sessions, then select an exact current target".to_owned(),
+            });
+            model.agent_modal = Some(UiAgentModal::ManagedSessionOutcome { agent, result });
+        }
+        UiManagedSessionOutcome::Uncertain { .. } => {
+            model.last_failure = Some(UiFailure {
+                code: "managed_session_uncertain".to_owned(),
+                action: "keep this operation identity while HQ reconciles the same request"
+                    .to_owned(),
+            });
+            model.agent_modal = Some(UiAgentModal::ManagedSessionOutcome { agent, result });
+        }
+        UiManagedSessionOutcome::Ready { session } => {
+            let provider = managed_session_provider(&result.action).to_owned();
+            model.last_failure = None;
+            model.agent_modal = None;
+            model.completion_context = Some(UiPendingCompletion {
+                target: UiCompletionContext::Agent {
+                    agent_id: agent.agent_id,
+                    selected_session: Some((provider, session.clone())),
+                },
+                refresh: UiCompletionRefresh::Initial,
+            });
+            show_completion_notice(model, UiCompletionNotice::AgentReady, effects)?;
+        }
+        UiManagedSessionOutcome::Stopped => {
+            let provider = managed_session_provider(&result.action);
+            let selected_session = agent
+                .sessions
+                .iter()
+                .find(|session| session.provider == provider && session.selected)
+                .or_else(|| {
+                    agent
+                        .sessions
+                        .iter()
+                        .find(|session| session.provider == provider)
+                })
+                .map(|session| (session.provider.clone(), session.session.clone()));
+            model.last_failure = None;
+            model.agent_modal = None;
+            model.completion_context = Some(UiPendingCompletion {
+                target: UiCompletionContext::Agent {
+                    agent_id: agent.agent_id,
+                    selected_session,
+                },
+                refresh: UiCompletionRefresh::Initial,
+            });
+            show_completion_notice(model, UiCompletionNotice::AgentStopped, effects)?;
+        }
+    }
     model.request_snapshot(effects)?;
     effects.push(UiEffect::RequestRedraw);
     Ok(())
+}
+
+fn managed_session_provider(action: &UiManagedSessionAction) -> &str {
+    match action {
+        UiManagedSessionAction::Start { provider, .. }
+        | UiManagedSessionAction::Resume { provider, .. }
+        | UiManagedSessionAction::Stop { provider, .. } => provider,
+    }
+}
+
+fn show_completion_notice(
+    model: &mut UiModel,
+    notice: UiCompletionNotice,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    model.completion_notice = Some(notice);
+    model.completion_timer = None;
+    model.schedule_timer(
+        UiTimerKind::DismissCompletion,
+        COMPLETION_NOTICE_DELAY,
+        effects,
+    )
+}
+
+fn apply_completion_context(model: &mut UiModel) {
+    let Some(context) = model
+        .completion_context
+        .as_ref()
+        .map(|pending| pending.target.clone())
+    else {
+        return;
+    };
+    match context {
+        UiCompletionContext::Agent {
+            agent_id,
+            selected_session,
+        } => {
+            let Some(agent) = model.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.agent_id == agent_id)
+                    .cloned()
+            }) else {
+                return;
+            };
+            if let Some((provider, session)) = &selected_session
+                && !agent.sessions.iter().any(|candidate| {
+                    &candidate.provider == provider && &candidate.session == session
+                })
+            {
+                return;
+            }
+            model.change_section(UiSection::Agents);
+            model.selected_row = Some(agent_hex(agent_id));
+            model.agent_modal = Some(UiAgentModal::Details {
+                agent,
+                selected_session,
+            });
+            model.project_modal = None;
+            model.completion_context = None;
+        }
+        UiCompletionContext::Project {
+            project_id,
+            continuation,
+        } => {
+            let Some(project) = model.snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .projects
+                    .iter()
+                    .find(|project| project.project_id == project_id)
+                    .cloned()
+            }) else {
+                return;
+            };
+            model.change_section(UiSection::Projects);
+            model.selected_row = Some(agent_hex(project_id));
+            model.agent_modal = None;
+            model.project_modal = match continuation {
+                UiProjectCompletionContinuation::Select => None,
+                UiProjectCompletionContinuation::Details => Some(UiProjectModal::Details {
+                    selected_resource: default_project_resource(&project),
+                    project,
+                }),
+                UiProjectCompletionContinuation::ComposeInput => Some(UiProjectModal::SendInput {
+                    project,
+                    content: String::new(),
+                    submitting: false,
+                }),
+            };
+            model.completion_context = None;
+        }
+    }
 }
 
 fn managed_session_failed(
@@ -5780,25 +6014,72 @@ fn project_command_completed(
         return Ok(());
     }
     model.pending_project = None;
-    model.last_failure = match &result.outcome {
-        UiProjectOutcome::Rejected { code, .. } => Some(UiFailure {
-            code: code.clone(),
-            action: "reload and reselect current project state before retrying".to_owned(),
-        }),
-        UiProjectOutcome::Reconcilable { code, .. } => Some(UiFailure {
-            code: code.clone(),
-            action: "inspect retained external state and reconcile this operation".to_owned(),
-        }),
-        UiProjectOutcome::Completed { .. }
-        | UiProjectOutcome::Running { .. }
-        | UiProjectOutcome::InputSent { .. }
+    model.completion_notice = None;
+    model.completion_timer = None;
+    model.completion_context = None;
+    match &result.outcome {
+        UiProjectOutcome::Rejected { code, .. } => {
+            model.last_failure = Some(UiFailure {
+                code: code.clone(),
+                action: "reload and reselect current project state before retrying".to_owned(),
+            });
+            model.project_modal = Some(UiProjectModal::Outcome { result });
+        }
+        UiProjectOutcome::Reconcilable { code, .. } => {
+            model.last_failure = Some(UiFailure {
+                code: code.clone(),
+                action: "inspect retained external state and reconcile this operation".to_owned(),
+            });
+            model.project_modal = Some(UiProjectModal::Outcome { result });
+        }
+        UiProjectOutcome::Running { .. }
         | UiProjectOutcome::ResourcePreview { .. }
-        | UiProjectOutcome::ResourceChecks { .. } => None,
-    };
-    model.project_modal = Some(UiProjectModal::Outcome { result });
+        | UiProjectOutcome::ResourceChecks { .. } => {
+            model.last_failure = None;
+            model.project_modal = Some(UiProjectModal::Outcome { result });
+        }
+        UiProjectOutcome::Completed { .. } | UiProjectOutcome::InputSent { .. } => {
+            let (notice, continuation) = project_completion_policy(&result);
+            model.last_failure = None;
+            model.project_modal = None;
+            model.completion_context = Some(UiPendingCompletion {
+                target: UiCompletionContext::Project {
+                    project_id: result.project_id,
+                    continuation,
+                },
+                refresh: UiCompletionRefresh::Initial,
+            });
+            show_completion_notice(model, notice, effects)?;
+        }
+    }
     model.request_snapshot(effects)?;
     effects.push(UiEffect::RequestRedraw);
     Ok(())
+}
+
+fn project_completion_policy(
+    result: &UiProjectResult,
+) -> (UiCompletionNotice, UiProjectCompletionContinuation) {
+    if matches!(result.outcome, UiProjectOutcome::InputSent { .. }) {
+        return (
+            UiCompletionNotice::InstructionsSent,
+            UiProjectCompletionContinuation::Details,
+        );
+    }
+    match result.action {
+        UiProjectAction::CreateExisting { .. } | UiProjectAction::CreateWorktree { .. } => (
+            UiCompletionNotice::ProjectCreated,
+            UiProjectCompletionContinuation::Select,
+        ),
+        UiProjectAction::Activate { .. } | UiProjectAction::Handoff { .. } => (
+            UiCompletionNotice::ProjectWorkReady,
+            UiProjectCompletionContinuation::ComposeInput,
+        ),
+        _ => (
+            UiCompletionNotice::ProjectUpdated,
+            UiProjectCompletionContinuation::Details,
+        ),
+    }
 }
 
 fn project_command_failed(

@@ -1,5 +1,48 @@
 # Completed
 
+## 2026-08-29 — Contextual TUI completion
+
+Replaced routine project and managed-session outcome dialogs with one typed completion policy.
+Ordinary successes now close their form, refresh from the authoritative snapshot, and show a
+four-second green footer confirmation that any user input may dismiss immediately. Confirmation
+copy is bounded and user-facing; operation identifiers and recovery evidence remain available only
+where they help diagnose an exceptional result.
+
+Completion navigation is retained independently of the transient notice. New projects are selected,
+ordinary project changes return to project details, activation and handoff continue into the first
+instruction composer, and advanced managed-session actions return to the refreshed agent with the
+exact provider session visible. A pre-command snapshot cannot strand navigation: HQ requests one
+bounded follow-up snapshot when the target is initially absent. Snapshot failure and reconnect
+retain the continuation, while a target still absent from the follow-up becomes an explicit stale
+completion failure instead of silently selecting the wrong object.
+
+Running, rejected, uncertain, reconcilable, conflict, preview, and resource-check outcomes remain
+modal because they carry a decision or material evidence. Pure-model tests cover every project and
+managed-session outcome class, timer and input dismissal, reconnect, stale completions, and the
+pre-command snapshot race. Render and installed pseudoterminal tests verify that routine completion
+requires no acknowledgement dialog. Formatting, architecture verification, qualification-evidence
+validation, strict workspace Clippy, locked workspace check/test/build, all HQ TUI targets, and all
+nine installed TUI pseudoterminal workflows pass.
+
+### Original plan entry
+
+### Replace routine outcome dialogs with contextual completion
+
+Create one typed presentation policy for command completion instead of opening an outcome modal for
+every project and managed-session response.
+
+- On ordinary success, close the form, request the authoritative snapshot, select the created or
+  changed object, and show a bounded transient confirmation in the footer/status area.
+- When success has an obvious continuation, navigate to it: project creation selects the new project;
+  starting project work opens its conversation or first-message composer; manual advanced session
+  administration returns to the agent with the selected session visible.
+- Keep a modal only when the user must make another decision, when a preview must be committed, or
+  when the result is rejected, uncertain, reconcilable, conflicted, or otherwise unsafe to dismiss.
+  Preserve operation identity and exact recovery evidence in those exceptional states.
+- Define and test completion behavior for every `UiProjectOutcome` and
+  `UiManagedSessionOutcome`, including reconnect and stale-completion cases, so no success path
+  strands the user or discards context.
+
 ## 2026-08-29 — Typed provider choices
 
 Added a bounded, passive provider catalog from the harness registry through the application and

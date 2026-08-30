@@ -261,9 +261,9 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
     );
     assert!(
         sent.bytes
-            .windows(b"Project change".len())
-            .any(|window| window == b"Project change"),
-        "TUI did not render typed input completion: {:?}",
+            .windows(b"Instructions sent".len())
+            .any(|window| window == b"Instructions sent"),
+        "TUI did not render contextual input completion: {:?}",
         sent.bytes
     );
 
@@ -999,8 +999,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"version".len())
-                    .any(|window| window == b"version")
+                    .windows(b"Project created".len())
+                    .any(|window| window == b"Project created")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1012,8 +1012,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"request".len())
-                    .any(|window| window == b"request")
+                    .windows(b"Project created".len())
+                    .any(|window| window == b"Project created")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1025,8 +1025,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"request".len())
-                    .any(|window| window == b"request")
+                    .windows(b"Instructions sent".len())
+                    .any(|window| window == b"Instructions sent")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");
@@ -1051,8 +1051,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]
-                    .windows(b"version".len())
-                    .any(|window| window == b"version")
+                    .windows(b"Project updated".len())
+                    .any(|window| window == b"Project updated")
             })
         {
             master.write_all(&[0x03]).expect("Ctrl-C writes");

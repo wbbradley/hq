@@ -1682,6 +1682,110 @@ fn managed_session_uncertainty_retains_operation_and_reconciliation_identity() {
 }
 
 #[test]
+fn managed_session_success_returns_to_the_refreshed_agent_with_a_transient_confirmation() {
+    let target = agent(16, "runtime");
+    let model = loaded_agents_model(1, std::slice::from_ref(&target));
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let pending = update(details.model, UiEvent::Input(UiInput::Character('e')))
+        .expect("resume selected conversation");
+    let (effect_id, action) = managed_session_effect(&pending.effects);
+    let completed = update(
+        pending.model,
+        UiEvent::ManagedSessionCompleted {
+            effect_id,
+            result: UiManagedSessionResult {
+                action: action.clone(),
+                operation_id: [17; 32],
+                outcome: UiManagedSessionOutcome::Ready {
+                    session: "session-16".to_owned(),
+                },
+            },
+        },
+    )
+    .expect("routine completion");
+    assert!(completed.model.agent_modal().is_none());
+    assert_eq!(
+        completed.model.completion_notice(),
+        Some("Agent conversation ready")
+    );
+
+    let snapshot_id = snapshot_effect(&completed.effects);
+    let refreshed = update(
+        completed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: agents_snapshot(2, vec![target]),
+        },
+    )
+    .expect("refreshed agent context");
+    assert!(matches!(
+        refreshed.model.agent_modal(),
+        Some(UiAgentModal::Details { agent, selected_session: Some((provider, session)) })
+            if agent.agent_id == [16; 32] && provider == "codex" && session == "session-16"
+    ));
+}
+
+#[test]
+fn stopped_session_completion_survives_a_failed_refresh_and_returns_to_agent_details() {
+    let target = agent(18, "runtime");
+    let model = loaded_agents_model(1, std::slice::from_ref(&target));
+    let details = update(model, UiEvent::Input(UiInput::Activate)).expect("details");
+    let pending = update(details.model, UiEvent::Input(UiInput::Character('t'))).expect("stop");
+    let (effect_id, action) = managed_session_effect(&pending.effects);
+    let completed = update(
+        pending.model,
+        UiEvent::ManagedSessionCompleted {
+            effect_id,
+            result: UiManagedSessionResult {
+                action: action.clone(),
+                operation_id: [19; 32],
+                outcome: UiManagedSessionOutcome::Stopped,
+            },
+        },
+    )
+    .expect("stop completion");
+    assert!(completed.model.agent_modal().is_none());
+    assert_eq!(
+        completed.model.completion_notice(),
+        Some("Agent stopped; saved conversation kept")
+    );
+    let snapshot_id = snapshot_effect(&completed.effects);
+    let failed = update(
+        completed.model,
+        UiEvent::SnapshotFailed {
+            effect_id: snapshot_id,
+            failure: UiFailure {
+                code: "disconnected".to_owned(),
+                action: "wait for HQ to reconnect".to_owned(),
+            },
+        },
+    )
+    .expect("refresh response lost");
+    let retry_timer = timer_effect(&failed.effects, UiTimerKind::RetrySnapshot);
+    let retrying = update(
+        failed.model,
+        UiEvent::TimerElapsed {
+            effect_id: retry_timer,
+        },
+    )
+    .expect("retry refresh");
+    let retry_snapshot = snapshot_effect(&retrying.effects);
+    let refreshed = update(
+        retrying.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: retry_snapshot,
+            snapshot: agents_snapshot(2, vec![target]),
+        },
+    )
+    .expect("reconnected context");
+    assert!(matches!(
+        refreshed.model.agent_modal(),
+        Some(UiAgentModal::Details { agent, selected_session: Some((provider, session)) })
+            if agent.agent_id == [18; 32] && provider == "codex" && session == "session-18"
+    ));
+}
+
+#[test]
 fn mailbox_navigation_workspace_survives_visiting_agent_session_management() {
     let mut source = snapshot(1, &["thread-a"]);
     let agent_source = agents_snapshot(1, vec![agent(9, "runtime")]);
@@ -1864,6 +1968,7 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
         },
     )
     .expect("conflicting ownership preview");
+    let creation_snapshot_id = snapshot_effect(&preview.effects);
     assert!(
         preview
             .effects
@@ -1902,14 +2007,57 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
     .expect("clear ownership preview");
     let committed =
         update(preview.model, UiEvent::Input(UiInput::Activate)).expect("commit creation");
+    let (create_id, create_action) = project_effect(&committed.effects);
     assert_eq!(
-        project_effect(&committed.effects).1,
+        create_action,
         UiProjectAction::CreateExisting {
             name: "existing".to_owned(),
             brief: Some("brief".to_owned()),
             path: "/repo/existing".to_owned(),
         }
     );
+    let created = update(
+        committed.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: create_id,
+            result: UiProjectResult {
+                action: create_action.clone(),
+                command_id: [37; 32],
+                operation_id: [38; 32],
+                project_id: [36; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::Completed {
+                    project_head: Some([39; 32]),
+                },
+            },
+        },
+    )
+    .expect("creation completion");
+    assert!(created.model.project_modal().is_none());
+    assert_eq!(created.model.completion_notice(), Some("Project created"));
+    let stale_refresh = update(
+        created.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: creation_snapshot_id,
+            snapshot: projects_snapshot(1, Vec::new()),
+        },
+    )
+    .expect("pre-commit refresh cannot strand completion");
+    let followup_id = snapshot_effect(&stale_refresh.effects);
+    let selected = update(
+        stale_refresh.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: followup_id,
+            snapshot: projects_snapshot(2, vec![project(36, "existing", "/repo/existing")]),
+        },
+    )
+    .expect("created project is selected");
+    assert_eq!(
+        selected.model.selected_row(),
+        Some(agent_row_id(36).as_str())
+    );
+    assert!(selected.model.project_modal().is_none());
 
     let mut model = update(cancelled.model, UiEvent::Input(UiInput::Character('c')))
         .expect("creation chooser")
@@ -2138,6 +2286,115 @@ fn project_input_retains_text_on_failure_and_exposes_reconcilable_external_state
         completed.model.project_modal(),
         Some(UiProjectModal::Outcome { result: actual }) if actual == &result
     ));
+}
+
+#[test]
+fn project_input_success_closes_the_form_selects_the_project_and_confirms_in_the_footer() {
+    let target = project(17, "target", "/target");
+    let mut model = loaded_projects_model(1, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('n')))
+        .expect("input form")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("ship it".to_owned())))
+        .expect("input")
+        .model;
+    let pending = update(model, UiEvent::Input(UiInput::Activate)).expect("submit input");
+    let (effect_id, action) = project_effect(&pending.effects);
+    let completed = update(
+        pending.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action,
+                command_id: [18; 32],
+                operation_id: [19; 32],
+                project_id: target.project_id,
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::InputSent {
+                    message_id: [20; 32],
+                },
+            },
+        },
+    )
+    .expect("routine completion");
+    assert!(completed.model.project_modal().is_none());
+    assert_eq!(
+        completed.model.completion_notice(),
+        Some("Instructions sent")
+    );
+
+    let snapshot_id = snapshot_effect(&completed.effects);
+    let notice_timer = timer_effect(&completed.effects, UiTimerKind::DismissCompletion);
+    let refreshed = update(
+        completed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: projects_snapshot(2, vec![target]),
+        },
+    )
+    .expect("refreshed project context");
+    assert_eq!(
+        refreshed.model.selected_row(),
+        Some(agent_row_id(17).as_str())
+    );
+    assert!(matches!(
+        refreshed.model.project_modal(),
+        Some(UiProjectModal::Details { project, .. }) if project.project_id == [17; 32]
+    ));
+    let dismissed = update(
+        refreshed.model,
+        UiEvent::TimerElapsed {
+            effect_id: notice_timer,
+        },
+    )
+    .expect("completion notice expires");
+    assert!(dismissed.model.completion_notice().is_none());
+    assert!(matches!(
+        dismissed.model.project_modal(),
+        Some(UiProjectModal::Details { project, .. }) if project.project_id == [17; 32]
+    ));
+}
+
+#[test]
+fn stale_project_completion_cannot_replace_the_current_operation() {
+    let target = project(8, "target", "/target");
+    let mut model = loaded_projects_model(1, vec![target.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('n')))
+        .expect("input form")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("running".to_owned())))
+        .expect("input")
+        .model;
+    let pending = update(model, UiEvent::Input(UiInput::Activate)).expect("submit input");
+    let (effect_id, action) = project_effect(&pending.effects);
+    let stale_id = snapshot_effect(&started_model().effects);
+    assert_ne!(stale_id, effect_id);
+    let stale = update(
+        pending.model.clone(),
+        UiEvent::ProjectCommandCompleted {
+            effect_id: stale_id,
+            result: UiProjectResult {
+                action,
+                command_id: [90; 32],
+                operation_id: [91; 32],
+                project_id: target.project_id,
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::InputSent {
+                    message_id: [92; 32],
+                },
+            },
+        },
+    )
+    .expect("stale project completion");
+    assert_eq!(stale.model, pending.model);
 }
 
 #[test]
@@ -2596,6 +2853,70 @@ fn project_new_session_provider_is_a_typed_choice_and_empty_catalog_blocks_submi
     assert!(matches!(
         blocked.model.project_modal(),
         Some(UiProjectModal::Activate { provider, submitting: false, .. }) if provider.is_empty()
+    ));
+}
+
+#[test]
+fn successful_project_activation_continues_in_the_first_instruction_composer() {
+    let target = project(53, "activation", "/workspace/activation");
+    let agent = project_agent(65, target.home);
+    let mut model = loaded_projects_model_with_agents(1, vec![target.clone()], vec![agent.clone()]);
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("details")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Character('v')))
+        .expect("activation form")
+        .model;
+    let pending = update(model, UiEvent::Input(UiInput::Activate)).expect("activate project");
+    let (effect_id, action) = project_effect(&pending.effects);
+    let completed = update(
+        pending.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id,
+            result: UiProjectResult {
+                action: action.clone(),
+                command_id: [66; 32],
+                operation_id: [67; 32],
+                project_id: target.project_id,
+                runtime_state: Some("ready".to_owned()),
+                runtime_code: None,
+                outcome: UiProjectOutcome::Completed {
+                    project_head: Some([68; 32]),
+                },
+            },
+        },
+    )
+    .expect("activation completion");
+    assert_eq!(
+        completed.model.completion_notice(),
+        Some("Project work is ready")
+    );
+    let snapshot_id = snapshot_effect(&completed.effects);
+    let mut refreshed_project = target;
+    refreshed_project.assignment = Some(UiProjectAssignment {
+        assignment_id: [69; 32],
+        agent_id: agent.agent_id,
+        provider: "codex".to_owned(),
+        session: Some("session-65".to_owned()),
+        phase: "runnable".to_owned(),
+        thread_id: Some([70; 32]),
+        launch_directory: Some("/workspace/activation".to_owned()),
+        blocked: None,
+        cardinality_conflicted: false,
+        runnable: true,
+    });
+    let refreshed = update(
+        completed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: projects_snapshot(2, vec![refreshed_project]),
+        },
+    )
+    .expect("continue with first instructions");
+    assert!(matches!(
+        refreshed.model.project_modal(),
+        Some(UiProjectModal::SendInput { project, content, submitting: false })
+            if project.project_id == [53; 32] && content.is_empty()
     ));
 }
 

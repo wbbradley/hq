@@ -255,6 +255,27 @@ empty, it explains that no reachable recipient exists, points to agent creation 
 available path, and notes that people in the user's HQ network may also appear there. It renders
 only `Esc close`; selection and composition controls remain hidden and inert until a target exists.
 
+### Contextual command completion
+
+One typed presentation policy covers every project and managed-session result. Routine
+`Completed`, `InputSent`, `Ready`, and `Stopped` results close the submitting form immediately,
+request an authoritative snapshot, and show a four-second bounded confirmation in the footer.
+The refreshed snapshot selects the affected object: project creation selects the new project,
+ordinary project changes reopen its details, project activation and handoff continue in the first
+instruction composer, and manual session administration returns to the agent with the exact saved
+conversation selected when known.
+
+The navigation intent is retained independently of the footer timer and across connection loss. If
+an already in-flight snapshot predates a completion and lacks the target, the model requests one
+bounded follow-up snapshot; if the target is still absent it reports a typed stale-target recovery
+instead of silently selecting something else. Stale effect identities remain inert.
+
+Dialogs remain for results that still require attention or preserve evidence the user explicitly
+requested: `Running`, `Rejected`, `Reconcilable`, and `Uncertain` outcomes, resource previews, and
+fresh resource checks. Creation and close previews continue to require an explicit commit. Exact
+operation, runtime, warning, and recovery identities stay in these exceptional dialogs and
+technical help; routine success does not make the user dismiss those implementation details.
+
 An activated conversation uses a
 responsive second pane, centers rendering around the stable fact anchor, labels activity as an
 information-only update, and expands only typed routing, semantics, evidence, or activity sections. Enter
@@ -288,11 +309,12 @@ they hide a required field, warning, action, or recovery instruction.
 
 Technical evidence is preserved, not translated away. Detail views and the `?` then `t` page label
 project, resource, assignment, message, request, provider/session, thread, revision, frontier,
-runtime, and recovery values as technical. Exceptional outcomes lead with `done`, `still
-finishing`, `could not make this change`, or `could not confirm whether the change finished`, then
-show the exact state/category/code, request identity, retained external state, and retry guidance.
-Render contracts cover these boundaries at wide and compact terminal sizes, including the rule
-that a stable failure code is absent from the ordinary footer and present in technical help.
+runtime, and recovery values as technical. Exceptional outcomes lead with `still finishing`,
+`could not make this change`, or `could not confirm whether the change finished`, then show the
+exact state/category/code, request identity, retained external state, and retry guidance. Routine
+completion uses a short `Done` footer instead. Render contracts cover these boundaries at wide and
+compact terminal sizes, including the rule that a stable failure code is absent from the ordinary
+footer and present in technical help.
 
 ## Shell obligations
 
