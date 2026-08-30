@@ -596,7 +596,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::SubmitSelfNote(_) => b"n".as_slice(),
                 PtyInteraction::CreateAgent(_) => b"jjjc".as_slice(),
                 PtyInteraction::StartRejectedSession => b"jjjl".as_slice(),
-                PtyInteraction::CreateExistingProject { .. } => b"jjjjc".as_slice(),
+                PtyInteraction::CreateExistingProject { .. } => b"jjjjc\r".as_slice(),
                 PtyInteraction::SendProjectInput { .. }
                 | PtyInteraction::DispatchProjectInput { .. }
                 | PtyInteraction::AddProjectResource { .. }
@@ -660,7 +660,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .any(|window| window == b"Name:")
         {
             master
-                .write_all(format!("{name}\t\t{path}\r").as_bytes())
+                .write_all(format!("\t{name}\x1b[Z{path}\r").as_bytes())
                 .expect("project form writes");
             master.flush().expect("project form flushes");
             content_sent = true;
@@ -992,6 +992,22 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         }
         if matches!(interaction, PtyInteraction::CreateExistingProject { .. })
             && content_sent
+            && !resource_commit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Enter create".len())
+                    .any(|window| window == b"Enter create")
+            })
+        {
+            master
+                .write_all(b"\r")
+                .expect("project create commit writes");
+            master.flush().expect("project create commit flushes");
+            resource_commit_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CreateExistingProject { .. })
+            && resource_commit_sent
             && !exit_sent
             && completion_offset.is_some_and(|offset| {
                 bytes[offset..]

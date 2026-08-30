@@ -613,6 +613,11 @@ pub struct UiProject {
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiProjectAction {
+    PreviewCreateExisting {
+        name: String,
+        brief: Option<String>,
+        path: String,
+    },
     CreateExisting {
         name: String,
         brief: Option<String>,
@@ -886,9 +891,21 @@ enum TextEdit<'a> {
 }
 
 /// Current project catalog, creation, input, or outcome interaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiProjectCreationChoice {
+    /// Record an existing folder as the project's first owned resource.
+    ExistingFolder,
+    /// Create a separate Git branch and worktree as an advanced convenience.
+    IsolatedWorktree,
+}
+
+/// Current project catalog, creation, input, or outcome interaction.
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UiProjectModal {
+    ChooseCreation {
+        selected: UiProjectCreationChoice,
+    },
     Search {
         query: String,
     },
@@ -2680,6 +2697,25 @@ fn apply_project_modal_input(
     }
     if matches!(input, UiInput::Escape) {
         if model.pending_project.is_none() {
+            if let Some(UiProjectModal::Outcome {
+                result:
+                    UiProjectResult {
+                        action: UiProjectAction::PreviewCreateExisting { name, brief, path },
+                        outcome: UiProjectOutcome::ResourcePreview { .. },
+                        ..
+                    },
+            }) = model.project_modal.clone()
+            {
+                model.project_modal = Some(UiProjectModal::CreateExisting {
+                    name,
+                    brief: brief.unwrap_or_default(),
+                    path,
+                    field: UiProjectFormField::Path,
+                    submitting: false,
+                });
+                model.last_failure = None;
+                return Ok(true);
+            }
             if let Some(UiProjectModal::Search { query }) = &model.project_modal {
                 model.project_search.clone_from(query);
             }
@@ -2690,6 +2726,28 @@ fn apply_project_modal_input(
     }
 
     match model.project_modal.clone() {
+        Some(UiProjectModal::ChooseCreation { mut selected }) => match input {
+            UiInput::NextItem | UiInput::PreviousItem => {
+                selected = match selected {
+                    UiProjectCreationChoice::ExistingFolder => {
+                        UiProjectCreationChoice::IsolatedWorktree
+                    }
+                    UiProjectCreationChoice::IsolatedWorktree => {
+                        UiProjectCreationChoice::ExistingFolder
+                    }
+                };
+                model.project_modal = Some(UiProjectModal::ChooseCreation { selected });
+                Ok(true)
+            }
+            UiInput::Activate => {
+                match selected {
+                    UiProjectCreationChoice::ExistingFolder => open_existing_project_form(model),
+                    UiProjectCreationChoice::IsolatedWorktree => open_worktree_project_form(model),
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
         Some(UiProjectModal::Search { mut query }) => match input {
             UiInput::Character(_)
             | UiInput::Paste(_)
@@ -3661,12 +3719,13 @@ fn edit_project_field(model: &mut UiModel, input: &UiInput) -> bool {
 }
 
 fn cycle_project_field(model: &mut UiModel, forward: bool) {
+    default_existing_project_name(model);
     let (fields, selected) = match &model.project_modal {
         Some(UiProjectModal::CreateExisting { field, .. }) => (
             &[
+                UiProjectFormField::Path,
                 UiProjectFormField::Name,
                 UiProjectFormField::Brief,
-                UiProjectFormField::Path,
             ][..],
             *field,
         ),
@@ -3698,6 +3757,60 @@ fn cycle_project_field(model: &mut UiModel, forward: bool) {
     {
         *field = fields[next];
     }
+}
+
+fn default_existing_project_name(model: &mut UiModel) {
+    let Some(UiProjectModal::CreateExisting {
+        name, path, field, ..
+    }) = &model.project_modal
+    else {
+        return;
+    };
+    if *field != UiProjectFormField::Path || !name.is_empty() || path.is_empty() {
+        return;
+    }
+    let normalized = normalize_path_input(path, model.home_directory.as_deref())
+        .unwrap_or_else(|_| path.clone());
+    let Some(candidate) = Path::new(&normalized)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    if let Some(UiProjectModal::CreateExisting { name, .. }) = &mut model.project_modal {
+        name.clone_from(&candidate);
+    }
+    model.form.cursors.insert(
+        UiFormField::Project(UiProjectFormField::Name),
+        candidate.len(),
+    );
+}
+
+fn open_existing_project_form(model: &mut UiModel) {
+    model.project_modal = Some(UiProjectModal::CreateExisting {
+        name: String::new(),
+        brief: String::new(),
+        path: String::new(),
+        field: UiProjectFormField::Path,
+        submitting: false,
+    });
+    model.last_failure = None;
+}
+
+fn open_worktree_project_form(model: &mut UiModel) {
+    model.project_modal = Some(UiProjectModal::CreateWorktree {
+        name: String::new(),
+        brief: String::new(),
+        source: String::new(),
+        destination: String::new(),
+        branch: String::new(),
+        base: String::new(),
+        field: UiProjectFormField::Name,
+        submitting: false,
+    });
+    model.last_failure = None;
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3742,18 +3855,19 @@ fn submit_project_modal(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Res
         }
     }
 
+    default_existing_project_name(model);
     let action = match model.project_modal.clone() {
         Some(UiProjectModal::CreateExisting {
             name, brief, path, ..
         }) => {
+            let Some(path) = normalized_path(model, UiProjectFormField::Path, &path) else {
+                return Ok(true);
+            };
             if name.is_empty() {
                 reject(model, UiProjectFormField::Name, "Enter a project name");
                 return Ok(true);
             }
-            let Some(path) = normalized_path(model, UiProjectFormField::Path, &path) else {
-                return Ok(true);
-            };
-            UiProjectAction::CreateExisting {
+            UiProjectAction::PreviewCreateExisting {
                 name,
                 brief: (!brief.is_empty()).then_some(brief),
                 path,
@@ -4021,6 +4135,13 @@ fn submit_project_preview(
         return Ok(true);
     }
     let action = match &result.action {
+        UiProjectAction::PreviewCreateExisting { name, brief, path } => {
+            UiProjectAction::CreateExisting {
+                name: name.clone(),
+                brief: brief.clone(),
+                path: path.clone(),
+            }
+        }
         UiProjectAction::PreviewAddResource {
             project_id,
             path,
@@ -4896,26 +5017,13 @@ fn mailbox_shortcut(
             Ok(true)
         }
         'c' if model.section == UiSection::Projects => {
-            model.project_modal = Some(UiProjectModal::CreateExisting {
-                name: String::new(),
-                brief: String::new(),
-                path: String::new(),
-                field: UiProjectFormField::Name,
-                submitting: false,
+            model.project_modal = Some(UiProjectModal::ChooseCreation {
+                selected: UiProjectCreationChoice::ExistingFolder,
             });
             Ok(true)
         }
         'w' if model.section == UiSection::Projects => {
-            model.project_modal = Some(UiProjectModal::CreateWorktree {
-                name: String::new(),
-                brief: String::new(),
-                source: String::new(),
-                destination: String::new(),
-                branch: String::new(),
-                base: String::new(),
-                field: UiProjectFormField::Name,
-                submitting: false,
-            });
+            open_worktree_project_form(model);
             Ok(true)
         }
         'h' => {

@@ -3537,8 +3537,30 @@ pub(crate) fn preview_project_resource_for_tui(
         .find(|project| project.project_id == project_id)
         .ok_or(CliError::ProjectState)?;
     ensure_resource_check_home(client.installation_id(), project.home)?;
+    preview_project_path_for_tui(&mut client, &catalog, Some(project_id), project.home, path)
+}
+
+pub(crate) fn preview_project_creation_resource_for_tui(
+    state: &StatePaths,
+    path: &Path,
+) -> Result<ProjectResourcePreviewView, CliError> {
+    let mut client = command_client(state)?;
+    let snapshot = client.snapshot()?;
+    let catalog = project_catalog_view(&snapshot, &ProjectCliCommand::List)?;
+    let home = client.installation_id();
+    preview_project_path_for_tui(&mut client, &catalog, None, home, path)
+}
+
+fn preview_project_path_for_tui(
+    client: &mut LocalNodeClient,
+    catalog: &ProjectCatalogView,
+    project_id: Option<ProjectId>,
+    home: InstallationId,
+    path: &Path,
+) -> Result<ProjectResourcePreviewView, CliError> {
     let display = normalized_existing_resource(path)?;
     let operation_id = OperationId::from_bytes(*random_command_id()?.as_bytes());
+    let project_id = project_id.unwrap_or_else(|| ProjectId::from_bytes(*operation_id.as_bytes()));
     let resource_id = project_resource_operation_identity(operation_id);
     let display_dto =
         ResourceLocatorDto::new(ResourceSchemeDto::WorkingTree, display.value().to_owned())
@@ -3587,7 +3609,7 @@ pub(crate) fn preview_project_resource_for_tui(
             };
             if let Some(conflict) = desired_resource_conflict(
                 project_id,
-                project.home,
+                home,
                 &requested_resource,
                 candidate.project_id,
                 candidate.home,

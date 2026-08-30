@@ -1,5 +1,54 @@
 # Completed
 
+## 2026-08-29 — Project creation centered on resource ownership
+
+Replaced the two competing project-creation entry points with one `Create project` chooser. Its
+recommended path records an existing folder, while isolated Git worktree creation is progressively
+disclosed as an optional advanced convenience and remains available through an expert shortcut.
+The footer and empty state now describe the user's intent without positioning HQ as a worktree
+manager.
+
+The folder workflow starts with the resource path, derives the project name from the normalized
+folder even when the form is submitted directly, labels the brief as optional, and explains both
+the ownership claim and HQ's non-ownership of routine filesystem and Git maintenance. Before any
+creation mutation, the TUI now performs a typed, read-only resource inspection against the complete
+authoritative catalog. A clear preview requires an explicit commit; a conflict names the owning
+project and its displayed path, emits no creation command, and returns to the retained form for
+editing.
+
+The existing project/resource domain model and worktree saga remain unchanged. Creation previews
+reuse the same canonical path inspection and overlap policy as ordinary resource mutations, while
+worktree failures retain their exact reconciliation and external-state evidence in technical
+details. Model, mapper, responsive-render, and installed pseudoterminal coverage exercise the
+chooser, folder defaults, conflict preflight, form recovery, direct worktree shortcut, and both
+creation modes. Formatting, architecture verification, qualification-evidence validation, strict
+workspace Clippy, locked workspace check/test/build, all HQ TUI targets, and all nine installed TUI
+pseudoterminal workflows pass.
+
+### Original plan entry
+
+### Clarify project creation and resource ownership
+
+Make project creation explain the durable HQ concept—resource ownership—without positioning HQ as
+a Git worktree manager.
+
+- Change the Projects footer to `c create`. Let `c` open one `Create project` chooser whose primary
+  path is `Use an existing folder` and whose optional advanced path is `Create an isolated Git
+  worktree`. An expert shortcut may open the worktree path directly, but it should not dominate the
+  default footer or empty state.
+- Rename `Create project from existing tree` to `Create project from folder` and explain that HQ will
+  record the folder as a project resource; it will not take over ordinary filesystem or Git
+  maintenance.
+- Rename `Create recoverable Git worktree project` to `Create an isolated Git worktree`. Explain in
+  user terms that this creates a branch and separate working directory while retaining external
+  files if setup is interrupted. Keep reconciliation and retained-external-state evidence in the
+  failure/details path.
+- Default the project name from the selected folder where possible, label the brief as optional,
+  preview the resource path and ownership implications, and report claim conflicts before commit in
+  terms of the conflicting project and path.
+- Preserve the authoritative project/resource model independently of how a directory or worktree was
+  created so future agent-managed worktrees require no project-model redesign.
+
 ## 2026-08-29 — Familiar TUI forms
 
 Introduced one pure, reusable form editor for project creation and input, resource paths,

@@ -1371,6 +1371,13 @@ fn local_human_memberships(
 #[allow(clippy::too_many_lines)]
 fn local_project_command(action: &UiProjectAction) -> LocalProjectCommand {
     match action {
+        UiProjectAction::PreviewCreateExisting { name, brief, path } => {
+            LocalProjectCommand::PreviewCreateExisting {
+                name: name.clone(),
+                brief: brief.clone(),
+                path: path.clone(),
+            }
+        }
         UiProjectAction::CreateExisting { name, brief, path } => {
             LocalProjectCommand::CreateExisting {
                 name: name.clone(),
@@ -2127,6 +2134,18 @@ mod tests {
         let project_id = [1; 32];
         let resource_id = [2; 32];
         let cases = [
+            (
+                UiProjectAction::PreviewCreateExisting {
+                    name: "release".to_owned(),
+                    brief: Some("ship it".to_owned()),
+                    path: "/workspace/release".to_owned(),
+                },
+                LocalProjectCommand::PreviewCreateExisting {
+                    name: "release".to_owned(),
+                    brief: Some("ship it".to_owned()),
+                    path: "/workspace/release".to_owned(),
+                },
+            ),
             (
                 UiProjectAction::PreviewAddResource {
                     project_id,

@@ -16,9 +16,10 @@ pub use model::{
     UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState, UiInput, UiMailboxAction,
     UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectFormField,
-    UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
-    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState,
-    UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
+    UiProject, UiProjectAction, UiProjectAssignment, UiProjectCreationChoice,
+    UiProjectExternalWarning, UiProjectFormField, UiProjectModal, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, UiTransition, update,
 };
 pub use render::render;

@@ -32,8 +32,9 @@ use crate::{
     cli::{
         CliError, HarnessCommand, NamedAgentCommand, NamedAgentSelector, NamedAgentView,
         ProjectCliCommand, ProjectResourceCliCommand, ProjectTuiResult, WorktreeCliRequest,
-        named_agent_catalog_view, preview_project_resource_for_tui, project_catalog_for_tui,
-        run_harness_for_tui, run_named_agent_for_tui, run_project_for_tui,
+        named_agent_catalog_view, preview_project_creation_resource_for_tui,
+        preview_project_resource_for_tui, project_catalog_for_tui, run_harness_for_tui,
+        run_named_agent_for_tui, run_project_for_tui,
     },
     unix_frame,
 };
@@ -280,6 +281,11 @@ pub(crate) fn tui_project_catalog(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LocalProjectCommand {
+    PreviewCreateExisting {
+        name: String,
+        brief: Option<String>,
+        path: String,
+    },
     CreateExisting {
         name: String,
         brief: Option<String>,
@@ -593,7 +599,8 @@ pub(crate) fn execute_project_command(
                 ProjectCliCommand::Unarchive(project_id)
             }
         }
-        LocalProjectCommand::PreviewAddResource { .. }
+        LocalProjectCommand::PreviewCreateExisting { .. }
+        | LocalProjectCommand::PreviewAddResource { .. }
         | LocalProjectCommand::PreviewReplaceResource { .. } => {
             unreachable!("preview commands return before command conversion")
         }
@@ -605,6 +612,10 @@ fn execute_project_preview(
     state: &StatePaths,
     command: &LocalProjectCommand,
 ) -> Result<Option<LocalProjectResult>, CliError> {
+    if let LocalProjectCommand::PreviewCreateExisting { path, .. } = command {
+        let preview = preview_project_creation_resource_for_tui(state, &PathBuf::from(path))?;
+        return Ok(Some(local_project_preview_result(command, preview)));
+    }
     let (project_id, path) = match command {
         LocalProjectCommand::PreviewAddResource {
             project_id, path, ..
@@ -619,8 +630,15 @@ fn execute_project_preview(
         ProjectId::from_bytes(project_id),
         &PathBuf::from(path),
     )?;
+    Ok(Some(local_project_preview_result(command, preview)))
+}
+
+fn local_project_preview_result(
+    command: &LocalProjectCommand,
+    preview: crate::cli::ProjectResourcePreviewView,
+) -> LocalProjectResult {
     let operation_id = *preview.operation_id.as_bytes();
-    Ok(Some(LocalProjectResult {
+    LocalProjectResult {
         command: command.clone(),
         command_id: operation_id,
         operation_id,
@@ -642,7 +660,7 @@ fn execute_project_preview(
                 })
                 .collect(),
         },
-    }))
+    }
 }
 
 fn project_result(

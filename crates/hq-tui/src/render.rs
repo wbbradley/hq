@@ -16,8 +16,8 @@ use crate::{
     UiConversationEntryKind, UiFocus, UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence,
     UiHumanMembershipStatus, UiHumanState, UiMailboxAction, UiMailboxDraftTarget, UiMailboxModal,
     UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel, UiProjectAction,
-    UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread, UiRow, UiRowKind,
-    UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
+    UiProjectCreationChoice, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread,
+    UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -322,11 +322,13 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
         })),
         UiSection::Projects => {
             actions.push(Line::from(if model.selected_row_data().is_some() {
-                "/ — search · Enter — inspect selected project · c — create from folder"
+                "/ — search · Enter — inspect selected project · c — create project"
             } else {
-                "/ — search · c — create from folder"
+                "/ — search · c — create project"
             }));
-            actions.push(Line::from("w — create an isolated Git worktree"));
+            actions.push(Line::from(
+                "w — advanced shortcut: create an isolated Git worktree",
+            ));
         }
     }
     actions
@@ -365,6 +367,28 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
     };
     frame.render_widget(Clear, area);
     let (title, lines) = match interaction {
+        UiProjectModal::ChooseCreation { selected } => (
+            " Create project ",
+            vec![
+                Line::from("How should this project's first folder be created?"),
+                Line::default(),
+                project_choice_line(
+                    "Use an existing folder",
+                    "recommended · record its ownership in HQ",
+                    *selected == UiProjectCreationChoice::ExistingFolder,
+                ),
+                project_choice_line(
+                    "Create an isolated Git worktree",
+                    "optional advanced · create a branch and separate folder",
+                    *selected == UiProjectCreationChoice::IsolatedWorktree,
+                ),
+                Line::default(),
+                Line::from(
+                    "HQ tracks folder ownership; it does not take over Git or filesystem maintenance.",
+                ),
+                Line::from("↑/↓ choose · Enter continue · Esc cancel"),
+            ],
+        ),
         UiProjectModal::Search { query } => (
             " Search projects ",
             vec![
@@ -508,6 +532,17 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
             push_project_text_field(
                 &mut lines,
                 model,
+                "Path",
+                path,
+                UiProjectFormField::Path,
+                *field == UiProjectFormField::Path,
+                true,
+                "Choose the existing folder this project should own",
+                true,
+            );
+            push_project_text_field(
+                &mut lines,
+                model,
                 "Name",
                 name,
                 UiProjectFormField::Name,
@@ -527,19 +562,14 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                 "A short description helps agents understand the project",
                 false,
             );
-            push_project_text_field(
-                &mut lines,
-                model,
-                "Path",
-                path,
-                UiProjectFormField::Path,
-                *field == UiProjectFormField::Path,
-                true,
-                "Use an absolute path, ~, or ~/…",
-                true,
-            );
             lines.push(Line::from(
-                "HQ will record this folder as a resource owned by the project.",
+                "Ownership preview: this project will claim this folder in HQ.",
+            ));
+            lines.push(Line::from(
+                "Other projects cannot own this folder or overlapping folders.",
+            ));
+            lines.push(Line::from(
+                "HQ will not take over ordinary filesystem or Git maintenance.",
             ));
             lines.push(Line::default());
             lines.push(Line::from(if *submitting {
@@ -1018,20 +1048,44 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                     lines.push(Line::from(format!("Requested path: {display_path}")));
                     lines.push(Line::from(format!("Resolved path: {canonical_path}")));
                     if conflicts.is_empty() {
-                        lines.push(Line::styled(
-                            "No other project owns this path · Enter add",
-                            Style::new().fg(Color::Green),
-                        ));
+                        let continuation = if matches!(
+                            result.action,
+                            UiProjectAction::PreviewCreateExisting { .. }
+                        ) {
+                            "No other project owns this folder · Enter create"
+                        } else {
+                            "No other project owns this path · Enter add"
+                        };
+                        lines.push(Line::styled(continuation, Style::new().fg(Color::Green)));
                     } else {
+                        let subject = if matches!(
+                            result.action,
+                            UiProjectAction::PreviewCreateExisting { .. }
+                        ) {
+                            "folder"
+                        } else {
+                            "path"
+                        };
                         lines.push(Line::styled(
-                            "Another project already owns this path:",
+                            format!("Another project already owns this {subject}:"),
                             Style::new().fg(Color::Red),
                         ));
                         for conflict in conflicts {
+                            let project = model
+                                .snapshot()
+                                .and_then(|snapshot| {
+                                    snapshot
+                                        .projects
+                                        .iter()
+                                        .find(|project| project.project_id == conflict.project_id)
+                                })
+                                .map_or_else(
+                                    || format!("project {}", short_identity(conflict.project_id)),
+                                    |project| format!("project ‘{}’", project.name),
+                                );
                             lines.push(Line::from(format!(
-                                " Project {} owns {}",
-                                short_identity(conflict.project_id),
-                                conflict.canonical_path
+                                " {project} owns {}",
+                                conflict.display_path
                             )));
                             lines.push(Line::from(format!(
                                 "  Technical relationship: {} · resource {}",
@@ -1061,6 +1115,9 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect)
                                 format!("  Technical reason: {category}/{code}"),
                                 Style::new().fg(Color::Red),
                             ));
+                        }
+                        if matches!(result.action, UiProjectAction::PreviewCreateExisting { .. }) {
+                            lines.push(Line::from("Esc edit the folder path"));
                         }
                     }
                 }
@@ -1379,6 +1436,9 @@ fn resource_health_label(health: &str) -> &str {
 
 fn project_action_label(action: &UiProjectAction) -> String {
     match action {
+        UiProjectAction::PreviewCreateExisting { name, .. } => {
+            format!("Check folder ownership before creating {name}")
+        }
         UiProjectAction::CreateExisting { name, .. } => format!("Create {name} from a folder"),
         UiProjectAction::CreateWorktree { name, .. } => {
             format!("Create an isolated worktree for {name}")
@@ -2198,7 +2258,7 @@ fn empty_section_lines(section: UiSection) -> Vec<Line<'static>> {
         UiSection::Projects => vec![
             Line::styled(" No projects yet.", heading),
             Line::from(" A project records work and ownership of its folders and resources."),
-            Line::from(" Press c create a project from a folder."),
+            Line::from(" Press c create a project and choose its first folder."),
         ],
     }
 }

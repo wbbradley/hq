@@ -27,28 +27,6 @@ provider/session identities, and recovery diagnostics.
 
 ## Next Up
 
-### Clarify project creation and resource ownership
-
-Make project creation explain the durable HQ concept—resource ownership—without positioning HQ as
-a Git worktree manager.
-
-- Change the Projects footer to `c create`. Let `c` open one `Create project` chooser whose primary
-  path is `Use an existing folder` and whose optional advanced path is `Create an isolated Git
-  worktree`. An expert shortcut may open the worktree path directly, but it should not dominate the
-  default footer or empty state.
-- Rename `Create project from existing tree` to `Create project from folder` and explain that HQ will
-  record the folder as a project resource; it will not take over ordinary filesystem or Git
-  maintenance.
-- Rename `Create recoverable Git worktree project` to `Create an isolated Git worktree`. Explain in
-  user terms that this creates a branch and separate working directory while retaining external
-  files if setup is interrupted. Keep reconciliation and retained-external-state evidence in the
-  failure/details path.
-- Default the project name from the selected folder where possible, label the brief as optional,
-  preview the resource path and ownership implications, and report claim conflicts before commit in
-  terms of the conflicting project and path.
-- Preserve the authoritative project/resource model independently of how a directory or worktree was
-  created so future agent-managed worktrees require no project-model redesign.
-
 ### Expose providers as typed available choices
 
 Remove every free-text provider namespace field from ordinary TUI workflows.

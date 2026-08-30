@@ -228,6 +228,16 @@ records work and ownership of folders and resources, then offers creation from a
 making Git worktree management the primary concept. Empty-state footers and contextual help omit
 `Enter` actions when there is no selected item.
 
+`c create` in Projects opens one intent-first chooser. Its recommended path records an existing
+folder as the project's first owned resource; the optional advanced path creates an isolated Git
+branch and worktree. `w` remains an expert shortcut for that advanced path, but it is absent from
+the ordinary footer and empty state. The folder-backed form asks for the path first, derives a
+default project name from its final path component, previews the normalized path and overlapping
+resource-ownership rule, and states that HQ does not take over filesystem or Git maintenance.
+Conflict previews name the conflicting project when it remains in the authoritative catalog and
+always show the conflicting display path. The resulting project/resource command and ownership
+model is identical regardless of which creation convenience opened the form.
+
 The direct-message chooser treats recipients as a future-extensible typed catalog. When it is
 empty, it explains that no reachable recipient exists, points to agent creation as the currently
 available path, and notes that people in the user's HQ network may also appear there. It renders

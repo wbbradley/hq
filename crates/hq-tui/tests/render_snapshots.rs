@@ -272,7 +272,7 @@ fn empty_sections_and_recipient_chooser_explain_exact_next_actions() {
             (
                 UiSection::Projects,
                 "No projects yet.",
-                "c create a project from a folder",
+                "c create a project and choose its first folder",
             ),
         ] {
             let model = empty_section_model(size, section);
@@ -691,6 +691,45 @@ fn project_worktree_form_and_reconcilable_outcome_are_responsive() {
 }
 
 #[test]
+fn project_creation_chooser_leads_with_folder_ownership_and_discloses_worktrees() {
+    let chooser = update(
+        project_model(UiSize {
+            width: 100,
+            height: 22,
+        }),
+        UiEvent::Input(UiInput::Character('c')),
+    )
+    .expect("project creation chooser")
+    .model;
+    let rendered = render_text(&chooser);
+    assert!(rendered.contains("Create project"), "{rendered}");
+    assert!(rendered.contains("Use an existing folder"), "{rendered}");
+    assert!(rendered.contains("recommended"), "{rendered}");
+    assert!(
+        rendered.contains("Create an isolated Git worktree"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("optional advanced"), "{rendered}");
+
+    let form = update(chooser, UiEvent::Input(UiInput::Activate))
+        .expect("existing folder form")
+        .model;
+    let form = update(
+        form,
+        UiEvent::Input(UiInput::Paste("/work/customer-api".to_owned())),
+    )
+    .expect("folder path")
+    .model;
+    let form = update(form, UiEvent::Input(UiInput::NextFocus))
+        .expect("default project name")
+        .model;
+    let rendered = render_text(&form);
+    assert!(rendered.contains("Name: customer-api│"), "{rendered}");
+    assert!(rendered.contains("claim this folder"), "{rendered}");
+    assert!(rendered.contains("overlapping folders"), "{rendered}");
+}
+
+#[test]
 fn project_form_explains_fields_caret_validation_and_normalized_paths() {
     let mut model = project_model(UiSize {
         width: 120,
@@ -698,25 +737,19 @@ fn project_form_explains_fields_caret_validation_and_normalized_paths() {
     })
     .with_home_directory(Some("/Users/example".to_owned()));
     model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("creation chooser")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
         .expect("existing form")
         .model;
     let empty = update(model, UiEvent::Input(UiInput::Activate))
         .expect("validate form")
         .model;
     let rendered = render_text(&empty);
-    assert!(rendered.contains("Name: │ (required)"), "{rendered}");
-    assert!(rendered.contains("Enter a project name"), "{rendered}");
+    assert!(rendered.contains("Path: │ (required)"), "{rendered}");
+    assert!(rendered.contains("Enter a path"), "{rendered}");
 
-    let mut model = update(empty, UiEvent::Input(UiInput::Paste("project".to_owned())))
-        .expect("name")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("brief")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("path")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Paste("~/repo".to_owned())))
+    let model = update(empty, UiEvent::Input(UiInput::Paste("~/repo".to_owned())))
         .expect("path")
         .model;
     let rendered = render_text(&model);
@@ -791,7 +824,7 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
                         display_path: "/shared".to_owned(),
                         canonical_path: "/canonical/shared".to_owned(),
                         conflicts: vec![UiProjectResourceConflict {
-                            project_id: [7; 32],
+                            project_id: [1; 32],
                             resource_id: [8; 32],
                             display_path: "/other".to_owned(),
                             canonical_path: "/canonical".to_owned(),
@@ -807,6 +840,7 @@ fn project_resource_forms_and_conflict_preview_are_responsive() {
         assert!(rendered.contains("Check a folder or resource before adding it"));
         assert!(rendered.contains("descendant"));
         assert!(rendered.contains("Another project already owns this path"));
+        assert!(rendered.contains("project ‘release’ owns /other"));
     }
 }
 

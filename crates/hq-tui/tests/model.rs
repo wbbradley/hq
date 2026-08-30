@@ -11,10 +11,11 @@ use hq_tui::{
     UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiProject, UiProjectAction, UiProjectAssignment, UiProjectExternalWarning, UiProjectFormField,
-    UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
-    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiRow, UiRowKind, UiRowState,
-    UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiProject, UiProjectAction, UiProjectAssignment, UiProjectCreationChoice,
+    UiProjectExternalWarning, UiProjectFormField, UiProjectModal, UiProjectOutcome,
+    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
+    UiProjectThread, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
+    UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -1647,34 +1648,48 @@ fn project_search_and_details_preserve_stable_identity_across_reload_and_resize(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effects() {
     let mut model = loaded_projects_model(1, Vec::new());
     model = update(model, UiEvent::Input(UiInput::Character('c')))
-        .expect("existing form")
+        .expect("creation chooser")
         .model;
-    model = update(model, UiEvent::Input(UiInput::Paste("existing".to_owned())))
-        .expect("name")
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::ChooseCreation {
+            selected: UiProjectCreationChoice::ExistingFolder
+        })
+    ));
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("existing folder form")
         .model;
+    model = update(
+        model,
+        UiEvent::Input(UiInput::Paste("/repo/existing".to_owned())),
+    )
+    .expect("path")
+    .model;
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("derived project name")
+        .model;
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::CreateExisting { name, .. }) if name == "existing"
+    ));
     model = update(model, UiEvent::Input(UiInput::NextFocus))
         .expect("brief")
         .model;
     model = update(model, UiEvent::Input(UiInput::Paste("brief".to_owned())))
         .expect("brief text")
         .model;
-    model = update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("path")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::Paste("/repo".to_owned())))
-        .expect("path text")
-        .model;
     let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit existing");
     let (existing_id, existing_action) = project_effect(&submitted.effects);
     assert_eq!(
         existing_action,
-        UiProjectAction::CreateExisting {
+        UiProjectAction::PreviewCreateExisting {
             name: "existing".to_owned(),
             brief: Some("brief".to_owned()),
-            path: "/repo".to_owned(),
+            path: "/repo/existing".to_owned(),
         }
     );
     let failed = update(
@@ -1690,8 +1705,9 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
     .expect("recoverable failure");
     assert!(matches!(
         failed.model.project_modal(),
-        Some(UiProjectModal::CreateExisting { path, submitting: false, .. }) if path == "/repo"
+        Some(UiProjectModal::CreateExisting { path, submitting: false, .. }) if path == "/repo/existing"
     ));
+    let retry_model = failed.model.clone();
     let cancelled = update(failed.model, UiEvent::Input(UiInput::Escape)).expect("cancel");
     assert!(cancelled.model.project_modal().is_none());
     assert!(
@@ -1701,7 +1717,94 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
             .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
     );
 
-    let mut model = update(cancelled.model, UiEvent::Input(UiInput::Character('w')))
+    let previewing = update(retry_model, UiEvent::Input(UiInput::Activate)).expect("retry preview");
+    let (preview_id, preview_action) = project_effect(&previewing.effects);
+    let preview = update(
+        previewing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: preview_id,
+            result: UiProjectResult {
+                action: preview_action,
+                command_id: [31; 32],
+                operation_id: [32; 32],
+                project_id: [33; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/repo/existing".to_owned(),
+                    canonical_path: "/repo/existing".to_owned(),
+                    conflicts: vec![UiProjectResourceConflict {
+                        project_id: [44; 32],
+                        resource_id: [45; 32],
+                        display_path: "/repo".to_owned(),
+                        canonical_path: "/repo".to_owned(),
+                        relationship: "ancestor".to_owned(),
+                    }],
+                },
+            },
+        },
+    )
+    .expect("conflicting ownership preview");
+    assert!(
+        preview
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+    let editing = update(preview.model, UiEvent::Input(UiInput::Escape))
+        .expect("return to the retained form")
+        .model;
+    assert!(matches!(
+        editing.project_modal(),
+        Some(UiProjectModal::CreateExisting { name, path, .. })
+            if name == "existing" && path == "/repo/existing"
+    ));
+    let previewing = update(editing, UiEvent::Input(UiInput::Activate)).expect("retry preview");
+    let (preview_id, preview_action) = project_effect(&previewing.effects);
+    let preview = update(
+        previewing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: preview_id,
+            result: UiProjectResult {
+                action: preview_action,
+                command_id: [34; 32],
+                operation_id: [35; 32],
+                project_id: [36; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/repo/existing".to_owned(),
+                    canonical_path: "/repo/existing".to_owned(),
+                    conflicts: Vec::new(),
+                },
+            },
+        },
+    )
+    .expect("clear ownership preview");
+    let committed =
+        update(preview.model, UiEvent::Input(UiInput::Activate)).expect("commit creation");
+    assert_eq!(
+        project_effect(&committed.effects).1,
+        UiProjectAction::CreateExisting {
+            name: "existing".to_owned(),
+            brief: Some("brief".to_owned()),
+            path: "/repo/existing".to_owned(),
+        }
+    );
+
+    let mut model = update(cancelled.model, UiEvent::Input(UiInput::Character('c')))
+        .expect("creation chooser")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextItem))
+        .expect("advanced worktree choice")
+        .model;
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::ChooseCreation {
+            selected: UiProjectCreationChoice::IsolatedWorktree
+        })
+    ));
+    let mut model = update(model, UiEvent::Input(UiInput::Activate))
         .expect("worktree form")
         .model;
     for (index, value) in ["worktree", "", "/source", "/destination", "feature", "main"]
@@ -1735,11 +1838,45 @@ fn both_project_creation_modes_emit_exact_typed_commands_and_cancel_without_effe
 }
 
 #[test]
+fn existing_folder_creation_defaults_the_name_when_submitted_from_the_path_field() {
+    let mut model = loaded_projects_model(1, Vec::new());
+    model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("creation chooser")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("existing folder form")
+        .model;
+    model = update(
+        model,
+        UiEvent::Input(UiInput::Paste("/repo/direct-submit".to_owned())),
+    )
+    .expect("folder path")
+    .model;
+
+    let submitted =
+        update(model, UiEvent::Input(UiInput::Activate)).expect("submit from path field");
+    assert_eq!(
+        project_effect(&submitted.effects).1,
+        UiProjectAction::PreviewCreateExisting {
+            name: "direct-submit".to_owned(),
+            brief: None,
+            path: "/repo/direct-submit".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
     let mut model =
         loaded_projects_model(1, Vec::new()).with_home_directory(Some("/Users/example".to_owned()));
     model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("creation chooser")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
         .expect("existing form")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("name field")
         .model;
     model = update(model, UiEvent::Input(UiInput::Paste("ac".to_owned())))
         .expect("name")
@@ -1801,10 +1938,7 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
             ..
         })
     ));
-    model = update(model, UiEvent::Input(UiInput::NextFocus))
-        .expect("brief field")
-        .model;
-    model = update(model, UiEvent::Input(UiInput::NextFocus))
+    model = update(model, UiEvent::Input(UiInput::PreviousFocus))
         .expect("path field")
         .model;
     model = update(model, UiEvent::Input(UiInput::Paste("~/repo".to_owned())))
@@ -1814,7 +1948,7 @@ fn forms_use_tab_unicode_safe_cursor_editing_and_current_user_path_expansion() {
     let (_, action) = project_effect(&submitted.effects);
     assert_eq!(
         action,
-        UiProjectAction::CreateExisting {
+        UiProjectAction::PreviewCreateExisting {
             name: "xé".to_owned(),
             brief: None,
             path: "/Users/example/repo".to_owned(),
