@@ -42,7 +42,7 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
         width: 104,
         height: 18,
     }));
-    assert!(summary.contains("Enter open · d message · n note · ? help · q quit"));
+    assert!(summary.contains("Enter open · n New… · d message · N note · ? help · q quit"));
     assert!(!summary.contains("archive/restore"));
     assert!(!summary.contains("a/u state"));
 
@@ -78,6 +78,72 @@ fn focused_mailbox_footer_keeps_complete_actions_in_contextual_help() {
     assert!(confirmation.contains("Archive the selected message?"));
     assert!(confirmation.contains("Only this message changes state"));
     assert!(confirmation.contains("conversation history stays intact"));
+}
+
+#[test]
+fn guided_new_workflow_explains_each_foreign_choice_in_user_terms() {
+    let model = project_model(UiSize {
+        width: 104,
+        height: 22,
+    });
+    let launcher = update(model, UiEvent::Input(UiInput::Character('n')))
+        .expect("open New launcher")
+        .model;
+    let rendered = render_text(&launcher);
+    assert!(
+        rendered.contains("What would you like to do?"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Work with an agent on a project"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Send a direct message"), "{rendered}");
+    assert!(rendered.contains("Write a personal note"), "{rendered}");
+    assert!(
+        rendered.contains("only the choices that intent needs"),
+        "{rendered}"
+    );
+
+    let projects = update(launcher, UiEvent::Input(UiInput::Activate))
+        .expect("choose project work")
+        .model;
+    let rendered = render_text(&projects);
+    assert!(
+        rendered.contains("Which project is this work for?"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("folders or resources it owns"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Create a project"), "{rendered}");
+
+    let agents = update(projects, UiEvent::Input(UiInput::Activate))
+        .expect("choose release")
+        .model;
+    let rendered = render_text(&agents);
+    assert!(
+        rendered.contains("Who should work on release?"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Unassigned agents are listed first"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Create an agent"), "{rendered}");
+
+    let composer = update(agents, UiEvent::Input(UiInput::Activate))
+        .expect("choose agent")
+        .model;
+    let rendered = render_text(&composer);
+    assert!(rendered.contains("Start project work"), "{rendered}");
+    assert!(
+        rendered.contains("continue the compatible saved project conversation"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("First instruction: │"), "{rendered}");
+    assert!(!rendered.contains("provider namespace"), "{rendered}");
 }
 
 #[test]
@@ -252,12 +318,12 @@ fn empty_sections_and_recipient_chooser_explain_exact_next_actions() {
             (
                 UiSection::Inbox,
                 "No conversations need your attention.",
-                "d message · n note",
+                "n New… for project work, a message, or a personal note",
             ),
             (
                 UiSection::Sent,
                 "You have not started or replied to a conversation.",
-                "d message · n note",
+                "n New… for project work, a message, or a personal note",
             ),
             (
                 UiSection::Archived,
@@ -267,12 +333,12 @@ fn empty_sections_and_recipient_chooser_explain_exact_next_actions() {
             (
                 UiSection::Agents,
                 "No named workers yet.",
-                "c create an agent",
+                "n New… to start guided work, or c to create an agent",
             ),
             (
                 UiSection::Projects,
                 "No projects yet.",
-                "c create a project and choose its first folder",
+                "n New… to start guided work, or c to create a project",
             ),
         ] {
             let model = empty_section_model(size, section);
@@ -414,7 +480,7 @@ fn mailbox_composer_is_responsive_and_rendering_only_borrows_state() {
         },
     ] {
         let ready = ready_model(size);
-        let opening = update(ready, UiEvent::Input(UiInput::Character('n'))).expect("self note");
+        let opening = update(ready, UiEvent::Input(UiInput::Character('N'))).expect("self note");
         let effect_id = opening
             .effects
             .iter()

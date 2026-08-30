@@ -15,9 +15,10 @@ use crate::{
     UiAgentProjectAssignment, UiAgentStatus, UiConnectionState, UiConversationEntry,
     UiConversationEntryKind, UiFocus, UiHelpPage, UiHumanIssue, UiHumanMembershipEvidence,
     UiHumanMembershipStatus, UiHumanState, UiMailboxAction, UiMailboxDraftTarget, UiMailboxModal,
-    UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel, UiProjectAction,
-    UiProjectCreationChoice, UiProjectFormField, UiProjectModal, UiProjectOutcome, UiProjectThread,
-    UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiTechnicalSection, model::WIDE_WIDTH,
+    UiManagedSessionAction, UiManagedSessionOutcome, UiMessageState, UiModel, UiNewChoice,
+    UiNewModal, UiProjectAction, UiProjectCreationChoice, UiProjectFormField, UiProjectModal,
+    UiProjectOutcome, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection,
+    UiTechnicalSection, model::WIDE_WIDTH,
 };
 
 const MINIMUM_WIDTH: u16 = 40;
@@ -46,10 +47,310 @@ pub fn render(frame: &mut Frame<'_>, model: &UiModel) {
         render_compact_content(frame, model, content);
     }
     render_footer(frame, model, footer);
+    render_new_modal(frame, model, content);
     render_mailbox_modal(frame, model, content);
     render_agent_modal(frame, model, content);
     render_project_modal(frame, model, content);
     render_help(frame, model, content);
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_new_modal(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
+    let Some(interaction) = model.new_modal() else {
+        return;
+    };
+    let width = available.width.saturating_sub(4).clamp(1, 82);
+    let height = available.height.clamp(1, 20);
+    let area = Rect {
+        x: available.x + available.width.saturating_sub(width) / 2,
+        y: available.y + available.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let (title, mut lines) = match interaction {
+        UiNewModal::Launcher { selected } => {
+            let choices = [
+                (
+                    UiNewChoice::ProjectWork,
+                    "Work with an agent on a project",
+                    "choose the work, agent, and first instruction",
+                ),
+                (
+                    UiNewChoice::DirectMessage,
+                    "Send a direct message",
+                    "contact a reachable agent or, later, another person",
+                ),
+                (
+                    UiNewChoice::PersonalNote,
+                    "Write a personal note",
+                    "save something only for yourself",
+                ),
+            ];
+            let mut lines = vec![
+                Line::from("What would you like to do?"),
+                Line::from("HQ will guide you through only the choices that intent needs."),
+                Line::default(),
+            ];
+            for (choice, label, detail) in choices {
+                lines.push(project_choice_line(label, detail, *selected == choice));
+            }
+            (" New… ", lines)
+        }
+        UiNewModal::ChooseProject {
+            projects,
+            selected,
+            create_new,
+        } => {
+            let mut lines = vec![
+                Line::from("Which project is this work for?"),
+                Line::from("A project records the work and the folders or resources it owns."),
+                Line::default(),
+            ];
+            for project in projects {
+                lines.push(project_choice_line(
+                    &project.name,
+                    project
+                        .resources
+                        .iter()
+                        .find(|resource| resource.primary)
+                        .or_else(|| project.resources.first())
+                        .map_or("no folder recorded", |resource| {
+                            resource.display_path.as_str()
+                        }),
+                    *selected == Some(project.project_id) && !*create_new,
+                ));
+            }
+            lines.push(project_choice_line(
+                "Create a project",
+                "record a folder and its ownership first",
+                *create_new,
+            ));
+            (" Choose project ", lines)
+        }
+        UiNewModal::ChooseAgent {
+            project,
+            agents,
+            selected,
+            create_new,
+        } => {
+            let mut lines = vec![
+                Line::from(format!("Who should work on {}?", project.name)),
+                Line::from(
+                    "Unassigned agents are listed first. HQ will not silently move an agent.",
+                ),
+                Line::default(),
+            ];
+            for agent in agents {
+                lines.push(project_choice_line(
+                    agent.names.first().map_or("Unnamed agent", String::as_str),
+                    &agent_status_label(&agent.status),
+                    *selected == Some(agent.agent_id) && !*create_new,
+                ));
+            }
+            lines.push(project_choice_line(
+                "Create an agent",
+                "give a new worker a durable name",
+                *create_new,
+            ));
+            (" Choose agent ", lines)
+        }
+        UiNewModal::ComposeProject {
+            project,
+            agent,
+            providers,
+            provider,
+            content,
+            provider_focused,
+        } => {
+            let available = providers.iter().filter(|choice| choice.available).count();
+            let mut lines = vec![
+                Line::from(format!(
+                    "Project: {} · Agent: {}",
+                    project.name,
+                    agent.names.first().map_or("Unnamed agent", String::as_str)
+                )),
+                Line::from(
+                    if project
+                        .threads
+                        .iter()
+                        .any(|thread| thread.agent_id == agent.agent_id)
+                        || project
+                            .assignment
+                            .as_ref()
+                            .is_some_and(|assignment| assignment.runnable)
+                    {
+                        "HQ will continue the compatible saved project conversation."
+                    } else {
+                        "HQ will prepare a project conversation before sending this instruction."
+                    },
+                ),
+                Line::default(),
+            ];
+            if available > 1 {
+                lines.push(Line::styled(
+                    format!(
+                        "Agent service: {}",
+                        provider_choice_label(providers, provider)
+                    ),
+                    if *provider_focused {
+                        selected_style(true)
+                    } else {
+                        Style::new()
+                    },
+                ));
+                lines.push(Line::from(
+                    "Use ↑/↓ to choose; HQ uses the default when possible.",
+                ));
+                lines.push(Line::default());
+            } else if available == 1 {
+                lines.push(Line::from(format!(
+                    "Agent service: {} (selected automatically)",
+                    provider_choice_label(providers, provider)
+                )));
+                lines.push(Line::default());
+            } else if !project
+                .threads
+                .iter()
+                .any(|thread| thread.agent_id == agent.agent_id)
+            {
+                lines.push(Line::styled(
+                    "No agent service is available. Configure one before continuing.",
+                    Style::new().fg(Color::Yellow),
+                ));
+                lines.push(Line::default());
+            }
+            let cursor = model.project_field_cursor(UiProjectFormField::Content, content);
+            lines.push(text_field_line(
+                "First instruction",
+                content,
+                cursor,
+                !*provider_focused,
+                "required",
+            ));
+            if let Some(error) = model.project_field_error(UiProjectFormField::Content) {
+                lines.push(Line::styled(error, Style::new().fg(Color::Red)));
+            }
+            (" Start project work ", lines)
+        }
+        UiNewModal::ReviewProject {
+            project,
+            agent,
+            provider,
+            content,
+            resumes_existing,
+            moves_project,
+            submitting,
+        } => (
+            " Review project work ",
+            vec![
+                Line::from("HQ is ready to do the following:"),
+                Line::default(),
+                Line::from(format!("Project: {}", project.name)),
+                Line::from(format!(
+                    "Agent: {}",
+                    agent.names.first().map_or("Unnamed agent", String::as_str)
+                )),
+                Line::from(format!("Agent service: {provider}")),
+                Line::from(format!(
+                    "Conversation: {}",
+                    if *resumes_existing {
+                        "continue saved"
+                    } else {
+                        "create for this project"
+                    }
+                )),
+                Line::from(if *moves_project {
+                    "Assignment: move this project's work to the selected agent"
+                } else {
+                    "Assignment: keep or create this project's assignment"
+                }),
+                Line::default(),
+                Line::from(format!("Instruction: {content}")),
+                Line::default(),
+                Line::from(if *submitting {
+                    "Preparing project work safely…"
+                } else {
+                    "Enter confirm · Esc edit"
+                }),
+            ],
+        ),
+        UiNewModal::AgentUnavailable {
+            project,
+            agent,
+            competing_project,
+            ..
+        } => (
+            " Agent already assigned ",
+            vec![
+                Line::styled(
+                    format!(
+                        "{} is assigned to {}.",
+                        agent.names.first().map_or("This agent", String::as_str),
+                        competing_project
+                    ),
+                    Style::new().fg(Color::Yellow).bold(),
+                ),
+                Line::from(format!(
+                    "HQ will not silently take the agent for {}.",
+                    project.name
+                )),
+                Line::default(),
+                Line::from(
+                    "Enter inspect the competing project and choose its explicit handoff path.",
+                ),
+                Line::from("Esc choose another agent."),
+            ],
+        ),
+        UiNewModal::ProjectUnavailable {
+            project,
+            competing_project,
+            reason,
+        } => (
+            " Project needs attention ",
+            vec![
+                Line::styled(
+                    format!("{} cannot start work yet: {reason}.", project.name),
+                    Style::new().fg(Color::Yellow).bold(),
+                ),
+                Line::from(competing_project.as_ref().map_or_else(
+                    || "Inspect the project to see the conflicting folder evidence.".to_owned(),
+                    |name| format!("The competing project is {name}."),
+                )),
+                Line::default(),
+                Line::from("Enter inspect this project · Esc choose another project"),
+            ],
+        ),
+        UiNewModal::Working {
+            project,
+            agent,
+            stage,
+        } => (
+            " Starting project work ",
+            vec![
+                Line::from(format!("Project: {project} · Agent: {agent}")),
+                Line::default(),
+                Line::from(stage.as_str()),
+                Line::from("Your choices and instruction are retained if setup needs attention."),
+            ],
+        ),
+    };
+    if !matches!(
+        interaction,
+        UiNewModal::ReviewProject { .. }
+            | UiNewModal::AgentUnavailable { .. }
+            | UiNewModal::ProjectUnavailable { .. }
+            | UiNewModal::Working { .. }
+    ) {
+        lines.push(Line::default());
+        lines.push(Line::from("↑/↓ choose · Enter continue · Esc back"));
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(title))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn render_help(frame: &mut Frame<'_>, model: &UiModel, available: Rect) {
@@ -312,19 +613,21 @@ fn section_help_actions(model: &UiModel) -> Vec<Line<'static>> {
                 actions.push(Line::from("Enter — open selected conversation"));
             }
             actions.push(Line::from(
-                "d — write a direct message · n — write a personal note",
+                "n — New… · d — direct message · N — personal note",
             ));
         }
-        UiSection::Agents => actions.push(Line::from(if model.selected_row_data().is_some() {
-            "/ — search · Enter — inspect selected agent · c — create agent"
-        } else {
-            "/ — search · c — create agent"
-        })),
+        UiSection::Agents => {
+            actions.push(Line::from(if model.selected_row_data().is_some() {
+                "n — New… · Enter — inspect · c — create · / — search"
+            } else {
+                "n — New… · c — create agent · / — search"
+            }));
+        }
         UiSection::Projects => {
             actions.push(Line::from(if model.selected_row_data().is_some() {
-                "/ — search · Enter — inspect selected project · c — create project"
+                "n — New… · Enter — inspect · c — create · / — search"
             } else {
-                "/ — search · c — create project"
+                "n — New… · c — create project · / — search"
             }));
             actions.push(Line::from(
                 "w — advanced shortcut: create an isolated Git worktree",
@@ -2301,14 +2604,14 @@ fn empty_section_lines(section: UiSection) -> Vec<Line<'static>> {
     match section {
         UiSection::Inbox => vec![
             Line::styled(" No conversations need your attention.", heading),
-            Line::from(" Start one now: d message · n note"),
+            Line::from(" Press n New… for project work, a message, or a personal note."),
         ],
         UiSection::Sent => vec![
             Line::styled(
                 " You have not started or replied to a conversation.",
                 heading,
             ),
-            Line::from(" Start one now: d message · n note"),
+            Line::from(" Press n New… for project work, a message, or a personal note."),
         ],
         UiSection::Archived => vec![
             Line::styled(" You have not put any conversations away.", heading),
@@ -2316,12 +2619,12 @@ fn empty_section_lines(section: UiSection) -> Vec<Line<'static>> {
         ],
         UiSection::Agents => vec![
             Line::styled(" No named workers yet.", heading),
-            Line::from(" Press c create an agent you can assign and contact."),
+            Line::from(" Press n New… to start guided work, or c to create an agent."),
         ],
         UiSection::Projects => vec![
             Line::styled(" No projects yet.", heading),
             Line::from(" A project records work and ownership of its folders and resources."),
-            Line::from(" Press c create a project and choose its first folder."),
+            Line::from(" Press n New… to start guided work, or c to create a project."),
         ],
     }
 }
@@ -2348,6 +2651,16 @@ fn render_conversation(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         .saturating_sub(capacity / 2)
         .min(conversation.entries.len().saturating_sub(capacity));
     let mut lines = Vec::new();
+    if let Some(context) = model.conversation_context() {
+        lines.push(Line::styled(
+            format!(
+                " Project: {} · Agent: {} · Service: {} ",
+                context.project, context.agent, context.provider
+            ),
+            Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
+        ));
+        lines.push(Line::default());
+    }
     for entry in conversation.entries.iter().skip(start).take(capacity) {
         lines.extend(render_conversation_entry(model, entry));
     }
@@ -2542,16 +2855,16 @@ fn render_footer(frame: &mut Frame<'_>, model: &UiModel, area: Rect) {
         " ←/→ section · Enter content · ? help · q quit".to_owned()
     } else if matches!(model.section(), UiSection::Agents | UiSection::Projects) {
         if model.selected_row_data().is_some() {
-            " Enter inspect · c create · / search · ? help · q quit".to_owned()
+            " Enter inspect · n New… · c create · / search · ? help · q quit".to_owned()
         } else {
-            " c create · / search · ? help · q quit".to_owned()
+            " n New… · c create · / search · ? help · q quit".to_owned()
         }
     } else if model.focus() == UiFocus::Conversation {
         conversation_footer(model)
     } else if model.selected_row_data().is_none() {
-        " d message · n note · ? help · q quit".to_owned()
+        " n New… · d message · N note · ? help · q quit".to_owned()
     } else if model.viewport().width >= WIDE_WIDTH {
-        " Enter open · d message · n note · ? help · q quit".to_owned()
+        " Enter open · n New… · d message · N note · ? help · q quit".to_owned()
     } else {
         " Enter open · ? help · q quit".to_owned()
     };

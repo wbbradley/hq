@@ -11,12 +11,673 @@ use hq_tui::{
     UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiProject, UiProjectAction, UiProjectAssignment, UiProjectCreationChoice,
-    UiProjectExternalWarning, UiProjectFormField, UiProjectModal, UiProjectOutcome,
-    UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict, UiProjectResult,
-    UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize, UiSnapshot,
-    UiTechnicalSection, UiTimerKind, update,
+    UiNewChoice, UiNewModal, UiProject, UiProjectAction, UiProjectAssignment,
+    UiProjectCreationChoice, UiProjectExternalWarning, UiProjectFormField, UiProjectModal,
+    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
+    UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
+    UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
+
+#[test]
+fn new_launcher_keeps_project_direct_and_personal_intents_distinct() {
+    let mut snapshot = snapshot(1, &[]);
+    snapshot.direct_targets = vec![direct_target("Ada", 4)];
+    let model = loaded_model(snapshot);
+
+    let launcher = update(model, UiEvent::Input(UiInput::Character('n')))
+        .expect("open New launcher")
+        .model;
+    assert!(matches!(
+        launcher.new_modal(),
+        Some(UiNewModal::Launcher {
+            selected: UiNewChoice::ProjectWork
+        })
+    ));
+
+    let direct = update(launcher, UiEvent::Input(UiInput::NextItem))
+        .expect("choose direct message")
+        .model;
+    let direct = update(direct, UiEvent::Input(UiInput::Activate)).expect("open recipients");
+    assert!(matches!(
+        direct.model.mailbox_modal(),
+        Some(UiMailboxModal::SelectDirect { targets, .. }) if targets.len() == 1
+    ));
+
+    let launcher = update(direct.model, UiEvent::Input(UiInput::Escape))
+        .expect("close recipients")
+        .model;
+    let launcher = update(launcher, UiEvent::Input(UiInput::Character('n')))
+        .expect("reopen New launcher")
+        .model;
+    let note = update(launcher, UiEvent::Input(UiInput::PreviousItem))
+        .expect("choose personal note")
+        .model;
+    let note = update(note, UiEvent::Input(UiInput::Activate)).expect("prepare note");
+    assert!(matches!(
+        open_draft_effect(&note.effects).1,
+        UiMailboxDraftTarget::SelfNote
+    ));
+}
+
+#[test]
+fn guided_project_work_resumes_ready_assignment_without_session_setup() {
+    let agent = project_agent(7, [9; 32]);
+    let mut project = project(5, "release", "/work/release");
+    project.assignment = Some(UiProjectAssignment {
+        assignment_id: [8; 32],
+        agent_id: agent.agent_id,
+        provider: "codex".to_owned(),
+        session: Some("session-7".to_owned()),
+        phase: "runnable".to_owned(),
+        thread_id: Some([6; 32]),
+        launch_directory: Some("/work/release".to_owned()),
+        blocked: None,
+        cardinality_conflicted: false,
+        runnable: true,
+    });
+    let mut model = loaded_projects_model_with_agents(1, vec![project], vec![agent]);
+    model = update(model, UiEvent::Input(UiInput::Character('n')))
+        .expect("launcher")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("project intent")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("select project")
+        .model;
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::ComposeProject { provider, .. }) if provider == "codex"
+    ));
+
+    model = update(model, UiEvent::Input(UiInput::Paste("ship it".to_owned())))
+        .expect("initial instruction")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("review")
+        .model;
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::ReviewProject { .. })
+    ));
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("send once");
+    assert!(matches!(
+        project_effect(&submitted.effects).1,
+        UiProjectAction::SendInput { project_id, content }
+            if project_id == [5; 32] && content == "ship it"
+    ));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn guided_project_work_activates_then_dispatches_once_and_opens_the_conversation() {
+    let agent = project_agent(7, [9; 32]);
+    let project = project(5, "release", "/work/release");
+    let mut model =
+        loaded_projects_model_with_agents(1, vec![project.clone()], vec![agent.clone()]);
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Paste("ship it".to_owned()),
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+    let activating = update(model, UiEvent::Input(UiInput::Activate)).expect("confirm setup");
+    let (activation_id, activation) = project_effect(&activating.effects);
+    assert!(matches!(
+        activation,
+        UiProjectAction::Activate {
+            project_id,
+            agent_id,
+            ref provider,
+            resume_session: None,
+            resume_thread: None,
+            ref launch_directory,
+        } if project_id == [5; 32]
+            && agent_id == [7; 32]
+            && provider == "codex"
+            && launch_directory == "/work/release"
+    ));
+
+    let completed = update(
+        activating.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: activation_id,
+            result: UiProjectResult {
+                action: activation,
+                command_id: [10; 32],
+                operation_id: [11; 32],
+                project_id: [5; 32],
+                runtime_state: Some("ready".to_owned()),
+                runtime_code: None,
+                outcome: UiProjectOutcome::Completed {
+                    project_head: Some([12; 32]),
+                },
+            },
+        },
+    )
+    .expect("activation complete");
+    let snapshot_id = snapshot_effect(&completed.effects);
+    let thread_id = [6; 32];
+    let mut ready_project = project;
+    ready_project.assignment = Some(UiProjectAssignment {
+        assignment_id: [8; 32],
+        agent_id: [7; 32],
+        provider: "codex".to_owned(),
+        session: Some("guided-session".to_owned()),
+        phase: "runnable".to_owned(),
+        thread_id: Some(thread_id),
+        launch_directory: Some("/work/release".to_owned()),
+        blocked: None,
+        cardinality_conflicted: false,
+        runnable: true,
+    });
+    let mut ready_snapshot = projects_snapshot(2, vec![ready_project.clone()]);
+    let agent_source = agents_snapshot(2, vec![agent]);
+    ready_snapshot.agents = agent_source.agents;
+    ready_snapshot.agent_rows = agent_source.agent_rows;
+    let dispatched = update(
+        completed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: ready_snapshot,
+        },
+    )
+    .expect("ready snapshot dispatches initial instruction");
+    let (input_id, input_action) = project_effect(&dispatched.effects);
+    assert!(matches!(
+        input_action,
+        UiProjectAction::SendInput { ref content, .. } if content == "ship it"
+    ));
+
+    let duplicate = update(
+        dispatched.model.clone(),
+        UiEvent::Invalidated { revision: 2 },
+    )
+    .expect("duplicate revision is inert");
+    assert!(!duplicate.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::SubmitProjectCommand {
+            action: UiProjectAction::SendInput { .. },
+            ..
+        }
+    )));
+
+    let sent = update(
+        dispatched.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: input_id,
+            result: UiProjectResult {
+                action: input_action,
+                command_id: [13; 32],
+                operation_id: [14; 32],
+                project_id: [5; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::InputSent {
+                    message_id: [15; 32],
+                },
+            },
+        },
+    )
+    .expect("input sent");
+    let sent_snapshot_id = snapshot_effect(&sent.effects);
+    let row_id = format!("thread:{}", "06".repeat(32));
+    let mut sent_snapshot = projects_snapshot(3, vec![ready_project]);
+    sent_snapshot.sent_rows = vec![UiRow {
+        id: row_id.clone(),
+        title: "release conversation".to_owned(),
+        detail: "1 sent message".to_owned(),
+        state: UiRowState::Waiting,
+        kind: UiRowKind::Conversation,
+    }];
+    let opening = update(
+        sent.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: sent_snapshot_id,
+            snapshot: sent_snapshot,
+        },
+    )
+    .expect("authoritative conversation appears");
+    let (conversation_id, selected_row, cursor) = conversation_effect(&opening.effects);
+    assert_eq!(selected_row, row_id);
+    assert_eq!(cursor, None);
+    assert_eq!(opening.model.section(), UiSection::Sent);
+    assert_eq!(
+        opening.model.conversation_context().map(|context| (
+            context.project.as_str(),
+            context.agent.as_str(),
+            context.provider.as_str(),
+        )),
+        Some(("release", "agent-7", "codex"))
+    );
+    let opened = update(
+        opening.model,
+        UiEvent::ConversationLoaded {
+            effect_id: conversation_id,
+            page: UiConversationPage {
+                row_id,
+                entries: vec![entry("sent", false)],
+                next_cursor: None,
+            },
+        },
+    )
+    .expect("conversation loaded");
+    assert_eq!(opened.model.focus(), UiFocus::Conversation);
+    let away = update(opened.model, UiEvent::Input(UiInput::Character('l')))
+        .expect("visit another section")
+        .model;
+    let returned = update(away, UiEvent::Input(UiInput::Character('h')))
+        .expect("return to sent conversation")
+        .model;
+    assert_eq!(
+        returned
+            .conversation_context()
+            .map(|context| context.project.as_str()),
+        Some("release")
+    );
+}
+
+#[test]
+fn guided_project_work_names_an_agents_competing_project_without_mutation() {
+    let mut assigned = project_agent(7, [9; 32]);
+    assigned.status = UiAgentStatus::Assigned(UiAgentProjectAssignment {
+        project_id: [4; 32],
+        project_name: "payments".to_owned(),
+        assignment_id: [3; 32],
+        provider: "codex".to_owned(),
+        session: Some("busy".to_owned()),
+        phase: UiAgentAssignmentPhase::Ready,
+        blocked: None,
+        cardinality_conflicted: false,
+    });
+    let mut model = loaded_projects_model_with_agents(
+        1,
+        vec![project(5, "release", "/work/release")],
+        vec![assigned],
+    );
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::AgentUnavailable {
+            competing_project,
+            ..
+        }) if competing_project == "payments"
+    ));
+    assert!(
+        update(model, UiEvent::Input(UiInput::Activate))
+            .expect("inspect conflict")
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+}
+
+#[test]
+fn guided_project_work_can_create_its_missing_project_and_continue() {
+    let mut model = loaded_projects_model(1, Vec::new());
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Paste("/work/new-project".to_owned()),
+        UiInput::NextFocus,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("creation step")
+            .model;
+    }
+    let previewing = update(model, UiEvent::Input(UiInput::Activate)).expect("preview");
+    let (preview_id, preview_action) = project_effect(&previewing.effects);
+    let preview = update(
+        previewing.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: preview_id,
+            result: UiProjectResult {
+                action: preview_action,
+                command_id: [20; 32],
+                operation_id: [21; 32],
+                project_id: [5; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::ResourcePreview {
+                    display_path: "/work/new-project".to_owned(),
+                    canonical_path: "/work/new-project".to_owned(),
+                    conflicts: Vec::new(),
+                },
+            },
+        },
+    )
+    .expect("safe preview");
+    let precommit_snapshot_id = snapshot_effect(&preview.effects);
+    let preview = update(
+        preview.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: precommit_snapshot_id,
+            snapshot: projects_snapshot(1, Vec::new()),
+        },
+    )
+    .expect("pre-commit snapshot");
+    let creating = update(preview.model, UiEvent::Input(UiInput::Activate)).expect("create");
+    let (create_id, create_action) = project_effect(&creating.effects);
+    let completed = update(
+        creating.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: create_id,
+            result: UiProjectResult {
+                action: create_action,
+                command_id: [22; 32],
+                operation_id: [23; 32],
+                project_id: [5; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::Completed {
+                    project_head: Some([24; 32]),
+                },
+            },
+        },
+    )
+    .expect("created");
+    let snapshot_id = snapshot_effect(&completed.effects);
+    let resumed = update(
+        completed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: projects_snapshot(2, vec![project(5, "new-project", "/work/new-project")]),
+        },
+    )
+    .expect("new project loaded");
+    assert!(matches!(
+        resumed.model.new_modal(),
+        Some(UiNewModal::ChooseAgent {
+            project,
+            create_new: true,
+            ..
+        }) if project.project_id == [5; 32]
+    ));
+}
+
+#[test]
+fn guided_project_work_can_create_its_missing_agent_and_continue() {
+    let project = project(5, "release", "/work/release");
+    let mut model = loaded_projects_model(1, vec![project.clone()]);
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Paste("builder".to_owned()),
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("agent step")
+            .model;
+    }
+    let creating = update(model, UiEvent::Input(UiInput::Activate)).expect("create agent");
+    let (agent_id, action) = agent_action_effect(&creating.effects);
+    assert!(matches!(action, UiAgentAction::Create { name } if name == "builder"));
+    let committed = update(
+        creating.model,
+        UiEvent::AgentCommandCommitted {
+            effect_id: agent_id,
+            revision: 2,
+        },
+    )
+    .expect("agent committed");
+    let snapshot_id = snapshot_effect(&committed.effects);
+    let builder = project_agent(7, [9; 32]);
+    let mut builder = UiAgent {
+        names: vec!["builder".to_owned()],
+        ..builder
+    };
+    builder.status = UiAgentStatus::Unassigned;
+    let mut refreshed = projects_snapshot(2, vec![project]);
+    let agent_source = agents_snapshot(2, vec![builder]);
+    refreshed.agents = agent_source.agents;
+    refreshed.agent_rows = agent_source.agent_rows;
+    let resumed = update(
+        committed.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: refreshed,
+        },
+    )
+    .expect("new agent loaded");
+    assert!(matches!(
+        resumed.model.new_modal(),
+        Some(UiNewModal::ComposeProject { agent, content, .. })
+            if agent.names == ["builder"] && content.is_empty()
+    ));
+}
+
+#[test]
+fn guided_project_rejection_and_uncertainty_retain_every_choice_and_draft() {
+    let agent = project_agent(7, [9; 32]);
+    let project = project(5, "release", "/work/release");
+    let mut model = loaded_projects_model_with_agents(1, vec![project], vec![agent]);
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Paste("keep this exact draft".to_owned()),
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+    let submitting = update(model, UiEvent::Input(UiInput::Activate)).expect("submit setup");
+    let (effect_id, action) = project_effect(&submitting.effects);
+    for outcome in [
+        UiProjectOutcome::Rejected {
+            category: "conflict".to_owned(),
+            code: "agent_changed".to_owned(),
+        },
+        UiProjectOutcome::Reconcilable {
+            stage: "runtime".to_owned(),
+            category: "uncertain".to_owned(),
+            code: "response_lost".to_owned(),
+            warning: None,
+        },
+    ] {
+        let result = update(
+            submitting.model.clone(),
+            UiEvent::ProjectCommandCompleted {
+                effect_id,
+                result: UiProjectResult {
+                    action: action.clone(),
+                    command_id: [30; 32],
+                    operation_id: [31; 32],
+                    project_id: [5; 32],
+                    runtime_state: None,
+                    runtime_code: None,
+                    outcome,
+                },
+            },
+        )
+        .expect("typed exceptional result");
+        assert!(matches!(
+            result.model.project_modal(),
+            Some(UiProjectModal::Outcome { .. })
+        ));
+        let recovered = update(result.model, UiEvent::Input(UiInput::Escape))
+            .expect("return to retained review")
+            .model;
+        assert!(matches!(
+            recovered.new_modal(),
+            Some(UiNewModal::ReviewProject {
+                project,
+                agent,
+                provider,
+                content,
+                submitting: false,
+                ..
+            }) if project.name == "release"
+                && agent.names == ["agent-7"]
+                && provider == "codex"
+                && content == "keep this exact draft"
+        ));
+    }
+}
+
+#[test]
+fn guided_project_work_only_offers_available_provider_choices_when_needed() {
+    let providers = vec![
+        available_provider("alpha", "Alpha", false),
+        available_provider("codex", "Codex", true),
+        UiProvider {
+            provider: "offline".to_owned(),
+            name: "Offline".to_owned(),
+            available: false,
+            configured_default: false,
+        },
+    ];
+    let mut model = loaded_projects_model_with_agents_and_providers(
+        1,
+        vec![project(5, "release", "/work/release")],
+        vec![project_agent(7, [9; 32])],
+        providers,
+    );
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::ComposeProject { provider, .. }) if provider == "codex"
+    ));
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("focus provider")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::PreviousItem))
+        .expect("choose previous available provider")
+        .model;
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::ComposeProject { provider, .. }) if provider == "alpha"
+    ));
+    model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("return to instruction")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Paste("ship it".to_owned())))
+        .expect("instruction")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("review")
+        .model;
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit");
+    assert!(matches!(
+        project_effect(&submitted.effects).1,
+        UiProjectAction::Activate { provider, .. } if provider == "alpha"
+    ));
+}
+
+#[test]
+fn guided_project_work_refreshes_provider_choices_without_losing_the_draft() {
+    let project = project(5, "release", "/work/release");
+    let agent = project_agent(7, [9; 32]);
+    let mut model = loaded_projects_model_with_agents_and_providers(
+        1,
+        vec![project.clone()],
+        vec![agent.clone()],
+        vec![
+            available_provider("alpha", "Alpha", false),
+            available_provider("codex", "Codex", true),
+        ],
+    );
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Paste("retained".to_owned()),
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+    let invalidated = update(model, UiEvent::Invalidated { revision: 2 }).expect("refresh");
+    let snapshot_id = snapshot_effect(&invalidated.effects);
+    let mut refreshed = projects_snapshot(2, vec![project]);
+    let agent_source = agents_snapshot(2, vec![agent]);
+    refreshed.agents = agent_source.agents;
+    refreshed.agent_rows = agent_source.agent_rows;
+    refreshed.providers = vec![available_provider("alpha", "Alpha", true)];
+    let reloaded = update(
+        invalidated.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: refreshed,
+        },
+    )
+    .expect("provider catalog replaced");
+    assert!(matches!(
+        reloaded.model.new_modal(),
+        Some(UiNewModal::ComposeProject {
+            provider,
+            content,
+            providers,
+            ..
+        }) if provider == "alpha" && content == "retained" && providers.len() == 1
+    ));
+}
+
+#[test]
+fn guided_project_work_names_a_competing_resource_owner_before_setup() {
+    let mut target = project(5, "release", "/work/release");
+    target.claimable = false;
+    target.resources[0].active_claim = false;
+    target.resources[0].conflicting_projects = vec![[4; 32]];
+    let competitor = project(4, "payments", "/work");
+    let mut model = loaded_projects_model(1, vec![target, competitor]);
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::ProjectUnavailable {
+            project,
+            competing_project: Some(competing_project),
+            reason,
+        }) if project.name == "release"
+            && competing_project == "payments"
+            && reason == "folder ownership needs attention"
+    ));
+    assert!(
+        update(model, UiEvent::Input(UiInput::Activate))
+            .expect("inspect conflict")
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+}
 
 #[test]
 fn startup_allocates_explicit_snapshot_tick_and_redraw_effects() {
@@ -754,7 +1415,7 @@ fn reconnect_preserves_the_open_conversation_until_authoritative_repair() {
 fn self_note_draft_autosaves_and_survives_resize_reconnect_and_reload() {
     let loaded = loaded_model(snapshot(1, &["thread-a"]));
     let opening =
-        update(loaded, UiEvent::Input(UiInput::Character('n'))).expect("open self-note draft");
+        update(loaded, UiEvent::Input(UiInput::Character('N'))).expect("open self-note draft");
     let (open_id, target) = open_draft_effect(&opening.effects);
     assert_eq!(target, &UiMailboxDraftTarget::SelfNote);
     let draft = UiMailboxDraft {
@@ -1111,7 +1772,7 @@ fn direct_archive_and_restore_emit_only_their_typed_commands() {
 #[test]
 fn escape_during_in_flight_autosave_waits_for_latest_text_before_closing() {
     let loaded = loaded_model(snapshot(1, &[]));
-    let opening = update(loaded, UiEvent::Input(UiInput::Character('n'))).expect("note");
+    let opening = update(loaded, UiEvent::Input(UiInput::Character('N'))).expect("note");
     let (open_id, _) = open_draft_effect(&opening.effects);
     let opened = update(
         opening.model,
@@ -1170,7 +1831,7 @@ fn escape_during_in_flight_autosave_waits_for_latest_text_before_closing() {
 #[test]
 fn optimistic_draft_conflict_preserves_local_text_and_adopts_current_version() {
     let loaded = loaded_model(snapshot(1, &[]));
-    let opening = update(loaded, UiEvent::Input(UiInput::Character('n'))).expect("note");
+    let opening = update(loaded, UiEvent::Input(UiInput::Character('N'))).expect("note");
     let (open_id, _) = open_draft_effect(&opening.effects);
     let opened = update(
         opening.model,

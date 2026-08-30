@@ -544,7 +544,7 @@ fn executor_runs_draft_autosave_and_stable_mailbox_command_in_order() {
         .expect("snapshot event")
         .model;
 
-    let opening = update(model, UiEvent::Input(UiInput::Character('n'))).expect("self note");
+    let opening = update(model, UiEvent::Input(UiInput::Character('N'))).expect("self note");
     model = opening.model;
     executor.execute(opening.effects).expect("open draft");
     model = update(model, receive_event(&mut executor))

@@ -48,7 +48,7 @@ edited text, direct target identity, or pending submission.
 The pure model owns reply, direct-message, self-note, archive, and restore interaction state. Enter
 opens a selected conversation summary so the operator can select an exact message. `r` opens an
 applicable reply draft only for a typed message target whose purpose permits replies; `d` selects
-one unconflicted named-agent mailbox by stable installation/mailbox identity; `n` opens a self-note;
+one unconflicted named-agent mailbox by stable installation/mailbox identity; `N` opens a self-note;
 `a` opens archive confirmation for an open message; and `u` opens restore confirmation for an
 archived message. Archive changes only that message's reversible state; it does not delete the
 thread or any message history. Using either state shortcut on a conversation summary shows a
@@ -80,6 +80,37 @@ Focused fields have a visible selection treatment and insertion caret. Labels sa
 required or optional, concise guidance and examples appear with the focused field, and known
 validation failures render next to that field before an effect is emitted. Stable failures from an
 actual operation remain in the global recovery presentation because they are not form validation.
+
+## Guided `New...` workflow
+
+`n` opens one global intent launcher from every ordinary section. Its choices remain separate:
+`Work with an agent on a project`, `Send a direct message`, and `Write a personal note`. The direct
+path enters the typed recipient catalog, whose recipient union can grow to include reachable human
+peers without inventing provider sessions for them. The note path enters the existing durable
+self-note composer. Expert `d` and `N` shortcuts retain direct access to those independent
+capabilities.
+
+The project path is a pure coordinator over existing domain operations. It selects an existing
+non-archived project or enters ordinary project creation, then selects an active agent whose
+mailbox belongs to the project's home installation or enters ordinary agent creation. Unassigned
+agents appear first. An agent already assigned elsewhere is never taken implicitly: the dialog
+names the competing project and links to its explicit project handoff controls. Project creation,
+agent creation, resource ownership, direct sessions, notes, and direct messages remain usable
+without this coordinator.
+
+A runnable current assignment skips setup and continues its exact conversation. Otherwise the
+coordinator reuses a compatible historical project thread when one exists, or selects an available
+provider using the shared typed provider policy and submits the existing retry-safe activation or
+handoff command. The user composes the initial instruction before a compact review names the
+project, agent, provider, conversation behavior, and any assignment move. After the authoritative
+snapshot proves the assignment runnable, the model emits the retained project input exactly once.
+Duplicate invalidations cannot repeat that submission.
+
+Successful input refreshes the authoritative Sent catalog, selects the exact project thread, loads
+its first bounded page, and shows a context banner naming the project, agent, and provider. A
+transport failure, rejection, response loss, reconcilable result, or reconnect retains every
+selection and the instruction draft. Decision-bearing and recovery outcomes remain modal; Escape
+returns from their evidence to the retained review instead of restarting the wizard.
 
 Project path fields share one lexical input boundary. Exact `~` and `~/...` forms expand using the
 current operating-system user's home directory, then `.` and `..` components normalize into the

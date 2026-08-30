@@ -138,6 +138,38 @@ fn installed_tui_self_note_matches_cli_and_survives_restart() {
 }
 
 #[test]
+fn installed_tui_new_launcher_explains_all_three_intents() {
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    initialize_identity(&state_root);
+    let _daemon = DaemonStopGuard(&state_root);
+    assert!(
+        hq_output(&state_root, &["human", "create"])
+            .status
+            .success()
+    );
+
+    let run = run_in_pty(&state_root, true, PtyInteraction::OpenNewLauncher);
+    assert!(run.status.success(), "TUI process failed: {:?}", run.bytes);
+    for phrase in [
+        "Work with an agent on a project",
+        "direct",
+        "message:",
+        "personal",
+        "note:",
+    ] {
+        assert!(
+            run.bytes
+                .windows(phrase.len())
+                .any(|window| window == phrase.as_bytes()),
+            "New launcher omitted {phrase:?}: {:?}",
+            run.bytes
+        );
+    }
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+}
+
+#[test]
 fn installed_tui_agent_create_matches_cli_and_survives_restart() {
     let directory = TestDirectory::new();
     let state_root = directory.path().join("state");
@@ -482,6 +514,7 @@ struct PtyRun {
 enum PtyInteraction<'content> {
     QuitOnStart,
     QuitAfterSetup,
+    OpenNewLauncher,
     SubmitSelfNote(&'content str),
     CreateAgent(&'content str),
     StartRejectedSession,
@@ -596,7 +629,8 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         if !initial_key_sent && alternate_screen_entered && interaction_ready {
             let key = match interaction {
                 PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup => b"q".as_slice(),
-                PtyInteraction::SubmitSelfNote(_) => b"n".as_slice(),
+                PtyInteraction::OpenNewLauncher => b"n".as_slice(),
+                PtyInteraction::SubmitSelfNote(_) => b"N".as_slice(),
                 PtyInteraction::CreateAgent(_) => b"jjjc".as_slice(),
                 PtyInteraction::StartRejectedSession => b"jjjl".as_slice(),
                 PtyInteraction::CreateExistingProject { .. } => b"jjjjc\r".as_slice(),
@@ -615,6 +649,15 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 interaction,
                 PtyInteraction::QuitOnStart | PtyInteraction::QuitAfterSetup
             );
+        }
+        if matches!(interaction, PtyInteraction::OpenNewLauncher)
+            && initial_key_sent
+            && !exit_sent
+            && bytes.windows(b"New".len()).any(|window| window == b"New")
+        {
+            master.write_all(&[0x03]).expect("Ctrl-C writes");
+            master.flush().expect("Ctrl-C flushes");
+            exit_sent = true;
         }
         if let PtyInteraction::SubmitSelfNote(content) = interaction
             && initial_key_sent

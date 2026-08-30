@@ -1,5 +1,54 @@
 # Completed
 
+## 2026-08-29 — Guided New workflow
+
+Added a global `n` launcher that starts from user intent: work with an agent on a project, send a
+direct message, or write a personal note. The project path selects or creates a project, prefers
+unassigned agents and can create one in place, asks for a typed provider choice only when multiple
+services are available, collects the instruction, and presents a compact plain-language review.
+The existing `d` direct-message and `N` personal-note shortcuts remain available.
+
+The workflow exact-resumes compatible project conversations and skips unnecessary setup for
+already-runnable assignments. Otherwise it drives the existing retry-safe activation or handoff,
+waits for the authoritative runnable snapshot, and emits the retained instruction exactly once.
+Provider catalog refreshes preserve the draft. Assignment and resource conflicts name the competing
+project without mutating state, while rejected or reconcilable outcomes preserve the complete review
+and draft for recovery and cannot later trigger a silent send.
+
+Successful sends select and open the exact conversation in Sent with a persistent context banner
+naming its project, agent, and provider. Direct sessions, messages, notes, and project/resource
+administration remain independent capabilities. Pure-model and rendering coverage exercises every
+wizard screen and the recovery paths; ten installed pseudoterminal workflows cover the user-facing
+launcher. Formatting, architecture verification, qualification validation, strict Clippy, locked
+workspace check/test/build, and all focused TUI suites pass.
+
+### Original plan entry
+
+### Add an extensible guided `New...` workflow
+
+Provide a clear path from intent to conversation while keeping project work, direct messages, and
+personal notes distinct.
+
+- Make `n new` open a small launcher with `Work with an agent on a project`, `Send a direct message`,
+  and `Write a personal note`. Retain expert shortcuts where useful. Structure direct-message target
+  selection so future human peers can appear alongside other typed recipients without changing the
+  project workflow or inventing provider sessions for humans.
+- For project work, guide the user through selecting or creating a project, selecting or creating an
+  unassigned agent, choosing a provider only when necessary, and composing the initial instruction.
+  Show a compact review in user terms before any materially different assignment or handoff.
+- Orchestrate the existing retry-safe project activation/session and input operations behind the
+  workflow. Resume a compatible existing project conversation when selected; otherwise create the
+  required scoped session and assignment, then dispatch the initial instruction exactly once.
+- Explain exceptional choices in place: an agent assigned to another project requires an explicit
+  handoff path; resource or assignment conflicts identify the competing project; rejected or
+  uncertain setup retains the user's selections and draft for recovery.
+- On success, open the resulting conversation with a visible context banner naming the project,
+  agent, and provider. Do not expose the user to an empty Inbox, operation outcome dialog, or a
+  separate unexplained managed-session step.
+- Preserve direct agent sessions, direct messaging, notes, and project/resource administration as
+  independent capabilities. The guided project path is a convenience over the domain model, not a
+  replacement for HQ's broader collaboration model.
+
 ## 2026-08-29 — Contextual TUI completion
 
 Replaced routine project and managed-session outcome dialogs with one typed completion policy.

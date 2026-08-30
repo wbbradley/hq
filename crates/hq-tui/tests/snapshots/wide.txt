@@ -15,4 +15,4 @@
                        │
                        │
 ────────────────────────────────────────────────────────────────────────────────────────────────────────
- Enter open · d message · n note · ? help · q quit
+ Enter open · n New… · d message · N note · ? help · q quit
