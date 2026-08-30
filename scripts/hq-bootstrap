@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly PROGRAM_NAME="${0##*/}"
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly SCRIPT_DIRECTORY
+DEFAULT_REPOSITORY="$(dirname -- "$SCRIPT_DIRECTORY")"
+readonly DEFAULT_REPOSITORY
+readonly REPOSITORY="${HQ_SOURCE_DIR:-$DEFAULT_REPOSITORY}"
+readonly TOOLCHAIN="${HQ_RUST_TOOLCHAIN:-1.98.0}"
+readonly INSTALL_ROOT="${HQ_INSTALL_ROOT:-${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}}"
+readonly HQ_BIN="$INSTALL_ROOT/bin/hq"
+readonly STATE_ROOT="${HQ_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/hq}"
+
+usage() {
+  cat <<EOF
+Usage: $PROGRAM_NAME [HUMAN_LABEL]
+
+Build and install HQ from source, discard the selected local installation, and
+walk through first-time identity and human-account creation.
+
+Environment:
+  HQ_SOURCE_DIR       Source checkout (default: $DEFAULT_REPOSITORY)
+  HQ_RUST_TOOLCHAIN   Rust toolchain (default: 1.98.0)
+  HQ_INSTALL_ROOT     Cargo installation root (default: CARGO_INSTALL_ROOT,
+                      CARGO_HOME, or $HOME/.cargo)
+  HQ_STATE_ROOT       State directory to reset (default: XDG_STATE_HOME/hq or
+                      $HOME/.local/state/hq)
+EOF
+}
+
+step() {
+  printf '\n==> %s\n' "$*"
+}
+
+die() {
+  printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+  exit 1
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
+
+(( $# <= 1 )) || die "expected at most one human-account label"
+[[ -f "$REPOSITORY/crates/hq-node/Cargo.toml" ]] || die "hq-node crate not found in $REPOSITORY"
+[[ "$INSTALL_ROOT" = /* ]] || die "install root must be an absolute path: $INSTALL_ROOT"
+[[ "$STATE_ROOT" = /* ]] || die "state root must be an absolute path: $STATE_ROOT"
+[[ "$STATE_ROOT" != / && "$STATE_ROOT" != "$HOME" ]] || die "refusing unsafe state root: $STATE_ROOT"
+
+BUILD_COMMIT="$(git -C "$REPOSITORY" rev-parse --verify HEAD)" || \
+  die "HQ source checkout not found at $REPOSITORY"
+readonly BUILD_COMMIT
+
+step "Checking HQ at ${BUILD_COMMIT:0:12}"
+(
+  cd "$REPOSITORY"
+  HQ_BUILD_COMMIT="$BUILD_COMMIT" \
+    cargo "+$TOOLCHAIN" build --locked --package hq-node --bin hq
+)
+
+if [[ -e "$STATE_ROOT" ]]; then
+  step "Stopping the current HQ node"
+  if command -v hq >/dev/null 2>&1; then
+    hq --state-root "$STATE_ROOT" daemon stop
+  elif [[ -x "$HQ_BIN" ]]; then
+    "$HQ_BIN" --state-root "$STATE_ROOT" daemon stop
+  else
+    die "cannot safely reset existing state without an installed hq executable"
+  fi
+fi
+
+step "Installing $HQ_BIN"
+HQ_BUILD_COMMIT="$BUILD_COMMIT" \
+  cargo "+$TOOLCHAIN" install \
+    --force \
+    --locked \
+    --root "$INSTALL_ROOT" \
+    --path "$REPOSITORY/crates/hq-node" \
+    --bin hq
+
+[[ -x "$HQ_BIN" ]] || die "cargo did not install an executable at $HQ_BIN"
+
+step "Resetting $STATE_ROOT"
+rm -rf -- "$STATE_ROOT"
+
+step "Creating a new installation identity"
+"$HQ_BIN" --state-root "$STATE_ROOT" identity init
+
+step "Creating the local human account"
+if (( $# == 1 )); then
+  "$HQ_BIN" --state-root "$STATE_ROOT" human create "$1"
+else
+  "$HQ_BIN" --state-root "$STATE_ROOT" human create
+fi
+
+printf '\nHQ is ready. Run: %s --state-root %q tui\n' "$HQ_BIN" "$STATE_ROOT"
