@@ -1584,19 +1584,37 @@ fn text_field_line(
 ) -> Line<'static> {
     let cursor = cursor.min(value.len());
     let (left, right) = value.split_at(cursor);
-    let style = if selected {
+    let input_style = theme.style(UiThemeRole::Input);
+    let label_style = if selected {
         selected_style(theme, true)
     } else {
-        theme.style(UiThemeRole::Input)
+        input_style
     };
     let mut spans = vec![Span::styled(
-        format!("{} {label}: {left}", if selected { '›' } else { ' ' }),
-        style,
+        format!("{} {label}:", if selected { '›' } else { ' ' }),
+        label_style,
     )];
-    if selected {
-        spans.push(Span::styled("│", theme.style(UiThemeRole::Cursor)));
+    if !value.is_empty() {
+        spans.push(Span::styled(format!(" {left}"), input_style));
     }
-    spans.push(Span::styled(format!("{right} {requirement}"), style));
+    if selected {
+        let (under_cursor, remainder) = right.chars().next().map_or_else(
+            || (" ".to_owned(), ""),
+            |character| {
+                let next = character.len_utf8();
+                (character.to_string(), &right[next..])
+            },
+        );
+        spans.push(Span::styled(under_cursor, theme.style(UiThemeRole::Cursor)));
+        spans.push(Span::styled(remainder.to_owned(), input_style));
+    } else if value.is_empty() {
+        spans.push(Span::styled(" ", input_style));
+    } else {
+        spans.push(Span::styled(right.to_owned(), input_style));
+    }
+    if value.is_empty() && !requirement.is_empty() {
+        spans.push(Span::styled(format!(" {requirement}"), input_style));
+    }
     Line::from(spans)
 }
 

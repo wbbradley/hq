@@ -776,7 +776,7 @@ fn agent_inspection_is_responsive_and_rendering_only_borrows_state() {
 }
 
 #[test]
-fn agent_form_marks_requirements_and_renders_the_insertion_caret() {
+fn agent_form_marks_empty_requirements_without_inserting_a_pipe_character() {
     let details = agent_details_model(UiSize {
         width: 90,
         height: 18,
@@ -788,8 +788,25 @@ fn agent_form_marks_requirements_and_renders_the_insertion_caret() {
         .expect("create agent")
         .model;
     let rendered = render_text(&form);
-    assert!(rendered.contains("Name: │ (required)"), "{rendered}");
+    assert!(rendered.contains("Name:"), "{rendered}");
+    assert!(rendered.contains("(required)"), "{rendered}");
+    assert!(!rendered.contains("Name: │"), "{rendered}");
     assert!(rendered.contains("such as reviewer"), "{rendered}");
+
+    let cursor_color = Color::Magenta;
+    let theme = UiTheme::terminal().with_style(
+        UiThemeRole::Cursor,
+        Style::new()
+            .bg(cursor_color)
+            .add_modifier(Modifier::REVERSED),
+    );
+    let buffer = render_buffer_with_theme(&form, &theme);
+    let (name_x, name_y) = find_text_start(&buffer, "Name:");
+    let cursor = buffer
+        .cell((name_x + 5, name_y))
+        .expect("trailing blank cursor cell");
+    assert_eq!(cursor.symbol(), " ");
+    assert_eq!(cursor.bg, cursor_color);
 }
 
 #[test]
@@ -1058,13 +1075,15 @@ fn project_creation_chooser_leads_with_folder_ownership_and_discloses_worktrees(
         .expect("default project name")
         .model;
     let rendered = render_text(&form);
-    assert!(rendered.contains("Name: customer-api│"), "{rendered}");
+    assert!(rendered.contains("Name: customer-api"), "{rendered}");
+    assert!(!rendered.contains("customer-api (required)"), "{rendered}");
+    assert!(!rendered.contains("customer-api│"), "{rendered}");
     assert!(rendered.contains("claim this folder"), "{rendered}");
     assert!(rendered.contains("overlapping folders"), "{rendered}");
 }
 
 #[test]
-fn project_form_explains_fields_caret_validation_and_normalized_paths() {
+fn project_form_explains_empty_fields_without_persistent_hints_or_pipe_glyphs() {
     let mut model = project_model(UiSize {
         width: 120,
         height: 24,
@@ -1080,19 +1099,45 @@ fn project_form_explains_fields_caret_validation_and_normalized_paths() {
         .expect("validate form")
         .model;
     let rendered = render_text(&empty);
-    assert!(rendered.contains("Path: │ (required)"), "{rendered}");
+    assert!(rendered.contains("Path:"), "{rendered}");
+    assert!(rendered.contains("(required)"), "{rendered}");
+    assert!(!rendered.contains("Path: │"), "{rendered}");
     assert!(rendered.contains("Enter a path"), "{rendered}");
 
     let model = update(empty, UiEvent::Input(UiInput::Paste("~/repo".to_owned())))
         .expect("path")
         .model;
     let rendered = render_text(&model);
-    assert!(rendered.contains("Path: ~/repo│ (required)"), "{rendered}");
+    assert!(rendered.contains("Path: ~/repo"), "{rendered}");
+    assert!(!rendered.contains("~/repo (required)"), "{rendered}");
+    assert!(!rendered.contains("~/repo│"), "{rendered}");
     assert!(
         rendered.contains("Will use: /Users/example/repo"),
         "{rendered}"
     );
     assert!(rendered.contains("Tab/Shift-Tab field"), "{rendered}");
+
+    let model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("name field")
+        .model;
+    let model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("brief field")
+        .model;
+    let model = update(
+        model,
+        UiEvent::Input(UiInput::Paste("Keep the release focused".to_owned())),
+    )
+    .expect("brief text")
+    .model;
+    let rendered = render_text(&model);
+    assert!(
+        rendered.contains("Brief: Keep the release focused"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("Keep the release focused (optional)"),
+        "{rendered}"
+    );
 }
 
 #[test]

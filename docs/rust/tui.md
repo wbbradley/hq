@@ -77,9 +77,10 @@ navigation, so these keys cannot accidentally change sections while a dialog is 
 caret positions, field errors, and pending submissions survive resize and authoritative refresh;
 async rejection keeps the user's input available for correction.
 
-Focused fields have a visible selection treatment and insertion caret. Labels say whether input is
-required or optional, concise guidance and examples appear with the focused field, and known
-validation failures render next to that field before an effect is emitted. Stable failures from an
+Focused fields have a visible selection treatment and insertion caret without adding a character
+to the field's displayed value. Empty fields say whether input is required or optional; that hint
+disappears once the field contains text. Concise guidance and examples appear with the focused
+field, and known validation failures render next to that field before an effect is emitted. Stable failures from an
 actual operation remain in the global recovery presentation because they are not form validation.
 
 ## Guided `New...` workflow

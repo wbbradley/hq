@@ -9523,3 +9523,39 @@ but it cannot name all of HQ's dialogs, focus states, and status treatments.
   copyable examples.
 - Finish with formatting, architecture verification, dependency-policy audit for any new parser
   crates, strict workspace Clippy, and the complete locked workspace test and build suite.
+
+## 2026-08-30 — Lighter project-folder fields
+
+One-line dialog fields no longer insert a literal pipe character into the rendered value. The
+shared renderer now applies the configurable cursor style to the actual character under the caret,
+or to one trailing blank cell at the end, while preserving Unicode-safe byte boundaries. Focus
+remains visible through the field marker and theme styles without the extra glyph.
+
+Required and optional hints now appear only while a field is empty and disappear as soon as it has
+content, including the path, generated project name, brief, agent name, and other shared one-line
+forms. Render coverage proves the cursor cell is themed but blank, filled required and optional
+fields omit their hints, empty fields retain guidance, and no field-adjacent pipe returns. The TUI
+form contract was updated, and formatting, architecture, Go-independence, qualification, strict
+workspace Clippy, locked workspace check/test/build, pure TUI, and installed PTY suites all pass.
+
+### Original plan entry
+
+### Create a project from folder improvements
+
+Currently dialogs looks like:
+
+┌ Create project from folder ──────────────────────────────────
+│› Path: ~/src/hq│ (required)
+│  Choose the existing folder this project should own
+│  Will use: /Users/wbbradley/src/hq
+│  Name:  (required)
+│  Brief:  (optional)
+│Ownership preview: this project will claim this folder in HQ.
+│Other projects cannot own this folder or overlapping folders.
+│HQ will not take over ordinary filesystem or Git maintenance.
+│
+│Tab/Shift-Tab field · Enter create · Esc cancel
+
+There is a pipe character at/after the cursor as you tab through the editable fields. It's unclear
+what that pipe character is for. Also, after a field has text we should not show (required) or
+(optional)

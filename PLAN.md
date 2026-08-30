@@ -26,23 +26,3 @@ ordinary screens explain goals and next actions; details screens expose stable I
 provider/session identities, and recovery diagnostics.
 
 ## Next Up
-
-### Create a project from folder improvements
-
-Currently dialogs looks like:
-
-┌ Create project from folder ──────────────────────────────────
-│› Path: ~/src/hq│ (required)
-│  Choose the existing folder this project should own
-│  Will use: /Users/wbbradley/src/hq
-│  Name:  (required)
-│  Brief:  (optional)
-│Ownership preview: this project will claim this folder in HQ.
-│Other projects cannot own this folder or overlapping folders.
-│HQ will not take over ordinary filesystem or Git maintenance.
-│
-│Tab/Shift-Tab field · Enter create · Esc cancel
-
-There is a pipe character at/after the cursor as you tab through the editable fields. It's unclear
-what that pipe character is for. Also, after a field has text we should not show (required) or
-(optional)
