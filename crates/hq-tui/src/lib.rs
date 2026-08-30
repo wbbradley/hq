@@ -17,11 +17,12 @@ pub use model::{
     UiHumanMembershipStatus, UiHumanSelectionEvidence, UiHumanState, UiInput, UiMailboxAction,
     UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiNewChoice, UiNewModal, UiProject, UiProjectAction, UiProjectAssignment,
-    UiProjectCreationChoice, UiProjectExternalWarning, UiProjectFormField, UiProjectModal,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
-    UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition, update,
+    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectCreationChoice, UiProjectExternalWarning, UiProjectFormField,
+    UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
+    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, UiTransition,
+    update,
 };
 pub use render::render;
 pub use theme::{Base16Palette, UiTheme, UiThemeRole};

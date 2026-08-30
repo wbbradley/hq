@@ -655,6 +655,8 @@ pub struct ProjectThreadView {
 pub struct ProjectInputView {
     /// Stable input message identity.
     pub message_id: MessageId,
+    /// Immutable causal thread containing this input.
+    pub thread_id: ThreadId,
     /// Home-assigned contiguous sequence.
     pub sequence: u64,
     /// Exact input-acceptance fact.
@@ -2651,59 +2653,14 @@ fn project_activation_action(
         return Err(CliError::AgentState);
     }
 
-    if let Some(session) = resume_session {
-        let matching_bindings = snapshot
-            .items
-            .iter()
-            .filter(|item| {
-                matches!(item, SnapshotItem::AgentSession {
-                    provider: candidate_provider,
-                    session: candidate_session,
-                    mailbox_installation: Some(installation),
-                    mailbox_id: Some(mailbox),
-                    conflicted: false,
-                    ..
-                } if candidate_provider == provider.as_str()
-                    && candidate_session == session.as_str()
-                    && installation.bytes() == *agent.mailbox.installation_id().as_bytes()
-                    && mailbox.bytes() == *agent.mailbox.mailbox_id().as_bytes())
-            })
-            .count();
-        if matching_bindings != 1 {
-            return Err(CliError::AgentState);
-        }
-        let thread = resume_thread.ok_or(CliError::Arguments)?;
-        let exact_history = snapshot.items.iter().any(|item| {
-            matches!(item, SnapshotItem::ProjectThread {
-                project_id: candidate_project,
-                agent_id,
-                provider: candidate_provider,
-                session: candidate_session,
-                thread_id,
-            } if candidate_project.bytes() == *project_id.as_bytes()
-                && agent_id.bytes() == *agent.agent_id.as_bytes()
-                && candidate_provider == provider.as_str()
-                && candidate_session == session.as_str()
-                && thread_id.bytes() == *thread.as_bytes())
-        });
-        if !exact_history {
-            return Err(CliError::ProjectState);
-        }
-    } else if let Some(thread) = resume_thread {
-        let historical = snapshot.items.iter().any(|item| {
-            matches!(item, SnapshotItem::ProjectThread {
-                project_id: candidate_project,
-                agent_id,
-                thread_id,
-                ..
-            } if candidate_project.bytes() == *project_id.as_bytes()
-                && agent_id.bytes() == *agent.agent_id.as_bytes()
-                && thread_id.bytes() == *thread.as_bytes())
-        });
-        if !historical {
-            return Err(CliError::ProjectState);
-        }
-    }
+    validate_project_activation_resume(
+        snapshot,
+        project_id,
+        &agent,
+        provider,
+        resume_session,
+        resume_thread,
+    )?;
 
     let launch_directory = if let Some(directory) = directory {
         normalized_existing_resource(directory)?
@@ -2734,6 +2691,89 @@ fn project_activation_action(
         resume_thread,
         launch_directory,
     })
+}
+
+fn validate_project_activation_resume(
+    snapshot: &AuthoritativeSnapshotDto,
+    project_id: ProjectId,
+    agent: &NamedAgentEvidence,
+    provider: &ProviderId,
+    resume_session: Option<&ProviderSessionId>,
+    resume_thread: Option<ThreadId>,
+) -> Result<(), CliError> {
+    if let Some(session) = resume_session {
+        let matching_bindings = snapshot
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(item, SnapshotItem::AgentSession {
+                    provider: candidate_provider,
+                    session: candidate_session,
+                    mailbox_installation: Some(installation),
+                    mailbox_id: Some(mailbox),
+                    conflicted: false,
+                    ..
+                } if candidate_provider == provider.as_str()
+                    && candidate_session == session.as_str()
+                    && installation.bytes() == *agent.mailbox.installation_id().as_bytes()
+                    && mailbox.bytes() == *agent.mailbox.mailbox_id().as_bytes())
+            })
+            .count();
+        if matching_bindings != 1 {
+            return Err(CliError::AgentState);
+        }
+        let thread = resume_thread.ok_or(CliError::Arguments)?;
+        let exact_history = snapshot.items.iter().any(|item| {
+            matches!(item, SnapshotItem::ProjectThread {
+                project_id: candidate_project,
+                agent_id: candidate_agent,
+                provider: candidate_provider,
+                session: candidate_session,
+                thread_id,
+            } if candidate_project.bytes() == *project_id.as_bytes()
+                && candidate_agent.bytes() == *agent.agent_id.as_bytes()
+                && candidate_provider == provider.as_str()
+                && candidate_session == session.as_str()
+                && thread_id.bytes() == *thread.as_bytes())
+        });
+        if !exact_history {
+            return Err(CliError::ProjectState);
+        }
+    } else if let Some(thread) = resume_thread {
+        let historical = snapshot.items.iter().any(|item| {
+            matches!(item, SnapshotItem::ProjectThread {
+                project_id: candidate_project,
+                agent_id,
+                thread_id,
+                ..
+            } if candidate_project.bytes() == *project_id.as_bytes()
+                && agent_id.bytes() == *agent.agent_id.as_bytes()
+                && thread_id.bytes() == *thread.as_bytes())
+        });
+        let pending = snapshot.items.iter().any(|item| {
+            let SnapshotItem::ProjectInput {
+                project_id: candidate_project,
+                message_id,
+                thread_id,
+                ..
+            } = item
+            else {
+                return false;
+            };
+            candidate_project.bytes() == *project_id.as_bytes()
+                && thread_id.bytes() == *thread.as_bytes()
+                && !snapshot.items.iter().any(|candidate| {
+                    matches!(candidate, SnapshotItem::ProjectDispatch {
+                        message_id: dispatched,
+                        ..
+                    } if dispatched == message_id)
+                })
+        });
+        if !historical && !pending {
+            return Err(CliError::ProjectState);
+        }
+    }
+    Ok(())
 }
 
 fn control_project(
@@ -3458,6 +3498,7 @@ fn add_project_inputs(
         let SnapshotItem::ProjectInput {
             project_id,
             message_id,
+            thread_id,
             sequence,
             accepted_fact,
         } = item
@@ -3474,6 +3515,7 @@ fn add_project_inputs(
         }
         project.inputs.push(ProjectInputView {
             message_id,
+            thread_id: ThreadId::from_bytes(thread_id.bytes()),
             sequence: *sequence,
             accepted_fact: FactId::from_bytes(accepted_fact.bytes()),
         });
@@ -8104,10 +8146,11 @@ fn render_project_catalog_human(view: &ProjectCatalogView) -> Result<String, Cli
         for input in &project.inputs {
             writeln!(
                 output,
-                "input project={} sequence={} message={} accepted_fact={}",
+                "input project={} sequence={} message={} thread={} accepted_fact={}",
                 project_id,
                 input.sequence,
                 encode_id(input.message_id.as_bytes()),
+                encode_id(input.thread_id.as_bytes()),
                 encode_id(input.accepted_fact.as_bytes()),
             )
             .map_err(|_| CliError::Runtime)?;
@@ -8210,6 +8253,7 @@ fn project_json(project: &ProjectView) -> serde_json::Value {
             "accepted_fact": encode_id(item.accepted_fact.as_bytes()),
             "message_id": encode_id(item.message_id.as_bytes()),
             "sequence": item.sequence,
+            "thread_id": encode_id(item.thread_id.as_bytes()),
         })).collect::<Vec<_>>(),
         "lifecycle": project.lifecycle,
         "name": project.name,
@@ -10097,6 +10141,71 @@ mod tests {
     }
 
     #[test]
+    fn project_activation_accepts_an_exact_undispatched_input_thread() {
+        let mut snapshot = activation_snapshot();
+        snapshot.items.retain(|item| {
+            !matches!(
+                item,
+                SnapshotItem::ProjectThread { .. } | SnapshotItem::ProjectAssignment { .. }
+            )
+        });
+        if let Some(SnapshotItem::Project { input_sequence, .. }) = snapshot
+            .items
+            .iter_mut()
+            .find(|item| matches!(item, SnapshotItem::Project { .. }))
+        {
+            *input_sequence = 1;
+        }
+        snapshot.items.push(SnapshotItem::ProjectInput {
+            project_id: Id32::new([1; 32]),
+            message_id: Id32::new([8; 32]),
+            thread_id: Id32::new([9; 32]),
+            sequence: 1,
+            accepted_fact: Id32::new([10; 32]),
+        });
+        let provider = ProviderId::new("fake").expect("provider");
+
+        let action = project_activation_action(
+            &snapshot,
+            ProjectId::from_bytes([1; 32]),
+            &NamedAgentSelector::Id(AgentId::from_bytes([4; 32])),
+            &provider,
+            None,
+            Some(ThreadId::from_bytes([9; 32])),
+            None,
+        )
+        .expect("pending input thread resolves");
+        assert!(matches!(
+            action,
+            ProjectCommandAction::Activate {
+                resume_session: None,
+                resume_thread: Some(thread),
+                ..
+            } if thread.as_bytes() == &[9; 32]
+        ));
+
+        snapshot.items.push(SnapshotItem::ProjectDispatch {
+            dispatch_id: Id32::new([11; 32]),
+            message_id: Id32::new([8; 32]),
+            sequence: 1,
+            fact_id: Id32::new([12; 32]),
+            conflicted: false,
+        });
+        assert_eq!(
+            project_activation_action(
+                &snapshot,
+                ProjectId::from_bytes([1; 32]),
+                &NamedAgentSelector::Id(AgentId::from_bytes([4; 32])),
+                &provider,
+                None,
+                Some(ThreadId::from_bytes([9; 32])),
+                None,
+            ),
+            Err(CliError::ProjectState)
+        );
+    }
+
+    #[test]
     fn project_handoff_requires_an_assignment_and_preserves_takeover_authorization() {
         let snapshot = activation_snapshot();
         let provider = ProviderId::new("fake").expect("provider");
@@ -10454,6 +10563,7 @@ mod tests {
                 SnapshotItem::ProjectInput {
                     project_id: Id32::new([1; 32]),
                     message_id: Id32::new([41; 32]),
+                    thread_id: Id32::new([43; 32]),
                     sequence: 7,
                     accepted_fact: Id32::new([42; 32]),
                 },

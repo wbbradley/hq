@@ -9,6 +9,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     UiActivityStatus, UiAgent, UiAgentAssignmentPhase, UiAgentAttentionReason, UiAgentModal,
@@ -768,6 +769,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
         Block::new().style(theme.style(UiThemeRole::ModalSurface)),
         area,
     );
+    let inner_width = area.width.saturating_sub(2);
     let (title, lines) = match interaction {
         UiProjectModal::ChooseCreation { selected } => (
             " Create project ",
@@ -798,6 +800,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             vec![
                 text_field_line(
                     theme,
+                    inner_width,
                     "Query",
                     query,
                     model.search_field_cursor(query, true),
@@ -941,6 +944,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             let mut lines = Vec::new();
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Path",
@@ -953,6 +957,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             );
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Name",
@@ -965,6 +970,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             );
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Brief",
@@ -1005,6 +1011,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             let mut lines = Vec::new();
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Name",
@@ -1017,6 +1024,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             );
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Brief",
@@ -1029,6 +1037,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             );
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Source",
@@ -1041,6 +1050,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             );
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Destination",
@@ -1053,6 +1063,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             );
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Branch",
@@ -1065,6 +1076,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             );
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Base",
@@ -1093,6 +1105,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             let mut lines = vec![Line::from(format!("Project: {}", project.name))];
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Instructions",
@@ -1123,6 +1136,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             let mut lines = vec![Line::from(format!("Project: {}", project.name))];
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Path",
@@ -1162,6 +1176,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             ];
             push_project_text_field(
                 theme,
+                inner_width,
                 &mut lines,
                 model,
                 "Path",
@@ -1241,6 +1256,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             " Set up project work ",
             project_activation_lines(
                 theme,
+                inner_width,
                 project,
                 agents,
                 providers,
@@ -1273,6 +1289,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
             " Move project work to another agent ",
             project_activation_lines(
                 theme,
+                inner_width,
                 project,
                 agents,
                 providers,
@@ -1592,6 +1609,7 @@ fn render_project_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme,
 
 fn text_field_line(
     theme: &UiTheme,
+    line_width: u16,
     label: &str,
     value: &str,
     cursor: usize,
@@ -1600,20 +1618,46 @@ fn text_field_line(
 ) -> Line<'static> {
     let cursor = cursor.min(value.len());
     let (left, right) = value.split_at(cursor);
-    let input_style = theme.style(UiThemeRole::Input);
+    let field_style = theme.style(if selected {
+        UiThemeRole::InputFieldFocused
+    } else {
+        UiThemeRole::InputField
+    });
     let label_style = if selected {
         selected_style(theme, true)
     } else {
-        input_style
+        theme.style(UiThemeRole::Input)
     };
-    let mut spans = vec![Span::styled(
-        format!("{} {label}:", if selected { '›' } else { ' ' }),
-        label_style,
-    )];
-    if !value.is_empty() {
-        spans.push(Span::styled(format!(" {left}"), input_style));
-    }
-    if selected {
+    let rendered_label = format!("{} {label}:", if selected { '›' } else { ' ' });
+    let label_width = UnicodeWidthStr::width(rendered_label.as_str());
+    let field_width = usize::from(line_width)
+        .saturating_sub(label_width.saturating_add(1))
+        .max(1);
+    let mut spans = vec![Span::styled(rendered_label, label_style), Span::raw(" ")];
+    if value.is_empty() {
+        let requirement_width = UnicodeWidthStr::width(requirement).min(field_width);
+        let cursor_width = usize::from(selected);
+        if selected {
+            spans.push(Span::styled(
+                " ",
+                field_style.patch(theme.style(UiThemeRole::Cursor)),
+            ));
+        }
+        spans.push(Span::styled(
+            " ".repeat(
+                field_width
+                    .saturating_sub(cursor_width)
+                    .saturating_sub(requirement_width),
+            ),
+            field_style,
+        ));
+        if requirement_width > 0 {
+            spans.push(Span::styled(
+                display_prefix(requirement, requirement_width).to_owned(),
+                field_style,
+            ));
+        }
+    } else if selected {
         let (under_cursor, remainder) = right.chars().next().map_or_else(
             || (" ".to_owned(), ""),
             |character| {
@@ -1621,21 +1665,80 @@ fn text_field_line(
                 (character.to_string(), &right[next..])
             },
         );
-        spans.push(Span::styled(under_cursor, theme.style(UiThemeRole::Cursor)));
-        spans.push(Span::styled(remainder.to_owned(), input_style));
-    } else if value.is_empty() {
-        spans.push(Span::styled(" ", input_style));
+        let under_cursor_width = under_cursor
+            .chars()
+            .next()
+            .and_then(UnicodeWidthChar::width)
+            .unwrap_or(1)
+            .max(1);
+        let (under_cursor, caret_width) = if under_cursor_width > field_width {
+            (" ".to_owned(), 1)
+        } else {
+            (under_cursor, under_cursor_width)
+        };
+        let left_budget = UnicodeWidthStr::width(left).min(field_width.saturating_sub(caret_width));
+        let visible_left = display_suffix(left, left_budget);
+        let right_budget = field_width
+            .saturating_sub(UnicodeWidthStr::width(visible_left))
+            .saturating_sub(caret_width);
+        let visible_right = display_prefix(remainder, right_budget);
+        let content_width = UnicodeWidthStr::width(visible_left)
+            .saturating_add(caret_width)
+            .saturating_add(UnicodeWidthStr::width(visible_right));
+        spans.push(Span::styled(visible_left.to_owned(), field_style));
+        spans.push(Span::styled(
+            under_cursor,
+            field_style.patch(theme.style(UiThemeRole::Cursor)),
+        ));
+        spans.push(Span::styled(visible_right.to_owned(), field_style));
+        spans.push(Span::styled(
+            " ".repeat(field_width.saturating_sub(content_width)),
+            field_style,
+        ));
     } else {
-        spans.push(Span::styled(right.to_owned(), input_style));
-    }
-    if value.is_empty() && !requirement.is_empty() {
-        spans.push(Span::styled(format!(" {requirement}"), input_style));
+        let visible = display_prefix(value, field_width);
+        let visible_width = UnicodeWidthStr::width(visible);
+        spans.push(Span::styled(visible.to_owned(), field_style));
+        spans.push(Span::styled(
+            " ".repeat(field_width.saturating_sub(visible_width)),
+            field_style,
+        ));
     }
     Line::from(spans)
 }
 
+fn display_prefix(value: &str, maximum_width: usize) -> &str {
+    let mut width: usize = 0;
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width.saturating_add(character_width) > maximum_width {
+            break;
+        }
+        width = width.saturating_add(character_width);
+        end = index + character.len_utf8();
+    }
+    &value[..end]
+}
+
+fn display_suffix(value: &str, maximum_width: usize) -> &str {
+    let mut width: usize = 0;
+    let mut start = value.len();
+    for (index, character) in value.char_indices().rev() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width.saturating_add(character_width) > maximum_width {
+            break;
+        }
+        width = width.saturating_add(character_width);
+        start = index;
+    }
+    &value[start..]
+}
+
+#[allow(clippy::too_many_arguments)]
 fn project_text_field_line(
     theme: &UiTheme,
+    line_width: u16,
     model: &UiModel,
     label: &str,
     value: &str,
@@ -1645,6 +1748,7 @@ fn project_text_field_line(
 ) -> Line<'static> {
     text_field_line(
         theme,
+        line_width,
         label,
         value,
         model.project_field_cursor(field, value),
@@ -1656,6 +1760,7 @@ fn project_text_field_line(
 #[allow(clippy::too_many_arguments)]
 fn push_project_text_field(
     theme: &UiTheme,
+    line_width: u16,
     lines: &mut Vec<Line<'static>>,
     model: &UiModel,
     label: &str,
@@ -1667,7 +1772,7 @@ fn push_project_text_field(
     path: bool,
 ) {
     lines.push(project_text_field_line(
-        theme, model, label, value, field, selected, required,
+        theme, line_width, model, label, value, field, selected, required,
     ));
     if let Some(error) = model.project_field_error(field) {
         lines.push(Line::styled(
@@ -1708,6 +1813,7 @@ fn provider_choice_label(providers: &[UiProvider], selected: &str) -> String {
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn project_activation_lines<'value>(
     theme: &UiTheme,
+    line_width: u16,
     project: &'value crate::UiProject,
     agents: &'value [UiAgent],
     providers: &'value [UiProvider],
@@ -1815,6 +1921,7 @@ fn project_activation_lines<'value>(
     }
     lines.push(project_text_field_line(
         theme,
+        line_width,
         model,
         "Working folder",
         directory,
@@ -2002,12 +2109,14 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, a
         Block::new().style(theme.style(UiThemeRole::ModalSurface)),
         area,
     );
+    let inner_width = area.width.saturating_sub(2);
     let (title, lines) = match interaction {
         UiAgentModal::Search { query } => (
             " Search agents ",
             vec![
                 text_field_line(
                     theme,
+                    inner_width,
                     "Query",
                     query,
                     model.search_field_cursor(query, false),
@@ -2081,6 +2190,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, a
         UiAgentModal::Create { name, submitting } => {
             let mut lines = vec![text_field_line(
                 theme,
+                inner_width,
                 "Name",
                 name,
                 model.agent_field_cursor(name),
@@ -2120,6 +2230,7 @@ fn render_agent_modal(frame: &mut Frame<'_>, model: &UiModel, theme: &UiTheme, a
                 Line::from(format!("Technical conversation: {provider}/{session}")),
                 text_field_line(
                     theme,
+                    inner_width,
                     "Name",
                     display_name,
                     model.session_field_cursor(display_name),
@@ -3268,4 +3379,31 @@ fn row_state_style(theme: &UiTheme, state: UiRowState) -> Style {
         UiRowState::Archived => UiThemeRole::RowArchived,
         UiRowState::Attention => UiThemeRole::RowAttention,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_prefix, display_suffix, text_field_line};
+    use crate::UiTheme;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn display_clipping_keeps_unicode_scalar_boundaries_and_cell_budgets() {
+        assert_eq!(display_prefix("a界b", 3), "a界");
+        assert_eq!(display_prefix("a界b", 2), "a");
+        assert_eq!(display_suffix("a界b", 3), "界b");
+        assert_eq!(display_suffix("a界b", 2), "b");
+    }
+
+    #[test]
+    fn a_wide_character_under_the_caret_cannot_overrun_a_one_cell_field() {
+        let line = text_field_line(&UiTheme::terminal(), 10, "Label", "界", 0, true, "");
+        let width = line
+            .spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum::<usize>();
+
+        assert_eq!(width, 10);
+    }
 }

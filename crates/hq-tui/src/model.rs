@@ -600,6 +600,17 @@ pub struct UiProjectThread {
     pub thread_id: [u8; 32],
 }
 
+/// One accepted project instruction that has not yet been dispatched.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiPendingProjectInput {
+    /// Stable public message identity returned by project-input submission.
+    pub message_id: [u8; 32],
+    /// Immutable causal thread containing the instruction.
+    pub thread_id: [u8; 32],
+    /// Home-assigned contiguous input sequence.
+    pub sequence: u64,
+}
+
 /// Complete passive project presentation used by selection and details.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UiProject {
@@ -619,6 +630,8 @@ pub struct UiProject {
     pub assignment: Option<UiProjectAssignment>,
     /// Complete exact project-scoped historical threads.
     pub threads: Vec<UiProjectThread>,
+    /// Accepted project instructions that have not yet been dispatched.
+    pub pending_inputs: Vec<UiPendingProjectInput>,
     /// Exact project head used for optimistic commands.
     pub head: [u8; 32],
     /// Next durable input sequence.
@@ -1435,6 +1448,11 @@ enum UiGuidedPending {
     AgentCreation {
         project_id: [u8; 32],
         expected_name: Option<String>,
+    },
+    Instruction(UiGuidedSubmission),
+    InputSnapshot {
+        submission: UiGuidedSubmission,
+        message_id: [u8; 32],
     },
     Activation(UiGuidedSubmission),
 }
@@ -2912,7 +2930,7 @@ fn apply_new_modal_input(
                 }) else {
                     return Ok(false);
                 };
-                open_guided_agent(model, project, agent);
+                open_guided_agent(model, project, agent, effects)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -2952,22 +2970,7 @@ fn apply_new_modal_input(
                     });
                     return Ok(true);
                 }
-                let moves_project = project
-                    .assignment
-                    .as_ref()
-                    .is_some_and(|assignment| assignment.agent_id != agent.agent_id);
-                if moves_project {
-                    model.new_modal = Some(UiNewModal::ReviewProject {
-                        project,
-                        agent,
-                        provider,
-                        resumes_existing,
-                        moves_project,
-                        submitting: false,
-                    });
-                } else {
-                    submit_guided_project(model, project, &agent, provider, effects)?;
-                }
+                continue_guided_provider(model, project, agent, provider, effects)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -2979,7 +2982,19 @@ fn apply_new_modal_input(
             submitting,
             ..
         } if matches!(input, UiInput::Activate) && !submitting => {
-            submit_guided_project(model, project, &agent, provider, effects)?;
+            if let Some(thread) = guided_thread(&project, agent.agent_id).cloned() {
+                submit_guided_project(
+                    model,
+                    project,
+                    &agent,
+                    provider,
+                    thread.thread_id,
+                    Some(thread.session),
+                    effects,
+                )?;
+            } else {
+                open_guided_instruction(model, project, &agent, provider);
+            }
             Ok(true)
         }
         UiNewModal::AgentUnavailable {
@@ -3151,7 +3166,12 @@ fn guided_agent_picker_from_snapshot(
     }
 }
 
-fn open_guided_agent(model: &mut UiModel, project: UiProject, agent: UiAgent) {
+fn open_guided_agent(
+    model: &mut UiModel,
+    project: UiProject,
+    agent: UiAgent,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
     let competing = match &agent.status {
         UiAgentStatus::Assigned(assignment) if assignment.project_id != project.project_id => {
             Some((assignment.project_id, assignment.project_name.clone()))
@@ -3168,7 +3188,7 @@ fn open_guided_agent(model: &mut UiModel, project: UiProject, agent: UiAgent) {
             competing_project_id,
             competing_project,
         });
-        return;
+        return Ok(());
     }
     if project
         .assignment
@@ -3176,13 +3196,87 @@ fn open_guided_agent(model: &mut UiModel, project: UiProject, agent: UiAgent) {
         .is_some_and(|assignment| assignment.agent_id == agent.agent_id && assignment.runnable)
     {
         open_project_message_composer(model, project);
-        return;
+        return Ok(());
     }
-    let provider = guided_thread(&project, agent.agent_id)
+    let historical = guided_thread(&project, agent.agent_id).cloned();
+    let provider = historical
+        .as_ref()
         .map(|thread| thread.provider.clone())
         .or_else(|| default_provider_choice_from_model(model))
         .unwrap_or_default();
-    model.new_modal = Some(guided_provider_picker(model, project, agent, provider));
+    let available = model.snapshot.as_ref().map_or(0, |snapshot| {
+        snapshot
+            .providers
+            .iter()
+            .filter(|provider| provider.available)
+            .count()
+    });
+    if historical.is_some() || available == 1 {
+        continue_guided_provider(model, project, agent, provider, effects)
+    } else {
+        model.new_modal = Some(guided_provider_picker(model, project, agent, provider));
+        Ok(())
+    }
+}
+
+fn continue_guided_provider(
+    model: &mut UiModel,
+    project: UiProject,
+    agent: UiAgent,
+    provider: String,
+    effects: &mut Vec<UiEffect>,
+) -> Result<(), UiError> {
+    let historical = guided_thread(&project, agent.agent_id).cloned();
+    let moves_project = project
+        .assignment
+        .as_ref()
+        .is_some_and(|assignment| assignment.agent_id != agent.agent_id);
+    if moves_project {
+        model.new_modal = Some(UiNewModal::ReviewProject {
+            project,
+            agent,
+            provider,
+            resumes_existing: historical.is_some(),
+            moves_project: true,
+            submitting: false,
+        });
+        return Ok(());
+    }
+    if let Some(thread) = historical {
+        submit_guided_project(
+            model,
+            project,
+            &agent,
+            provider,
+            thread.thread_id,
+            Some(thread.session),
+            effects,
+        )
+    } else {
+        open_guided_instruction(model, project, &agent, provider);
+        Ok(())
+    }
+}
+
+fn open_guided_instruction(
+    model: &mut UiModel,
+    project: UiProject,
+    agent: &UiAgent,
+    provider: String,
+) {
+    model.guided_pending = Some(UiGuidedPending::Instruction(UiGuidedSubmission {
+        project_id: project.project_id,
+        agent_id: agent.agent_id,
+        provider,
+    }));
+    model.new_modal = None;
+    model.change_section(UiSection::Projects);
+    model.selected_row = Some(agent_hex(project.project_id));
+    model.project_modal = Some(UiProjectModal::SendInput {
+        project,
+        content: String::new(),
+        submitting: false,
+    });
 }
 
 fn guided_provider_picker(
@@ -3233,6 +3327,8 @@ fn submit_guided_project(
     project: UiProject,
     agent: &UiAgent,
     provider: String,
+    thread_id: [u8; 32],
+    resume_session: Option<String>,
     effects: &mut Vec<UiEffect>,
 ) -> Result<(), UiError> {
     let agent_name = agent
@@ -3240,7 +3336,6 @@ fn submit_guided_project(
         .first()
         .cloned()
         .unwrap_or_else(|| "selected agent".to_owned());
-    let historical = guided_thread(&project, agent.agent_id);
     let submission = UiGuidedSubmission {
         project_id: project.project_id,
         agent_id: agent.agent_id,
@@ -3251,7 +3346,7 @@ fn submit_guided_project(
         .iter()
         .find(|resource| resource.primary)
         .or_else(|| project.resources.first())
-        .map(|resource| resource.display_path.clone())
+        .map(|resource| resource.canonical_path.clone())
         .unwrap_or_default();
     if directory.is_empty() {
         model.last_failure = Some(UiFailure {
@@ -3261,19 +3356,19 @@ fn submit_guided_project(
         return Ok(());
     }
     let action = if let Some(current) = project.assignment.as_ref() {
-        let Some(thread_id) = current.thread_id else {
+        if current.thread_id.is_none() {
             model.last_failure = Some(UiFailure {
                 code: "guided_handoff_not_ready".to_owned(),
                 action: "inspect the current project setup before moving it to another agent"
                     .to_owned(),
             });
             return Ok(());
-        };
+        }
         UiProjectAction::Handoff {
             project_id: project.project_id,
             agent_id: agent.agent_id,
             provider,
-            resume_session: historical.map(|thread| thread.session.clone()),
+            resume_session,
             thread_id,
             launch_directory: directory,
             force_takeover: false,
@@ -3283,8 +3378,8 @@ fn submit_guided_project(
             project_id: project.project_id,
             agent_id: agent.agent_id,
             provider,
-            resume_session: historical.map(|thread| thread.session.clone()),
-            resume_thread: historical.map(|thread| thread.thread_id),
+            resume_session,
+            resume_thread: Some(thread_id),
             launch_directory: directory,
         }
     };
@@ -3498,6 +3593,15 @@ fn apply_project_modal_input(
     }
     if matches!(input, UiInput::Escape) {
         if model.pending_project.is_none() {
+            if matches!(model.guided_pending, Some(UiGuidedPending::Instruction(_)))
+                && let Some(UiProjectModal::SendInput { project, .. }) = model.project_modal.clone()
+            {
+                model.guided_pending = None;
+                model.project_modal = None;
+                open_guided_project(model, project);
+                model.last_failure = None;
+                return Ok(true);
+            }
             if let Some(UiProjectModal::Outcome {
                 result:
                     UiProjectResult {
@@ -6226,7 +6330,7 @@ fn snapshot_loaded(
     let current_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
     if snapshot.revision >= current_revision {
         model.apply_snapshot(snapshot);
-        apply_guided_snapshot(model);
+        apply_guided_snapshot(model, effects)?;
         apply_completion_context(model);
     }
     let observed_revision = model.snapshot.as_ref().map_or(0, |value| value.revision);
@@ -6736,9 +6840,10 @@ fn apply_completion_context(model: &mut UiModel) {
     }
 }
 
-fn apply_guided_snapshot(model: &mut UiModel) {
+#[allow(clippy::too_many_lines)]
+fn apply_guided_snapshot(model: &mut UiModel, effects: &mut Vec<UiEffect>) -> Result<(), UiError> {
     let Some(pending) = model.guided_pending.clone() else {
-        return;
+        return Ok(());
     };
     match pending {
         UiGuidedPending::ProjectSnapshot { project_id } => {
@@ -6749,7 +6854,7 @@ fn apply_guided_snapshot(model: &mut UiModel) {
                     .find(|project| project.project_id == project_id)
                     .cloned()
             }) else {
-                return;
+                return Ok(());
             };
             model.guided_pending = None;
             open_guided_project(model, project);
@@ -6759,7 +6864,7 @@ fn apply_guided_snapshot(model: &mut UiModel) {
             expected_name: Some(expected_name),
         } => {
             let Some(snapshot) = model.snapshot.as_ref() else {
-                return;
+                return Ok(());
             };
             let Some(project) = snapshot
                 .projects
@@ -6767,7 +6872,7 @@ fn apply_guided_snapshot(model: &mut UiModel) {
                 .find(|project| project.project_id == project_id)
                 .cloned()
             else {
-                return;
+                return Ok(());
             };
             let matches = snapshot
                 .agents
@@ -6779,11 +6884,54 @@ fn apply_guided_snapshot(model: &mut UiModel) {
                 .cloned()
                 .collect::<Vec<_>>();
             let [agent] = matches.as_slice() else {
-                return;
+                return Ok(());
             };
             let agent = agent.clone();
             model.guided_pending = None;
-            open_guided_agent(model, project, agent);
+            open_guided_agent(model, project, agent, effects)?;
+        }
+        UiGuidedPending::InputSnapshot {
+            submission,
+            message_id,
+        } => {
+            let Some((project, agent)) = model.snapshot.as_ref().and_then(|snapshot| {
+                let project = snapshot
+                    .projects
+                    .iter()
+                    .find(|project| project.project_id == submission.project_id)?
+                    .clone();
+                let agent = snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.agent_id == submission.agent_id)?
+                    .clone();
+                Some((project, agent))
+            }) else {
+                return Ok(());
+            };
+            if project.assignment.as_ref().is_some_and(|assignment| {
+                assignment.agent_id == submission.agent_id && assignment.runnable
+            }) {
+                open_project_message_composer(model, project);
+                return Ok(());
+            }
+            let Some(input) = project
+                .pending_inputs
+                .iter()
+                .find(|input| input.message_id == message_id)
+                .copied()
+            else {
+                return Ok(());
+            };
+            submit_guided_project(
+                model,
+                project,
+                &agent,
+                submission.provider,
+                input.thread_id,
+                None,
+                effects,
+            )?;
         }
         UiGuidedPending::Activation(submission) => {
             let Some(project) = model
@@ -6799,16 +6947,18 @@ fn apply_guided_snapshot(model: &mut UiModel) {
                 })
                 .cloned()
             else {
-                return;
+                return Ok(());
             };
             open_project_message_composer(model, project);
         }
         UiGuidedPending::ProjectCreation
+        | UiGuidedPending::Instruction(_)
         | UiGuidedPending::AgentCreation {
             expected_name: None,
             ..
         } => {}
     }
+    Ok(())
 }
 
 fn refresh_new_modal(model: &mut UiModel, snapshot: &UiSnapshot) {
@@ -7014,6 +7164,48 @@ fn guided_project_completed(
             });
             model.last_failure = None;
             show_completion_notice(model, UiCompletionNotice::ProjectCreated, effects)?;
+            Ok(true)
+        }
+        (
+            Some(UiGuidedPending::Instruction(submission)),
+            UiProjectAction::SendInput { project_id, .. },
+            UiProjectOutcome::InputSent { message_id },
+        ) if *project_id == submission.project_id => {
+            let project_name = model
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .projects
+                        .iter()
+                        .find(|project| project.project_id == submission.project_id)
+                })
+                .map_or_else(
+                    || "Selected project".to_owned(),
+                    |project| project.name.clone(),
+                );
+            let agent_name = model
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .agents
+                        .iter()
+                        .find(|agent| agent.agent_id == submission.agent_id)
+                })
+                .and_then(|agent| agent.names.first().cloned())
+                .unwrap_or_else(|| "Selected agent".to_owned());
+            model.guided_pending = Some(UiGuidedPending::InputSnapshot {
+                submission: submission.clone(),
+                message_id: *message_id,
+            });
+            model.project_modal = None;
+            model.new_modal = Some(UiNewModal::Working {
+                project: project_name,
+                agent: agent_name,
+                stage: "Saving the first instruction…".to_owned(),
+            });
+            model.last_failure = None;
             Ok(true)
         }
         (
@@ -7376,6 +7568,7 @@ mod tests {
             claimable: true,
             assignment: None,
             threads: Vec::new(),
+            pending_inputs: Vec::new(),
             head: [3; 32],
             input_sequence: 0,
             resources: Vec::new(),

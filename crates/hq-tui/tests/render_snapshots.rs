@@ -142,9 +142,9 @@ fn guided_new_workflow_explains_each_foreign_choice_in_user_terms() {
         .expect("choose agent")
         .model;
     let rendered = render_text(&provider);
-    assert!(rendered.contains("Start project work"), "{rendered}");
+    assert!(!rendered.contains("Start project work"), "{rendered}");
     assert!(
-        rendered.contains("continue the compatible saved project conversation"),
+        rendered.contains("Preparing the project conversation"),
         "{rendered}"
     );
     assert!(!rendered.contains("required"), "{rendered}");
@@ -803,7 +803,7 @@ fn agent_form_marks_empty_requirements_without_inserting_a_pipe_character() {
     let buffer = render_buffer_with_theme(&form, &theme);
     let (name_x, name_y) = find_text_start(&buffer, "Name:");
     let cursor = buffer
-        .cell((name_x + 5, name_y))
+        .cell((name_x + 6, name_y))
         .expect("trailing blank cursor cell");
     assert_eq!(cursor.symbol(), " ");
     assert_eq!(cursor.bg, cursor_color);
@@ -1148,6 +1148,70 @@ fn project_form_explains_empty_fields_without_persistent_hints_or_pipe_glyphs() 
     assert!(
         !rendered.contains("Keep the release focused (optional)"),
         "{rendered}"
+    );
+}
+
+#[test]
+fn one_line_fields_fill_the_dialog_and_float_empty_requirements() {
+    let mut model = project_model(UiSize {
+        width: 120,
+        height: 24,
+    });
+    model = update(model, UiEvent::Input(UiInput::Character('c')))
+        .expect("project creation chooser")
+        .model;
+    model = update(model, UiEvent::Input(UiInput::Activate))
+        .expect("existing-folder form")
+        .model;
+
+    let unfocused = Color::DarkGray;
+    let focused = Color::Blue;
+    let caret = Color::White;
+    let theme = UiTheme::terminal()
+        .with_style(UiThemeRole::InputField, Style::new().bg(unfocused))
+        .with_style(UiThemeRole::InputFieldFocused, Style::new().bg(focused))
+        .with_style(UiThemeRole::Cursor, Style::new().bg(caret));
+    let buffer = render_buffer_with_theme(&model, &theme);
+    let (path_x, path_y) = find_text_start(&buffer, "Path:");
+    let right_border = (path_x..buffer.area.right())
+        .rev()
+        .find(|x| {
+            buffer
+                .cell((*x, path_y))
+                .is_some_and(|cell| cell.symbol() == "│")
+        })
+        .expect("dialog right border");
+    let gap = buffer.cell((path_x + 5, path_y)).expect("label gap");
+    assert_eq!(gap.symbol(), " ");
+    assert_ne!(gap.bg, focused);
+    let input_start = path_x + 6;
+    assert_eq!(
+        buffer.cell((input_start, path_y)).expect("caret cell").bg,
+        caret
+    );
+    let (required_x, required_y) = find_text_start(&buffer, "(required)");
+    assert_eq!(required_y, path_y);
+    assert_eq!(
+        required_x + u16::try_from("(required)".len()).expect("short hint width"),
+        right_border
+    );
+    for x in input_start + 1..right_border {
+        let cell = buffer.cell((x, path_y)).expect("focused field cell");
+        assert_eq!(cell.bg, focused, "field cell {x} was not focused");
+    }
+
+    let unfocused_model = update(model, UiEvent::Input(UiInput::NextFocus))
+        .expect("move to project name")
+        .model;
+    let buffer = render_buffer_with_theme(&unfocused_model, &theme);
+    let (path_x, path_y) = find_text_start(&buffer, "Path:");
+    let input_start = path_x + 6;
+    assert_eq!(
+        buffer
+            .cell((input_start, path_y))
+            .expect("unfocused input surface")
+            .bg,
+        unfocused
     );
 }
 
@@ -1890,6 +1954,7 @@ fn onboarding_project() -> UiProject {
         claimable: true,
         assignment: None,
         threads: Vec::new(),
+        pending_inputs: Vec::new(),
         head: [2; 32],
         input_sequence: 0,
         resources: vec![UiProjectResource {
@@ -2130,6 +2195,7 @@ fn project_model_with_state(
                 thread_id: [10; 32],
             },
         ],
+        pending_inputs: Vec::new(),
         head: [3; 32],
         input_sequence: 0,
         resources: vec![UiProjectResource {

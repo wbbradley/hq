@@ -544,9 +544,16 @@ impl DomainSnapshot {
                     continue;
                 }
                 (ProjectProjectionKey::Input(_), ProjectProjection::Input(view)) => {
+                    let Some(ConversationProjection::Message(message)) = self
+                        .conversation
+                        .projection(ConversationProjectionKey::Message(view.message_id))
+                    else {
+                        continue;
+                    };
                     ClientProjection::ProjectInput {
                         project_id: view.project_id,
                         message_id: view.message_id,
+                        thread_id: message.thread_id,
                         sequence: view.sequence,
                         accepted_fact: view.accepted_fact,
                     }
@@ -921,6 +928,7 @@ pub enum ClientProjection {
     ProjectInput {
         project_id: ProjectId,
         message_id: MessageId,
+        thread_id: ThreadId,
         sequence: u64,
         accepted_fact: FactId,
     },

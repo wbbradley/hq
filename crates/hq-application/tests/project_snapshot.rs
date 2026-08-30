@@ -9,13 +9,15 @@ use hq_application::{
     ProjectionSnapshot,
 };
 use hq_domain::{
-    AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, DispatchId, FactId,
-    InstallationId, MailboxAddress, MailboxId, MessageId, ProjectId, ProviderId, ProviderSessionId,
-    ResourceLocator, ResourceScheme, ShortText, ThreadId,
+    AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, ContentText, DispatchId,
+    FactId, InstallationId, MailboxAddress, MailboxId, MessageContent, MessageId, MessagePurpose,
+    PresentationKind, ProjectId, ProviderId, ProviderSessionId, ResourceLocator, ResourceScheme,
+    ShortText, ThreadId, Timestamp,
 };
 use hq_reducer::{
-    ProjectAssignmentPhase, ProjectAssignmentView, ProjectDispatchView, ProjectInputView,
-    ProjectLifecycle, ProjectProjection, ProjectProjectionKey, ProjectView,
+    ConversationProjection, ConversationProjectionKey, MessageView, ProjectAssignmentPhase,
+    ProjectAssignmentView, ProjectDispatchView, ProjectInputView, ProjectLifecycle,
+    ProjectProjection, ProjectProjectionKey, ProjectView,
 };
 
 #[test]
@@ -75,9 +77,33 @@ fn client_project_snapshot_exposes_assignment_and_deduplicated_exact_threads() {
             input_sequence: 2,
         })),
     );
+    let mut conversation_projections = BTreeMap::new();
     for (message_byte, dispatch_byte, sequence) in [(11, 12, 1), (13, 14, 2)] {
         let message_id = MessageId::from_bytes([message_byte; 32]);
         let dispatch_id = DispatchId::from_bytes([dispatch_byte; 32]);
+        conversation_projections.insert(
+            ConversationProjectionKey::Message(message_id),
+            ConversationProjection::Message(Box::new(MessageView {
+                fact_id: FactId::from_bytes([message_byte + 20; 32]),
+                authored_at: Timestamp::from_unix_millis(i64::from(message_byte)),
+                account_id: Some(AccountId::from_bytes([8; 32])),
+                thread_id: ThreadId::from_bytes([message_byte + 50; 32]),
+                content: MessageContent {
+                    message_id,
+                    sender: MailboxAddress::new(home, MailboxId::from_bytes([9; 32])),
+                    recipient: None,
+                    body: ContentText::new("project input").expect("content"),
+                    purpose: MessagePurpose::Asynchronous,
+                    presentation: PresentationKind::Message,
+                    correlation: None,
+                    project_id: Some(project_id),
+                },
+                open: true,
+                rejected: false,
+                state_frontier: BTreeSet::new(),
+                peer_received_by: BTreeSet::new(),
+            })),
+        );
         projections.insert(
             ProjectProjectionKey::Input(message_id),
             ProjectProjection::Input(Box::new(ProjectInputView {
@@ -103,7 +129,7 @@ fn client_project_snapshot_exposes_assignment_and_deduplicated_exact_threads() {
     }
     let snapshot = DomainSnapshot::new(
         ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
-        ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
+        ProjectionSnapshot::new(BTreeMap::new(), conversation_projections, BTreeMap::new()),
         ProjectionSnapshot::new(BTreeMap::new(), BTreeMap::new(), BTreeMap::new()),
         ProjectProjectionSnapshot::new(BTreeMap::new(), projections, BTreeMap::new()),
     );
@@ -141,4 +167,28 @@ fn client_project_snapshot_exposes_assignment_and_deduplicated_exact_threads() {
     assert_eq!(threads[0].provider, provider);
     assert_eq!(threads[0].session, session);
     assert_eq!(threads[0].thread_id, thread_id);
+
+    let inputs = client
+        .iter()
+        .filter_map(|projection| match projection {
+            ClientProjection::ProjectInput {
+                message_id,
+                thread_id,
+                sequence,
+                ..
+            } => Some((*message_id, *thread_id, *sequence)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inputs.len(), 2);
+    assert!(inputs.contains(&(
+        MessageId::from_bytes([11; 32]),
+        ThreadId::from_bytes([61; 32]),
+        1,
+    )));
+    assert!(inputs.contains(&(
+        MessageId::from_bytes([13; 32]),
+        ThreadId::from_bytes([63; 32]),
+        2,
+    )));
 }

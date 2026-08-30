@@ -40,6 +40,8 @@ An empty acknowledgement fails as a crashed boundary. A different resume acknowl
 Production registration exists only in the foreground node composition root. That boundary resolves
 the executable, optional model, permissive process policy, and fresh-thread developer instructions;
 it also requires an active uniquely named agent and an existing absolute working-tree directory.
+The executable defaults to `codex`; deployments and deterministic installed tests may override it
+with `CODEX_BIN` without changing the provider identity or launch contract.
 Direct managed sessions carry the node-canonicalized directory, while project activation carries
 its explicitly selected directory through the passive runtime request. Provider-private launch
 policy and Codex vocabulary do not enter the neutral harness or project workflow crates.

@@ -1912,6 +1912,8 @@ pub enum SnapshotItem {
         project_id: Id32,
         /// Stable public message identity.
         message_id: Id32,
+        /// Immutable causal thread containing this accepted input.
+        thread_id: Id32,
         /// Home-assigned contiguous sequence.
         sequence: u64,
         /// Acceptance fact.

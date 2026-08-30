@@ -155,11 +155,11 @@ particular causal situation.
 | 27 | account | `project-home`, `account-membership`, `active-human` |
 | 28–37, 39 | account | `previous-state`, `project-home`, `account-membership`, `active-human` |
 | 38 | account | `previous-state`, `project-home`, and optional matching `account-membership`/`active-human` for a human mutation |
-| 40–41 | account | `previous-state`, `project-home`, `assignment` |
+| 40–41 | account | `previous-state`, `project-home`, `account-membership`, `assignment` |
 | 42 | account | `previous-state`, `project-home`, `assignment`, and matching `account-membership`/`active-human` when forced |
-| 43 | account | `previous-state`, `project-home` |
-| 44 | account | `previous-state`, `project-home`, `assignment`, `dispatch` |
-| 45 | account | `previous-state`, `project-home`, `dispatch`, `assignment`, `output-binding` |
+| 43 | account | `previous-state`, `project-home`, `account-membership` |
+| 44 | account | `previous-state`, `project-home`, `account-membership`, `assignment`, `dispatch` |
+| 45 | account | `previous-state`, `project-home`, `account-membership`, `dispatch`, `assignment`, `output-binding` |
 | 46 | control | `account-membership`, `active-human`, `project-home` |
 | 47–48 | control | `project-home`, `request`; matching `account-membership`/`active-human` may preserve requesting-account context |
 

@@ -206,6 +206,13 @@ pub(crate) struct LocalProjectThread {
     pub thread_id: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LocalPendingProjectInput {
+    pub message_id: [u8; 32],
+    pub thread_id: [u8; 32],
+    pub sequence: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LocalProject {
     pub project_id: [u8; 32],
@@ -216,6 +223,7 @@ pub(crate) struct LocalProject {
     pub claimable: bool,
     pub assignment: Option<LocalProjectAssignment>,
     pub threads: Vec<LocalProjectThread>,
+    pub pending_inputs: Vec<LocalPendingProjectInput>,
     pub head: [u8; 32],
     pub input_sequence: u64,
     pub resources: Vec<LocalProjectResource>,
@@ -227,54 +235,72 @@ pub(crate) fn tui_project_catalog(
     Ok(project_catalog_for_tui(snapshot)?
         .projects
         .into_iter()
-        .map(|project| LocalProject {
-            project_id: *project.project_id.as_bytes(),
-            home: *project.home.as_bytes(),
-            name: project.name,
-            lifecycle: project.lifecycle,
-            archived: project.archived,
-            claimable: project.claimable,
-            assignment: project.assignment.map(|assignment| LocalProjectAssignment {
-                assignment_id: *assignment.assignment_id.as_bytes(),
-                agent_id: *assignment.agent_id.as_bytes(),
-                provider: assignment.provider,
-                session: assignment.session,
-                phase: assignment.phase,
-                thread_id: assignment.thread_id.map(|thread| *thread.as_bytes()),
-                launch_directory: assignment.launch_directory.map(|path| path.value),
-                blocked: assignment.blocked,
-                cardinality_conflicted: assignment.cardinality_conflicted,
-                runnable: assignment.runnable,
-            }),
-            threads: project
-                .threads
-                .into_iter()
-                .map(|thread| LocalProjectThread {
-                    agent_id: *thread.agent_id.as_bytes(),
-                    provider: thread.provider,
-                    session: thread.session,
-                    thread_id: *thread.thread_id.as_bytes(),
+        .map(|project| {
+            let dispatched = project
+                .dispatches
+                .iter()
+                .map(|dispatch| dispatch.message_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let pending_inputs = project
+                .inputs
+                .iter()
+                .filter(|input| !dispatched.contains(&input.message_id))
+                .map(|input| LocalPendingProjectInput {
+                    message_id: *input.message_id.as_bytes(),
+                    thread_id: *input.thread_id.as_bytes(),
+                    sequence: input.sequence,
                 })
-                .collect(),
-            head: *project.head.as_bytes(),
-            input_sequence: project.input_sequence,
-            resources: project
-                .resources
-                .into_iter()
-                .map(|resource| LocalProjectResource {
-                    resource_id: *resource.resource_id.as_bytes(),
-                    display_path: resource.display_locator.value,
-                    canonical_path: resource.canonical_locator.value,
-                    health: resource.health.to_owned(),
-                    primary: resource.primary,
-                    active_claim: resource.active_claim,
-                    conflicting_projects: resource
-                        .conflicting_projects
-                        .into_iter()
-                        .map(|project_id| *project_id.as_bytes())
-                        .collect(),
-                })
-                .collect(),
+                .collect();
+            LocalProject {
+                project_id: *project.project_id.as_bytes(),
+                home: *project.home.as_bytes(),
+                name: project.name,
+                lifecycle: project.lifecycle,
+                archived: project.archived,
+                claimable: project.claimable,
+                assignment: project.assignment.map(|assignment| LocalProjectAssignment {
+                    assignment_id: *assignment.assignment_id.as_bytes(),
+                    agent_id: *assignment.agent_id.as_bytes(),
+                    provider: assignment.provider,
+                    session: assignment.session,
+                    phase: assignment.phase,
+                    thread_id: assignment.thread_id.map(|thread| *thread.as_bytes()),
+                    launch_directory: assignment.launch_directory.map(|path| path.value),
+                    blocked: assignment.blocked,
+                    cardinality_conflicted: assignment.cardinality_conflicted,
+                    runnable: assignment.runnable,
+                }),
+                threads: project
+                    .threads
+                    .into_iter()
+                    .map(|thread| LocalProjectThread {
+                        agent_id: *thread.agent_id.as_bytes(),
+                        provider: thread.provider,
+                        session: thread.session,
+                        thread_id: *thread.thread_id.as_bytes(),
+                    })
+                    .collect(),
+                pending_inputs,
+                head: *project.head.as_bytes(),
+                input_sequence: project.input_sequence,
+                resources: project
+                    .resources
+                    .into_iter()
+                    .map(|resource| LocalProjectResource {
+                        resource_id: *resource.resource_id.as_bytes(),
+                        display_path: resource.display_locator.value,
+                        canonical_path: resource.canonical_locator.value,
+                        health: resource.health.to_owned(),
+                        primary: resource.primary,
+                        active_claim: resource.active_claim,
+                        conflicting_projects: resource
+                            .conflicting_projects
+                            .into_iter()
+                            .map(|project_id| *project_id.as_bytes())
+                            .collect(),
+                    })
+                    .collect(),
+            }
         })
         .collect())
 }

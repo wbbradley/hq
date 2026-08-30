@@ -171,6 +171,11 @@ canonical locators, health, primary/active-claim flags, and bounded conflicting-
 a client query representation, not the reducer's Rust layout or
 the store's normalized row schema.
 
+Accepted project-input items carry the immutable causal thread derived from their ordinary
+message alongside the message ID and home-assigned sequence. Clients use that exact correlation
+when a first instruction creates the thread that project activation must select; they never infer
+a thread from arrival order or substitute a different historical conversation.
+
 Project messaging uses the ordinary retryable mutation request, not the project-control DTO. Its
 message plan is account-addressed and contains both the typed project ID and exact project mailbox.
 The node sequences usable input at the authoritative home after local commit, replicated ingest,

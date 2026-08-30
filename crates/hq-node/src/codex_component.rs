@@ -31,7 +31,8 @@ pub struct ForegroundCodexConfig {
 impl Default for ForegroundCodexConfig {
     fn default() -> Self {
         Self {
-            executable: PathBuf::from("codex"),
+            executable: std::env::var_os("CODEX_BIN")
+                .map_or_else(|| PathBuf::from("codex"), PathBuf::from),
             model: None,
             permissive: false,
             call_timeout: Duration::from_secs(30),

@@ -626,11 +626,13 @@ pub fn snapshot_to_v1(
             ClientProjection::ProjectInput {
                 project_id,
                 message_id,
+                thread_id,
                 sequence,
                 accepted_fact,
             } => SnapshotItem::ProjectInput {
                 project_id: id32(project_id.as_bytes()),
                 message_id: id32(message_id.as_bytes()),
+                thread_id: id32(thread_id.as_bytes()),
                 sequence,
                 accepted_fact: id32(accepted_fact.as_bytes()),
             },

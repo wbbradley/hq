@@ -590,6 +590,7 @@ fn executor_runs_draft_autosave_and_stable_mailbox_command_in_order() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
     let source = AuthoritativeSnapshotDto::new(
         21,
@@ -627,7 +628,28 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
                 archived: false,
                 claimable: false,
                 head: Id32::new([11; 32]),
-                input_sequence: 0,
+                input_sequence: 2,
+            },
+            SnapshotItem::ProjectInput {
+                project_id: Id32::new([7; 32]),
+                message_id: Id32::new([17; 32]),
+                thread_id: Id32::new([18; 32]),
+                sequence: 1,
+                accepted_fact: Id32::new([19; 32]),
+            },
+            SnapshotItem::ProjectDispatch {
+                dispatch_id: Id32::new([20; 32]),
+                message_id: Id32::new([17; 32]),
+                sequence: 1,
+                fact_id: Id32::new([21; 32]),
+                conflicted: false,
+            },
+            SnapshotItem::ProjectInput {
+                project_id: Id32::new([7; 32]),
+                message_id: Id32::new([22; 32]),
+                thread_id: Id32::new([23; 32]),
+                sequence: 2,
+                accepted_fact: Id32::new([24; 32]),
             },
             SnapshotItem::IncompleteMessagesTruncated,
         ],
@@ -673,6 +695,10 @@ fn authoritative_snapshot_mapping_is_complete_and_deterministic() {
     assert_eq!(snapshot.projects[0].home, [8; 32]);
     assert_eq!(snapshot.projects[0].name, "release");
     assert_eq!(snapshot.projects[0].head, [11; 32]);
+    assert_eq!(snapshot.projects[0].pending_inputs.len(), 1);
+    assert_eq!(snapshot.projects[0].pending_inputs[0].message_id, [22; 32]);
+    assert_eq!(snapshot.projects[0].pending_inputs[0].thread_id, [23; 32]);
+    assert_eq!(snapshot.projects[0].pending_inputs[0].sequence, 2);
     assert_eq!(snapshot.sent_rows.len(), 1);
     assert_eq!(snapshot.archived_rows.len(), 1);
     assert_eq!(snapshot.archived_rows[0].detail, "3 archived messages");

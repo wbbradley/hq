@@ -1677,6 +1677,15 @@ fn tui_projects(projects: Vec<LocalProject>) -> Vec<UiProject> {
                     thread_id: thread.thread_id,
                 })
                 .collect(),
+            pending_inputs: project
+                .pending_inputs
+                .into_iter()
+                .map(|input| hq_tui::UiPendingProjectInput {
+                    message_id: input.message_id,
+                    thread_id: input.thread_id,
+                    sequence: input.sequence,
+                })
+                .collect(),
             head: project.head,
             input_sequence: project.input_sequence,
             resources: project

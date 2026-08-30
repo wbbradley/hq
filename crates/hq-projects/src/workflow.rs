@@ -2364,6 +2364,14 @@ where
                     error(ErrorCategory::Conflict, "project_assignment_conflict"),
                 );
             }
+            let Some(thread) = select_thread(&snapshot, resume_thread) else {
+                return reject(
+                    &self.store,
+                    record,
+                    error(ErrorCategory::Conflict, "project_activation_thread_missing"),
+                );
+            };
+            record.selected_thread = Some(thread);
             checkpoint(
                 &self.store,
                 record,
@@ -2566,7 +2574,10 @@ where
                         && observation.within_claims
                         && observation.observed_canonical == launch_directory =>
                 {
-                    let Some(thread) = select_thread(&snapshot, resume_thread) else {
+                    let Some(thread) = record
+                        .selected_thread
+                        .or_else(|| select_thread(&snapshot, resume_thread))
+                    else {
                         return self.compensate(
                             record,
                             agent_id,
@@ -3351,10 +3362,12 @@ fn select_thread(
     requested.map_or_else(
         || snapshot.pending_inputs.first().map(|input| input.thread_id),
         |thread| {
-            snapshot
-                .historical_threads
-                .contains(&thread)
-                .then_some(thread)
+            (snapshot.historical_threads.contains(&thread)
+                || snapshot
+                    .pending_inputs
+                    .iter()
+                    .any(|input| input.thread_id == thread))
+            .then_some(thread)
         },
     )
 }

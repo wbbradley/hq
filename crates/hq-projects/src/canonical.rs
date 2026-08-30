@@ -443,12 +443,7 @@ fn build_plan(
         .map_err(|_| domain_error(ErrorCategory::InvariantViolation, "project_parent_overflow"))?;
     let causal = CausalReferences::<MAX_FACT_PARENTS, MAX_FACT_AUTHORITIES>::new(
         parents,
-        [
-            AuthorityReference::new(AuthorityRole::PreviousState, view.head),
-            AuthorityReference::new(AuthorityRole::ProjectHome, installation_root),
-            AuthorityReference::new(AuthorityRole::AccountMembership, active_human),
-            AuthorityReference::new(AuthorityRole::ActiveHuman, active_human),
-        ],
+        project_authorities(&mutation.action, view.head, installation_root, active_human),
     )
     .map_err(|_| domain_error(ErrorCategory::InvariantViolation, "project_causal_invalid"))?;
     Ok(FactPlan::new(
@@ -459,6 +454,42 @@ fn build_plan(
         payload,
         *mutation.request_digest.as_bytes(),
     ))
+}
+
+fn project_authorities(
+    action: &CanonicalProjectMutationAction,
+    previous: FactId,
+    installation_root: FactId,
+    active_human: FactId,
+) -> Vec<AuthorityReference> {
+    let mut authorities = vec![
+        AuthorityReference::new(AuthorityRole::PreviousState, previous),
+        AuthorityReference::new(AuthorityRole::ProjectHome, installation_root),
+        AuthorityReference::new(AuthorityRole::AccountMembership, active_human),
+    ];
+    match action {
+        CanonicalProjectMutationAction::MakeRunnable { .. }
+        | CanonicalProjectMutationAction::BlockAssignment { .. } => {
+            authorities.push(AuthorityReference::new(AuthorityRole::Assignment, previous));
+        }
+        CanonicalProjectMutationAction::EndAssignment { .. } => {
+            authorities.extend([
+                AuthorityReference::new(AuthorityRole::Assignment, previous),
+                AuthorityReference::new(AuthorityRole::ActiveHuman, active_human),
+            ]);
+        }
+        CanonicalProjectMutationAction::RecordDispatch { input, .. } => {
+            authorities.extend([
+                AuthorityReference::new(AuthorityRole::Assignment, previous),
+                AuthorityReference::new(AuthorityRole::Dispatch, input.accepted_fact),
+            ]);
+        }
+        _ => authorities.extend([AuthorityReference::new(
+            AuthorityRole::ActiveHuman,
+            active_human,
+        )]),
+    }
+    authorities
 }
 
 fn build_creation_plan(
@@ -1144,11 +1175,13 @@ mod tests {
 
     use hq_application::{DomainSnapshot, ProjectionSnapshot};
     use hq_domain::{
-        AccountId, AgentId, AssignmentId, AssignmentIntent, AuthorityRole, BoundedText,
-        CommandDigest, CommandId, EncryptionPublicKey, FactId, FactScope, InstallationAddress,
-        InstallationId, MailboxAddress, MailboxId, ProjectId, ProjectResource, ProviderId,
-        ResourceHealth, ResourceId, ResourceLocator, ResourceScheme, SemanticPayload, ShortText,
-        SigningPublicKey, Timestamp,
+        AccountId, AgentId, AssignmentBinding, AssignmentId, AssignmentIntent, AuthorityReference,
+        AuthorityRole, BoundedText, CommandDigest, CommandId, ContentText, DispatchId,
+        EncryptionPublicKey, FactId, FactScope, InstallationAddress, InstallationId,
+        MailboxAddress, MailboxId, MessageId, OperationCorrelation, OperationId, ProjectId,
+        ProjectResource, ProviderId, ProviderSessionId, ResourceHealth, ResourceId,
+        ResourceLocator, ResourceScheme, SemanticPayload, ShortText, SigningPublicKey, ThreadId,
+        Timestamp,
     };
     use hq_reducer::{
         AgentLifecycle, AgentProjection, AgentProjectionKey, AgentView, AuthorityProjection,
@@ -1158,8 +1191,71 @@ mod tests {
 
     use super::{
         CanonicalProjectMutation, CanonicalProjectMutationAction, build_creation_plan,
-        build_retirement_plan, payload, resource_payload, workflow_snapshot,
+        build_retirement_plan, payload, project_authorities, resource_payload, workflow_snapshot,
     };
+
+    #[test]
+    fn assignment_and_dispatch_actions_use_protocol_specific_authorities() {
+        let previous = FactId::from_bytes([1; 32]);
+        let home = FactId::from_bytes([2; 32]);
+        let human = FactId::from_bytes([3; 32]);
+        let provider = ProviderId::new("provider").expect("provider");
+        let session = ProviderSessionId::new("session").expect("session");
+        let binding = AssignmentBinding {
+            assignment_id: AssignmentId::from_bytes([4; 32]),
+            agent_id: AgentId::from_bytes([5; 32]),
+            provider: provider.clone(),
+            session: session.clone(),
+        };
+        let thread_id = ThreadId::from_bytes([6; 32]);
+        let runnable = CanonicalProjectMutationAction::MakeRunnable {
+            binding: binding.clone(),
+            thread_id,
+            launch_directory: ResourceLocator::new(
+                ResourceScheme::WorkingTree,
+                BoundedText::new("/work").expect("locator"),
+            ),
+            activation: OperationCorrelation::new(
+                provider,
+                session,
+                OperationId::from_bytes([7; 32]),
+            ),
+        };
+        assert_eq!(
+            project_authorities(&runnable, previous, home, human),
+            vec![
+                AuthorityReference::new(AuthorityRole::PreviousState, previous),
+                AuthorityReference::new(AuthorityRole::ProjectHome, home),
+                AuthorityReference::new(AuthorityRole::AccountMembership, human),
+                AuthorityReference::new(AuthorityRole::Assignment, previous),
+            ]
+        );
+
+        let accepted_fact = FactId::from_bytes([8; 32]);
+        let dispatch = CanonicalProjectMutationAction::RecordDispatch {
+            input: super::PendingProjectInput {
+                message_id: MessageId::from_bytes([9; 32]),
+                input_fact_id: FactId::from_bytes([10; 32]),
+                accepted_fact,
+                sequence: std::num::NonZeroU64::MIN,
+                thread_id,
+                body: ContentText::new("work").expect("content"),
+            },
+            dispatch_id: DispatchId::from_bytes([11; 32]),
+            binding,
+            thread_id,
+        };
+        assert_eq!(
+            project_authorities(&dispatch, previous, home, human),
+            vec![
+                AuthorityReference::new(AuthorityRole::PreviousState, previous),
+                AuthorityReference::new(AuthorityRole::ProjectHome, home),
+                AuthorityReference::new(AuthorityRole::AccountMembership, human),
+                AuthorityReference::new(AuthorityRole::Assignment, previous),
+                AuthorityReference::new(AuthorityRole::Dispatch, accepted_fact),
+            ]
+        );
+    }
 
     #[test]
     fn creation_has_no_previous_state_and_binds_home_and_active_human_authority() {

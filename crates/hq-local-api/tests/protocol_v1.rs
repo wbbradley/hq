@@ -1277,6 +1277,7 @@ fn every_snapshot_projection_variant_round_trips_as_an_owned_client_dto() {
         SnapshotItem::ProjectInput {
             project_id: id(14),
             message_id: id(16),
+            thread_id: id(15),
             sequence: 1,
             accepted_fact: id(17),
         },

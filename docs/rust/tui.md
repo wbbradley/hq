@@ -77,11 +77,15 @@ navigation, so these keys cannot accidentally change sections while a dialog is 
 caret positions, field errors, and pending submissions survive resize and authoritative refresh;
 async rejection keeps the user's input available for correction.
 
-Focused fields have a visible selection treatment and insertion caret without adding a character
-to the field's displayed value. Empty fields say whether input is required or optional; that hint
-disappears once the field contains text. Concise guidance and examples appear with the focused
-field, and known validation failures render next to that field before an effect is emitted. Stable failures from an
-actual operation remain in the global recovery presentation because they are not form validation.
+Each one-line field leaves a visible gap after its label and fills the dialog's remaining inner
+width with a subdued surface. Focus changes that complete surface and composes a visible insertion
+caret over it without adding a character to the field's value; no-color themes retain independent
+non-color focus cues. An empty field right-aligns `required` or `optional` inside the surface, and
+the hint disappears as soon as the field contains text. Padding, clipping, and caret visibility use
+terminal display-cell width, so narrow dialogs and wide Unicode characters do not wrap or split a
+value. Concise guidance and examples appear with the focused field, and known validation failures
+render next to that field before an effect is emitted. Stable failures from an actual operation
+remain in the global recovery presentation because they are not form validation.
 
 ## Guided `New...` workflow
 
@@ -101,12 +105,18 @@ agent creation, resource ownership, direct sessions, notes, and direct messages 
 without this coordinator.
 
 A runnable current assignment skips setup and opens the ordinary new-message form for that project.
-Otherwise the coordinator reuses a compatible historical project thread when one exists, or
-selects an available provider using the shared typed provider policy and submits the existing
-retry-safe activation or handoff command. A compact review names the project, agent, provider,
-conversation behavior, and any assignment move without asking for message content. After the
-authoritative snapshot proves the assignment runnable, the model opens the same empty project
-message form; starting work never sends a project input by itself.
+A compatible historical project thread resumes its exact provider, session, and thread without a
+routine provider confirmation. A target without history collects and durably accepts its first
+project instruction before activation. The model then waits for the authoritative snapshot to join
+that returned message ID to its exact thread and activates or hands off on that thread. After a
+later snapshot proves the assignment runnable, the model opens the ordinary project message form;
+the accepted instruction remains pending for the project workflow's exactly-once dispatch.
+
+One available agent service is selected automatically. Several available services open `Start
+project work`; none leave that screen open with actionable setup guidance. A real assignment move
+still requires a compact review naming the project, agent, selected service, conversation behavior,
+and handoff. Refresh failure or reconnect retains the exact project, agent, provider, accepted
+message, and thread correlation and never authors the first instruction again.
 
 A transport failure, rejection, response loss, reconcilable result, or reconnect retains every
 setup selection. Decision-bearing and recovery outcomes remain modal; Escape returns from their

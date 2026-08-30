@@ -9,6 +9,7 @@ use std::{
     fs::File,
     io::{ErrorKind, Read, Write},
     os::fd::OwnedFd,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, ExitStatus, Stdio},
     sync::{Mutex, MutexGuard},
@@ -446,6 +447,64 @@ fn installed_tui_creates_an_existing_tree_project_and_sends_input() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
+fn installed_guided_work_creates_everything_and_dispatches_the_first_instruction_once() {
+    let _scenario = serial_scenario();
+    let directory = TestDirectory::new();
+    let state_root = directory.path().join("state");
+    let worktree = directory.path().join("guided-worktree");
+    let provider_bin = directory.path().join("provider-bin");
+    std::fs::create_dir(&worktree).expect("guided working tree");
+    std::fs::create_dir(&provider_bin).expect("provider bin directory");
+    install_fake_codex(&provider_bin);
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let search_path = format!("{}:{inherited_path}", provider_bin.display());
+
+    initialize_identity(&state_root);
+    let _daemon = start_foreground_daemon(&state_root, &search_path, &provider_bin.join("codex"));
+    let human = hq_output_with_search_path(&state_root, &["human", "create"], &search_path);
+    assert!(human.status.success(), "human create failed: {human:?}");
+
+    let name = "guided-project";
+    let agent = "guided-agent";
+    let content = "implement the guided change";
+    let run = run_in_pty(
+        &state_root,
+        true,
+        PtyInteraction::CreateGuidedProjectWork {
+            name,
+            path: worktree.to_str().expect("UTF-8 guided path"),
+            agent,
+            content,
+            search_path: &search_path,
+        },
+    );
+    assert!(run.status.success(), "guided TUI failed: {:?}", run.bytes);
+    assert_eq!(run.before, run.after, "TUI did not restore terminal modes");
+    for forbidden in [
+        "Start project work",
+        "project_activation_thread_missing",
+        "HQ could not make this change",
+    ] {
+        assert!(
+            !run.bytes
+                .windows(forbidden.len())
+                .any(|window| window == forbidden.as_bytes()),
+            "guided TUI rendered forbidden text {forbidden:?}: {:?}",
+            run.bytes
+        );
+    }
+    let project = project_json(&state_root, name);
+    assert_eq!(project["assignment"]["runnable"], true);
+    assert_eq!(project["inputs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(project["dispatches"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        project["inputs"][0]["message_id"],
+        project["dispatches"][0]["message_id"]
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn installed_tui_project_lifecycle_matches_the_cli() {
     let _scenario = serial_scenario();
     let directory = TestDirectory::new();
@@ -611,6 +670,13 @@ enum PtyInteraction<'content> {
         name: &'content str,
         path: &'content str,
     },
+    CreateGuidedProjectWork {
+        name: &'content str,
+        path: &'content str,
+        agent: &'content str,
+        content: &'content str,
+        search_path: &'content str,
+    },
     SendProjectInput {
         name: &'content str,
         content: &'content str,
@@ -678,6 +744,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         .stderr(stderr);
     if matches!(interaction, PtyInteraction::StartRejectedSession) {
         command.env("PATH", "/nonexistent");
+    }
+    if let PtyInteraction::CreateGuidedProjectWork { search_path, .. } = interaction {
+        command.env("PATH", search_path);
     }
     if explicit {
         command.arg("tui");
@@ -750,6 +819,9 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 PtyInteraction::StartRejectedSession => vec![b"l", b"l", b"l", b"\t"],
                 PtyInteraction::CreateExistingProject { .. } => {
                     vec![b"l", b"l", b"l", b"l", b"c", b"\r"]
+                }
+                PtyInteraction::CreateGuidedProjectWork { .. } => {
+                    vec![b"n", b"\r", b"\r", b"\r"]
                 }
                 PtyInteraction::SendProjectInput { .. }
                 | PtyInteraction::DispatchProjectInput { .. }
@@ -892,6 +964,66 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                 .expect("project form writes");
             master.flush().expect("project form flushes");
             content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::CreateGuidedProjectWork { name, path, .. } = interaction
+            && initial_key_sent
+            && !content_sent
+            && bytes
+                .windows(b"Name:".len())
+                .any(|window| window == b"Name:")
+        {
+            master
+                .write_all(format!("\t{name}\x1b[Z{path}\r").as_bytes())
+                .expect("guided project form writes");
+            master.flush().expect("guided project form flushes");
+            content_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if matches!(interaction, PtyInteraction::CreateGuidedProjectWork { .. })
+            && content_sent
+            && !managed_action_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Create an agent".len())
+                    .any(|window| window == b"Create an agent")
+            })
+        {
+            master.write_all(b"\r").expect("guided agent choice writes");
+            master.flush().expect("guided agent choice flushes");
+            managed_action_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::CreateGuidedProjectWork { agent, .. } = interaction
+            && managed_action_sent
+            && !managed_provider_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Name:".len())
+                    .any(|window| window == b"Name:")
+            })
+        {
+            master
+                .write_all(format!("{agent}\r").as_bytes())
+                .expect("guided agent name writes");
+            master.flush().expect("guided agent name flushes");
+            managed_provider_sent = true;
+            completion_offset = Some(bytes.len());
+        }
+        if let PtyInteraction::CreateGuidedProjectWork { content, .. } = interaction
+            && managed_provider_sent
+            && !resource_commit_sent
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Instructions:".len())
+                    .any(|window| window == b"Instructions:")
+            })
+        {
+            master
+                .write_all(format!("{content}\r").as_bytes())
+                .expect("guided instruction writes");
+            master.flush().expect("guided instruction flushes");
+            resource_commit_sent = true;
             completion_offset = Some(bytes.len());
         }
         if let PtyInteraction::CreateWorktreeProject {
@@ -1181,6 +1313,7 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
             exit_sent = true;
         }
         let lifecycle_action_sent = resource_commit_sent
+            && !matches!(interaction, PtyInteraction::CreateGuidedProjectWork { .. })
             || managed_action_sent && matches!(interaction, PtyInteraction::OpenProject { .. })
             || managed_provider_sent
                 && matches!(interaction, PtyInteraction::SetProjectArchived { .. });
@@ -1198,6 +1331,23 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
                     });
             let agent_reached = agent_target.is_some_and(|name| agent_exists(state_root, name));
             if lifecycle_reached || agent_reached {
+                master.write_all(&[0x03]).expect("Ctrl-C writes");
+                master.flush().expect("Ctrl-C flushes");
+                exit_sent = true;
+            }
+        }
+        if let PtyInteraction::CreateGuidedProjectWork { name, .. } = interaction
+            && resource_commit_sent
+            && !exit_sent
+            && Instant::now() >= next_state_probe_at
+            && completion_offset.is_some_and(|offset| {
+                bytes[offset..]
+                    .windows(b"Instructions:".len())
+                    .any(|window| window == b"Instructions:")
+            })
+        {
+            next_state_probe_at = Instant::now() + AUTHORITATIVE_STATE_PROBE_INTERVAL;
+            if project_is_runnable_with_one_dispatch(state_root, name) {
                 master.write_all(&[0x03]).expect("Ctrl-C writes");
                 master.flush().expect("Ctrl-C flushes");
                 exit_sent = true;
@@ -1287,8 +1437,25 @@ fn run_in_pty(state_root: &Path, explicit: bool, interaction: PtyInteraction<'_>
         if Instant::now().duration_since(last_output_at) >= PROCESS_INACTIVITY_WATCHDOG {
             let _ = child.kill();
             let _ = child.wait();
+            let provider_calls = match interaction {
+                PtyInteraction::CreateGuidedProjectWork { search_path, .. } => search_path
+                    .split(':')
+                    .next()
+                    .map(|directory| {
+                        std::fs::read_to_string(Path::new(directory).join("calls.log"))
+                    })
+                    .transpose()
+                    .unwrap_or_else(|error| Some(format!("unreadable: {error}"))),
+                _ => None,
+            };
+            let guided_project = match interaction {
+                PtyInteraction::CreateGuidedProjectWork { name, .. } => {
+                    Some(project_json(state_root, name))
+                }
+                _ => None,
+            };
             panic!(
-                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); output: {}",
+                "TUI process timed out for {interaction:?} (initial={initial_key_sent}, content={content_sent}, action={managed_action_sent}, provider={managed_provider_sent}, resource={resource_commit_sent}, exit={exit_sent}); provider calls: {provider_calls:?}; project: {guided_project:?}; output: {}",
                 String::from_utf8_lossy(&bytes)
             );
         }
@@ -1373,6 +1540,14 @@ fn project_has_state(state_root: &Path, project_id: &str, lifecycle: &str, archi
         .is_some_and(|project| project["lifecycle"] == lifecycle && project["archived"] == archived)
 }
 
+fn project_is_runnable_with_one_dispatch(state_root: &Path, name: &str) -> bool {
+    let project = project_json(state_root, name);
+    project["assignment"]["runnable"] == true
+        && project["inputs"].as_array().map(Vec::len) == Some(1)
+        && project["dispatches"].as_array().map(Vec::len) == Some(1)
+        && project["inputs"][0]["message_id"] == project["dispatches"][0]["message_id"]
+}
+
 fn hq_output(state_root: &Path, arguments: &[&str]) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_hq"));
     command.arg("--state-root").arg(state_root);
@@ -1383,6 +1558,69 @@ fn hq_output(state_root: &Path, arguments: &[&str]) -> std::process::Output {
         .stdin(Stdio::null())
         .output()
         .expect("installed HQ command runs")
+}
+
+fn hq_output_with_search_path(
+    state_root: &Path,
+    arguments: &[&str],
+    search_path: &str,
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hq"));
+    command
+        .arg("--state-root")
+        .arg(state_root)
+        .env("PATH", search_path);
+    for argument in arguments {
+        command.arg(argument);
+    }
+    command
+        .stdin(Stdio::null())
+        .output()
+        .expect("installed HQ command runs with provider search path")
+}
+
+fn install_fake_codex(directory: &Path) {
+    let executable = directory.join("codex");
+    std::fs::write(
+        &executable,
+        r#"#!/usr/bin/python3
+import json
+import os
+import sys
+
+thread_id = "hq-test-thread"
+for line in sys.stdin:
+    with open(os.path.join(os.path.dirname(__file__), "calls.log"), "a") as log:
+        log.write(line)
+    message = json.loads(line)
+    method = message.get("method")
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    if method == "initialize":
+        result = {}
+    elif method == "thread/start":
+        result = {"thread": {"id": thread_id, "turns": []}}
+    elif method == "thread/resume":
+        thread_id = message.get("params", {}).get("threadId", thread_id)
+        result = {"thread": {"id": thread_id, "turns": []}}
+    elif method == "turn/start":
+        result = {"turn": {"id": "hq-test-turn", "status": "inProgress", "items": []}}
+    elif method == "thread/read":
+        result = {"thread": {"id": thread_id, "turns": []}}
+    elif method in ("turn/interrupt", "turn/steer"):
+        result = {"turnId": "hq-test-turn"}
+    else:
+        continue
+    print(json.dumps({"id": request_id, "result": result}), flush=True)
+"#,
+    )
+    .expect("fake Codex executable writes");
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("fake Codex metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(executable, permissions).expect("fake Codex is executable");
 }
 
 fn stdio_clone(descriptor: &OwnedFd) -> Stdio {
@@ -1420,5 +1658,54 @@ impl Drop for DaemonStopGuard<'_> {
             .arg("stop")
             .stdin(Stdio::null())
             .output();
+    }
+}
+
+struct ForegroundDaemonGuard<'state> {
+    state_root: &'state Path,
+    child: Option<std::process::Child>,
+}
+
+impl Drop for ForegroundDaemonGuard<'_> {
+    fn drop(&mut self) {
+        let _ = hq_output(self.state_root, &["daemon", "stop"]);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_foreground_daemon<'state>(
+    state_root: &'state Path,
+    search_path: &str,
+    provider_executable: &Path,
+) -> ForegroundDaemonGuard<'state> {
+    let child = Command::new(env!("CARGO_BIN_EXE_hq"))
+        .arg("--state-root")
+        .arg(state_root)
+        .args(["daemon", "run"])
+        .env("PATH", search_path)
+        .env("CODEX_BIN", provider_executable)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("foreground daemon starts");
+    let guard = ForegroundDaemonGuard {
+        state_root,
+        child: Some(child),
+    };
+    let started = Instant::now();
+    loop {
+        let status = hq_output(state_root, &["daemon", "status"]);
+        if status.status.success() && String::from_utf8_lossy(&status.stdout).contains("ready") {
+            return guard;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "foreground daemon did not become ready: {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
 }

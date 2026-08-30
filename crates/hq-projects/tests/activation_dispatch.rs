@@ -863,6 +863,62 @@ fn stale_head_rejects_before_resource_or_runtime_effects() {
 }
 
 #[test]
+fn threadless_activation_rejects_before_assignment_or_runtime_effects() {
+    let mut threadless = snapshot(CanonicalProjectLifecycle::Open);
+    threadless.pending_inputs.clear();
+    threadless.historical_threads.clear();
+    let canonical = ScriptedCanonical::new(threadless);
+    let runtime = ScriptedRuntime::default();
+    let manager = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+
+    let outcome = manager
+        .control(activation_request())
+        .expect("threadless activation rejection");
+    let ProjectCommandOutcome::Rejected { error, .. } = outcome else {
+        panic!("expected threadless rejection, got {outcome:?}");
+    };
+    assert_eq!(error.code().as_str(), "project_activation_thread_missing");
+    assert!(canonical.mutations().is_empty());
+    assert_eq!(runtime.0.lock().expect("runtime lock").starts, 0);
+}
+
+#[test]
+fn activation_accepts_an_explicit_pending_input_thread() {
+    let mut pending_only = snapshot(CanonicalProjectLifecycle::Open);
+    pending_only.historical_threads.clear();
+    let pending = pending_only.pending_inputs[0].clone();
+    let canonical = ScriptedCanonical::new(pending_only);
+    let runtime = ScriptedRuntime::default();
+    let manager = ProjectWorkflowManager::new(
+        MemorySagaStore::default(),
+        canonical.clone(),
+        runtime.clone(),
+        HealthyResources,
+    );
+    let mut request = activation_request();
+    let ProjectCommandAction::Activate { resume_thread, .. } = &mut request.action else {
+        panic!("activation request changed shape");
+    };
+    *resume_thread = Some(pending.thread_id);
+
+    let outcome = manager.control(request).expect("pending-thread activation");
+    assert!(matches!(outcome, ProjectCommandOutcome::Completed { .. }));
+    let assignment = canonical
+        .snapshot_value()
+        .assignment
+        .expect("runnable assignment");
+    assert_eq!(assignment.thread_id, Some(pending.thread_id));
+    let runtime = runtime.0.lock().expect("runtime lock");
+    assert_eq!(runtime.starts, 1);
+    assert_eq!(runtime.deliveries.len(), 1);
+}
+
+#[test]
 fn compensation_response_loss_repairs_with_the_original_failure_and_finishes_closed() {
     let canonical = ScriptedCanonical::uncertain_during_compensation(snapshot(
         CanonicalProjectLifecycle::Closed,
@@ -1100,7 +1156,7 @@ fn explicit_resume_uses_the_requested_historical_thread_and_exact_session() {
 }
 
 #[test]
-fn missing_explicit_resume_thread_compensates_without_consuming_pending_input() {
+fn missing_explicit_resume_thread_rejects_before_effects_without_consuming_pending_input() {
     let canonical = ScriptedCanonical::new(snapshot(CanonicalProjectLifecycle::Closed));
     let runtime = ScriptedRuntime::default();
     let manager = ProjectWorkflowManager::new(
@@ -1116,12 +1172,18 @@ fn missing_explicit_resume_thread_compensates_without_consuming_pending_input() 
 
     let outcome = manager.control(request).expect("missing thread rejection");
 
-    assert!(matches!(outcome, ProjectCommandOutcome::Rejected { .. }));
+    let ProjectCommandOutcome::Rejected { error, .. } = outcome else {
+        panic!("expected rejection, got {outcome:?}");
+    };
+    assert_eq!(error.code().as_str(), "project_activation_thread_missing");
     let restored = canonical.snapshot_value();
     assert_eq!(restored.lifecycle, CanonicalProjectLifecycle::Closed);
     assert!(restored.assignment.is_none());
     assert_eq!(restored.pending_inputs.len(), 1);
-    assert_eq!(runtime.0.lock().expect("runtime lock").stops, 1);
+    assert!(canonical.mutations().is_empty());
+    let runtime = runtime.0.lock().expect("runtime lock");
+    assert_eq!(runtime.starts, 0);
+    assert_eq!(runtime.stops, 0);
 }
 
 #[test]

@@ -11,11 +11,11 @@ use hq_tui::{
     UiDirectTarget, UiEffect, UiEvent, UiFailure, UiFocus, UiHelpPage, UiHumanState, UiInput,
     UiMailboxAction, UiMailboxDraft, UiMailboxDraftTarget, UiMailboxModal, UiManagedSessionAction,
     UiManagedSessionOutcome, UiManagedSessionResult, UiMessageState, UiMessageTarget, UiModel,
-    UiNewChoice, UiNewModal, UiProject, UiProjectAction, UiProjectAssignment,
-    UiProjectCreationChoice, UiProjectExternalWarning, UiProjectFormField, UiProjectModal,
-    UiProjectOutcome, UiProjectResource, UiProjectResourceCheck, UiProjectResourceConflict,
-    UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind, UiRowState, UiSection, UiSize,
-    UiSnapshot, UiTechnicalSection, UiTimerKind, update,
+    UiNewChoice, UiNewModal, UiPendingProjectInput, UiProject, UiProjectAction,
+    UiProjectAssignment, UiProjectCreationChoice, UiProjectExternalWarning, UiProjectFormField,
+    UiProjectModal, UiProjectOutcome, UiProjectResource, UiProjectResourceCheck,
+    UiProjectResourceConflict, UiProjectResult, UiProjectThread, UiProvider, UiRow, UiRowKind,
+    UiRowState, UiSection, UiSize, UiSnapshot, UiTechnicalSection, UiTimerKind, update,
 };
 
 #[test]
@@ -184,8 +184,38 @@ fn guided_project_work_resumes_ready_assignment_without_session_setup() {
 }
 
 #[test]
+fn cancelling_a_guided_first_instruction_returns_to_agent_selection() {
+    let agent = project_agent(7, [9; 32]);
+    let project = project(5, "release", "/work/release");
+    let mut model = loaded_projects_model_with_agents(1, vec![project], vec![agent]);
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+
+    let cancelled = update(model, UiEvent::Input(UiInput::Escape)).expect("cancel instruction");
+    assert!(
+        cancelled
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+    assert!(cancelled.model.project_modal().is_none());
+    assert!(matches!(
+        cancelled.model.new_modal(),
+        Some(UiNewModal::ChooseAgent { project, .. }) if project.project_id == [5; 32]
+    ));
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
-fn guided_project_work_activates_then_opens_the_project_message_composer() {
+fn guided_project_work_sends_first_instruction_before_exact_thread_activation() {
     let agent = project_agent(7, [9; 32]);
     let project = project(5, "release", "/work/release");
     let mut model =
@@ -200,7 +230,88 @@ fn guided_project_work_activates_then_opens_the_project_message_composer() {
             .expect("guided step")
             .model;
     }
-    let activating = update(model, UiEvent::Input(UiInput::Activate)).expect("confirm setup");
+    assert!(model.new_modal().is_none());
+    assert!(matches!(
+        model.project_modal(),
+        Some(UiProjectModal::SendInput {
+            project,
+            content,
+            submitting: false,
+        }) if project.project_id == [5; 32] && content.is_empty()
+    ));
+    model = update(
+        model,
+        UiEvent::Input(UiInput::Paste("Ship the first change".to_owned())),
+    )
+    .expect("first instruction")
+    .model;
+    let sending = update(model, UiEvent::Input(UiInput::Activate)).expect("send instruction");
+    let (send_id, send_action) = project_effect(&sending.effects);
+    assert!(matches!(
+        send_action,
+        UiProjectAction::SendInput { project_id, ref content }
+            if project_id == [5; 32] && content == "Ship the first change"
+    ));
+    let input_message = [13; 32];
+    let sent = update(
+        sending.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: send_id,
+            result: UiProjectResult {
+                action: send_action,
+                command_id: input_message,
+                operation_id: input_message,
+                project_id: [5; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::InputSent {
+                    message_id: input_message,
+                },
+            },
+        },
+    )
+    .expect("instruction accepted");
+    let input_snapshot_id = snapshot_effect(&sent.effects);
+    let disconnected = update(
+        sent.model,
+        UiEvent::SnapshotFailed {
+            effect_id: input_snapshot_id,
+            failure: UiFailure {
+                code: "node_unavailable".to_owned(),
+                action: "wait for HQ to reconnect".to_owned(),
+            },
+        },
+    )
+    .expect("accepted instruction survives a lost refresh");
+    let retry_timer = timer_effect(&disconnected.effects, UiTimerKind::RetrySnapshot);
+    let retrying = update(
+        disconnected.model,
+        UiEvent::TimerElapsed {
+            effect_id: retry_timer,
+        },
+    )
+    .expect("retry accepted-input refresh");
+    let input_snapshot_id = snapshot_effect(&retrying.effects);
+    let thread_id = [6; 32];
+    let mut pending_project = project.clone();
+    pending_project.input_sequence = 2;
+    pending_project.pending_inputs = vec![UiPendingProjectInput {
+        message_id: input_message,
+        thread_id,
+        sequence: 2,
+    }];
+    let mut pending_snapshot = projects_snapshot(2, vec![pending_project]);
+    let agent_source = agents_snapshot(2, vec![agent.clone()]);
+    pending_snapshot.agents = agent_source.agents;
+    pending_snapshot.agent_rows = agent_source.agent_rows;
+    let activating = update(
+        retrying.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: input_snapshot_id,
+            snapshot: pending_snapshot,
+        },
+    )
+    .expect("accepted input selects its exact thread");
     let (activation_id, activation) = project_effect(&activating.effects);
     assert!(matches!(
         activation,
@@ -209,11 +320,12 @@ fn guided_project_work_activates_then_opens_the_project_message_composer() {
             agent_id,
             ref provider,
             resume_session: None,
-            resume_thread: None,
+            resume_thread: Some(selected_thread),
             ref launch_directory,
         } if project_id == [5; 32]
             && agent_id == [7; 32]
             && provider == "codex"
+            && selected_thread == thread_id
             && launch_directory == "/work/release"
     ));
 
@@ -236,7 +348,6 @@ fn guided_project_work_activates_then_opens_the_project_message_composer() {
     )
     .expect("activation complete");
     let snapshot_id = snapshot_effect(&completed.effects);
-    let thread_id = [6; 32];
     let mut ready_project = project;
     ready_project.assignment = Some(UiProjectAssignment {
         assignment_id: [8; 32],
@@ -271,6 +382,13 @@ fn guided_project_work_activates_then_opens_the_project_message_composer() {
         }) if project.project_id == [5; 32] && content.is_empty()
     ));
     assert!(composing.model.new_modal().is_none());
+    assert!(!activating.effects.iter().any(|effect| matches!(
+        effect,
+        UiEffect::SubmitProjectCommand {
+            action: UiProjectAction::SendInput { .. },
+            ..
+        }
+    )));
     assert!(!composing.effects.iter().any(|effect| matches!(
         effect,
         UiEffect::SubmitProjectCommand {
@@ -427,17 +545,24 @@ fn guided_project_work_can_create_its_missing_agent_and_continue() {
         },
     )
     .expect("new agent loaded");
+    assert!(resumed.model.new_modal().is_none());
     assert!(matches!(
-        resumed.model.new_modal(),
-        Some(UiNewModal::ChooseProvider { agent, .. }) if agent.names == ["builder"]
+        resumed.model.project_modal(),
+        Some(UiProjectModal::SendInput {
+            project,
+            content,
+            submitting: false,
+        }) if project.project_id == [5; 32] && content.is_empty()
     ));
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn guided_project_failure_does_not_rearm_the_submission() {
     let agent = project_agent(7, [9; 32]);
     let project = project(5, "release", "/work/release");
-    let mut model = loaded_projects_model_with_agents(1, vec![project], vec![agent]);
+    let mut model =
+        loaded_projects_model_with_agents(1, vec![project.clone()], vec![agent.clone()]);
     for input in [
         UiInput::Character('n'),
         UiInput::Activate,
@@ -448,7 +573,50 @@ fn guided_project_failure_does_not_rearm_the_submission() {
             .expect("guided step")
             .model;
     }
-    let submitting = update(model, UiEvent::Input(UiInput::Activate)).expect("submit setup");
+    model = update(
+        model,
+        UiEvent::Input(UiInput::Paste("Retain this instruction".to_owned())),
+    )
+    .expect("instruction")
+    .model;
+    let sending = update(model, UiEvent::Input(UiInput::Activate)).expect("send instruction");
+    let (send_id, send_action) = project_effect(&sending.effects);
+    let message_id = [32; 32];
+    let sent = update(
+        sending.model,
+        UiEvent::ProjectCommandCompleted {
+            effect_id: send_id,
+            result: UiProjectResult {
+                action: send_action,
+                command_id: message_id,
+                operation_id: message_id,
+                project_id: [5; 32],
+                runtime_state: None,
+                runtime_code: None,
+                outcome: UiProjectOutcome::InputSent { message_id },
+            },
+        },
+    )
+    .expect("instruction accepted");
+    let snapshot_id = snapshot_effect(&sent.effects);
+    let mut pending_project = project;
+    pending_project.pending_inputs = vec![UiPendingProjectInput {
+        message_id,
+        thread_id: [33; 32],
+        sequence: 2,
+    }];
+    let mut pending_snapshot = projects_snapshot(2, vec![pending_project]);
+    let agent_source = agents_snapshot(2, vec![agent]);
+    pending_snapshot.agents = agent_source.agents;
+    pending_snapshot.agent_rows = agent_source.agent_rows;
+    let submitting = update(
+        sent.model,
+        UiEvent::SnapshotLoaded {
+            effect_id: snapshot_id,
+            snapshot: pending_snapshot,
+        },
+    )
+    .expect("activation submitted");
     let (effect_id, action) = project_effect(&submitting.effects);
     for outcome in [
         UiProjectOutcome::Rejected {
@@ -560,10 +728,158 @@ fn guided_project_work_only_offers_available_provider_choices_when_needed() {
         model.new_modal(),
         Some(UiNewModal::ChooseProvider { provider, .. }) if provider == "alpha"
     ));
-    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("submit");
+    let composing = update(model, UiEvent::Input(UiInput::Activate)).expect("choose provider");
+    assert!(matches!(
+        composing.model.project_modal(),
+        Some(UiProjectModal::SendInput { content, .. }) if content.is_empty()
+    ));
+    assert!(
+        composing
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+}
+
+#[test]
+fn guided_project_work_keeps_an_actionable_state_without_a_provider() {
+    let mut model = loaded_projects_model_with_agents_and_providers(
+        1,
+        vec![project(5, "release", "/work/release")],
+        vec![project_agent(7, [9; 32])],
+        Vec::new(),
+    );
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::ChooseProvider { providers, .. }) if providers.is_empty()
+    ));
+    let blocked = update(model, UiEvent::Input(UiInput::Activate)).expect("provider gate");
+    assert_eq!(
+        blocked
+            .model
+            .last_failure()
+            .map(|failure| failure.code.as_str()),
+        Some("guided_provider_unavailable")
+    );
+    assert!(
+        blocked
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, UiEffect::SubmitProjectCommand { .. }))
+    );
+}
+
+#[test]
+fn guided_project_work_resumes_an_exact_historical_thread_without_provider_confirmation() {
+    let agent = project_agent(7, [9; 32]);
+    let mut target = project(5, "release", "/work/release");
+    target.threads.push(UiProjectThread {
+        agent_id: agent.agent_id,
+        provider: "codex".to_owned(),
+        session: "saved-session".to_owned(),
+        thread_id: [44; 32],
+    });
+    let mut model =
+        loaded_projects_model_with_agents_and_providers(1, vec![target], vec![agent], Vec::new());
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided step")
+            .model;
+    }
+    let resuming = update(model, UiEvent::Input(UiInput::Activate)).expect("select agent");
+    assert!(
+        resuming
+            .model
+            .new_modal()
+            .is_some_and(|modal| matches!(modal, UiNewModal::Working { .. }))
+    );
+    assert!(matches!(
+        project_effect(&resuming.effects).1,
+        UiProjectAction::Activate {
+            provider,
+            resume_session: Some(session),
+            resume_thread: Some(thread),
+            ..
+        } if provider == "codex" && session == "saved-session" && thread == [44; 32]
+    ));
+}
+
+#[test]
+fn guided_project_work_reviews_a_real_handoff_before_submitting_it() {
+    let receiving_agent = project_agent(7, [9; 32]);
+    let current_agent = project_agent(8, [9; 32]);
+    let mut target = project(5, "release", "/work/release");
+    target.assignment = Some(UiProjectAssignment {
+        assignment_id: [9; 32],
+        agent_id: current_agent.agent_id,
+        provider: "codex".to_owned(),
+        session: Some("current-session".to_owned()),
+        phase: "blocked".to_owned(),
+        thread_id: Some([10; 32]),
+        launch_directory: Some("/work/release".to_owned()),
+        blocked: Some("runtime_unavailable".to_owned()),
+        cardinality_conflicted: false,
+        runnable: false,
+    });
+    target.threads.push(UiProjectThread {
+        agent_id: receiving_agent.agent_id,
+        provider: "codex".to_owned(),
+        session: "receiving-session".to_owned(),
+        thread_id: [44; 32],
+    });
+    let mut model = loaded_projects_model_with_agents_and_providers(
+        1,
+        vec![target],
+        vec![receiving_agent, current_agent],
+        Vec::new(),
+    );
+    for input in [
+        UiInput::Character('n'),
+        UiInput::Activate,
+        UiInput::Activate,
+        UiInput::Activate,
+    ] {
+        model = update(model, UiEvent::Input(input))
+            .expect("guided handoff step")
+            .model;
+    }
+    assert!(matches!(
+        model.new_modal(),
+        Some(UiNewModal::ReviewProject {
+            resumes_existing: true,
+            moves_project: true,
+            ..
+        })
+    ));
+
+    let submitted = update(model, UiEvent::Input(UiInput::Activate)).expect("confirm handoff");
     assert!(matches!(
         project_effect(&submitted.effects).1,
-        UiProjectAction::Activate { provider, .. } if provider == "alpha"
+        UiProjectAction::Handoff {
+            agent_id,
+            provider,
+            resume_session: Some(session),
+            thread_id,
+            force_takeover: false,
+            ..
+        } if agent_id == [7; 32]
+            && provider == "codex"
+            && session == "receiving-session"
+            && thread_id == [44; 32]
     ));
 }
 
@@ -4012,6 +4328,7 @@ fn project(byte: u8, name: &str, path: &str) -> UiProject {
         claimable: true,
         assignment: None,
         threads: Vec::new(),
+        pending_inputs: Vec::new(),
         head: [byte.saturating_add(1); 32],
         input_sequence: 1,
         resources: vec![UiProjectResource {

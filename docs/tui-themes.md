@@ -114,6 +114,8 @@ Every configurable role is listed below. A resolved theme always has a style for
 | `ui.modal.title` | Dialog title |
 | `ui.header.badge` | HQ header badge |
 | `ui.input` | Editable and choice input |
+| `ui.input.field` | Padded surface of an unfocused one-line text field |
+| `ui.input.field.focused` | Padded surface of the focused one-line text field |
 | `ui.cursor` | Text insertion cursor |
 | `ui.footer` | Ordinary key guidance |
 | `ui.footer.success` | Successful completion guidance |

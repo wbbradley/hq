@@ -2,7 +2,7 @@
 
 use ratatui::style::{Color, Style};
 
-const ROLE_COUNT: usize = 30;
+const ROLE_COUNT: usize = 32;
 
 /// Every independently configurable visual role in the HQ terminal interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -38,6 +38,10 @@ pub enum UiThemeRole {
     HeaderBadge,
     /// Editable text and choice input.
     Input,
+    /// Complete one-line editable field surface when it does not own focus.
+    InputField,
+    /// Complete one-line editable field surface while it owns focus.
+    InputFieldFocused,
     /// Text insertion cursor.
     Cursor,
     /// Ordinary footer and key guidance.
@@ -88,6 +92,8 @@ impl UiThemeRole {
         Self::ModalTitle,
         Self::HeaderBadge,
         Self::Input,
+        Self::InputField,
+        Self::InputFieldFocused,
         Self::Cursor,
         Self::Footer,
         Self::FooterSuccess,
@@ -123,6 +129,8 @@ impl UiThemeRole {
             Self::ModalTitle => "ui.modal.title",
             Self::HeaderBadge => "ui.header.badge",
             Self::Input => "ui.input",
+            Self::InputField => "ui.input.field",
+            Self::InputFieldFocused => "ui.input.field.focused",
             Self::Cursor => "ui.cursor",
             Self::Footer => "ui.footer",
             Self::FooterSuccess => "ui.footer.success",
@@ -246,6 +254,16 @@ impl UiTheme {
             Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
         );
         set(&mut styles, UiThemeRole::Input, Style::new());
+        set(
+            &mut styles,
+            UiThemeRole::InputField,
+            Style::new().fg(Color::Reset).bg(Color::DarkGray),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::InputFieldFocused,
+            Style::new().fg(Color::Black).bg(Color::Cyan),
+        );
         set(&mut styles, UiThemeRole::Cursor, Style::new().reversed());
         set(
             &mut styles,
@@ -354,6 +372,16 @@ impl UiTheme {
             UiThemeRole::HeaderBadge,
             Style::new().bold().reversed(),
         );
+        set(
+            &mut styles,
+            UiThemeRole::InputField,
+            Style::new().dim().underlined(),
+        );
+        set(
+            &mut styles,
+            UiThemeRole::InputFieldFocused,
+            Style::new().bold().reversed(),
+        );
         set(&mut styles, UiThemeRole::Cursor, Style::new().reversed());
         for role in [
             UiThemeRole::FooterSuccess,
@@ -414,6 +442,11 @@ impl UiTheme {
                 Style::new().fg(background).bg(accent).bold(),
             )
             .with_style(UiThemeRole::Input, Style::new().fg(text).bg(surface))
+            .with_style(UiThemeRole::InputField, Style::new().fg(text).bg(selection))
+            .with_style(
+                UiThemeRole::InputFieldFocused,
+                Style::new().fg(background).bg(accent).bold(),
+            )
             .with_style(UiThemeRole::Cursor, Style::new().fg(background).bg(text))
             .with_style(UiThemeRole::Footer, Style::new().fg(muted))
             .with_style(UiThemeRole::FooterSuccess, Style::new().fg(success))
